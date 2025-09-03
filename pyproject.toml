@@ -47,7 +47,7 @@ version = "3.1.2"
 uform-chat = "uform.chat:main"
 
 [project.optional-dependencies]
-torch = ["torch>=1.13.1", "torchvision", "transformers>=4.36.2"]
+torch = ["torch>=1.13.1", "torchvision", "transformers>=4.36.2,<4.49.0"]
 onnx = ["onnx>=1.15.0", "onnxruntime>=1.17.1", "numpy"]
 onnx-gpu = ["onnx>=1.15.0", "onnxruntime-gpu>=1.17.1", "numpy"]
 dev = ["pytest", "pandas"]
