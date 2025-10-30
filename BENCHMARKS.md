@@ -112,42 +112,35 @@ options:
                         Batch size for the benchmark. Batch size 1 measures latency. Large batch sizes may not fit on every GPU.
 ```
 
-Running that script for a fairly small batch size of 50 on an Nvidia H100 GPU and 
+On Nvidia B200, the results may look like:
 
-| Model Name                                     | Device | Backend | Images Preprocessed/s | Images Encoded/s | Texts Preprocessed/s | Texts Encoded/s |
-| :--------------------------------------------- | :----- | :------ | --------------------: | :--------------- | :------------------- | :-------------- |
-| unum-cloud/uform3-image-text-english-base      | cpu    | torch   |                 23.03 | 76.57            | 15,978.03            | 562.28          |
-| unum-cloud/uform3-image-text-english-base      | cpu    | onnx    |                 23.11 | 77.75            | 13,880.27            | 1,067.40        |
-| unum-cloud/uform3-image-text-english-base      | cuda   | torch   |                 22.87 | 1,060.40         | 12,348.94            | 13,242.83       |
-| unum-cloud/uform3-image-text-english-large     | cpu    | torch   |                 22.41 | 10.84            | 13,350.45            | 145.12          |
-| unum-cloud/uform3-image-text-english-large     | cpu    | onnx    |                 23.13 | 19.60            | 18,031.85            | 960.09          |
-| unum-cloud/uform3-image-text-english-large     | cuda   | torch   |                 22.78 | 244.86           | 13,226.40            | 10,204.04       |
-| unum-cloud/uform3-image-text-english-small     | cpu    | torch   |                 20.08 | 71.68            | 12,147.05            | 249.63          |
-| unum-cloud/uform3-image-text-english-small     | cpu    | onnx    |                 22.84 | 195.27           | 13,636.99            | 1,385.25        |
-| unum-cloud/uform3-image-text-english-small     | cuda   | torch   |                 22.63 | 2,662.16         | 14,731.18            | 14,694.87       |
-| unum-cloud/uform3-image-text-multilingual-base | cpu    | torch   |                 22.98 | 64.28            | 10,129.27            | 209.76          |
-| unum-cloud/uform3-image-text-multilingual-base | cpu    | onnx    |                 23.06 | 66.81            | 8,963.13             | 1,104.32        |
-| unum-cloud/uform3-image-text-multilingual-base | cuda   | torch   |                 22.88 | 1,051.95         | 15,639.72            | 12,416.12       |
+```bash
+uv run python python/scripts/bench_encoders.py --batch-size 2048 --gpu --torch
+```
 
-If you are interested in performance numbers on consumer grade hardware, compared to third-party models, here are some rough estimates.
-On Nvidia RTX 3090:
+| Model                                          | Device   | Backend   | Precision   |   Images/s |   Texts/s |
+|:-----------------------------------------------|:---------|:----------|:------------|-----------:|----------:|
+| unum-cloud/uform3-image-text-english-base      | cuda     | torch     | bfloat16    |     6662.7 |   38482.7 |
+| unum-cloud/uform3-image-text-english-large     | cuda     | torch     | bfloat16    |     2930.2 |   53927.5 |
+| unum-cloud/uform3-image-text-english-small     | cuda     | torch     | bfloat16    |     1385.6 |    6611.2 |
+| unum-cloud/uform3-image-text-multilingual-base | cuda     | torch     | bfloat16    |     7235.1 |   36690.4 |
 
-| Model                                            | Multilingual |                  Speed |    Speedup |
-| :----------------------------------------------- | -----------: | ---------------------: | ---------: |
-| `bert-base-uncased`                              |           No | 1'612 sequences/second |            |
-| `distilbert-base-uncased`                        |           No | 3'174 sequences/second |     x 1.96 |
-| `sentence-transformers/all-MiniLM-L12-v2`        |      __Yes__ | 3'604 sequences/second |     x 2.24 |
-| `unum-cloud/uform3-image-text-multilingual-base` |      __Yes__ | 6'809 sequences/second | __x 4.22__ |
+On the 160-core dual-socket Intel Emerald Rapids CPU-only setup, the results may look like:
 
-Given the small size of the model it also work well on mobile devices.
-On Apple M2 Arm chips the energy efficiency of inference can exceed that of the RTX 3090 GPU and other Ampere-generation cards.
+```bash
+uv run python python/scripts/bench_encoders.py --batch-size 128 --cpu --torch --onnx
+```
 
-| Device                 |               Speed | Device TDP |        Efficiency |
-| :--------------------- | ------------------: | ---------: | ----------------: |
-| Nvidia RTX 3090        | ~ 140 tokens/second |     < 350W | 0.40 tokens/joule |
-| Apple M2 Pro unplugged |  ~ 19 tokens/second |      < 20W | 0.95 tokens/joule |
-| Apple M2 Max unplugged |  ~ 38 tokens/second |      < 36W | 1.06 tokens/joule |
-| Apple M2 Max plugged   |  ~ 56 tokens/second |      < 89W | 0.63 tokens/joule |
+| Model                                          | Device   | Backend   | Precision   |   Images/s |   Texts/s |
+|:-----------------------------------------------|:---------|:----------|:------------|-----------:|----------:|
+| unum-cloud/uform3-image-text-english-base      | cpu      | torch     | bfloat16    |      164.3 |    3228.1 |
+| unum-cloud/uform3-image-text-english-base      | cpu      | onnx      | unknown     |      212.8 |    1752.8 |
+| unum-cloud/uform3-image-text-english-large     | cpu      | torch     | bfloat16    |       32.1 |    3550.8 |
+| unum-cloud/uform3-image-text-english-large     | cpu      | onnx      | unknown     |       58.9 |    1348.2 |
+| unum-cloud/uform3-image-text-english-small     | cpu      | torch     | bfloat16    |      335.9 |    5801.1 |
+| unum-cloud/uform3-image-text-english-small     | cpu      | onnx      | unknown     |      325.4 |    2589.3 |
+| unum-cloud/uform3-image-text-multilingual-base | cpu      | torch     | bfloat16    |      153.2 |    4026.2 |
+| unum-cloud/uform3-image-text-multilingual-base | cpu      | onnx      | unknown     |      197.5 |    1401.4 |
 
 ### Generative Models
 
