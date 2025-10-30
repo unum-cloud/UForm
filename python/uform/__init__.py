@@ -89,6 +89,7 @@ def get_model_torch(
     token: Optional[str] = None,
     device: Literal["cpu", "cuda"] = "cpu",
     modalities: Optional[Tuple[Union[str, Modality]]] = None,
+    dtype: Optional[str] = "bfloat16",
 ) -> Tuple[Dict[Modality, Callable], Dict]:
     """
     Fetches and constructs a PyTorch model with its processors based on provided modalities.
@@ -97,10 +98,28 @@ def get_model_torch(
     :param token: Optional API token for authenticated access to the model.
     :param device: The device to load the model onto ('cpu' or 'cuda').
     :param modalities: A tuple specifying the types of model components to fetch (e.g., text encoder).
+    :param dtype: Model precision/dtype. Options: "float32", "float16", "bfloat16" (default).
+                  bfloat16 provides ~2x speedup with minimal accuracy loss on modern hardware.
+                  Works on CPUs with AVX-512 BF16 support and all modern CUDA GPUs.
+                  Set to None to keep original float32 precision.
     :return: A tuple containing dictionaries for processors and models keyed by their respective modalities.
     """
+    import torch
     from uform.torch_encoders import TextEncoder, ImageEncoder
     from uform.torch_processors import TextProcessor, ImageProcessor
+
+    # Map dtype string to torch dtype
+    dtype_map = {
+        "float32": torch.float32,
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        None: None,
+    }
+
+    if dtype not in dtype_map:
+        raise ValueError(f"Invalid dtype: {dtype}. Must be one of {list(dtype_map.keys())}")
+
+    torch_dtype = dtype_map[dtype]
 
     modalities = _normalize_modalities(modalities)
     config_path, modality_paths, tokenizer_path = get_checkpoint(model_name, modalities, token=token, format=".pt")
@@ -112,6 +131,8 @@ def get_model_torch(
         processor = TextProcessor(config_path, tokenizer_path)
         encoder = TextEncoder.from_pretrained(config_path, modality_paths.get(Modality.TEXT_ENCODER))
         encoder = encoder.eval().to(device)
+        if torch_dtype is not None:
+            encoder = encoder.to(dtype=torch_dtype)
         result_processors[Modality.TEXT_ENCODER] = processor
         result_models[Modality.TEXT_ENCODER] = encoder
 
@@ -119,6 +140,8 @@ def get_model_torch(
         processor = ImageProcessor(config_path)
         encoder = ImageEncoder.from_pretrained(config_path, modality_paths.get(Modality.IMAGE_ENCODER))
         encoder = encoder.eval().to(device)
+        if torch_dtype is not None:
+            encoder = encoder.to(dtype=torch_dtype)
         result_processors[Modality.IMAGE_ENCODER] = processor
         result_models[Modality.IMAGE_ENCODER] = encoder
 
@@ -172,6 +195,7 @@ def get_model(
     backend: Literal["onnx", "torch"] = "onnx",  # lighter = better
     modalities: Optional[Tuple[str, Modality]] = None,  # all by default
     token: Optional[str] = None,  # optional HuggingFace Hub token for private models
+    dtype: Optional[str] = "bfloat16",  # precision for torch backend (float32, float16, bfloat16)
 ) -> Tuple[Dict[Modality, Callable], Dict]:
     """
     Fetches a model and its processors from the Hugging Face Hub, using either the ONNX or Torch backend.
@@ -180,12 +204,15 @@ def get_model(
     :param device: The device to load the model onto ('cpu' or 'cuda').
     :param backend: The backend framework to use ('onnx' or 'torch').
     :param modalities: A tuple specifying the types of model components to fetch.
+    :param dtype: PyTorch model precision. Options: "float32", "float16", "bfloat16" (default).
+                  Only applies to torch backend. bfloat16 provides ~2x speedup with minimal accuracy loss.
+                  Works on CPUs with AVX-512 BF16 support and all modern CUDA GPUs.
     :param token: Optional API token for authenticated access to the model.
     :return: A tuple containing dictionaries for processors and models keyed by their respective modalities.
     """
     if backend == "onnx":
         return get_model_onnx(model_name, device=device, token=token, modalities=modalities)
     elif backend == "torch":
-        return get_model_torch(model_name, device=device, token=token, modalities=modalities)
+        return get_model_torch(model_name, device=device, token=token, modalities=modalities, dtype=dtype)
     else:
         raise ValueError(f"Unknown backend: {backend}")

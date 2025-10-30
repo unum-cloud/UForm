@@ -137,7 +137,8 @@ Then, load the model:
 ```py
 from uform import get_model, Modality
 
-processors, models = get_model('unum-cloud/uform3-image-text-english-small')
+# Defaults to `dtype='bfloat16'` for ~2x speedup with minimal accuracy loss
+processors, models = get_model('unum-cloud/uform3-image-text-english-small', device='cuda')
 
 model_text = models[Modality.TEXT_ENCODER]
 model_image = models[Modality.IMAGE_ENCODER]

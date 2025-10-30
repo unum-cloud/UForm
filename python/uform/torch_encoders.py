@@ -384,6 +384,12 @@ class ImageEncoder(nn.Module):
         if _is_on_gpu(self) and not x.is_cuda:
             x = x.cuda()
 
+        # Convert input to match model dtype (handles bfloat16/float16 conversion)
+        if hasattr(self, 'patch_embed') and hasattr(self.patch_embed, 'weight'):
+            model_dtype = self.patch_embed.weight.dtype
+            if x.dtype != model_dtype:
+                x = x.to(dtype=model_dtype)
+
         features = self.forward_features(x)
         embeddings = self.forward_embedding(features)
         return_features = return_features if return_features is not None else self.return_features
