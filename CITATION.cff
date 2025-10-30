@@ -11,7 +11,7 @@ authors:
   given-names: "Ash"
   orcid: "https://orcid.org/0000-0002-4882-1815"
 title: "UForm by Unum Cloud"
-version: 3.1.3
+version: 3.1.4
 keywords:
 - "text-to-image retrieval"
 - "multimodal"
