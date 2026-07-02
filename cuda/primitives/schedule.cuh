@@ -9,7 +9,7 @@
  *      1. @ref gpu_stream_t — a move-only owning wrapper over a real (non-null) @c CUstream , holding the
  *         device's primary context retained, so ordering is explicit and capture is legal (stream capture
  *         rejects the legacy null stream).
- *      2. @ref gpu_replay_graph_t — the capture-once / replay-forever contract: @ref try_make captures a
+ *      2. @ref gpu_replay_graph_t — the capture-once / replay-forever contract: @ref make captures a
  *         body of kernel launches into a @c CUgraph , instantiates it, uploads the executable, and keeps
  *         only that; every later step is one @c cuGraphLaunch with @b zero host-side re-derivation.
  *
@@ -31,7 +31,7 @@
  *
  *  Launching one graph per GPU serializes at the driver when the bodies touch shared resources, and
  *  serialized launches deadlock the moment rank 0 parks at a cross-rank barrier its peers never reach.
- *  The multi-stream @ref try_make therefore records @b one graph across all ranks: the trunk stream
+ *  The multi-stream @ref make therefore records @b one graph across all ranks: the trunk stream
  *  records a fork event, every branch stream waits only on the fork (never on a sibling, so branch
  *  kernels stay mutually independent and co-resident at replay), and the trunk joins on every branch
  *  before ending the capture. One @c cuGraphLaunch then makes every rank's work resident together.
@@ -46,12 +46,26 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span` for the typed transfer helpers
 
-#include "types.cuh" // `expected`, `expected_t`, `status_t`
-#include "array.cuh" // `array` for the node-guard walk
+#include "types.cuh"      // `expected`, `expected_t`, `status_t`
+#include "array.cuh"      // `array` for the node-guard walk
+#include "allocators.cuh" // `gpu_arena_alloc` backing the owning rank-1 tensor aliases
 
 namespace unum::uform::primitives {
 
 namespace nk = ashvardanian::numkong;
+
+/** @brief Rank-1 UInt32 device / host view. */
+using u32r1_view_t = nk::tensor_view<u32_t, 1>;
+/** @brief Rank-1 Float32 device / host view. */
+using f32r1_view_t = nk::tensor_view<f32_t, 1>;
+/** @brief Rank-1 UInt32 mutable device / host span. */
+using u32r1_span_t = nk::tensor_span<u32_t, 1>;
+/** @brief Rank-1 Float32 mutable device / host span. */
+using f32r1_span_t = nk::tensor_span<f32_t, 1>;
+/** @brief Rank-1 UInt32 device-only buffer owned through a @ref gpu_arena_t . */
+using u32r1_tensor_arena_t = nk::tensor<u32_t, gpu_arena_alloc<u32_t>, 1>;
+/** @brief Rank-1 Float32 device-only buffer owned through a @ref gpu_arena_t . */
+using f32r1_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 1>;
 
 /**
  *  @brief A move-only owning wrapper over a real (non-null) @c CUstream on one device.
@@ -96,7 +110,7 @@ struct gpu_stream_t {
         if (CUresult result = cuCtxPushCurrent(stream.context_); result != CUDA_SUCCESS)
             return expected<gpu_stream_t>::fail(result, "context push failed (device={})", device);
         CUresult const created = cuStreamCreateWithPriority(&stream.stream_, flags, priority);
-        (void)cuCtxPopCurrent(nullptr);
+        cuCtxPopCurrent(nullptr);
         if (created != CUDA_SUCCESS)
             return expected<gpu_stream_t>::fail(created, "stream creation failed (device={} priority={})", device,
                                                 priority);
@@ -115,14 +129,14 @@ struct gpu_stream_t {
   private:
     void destroy_() noexcept {
         if (stream_ != nullptr) {
-            (void)cuCtxPushCurrent(context_);
-            (void)cuStreamDestroy(stream_);
-            (void)cuCtxPopCurrent(nullptr);
+            cuCtxPushCurrent(context_);
+            cuStreamDestroy(stream_);
+            cuCtxPopCurrent(nullptr);
             stream_ = nullptr;
         }
         if (context_ != nullptr) {
             CUdevice device_handle = 0;
-            if (cuDeviceGet(&device_handle, device_) == CUDA_SUCCESS) (void)cuDevicePrimaryCtxRelease(device_handle);
+            if (cuDeviceGet(&device_handle, device_) == CUDA_SUCCESS) cuDevicePrimaryCtxRelease(device_handle);
             context_ = nullptr;
         }
         device_ = -1;
@@ -177,7 +191,7 @@ template <typename value_type_>
 }
 
 /**
- *  @brief The capture-once / replay-forever graph: @ref try_make turns a body of enqueues into one
+ *  @brief The capture-once / replay-forever graph: @ref make turns a body of enqueues into one
  *      uploaded @c CUgraphExec , and every later step is a single @c cuGraphLaunch .
  *
  *  Move-only, and @b always launchable when it exists: construction captures, enforces the no-allocation
@@ -210,7 +224,7 @@ struct gpu_replay_graph_t {
      *  @param[in] body A callable returning @ref expected_t whose only effect is enqueuing onto @p stream .
      */
     template <typename body_type_>
-    [[nodiscard]] static expected<gpu_replay_graph_t> try_make(CUstream stream, body_type_ &&body) noexcept {
+    [[nodiscard]] static expected<gpu_replay_graph_t> make(CUstream stream, body_type_ &&body) noexcept {
         if (stream == nullptr)
             return expected<gpu_replay_graph_t>::fail(status_t::invalid_input_k,
                                                       "capture needs a real stream, not the null stream");
@@ -220,11 +234,11 @@ struct gpu_replay_graph_t {
         CUgraph graph = nullptr;
         CUresult const ended = cuStreamEndCapture(stream, &graph);
         if (!emitted) {
-            if (graph != nullptr) (void)cuGraphDestroy(graph);
+            if (graph != nullptr) cuGraphDestroy(graph);
             return expected<gpu_replay_graph_t>::fail(std::move(emitted));
         }
         if (ended != CUDA_SUCCESS || graph == nullptr) {
-            if (graph != nullptr) (void)cuGraphDestroy(graph);
+            if (graph != nullptr) cuGraphDestroy(graph);
             return expected<gpu_replay_graph_t>::fail(ended, "stream capture end failed");
         }
         return adopt_(graph, stream);
@@ -241,15 +255,15 @@ struct gpu_replay_graph_t {
      *      enqueuing rank-local work onto @c streams[rank] . Branch bodies must not depend on each other.
      */
     template <typename body_type_>
-    [[nodiscard]] static expected<gpu_replay_graph_t> try_make(std::span<CUstream const> streams,
-                                                               body_type_ &&body) noexcept {
+    [[nodiscard]] static expected<gpu_replay_graph_t> make(std::span<CUstream const> streams,
+                                                           body_type_ &&body) noexcept {
         if (streams.empty())
             return expected<gpu_replay_graph_t>::fail(status_t::invalid_input_k, "capture needs at least one stream");
         for (std::size_t rank = 0; rank != streams.size(); ++rank)
             if (streams[rank] == nullptr)
                 return expected<gpu_replay_graph_t>::fail(status_t::invalid_input_k,
                                                           "capture needs real streams (rank {} is null)", rank);
-        if (streams.size() == 1) return try_make(streams.front(), [&body]() noexcept { return body(std::size_t {0}); });
+        if (streams.size() == 1) return make(streams.front(), [&body]() noexcept { return body(std::size_t {0}); });
 
         CUstream const trunk = streams.front();
         CUevent fork_event = nullptr;
@@ -295,14 +309,14 @@ struct gpu_replay_graph_t {
         (void)destroy_event_(fork_event);
         for (CUevent &event : join_events) (void)destroy_event_(event);
         if (!outcome) {
-            if (graph != nullptr) (void)cuGraphDestroy(graph);
+            if (graph != nullptr) cuGraphDestroy(graph);
             return expected<gpu_replay_graph_t>::fail(std::move(outcome));
         }
         return adopt_(graph, trunk);
     }
 
     /** @brief Replay the executable on @p stream : one @c cuGraphLaunch — staging already happened at
-     *      @ref try_make . */
+     *      @ref make . */
     [[nodiscard]] expected_t launch(CUstream stream) const noexcept {
         if (exec_ == nullptr)
             return expected_t::fail(status_t::invalid_input_k, "launching an empty (default or moved-from) graph");
@@ -317,12 +331,12 @@ struct gpu_replay_graph_t {
     [[nodiscard]] static expected<gpu_replay_graph_t> adopt_(CUgraph graph, CUstream stream) noexcept {
         expected_t guarded = guard_alloc_nodes_(graph);
         if (!guarded) {
-            (void)cuGraphDestroy(graph);
+            cuGraphDestroy(graph);
             return expected<gpu_replay_graph_t>::fail(std::move(guarded));
         }
         gpu_replay_graph_t replay;
         CUresult const instantiated = cuGraphInstantiate(&replay.exec_, graph, 0);
-        (void)cuGraphDestroy(graph);
+        cuGraphDestroy(graph);
         if (instantiated != CUDA_SUCCESS) {
             replay.exec_ = nullptr;
             return expected<gpu_replay_graph_t>::fail(instantiated, "graph instantiation failed");
@@ -368,7 +382,7 @@ struct gpu_replay_graph_t {
         if (CUresult result = cuCtxPushCurrent(stream_context); result != CUDA_SUCCESS)
             return expected_t::fail(result, "context push failed");
         CUresult const created = cuEventCreate(&event, CU_EVENT_DISABLE_TIMING);
-        (void)cuCtxPopCurrent(nullptr);
+        cuCtxPopCurrent(nullptr);
         if (created != CUDA_SUCCESS) return expected_t::fail(created, "event creation failed");
         return {};
     }
@@ -381,7 +395,7 @@ struct gpu_replay_graph_t {
     }
 
     void destroy_() noexcept {
-        if (exec_ != nullptr) (void)cuGraphExecDestroy(exec_);
+        if (exec_ != nullptr) cuGraphExecDestroy(exec_);
         exec_ = nullptr;
     }
 

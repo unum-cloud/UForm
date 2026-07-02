@@ -65,15 +65,6 @@ namespace unum::uform::primitives {
 
 namespace nk = ashvardanian::numkong;
 
-/** @brief Rank-1 UInt32 device / host view. */
-using u32r1_view_t = nk::tensor_view<u32_t, 1>;
-/** @brief Rank-1 Float32 device / host view. */
-using f32r1_view_t = nk::tensor_view<f32_t, 1>;
-/** @brief Rank-1 UInt32 device-only buffer. */
-using u32r1_tensor_arena_t = nk::tensor<u32_t, gpu_arena_alloc<u32_t>, 1>;
-/** @brief Rank-1 Float32 device-only buffer. */
-using f32r1_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 1>;
-
 /**
  *  @brief Scaling and labeling knobs of a contrastive loss — host fallbacks plus optional device views of
  *      the learnable scalars, so a captured step reads per-step-updated values without a host readback.
@@ -220,11 +211,15 @@ struct contrastive_relations_view_t {
  *      through @ref gpu_arena_alloc at fixed capacity, re-uploaded per step, and viewed by kernels
  *      through @ref contrastive_relations_view_t windows over the live extents.
  *
- *  Eight columns: three offset rows @b [max_anchors+1] , three id runs @b [max_nnz] , two score runs
- *  @b [max_nnz] . Addresses never change after @ref make — the capture-stability contract — so a replayed
- *  graph reads whatever @ref upload staged last. Uploads run @b outside any capture. The effective-length
- *  columns are @b borrowed per-step device views bound through @ref bind_effective_lengths — owned by the
- *  batch pipeline, capture-stable like everything else.
+ *  Eight columns: three offset rows @b [max_anchors+1] , three id runs @b [max_edges] , two score runs
+ *  @b [max_edges] . Addresses never change after @ref make — the capture-stability contract — so a
+ *  replayed graph reads whatever @ref upload staged last. Uploads run @b outside any capture.
+ *
+ *  Ownership is deliberately split: the CSR columns are @b owned (they are staged copies of host data
+ *  with no other home), while the effective-length columns are @b borrowed device views — the batch
+ *  pipeline owns those lengths and re-fills them per step at capture-stable addresses; copying them here
+ *  would duplicate per-step state. Both arrive through @ref upload / @ref upload_diagonal , the single
+ *  staging entry points.
  */
 struct contrastive_relations_t {
 
@@ -271,6 +266,10 @@ struct contrastive_relations_t {
      *  @c [0,num_candidates_global) , negative scores. There is no silent fallback.
      *
      *  @param[in] ignore_offsets / @p ignore_ids Empty views mean no ignores.
+     *  @param[in] query_effective_lengths / @p candidate_effective_lengths The per-step PAD columns the
+     *      resolver reads: @b [num_anchors] and @b [num_candidates_global] (by global id) device views, 0
+     *      marking PAD, empty meaning all-live. @b Borrowed, never copied — the batch pipeline owns them
+     *      and keeps the addresses capture-stable.
      */
     [[nodiscard]] expected_t upload(                                                                  //
         u32r1_view_t attract_offsets, u32r1_view_t attract_ids,                                       //
@@ -278,6 +277,7 @@ struct contrastive_relations_t {
         u32r1_view_t repel_offsets, u32r1_view_t repel_ids,                                           //
         f32r1_view_t repel_scores,                                                                    //
         u32r1_view_t ignore_offsets, u32r1_view_t ignore_ids,                                         //
+        u32r1_view_t query_effective_lengths, u32r1_view_t candidate_effective_lengths,               //
         std::size_t num_candidates_global, std::size_t diagonal_base, f32_t implicit_negative_weight, //
         gpu_stream_t const &stream) noexcept {
 
@@ -325,15 +325,18 @@ struct contrastive_relations_t {
         attract_edge_count_ = static_cast<u32_t>(attract_ids.extent(0));
         repel_edge_count_ = static_cast<u32_t>(repel_ids.extent(0));
         ignore_edge_count_ = has_ignores ? static_cast<u32_t>(ignore_ids.extent(0)) : 0u;
-        has_ignores_ = has_ignores;
+        query_effective_lengths_ = query_effective_lengths;
+        candidate_effective_lengths_ = candidate_effective_lengths;
         diagonal_base_ = diagonal_base;
         implicit_negative_weight_ = implicit_negative_weight;
         return {};
     }
 
-    /** @brief Stage the zero-edge diagonal default: the offsets row is zeroed (every run empty) and both
-     *      edge sets collapse to empty views. */
-    [[nodiscard]] expected_t upload_diagonal(u32_t num_anchors, std::size_t diagonal_base,
+    /** @brief Stage the zero-edge diagonal default: the offsets row is zeroed (every run empty), both
+     *      edge sets collapse to empty views, and the borrowed effective-length columns are adopted as in
+     *      @ref upload . */
+    [[nodiscard]] expected_t upload_diagonal(u32_t num_anchors, u32r1_view_t query_effective_lengths,
+                                             u32r1_view_t candidate_effective_lengths, std::size_t diagonal_base,
                                              f32_t implicit_negative_weight, gpu_stream_t const &stream) noexcept {
         if (num_anchors == 0 || num_anchors > max_anchors_)
             return expected_t::fail(status_t::shape_unsupported_k,
@@ -347,23 +350,16 @@ struct contrastive_relations_t {
         attract_edge_count_ = 0u;
         repel_edge_count_ = 0u;
         ignore_edge_count_ = 0u;
-        has_ignores_ = false;
+        query_effective_lengths_ = query_effective_lengths;
+        candidate_effective_lengths_ = candidate_effective_lengths;
         diagonal_base_ = diagonal_base;
         implicit_negative_weight_ = implicit_negative_weight;
         return {};
     }
 
-    /** @brief Bind the per-step effective-length device columns the resolver's PAD gate reads: @p query
-     *      spans @b [num_anchors] , @p candidate spans @b [num_candidates_global] by global id; a 0 length
-     *      marks PAD, an empty view means all-live. Borrowed, never owned — the batch pipeline keeps the
-     *      addresses capture-stable like every other column. */
-    void bind_effective_lengths(u32r1_view_t query, u32r1_view_t candidate) noexcept {
-        query_effective_lengths_ = query;
-        candidate_effective_lengths_ = candidate;
-    }
-
     /** @brief Views over the live extents of the owned columns — what kernels take by value. Valid after
-     *      the last successful upload. */
+     *      the last successful upload. An ignore set staged with zero edges is indistinguishable from no
+     *      ignores, so its views collapse to empty. */
     [[nodiscard]] contrastive_relations_view_t view() const noexcept {
         contrastive_relations_view_t view;
         view.attract_offsets = {attract_offsets_.data(), num_anchors_ + 1u};
@@ -374,7 +370,7 @@ struct contrastive_relations_t {
             view.repel_ids = {repel_ids_.data(), repel_edge_count_};
             view.repel_scores = {repel_scores_.data(), repel_edge_count_};
         }
-        if (has_ignores_) {
+        if (ignore_edge_count_ != 0) {
             view.ignore_offsets = {ignore_offsets_.data(), num_anchors_ + 1u};
             view.ignore_ids = {ignore_ids_.data(), ignore_edge_count_};
         }
@@ -439,7 +435,6 @@ struct contrastive_relations_t {
     u32_t attract_edge_count_ = 0;
     u32_t repel_edge_count_ = 0;
     u32_t ignore_edge_count_ = 0;
-    bool has_ignores_ = false;
     std::size_t diagonal_base_ = 0;
     f32_t implicit_negative_weight_ = 1.0f;
 };
