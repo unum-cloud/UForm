@@ -11,7 +11,7 @@
  *
  *  Unlike `std::vector`, sizing doesn't imply filling: the explicit @c try_resize_uninitialized commits a
  *  new tail without a memset or a constructor loop, so a buffer can be sized on the host and written first
- *  by a GPU kernel — the shape @c gpu_alloc_t -backed device arrays rely on, since the host must never touch
+ *  by a GPU kernel — the shape @c gpu_alloc -backed device arrays rely on, since the host must never touch
  *  their bytes. The allocator must never throw — failure is a @c nullptr return, surfaced as
  *  @ref status_t::bad_alloc_k .
  */

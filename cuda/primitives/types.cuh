@@ -1,6 +1,5 @@
 /**
- *  @brief Foundational vocabulary of the UForm v4 primitives cell: statuses, error channel, launch constants,
- *      mesh topology.
+ *  @brief Foundational vocabulary of the UForm v4 primitives cell: statuses, error channel, launch constants.
  *  @file cuda/primitives/types.cuh
  *  @author Ash Vardanian
  *  @date July 2, 2026
@@ -12,16 +11,37 @@
  */
 #pragma once
 
+#include <cstddef> // `std::ptrdiff_t`
 #include <cstdint> // `std::int32_t`, `std::uint32_t`
 
-#include <format>          // `std::vformat`, `std::make_format_args`
+#include <format>          // `std::vformat_to`, `std::make_format_args`, `std::formatter`
 #include <source_location> // `std::source_location`
-#include <string>          // `std::string`
 #include <utility>         // `std::move`, `std::forward`
 
 #include <cuda.h> // `CUresult`, `cuGetErrorString`
 
+#include <stringzilla/stringzilla.hpp> // `sz::string` — the exception-free diagnostics carrier
+
+/** @brief `std::format` support for StringZilla slices, so diagnostics interpolate them directly —
+ *      no conversion shims at call sites. */
+template <>
+struct std::formatter<ashvardanian::stringzilla::string_view> : std::formatter<std::string_view> {
+    auto format(ashvardanian::stringzilla::string_view text, std::format_context &context) const {
+        return std::formatter<std::string_view>::format(std::string_view {text.data(), text.size()}, context);
+    }
+};
+
+/** @brief `std::format` support for owning StringZilla strings — same bridge, by reference. */
+template <>
+struct std::formatter<ashvardanian::stringzilla::string> : std::formatter<std::string_view> {
+    auto format(ashvardanian::stringzilla::string const &text, std::format_context &context) const {
+        return std::formatter<std::string_view>::format(std::string_view {text.data(), text.size()}, context);
+    }
+};
+
 namespace unum::uform::primitives {
+
+namespace sz = ashvardanian::stringzilla;
 
 /** @brief Thread count of one CUDA warp — the granularity of every shuffle-based reduction tree. */
 inline constexpr unsigned warp_size_k = 32u;
@@ -30,7 +50,7 @@ inline constexpr unsigned warp_size_k = 32u;
  *      temp-storage budget (1 KB SMEM) with full occupancy on sm_90 and sm_100. */
 inline constexpr unsigned kernel_block_size_default_k = 256u;
 
-/** @brief Outcome of any fallible operation. @c success_k == 0; all error codes are negative + stable. */
+/** @brief Outcome of any fallible operation. @c success_k==0 ; all error codes are negative + stable. */
 enum class status_t : std::int32_t {
     /** @brief The operation completed; outputs are valid. */
     success_k = 0,
@@ -43,6 +63,8 @@ enum class status_t : std::int32_t {
     shape_unsupported_k = -12,
     /** @brief A CUDA Runtime call failed. */
     cuda_error_k = -13,
+    /** @brief A host I/O / file operation failed (read / write / rename / timeout on a peer's file). */
+    io_error_k = -19,
 
     /** @brief An unclassified failure; prefer a specific code above when one fits. */
     other_k = -1,
@@ -56,9 +78,40 @@ enum class status_t : std::int32_t {
     case status_t::invalid_input_k: return "invalid_input";
     case status_t::shape_unsupported_k: return "shape_unsupported";
     case status_t::cuda_error_k: return "cuda_error";
+    case status_t::io_error_k: return "io_error";
     case status_t::other_k: return "other";
     }
     return "unknown";
+}
+
+/** @brief An output iterator @c std::vformat_to writes through, appending straight into an exception-free
+ *      StringZilla string. An allocation failure latches into the shared @c failed flag (when bound) and
+ *      truncates the text — for diagnostics that is acceptable as-is; for payloads, @ref format_into
+ *      surfaces the flag. */
+struct format_into_t {
+    using difference_type = std::ptrdiff_t;
+
+    sz::string *text = nullptr;
+    bool *failed = nullptr;
+
+    format_into_t &operator*() noexcept { return *this; }
+    format_into_t &operator++() noexcept { return *this; }
+    format_into_t operator++(int) noexcept { return *this; }
+    format_into_t &operator=(char character) noexcept {
+        if (!text->try_push_back(character) && failed != nullptr) *failed = true;
+        return *this;
+    }
+};
+
+/** @brief `std::format` straight into an exception-free StringZilla string, appending — the one spelling
+ *      for every payload and path assembly. @c false only on allocation failure (the text is then
+ *      truncated); the format string is compile-time checked. */
+template <typename... arg_types_>
+[[nodiscard]] inline bool format_into(sz::string &text, std::format_string<arg_types_...> format_string,
+                                      arg_types_ &&...args) noexcept {
+    bool failed = false;
+    std::vformat_to(format_into_t {&text, &failed}, format_string.get(), std::make_format_args(args...));
+    return !failed;
 }
 
 /** @brief A format string bundled with the @c std::source_location of the call site that spelled it. The
@@ -78,16 +131,16 @@ struct format_at_t {
  *
  *  Move-only: the explicit @c noexcept on the defaulted move members is a compile-time check that every
  *  instantiating @c value_type_ moves without throwing, so a result propagates up the call chain as nothing
- *  but @c noexcept moves. The description is materialized with @c std::format at the failure site — the
- *  only place the operands (shapes, counts, labels) are still in scope — and @ref format_at_t records that
- *  site's @c std::source_location .
+ *  but @c noexcept moves. The description is an exception-free StringZilla string, materialized with
+ *  @c std::format at the failure site — the only place the operands (shapes, counts, labels) are still in
+ *  scope — and @ref format_at_t records that site's @c std::source_location .
  */
 template <typename value_type_>
 struct expected {
     value_type_ value_ {};
     status_t status_ = status_t::success_k;
     CUresult cu_error_ = CUDA_SUCCESS;
-    std::string description_ {};
+    sz::string description_ {};
     std::source_location location_ {};
 
     expected() noexcept = delete;
@@ -110,13 +163,7 @@ struct expected {
         expected result {value_type_ {}};
         result.status_ = status;
         result.location_ = format.location;
-        try {
-            result.description_ = std::vformat(format.format, std::make_format_args(args...));
-        }
-        catch (...) {
-            // A malformed runtime argument; surface the bare format string so the diagnostic still lands.
-            result.description_ = format.format;
-        }
+        std::vformat_to(format_into_t {&result.description_}, format.format, std::make_format_args(args...));
         return result;
     }
 
@@ -129,59 +176,85 @@ struct expected {
         char const *cu_error_string = nullptr;
         if (cuGetErrorString(cu_error, &cu_error_string) != CUDA_SUCCESS || cu_error_string == nullptr)
             cu_error_string = "unknown";
-        result.description_ += ": ";
-        result.description_ += cu_error_string;
+        (void)result.description_.try_append(": ");
+        (void)result.description_.try_append(cu_error_string);
+        return result;
+    }
+
+    /** @brief Failure adopted from another @ref expected 's error channel: the status, driver error,
+     *      description, and failure site travel @b unchanged — the composition path for helpers, so
+     *      forwarding never reformats and never loses the original location. */
+    template <typename other_type_>
+    [[nodiscard]] static expected fail(expected<other_type_> &&other) noexcept {
+        expected result {value_type_ {}};
+        result.status_ = other.status_;
+        result.cu_error_ = other.cu_error_;
+        result.description_ = std::move(other.description_);
+        result.location_ = other.location_;
         return result;
     }
 };
 
 /**
- *  @brief The three-domain mesh shape — the host-side single source of truth for cluster geometry.
- *
- *  Names the three NESTED GPU domains a run spans, smallest to largest, and stores ONLY their three sizes —
- *  every grouping question is integer arithmetic off them, never stored:
- *
- *    - @c host_domain — the GPUs ONE process drives (one box / one OS image; ≤ 8). On NVL72 a process drives
- *      2–4 GPUs, so the host_domain is SMALLER than the multimem_domain.
- *    - @c multimem_domain — the GPUs reachable by @c multimem.* over NVLink / NVSwitch (NVL8 = 8, NVL72 = 72),
- *      addressed by a single multimem VA. One or more host_domains compose a multimem_domain.
- *    - @c colocated_domain — the whole InfiniBand world (~10^5), reached by device-initiated one-sided RDMA.
- *      One or more multimem_domains compose the colocated_domain; it shares ONE global batch.
- *
- *  Invariant: @c host ≤ multimem ≤ colocated , @c multimem % host == 0 , @c colocated % multimem == 0 .
- *  Single NVL8 box: all three are 8. Two-box RDMA: host = multimem = 8, colocated = 16. NVL72 + RDMA:
- *  host = 8, multimem = 72, colocated = 144. Immutable after rendezvous — the topology is identity, not
- *  state. A rank is one GPU, named by a single @c std::uint32_t @c gpu_index in
- *  @c [0, gpus_per_colocated_domain) ; there are no rank/index aliases.
+ *  @brief The value-less @ref expected — the return type of fallible actions that produce no result
+ *      (publish, await, barrier), carrying the same status / driver-error / description / location
+ *      channel. Default-constructed means success: @c return @c {} .
  */
-struct mesh_topology_t {
-    /** @brief GPUs one process drives — one host / NVLink box (≤ 8). */
-    std::uint32_t gpus_per_host_domain = 1u;
-    /** @brief GPUs in one NVLink domain reachable by @c multimem.* (≤ 72 today). */
-    std::uint32_t gpus_per_multimem_domain = 1u;
-    /** @brief Total data-parallel GPUs sharing ONE global batch — the whole InfiniBand world (~10^5). */
-    std::uint32_t gpus_per_colocated_domain = 1u;
+template <>
+struct expected<void> {
+    status_t status_ = status_t::success_k;
+    CUresult cu_error_ = CUDA_SUCCESS;
+    sz::string description_ {};
+    std::source_location location_ {};
 
-    /** @brief Which host_domain a global @p gpu_index belongs to. */
-    [[nodiscard]] std::uint32_t host_domain_of(std::uint32_t gpu_index) const noexcept {
-        return gpu_index / gpus_per_host_domain;
+    expected() noexcept = default;
+    expected(expected const &) noexcept = delete;
+    expected &operator=(expected const &) noexcept = delete;
+
+    expected(expected &&) noexcept = default;
+    expected &operator=(expected &&) noexcept = default;
+
+    /** @brief @c true iff the action succeeded. */
+    [[nodiscard]] explicit operator bool() const noexcept { return status_ == status_t::success_k; }
+
+    /** @brief Failure tagged with a @ref status_t : materializes @p format + @p args into the description
+     *      and records the failure site @ref format_at_t captured. */
+    template <typename... arg_types_>
+    [[nodiscard]] static expected fail(status_t status, format_at_t format, arg_types_ &&...args) noexcept {
+        expected result;
+        result.status_ = status;
+        result.location_ = format.location;
+        std::vformat_to(format_into_t {&result.description_}, format.format, std::make_format_args(args...));
+        return result;
     }
-    /** @brief Which multimem_domain a global @p gpu_index belongs to. */
-    [[nodiscard]] std::uint32_t multimem_domain_of(std::uint32_t gpu_index) const noexcept {
-        return gpu_index / gpus_per_multimem_domain;
+
+    /** @brief Failure carrying a CUDA Driver error: same as the @ref status_t overload, tagged
+     *      @c cuda_error_k , with the driver's own error string appended to the description. */
+    template <typename... arg_types_>
+    [[nodiscard]] static expected fail(CUresult cu_error, format_at_t format, arg_types_ &&...args) noexcept {
+        expected result = fail(status_t::cuda_error_k, format, std::forward<arg_types_>(args)...);
+        result.cu_error_ = cu_error;
+        char const *cu_error_string = nullptr;
+        if (cuGetErrorString(cu_error, &cu_error_string) != CUDA_SUCCESS || cu_error_string == nullptr)
+            cu_error_string = "unknown";
+        (void)result.description_.try_append(": ");
+        (void)result.description_.try_append(cu_error_string);
+        return result;
     }
-    /** @brief A global @p gpu_index 's position WITHIN its multimem_domain — the intra-domain collective rank. */
-    [[nodiscard]] std::uint32_t index_in_multimem_domain(std::uint32_t gpu_index) const noexcept {
-        return gpu_index % gpus_per_multimem_domain;
-    }
-    /** @brief Number of host_domains (processes) in the colocated_domain. */
-    [[nodiscard]] std::uint32_t host_domain_count() const noexcept {
-        return gpus_per_colocated_domain / gpus_per_host_domain;
-    }
-    /** @brief Number of multimem_domains in the colocated_domain — the inter-domain collective width. */
-    [[nodiscard]] std::uint32_t multimem_domain_count() const noexcept {
-        return gpus_per_colocated_domain / gpus_per_multimem_domain;
+
+    /** @brief Failure adopted from another @ref expected 's error channel, unchanged. */
+    template <typename other_type_>
+    [[nodiscard]] static expected fail(expected<other_type_> &&other) noexcept {
+        expected result;
+        result.status_ = other.status_;
+        result.cu_error_ = other.cu_error_;
+        result.description_ = std::move(other.description_);
+        result.location_ = other.location_;
+        return result;
     }
 };
+
+/** @brief The everyday spelling of the value-less @ref expected . */
+using expected_t = expected<void>;
 
 } // namespace unum::uform::primitives
