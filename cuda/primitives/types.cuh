@@ -43,15 +43,20 @@ namespace unum::uform::primitives {
 
 namespace sz = ashvardanian::stringzilla;
 
+using i32_t = std::int32_t;
+using u32_t = std::uint32_t;
+using f32_t = float;
+using f64_t = double;
+
 /** @brief Thread count of one CUDA warp — the granularity of every shuffle-based reduction tree. */
 inline constexpr unsigned warp_size_k = 32u;
 
-/** @brief Default thread count per CTA for hand-rolled kernels. Fits the CUB @c BlockReduce<float,256>
+/** @brief Default thread count per CTA for hand-rolled kernels. Fits the CUB @c BlockReduce<f32_t,256>
  *      temp-storage budget (1 KB SMEM) with full occupancy on sm_90 and sm_100. */
 inline constexpr unsigned kernel_block_size_default_k = 256u;
 
 /** @brief Outcome of any fallible operation. @c success_k==0 ; all error codes are negative + stable. */
-enum class status_t : std::int32_t {
+enum class status_t : i32_t {
     /** @brief The operation completed; outputs are valid. */
     success_k = 0,
 

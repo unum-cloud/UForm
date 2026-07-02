@@ -146,7 +146,7 @@ struct gpu_arena_t {
         if (CUresult result = cuMemAddressReserve(&arena.base_, arena.reserved_bytes_, 0, 0, 0); result != CUDA_SUCCESS)
             return expected<gpu_arena_t>::fail(result, "VA reservation failed (device={} bytes={})", device,
                                                arena.reserved_bytes_);
-        return std::move(arena);
+        return expected<gpu_arena_t> {std::move(arena)};
     }
 
     /** @brief Bytes carved so far. */
@@ -242,7 +242,7 @@ struct gpu_arena_t {
 /**
  *  @brief Standard-allocator facade over a borrowed @ref gpu_arena_t , so owning containers size
  *      arena slabs without the bespoke carve spelling:
- *      @c nk::tensor<float,gpu_arena_alloc<float>,2>::try_empty({rows,cols},gpu_arena_alloc<float>{arena})
+ *      @c nk::tensor<f32_t,gpu_arena_alloc<f32_t>,2>::try_empty({rows,cols},gpu_arena_alloc<f32_t>{arena})
  *      carves — and grows the arena — automatically; @ref array composes the same way.
  *
  *  Deallocation is deliberately a no-op: a bump arena reclaims through @ref gpu_arena_t::rewind /
@@ -295,7 +295,7 @@ struct gpu_arena_alloc {
  *  chain needs no host fences; the memory is valid only in that stream's order (host access requires a
  *  sync). Satisfies @c std::allocator_traits — a stateful, trivially-copyable handle over the device's
  *  default memory pool — so NumKong's owning tensor composes directly:
- *  @c nk::tensor<float,gpu_alloc<float>,2>::try_empty({rows,cols},alloc) . Only @c try_empty applies:
+ *  @c nk::tensor<f32_t,gpu_alloc<f32_t>,2>::try_empty({rows,cols},alloc) . Only @c try_empty applies:
  *  the other factories ( @c try_zeros / @c try_full ) initialize through host writes, which device memory
  *  forbids — fill with a kernel or @c cuMemsetD*Async instead.
  */

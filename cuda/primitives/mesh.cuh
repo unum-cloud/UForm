@@ -119,34 +119,30 @@ namespace sz = ashvardanian::stringzilla;
  *  bootstrap, never papered over. The concrete worlds in the file header: two HGX H100 boxes are
  *  @c {8,8,16} , two GB200 NVL72 racks are @c {4,72,144} , two Vera Rubin NVL144 racks are @c {8,144,288} .
  *  Immutable after rendezvous — the topology is identity, not state. A rank is one GPU, named by a single
- *  @c std::uint32_t @c gpu_index in @c [0,gpus_per_colocated_domain) ; there are no rank/index aliases.
+ *  @c u32_t @c gpu_index in @c [0,gpus_per_colocated_domain) ; there are no rank/index aliases.
  */
 struct mesh_shape_t {
     /** @brief GPUs one process drives — a whole HGX box, or one NVL72 / NVL144 compute tray. */
-    std::uint32_t gpus_per_host_domain = 1u;
+    u32_t gpus_per_host_domain = 1u;
     /** @brief GPUs in one NVLink domain reachable by @c multimem.* (8 on HGX, 72 / 144 on NVL racks). */
-    std::uint32_t gpus_per_multimem_domain = 1u;
+    u32_t gpus_per_multimem_domain = 1u;
     /** @brief Total data-parallel GPUs sharing @b one global batch — the whole InfiniBand world (~10^5). */
-    std::uint32_t gpus_per_colocated_domain = 1u;
+    u32_t gpus_per_colocated_domain = 1u;
 
     /** @brief Which host_domain a global @p gpu_index belongs to. */
-    [[nodiscard]] std::uint32_t host_domain_of(std::uint32_t gpu_index) const noexcept {
-        return gpu_index / gpus_per_host_domain;
-    }
+    [[nodiscard]] u32_t host_domain_of(u32_t gpu_index) const noexcept { return gpu_index / gpus_per_host_domain; }
     /** @brief Which multimem_domain a global @p gpu_index belongs to. */
-    [[nodiscard]] std::uint32_t multimem_domain_of(std::uint32_t gpu_index) const noexcept {
+    [[nodiscard]] u32_t multimem_domain_of(u32_t gpu_index) const noexcept {
         return gpu_index / gpus_per_multimem_domain;
     }
     /** @brief A global @p gpu_index 's position @b within its multimem_domain — the intra-domain collective rank. */
-    [[nodiscard]] std::uint32_t index_in_multimem_domain(std::uint32_t gpu_index) const noexcept {
+    [[nodiscard]] u32_t index_in_multimem_domain(u32_t gpu_index) const noexcept {
         return gpu_index % gpus_per_multimem_domain;
     }
     /** @brief Number of host_domains (processes) in the colocated_domain. */
-    [[nodiscard]] std::uint32_t host_domain_count() const noexcept {
-        return gpus_per_colocated_domain / gpus_per_host_domain;
-    }
+    [[nodiscard]] u32_t host_domain_count() const noexcept { return gpus_per_colocated_domain / gpus_per_host_domain; }
     /** @brief Number of multimem_domains in the colocated_domain — the inter-domain collective width. */
-    [[nodiscard]] std::uint32_t multimem_domain_count() const noexcept {
+    [[nodiscard]] u32_t multimem_domain_count() const noexcept {
         return gpus_per_colocated_domain / gpus_per_multimem_domain;
     }
 };
@@ -165,7 +161,7 @@ struct mesh_location_t {
     /** @brief The three nested-domain sizes (by value) — domains derived from @c gpu_index . */
     mesh_shape_t topology {};
     /** @brief This rank's global coordinate in @c [0,gpus_per_colocated_domain) — the only coordinate stored. */
-    std::uint32_t gpu_index = 0u;
+    u32_t gpu_index = 0u;
     /** @brief Multicast VA of this rank's multimem_domain; a @c multimem.* op against @c +offset fans
      *      across the whole domain, so there is no per-peer pointer list for intra-domain peers. Null
      *      until the symmetric heap binds it; null at @c gpus_per_multimem_domain==1 forever. */
@@ -180,9 +176,8 @@ struct mesh_location_t {
  *  @param[in] gpus_per_multimem_domain One NVLink multicast domain; a multiple of the host domain.
  *  @param[in] gpus_per_colocated_domain The whole data-parallel world; a multiple of the multimem domain.
  */
-[[nodiscard]] inline expected<mesh_shape_t> make_mesh_shape(std::uint32_t gpus_per_host_domain,
-                                                            std::uint32_t gpus_per_multimem_domain,
-                                                            std::uint32_t gpus_per_colocated_domain) noexcept {
+[[nodiscard]] inline expected<mesh_shape_t> make_mesh_shape(u32_t gpus_per_host_domain, u32_t gpus_per_multimem_domain,
+                                                            u32_t gpus_per_colocated_domain) noexcept {
     if (gpus_per_host_domain == 0 || gpus_per_host_domain > gpus_per_multimem_domain ||
         gpus_per_multimem_domain > gpus_per_colocated_domain)
         return expected<mesh_shape_t>::fail(
@@ -239,7 +234,7 @@ struct mesh_location_t {
         }
     }
 
-    std::uint32_t const gpus = static_cast<std::uint32_t>(device_count);
+    u32_t const gpus = static_cast<u32_t>(device_count);
     return mesh_shape_t {gpus, gpus, gpus};
 }
 
@@ -255,9 +250,9 @@ inline constexpr char mesh_schema_k[] = "uform.mesh.1";
  *      host_domain in @ref mesh_topology_t::host_domains . POD so the table is @ref array -friendly. */
 struct mesh_host_domain_t {
     /** @brief The host_domain's index in @c [0,host_domain_count) — identity from the launcher, never derived. */
-    std::uint32_t host_domain_index = 0;
+    u32_t host_domain_index = 0;
     /** @brief GPUs the host_domain probed locally; the bootstrap validates this is uniform across the world. */
-    std::uint32_t device_count = 0;
+    u32_t device_count = 0;
     /** @brief The host_domain's hostname — for diagnostics and for the transport wiring to name its peers. */
     char hostname[hostname_capacity_k] = {};
     /** @brief The GPU model, spaces replaced with underscores; the bootstrap validates the world runs
@@ -322,7 +317,7 @@ struct mesh_topology_t {
     /** @brief The validated three-domain shape — see the concrete worlds in the file header. */
     mesh_shape_t shape {};
     /** @brief This host_domain's index in @c [0,host_domain_count) — identity from the launcher. */
-    std::uint32_t host_domain_index = 0;
+    u32_t host_domain_index = 0;
     /** @brief Every host_domain's published facts, indexed by host_domain index. */
     array<mesh_host_domain_t> host_domains {};
     /** @brief The resolved @c <directory>/<job_id> exchange root; empty in a single-host_domain world. */
@@ -331,9 +326,7 @@ struct mesh_topology_t {
     /** @brief Number of host_domains in the world — the table's extent, agreeing with
      *      @c shape.host_domain_count() by construction: @ref bootstrap sizes both from the same argument
      *      and never resizes either. */
-    [[nodiscard]] std::uint32_t host_domain_count() const noexcept {
-        return static_cast<std::uint32_t>(host_domains.size());
-    }
+    [[nodiscard]] u32_t host_domain_count() const noexcept { return static_cast<u32_t>(host_domains.size()); }
     /** @brief This host_domain's own published facts. */
     [[nodiscard]] mesh_host_domain_t const &self() const noexcept { return host_domains[host_domain_index]; }
     /** @brief Whether this host_domain owns @c gpu_index 0 — the one that aggregates the exchange and
@@ -342,13 +335,9 @@ struct mesh_topology_t {
     /** @brief The global @c gpu_index of this host_domain's local CUDA device ordinal 0 —
      *      @c host_domain_index·gpus_per_host_domain . This is the local↔global mapping every wiring
      *      phase relies on: local ordinal @c d is global @c gpu_index @c first_gpu_index()+d . */
-    [[nodiscard]] std::uint32_t first_gpu_index() const noexcept {
-        return host_domain_index * shape.gpus_per_host_domain;
-    }
+    [[nodiscard]] u32_t first_gpu_index() const noexcept { return host_domain_index * shape.gpus_per_host_domain; }
     /** @brief Which multimem_domain this host_domain belongs to — on an NVL72 tray, which rack. */
-    [[nodiscard]] std::uint32_t multimem_domain_index() const noexcept {
-        return shape.multimem_domain_of(first_gpu_index());
-    }
+    [[nodiscard]] u32_t multimem_domain_index() const noexcept { return shape.multimem_domain_of(first_gpu_index()); }
     /** @brief Whether this host_domain leads its multimem_domain — the process that creates the multicast
      *      object, exports its fabric handle, and publishes the per-domain wiring digest. */
     [[nodiscard]] bool is_multimem_domain_lead() const noexcept {
@@ -374,9 +363,11 @@ struct mesh_topology_t {
      *      node families collide.
      *  @param[in] timeout_seconds Upper bound on every await; a missing peer fails loudly, never hangs.
      */
-    [[nodiscard]] static expected<mesh_topology_t> bootstrap(
-        std::uint32_t host_domain_index, std::uint32_t host_domain_count, std::uint32_t gpus_per_multimem_domain = 0,
-        char const *directory = nullptr, char const *job_id = nullptr, double timeout_seconds = 120.0) noexcept {
+    [[nodiscard]] static expected<mesh_topology_t> bootstrap(u32_t host_domain_index, u32_t host_domain_count,
+                                                             u32_t gpus_per_multimem_domain = 0,
+                                                             char const *directory = nullptr,
+                                                             char const *job_id = nullptr,
+                                                             f64_t timeout_seconds = 120.0) noexcept {
         if (host_domain_count == 0 || host_domain_index >= host_domain_count)
             return expected<mesh_topology_t>::fail( //
                 status_t::invalid_input_k,
@@ -384,7 +375,7 @@ struct mesh_topology_t {
                 host_domain_index, host_domain_count);
         expected<mesh_shape_t> local = discover_mesh_shape();
         if (!local) return expected<mesh_topology_t>::fail(std::move(local));
-        std::uint32_t const local_devices = local.value_.gpus_per_host_domain;
+        u32_t const local_devices = local.value_.gpus_per_host_domain;
 
         // The multimem extent is explicit configuration (see the parameter docs); the nesting invariants
         // are enforced by the same make_mesh_shape every hand-configured world goes through.
@@ -483,11 +474,11 @@ struct mesh_topology_t {
 
     /** @brief Spin-wait (50 ms polls) until @p peer_host_domain 's payload under @p key exists, then read
      *      it whole into @p out ; fails with the full path when @p timeout_seconds elapses first. */
-    [[nodiscard]] expected_t await_text(std::uint32_t peer_host_domain, sz::string_view key, sz::string &out,
-                                        double timeout_seconds) const noexcept {
+    [[nodiscard]] expected_t await_text(u32_t peer_host_domain, sz::string_view key, sz::string &out,
+                                        f64_t timeout_seconds) const noexcept {
         expected<sz::string> path = host_domain_file_path_(peer_host_domain, key);
         if (!path) return expected_t::fail(std::move(path));
-        auto const deadline = std::chrono::steady_clock::now() + std::chrono::duration<double>(timeout_seconds);
+        auto const deadline = std::chrono::steady_clock::now() + std::chrono::duration<f64_t>(timeout_seconds);
         while (true) {
             if (std::FILE *file = std::fopen(path.value_.c_str(), "r"); file != nullptr) {
                 char buffer[512];
@@ -513,14 +504,14 @@ struct mesh_topology_t {
      *      @c <tag>.release ; the lead collects every arrival, then publishes the release. Distinct tags
      *      give independent barriers within one job ( @c "mesh" , @c "connected" , @c "heap" ). A
      *      single-host_domain world returns immediately. */
-    [[nodiscard]] expected_t barrier(sz::string_view tag, double timeout_seconds) const noexcept {
+    [[nodiscard]] expected_t barrier(sz::string_view tag, f64_t timeout_seconds) const noexcept {
         if (host_domain_count() <= 1) return {};
         sz::string arrive_key, release_key;
         if (!format_into(arrive_key, "{}.arrive", tag) || !format_into(release_key, "{}.release", tag))
             return expected_t::fail(status_t::bad_alloc_k, "barrier key assembly failed (tag={})", tag);
         sz::string content;
         if (host_domain_index == 0) {
-            for (std::uint32_t peer_index = 1; peer_index != host_domain_count(); ++peer_index)
+            for (u32_t peer_index = 1; peer_index != host_domain_count(); ++peer_index)
                 if (expected_t arrived = await_text(peer_index, arrive_key.view(), content, timeout_seconds); !arrived)
                     return arrived;
             return publish_text(release_key.view(), "1\n");
@@ -536,14 +527,14 @@ struct mesh_topology_t {
         sz::string_view job {};
         sz::string_view hostname {};
         sz::string_view device_name {};
-        std::uint32_t host_domain_index = 0;
-        std::uint32_t host_domain_count = 0;
-        std::uint32_t multimem = 0;
-        std::uint32_t devices = 0;
+        u32_t host_domain_index = 0;
+        u32_t host_domain_count = 0;
+        u32_t multimem = 0;
+        u32_t devices = 0;
     };
 
     /** @brief Parse a whole decimal token; @c false on anything but a clean number. */
-    [[nodiscard]] static bool parse_u32_(sz::string_view token, std::uint32_t &value) noexcept {
+    [[nodiscard]] static bool parse_u32_(sz::string_view token, u32_t &value) noexcept {
         std::from_chars_result const result = std::from_chars(token.data(), token.data() + token.size(), value);
         return result.ec == std::errc {} && result.ptr == token.data() + token.size();
     }
@@ -558,13 +549,13 @@ struct mesh_topology_t {
     /** @brief Probe this host_domain's own facts: hostname plus the GPU model, verified uniform across
      *      the local devices too — the shape describes identical GPUs, and a box with mixed cards would
      *      break every "three integers describe the world" derivation downstream. */
-    [[nodiscard]] static expected<mesh_host_domain_t> probe_local_host_domain_(std::uint32_t host_domain_index,
-                                                                               std::uint32_t device_count) noexcept {
+    [[nodiscard]] static expected<mesh_host_domain_t> probe_local_host_domain_(u32_t host_domain_index,
+                                                                               u32_t device_count) noexcept {
         mesh_host_domain_t self;
         self.host_domain_index = host_domain_index;
         self.device_count = device_count;
         if (::gethostname(self.hostname, sizeof(self.hostname) - 1u) != 0) self.hostname[0] = '\0';
-        for (std::uint32_t device_ordinal = 0; device_ordinal != device_count; ++device_ordinal) {
+        for (u32_t device_ordinal = 0; device_ordinal != device_count; ++device_ordinal) {
             CUdevice device = 0;
             if (CUresult result = cuDeviceGet(&device, static_cast<int>(device_ordinal)); result != CUDA_SUCCESS)
                 return expected<mesh_host_domain_t>::fail(result, "device handle query failed (device={})",
@@ -641,7 +632,7 @@ struct mesh_topology_t {
      *      @c device_name @c <m> must be well-formed and in range, and exactly @c table.size() rows must
      *      be present. Emits no diagnostics — the caller owns the message, with the whole payload in it. */
     [[nodiscard]] static bool parse_manifest_(sz::string_view payload, sz::string_view job,
-                                              std::uint32_t gpus_per_multimem_domain,
+                                              u32_t gpus_per_multimem_domain,
                                               array<mesh_host_domain_t> &table) noexcept {
         // The partition API as a tokenizer: pop the leading space-separated token off the row.
         auto take_token = [](sz::string_view &row) noexcept {
@@ -661,7 +652,7 @@ struct mesh_topology_t {
 
         sz::byteset const whitespaces = sz::whitespaces_set();
         std::size_t parsed_rows = 0;
-        std::uint32_t multimem = 0;
+        u32_t multimem = 0;
         bool schema_matched = false, job_matched = false, multimem_matched = false;
         for (sz::string_view line : payload.split(sz::newlines_set())) {
             auto [key, match, value] = line.partition(' ');
@@ -684,8 +675,8 @@ struct mesh_topology_t {
      *      host_domain's own @p probed facts and the world @ref shape , fill @ref host_domains , and
      *      publish the merged manifest. */
     [[nodiscard]] expected_t collect_world_as_lead_(sz::string_view job, mesh_host_domain_t const &probed,
-                                                    double timeout_seconds) noexcept {
-        for (std::uint32_t peer_index = 1; peer_index != host_domain_count(); ++peer_index) {
+                                                    f64_t timeout_seconds) noexcept {
+        for (u32_t peer_index = 1; peer_index != host_domain_count(); ++peer_index) {
             sz::string peer_facts;
             if (expected_t awaited = await_text(peer_index, "mesh", peer_facts, timeout_seconds); !awaited)
                 return awaited;
@@ -734,7 +725,7 @@ struct mesh_topology_t {
     /** @brief A follower's half of the exchange: read the lead's manifest, adopt the world table, and
      *      verify the row describing this host_domain agrees with the local @p probed facts. */
     [[nodiscard]] expected_t adopt_manifest_(sz::string_view job, mesh_host_domain_t const &probed,
-                                             double timeout_seconds) noexcept {
+                                             f64_t timeout_seconds) noexcept {
         sz::string manifest;
         if (expected_t awaited = await_text(0u, "manifest", manifest, timeout_seconds); !awaited) return awaited;
         if (!parse_manifest_(manifest.view(), job, shape.gpus_per_multimem_domain, host_domains))
@@ -749,8 +740,7 @@ struct mesh_topology_t {
     }
 
     /** @brief The @c <exchange_directory>/host_domain<N>.<key> path of one host_domain's payload. */
-    [[nodiscard]] expected<sz::string> host_domain_file_path_(std::uint32_t host_domain,
-                                                              sz::string_view key) const noexcept {
+    [[nodiscard]] expected<sz::string> host_domain_file_path_(u32_t host_domain, sz::string_view key) const noexcept {
         sz::string path;
         if (!format_into(path, "{}/host_domain{}.{}", exchange_directory, host_domain, key))
             return expected<sz::string>::fail(status_t::bad_alloc_k, "exchange path assembly failed (key={})", key);
@@ -768,10 +758,9 @@ struct mesh_topology_t {
  *      links nothing — no MPI library enters the build. Identity only: it selects @b which host_domain,
  *      never a count — the counts are explicit @ref mesh_topology_t::bootstrap arguments, so a
  *      misconfigured launcher cannot change the math. */
-[[nodiscard]] inline std::uint32_t host_domain_index_from_environment() noexcept {
+[[nodiscard]] inline u32_t host_domain_index_from_environment() noexcept {
     for (char const *variable : {"UFORM_HOST_DOMAIN_INDEX", "SLURM_NODEID", "OMPI_COMM_WORLD_RANK"})
-        if (char const *value = std::getenv(variable); value != nullptr)
-            return static_cast<std::uint32_t>(std::atoi(value));
+        if (char const *value = std::getenv(variable); value != nullptr) return static_cast<u32_t>(std::atoi(value));
     return 0u;
 }
 
