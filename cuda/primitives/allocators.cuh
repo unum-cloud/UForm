@@ -35,8 +35,8 @@
 
 #include <cuda.h> // `CUdeviceptr`, `cuMemAddressReserve`, `cuMemCreate`, `cuMemMap`, `cuMemAllocAsync`
 
-#include "safe_array.cuh" // `safe_array` for exception-free chunk bookkeeping
-#include "types.cuh"      // `expected`, `status_t`
+#include "types.cuh" // `expected`, `status_t`
+#include "array.cuh" // `array` for exception-free chunk bookkeeping
 
 namespace unum::uform::primitives {
 
@@ -98,7 +98,7 @@ struct gpu_arena_t {
     /** @brief Device ordinal the physical chunks live on. */
     int device_ = 0;
     /** @brief Mapped chunks, in mapping order, for teardown. */
-    safe_array<physical_chunk_t> chunks_ {};
+    array<physical_chunk_t> chunks_ {};
 
     gpu_arena_t() noexcept = default;
     gpu_arena_t(gpu_arena_t const &) = delete;
@@ -243,7 +243,7 @@ struct gpu_arena_t {
  *  @brief Standard-allocator facade over a borrowed @ref gpu_arena_t , so owning containers size
  *      arena slabs without the bespoke carve spelling:
  *      @c nk::tensor<float,gpu_arena_alloc<float>,2>::try_empty({rows,cols},gpu_arena_alloc<float>{arena})
- *      carves — and grows the arena — automatically; @ref safe_array composes the same way.
+ *      carves — and grows the arena — automatically; @ref array composes the same way.
  *
  *  Deallocation is deliberately a no-op: a bump arena reclaims through @ref gpu_arena_t::rewind /
  *  @ref gpu_arena_t::release , never per buffer — so a container backed by this allocator must not outlive

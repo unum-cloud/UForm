@@ -1,10 +1,10 @@
 /**
  *  @brief Exception-free allocator-aware resizable array — the primitives cell's `std::vector` replacement.
- *  @file cuda/primitives/safe_array.cuh
+ *  @file cuda/primitives/array.cuh
  *  @author Ash Vardanian
  *  @date July 2, 2026
  *
- *  @ref safe_array grows like `std::vector` but can never throw: every fallible operation is a @c try_*
+ *  @ref array grows like `std::vector` but can never throw: every fallible operation is a @c try_*
  *  method returning a @ref status_t , copies are deleted (an accidental deep copy is an allocation the
  *  caller never sees fail), and moves are @c noexcept by construction. Same contract as StringZilla's
  *  @c sz::safe_vector , restated on this cell's status vocabulary.
@@ -39,7 +39,7 @@ namespace unum::uform::primitives {
  *      @ref status_t::bad_alloc_k ; must propagate on move assignment so the move assignment stays @c noexcept .
  */
 template <typename value_type_, typename allocator_type_ = std::allocator<value_type_>>
-class safe_array {
+class array {
   public:
     using value_type = value_type_;
     using size_type = std::size_t;
@@ -61,20 +61,20 @@ class safe_array {
     [[no_unique_address]] allocator_type alloc_ {};
 
   public:
-    safe_array() noexcept = default;
-    explicit safe_array(allocator_type alloc) noexcept : alloc_(std::move(alloc)) {}
-    ~safe_array() noexcept { reset(); }
+    array() noexcept = default;
+    explicit array(allocator_type alloc) noexcept : alloc_(std::move(alloc)) {}
+    ~array() noexcept { reset(); }
 
     /** @warning Use @ref try_assign instead, to handle out-of-memory failures. */
-    safe_array(safe_array const &) = delete;
+    array(array const &) = delete;
     /** @warning Use @ref try_assign instead, to handle out-of-memory failures. */
-    safe_array &operator=(safe_array const &) = delete;
+    array &operator=(array const &) = delete;
 
-    safe_array(safe_array &&other) noexcept
+    array(array &&other) noexcept
         : data_(std::exchange(other.data_, nullptr)), size_(std::exchange(other.size_, 0)),
           capacity_(std::exchange(other.capacity_, 0)), alloc_(std::move(other.alloc_)) {}
 
-    safe_array &operator=(safe_array &&other) noexcept {
+    array &operator=(array &&other) noexcept {
         if (this == &other) return *this;
         reset();
         data_ = std::exchange(other.data_, nullptr);
