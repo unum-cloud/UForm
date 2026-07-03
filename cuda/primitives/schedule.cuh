@@ -190,6 +190,81 @@ template <typename value_type_>
     return {};
 }
 
+#if defined(__CUDACC__)
+
+/**
+ *  @brief Launch a compiled-in kernel through the Driver API — the checked replacement for the
+ *      triple-chevron syntax, which returns no error code, fails silently on impossible configurations,
+ *      and drags a hidden CUDA Runtime dependency behind every launch:
+ *      https://ashvardanian.com/posts/less-wrong-cuda-hello-world/
+ *
+ *  The kernel's entry address resolves to a @c CUfunction through @c cudaGetFuncBySymbol — the one
+ *  sanctioned interop symbol, declared by nvcc's own implicit headers and serviced by the fatbin
+ *  registration stub nvcc statically embeds into every kernel-carrying binary regardless — and the launch
+ *  itself is one checked @c cuLaunchKernel . No dynamic @c libcudart enters the link.
+ *
+ *  Arguments bind by const reference (temporaries included — the driver copies their bytes out before
+ *  returning), and every argument's type must match the kernel's parameter type @b exactly: the driver
+ *  copies raw bytes, so the implicit conversions a triple-chevron call would perform do not apply —
+ *  convert spans to views at the call site.
+ */
+template <typename... arg_types_>
+[[nodiscard]] inline expected_t launch_kernel(void const *kernel_symbol, dim3 grid_size, dim3 block_size,
+                                              gpu_stream_t const &stream, arg_types_ const &...args) noexcept {
+    static_assert(sizeof...(arg_types_) != 0, "a kernel without arguments has nothing to compute");
+    CUfunction function = nullptr;
+    if (int result = static_cast<int>(cudaGetFuncBySymbol(&function, kernel_symbol)); result != 0)
+        return expected_t::fail(status_t::cuda_error_k, "kernel symbol resolution failed (code={})", result);
+    void *argument_addresses[] = {const_cast<void *>(static_cast<void const *>(&args))...};
+    if (CUresult result = cuLaunchKernel(function, grid_size.x, grid_size.y, grid_size.z, block_size.x, block_size.y,
+                                         block_size.z, 0, stream.get(), argument_addresses, nullptr);
+        result != CUDA_SUCCESS)
+        return expected_t::fail(result, "kernel launch failed (grid=[{},{},{}] block=[{},{},{}])", grid_size.x,
+                                grid_size.y, grid_size.z, block_size.x, block_size.y, block_size.z);
+    return {};
+}
+
+/**
+ *  @brief All-lanes-get-the-total shuffle sum of one warp — the fixed-order tree every deterministic
+ *      reduction in the cell builds on.
+ *
+ *  Hand-rolled rather than @c cub::WarpReduce deliberately: the XOR-shuffle butterfly already delivers
+ *  the total to @b every lane with zero shared memory, while CUB's warp reduction returns the total in
+ *  lane 0 only and asks for a @c TempStorage — the broadcast we need back costs exactly the shuffle we
+ *  started with. CUB stays the tool for the primitives it genuinely owns (device-wide sorts, scans,
+ *  @c LowerBound ).
+ */
+[[nodiscard]] __device__ inline f32_t warp_reduce_broadcast(f32_t value) noexcept {
+    for (unsigned delta = warp_size_k / 2u; delta != 0u; delta /= 2u)
+        value += __shfl_xor_sync(0xffffffffu, value, delta);
+    return value;
+}
+
+/** @brief All-threads-get-the-total CTA sum: per-warp shuffle trees, lane-0 partials staged through
+ *      static shared memory, one final warp tree, one broadcast slot — fixed-order, deterministic,
+ *      sized for @p block_size_ threads. */
+template <unsigned block_size_>
+[[nodiscard]] __device__ inline f32_t block_reduce_broadcast(f32_t value) noexcept {
+    static_assert(block_size_ % warp_size_k == 0, "the staging array assumes whole warps");
+    constexpr unsigned warps_k = block_size_ / warp_size_k;
+    __shared__ f32_t warp_partials[warps_k];
+    __shared__ f32_t block_total;
+    unsigned const lane_index = threadIdx.x % warp_size_k;
+    unsigned const warp_index = threadIdx.x / warp_size_k;
+    f32_t const warp_total = warp_reduce_broadcast(value);
+    if (lane_index == 0u) warp_partials[warp_index] = warp_total;
+    __syncthreads();
+    if (warp_index == 0u) {
+        f32_t staged = lane_index < warps_k ? warp_partials[lane_index] : 0.0f;
+        staged = warp_reduce_broadcast(staged);
+        if (lane_index == 0u) block_total = staged;
+    }
+    __syncthreads();
+    return block_total;
+}
+
+#endif // defined(__CUDACC__)
+
 /**
  *  @brief The capture-once / replay-forever graph: @ref make turns a body of enqueues into one
  *      uploaded @c CUgraphExec , and every later step is a single @c cuGraphLaunch .
