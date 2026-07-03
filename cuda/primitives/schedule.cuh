@@ -42,7 +42,9 @@
 #include <span>    // `std::span` — the multi-stream capture rank list
 #include <utility> // `std::exchange`, `std::forward`
 
-#include <cuda.h> // `CUstream`, `CUgraph`, `CUgraphExec`, `CUevent`
+#include <cuda.h>     // `CUstream`, `CUgraph`, `CUgraphExec`, `CUevent`
+#include <cublasLt.h> // `cublasLtHandle_t`, `cublasLtMatmul` — the tensor-core matmul sessions
+#include <cudnn.h>    // `cudnnHandle_t` — the fused-attention session (graphs live with their consumers)
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span` for the typed transfer helpers
 
@@ -58,14 +60,24 @@ namespace nk = ashvardanian::numkong;
 using u32r1_view_t = nk::tensor_view<u32_t, 1>;
 /** @brief Rank-1 Float32 device / host view. */
 using f32r1_view_t = nk::tensor_view<f32_t, 1>;
+/** @brief Rank-2 Float32 device / host view. */
+using f32r2_view_t = nk::tensor_view<f32_t, 2>;
+/** @brief Rank-1 raw-byte device / host view. */
+using b8r1_view_t = nk::tensor_view<std::byte, 1>;
 /** @brief Rank-1 UInt32 mutable device / host span. */
 using u32r1_span_t = nk::tensor_span<u32_t, 1>;
 /** @brief Rank-1 Float32 mutable device / host span. */
 using f32r1_span_t = nk::tensor_span<f32_t, 1>;
+/** @brief Rank-2 Float32 mutable device / host span. */
+using f32r2_span_t = nk::tensor_span<f32_t, 2>;
+/** @brief Rank-1 raw-byte mutable device / host span — the workspace currency. */
+using b8r1_span_t = nk::tensor_span<std::byte, 1>;
 /** @brief Rank-1 UInt32 device-only buffer owned through a @ref gpu_arena_t . */
 using u32r1_tensor_arena_t = nk::tensor<u32_t, gpu_arena_alloc<u32_t>, 1>;
 /** @brief Rank-1 Float32 device-only buffer owned through a @ref gpu_arena_t . */
 using f32r1_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 1>;
+/** @brief Rank-1 raw-byte device-only buffer owned through a @ref gpu_arena_t — vendor workspaces. */
+using b8r1_tensor_arena_t = nk::tensor<std::byte, gpu_arena_alloc<std::byte>, 1>;
 
 /**
  *  @brief A move-only owning wrapper over a real (non-null) @c CUstream on one device.
@@ -475,6 +487,259 @@ struct gpu_replay_graph_t {
     }
 
     CUgraphExec exec_ = nullptr;
+};
+
+/**
+ *  @brief A shared cuBLASLt session: one handle per device, owned once and borrowed by every plan — the
+ *      tensor-core matmul entry point for losses, projection heads, and anything else with large matrix
+ *      products. Slow primitives are hated here: wide GEMMs go through this, never hand-rolled loops.
+ */
+struct cublaslt_session_t {
+
+    cublaslt_session_t() noexcept = default;
+    cublaslt_session_t(cublaslt_session_t const &) = delete;
+    cublaslt_session_t &operator=(cublaslt_session_t const &) = delete;
+    cublaslt_session_t(cublaslt_session_t &&other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
+    cublaslt_session_t &operator=(cublaslt_session_t &&other) noexcept {
+        if (this != &other) {
+            destroy_();
+            handle_ = std::exchange(other.handle_, nullptr);
+        }
+        return *this;
+    }
+    ~cublaslt_session_t() noexcept { destroy_(); }
+
+    /** @brief Create the handle — once per device, outside any capture. */
+    [[nodiscard]] static expected<cublaslt_session_t> make() noexcept {
+        cublaslt_session_t session;
+        if (cublasStatus_t status = cublasLtCreate(&session.handle_); status != CUBLAS_STATUS_SUCCESS)
+            return expected<cublaslt_session_t>::fail(
+                status_t::cuda_error_k, "cuBLASLt handle creation failed (status={})", static_cast<int>(status));
+        return expected<cublaslt_session_t> {std::move(session)};
+    }
+
+    /** @brief The wrapped handle, borrowed by plans. */
+    [[nodiscard]] cublasLtHandle_t get() const noexcept { return handle_; }
+
+  private:
+    void destroy_() noexcept {
+        if (handle_ != nullptr) cublasLtDestroy(std::exchange(handle_, nullptr));
+    }
+
+    cublasLtHandle_t handle_ = nullptr;
+};
+
+/**
+ *  @brief The static description of one @ref cublaslt_plan_t : stored operand extents and row strides
+ *      (all row-major, in elements), the transpose ops, and the effective product dimensions they imply.
+ *      BFloat16 operands with Float32 accumulation and output — the one precision recipe this project
+ *      trains with.
+ */
+struct cublaslt_plan_config_t {
+    /** @brief Stored extents of operand A, before @ref transpose_a . */
+    u32_t a_rows = 0, a_cols = 0;
+    /** @brief Elements between consecutive rows of A (its allocated row width). */
+    u32_t a_row_stride = 0;
+    /** @brief Stored extents of operand B, before @ref transpose_b . */
+    u32_t b_rows = 0, b_cols = 0;
+    /** @brief Elements between consecutive rows of B. */
+    u32_t b_row_stride = 0;
+    /** @brief Extents of the output C. */
+    u32_t c_rows = 0, c_cols = 0;
+    /** @brief Elements between consecutive rows of C. */
+    u32_t c_row_stride = 0;
+    /** @brief Whether the product uses the transposed reading of the stored operand. */
+    bool transpose_a = false, transpose_b = false;
+    /** @brief Operand element types — BFloat16 by default; @c CUDA_R_8F_E4M3 selects the FP8 path. */
+    cudaDataType_t a_type = CUDA_R_16BF, b_type = CUDA_R_16BF;
+    /** @brief Output element type — Float32 accumulator surface by default, BFloat16 for activations. */
+    cudaDataType_t c_type = CUDA_R_32F;
+    /** @brief Optional per-tensor FP8 descale scalars (Float32, device-resident, capture-stable
+     *      addresses) pinned into the descriptor at @ref cublaslt_plan_t::make — the tensor-core native
+     *      dequantisation, no post-matmul descale kernel. Null means unscaled. */
+    f32_t const *a_descale = nullptr;
+    f32_t const *b_descale = nullptr;
+};
+
+/**
+ *  @brief One pre-planned tensor-core matmul: descriptors, layouts, and the heuristic-chosen algorithm
+ *      are pinned at @ref make , so a @ref matmul call is a pure enqueue with a fixed kernel — hidden
+ *      allocation cannot happen (the workspace is caller-owned) and results replay bit-identically (a
+ *      pinned algorithm never re-tunes).
+ */
+struct cublaslt_plan_t {
+
+    cublaslt_plan_t() noexcept = default;
+    cublaslt_plan_t(cublaslt_plan_t const &) = delete;
+    cublaslt_plan_t &operator=(cublaslt_plan_t const &) = delete;
+    cublaslt_plan_t(cublaslt_plan_t &&other) noexcept
+        : description_(std::exchange(other.description_, nullptr)), a_layout_(std::exchange(other.a_layout_, nullptr)),
+          b_layout_(std::exchange(other.b_layout_, nullptr)), c_layout_(std::exchange(other.c_layout_, nullptr)),
+          algorithm_(other.algorithm_), workspace_bytes_(std::exchange(other.workspace_bytes_, 0)) {}
+    cublaslt_plan_t &operator=(cublaslt_plan_t &&other) noexcept {
+        if (this != &other) {
+            destroy_();
+            description_ = std::exchange(other.description_, nullptr);
+            a_layout_ = std::exchange(other.a_layout_, nullptr);
+            b_layout_ = std::exchange(other.b_layout_, nullptr);
+            c_layout_ = std::exchange(other.c_layout_, nullptr);
+            algorithm_ = other.algorithm_;
+            workspace_bytes_ = std::exchange(other.workspace_bytes_, 0);
+        }
+        return *this;
+    }
+    ~cublaslt_plan_t() noexcept { destroy_(); }
+
+    /** @brief Build the descriptors and pin the best heuristic algorithm within @p workspace_limit —
+     *      once, at setup, outside any capture. */
+    [[nodiscard]] static expected<cublaslt_plan_t> make(cublaslt_session_t const &session,
+                                                        cublaslt_plan_config_t config,
+                                                        std::size_t workspace_limit) noexcept {
+        cublaslt_plan_t plan;
+        if (cublasStatus_t status = cublasLtMatmulDescCreate(&plan.description_, CUBLAS_COMPUTE_32F, CUDA_R_32F);
+            status != CUBLAS_STATUS_SUCCESS)
+            return expected<cublaslt_plan_t>::fail(
+                status_t::cuda_error_k, "matmul description creation failed (status={})", static_cast<int>(status));
+        cublasOperation_t const a_operation = config.transpose_a ? CUBLAS_OP_T : CUBLAS_OP_N;
+        cublasOperation_t const b_operation = config.transpose_b ? CUBLAS_OP_T : CUBLAS_OP_N;
+        cublasLtMatmulDescSetAttribute(plan.description_, CUBLASLT_MATMUL_DESC_TRANSA, &a_operation,
+                                       sizeof(a_operation));
+        cublasLtMatmulDescSetAttribute(plan.description_, CUBLASLT_MATMUL_DESC_TRANSB, &b_operation,
+                                       sizeof(b_operation));
+        // FP8 dequantisation is the tensor core's own: the descale scalars live at capture-stable device
+        // addresses, so pinning the pointers into the descriptor is replay-safe — values may change,
+        // addresses never do. Fast accumulation is the FP8-native mode.
+        if (config.a_descale != nullptr)
+            cublasLtMatmulDescSetAttribute(plan.description_, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &config.a_descale,
+                                           sizeof(config.a_descale));
+        if (config.b_descale != nullptr)
+            cublasLtMatmulDescSetAttribute(plan.description_, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &config.b_descale,
+                                           sizeof(config.b_descale));
+        if (config.a_type == CUDA_R_8F_E4M3 || config.b_type == CUDA_R_8F_E4M3) {
+            std::int8_t const fast_accumulation = 1;
+            cublasLtMatmulDescSetAttribute(plan.description_, CUBLASLT_MATMUL_DESC_FAST_ACCUM, &fast_accumulation,
+                                           sizeof(fast_accumulation));
+        }
+
+        // Row-major layouts of the stored operands; the ops above provide any transposed reading.
+        auto make_layout = [](cublasLtMatrixLayout_t &layout, cudaDataType_t type, u32_t rows, u32_t cols,
+                              u32_t row_stride) noexcept {
+            if (cublasLtMatrixLayoutCreate(&layout, type, rows, cols, static_cast<i64_t>(row_stride)) !=
+                CUBLAS_STATUS_SUCCESS)
+                return false;
+            cublasLtOrder_t const row_major = CUBLASLT_ORDER_ROW;
+            return cublasLtMatrixLayoutSetAttribute(layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &row_major,
+                                                    sizeof(row_major)) == CUBLAS_STATUS_SUCCESS;
+        };
+        if (!make_layout(plan.a_layout_, config.a_type, config.a_rows, config.a_cols, config.a_row_stride) ||
+            !make_layout(plan.b_layout_, config.b_type, config.b_rows, config.b_cols, config.b_row_stride) ||
+            !make_layout(plan.c_layout_, config.c_type, config.c_rows, config.c_cols, config.c_row_stride))
+            return expected<cublaslt_plan_t>::fail(status_t::cuda_error_k, "matrix layout creation failed");
+
+        cublasLtMatmulPreference_t preference = nullptr;
+        if (cublasLtMatmulPreferenceCreate(&preference) != CUBLAS_STATUS_SUCCESS)
+            return expected<cublaslt_plan_t>::fail(status_t::cuda_error_k, "matmul preference creation failed");
+        cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace_limit,
+                                             sizeof(workspace_limit));
+        cublasLtMatmulHeuristicResult_t heuristic {};
+        int heuristic_count = 0;
+        cublasStatus_t const searched = cublasLtMatmulAlgoGetHeuristic(session.get(), plan.description_, plan.a_layout_,
+                                                                       plan.b_layout_, plan.c_layout_, plan.c_layout_,
+                                                                       preference, 1, &heuristic, &heuristic_count);
+        cublasLtMatmulPreferenceDestroy(preference);
+        if (searched != CUBLAS_STATUS_SUCCESS || heuristic_count == 0)
+            return expected<cublaslt_plan_t>::fail( //
+                status_t::shape_unsupported_k,
+                "no tensor-core algorithm for this product (a=[{}x{}] b=[{}x{}] c=[{}x{}] status={})", config.a_rows,
+                config.a_cols, config.b_rows, config.b_cols, config.c_rows, config.c_cols, static_cast<int>(searched));
+        plan.algorithm_ = heuristic.algo;
+        plan.workspace_bytes_ = heuristic.workspaceSize;
+        return expected<cublaslt_plan_t> {std::move(plan)};
+    }
+
+    /** @brief The workspace bytes the pinned algorithm needs; the caller sizes one shared buffer to the
+     *      maximum over its plans. */
+    [[nodiscard]] std::size_t workspace_bytes() const noexcept { return workspace_bytes_; }
+
+    /** @brief Enqueue @c C = A·B + beta·C on @p stream — a fixed tensor-core kernel, no planning, no
+     *      allocation. Operand pointers are the vendor boundary; extents were pinned at @ref make . */
+    [[nodiscard]] expected_t matmul(cublaslt_session_t const &session, void const *a, void const *b, void *c,
+                                    f32_t beta, b8r1_span_t workspace, gpu_stream_t const &stream) const noexcept {
+        f32_t const alpha = 1.0f;
+        if (cublasStatus_t status = cublasLtMatmul(session.get(), description_, &alpha, a, a_layout_, b, b_layout_,
+                                                   &beta, c, c_layout_, c, c_layout_, &algorithm_, workspace.data(),
+                                                   workspace.extent(0), stream.get());
+            status != CUBLAS_STATUS_SUCCESS)
+            return expected_t::fail(status_t::cuda_error_k, "tensor-core matmul failed (status={})",
+                                    static_cast<int>(status));
+        return {};
+    }
+
+  private:
+    void destroy_() noexcept {
+        if (c_layout_ != nullptr) cublasLtMatrixLayoutDestroy(std::exchange(c_layout_, nullptr));
+        if (b_layout_ != nullptr) cublasLtMatrixLayoutDestroy(std::exchange(b_layout_, nullptr));
+        if (a_layout_ != nullptr) cublasLtMatrixLayoutDestroy(std::exchange(a_layout_, nullptr));
+        if (description_ != nullptr) cublasLtMatmulDescDestroy(std::exchange(description_, nullptr));
+    }
+
+    cublasLtMatmulDesc_t description_ = nullptr;
+    cublasLtMatrixLayout_t a_layout_ = nullptr;
+    cublasLtMatrixLayout_t b_layout_ = nullptr;
+    cublasLtMatrixLayout_t c_layout_ = nullptr;
+    cublasLtMatmulAlgo_t algorithm_ {};
+    std::size_t workspace_bytes_ = 0;
+};
+
+/**
+ *  @brief A shared cuDNN session: one handle per device, owned once and borrowed by every fused-graph
+ *      consumer — the fused-attention entry point. The graphs themselves live with their consumers
+ *      (e.g. the transformer block owns its SDPA plans); this owner carries only the handle, bound to
+ *      the caller's stream at execute time.
+ */
+struct cudnn_session_t {
+
+    cudnn_session_t() noexcept = default;
+    cudnn_session_t(cudnn_session_t const &) = delete;
+    cudnn_session_t &operator=(cudnn_session_t const &) = delete;
+    cudnn_session_t(cudnn_session_t &&other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
+    cudnn_session_t &operator=(cudnn_session_t &&other) noexcept {
+        if (this != &other) {
+            destroy_();
+            handle_ = std::exchange(other.handle_, nullptr);
+        }
+        return *this;
+    }
+    ~cudnn_session_t() noexcept { destroy_(); }
+
+    /** @brief Create the handle — once per device, outside any capture. */
+    [[nodiscard]] static expected<cudnn_session_t> make() noexcept {
+        cudnn_session_t session;
+        if (cudnnStatus_t status = cudnnCreate(&session.handle_); status != CUDNN_STATUS_SUCCESS)
+            return expected<cudnn_session_t>::fail(status_t::cuda_error_k, "cuDNN handle creation failed ({})",
+                                                   cudnnGetErrorString(status));
+        return expected<cudnn_session_t> {std::move(session)};
+    }
+
+    /** @brief Bind the handle to @p stream — cuDNN executes on whatever stream the handle carries, so
+     *      every consumer re-binds before its enqueue. */
+    [[nodiscard]] expected_t bind(gpu_stream_t const &stream) const noexcept {
+        if (cudnnStatus_t status = cudnnSetStream(handle_, reinterpret_cast<cudaStream_t>(stream.get()));
+            status != CUDNN_STATUS_SUCCESS)
+            return expected_t::fail(status_t::cuda_error_k, "cuDNN stream binding failed ({})",
+                                    cudnnGetErrorString(status));
+        return {};
+    }
+
+    /** @brief The wrapped handle, borrowed by graph builders and executes. */
+    [[nodiscard]] cudnnHandle_t get() const noexcept { return handle_; }
+
+  private:
+    void destroy_() noexcept {
+        if (handle_ != nullptr) cudnnDestroy(std::exchange(handle_, nullptr));
+    }
+
+    cudnnHandle_t handle_ = nullptr;
 };
 
 } // namespace unum::uform::primitives
