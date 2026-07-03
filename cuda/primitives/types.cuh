@@ -18,7 +18,9 @@
 #include <source_location> // `std::source_location`
 #include <utility>         // `std::move`, `std::forward`
 
-#include <cuda.h> // `CUresult`, `cuGetErrorString`
+#include <cuda.h>      // `CUresult`, `cuGetErrorString`
+#include <cuda_bf16.h> // `__nv_bfloat16` behind the `bf16_t` alias
+#include <cuda_fp8.h>  // `__nv_fp8_e4m3` behind the `e4m3_t` alias
 
 #include <stringzilla/stringzilla.hpp> // `sz::string` — the exception-free diagnostics carrier
 
@@ -43,12 +45,20 @@ namespace unum::uform::primitives {
 
 namespace sz = ashvardanian::stringzilla;
 
+using b8_t = std::byte;
+
 using u8_t = std::uint8_t;
 using u16_t = std::uint16_t;
-using i32_t = std::int32_t;
 using u32_t = std::uint32_t;
-using i64_t = std::int64_t;
 using u64_t = std::uint64_t;
+
+using i8_t = std::int8_t;
+using i16_t = std::int16_t;
+using i32_t = std::int32_t;
+using i64_t = std::int64_t;
+
+using e4m3_t = __nv_fp8_e4m3;
+using bf16_t = __nv_bfloat16;
 using f32_t = float;
 using f64_t = double;
 
