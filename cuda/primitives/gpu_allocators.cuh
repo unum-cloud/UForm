@@ -1,10 +1,13 @@
 /**
- *  @brief GPU memory allocators of the UForm v4 primitives cell: a growing carve arena + a stream-ordered allocator.
- *  @file cuda/primitives/allocators.cuh
+ *  @brief Single-GPU memory allocators of the UForm v4 primitives cell: a growing carve arena + a
+ *      stream-ordered allocator, each owning memory of exactly @b one device.
+ *  @file cuda/primitives/gpu_allocators.cuh
  *  @author Ash Vardanian
  *  @date July 2, 2026
  *
- *  Two allocators for the two memory disciplines the stack needs, both on the CUDA Driver API:
+ *  Two allocators for the two @b single-GPU memory disciplines the stack needs, both on the CUDA Driver
+ *  API (the multi-device symmetric memory of a multimem_domain lives with the multimem collectives,
+ *  beside its one consumer):
  *
  *    - @ref gpu_arena_t — a virtual-memory (VMM) bump arena for @b homogeneous fixed-shape workloads, where
  *      every call allocates the same sequence of sizes — model training and inference steps. It owns the
@@ -21,6 +24,11 @@
  *      instantiates owning tensors whose storage is arena allocations (deallocation is a no-op; reclamation
  *      is the arena's cursor rewind).
  *
+ *  There is no in-house memory ledger: the driver already keeps the truth — @c cuMemGetInfo for a
+ *  device's totals, the default pool's attributes for the stream-ordered tier's usage and high-water
+ *  marks — and @ref gpu_memory_report reads it on demand. Per-owner attribution is each owner's own
+ *  accessors ( @ref gpu_arena_t::used / @ref gpu_arena_t::mapped ).
+ *
  *  The arena's physical chunks are created @c gpuDirectRDMACapable , so the same slabs can later be
  *  registered as InfiniBand MRs or bound to a multicast object — symmetric / multimem backing is a property
  *  added to @b this arena at creation, not a third allocator: running the identical carve program on every rank
@@ -30,6 +38,7 @@
 
 #include <cstddef> // `std::size_t`, `std::byte`
 
+#include <span>        // `std::span` — the `visible_to` device-ID list
 #include <type_traits> // `std::true_type`
 #include <utility>     // `std::exchange`
 
@@ -47,6 +56,38 @@ inline constexpr std::size_t arena_alignment_k = 256u;
 /** @brief Round @p bytes up to the next multiple of @p granularity (any positive step). */
 [[nodiscard]] inline constexpr std::size_t round_up_to_multiple(std::size_t bytes, std::size_t granularity) noexcept {
     return (bytes + granularity - 1u) / granularity * granularity;
+}
+
+/** @brief One device's memory picture, straight from the driver — see @ref gpu_memory_report . */
+struct gpu_memory_report_t {
+    /** @brief HBM not yet allocated by anyone in any process, per @c cuMemGetInfo . */
+    std::size_t free_bytes = 0;
+    /** @brief The device's total HBM. */
+    std::size_t total_bytes = 0;
+    /** @brief Bytes currently allocated from the device's default stream-ordered pool. */
+    std::size_t pool_used_bytes = 0;
+    /** @brief The pool's high-water mark since its last reset. */
+    std::size_t pool_peak_bytes = 0;
+};
+
+/** @brief Poll the driver for @p device 's memory picture — the diagnostics counterpart of the owners'
+ *      own accessors ( @c arena.used()/mapped() ); there is no in-house ledger to keep in sync. The
+ *      calling thread must hold a context on @p device (the @c cuMemGetInfo scope). */
+[[nodiscard]] inline expected<gpu_memory_report_t> gpu_memory_report(i32_t device) noexcept {
+    gpu_memory_report_t report;
+    if (CUresult result = cuMemGetInfo(&report.free_bytes, &report.total_bytes); result != CUDA_SUCCESS)
+        return expected<gpu_memory_report_t>::fail(result, "memory info query failed (device={})", device);
+    CUdevice device_handle = 0;
+    CUmemoryPool pool = nullptr;
+    if (cuDeviceGet(&device_handle, device) == CUDA_SUCCESS &&
+        cuDeviceGetDefaultMemPool(&pool, device_handle) == CUDA_SUCCESS) {
+        cuuint64_t used = 0, peak = 0;
+        if (cuMemPoolGetAttribute(pool, CU_MEMPOOL_ATTR_USED_MEM_CURRENT, &used) == CUDA_SUCCESS)
+            report.pool_used_bytes = static_cast<std::size_t>(used);
+        if (cuMemPoolGetAttribute(pool, CU_MEMPOOL_ATTR_USED_MEM_HIGH, &peak) == CUDA_SUCCESS)
+            report.pool_peak_bytes = static_cast<std::size_t>(peak);
+    }
+    return expected<gpu_memory_report_t> {report};
 }
 
 /**
@@ -99,6 +140,9 @@ struct gpu_arena_t {
     int device_ = 0;
     /** @brief Mapped chunks, in mapping order, for teardown. */
     array<physical_chunk_t> chunks_ {};
+    /** @brief Peer devices named in @c visible_to at @ref make — baked configuration every chunk
+     *      (present and future) is granted to; nothing appends to it after construction. */
+    array<i32_t> visible_to_ {};
 
     gpu_arena_t() noexcept = default;
     gpu_arena_t(gpu_arena_t const &) = delete;
@@ -108,7 +152,7 @@ struct gpu_arena_t {
         : base_(std::exchange(other.base_, 0)), reserved_bytes_(std::exchange(other.reserved_bytes_, 0)),
           mapped_bytes_(std::exchange(other.mapped_bytes_, 0)), used_bytes_(std::exchange(other.used_bytes_, 0)),
           granularity_(std::exchange(other.granularity_, 0)), device_(std::exchange(other.device_, 0)),
-          chunks_(std::move(other.chunks_)) {}
+          chunks_(std::move(other.chunks_)), visible_to_(std::move(other.visible_to_)) {}
 
     gpu_arena_t &operator=(gpu_arena_t &&other) noexcept {
         if (this == &other) return *this;
@@ -120,6 +164,7 @@ struct gpu_arena_t {
         granularity_ = std::exchange(other.granularity_, 0);
         device_ = std::exchange(other.device_, 0);
         chunks_ = std::move(other.chunks_);
+        visible_to_ = std::move(other.visible_to_);
         return *this;
     }
 
@@ -131,12 +176,23 @@ struct gpu_arena_t {
      *  The chunks later mapped in are created @c gpuDirectRDMACapable so the arena's slabs can be
      *  MR-registered or multicast-bound without re-allocation.
      *
+     *  Cross-device visibility is @b construction-time configuration: every peer named in
+     *  @p visible_to is granted read-write access to every chunk this arena ever maps (a VMM
+     *  page-table grant — one-time cost, no address motion, capture-stable peer views). There is no
+     *  post-hoc grant; consumers @b validate with @ref is_visible_to and fail loudly.
+     *
      *  @param[in] device Device ordinal the arena's physical chunks will live on.
      *  @param[in] reserve_bytes Growth ceiling; rounded up to the device's allocation granularity.
+     *  @param[in] visible_to Peer device ordinals that must be able to read this arena over NVLink.
      */
-    [[nodiscard]] static expected<gpu_arena_t> make(int device, std::size_t reserve_bytes) noexcept {
+    [[nodiscard]] static expected<gpu_arena_t> make(int device, std::size_t reserve_bytes,
+                                                    std::span<i32_t const> visible_to = {}) noexcept {
         gpu_arena_t arena;
         arena.device_ = device;
+        for (i32_t const peer : visible_to)
+            if (peer != device)
+                if (arena.visible_to_.try_push_back(peer) != status_t::success_k)
+                    return expected<gpu_arena_t>::fail(status_t::bad_alloc_k, "peer table allocation failed");
         CUmemAllocationProp properties = allocation_properties_(device);
         if (CUresult result = cuMemGetAllocationGranularity(&arena.granularity_, &properties,
                                                             CU_MEM_ALLOC_GRANULARITY_MINIMUM);
@@ -155,6 +211,16 @@ struct gpu_arena_t {
     [[nodiscard]] std::size_t mapped() const noexcept { return mapped_bytes_; }
     /** @brief The current cursor position, to be rewound to with @ref rewind . */
     [[nodiscard]] snapshot_t snapshot() const noexcept { return {used_bytes_}; }
+
+    /** @brief Whether @p device can read this arena: the home device, or a peer named in the
+     *      @c visible_to set at @ref make . Consumers needing cross-device reads validate with this
+     *      and fail loudly — visibility is never granted after construction. */
+    [[nodiscard]] bool is_visible_to(int device) const noexcept {
+        if (device == device_) return true;
+        for (i32_t const peer : visible_to_.view())
+            if (peer == device) return true;
+        return false;
+    }
 
     /**
      *  @brief Allocate @p bytes at @p alignment off the bump cursor, growing the physical backing when the
@@ -216,6 +282,19 @@ struct gpu_arena_t {
                 cuMemUnmap(base_ + mapped_bytes_, chunk_bytes);
                 cuMemRelease(handle);
                 return result;
+            }
+            // Every chunk honors the `visible_to_` set baked at make.
+            for (i32_t const peer : visible_to_.view()) {
+                CUmemAccessDesc peer_access {};
+                peer_access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+                peer_access.location.id = peer;
+                peer_access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+                if (CUresult result = cuMemSetAccess(base_ + mapped_bytes_, chunk_bytes, &peer_access, 1);
+                    result != CUDA_SUCCESS) {
+                    cuMemUnmap(base_ + mapped_bytes_, chunk_bytes);
+                    cuMemRelease(handle);
+                    return result;
+                }
             }
             if (chunks_.try_push_back({handle, chunk_bytes}) != status_t::success_k) {
                 cuMemUnmap(base_ + mapped_bytes_, chunk_bytes);
@@ -321,7 +400,8 @@ struct gpu_alloc {
     constexpr gpu_alloc(gpu_alloc<other_type_> const &other) noexcept : stream(other.stream) {}
 
     /** @brief Stream-ordered allocation from the device's default memory pool; @c nullptr on failure —
-     *      matching NumKong's non-throwing allocator contract. */
+     *      matching NumKong's non-throwing allocator contract. The pool's own attributes carry the
+     *      usage and high-water marks (see @ref gpu_memory_report ). */
     [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
         CUdeviceptr pointer = 0;
         if (cuMemAllocAsync(&pointer, count * sizeof(value_type), stream) != CUDA_SUCCESS) return nullptr;

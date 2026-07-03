@@ -408,7 +408,7 @@ struct mesh_topology_t {
             return expected<mesh_topology_t>::fail( //
                 status_t::invalid_input_k,
                 "a multi-host_domain bootstrap needs a shared exchange directory: pass one or set " //
-                "$UFORM_EXCHANGE_DIR (host_domain_" "count={})",
+                "$UFORM_EXCHANGE_DIR (host_domain_count={})",
                 host_domain_count);
         char const *job = job_id != nullptr ? job_id : std::getenv("UFORM_JOB_ID");
         if (job == nullptr)
