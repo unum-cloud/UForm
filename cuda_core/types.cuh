@@ -104,6 +104,38 @@ struct epoch_t {
     return rounds;
 }
 
+/** @brief One keyed mixing round of the Feistel bijections every deterministic draw builds on —
+ *      dataset shuffling, batch mixing, span masking. Pure and device-callable. */
+[[nodiscard]] constexpr u32_t permutation_round(u32_t half, u32_t key) noexcept {
+    u32_t mixed = half * 2654435761u + key;
+    mixed ^= mixed >> 15;
+    mixed *= 2246822519u;
+    mixed ^= mixed >> 13;
+    return mixed;
+}
+
+/** @brief The keyed bijection over @c [0,count) : a 4-round Feistel over the smallest even-bit
+ *      domain covering @p count , cycle-walked back into range — identical on every host and GPU
+ *      for the same @c (seed,epoch) , so no shuffle, mix, or mask ever needs an exchange. */
+[[nodiscard]] constexpr std::size_t epoch_permutation(u64_t seed, epoch_t epoch, std::size_t index,
+                                                      std::size_t count) noexcept {
+    u32_t const half_bits = (ceil_log2(static_cast<u32_t>(count)) + 1u) / 2u;
+    u32_t const half_mask = (1u << half_bits) - 1u;
+    std::size_t value = index;
+    do {
+        u32_t left = static_cast<u32_t>(value >> half_bits) & half_mask;
+        u32_t right = static_cast<u32_t>(value) & half_mask;
+        for (u32_t round = 0; round != 4; ++round) {
+            u32_t const key = static_cast<u32_t>(seed >> (16 * (round % 4))) + epoch.index * 40503u + round;
+            u32_t const swapped = right;
+            right = left ^ (permutation_round(right, key) & half_mask);
+            left = swapped;
+        }
+        value = (static_cast<std::size_t>(left) << half_bits) | right;
+    } while (value >= count);
+    return value;
+}
+
 /** @brief Outcome of any fallible operation. @c success_k==0 ; all error codes are negative + stable. */
 enum class status_t : i32_t {
     /** @brief The operation completed; outputs are valid. */

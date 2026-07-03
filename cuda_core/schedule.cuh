@@ -38,6 +38,7 @@
  */
 #pragma once
 
+#include <array>   // `std::array` — the deterministic-algorithm candidate table
 #include <cstddef> // `std::size_t`
 #include <cstring> // `std::memset` — zeroing pinned scalar slots
 #include <span>    // `std::span` — the multi-stream capture rank list
@@ -610,11 +611,14 @@ struct cublaslt_plan_t {
     }
     ~cublaslt_plan_t() noexcept { destroy_(); }
 
-    /** @brief Build the descriptors and pin the best heuristic algorithm within @p workspace_limit —
-     *      once, at setup, outside any capture. */
+    /** @brief Build the descriptors and pin the best @b deterministic heuristic algorithm — once, at
+     *      setup, outside any capture. The engine's chooser runs unbounded and reports what its pick
+     *      needs ( @ref workspace_bytes — the caller allocates exactly that, and the arena budget is
+     *      the real constraint); determinism is enforced by name, never by a size cap: the pinned
+     *      algorithm must be single-split with no cross-CTA reduction, so no atomics ever touch the
+     *      accumulator. */
     [[nodiscard]] static expected<cublaslt_plan_t> make(cublaslt_session_t const &session,
-                                                        cublaslt_plan_config_t config,
-                                                        std::size_t workspace_limit) noexcept {
+                                                        cublaslt_plan_config_t config) noexcept {
         cublaslt_plan_t plan;
         if (cublasStatus_t status = cublasLtMatmulDescCreate(&plan.description_, CUBLAS_COMPUTE_32F, CUDA_R_32F);
             status != CUBLAS_STATUS_SUCCESS)
@@ -659,22 +663,44 @@ struct cublaslt_plan_t {
         cublasLtMatmulPreference_t preference = nullptr;
         if (cublasLtMatmulPreferenceCreate(&preference) != CUBLAS_STATUS_SUCCESS)
             return expected<cublaslt_plan_t>::fail(status_t::cuda_error_k, "matmul preference creation failed");
-        cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace_limit,
-                                             sizeof(workspace_limit));
-        cublasLtMatmulHeuristicResult_t heuristic {};
+        // No artificial ceiling: the chooser ranks freely, the pick reports its exact appetite, and
+        // the arena decides whether that fits — loudly, at the caller's allocation.
+        std::uint64_t const unbounded = ~std::uint64_t {0};
+        cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &unbounded,
+                                             sizeof(unbounded));
+        std::array<cublasLtMatmulHeuristicResult_t, 8> heuristics {};
         int heuristic_count = 0;
-        cublasStatus_t const searched = cublasLtMatmulAlgoGetHeuristic(session.get(), plan.description_, plan.a_layout_,
-                                                                       plan.b_layout_, plan.c_layout_, plan.c_layout_,
-                                                                       preference, 1, &heuristic, &heuristic_count);
+        cublasStatus_t const searched = cublasLtMatmulAlgoGetHeuristic(
+            session.get(), plan.description_, plan.a_layout_, plan.b_layout_, plan.c_layout_, plan.c_layout_,
+            preference, static_cast<int>(heuristics.size()), heuristics.data(), &heuristic_count);
         cublasLtMatmulPreferenceDestroy(preference);
         if (searched != CUBLAS_STATUS_SUCCESS || heuristic_count == 0)
             return expected<cublaslt_plan_t>::fail( //
                 status_t::shape_unsupported_k,
                 "no tensor-core algorithm for this product (a=[{}x{}] b=[{}x{}] c=[{}x{}] status={})", config.a_rows,
                 config.a_cols, config.b_rows, config.b_cols, config.c_rows, config.c_cols, static_cast<int>(searched));
-        plan.algorithm_ = heuristic.algo;
-        plan.workspace_bytes_ = heuristic.workspaceSize;
-        return expected<cublaslt_plan_t> {std::move(plan)};
+        // The determinism gate: single split, no cross-CTA reduction scheme — the properties a size
+        // cap only ever enforced by accident.
+        for (int candidate = 0; candidate != heuristic_count; ++candidate) {
+            cublasLtMatmulHeuristicResult_t const &heuristic = heuristics[static_cast<std::size_t>(candidate)];
+            std::int32_t splits = 0;
+            std::uint32_t reduction = CUBLASLT_REDUCTION_SCHEME_NONE;
+            std::size_t written = 0;
+            if (cublasLtMatmulAlgoConfigGetAttribute(&heuristic.algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &splits,
+                                                     sizeof(splits), &written) != CUBLAS_STATUS_SUCCESS)
+                continue;
+            if (cublasLtMatmulAlgoConfigGetAttribute(&heuristic.algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, &reduction,
+                                                     sizeof(reduction), &written) != CUBLAS_STATUS_SUCCESS)
+                continue;
+            if (splits > 1 || reduction != CUBLASLT_REDUCTION_SCHEME_NONE) continue;
+            plan.algorithm_ = heuristic.algo;
+            plan.workspace_bytes_ = heuristic.workspaceSize;
+            return expected<cublaslt_plan_t> {std::move(plan)};
+        }
+        return expected<cublaslt_plan_t>::fail(
+            status_t::shape_unsupported_k,
+            "no deterministic tensor-core algorithm among {} candidates (a=[{}x{}] b=[{}x{}] c=[{}x{}])",
+            heuristic_count, config.a_rows, config.a_cols, config.b_rows, config.b_cols, config.c_rows, config.c_cols);
     }
 
     /** @brief The workspace bytes the pinned algorithm needs; the caller sizes one shared buffer to the
