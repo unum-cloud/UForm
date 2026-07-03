@@ -7,7 +7,7 @@
  */
 #include "multimem_collectives.cuh"
 
-namespace unum::uform::primitives {
+namespace unum::uform::core {
 
 /**
  *  @brief Domain barrier: lane 0 release-adds 1 into every replica's counter, then acquire-spins on its
@@ -118,8 +118,7 @@ expected<gpu_symmetric_arena_t> gpu_symmetric_arena_t::make(std::span<i32_t cons
         // Create into a local and publish only after the map succeeds, so "published handle" and
         // "mapped slice" are the same fact — teardown needs no separate high-water counter.
         CUmemGenericAllocationHandle handle = 0;
-        if (CUresult result = cuMemCreate(&handle, arena.member_stride_, &properties, 0);
-            result != CUDA_SUCCESS)
+        if (CUresult result = cuMemCreate(&handle, arena.member_stride_, &properties, 0); result != CUDA_SUCCESS)
             return result_t::fail(result, "slice allocation failed (device={} bytes={})", devices[member],
                                   arena.member_stride_);
         if (CUresult result = cuMemMap(slice, arena.member_stride_, 0, handle, 0); result != CUDA_SUCCESS) {
@@ -149,8 +148,7 @@ expected<multimem_domain_t> multimem_domain_t::make(std::span<i32_t const> devic
                               streams.size());
     // Host-side staging (memsets, the epoch reset) needs a current context; the lead stream owns one.
     switch_to_gpu_t gpu_scope {streams[0]};
-    if (!gpu_scope.ok())
-        return result_t::fail(status_t::cuda_error_k, "context entry failed (device={})", devices[0]);
+    if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (device={})", devices[0]);
 
     multimem_domain_t domain;
     domain.payload_scalars_ = payload_scalars;
@@ -189,21 +187,19 @@ expected<multimem_domain_t> multimem_domain_t::make(std::span<i32_t const> devic
     if (multimem_everywhere) {
         std::size_t const bound_bytes = domain.replicas_.member_stride();
         multimem_properties.size = bound_bytes;
-        if (CUresult result = cuMulticastCreate(&domain.multimem_handle_, &multimem_properties);
-            result != CUDA_SUCCESS)
+        if (CUresult result = cuMulticastCreate(&domain.multimem_handle_, &multimem_properties); result != CUDA_SUCCESS)
             return result_t::fail(result, "multicast object creation failed (members={} bytes={})", member_count,
                                   bound_bytes);
         for (i32_t const device : devices) {
             CUdevice device_handle = 0;
             if (CUresult result = cuDeviceGet(&device_handle, device); result != CUDA_SUCCESS)
                 return result_t::fail(result, "device handle failed ({})", device);
-            if (CUresult result = cuMulticastAddDevice(domain.multimem_handle_, device_handle);
-                result != CUDA_SUCCESS)
+            if (CUresult result = cuMulticastAddDevice(domain.multimem_handle_, device_handle); result != CUDA_SUCCESS)
                 return result_t::fail(result, "multicast add-device failed (device={})", device);
         }
         for (std::size_t member = 0; member != member_count; ++member)
-            if (CUresult result = cuMulticastBindMem(domain.multimem_handle_, 0,
-                                                     domain.replicas_.member_handle(member), 0, bound_bytes, 0);
+            if (CUresult result = cuMulticastBindMem(domain.multimem_handle_, 0, domain.replicas_.member_handle(member),
+                                                     0, bound_bytes, 0);
                 result != CUDA_SUCCESS)
                 return result_t::fail(result, "multicast bind failed (member={})", member);
         if (CUresult result = cuMemAddressReserve(&domain.multimem_pointer_, bound_bytes, 0, 0, 0);
@@ -252,16 +248,15 @@ expected_t multimem_domain_t::reduce_scatter(std::size_t member_index, f32r1_spa
                                              std::size_t shard_begin, gpu_stream_t const &stream) noexcept {
     std::size_t const shard_scalars = destination.extent(0);
     if (shard_begin + shard_scalars > payload_scalars_)
-        return expected_t::fail(status_t::shape_unsupported_k,
-                                "shard [{},{}) exceeds the domain payload of {} scalars", shard_begin,
-                                shard_begin + shard_scalars, payload_scalars_);
+        return expected_t::fail(status_t::shape_unsupported_k, "shard [{},{}) exceeds the domain payload of {} scalars",
+                                shard_begin, shard_begin + shard_scalars, payload_scalars_);
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const grid_shape {grid_size_for(shard_scalars), 1u, 1u};
     if (tier() == multimem_tier_t::switch_reduced_k)
-        return launch_kernel(reinterpret_cast<void const *>(&multimem_reduce_scatter_kernel_), grid_shape,
-                             block_shape, stream, member(member_index), destination, shard_begin);
-    return launch_kernel(reinterpret_cast<void const *>(&multimem_reduce_scatter_peer_kernel_), grid_shape,
-                         block_shape, stream, member(member_index), destination, shard_begin);
+        return launch_kernel(reinterpret_cast<void const *>(&multimem_reduce_scatter_kernel_), grid_shape, block_shape,
+                             stream, member(member_index), destination, shard_begin);
+    return launch_kernel(reinterpret_cast<void const *>(&multimem_reduce_scatter_peer_kernel_), grid_shape, block_shape,
+                         stream, member(member_index), destination, shard_begin);
 }
 
-} // namespace unum::uform::primitives
+} // namespace unum::uform::core

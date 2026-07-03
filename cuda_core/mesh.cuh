@@ -95,7 +95,7 @@
 #include "types.cuh" // `expected`, `expected_t`, `status_t`, `format_into`
 #include "array.cuh" // `array` for the exception-free host_domain table
 
-namespace unum::uform::primitives {
+namespace unum::uform::core {
 
 namespace sz = ashvardanian::stringzilla;
 
@@ -764,4 +764,4 @@ struct mesh_topology_t {
     return 0u;
 }
 
-} // namespace unum::uform::primitives
+} // namespace unum::uform::core

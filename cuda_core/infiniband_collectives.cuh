@@ -87,7 +87,7 @@
 #include "schedule.cuh"       // `b8r1_span_t` — the registered GPU range travels as one typed span
 #include "mesh.cuh"           // `mesh_topology_t` — the coordinate exchange rides the mesh rendezvous
 
-namespace unum::uform::primitives {
+namespace unum::uform::core {
 
 /** @brief Monotonic never-reset arrival counter the GDAKI collectives spin on; lives in device memory. */
 using infiniband_epoch_t = u32_t;
@@ -315,8 +315,7 @@ struct infiniband_nic_t {
     /** @brief Open the adapter serving global GPU @p global_gpu_index (name @c mlx5_<index> — the
      *      box's GPU↔HCA pairing), allocate its protection domain, and cache the port identity.
      *  @param[in] infiniband_port The port on the adapter; single-port ConnectX parts use 1. */
-    [[nodiscard]] static expected<infiniband_nic_t> make(u32_t global_gpu_index,
-                                                         u8_t infiniband_port = 1) noexcept {
+    [[nodiscard]] static expected<infiniband_nic_t> make(u32_t global_gpu_index, u8_t infiniband_port = 1) noexcept {
         infiniband_nic_t nic;
         nic.port_ = infiniband_port;
         sz::string nic_name;
@@ -354,8 +353,8 @@ struct infiniband_nic_t {
 
         nic.protection_domain_ = ibv_alloc_pd(nic.device_context_);
         if (nic.protection_domain_ == nullptr)
-            return expected<infiniband_nic_t>::fail(status_t::io_error_k,
-                                                    "protection-domain allocation failed on {}", nic_name);
+            return expected<infiniband_nic_t>::fail(status_t::io_error_k, "protection-domain allocation failed on {}",
+                                                    nic_name);
         return expected<infiniband_nic_t> {std::move(nic)};
     }
 
@@ -444,8 +443,7 @@ struct infiniband_endpoint_t {
      *  @param[in] gpu_buffer The GPU VRAM range peers will read and write, shaped @b [buffer_bytes] —
      *      typically a window over a @ref gpu_arena_t (its chunks are created GPUDirect-RDMA-capable).
      */
-    [[nodiscard]] static expected<infiniband_endpoint_t> make(infiniband_nic_t &nic,
-                                                              b8r1_span_t gpu_buffer) noexcept {
+    [[nodiscard]] static expected<infiniband_endpoint_t> make(infiniband_nic_t &nic, b8r1_span_t gpu_buffer) noexcept {
         if (nic.context() == nullptr || gpu_buffer.empty())
             return expected<infiniband_endpoint_t>::fail(status_t::invalid_input_k,
                                                          "an endpoint needs an opened NIC and a non-empty buffer");
@@ -481,8 +479,7 @@ struct infiniband_endpoint_t {
         coordinates.packet_sequence_number = 0;
         coordinates.remote_key = endpoint.memory_region_->rkey;
         coordinates.buffer_address = reinterpret_cast<u64_t>(gpu_buffer.data());
-        std::memcpy(coordinates.global_identifier, nic.global_identifier(),
-                    sizeof(coordinates.global_identifier));
+        std::memcpy(coordinates.global_identifier, nic.global_identifier(), sizeof(coordinates.global_identifier));
         return expected<infiniband_endpoint_t> {std::move(endpoint)};
     }
 
@@ -1471,8 +1468,8 @@ struct colocated_domain_t {
         layout.payload_bytes = shard_bytes;
         layout.landing_bytes = shard_bytes;
         layout.rounds = ceil_log2(topology_->shape.multimem_domain_count());
-        return infiniband_member_t::make_(*topology_, member_index, nics_[member_index], arena, layout,
-                                          key_prefix, timeout_seconds);
+        return infiniband_member_t::make_(*topology_, member_index, nics_[member_index], arena, layout, key_prefix,
+                                          timeout_seconds);
     }
 
     /** @brief Wire one member for the cross-domain all-gather of domain-major @p block_bytes blocks:
@@ -1487,8 +1484,8 @@ struct colocated_domain_t {
         layout.payload_bytes = static_cast<std::size_t>(topology_->shape.multimem_domain_count()) * block_bytes;
         layout.landing_bytes = 0;
         layout.rounds = ceil_log2(topology_->shape.multimem_domain_count());
-        return infiniband_member_t::make_(*topology_, member_index, nics_[member_index], arena, layout,
-                                          key_prefix, timeout_seconds);
+        return infiniband_member_t::make_(*topology_, member_index, nics_[member_index], arena, layout, key_prefix,
+                                          timeout_seconds);
     }
 
     /** @brief The bootstrapped world this domain was wired against. */
@@ -1546,4 +1543,4 @@ struct colocated_domain_t {
 
 #endif // defined(UFORM_WITH_INFINIBAND)
 
-} // namespace unum::uform::primitives
+} // namespace unum::uform::core

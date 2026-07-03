@@ -53,7 +53,7 @@
 #include "array.cuh"          // `array` for the node-guard walk
 #include "gpu_allocators.cuh" // `gpu_arena_alloc` backing the owning rank-1 tensor aliases
 
-namespace unum::uform::primitives {
+namespace unum::uform::core {
 
 namespace nk = ashvardanian::numkong;
 
@@ -786,8 +786,8 @@ struct epoch_counter_t {
      *      before any barrier. Under capture this records the copy node @ref advance_host refreshes. */
     [[nodiscard]] expected_t advance(gpu_stream_t const &stream) noexcept {
         staging_[0] += increment_;
-        if (CUresult result = cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(device_epoch_.data()),
-                                                staging_.data(), sizeof(u32_t), stream.get());
+        if (CUresult result = cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(device_epoch_.data()), staging_.data(),
+                                                sizeof(u32_t), stream.get());
             result != CUDA_SUCCESS)
             return expected_t::fail(result, "epoch upload failed");
         return {};
@@ -879,4 +879,4 @@ struct cudnn_session_t {
     cudnnHandle_t handle_ = nullptr;
 };
 
-} // namespace unum::uform::primitives
+} // namespace unum::uform::core

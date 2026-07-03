@@ -22,6 +22,8 @@
 #include <cuda_bf16.h> // `__nv_bfloat16` behind the `bf16_t` alias
 #include <cuda_fp8.h>  // `__nv_fp8_e4m3` behind the `e4m3_t` alias
 
+#include <numkong/tensor.hpp> // `nk::tensor_span`, `nk::tensor_view` — `differentiable_weights_t`
+
 #include <stringzilla/stringzilla.hpp> // `sz::string` — the exception-free diagnostics carrier
 
 /** @brief `std::format` support for StringZilla slices, so diagnostics interpolate them directly —
@@ -41,9 +43,10 @@ struct std::formatter<ashvardanian::stringzilla::string> : std::formatter<std::s
     }
 };
 
-namespace unum::uform::primitives {
+namespace unum::uform::core {
 
 namespace sz = ashvardanian::stringzilla;
+namespace nk = ashvardanian::numkong;
 
 using b8_t = std::byte;
 
@@ -61,6 +64,10 @@ using i64_t = std::int64_t;
  *      fits 16 bits, and every token tape, staging slot, and embedding lookup trades in this width. */
 using token_id_t = u16_t;
 
+/** @brief One raw image / video channel sample, as decoders emit it — 8-bit, interleaved channels;
+ *      normalization is the entry projection's job, inside the differentiated step. */
+using pixel_t = u8_t;
+
 using e4m3_t = __nv_fp8_e4m3;
 using bf16_t = __nv_bfloat16;
 using f32_t = float;
@@ -73,9 +80,19 @@ inline constexpr unsigned warp_size_k = 32u;
  *      temp-storage budget (1 KB SMEM) with full occupancy on sm_90 and sm_100. */
 inline constexpr unsigned kernel_block_size_default_k = 256u;
 
+/** @brief The typical upper bound on the number of GPUs attached to the same host process
+ *      within the same "multimem" domain.
+ *  @sa Defines the upper bound for @ref mesh_shape_t::gpus_per_host_domain. */
+inline constexpr unsigned max_gpus_per_host_k = 32u;
+
+/** @brief One pass over the dataset — a strong type, so the keyed draws (shuffling, mixing, masking)
+ *      can never confuse it with any other counter in an argument list. */
+struct epoch_t {
+    u32_t index = 0;
+};
+
 /** @brief @c ceil(numerator/denominator) over non-negative integers — grid sizing, chunk counts. */
-[[nodiscard]] inline constexpr std::size_t divide_round_up(std::size_t numerator,
-                                                           std::size_t denominator) noexcept {
+[[nodiscard]] inline constexpr std::size_t divide_round_up(std::size_t numerator, std::size_t denominator) noexcept {
     return (numerator + denominator - 1u) / denominator;
 }
 
@@ -294,4 +311,12 @@ struct expected<void> {
 /** @brief The everyday spelling of the value-less @ref expected . */
 using expected_t = expected<void>;
 
-} // namespace unum::uform::primitives
+/** @brief One weight matrix with its gradient — what models publish and optimizers consume. Vector
+ *      parameters (norm scales, biases) are @b [1,cols] . The optimizer reads the gradient and writes
+ *      the weights, hence the mutability split. */
+struct differentiable_weights_t {
+    nk::tensor_span<bf16_t, 2> weights {};
+    nk::tensor_view<bf16_t, 2> weights_grad {};
+};
+
+} // namespace unum::uform::core

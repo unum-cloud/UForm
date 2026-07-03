@@ -19,7 +19,7 @@
 
 #include <cstddef> // `std::size_t`
 
-#include <memory>      // `std::allocator_traits`, `std::allocator`
+#include <memory>      // `std::alloc_traits`, `std::allocator`
 #include <new>         // placement `new`
 #include <span>        // `std::span`
 #include <type_traits> // `std::is_nothrow_move_constructible_v`
@@ -27,7 +27,7 @@
 
 #include "types.cuh" // `status_t`
 
-namespace unum::uform::primitives {
+namespace unum::uform::core {
 
 /**
  *  @brief Safer alternative to `std::vector`: no exceptions, no copy constructors, and @c try_reserve /
@@ -35,21 +35,21 @@ namespace unum::uform::primitives {
  *
  *  @tparam value_type_ Element type; must be nothrow-move-constructible so relocation on growth cannot
  *      throw mid-move and leave the array half-relocated.
- *  @tparam allocator_type_ Must never throw — failure is a @c nullptr return, surfaced as
+ *  @tparam alloc_type_ Must never throw — failure is a @c nullptr return, surfaced as
  *      @ref status_t::bad_alloc_k ; must propagate on move assignment so the move assignment stays @c noexcept .
  */
-template <typename value_type_, typename allocator_type_ = std::allocator<value_type_>>
+template <typename value_type_, typename alloc_type_ = std::allocator<value_type_>>
 class array {
   public:
     using value_type = value_type_;
     using size_type = std::size_t;
-    using allocator_type = allocator_type_;
+    using alloc_type = alloc_type_;
 
-    using allocator_traits = std::allocator_traits<allocator_type>;
-    using allocated_type = typename allocator_traits::value_type;
+    using alloc_traits = std::alloc_traits<alloc_type>;
+    using allocated_type = typename alloc_traits::value_type;
     static_assert(sizeof(value_type) == sizeof(allocated_type),
                   "Allocator value type must be the same size as the array value type");
-    static_assert(allocator_traits::propagate_on_container_move_assignment::value,
+    static_assert(alloc_traits::propagate_on_container_move_assignment::value,
                   "Allocator must propagate on move assignment, otherwise the move assignment won't be `noexcept`");
     static_assert(std::is_nothrow_move_constructible_v<value_type_>,
                   "Elements must be nothrow-move-constructible so growth relocation cannot fail mid-move");
@@ -58,11 +58,11 @@ class array {
     value_type *data_ = nullptr;
     size_type size_ = 0;
     size_type capacity_ = 0;
-    [[no_unique_address]] allocator_type alloc_ {};
+    [[no_unique_address]] alloc_type alloc_ {};
 
   public:
     array() noexcept = default;
-    explicit array(allocator_type alloc) noexcept : alloc_(std::move(alloc)) {}
+    explicit array(alloc_type alloc) noexcept : alloc_(std::move(alloc)) {}
     ~array() noexcept { reset(); }
 
     /** @warning Use @ref try_assign instead, to handle out-of-memory failures. */
@@ -109,8 +109,7 @@ class array {
     /** @brief Destroy every element and return the backing memory to the allocator. */
     void reset() noexcept {
         clear();
-        if (data_ != nullptr)
-            allocator_traits::deallocate(alloc_, reinterpret_cast<allocated_type *>(data_), capacity_);
+        if (data_ != nullptr) alloc_traits::deallocate(alloc_, reinterpret_cast<allocated_type *>(data_), capacity_);
         data_ = nullptr;
         capacity_ = 0;
     }
@@ -120,15 +119,14 @@ class array {
      *  @retval status_t::bad_alloc_k The allocator returned null; the array is untouched. */
     [[nodiscard]] status_t try_reserve(size_type new_capacity) noexcept {
         if (new_capacity <= capacity_) return status_t::success_k;
-        allocated_type *raw = allocator_traits::allocate(alloc_, new_capacity);
+        allocated_type *raw = alloc_traits::allocate(alloc_, new_capacity);
         if (raw == nullptr) return status_t::bad_alloc_k;
         value_type *new_data = reinterpret_cast<value_type *>(raw);
         for (size_type index = 0; index != size_; ++index) {
             new (new_data + index) value_type(std::move(data_[index]));
             if constexpr (!std::is_trivially_destructible_v<value_type>) data_[index].~value_type();
         }
-        if (data_ != nullptr)
-            allocator_traits::deallocate(alloc_, reinterpret_cast<allocated_type *>(data_), capacity_);
+        if (data_ != nullptr) alloc_traits::deallocate(alloc_, reinterpret_cast<allocated_type *>(data_), capacity_);
         data_ = new_data;
         capacity_ = new_capacity;
         return status_t::success_k;
@@ -184,4 +182,92 @@ class array {
     }
 };
 
-} // namespace unum::uform::primitives
+/**
+ *  @brief Allocator-free sibling of @ref array : inline storage for up to @p capacity_limit_ elements,
+ *      a runtime size, and no heap behind it — the natural owner of per-GPU object tables, where the
+ *      bound is a small compile-time constant and elements must never relocate once constructed.
+ *
+ *  Same contract otherwise: no exceptions, no copies, @c noexcept moves (element-wise — the storage is
+ *  inline), @c try_* growth that can only fail by exceeding the capacity limit.
+ */
+template <typename value_type_, std::size_t capacity_limit_>
+class stack_array {
+  public:
+    using value_type = value_type_;
+    using size_type = std::size_t;
+
+    static_assert(std::is_nothrow_move_constructible_v<value_type_>,
+                  "Elements must be nothrow-move-constructible so container moves stay `noexcept`");
+
+    stack_array() noexcept = default;
+    stack_array(stack_array const &) = delete;
+    stack_array &operator=(stack_array const &) = delete;
+    stack_array(stack_array &&other) noexcept {
+        for (size_type index = 0; index != other.size_; ++index) new (slot_(index)) value_type(std::move(other[index]));
+        size_ = other.size_;
+        other.clear();
+    }
+    stack_array &operator=(stack_array &&other) noexcept {
+        if (this != &other) {
+            clear();
+            for (size_type index = 0; index != other.size_; ++index)
+                new (slot_(index)) value_type(std::move(other[index]));
+            size_ = other.size_;
+            other.clear();
+        }
+        return *this;
+    }
+    ~stack_array() noexcept { clear(); }
+
+    [[nodiscard]] static constexpr size_type capacity() noexcept { return capacity_limit_; }
+    [[nodiscard]] size_type size() const noexcept { return size_; }
+
+    [[nodiscard]] value_type &operator[](size_type index) noexcept { return *std::launder(slot_(index)); }
+    [[nodiscard]] value_type const &operator[](size_type index) const noexcept { return *std::launder(slot_(index)); }
+    [[nodiscard]] value_type *begin() noexcept { return std::launder(slot_(0)); }
+    [[nodiscard]] value_type const *begin() const noexcept { return std::launder(slot_(0)); }
+    [[nodiscard]] value_type *end() noexcept { return begin() + size_; }
+    [[nodiscard]] value_type const *end() const noexcept { return begin() + size_; }
+    [[nodiscard]] std::span<value_type> span() noexcept { return {begin(), size_}; }
+    [[nodiscard]] std::span<value_type const> view() const noexcept { return {begin(), size_}; }
+
+    /** @brief Move-append one element; @ref status_t::bad_alloc_k past the capacity limit. */
+    [[nodiscard]] status_t try_push_back(value_type value) noexcept {
+        if (size_ == capacity_limit_) return status_t::bad_alloc_k;
+        new (slot_(size_)) value_type(std::move(value));
+        ++size_;
+        return status_t::success_k;
+    }
+
+    /** @brief Grow to @p new_size default-constructed elements (or shrink, destroying the tail);
+     *      @ref status_t::bad_alloc_k past the capacity limit. */
+    [[nodiscard]] status_t try_resize(size_type new_size) noexcept {
+        if (new_size > capacity_limit_) return status_t::bad_alloc_k;
+        for (; size_ > new_size; --size_) std::launder(slot_(size_ - 1))->~value_type();
+        for (; size_ < new_size; ++size_) new (slot_(size_)) value_type();
+        return status_t::success_k;
+    }
+
+    void clear() noexcept {
+        for (size_type index = size_; index != 0; --index) std::launder(slot_(index - 1))->~value_type();
+        size_ = 0;
+    }
+
+  private:
+    [[nodiscard]] value_type *slot_(size_type index) noexcept {
+        return reinterpret_cast<value_type *>(storage_) + index;
+    }
+    [[nodiscard]] value_type const *slot_(size_type index) const noexcept {
+        return reinterpret_cast<value_type const *>(storage_) + index;
+    }
+
+    alignas(value_type_) b8_t storage_[capacity_limit_ * sizeof(value_type_)] {};
+    size_type size_ = 0;
+};
+
+/** @brief One entry per GPU of this host_domain — the per-GPU object table every composition root
+ *      owns and threads down by reference; see @ref max_gpus_per_host_k . */
+template <typename value_type_>
+using per_gpu_array = stack_array<value_type_, max_gpus_per_host_k>;
+
+} // namespace unum::uform::core

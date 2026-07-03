@@ -38,7 +38,7 @@
 #include "schedule.cuh"       // `gpu_stream_t`, `launch_kernel`, `current_context_t`, the rank-1 aliases
 #include "gpu_allocators.cuh" // `gpu_arena_t` conventions, `round_up_to_multiple`
 
-namespace unum::uform::primitives {
+namespace unum::uform::core {
 
 /**
  *  @brief The symmetric memory of one multimem_domain: one contiguous VA range whose per-member slices
@@ -328,8 +328,8 @@ struct multimem_domain_t {
     /** @brief Enqueue member @p member_index 's reduce-scatter shard: @p destination receives the
      *      domain-wide sum of @c [shard_begin,shard_begin+destination.extent(0)) . Call after the
      *      barrier proved every member's payload complete. */
-    [[nodiscard]] expected_t reduce_scatter(std::size_t member_index, f32r1_span_t destination,
-                                            std::size_t shard_begin, gpu_stream_t const &stream) noexcept;
+    [[nodiscard]] expected_t reduce_scatter(std::size_t member_index, f32r1_span_t destination, std::size_t shard_begin,
+                                            gpu_stream_t const &stream) noexcept;
 
   private:
     /** @brief Byte offset of the arrival counter inside every replica — pure layout arithmetic over
@@ -388,4 +388,4 @@ struct multimem_domain_t {
     std::size_t reserved_scalars_ = 0;
 };
 
-} // namespace unum::uform::primitives
+} // namespace unum::uform::core

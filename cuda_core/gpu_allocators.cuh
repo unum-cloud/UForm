@@ -18,9 +18,9 @@
  *    - @ref gpu_alloc — a stream-ordered allocator ( @c cuMemAllocAsync / @c cuMemFreeAsync ) for exactly
  *      the opposite: @b heterogeneous shape-varying workloads, where every call differs — the data loaders'
  *      variable-length blobs and decode scratch, living outside captured graphs. Satisfies
- *      @c std::allocator_traits , so it plugs into NumKong's owning
+ *      @c std::alloc_traits , so it plugs into NumKong's owning
  *      @c nk::tensor<value_type,gpu_alloc<value_type>,rank> directly.
- *    - @ref gpu_arena_alloc — the same @c std::allocator_traits facade over a borrowed arena, so model code
+ *    - @ref gpu_arena_alloc — the same @c std::alloc_traits facade over a borrowed arena, so model code
  *      instantiates owning tensors whose storage is arena allocations (deallocation is a no-op; reclamation
  *      is the arena's cursor rewind).
  *
@@ -47,7 +47,7 @@
 #include "types.cuh" // `expected`, `status_t`
 #include "array.cuh" // `array` for exception-free chunk bookkeeping
 
-namespace unum::uform::primitives {
+namespace unum::uform::core {
 
 /** @brief Byte alignment of every arena allocation; matches the 256-byte guarantee of the CUDA allocators, so
  *      an allocation base is always vector-load aligned. */
@@ -368,11 +368,14 @@ struct gpu_arena_alloc {
     }
 };
 
+/** @brief The canonical byte-typed arena-allocator handle — what APIs receive and rebind. */
+using gpu_arena_alloc_t = gpu_arena_alloc<b8_t>;
+
 /**
  *  @brief Pinned host-memory allocator — page-locked pages the DMA engines read directly, for the two
  *      host-side surfaces of a replayed step: epoch staging slots that captured copy nodes re-read at
  *      every launch, and loss landings polled without a stream synchronize. Stateless; needs a current
- *      context at the call, like every driver allocation here. Satisfies @c std::allocator_traits , so
+ *      context at the call, like every driver allocation here. Satisfies @c std::alloc_traits , so
  *      NumKong's owning tensor composes directly:
  *
  *      nk::tensor<f32_t, pinned_alloc<f32_t>, 1> landings;
@@ -396,8 +399,7 @@ struct pinned_alloc {
     /** @brief Pin @p count elements of portable host memory; @c nullptr on failure. */
     [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
         void *base = nullptr;
-        if (cuMemHostAlloc(&base, count * sizeof(value_type), CU_MEMHOSTALLOC_PORTABLE) != CUDA_SUCCESS)
-            return nullptr;
+        if (cuMemHostAlloc(&base, count * sizeof(value_type), CU_MEMHOSTALLOC_PORTABLE) != CUDA_SUCCESS) return nullptr;
         return static_cast<value_type *>(base);
     }
 
@@ -408,6 +410,9 @@ struct pinned_alloc {
     [[nodiscard]] constexpr bool operator==(pinned_alloc const &) const noexcept { return true; }
 };
 
+/** @brief The canonical byte-typed pinned-allocator handle — what APIs receive and rebind. */
+using pinned_alloc_t = pinned_alloc<b8_t>;
+
 /**
  *  @brief Stream-ordered device allocator for @b heterogeneous shape-varying workloads — the exact opposite
  *      of @ref gpu_arena_t : every call may bring a different size, so buffers are individually allocated
@@ -416,7 +421,7 @@ struct pinned_alloc {
  *
  *  Allocation and deallocation enqueue on the bound stream, so a loader's alloc → decode → consume → free
  *  chain needs no host fences; the memory is valid only in that stream's order (host access requires a
- *  sync). Satisfies @c std::allocator_traits — a stateful, trivially-copyable handle over the device's
+ *  sync). Satisfies @c std::alloc_traits — a stateful, trivially-copyable handle over the device's
  *  default memory pool — so NumKong's owning tensor composes directly:
  *  @c nk::tensor<f32_t,gpu_alloc<f32_t>,2>::try_empty({rows,cols},alloc) . Only @c try_empty applies:
  *  the other factories ( @c try_zeros / @c try_full ) initialize through host writes, which device memory
@@ -460,4 +465,7 @@ struct gpu_alloc {
     [[nodiscard]] constexpr bool operator==(gpu_alloc const &other) const noexcept { return stream == other.stream; }
 };
 
-} // namespace unum::uform::primitives
+/** @brief The canonical byte-typed stream-ordered-allocator handle — what APIs receive and rebind. */
+using gpu_alloc_t = gpu_alloc<b8_t>;
+
+} // namespace unum::uform::core
