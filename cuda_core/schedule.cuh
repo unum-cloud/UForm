@@ -17,7 +17,7 @@
  *
  *  A captured body must be a pure enqueue program: no host synchronization, no device-to-host reads, and
  *  @b no allocation. Per-step host-varying values travel through device memory the body reads at replay
- *  (learnable scalars, staged relation slabs, epoch counters) — never through re-captured code. The
+ *  (learnable scalars, staged relation columns, epoch counters) — never through re-captured code. The
  *  contract is enforced, not trusted: after capture the graph's nodes are walked, and any
  *  allocation / free node is a @b loud failure — an allocating body escapes every arena budget and
  *  deadlocks device-local multi-GPU worlds at first launch, and there is no correct fallback.
@@ -39,6 +39,7 @@
 #pragma once
 
 #include <cstddef> // `std::size_t`
+#include <cstring> // `std::memset` — zeroing pinned scalar slots
 #include <span>    // `std::span` — the multi-stream capture rank list
 #include <utility> // `std::exchange`, `std::forward`
 
@@ -48,14 +49,16 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span` for the typed transfer helpers
 
-#include "types.cuh"      // `expected`, `expected_t`, `status_t`
-#include "array.cuh"      // `array` for the node-guard walk
-#include "allocators.cuh" // `gpu_arena_alloc` backing the owning rank-1 tensor aliases
+#include "types.cuh"          // `expected`, `expected_t`, `status_t`
+#include "array.cuh"          // `array` for the node-guard walk
+#include "gpu_allocators.cuh" // `gpu_arena_alloc` backing the owning rank-1 tensor aliases
 
 namespace unum::uform::primitives {
 
 namespace nk = ashvardanian::numkong;
 
+/** @brief Rank-1 token-id device / host view — the batch's token currency. */
+using tokens_view_t = nk::tensor_view<token_id_t, 1>;
 /** @brief Rank-1 UInt32 device / host view. */
 using u32r1_view_t = nk::tensor_view<u32_t, 1>;
 /** @brief Rank-1 Float32 device / host view. */
@@ -64,6 +67,8 @@ using f32r1_view_t = nk::tensor_view<f32_t, 1>;
 using f32r2_view_t = nk::tensor_view<f32_t, 2>;
 /** @brief Rank-1 raw-byte device / host view. */
 using b8r1_view_t = nk::tensor_view<std::byte, 1>;
+/** @brief Rank-1 token-id mutable device / host span — the batch's token currency. */
+using tokens_span_t = nk::tensor_span<token_id_t, 1>;
 /** @brief Rank-1 UInt32 mutable device / host span. */
 using u32r1_span_t = nk::tensor_span<u32_t, 1>;
 /** @brief Rank-1 Float32 mutable device / host span. */
@@ -72,6 +77,8 @@ using f32r1_span_t = nk::tensor_span<f32_t, 1>;
 using f32r2_span_t = nk::tensor_span<f32_t, 2>;
 /** @brief Rank-1 raw-byte mutable device / host span — the workspace currency. */
 using b8r1_span_t = nk::tensor_span<std::byte, 1>;
+/** @brief Rank-1 token-id device-only buffer owned through a @ref gpu_arena_t — the token tape. */
+using tokens_tensor_arena_t = nk::tensor<token_id_t, gpu_arena_alloc<token_id_t>, 1>;
 /** @brief Rank-1 UInt32 device-only buffer owned through a @ref gpu_arena_t . */
 using u32r1_tensor_arena_t = nk::tensor<u32_t, gpu_arena_alloc<u32_t>, 1>;
 /** @brief Rank-1 Float32 device-only buffer owned through a @ref gpu_arena_t . */
@@ -220,6 +227,19 @@ template <typename value_type_>
  *  copies raw bytes, so the implicit conversions a triple-chevron call would perform do not apply —
  *  convert spans to views at the call site.
  */
+/** @brief Grid cap of every grid-strided launch: a bandwidth-bound kernel gains nothing past this, and
+ *      an unbounded grid stalls capture-time instantiation on huge shards. */
+inline constexpr unsigned kernel_grid_cap_k = 4096u;
+
+/** @brief The one grid-size formula for grid-strided kernels over @p scalars elements: at least one
+ *      CTA, at most @ref kernel_grid_cap_k . */
+[[nodiscard]] inline constexpr unsigned grid_size_for(std::size_t scalars,
+                                                      unsigned block = kernel_block_size_default_k) noexcept {
+    std::size_t const grid = divide_round_up(scalars, block);
+    if (grid == 0) return 1u;
+    return grid > kernel_grid_cap_k ? kernel_grid_cap_k : static_cast<unsigned>(grid);
+}
+
 template <typename... arg_types_>
 [[nodiscard]] inline expected_t launch_kernel(void const *kernel_symbol, dim3 grid_size, dim3 block_size,
                                               gpu_stream_t const &stream, arg_types_ const &...args) noexcept {
@@ -689,6 +709,123 @@ struct cublaslt_plan_t {
     cublasLtMatrixLayout_t c_layout_ = nullptr;
     cublasLtMatmulAlgo_t algorithm_ {};
     std::size_t workspace_bytes_ = 0;
+};
+
+/**
+ *  @brief A move-only owning wrapper over a @c CUevent — the cross-stream ordering token (fork / join
+ *      seams, gather-ready signals) with the timing machinery disabled.
+ */
+struct gpu_event_t {
+    gpu_event_t() noexcept = default;
+    gpu_event_t(gpu_event_t const &) = delete;
+    gpu_event_t &operator=(gpu_event_t const &) = delete;
+    gpu_event_t(gpu_event_t &&other) noexcept : event_(std::exchange(other.event_, nullptr)) {}
+    gpu_event_t &operator=(gpu_event_t &&other) noexcept {
+        if (this != &other) {
+            if (event_ != nullptr) cuEventDestroy(event_);
+            event_ = std::exchange(other.event_, nullptr);
+        }
+        return *this;
+    }
+    ~gpu_event_t() noexcept {
+        if (event_ != nullptr) cuEventDestroy(event_);
+    }
+
+    /** @brief Create the event — once, at setup. */
+    [[nodiscard]] static expected<gpu_event_t> make() noexcept {
+        gpu_event_t event;
+        if (CUresult result = cuEventCreate(&event.event_, CU_EVENT_DISABLE_TIMING); result != CUDA_SUCCESS)
+            return expected<gpu_event_t>::fail(result, "event creation failed");
+        return expected<gpu_event_t> {std::move(event)};
+    }
+
+    /** @brief The wrapped handle for record / wait calls. */
+    [[nodiscard]] CUevent get() const noexcept { return event_; }
+
+  private:
+    CUevent event_ = nullptr;
+};
+
+/** @brief Rank-1 UInt32 pinned-host buffer — epoch staging captured copy nodes re-read at replay. */
+using u32r1_tensor_pinned_t = nk::tensor<u32_t, pinned_alloc<u32_t>, 1>;
+/** @brief Rank-1 Float32 pinned-host buffer — synchronization-free loss landings. */
+using f32r1_tensor_pinned_t = nk::tensor<f32_t, pinned_alloc<f32_t>, 1>;
+
+/**
+ *  @brief The monotonic step counter of one collective surface — the only mutable host state a
+ *      captured step keys on. The pinned staging slot @b is the count (no shadow copy); the device
+ *      destination is borrowed. Exactly two behaviors: @ref advance (bump + enqueue the upload, the
+ *      eager / capture path) and @ref advance_host (bump only, the per-replay path — the captured
+ *      copy node re-reads the pinned slot at every launch). Counts never reset; a replayed barrier's
+ *      target only grows.
+ */
+struct epoch_counter_t {
+
+    epoch_counter_t() noexcept = default;
+    epoch_counter_t(epoch_counter_t const &) = delete;
+    epoch_counter_t &operator=(epoch_counter_t const &) = delete;
+    epoch_counter_t(epoch_counter_t &&) noexcept = default;
+    epoch_counter_t &operator=(epoch_counter_t &&) noexcept = default;
+
+    /** @brief Pin the staging slot — once, at setup, with a current context.
+     *  @param[in] device_epoch The one-scalar device destination, borrowed for this object's lifetime.
+     *  @param[in] increment How far one step advances the count (a member count, a round count). */
+    [[nodiscard]] static expected<epoch_counter_t> make(u32r1_span_t device_epoch, u32_t increment) noexcept {
+        epoch_counter_t counter;
+        counter.device_epoch_ = device_epoch;
+        counter.increment_ = increment;
+        counter.staging_ = u32r1_tensor_pinned_t::try_empty({1}, pinned_alloc<u32_t> {});
+        if (!counter.staging_)
+            return expected<epoch_counter_t>::fail(status_t::bad_alloc_k, "pinned epoch staging failed");
+        // Seeded one step below zero (u32 wrap-around), so the first bump stages epoch 0.
+        counter.staging_[0] = 0u - increment;
+        return expected<epoch_counter_t> {std::move(counter)};
+    }
+
+    /** @brief Bump the count and enqueue its upload — once per step, on the surface's lead stream,
+     *      before any barrier. Under capture this records the copy node @ref advance_host refreshes. */
+    [[nodiscard]] expected_t advance(gpu_stream_t const &stream) noexcept {
+        staging_[0] += increment_;
+        if (CUresult result = cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(device_epoch_.data()),
+                                                staging_.data(), sizeof(u32_t), stream.get());
+            result != CUDA_SUCCESS)
+            return expected_t::fail(result, "epoch upload failed");
+        return {};
+    }
+
+    /** @brief The replay-time sibling of @ref advance : bump the pinned slot the captured copy node
+     *      reads — once before every @c cuGraphLaunch of a step containing this surface's barriers. */
+    void advance_host() noexcept { staging_[0] += increment_; }
+
+  private:
+    /** @brief The borrowed one-scalar device destination the barriers spin against. */
+    u32r1_span_t device_epoch_ {};
+    /** @brief The pinned slot holding THE count — the address the (possibly captured) upload reads. */
+    u32r1_tensor_pinned_t staging_ {};
+    /** @brief One step's advance — the arrivals a barrier waits for. */
+    u32_t increment_ = 0;
+};
+
+/**
+ *  @brief For this scope, the calling thread switches to @p stream 's GPU — and switches back at scope
+ *      end. The Driver API needs a current context for every allocation, module load, and launch, and
+ *      one process drives many GPUs from one thread, so per-device work must enter that device's
+ *      context for its duration; the context comes from the object that already owns it (the stream),
+ *      never from a separate retain path. Check @ref ok() before relying on the scope.
+ */
+struct switch_to_gpu_t {
+    explicit switch_to_gpu_t(gpu_stream_t const &stream) noexcept
+        : ok_(cuCtxPushCurrent(stream.context()) == CUDA_SUCCESS) {}
+    switch_to_gpu_t(switch_to_gpu_t const &) = delete;
+    switch_to_gpu_t &operator=(switch_to_gpu_t const &) = delete;
+    ~switch_to_gpu_t() noexcept {
+        if (ok_) cuCtxPopCurrent(nullptr);
+    }
+    /** @brief Whether the switch happened — a false scope must fail the caller loudly. */
+    [[nodiscard]] bool ok() const noexcept { return ok_; }
+
+  private:
+    bool ok_ = false;
 };
 
 /**

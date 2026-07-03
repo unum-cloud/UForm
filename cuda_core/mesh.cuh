@@ -30,7 +30,7 @@
  *      4. Multicast-object fabric handles — exported by one process per multimem_domain, imported by its
  *         siblings before the domain-wide bind.
  *
- *  Secondary roles, in descending importance: @b phase @b ordering (arenas carved → MRs registered → QPs
+ *  Secondary roles, in descending importance: @b phase @b ordering (arenas allocated → MRs registered → QPs
  *  connected → training starts; @ref mesh_topology_t::barrier keeps any host_domain from running ahead),
  *  @b agreement @b validation (GPU model and count, world size, multimem extent, schema and job identity),
  *  and @b boot @b verification (a bounded await turns a wedged host_domain into a named failure, never a

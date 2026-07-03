@@ -57,6 +57,10 @@ using i16_t = std::int16_t;
 using i32_t = std::int32_t;
 using i64_t = std::int64_t;
 
+/** @brief One vocabulary entry's index — the byte-level vocabulary (256 bytes + the special tokens)
+ *      fits 16 bits, and every token tape, staging slot, and embedding lookup trades in this width. */
+using token_id_t = u16_t;
+
 using e4m3_t = __nv_fp8_e4m3;
 using bf16_t = __nv_bfloat16;
 using f32_t = float;
@@ -68,6 +72,20 @@ inline constexpr unsigned warp_size_k = 32u;
 /** @brief Default thread count per CTA for hand-rolled kernels. Fits the CUB @c BlockReduce<f32_t,256>
  *      temp-storage budget (1 KB SMEM) with full occupancy on sm_90 and sm_100. */
 inline constexpr unsigned kernel_block_size_default_k = 256u;
+
+/** @brief @c ceil(numerator/denominator) over non-negative integers — grid sizing, chunk counts. */
+[[nodiscard]] inline constexpr std::size_t divide_round_up(std::size_t numerator,
+                                                           std::size_t denominator) noexcept {
+    return (numerator + denominator - 1u) / denominator;
+}
+
+/** @brief @c ceil(log2(value)) for @c value>=1 — the recursive-doubling round count over @c value
+ *      domains. */
+[[nodiscard]] inline constexpr u32_t ceil_log2(u32_t value) noexcept {
+    u32_t rounds = 0;
+    while ((1u << rounds) < value) ++rounds;
+    return rounds;
+}
 
 /** @brief Outcome of any fallible operation. @c success_k==0 ; all error codes are negative + stable. */
 enum class status_t : i32_t {

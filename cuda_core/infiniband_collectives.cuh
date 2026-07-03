@@ -283,8 +283,119 @@ enum class infiniband_signal_t : u32_t {
 };
 
 /**
- *  @brief One (GPU, NIC) Reliable-Connection endpoint talking to one remote GPU: device context,
- *      protection domain, completion queue, RC queue pair, and a memory region over GPU VRAM.
+ *  @brief One opened mlx5 adapter serving one GPU: the device context, the protection domain, and the
+ *      port identity (LID, GID, MTU) every endpoint on this GPU borrows — opened @b once, in main,
+ *      never per queue pair. Move-only; teardown deallocates the domain and closes the device.
+ */
+struct infiniband_nic_t {
+
+    infiniband_nic_t() noexcept = default;
+    infiniband_nic_t(infiniband_nic_t const &) = delete;
+    infiniband_nic_t &operator=(infiniband_nic_t const &) = delete;
+    infiniband_nic_t(infiniband_nic_t &&other) noexcept
+        : device_context_(std::exchange(other.device_context_, nullptr)),
+          protection_domain_(std::exchange(other.protection_domain_, nullptr)),
+          local_identifier_(other.local_identifier_), path_mtu_(other.path_mtu_), port_(other.port_) {
+        std::memcpy(global_identifier_, other.global_identifier_, sizeof(global_identifier_));
+    }
+    infiniband_nic_t &operator=(infiniband_nic_t &&other) noexcept {
+        if (this != &other) {
+            destroy_();
+            device_context_ = std::exchange(other.device_context_, nullptr);
+            protection_domain_ = std::exchange(other.protection_domain_, nullptr);
+            local_identifier_ = other.local_identifier_;
+            path_mtu_ = other.path_mtu_;
+            port_ = other.port_;
+            std::memcpy(global_identifier_, other.global_identifier_, sizeof(global_identifier_));
+        }
+        return *this;
+    }
+    ~infiniband_nic_t() noexcept { destroy_(); }
+
+    /** @brief Open the adapter serving global GPU @p global_gpu_index (name @c mlx5_<index> — the
+     *      box's GPU↔HCA pairing), allocate its protection domain, and cache the port identity.
+     *  @param[in] infiniband_port The port on the adapter; single-port ConnectX parts use 1. */
+    [[nodiscard]] static expected<infiniband_nic_t> make(u32_t global_gpu_index,
+                                                         u8_t infiniband_port = 1) noexcept {
+        infiniband_nic_t nic;
+        nic.port_ = infiniband_port;
+        sz::string nic_name;
+        if (!format_into(nic_name, "mlx5_{}", global_gpu_index))
+            return expected<infiniband_nic_t>::fail(status_t::bad_alloc_k, "nic name formatting failed");
+
+        int device_count = 0;
+        ibv_device **device_list = ibv_get_device_list(&device_count);
+        if (device_list == nullptr)
+            return expected<infiniband_nic_t>::fail(status_t::io_error_k,
+                                                    "no RDMA devices visible (is the RDMA stack loaded?)");
+        for (int device_index = 0; device_index != device_count; ++device_index) {
+            char const *name = ibv_get_device_name(device_list[device_index]);
+            if (name != nullptr && std::strcmp(name, nic_name.c_str()) == 0) {
+                nic.device_context_ = ibv_open_device(device_list[device_index]);
+                break;
+            }
+        }
+        ibv_free_device_list(device_list);
+        if (nic.device_context_ == nullptr)
+            return expected<infiniband_nic_t>::fail(status_t::io_error_k,
+                                                    "RDMA device \"{}\" not found or failed to open", nic_name);
+
+        ibv_port_attr port_attributes {};
+        if (ibv_query_port(nic.device_context_, infiniband_port, &port_attributes) != 0)
+            return expected<infiniband_nic_t>::fail(status_t::io_error_k, "port {} query failed on \"{}\"",
+                                                    infiniband_port, nic_name);
+        nic.local_identifier_ = port_attributes.lid;
+        nic.path_mtu_ = static_cast<unsigned>(port_attributes.active_mtu);
+        ibv_gid port_gid {};
+        if (ibv_query_gid(nic.device_context_, infiniband_port, 0, &port_gid) != 0)
+            return expected<infiniband_nic_t>::fail(status_t::io_error_k, "GID query failed on \"{}\" port {}",
+                                                    nic_name, infiniband_port);
+        std::memcpy(nic.global_identifier_, port_gid.raw, sizeof(nic.global_identifier_));
+
+        nic.protection_domain_ = ibv_alloc_pd(nic.device_context_);
+        if (nic.protection_domain_ == nullptr)
+            return expected<infiniband_nic_t>::fail(status_t::io_error_k,
+                                                    "protection-domain allocation failed on {}", nic_name);
+        return expected<infiniband_nic_t> {std::move(nic)};
+    }
+
+    /** @brief The opened device context endpoints create queues against — borrowed, still owned here. */
+    [[nodiscard]] ibv_context *context() const noexcept { return device_context_; }
+    /** @brief The shared protection domain endpoints register regions and queue pairs in. */
+    [[nodiscard]] ibv_pd *protection_domain() const noexcept { return protection_domain_; }
+    /** @brief The port's local identifier — the same-subnet InfiniBand route. */
+    [[nodiscard]] u32_t local_identifier() const noexcept { return local_identifier_; }
+    /** @brief The port's active MTU, baked into every queue pair's RTR transition. */
+    [[nodiscard]] unsigned path_mtu() const noexcept { return path_mtu_; }
+    /** @brief The port number every queue pair binds. */
+    [[nodiscard]] u8_t port() const noexcept { return port_; }
+    /** @brief The 16-byte port GID — carried in coordinates for a future routed fabric. */
+    [[nodiscard]] u8_t const *global_identifier() const noexcept { return global_identifier_; }
+
+  private:
+    void destroy_() noexcept {
+        if (protection_domain_ != nullptr) ibv_dealloc_pd(std::exchange(protection_domain_, nullptr));
+        if (device_context_ != nullptr) ibv_close_device(std::exchange(device_context_, nullptr));
+    }
+
+    /** @brief The opened mlx5 device. */
+    ibv_context *device_context_ = nullptr;
+    /** @brief The one protection domain every endpoint on this GPU shares. */
+    ibv_pd *protection_domain_ = nullptr;
+    /** @brief Cached port identity — queried once at @ref make . */
+    u32_t local_identifier_ = 0;
+    /** @brief The port's active MTU. */
+    unsigned path_mtu_ = 0;
+    /** @brief The bound port number. */
+    u8_t port_ = 1;
+    /** @brief The port's global identifier. */
+    u8_t global_identifier_[16] = {};
+};
+
+/**
+ *  @brief One Reliable-Connection endpoint talking to one remote GPU: completion queue, RC queue pair,
+ *      and a memory region over GPU VRAM — all inside a borrowed @ref infiniband_nic_t 's device
+ *      context and protection domain.
  *
  *  The region registers dmabuf-first ( @c cuMemGetHandleForAddressRange exports the range,
  *  @c ibv_reg_dmabuf_mr registers the descriptor with the GPU virtual address as the I/O address so peer
@@ -292,7 +403,7 @@ enum class infiniband_signal_t : u32_t {
  *  @c ibv_reg_mr serviced by the @c nvidia_peermem kernel module. Host-posted writes and completion polls
  *  remain the bring-up / smoke-test path; production traffic runs through the GDAKI mappings layered on
  *  this endpoint's queue pair. Move-only; teardown reverses construction: region, queue pair, completion
- *  queue, protection domain, dmabuf descriptor, device.
+ *  queue, dmabuf descriptor — the adapter stays with its NIC owner.
  */
 struct infiniband_endpoint_t {
 
@@ -301,9 +412,7 @@ struct infiniband_endpoint_t {
     infiniband_endpoint_t &operator=(infiniband_endpoint_t const &) = delete;
 
     infiniband_endpoint_t(infiniband_endpoint_t &&other) noexcept
-        : device_context_(std::exchange(other.device_context_, nullptr)),
-          protection_domain_(std::exchange(other.protection_domain_, nullptr)),
-          completion_queue_(std::exchange(other.completion_queue_, nullptr)),
+        : completion_queue_(std::exchange(other.completion_queue_, nullptr)),
           queue_pair_(std::exchange(other.queue_pair_, nullptr)),
           memory_region_(std::exchange(other.memory_region_, nullptr)),
           gpu_buffer_(std::exchange(other.gpu_buffer_, b8r1_span_t {})),
@@ -313,8 +422,6 @@ struct infiniband_endpoint_t {
     infiniband_endpoint_t &operator=(infiniband_endpoint_t &&other) noexcept {
         if (this != &other) {
             destroy_();
-            device_context_ = std::exchange(other.device_context_, nullptr);
-            protection_domain_ = std::exchange(other.protection_domain_, nullptr);
             completion_queue_ = std::exchange(other.completion_queue_, nullptr);
             queue_pair_ = std::exchange(other.queue_pair_, nullptr);
             memory_region_ = std::exchange(other.memory_region_, nullptr);
@@ -330,45 +437,26 @@ struct infiniband_endpoint_t {
     ~infiniband_endpoint_t() noexcept { destroy_(); }
 
     /**
-     *  @brief Open @p nic_name , build the protection domain / completion queue / RC queue pair, and
+     *  @brief Build the completion queue + RC queue pair inside @p nic 's protection domain and
      *      register @p gpu_buffer as a GPUDirect memory region — everything a peer handshake needs.
      *
-     *  @param[in] nic_name The mlx5 device name (e.g. @c "mlx5_0" ) from the ibverbs device list.
-     *  @param[in] infiniband_port The port on that adapter; single-port ConnectX parts use 1.
+     *  @param[in] nic The GPU's opened adapter — borrowed for this endpoint's whole lifetime.
      *  @param[in] gpu_buffer The GPU VRAM range peers will read and write, shaped @b [buffer_bytes] —
      *      typically a window over a @ref gpu_arena_t (its chunks are created GPUDirect-RDMA-capable).
      */
-    [[nodiscard]] static expected<infiniband_endpoint_t> make(char const *nic_name, u8_t infiniband_port,
+    [[nodiscard]] static expected<infiniband_endpoint_t> make(infiniband_nic_t &nic,
                                                               b8r1_span_t gpu_buffer) noexcept {
-        if (nic_name == nullptr || gpu_buffer.empty())
+        if (nic.context() == nullptr || gpu_buffer.empty())
             return expected<infiniband_endpoint_t>::fail(status_t::invalid_input_k,
-                                                         "an endpoint needs a NIC name and a non-empty GPU buffer");
+                                                         "an endpoint needs an opened NIC and a non-empty buffer");
         infiniband_endpoint_t endpoint;
-        endpoint.infiniband_port_ = infiniband_port;
+        endpoint.infiniband_port_ = nic.port();
+        endpoint.path_mtu_ = nic.path_mtu();
         endpoint.gpu_buffer_ = gpu_buffer;
 
-        if (expected_t opened = endpoint.open_device_(nic_name); !opened)
-            return expected<infiniband_endpoint_t>::fail(std::move(opened));
-
-        ibv_port_attr port_attributes {};
-        if (ibv_query_port(endpoint.device_context_, infiniband_port, &port_attributes) != 0)
-            return expected<infiniband_endpoint_t>::fail(status_t::io_error_k, "port {} query failed on \"{}\"",
-                                                         infiniband_port, nic_name);
-        endpoint.path_mtu_ = static_cast<unsigned>(port_attributes.active_mtu);
-        ibv_gid port_gid {};
-        if (ibv_query_gid(endpoint.device_context_, infiniband_port, 0, &port_gid) != 0)
-            return expected<infiniband_endpoint_t>::fail(status_t::io_error_k, "GID query failed on \"{}\" port {}",
-                                                         nic_name, infiniband_port);
-
-        endpoint.protection_domain_ = ibv_alloc_pd(endpoint.device_context_);
-        if (endpoint.protection_domain_ == nullptr)
-            return expected<infiniband_endpoint_t>::fail(status_t::io_error_k,
-                                                         "protection-domain allocation failed on {}", nic_name);
-        endpoint.completion_queue_ = ibv_create_cq(endpoint.device_context_, infiniband_queue_depth_k, nullptr, nullptr,
-                                                   0);
+        endpoint.completion_queue_ = ibv_create_cq(nic.context(), infiniband_queue_depth_k, nullptr, nullptr, 0);
         if (endpoint.completion_queue_ == nullptr)
-            return expected<infiniband_endpoint_t>::fail(status_t::io_error_k, "completion-queue creation failed on {}",
-                                                         nic_name);
+            return expected<infiniband_endpoint_t>::fail(status_t::io_error_k, "completion-queue creation failed");
 
         ibv_qp_init_attr queue_pair_config {};
         queue_pair_config.send_cq = endpoint.completion_queue_;
@@ -379,21 +467,22 @@ struct infiniband_endpoint_t {
         queue_pair_config.cap.max_recv_wr = infiniband_queue_depth_k;
         queue_pair_config.cap.max_send_sge = 1;
         queue_pair_config.cap.max_recv_sge = 1;
-        endpoint.queue_pair_ = ibv_create_qp(endpoint.protection_domain_, &queue_pair_config);
+        endpoint.queue_pair_ = ibv_create_qp(nic.protection_domain(), &queue_pair_config);
         if (endpoint.queue_pair_ == nullptr)
-            return expected<infiniband_endpoint_t>::fail(
-                status_t::io_error_k, "Reliable-Connection queue-pair creation failed on {}", nic_name);
+            return expected<infiniband_endpoint_t>::fail(status_t::io_error_k,
+                                                         "Reliable-Connection queue-pair creation failed");
 
-        if (expected_t registered = endpoint.register_gpu_memory_(); !registered)
+        if (expected_t registered = endpoint.register_gpu_memory_(nic.protection_domain()); !registered)
             return expected<infiniband_endpoint_t>::fail(std::move(registered));
 
         infiniband_coordinates_t &coordinates = endpoint.local_coordinates_;
-        coordinates.local_identifier = port_attributes.lid;
+        coordinates.local_identifier = nic.local_identifier();
         coordinates.queue_pair_number = endpoint.queue_pair_->qp_num;
         coordinates.packet_sequence_number = 0;
         coordinates.remote_key = endpoint.memory_region_->rkey;
         coordinates.buffer_address = reinterpret_cast<u64_t>(gpu_buffer.data());
-        std::memcpy(coordinates.global_identifier, port_gid.raw, sizeof(coordinates.global_identifier));
+        std::memcpy(coordinates.global_identifier, nic.global_identifier(),
+                    sizeof(coordinates.global_identifier));
         return expected<infiniband_endpoint_t> {std::move(endpoint)};
     }
 
@@ -514,33 +603,15 @@ struct infiniband_endpoint_t {
     }
 
   private:
-    /** @brief Open the mlx5 device named @p nic_name from the ibverbs device list. */
-    [[nodiscard]] expected_t open_device_(char const *nic_name) noexcept {
-        int device_count = 0;
-        ibv_device **device_list = ibv_get_device_list(&device_count);
-        if (device_list == nullptr)
-            return expected_t::fail(status_t::io_error_k, "no RDMA devices visible (is the RDMA stack loaded?)");
-        for (int device_index = 0; device_index != device_count; ++device_index) {
-            char const *name = ibv_get_device_name(device_list[device_index]);
-            if (name != nullptr && std::strcmp(name, nic_name) == 0) {
-                device_context_ = ibv_open_device(device_list[device_index]);
-                break;
-            }
-        }
-        ibv_free_device_list(device_list);
-        if (device_context_ == nullptr)
-            return expected_t::fail(status_t::io_error_k, "RDMA device \"{}\" not found or failed to open", nic_name);
-        return {};
-    }
-
-    /** @brief Register the GPU buffer as a GPUDirect region: dmabuf-first, @c nvidia_peermem fallback. */
-    [[nodiscard]] expected_t register_gpu_memory_() noexcept {
+    /** @brief Register the GPU buffer as a GPUDirect region in @p protection_domain : dmabuf-first,
+     *      @c nvidia_peermem fallback. */
+    [[nodiscard]] expected_t register_gpu_memory_(ibv_pd *protection_domain) noexcept {
         int dmabuf_descriptor = -1;
         CUresult const exported = cuMemGetHandleForAddressRange(
             &dmabuf_descriptor, reinterpret_cast<CUdeviceptr>(gpu_buffer_.data()), gpu_buffer_.extent(0),
             CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
         if (exported == CUDA_SUCCESS && dmabuf_descriptor >= 0) {
-            memory_region_ = ibv_reg_dmabuf_mr(protection_domain_, 0, gpu_buffer_.extent(0),
+            memory_region_ = ibv_reg_dmabuf_mr(protection_domain, 0, gpu_buffer_.extent(0),
                                                reinterpret_cast<u64_t>(gpu_buffer_.data()), dmabuf_descriptor,
                                                infiniband_access_flags_k);
             if (memory_region_ != nullptr) {
@@ -549,7 +620,7 @@ struct infiniband_endpoint_t {
             }
             ::close(dmabuf_descriptor);
         }
-        memory_region_ = ibv_reg_mr(protection_domain_, gpu_buffer_.data(), gpu_buffer_.extent(0),
+        memory_region_ = ibv_reg_mr(protection_domain, gpu_buffer_.data(), gpu_buffer_.extent(0),
                                     infiniband_access_flags_k);
         if (memory_region_ == nullptr)
             return expected_t::fail(status_t::io_error_k,
@@ -563,22 +634,27 @@ struct infiniband_endpoint_t {
         if (memory_region_ != nullptr) ibv_dereg_mr(std::exchange(memory_region_, nullptr));
         if (queue_pair_ != nullptr) ibv_destroy_qp(std::exchange(queue_pair_, nullptr));
         if (completion_queue_ != nullptr) ibv_destroy_cq(std::exchange(completion_queue_, nullptr));
-        if (protection_domain_ != nullptr) ibv_dealloc_pd(std::exchange(protection_domain_, nullptr));
         if (dmabuf_descriptor_ >= 0) ::close(std::exchange(dmabuf_descriptor_, -1));
-        if (device_context_ != nullptr) ibv_close_device(std::exchange(device_context_, nullptr));
         gpu_buffer_ = b8r1_span_t {};
     }
 
-    ibv_context *device_context_ = nullptr;
-    ibv_pd *protection_domain_ = nullptr;
+    /** @brief This endpoint's completion queue — its own, so drains never cross lanes. */
     ibv_cq *completion_queue_ = nullptr;
+    /** @brief The Reliable-Connection queue pair — the single-poster concurrency granularity. */
     ibv_qp *queue_pair_ = nullptr;
+    /** @brief The GPUDirect memory region over @ref gpu_buffer_ . */
     ibv_mr *memory_region_ = nullptr;
+    /** @brief The registered GPU VRAM range peers read and write. */
     b8r1_span_t gpu_buffer_ {};
+    /** @brief The exported dmabuf descriptor when that registration path won; -1 on the fallback. */
     int dmabuf_descriptor_ = -1;
+    /** @brief The bound port, from the owning NIC. */
     u8_t infiniband_port_ = 1;
+    /** @brief The port's active MTU, from the owning NIC. */
     unsigned path_mtu_ = 0;
+    /** @brief What this endpoint publishes for the peer's @ref connect . */
     infiniband_coordinates_t local_coordinates_ {};
+    /** @brief The connected peer's coordinates, kept for host-posted writes. */
     infiniband_coordinates_t peer_coordinates_ {};
 };
 
@@ -643,7 +719,7 @@ struct infiniband_queue_mapping_t {
     ~infiniband_queue_mapping_t() noexcept { destroy_(); }
 
     /** @brief Expose @p queue_pair 's raw mlx5 send queue / doorbell / BlueFlame register and map all
-     *      three for the GPU; the producer counter is carved from @p arena (capture-stable address). */
+     *      three for the GPU; the producer counter is allocated from @p arena (capture-stable address). */
     [[nodiscard]] static expected<infiniband_queue_mapping_t> make(ibv_qp *queue_pair, gpu_arena_t &arena) noexcept {
         if (queue_pair == nullptr)
             return expected<infiniband_queue_mapping_t>::fail(status_t::invalid_input_k, "null queue pair");
@@ -693,7 +769,7 @@ struct infiniband_queue_mapping_t {
         mapping.handles_.producer_index = arena.allocate_object<u32_t>(1);
         if (mapping.handles_.producer_index == nullptr)
             return expected<infiniband_queue_mapping_t>::fail(
-                status_t::bad_alloc_k, "producer-index counter carve failed (arena_used={})", arena.used());
+                status_t::bad_alloc_k, "producer-index counter allocation failed (arena_used={})", arena.used());
         if (CUresult result = cuMemsetD8(reinterpret_cast<CUdeviceptr>(mapping.handles_.producer_index), 0,
                                          sizeof(u32_t));
             result != CUDA_SUCCESS)
@@ -743,7 +819,7 @@ struct infiniband_completion_mapping_t {
     ~infiniband_completion_mapping_t() noexcept { destroy_(); }
 
     /** @brief Expose @p completion_queue 's raw mlx5 ring + doorbell and map both for the GPU; the
-     *      consumer counter is carved from @p arena . The ring must be a power of two and uncompressed. */
+     *      consumer counter is allocated from @p arena . The ring must be a power of two and uncompressed. */
     [[nodiscard]] static expected<infiniband_completion_mapping_t> make(ibv_cq *completion_queue,
                                                                         gpu_arena_t &arena) noexcept {
         if (completion_queue == nullptr)
@@ -795,7 +871,7 @@ struct infiniband_completion_mapping_t {
         mapping.handles_.consumer_index = arena.allocate_object<u32_t>(1);
         if (mapping.handles_.consumer_index == nullptr)
             return expected<infiniband_completion_mapping_t>::fail(
-                status_t::bad_alloc_k, "consumer-index counter carve failed (arena_used={})", arena.used());
+                status_t::bad_alloc_k, "consumer-index counter allocation failed (arena_used={})", arena.used());
         if (CUresult result = cuMemsetD8(reinterpret_cast<CUdeviceptr>(mapping.handles_.consumer_index), 0,
                                          sizeof(u32_t));
             result != CUDA_SUCCESS)
@@ -986,8 +1062,6 @@ struct infiniband_allgather_plan_t {
 
 /** @brief Lane width of the single-block doorbell kernels; only lane 0 posts and spins. */
 inline constexpr unsigned infiniband_doorbell_block_threads_k = 32u;
-/** @brief Grid cap of the bandwidth-bound accumulate so a huge shard still launches bounded (grid-strided). */
-inline constexpr unsigned infiniband_accumulate_grid_cap_k = 4096u;
 
 /**
  *  @brief Post-and-drain step of one all-reduce round: lane 0 posts this domain's shard, then the arrival
@@ -1082,55 +1156,18 @@ using infiniband_links_tensor_t = nk::tensor<infiniband_link_t, gpu_arena_alloc<
  *      the exchanged coordinates, the device-resident link table, and the collective's epoch scalar —
  *      the level-2 counterpart of @ref multimem_domain_t 's per-member surface.
  *
- *  Constructed only through the role factories — @ref make_allreduce (a Float32 shard summed across
- *  domains, per-round landings) or @ref make_allgather (domain-major blocks gathered in place, the
- *  payload doubling as the landing) — so a member's heap layout can never contradict the collective it
- *  runs. The collectives themselves are the argument-free methods @ref allreduce_sum and
- *  @ref allgather : payload, links, epoch, and the domain coordinate are all baked at wiring time.
+ *  Constructed only through @ref colocated_domain_t 's role factories — @c wire_allreduce (a Float32
+ *  shard summed across domains, per-round landings) or @c wire_allgather (domain-major blocks gathered
+ *  in place, the payload doubling as the landing) — so a member's heap layout can never contradict the
+ *  collective it runs, and the adapters underneath are always the shared ones. The collectives
+ *  themselves are the argument-free methods @ref allreduce_sum and @ref allgather : payload, links,
+ *  epoch, and the domain coordinate are all baked at wiring time.
  */
 struct infiniband_member_t {
 
-    /**
-     *  @brief Wire this member for the cross-domain Float32 all-reduce-sum of a @p shard_bytes payload:
-     *      heap @b [shard | rounds landings | rounds flags] . Runs once, at setup, outside any capture;
-     *      the calling thread must hold the member's context.
-     *
-     *  @param[in] topology The bootstrapped world; coordinates travel over its exchange.
-     *  @param[in] member_index This GPU's index inside its multimem_domain; NIC @c mlx5_<global_gpu>
-     *      and the partner's same-index GPU pair with it.
-     *  @param[in] arena The member's arena; the heap, the link table, and the mapping counters carve
-     *      from it (its chunks are GPUDirect-RDMA-capable by construction).
-     *  @param[in] key_prefix Exchange-key namespace; keys are @c "<prefix>.<round>" , so distinct
-     *      collectives never collide.
-     */
-    [[nodiscard]] static expected<infiniband_member_t> make_allreduce(mesh_topology_t const &topology,
-                                                                      u32_t member_index, gpu_arena_t &arena,
-                                                                      std::size_t shard_bytes,
-                                                                      sz::string_view key_prefix,
-                                                                      f64_t timeout_seconds = 120.0) noexcept {
-        heap_layout_t layout;
-        layout.payload_bytes = shard_bytes;
-        layout.landing_bytes = shard_bytes;
-        layout.rounds = rounds_for_(topology);
-        return make_(topology, member_index, arena, layout, key_prefix, timeout_seconds);
-    }
-
-    /** @brief Wire this member for the cross-domain all-gather of domain-major @p block_bytes blocks:
-     *      the payload spans @b [domains·block_bytes] and doubles as the landing — blocks land in
-     *      place. Same contract as @ref make_allreduce otherwise. */
-    [[nodiscard]] static expected<infiniband_member_t> make_allgather(mesh_topology_t const &topology,
-                                                                      u32_t member_index, gpu_arena_t &arena,
-                                                                      std::size_t block_bytes,
-                                                                      sz::string_view key_prefix,
-                                                                      f64_t timeout_seconds = 120.0) noexcept {
-        heap_layout_t layout;
-        layout.payload_bytes = static_cast<std::size_t>(topology.shape.multimem_domain_count()) * block_bytes;
-        layout.landing_bytes = 0;
-        layout.rounds = rounds_for_(topology);
-        return make_(topology, member_index, arena, layout, key_prefix, timeout_seconds);
-    }
-
   private:
+    friend struct colocated_domain_t;
+
     /**
      *  @brief Byte offsets of one member's registered symmetric heap — the identical formula on every
      *      domain: the
@@ -1145,31 +1182,22 @@ struct infiniband_member_t {
         /** @brief Recursive-doubling rounds — the link, landing, and flag count. */
         u32_t rounds = 0;
 
-        [[nodiscard]] std::size_t landings_offset() const noexcept { return align_(payload_bytes); }
+        [[nodiscard]] std::size_t landings_offset() const noexcept {
+            return round_up_to_multiple(payload_bytes, cache_line_bytes_k);
+        }
         [[nodiscard]] std::size_t flags_offset() const noexcept {
-            return align_(landings_offset() + rounds * landing_bytes);
+            return round_up_to_multiple(landings_offset() + rounds * landing_bytes, cache_line_bytes_k);
         }
         [[nodiscard]] std::size_t total_bytes() const noexcept {
-            return align_(flags_offset() + rounds * sizeof(u32_t));
+            return round_up_to_multiple(flags_offset() + rounds * sizeof(u32_t), cache_line_bytes_k);
         }
-
-      private:
-        [[nodiscard]] static std::size_t align_(std::size_t bytes) noexcept { return (bytes + 127ull) & ~127ull; }
     };
 
-    /** @brief The recursive-doubling round count of the topology's domain grid. */
-    [[nodiscard]] static u32_t rounds_for_(mesh_topology_t const &topology) noexcept {
-        u32_t const domains = topology.shape.multimem_domain_count();
-        u32_t rounds = 0;
-        while ((1u << rounds) < domains) ++rounds;
-        return rounds;
-    }
-
-    /** @brief The shared wiring body behind both role factories — see @ref make_allreduce for the
-     *      contract. */
+    /** @brief The shared wiring body behind @ref colocated_domain_t 's role factories: allocate the heap,
+     *      wire one endpoint per round on the shared @p nic , exchange coordinates, stage the links. */
     [[nodiscard]] static expected<infiniband_member_t> make_(mesh_topology_t const &topology, u32_t member_index,
-                                                             gpu_arena_t &arena, heap_layout_t layout,
-                                                             sz::string_view key_prefix,
+                                                             infiniband_nic_t &nic, gpu_arena_t &arena,
+                                                             heap_layout_t layout, sz::string_view key_prefix,
                                                              f64_t timeout_seconds) noexcept {
         using result_t = expected<infiniband_member_t>;
         mesh_shape_t const &shape = topology.shape;
@@ -1191,11 +1219,16 @@ struct infiniband_member_t {
         member.links_ = infiniband_links_tensor_t::try_empty({layout.rounds}, link_alloc);
         member.epoch_ = u32r1_tensor_arena_t::try_empty({1}, u32_alloc);
         if (!member.heap_ || !member.links_ || !member.epoch_)
-            return result_t::fail(status_t::bad_alloc_k, "member heap / table carve failed ({} bytes, arena_used={})",
-                                  heap_bytes, arena.used());
+            return result_t::fail(status_t::bad_alloc_k,
+                                  "member heap / table allocation failed ({} bytes, arena_used={})", heap_bytes,
+                                  arena.used());
         if (cuMemsetD8(reinterpret_cast<CUdeviceptr>(member.heap_.data()), 0, heap_bytes) != CUDA_SUCCESS ||
             cuMemsetD8(reinterpret_cast<CUdeviceptr>(member.epoch_.data()), 0, sizeof(u32_t)) != CUDA_SUCCESS)
             return result_t::fail(status_t::cuda_error_k, "member heap reset failed");
+        expected<epoch_counter_t> counter = epoch_counter_t::make(u32r1_span_t {member.epoch_.data(), 1},
+                                                                  layout.rounds);
+        if (!counter) return result_t::fail(std::move(counter));
+        member.epoch_counter_ = std::move(counter.value_);
         if (member.endpoints_.try_resize(layout.rounds) != status_t::success_k ||
             member.queues_.try_resize(layout.rounds) != status_t::success_k ||
             member.completions_.try_resize(layout.rounds) != status_t::success_k)
@@ -1204,16 +1237,13 @@ struct infiniband_member_t {
         if (host_links.try_resize(layout.rounds) != status_t::success_k)
             return result_t::fail(status_t::bad_alloc_k, "host link staging failed");
 
-        sz::string nic_name;
-        if (!format_into(nic_name, "mlx5_{}", topology.first_gpu_index() + member_index))
-            return result_t::fail(status_t::bad_alloc_k, "nic name formatting failed");
         b8r1_span_t const heap_span {member.heap_.data(), heap_bytes};
         for (u32_t round = 0; round != layout.rounds; ++round) {
             u32_t const partner_domain = domain_index ^ (1u << round);
             if (partner_domain >= domains)
                 return result_t::fail(status_t::shape_unsupported_k,
                                       "non-power-of-two domain counts are unsupported ({} domains)", domains);
-            expected<infiniband_endpoint_t> endpoint = infiniband_endpoint_t::make(nic_name.c_str(), 1u, heap_span);
+            expected<infiniband_endpoint_t> endpoint = infiniband_endpoint_t::make(nic, heap_span);
             if (!endpoint) return result_t::fail(std::move(endpoint));
             member.endpoints_[round] = std::move(endpoint.value_);
             sz::string key;
@@ -1279,15 +1309,20 @@ struct infiniband_member_t {
         std::size_t const block_bytes = layout_.payload_bytes >> layout_.rounds;
         return {heap_.data() + static_cast<std::size_t>(multimem_domain_index_) * block_bytes, block_bytes};
     }
-    /** @brief The one host write of a step: upload the epoch and advance the host counter by the round
-     *      count — enqueue on @p stream before this step's collective. */
+    /** @brief The one enqueued host write of a step: stage the epoch into the pinned slot and enqueue
+     *      its upload — on @p stream , before this step's collective. Under capture this records a copy
+     *      node that re-reads the pinned slot at every replay (see @ref advance_host ). A no-op on the
+     *      zero-round single-domain identity. */
     [[nodiscard]] expected_t advance(gpu_stream_t const &stream) noexcept {
-        if (CUresult result = cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(epoch_.data()), &host_epoch_,
-                                                sizeof(host_epoch_), stream.get());
-            result != CUDA_SUCCESS)
-            return expected_t::fail(result, "member epoch upload failed");
-        host_epoch_ += layout_.rounds;
-        return {};
+        if (layout_.rounds == 0) return {};
+        return epoch_counter_.advance(stream);
+    }
+
+    /** @brief The replay-time sibling of @ref advance — see @ref epoch_counter_t::advance_host . Once
+     *      before every @c cuGraphLaunch of a step that contains this member's collective. */
+    void advance_host() noexcept {
+        if (layout_.rounds == 0) return;
+        epoch_counter_.advance_host();
     }
 
 #if defined(__CUDACC__)
@@ -1296,18 +1331,17 @@ struct infiniband_member_t {
      *      the cross-domain gradient / force reduce, enqueued on @p stream as capture-safe graph nodes.
      *
      *  Rounds run in order (round @c r 's accumulate feeds round @c r+1 's post); within a round:
-     *  post-and-drain, wait, accumulate. Call @ref advance first, once per step.
+     *  post-and-drain, wait, accumulate. Call @ref advance first, once per step. Zero rounds — the
+     *  single-domain identity — enqueues nothing.
      */
     [[nodiscard]] expected_t allreduce_sum(gpu_stream_t const &stream) noexcept {
+        if (layout_.rounds == 0) return {};
         if (layout_.landing_bytes == 0)
             return expected_t::fail(status_t::invalid_input_k,
                                     "this member is wired for the all-gather, not the all-reduce");
         std::size_t const shard_scalars = layout_.payload_bytes / sizeof(f32_t);
         f32_t *const shard = reinterpret_cast<f32_t *>(heap_.data());
-        unsigned accumulate_grid = static_cast<unsigned>((shard_scalars + kernel_block_size_default_k - 1) /
-                                                         kernel_block_size_default_k);
-        if (accumulate_grid == 0u) accumulate_grid = 1u;
-        if (accumulate_grid > infiniband_accumulate_grid_cap_k) accumulate_grid = infiniband_accumulate_grid_cap_k;
+        unsigned const accumulate_grid = grid_size_for(shard_scalars);
         dim3 const doorbell_grid {1u, 1u, 1u};
         dim3 const doorbell_block {infiniband_doorbell_block_threads_k, 1u, 1u};
         infiniband_links_view_t const links {links_.data(), layout_.rounds};
@@ -1335,6 +1369,7 @@ struct infiniband_member_t {
      *      slot; after @c log2(D) rounds every block is filled. Call @ref advance first, once per step.
      */
     [[nodiscard]] expected_t allgather(gpu_stream_t const &stream) noexcept {
+        if (layout_.rounds == 0) return {};
         if (layout_.landing_bytes != 0)
             return expected_t::fail(status_t::invalid_input_k,
                                     "this member is wired for the all-reduce, not the all-gather");
@@ -1364,8 +1399,9 @@ struct infiniband_member_t {
     heap_layout_t layout_ {};
     /** @brief This rank's multimem_domain index — the recursive-doubling coordinate, baked at wiring. */
     u32_t multimem_domain_index_ = 0;
-    /** @brief The host-side epoch counter @ref advance uploads and bumps once per step. */
-    u32_t host_epoch_ = 0;
+    /** @brief The member's monotonic step counter — host count, pinned staging, and the device epoch
+     *      scalar it uploads into; see @ref epoch_counter_t . */
+    epoch_counter_t epoch_counter_ {};
     /** @brief The registered symmetric heap: payload, per-round landings, per-round flags. */
     b8r1_tensor_arena_t heap_ {};
     /** @brief One connected RC endpoint per round; the two mapping tables below layer onto them. */
@@ -1379,6 +1415,133 @@ struct infiniband_member_t {
     infiniband_links_tensor_t links_ {};
     /** @brief The device epoch scalar; see @ref advance . */
     u32r1_tensor_arena_t epoch_ {};
+};
+
+/**
+ *  @brief This process's membership of the mesh's colocated_domain: the opened NICs of every local GPU
+ *      and the coordinate-exchange context — created @b once in main, right after the mesh bootstrap,
+ *      and threaded by reference to every cross-domain consumer, exactly like the per-rank arenas and
+ *      the one @ref multimem_domain_t .
+ *
+ *  Wiring a member is a consumer's own lane — its queue pairs (the single-poster concurrency
+ *  granularity, so consumers' collectives can overlap), its heap, its epoch; this domain only lends
+ *  the shared adapters and the exchange. Batch-shuffle payload movement slots in later as a third role
+ *  ( @c wire_alltoall with per-pair sizes) without touching the NIC or member layers.
+ */
+struct colocated_domain_t {
+
+    /** @brief Open every local GPU's adapter — @c mlx5_<first_gpu_index()+m> , the box's GPU↔HCA
+     *      pairing — once for the process. */
+    [[nodiscard]] static expected<colocated_domain_t> make(mesh_topology_t const &topology) noexcept {
+        using result_t = expected<colocated_domain_t>;
+        colocated_domain_t domain;
+        domain.topology_ = &topology;
+        // A single-domain world never posts — no adapters to open, no InfiniBand hardware required.
+        if (topology.shape.multimem_domain_count() == 1) return result_t {std::move(domain)};
+        u32_t const gpus = topology.shape.gpus_per_multimem_domain;
+        if (domain.nics_.try_resize(gpus) != status_t::success_k)
+            return result_t::fail(status_t::bad_alloc_k, "NIC table allocation failed ({} GPUs)", gpus);
+        for (u32_t member = 0; member != gpus; ++member) {
+            expected<infiniband_nic_t> nic = infiniband_nic_t::make(topology.first_gpu_index() + member);
+            if (!nic) return result_t::fail(std::move(nic));
+            domain.nics_[member] = std::move(nic.value_);
+        }
+        return result_t {std::move(domain)};
+    }
+
+    /**
+     *  @brief Wire one member for the cross-domain Float32 all-reduce-sum of a @p shard_bytes payload:
+     *      heap @b [shard | rounds landings | rounds flags] . One member per (consumer, role) — own
+     *      queue pairs, own epoch. Runs once, at setup, outside any capture; the calling thread must
+     *      hold the member's context.
+     *
+     *  @param[in] member_index This GPU's index inside its multimem_domain; the partner's same-index
+     *      GPU pairs with it.
+     *  @param[in] arena The member's arena; the heap, the link table, and the mapping counters allocate
+     *      from it (its chunks are GPUDirect-RDMA-capable by construction).
+     *  @param[in] key_prefix Exchange-key namespace; keys are @c "<prefix>.<round>" , so distinct
+     *      consumers never collide.
+     */
+    [[nodiscard]] expected<infiniband_member_t> wire_allreduce(u32_t member_index, gpu_arena_t &arena,
+                                                               std::size_t shard_bytes, sz::string_view key_prefix,
+                                                               f64_t timeout_seconds = 120.0) noexcept {
+        // The single-domain identity: no partners exist, every collective is a no-op.
+        if (multimem_domain_count() == 1) return expected<infiniband_member_t> {infiniband_member_t {}};
+        infiniband_member_t::heap_layout_t layout;
+        layout.payload_bytes = shard_bytes;
+        layout.landing_bytes = shard_bytes;
+        layout.rounds = ceil_log2(topology_->shape.multimem_domain_count());
+        return infiniband_member_t::make_(*topology_, member_index, nics_[member_index], arena, layout,
+                                          key_prefix, timeout_seconds);
+    }
+
+    /** @brief Wire one member for the cross-domain all-gather of domain-major @p block_bytes blocks:
+     *      the payload spans @b [domains·block_bytes] and doubles as the landing — blocks land in
+     *      place. Same contract as @ref wire_allreduce otherwise. */
+    [[nodiscard]] expected<infiniband_member_t> wire_allgather(u32_t member_index, gpu_arena_t &arena,
+                                                               std::size_t block_bytes, sz::string_view key_prefix,
+                                                               f64_t timeout_seconds = 120.0) noexcept {
+        // The single-domain identity: no partners exist, every collective is a no-op.
+        if (multimem_domain_count() == 1) return expected<infiniband_member_t> {infiniband_member_t {}};
+        infiniband_member_t::heap_layout_t layout;
+        layout.payload_bytes = static_cast<std::size_t>(topology_->shape.multimem_domain_count()) * block_bytes;
+        layout.landing_bytes = 0;
+        layout.rounds = ceil_log2(topology_->shape.multimem_domain_count());
+        return infiniband_member_t::make_(*topology_, member_index, nics_[member_index], arena, layout,
+                                          key_prefix, timeout_seconds);
+    }
+
+    /** @brief The bootstrapped world this domain was wired against. */
+    [[nodiscard]] mesh_topology_t const &topology() const noexcept { return *topology_; }
+    /** @brief How many multimem_domains the world spans — 1 means no member ever posts. */
+    [[nodiscard]] u32_t multimem_domain_count() const noexcept { return topology_->shape.multimem_domain_count(); }
+
+  private:
+    /** @brief The bootstrapped world — borrowed; main owns it for the process lifetime. */
+    mesh_topology_t const *topology_ = nullptr;
+    /** @brief One opened adapter per local GPU, member order. */
+    array<infiniband_nic_t> nics_ {};
+};
+
+#else // !defined(UFORM_WITH_INFINIBAND)
+
+/** @brief The build-gate stub: only the zero-round single-domain identity exists — every collective is
+ *      a no-op, and wiring a real member fails loudly naming the gate. */
+struct infiniband_member_t {
+    [[nodiscard]] b8r1_span_t payload() noexcept { return {}; }
+    [[nodiscard]] b8r1_span_t own_block() noexcept { return {}; }
+    [[nodiscard]] expected_t advance(gpu_stream_t const &) noexcept { return {}; }
+    void advance_host() noexcept {}
+    [[nodiscard]] expected_t allreduce_sum(gpu_stream_t const &) noexcept { return {}; }
+    [[nodiscard]] expected_t allgather(gpu_stream_t const &) noexcept { return {}; }
+};
+
+/** @brief The build-gate stub of the colocated domain: single-domain topologies work (nothing to
+ *      wire); multi-domain worlds fail loudly naming the gate. */
+struct colocated_domain_t {
+    [[nodiscard]] static expected<colocated_domain_t> make(mesh_topology_t const &topology) noexcept {
+        if (topology.shape.multimem_domain_count() != 1)
+            return expected<colocated_domain_t>::fail(
+                status_t::other_k,
+                "built without UFORM_WITH_INFINIBAND — rebuild with libibverbs + libmlx5 for " //
+                "cross-domain collectives");
+        colocated_domain_t domain;
+        domain.topology_ = &topology;
+        return expected<colocated_domain_t> {std::move(domain)};
+    }
+    [[nodiscard]] expected<infiniband_member_t> wire_allreduce(u32_t, gpu_arena_t &, std::size_t, sz::string_view,
+                                                               f64_t = 120.0) noexcept {
+        return expected<infiniband_member_t> {infiniband_member_t {}};
+    }
+    [[nodiscard]] expected<infiniband_member_t> wire_allgather(u32_t, gpu_arena_t &, std::size_t, sz::string_view,
+                                                               f64_t = 120.0) noexcept {
+        return expected<infiniband_member_t> {infiniband_member_t {}};
+    }
+    [[nodiscard]] mesh_topology_t const &topology() const noexcept { return *topology_; }
+    [[nodiscard]] u32_t multimem_domain_count() const noexcept { return 1u; }
+
+  private:
+    mesh_topology_t const *topology_ = nullptr;
 };
 
 #endif // defined(UFORM_WITH_INFINIBAND)

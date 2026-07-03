@@ -225,7 +225,7 @@ struct contrastive_relations_view_t {
  */
 struct contrastive_relations_t {
 
-    /** @brief Carve the eight columns off @p arena at their worst-case capacity; every upload
+    /** @brief Allocate the eight columns off @p arena at their worst-case capacity; every upload
      *      @c try_resize s them to the step's live extents without moving an address — the columns' own
      *      shapes are the single source of the live counts.
      *  @param[in] max_vertices Most local vertex rows any step will carry.
@@ -242,17 +242,17 @@ struct contrastive_relations_t {
         relations.attract_offsets_ = u32r1_tensor_arena_t::try_empty({offsets_count}, index_alloc);
         relations.repel_offsets_ = u32r1_tensor_arena_t::try_empty({offsets_count}, index_alloc);
         relations.ignore_offsets_ = u32r1_tensor_arena_t::try_empty({offsets_count}, index_alloc);
-        bool carved = relations.attract_offsets_ && relations.repel_offsets_ && relations.ignore_offsets_;
+        bool allocated = relations.attract_offsets_ && relations.repel_offsets_ && relations.ignore_offsets_;
         if (max_edges != 0) {
             relations.attract_ids_ = u32r1_tensor_arena_t::try_empty({max_edges}, index_alloc);
             relations.repel_ids_ = u32r1_tensor_arena_t::try_empty({max_edges}, index_alloc);
             relations.ignore_ids_ = u32r1_tensor_arena_t::try_empty({max_edges}, index_alloc);
             relations.attract_scores_ = f32r1_tensor_arena_t::try_empty({max_edges}, score_alloc);
             relations.repel_scores_ = f32r1_tensor_arena_t::try_empty({max_edges}, score_alloc);
-            carved = carved && relations.attract_ids_ && relations.repel_ids_ && relations.ignore_ids_ &&
-                     relations.attract_scores_ && relations.repel_scores_;
+            allocated = allocated && relations.attract_ids_ && relations.repel_ids_ && relations.ignore_ids_ &&
+                        relations.attract_scores_ && relations.repel_scores_;
         }
-        if (!carved)
+        if (!allocated)
             return expected<contrastive_relations_t>::fail(
                 status_t::bad_alloc_k,
                 "relations column allocation failed (max_vertices={} max_edges={} arena_used={})", max_vertices,

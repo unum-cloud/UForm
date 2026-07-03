@@ -1,5 +1,5 @@
 /**
- *  @brief Single-GPU memory allocators of the UForm v4 primitives cell: a growing carve arena + a
+ *  @brief Single-GPU memory allocators of the UForm v4 primitives cell: a growing bump arena + a
  *      stream-ordered allocator, each owning memory of exactly @b one device.
  *  @file cuda/primitives/gpu_allocators.cuh
  *  @author Ash Vardanian
@@ -12,7 +12,7 @@
  *    - @ref gpu_arena_t — a virtual-memory (VMM) bump arena for @b homogeneous fixed-shape workloads, where
  *      every call allocates the same sequence of sizes — model training and inference steps. It owns the
  *      weights, activations, and step scratch: reserves a large VA range once, maps physical chunks in on
- *      demand, and hands out aligned carves as pure pointer arithmetic — no deallocation, only cursor
+ *      demand, and hands out aligned allocations as pure pointer arithmetic — no deallocation, only cursor
  *      resets, so an allocation sequence is deterministic across captured-graph replays and legal inside
  *      capture. Growth ( @c cuMemMap ) is a host-immediate init-time operation, never a step-path one.
  *    - @ref gpu_alloc — a stream-ordered allocator ( @c cuMemAllocAsync / @c cuMemFreeAsync ) for exactly
@@ -29,10 +29,10 @@
  *  marks — and @ref gpu_memory_report reads it on demand. Per-owner attribution is each owner's own
  *  accessors ( @ref gpu_arena_t::used / @ref gpu_arena_t::mapped ).
  *
- *  The arena's physical chunks are created @c gpuDirectRDMACapable , so the same slabs can later be
+ *  The arena's physical chunks are created @c gpuDirectRDMACapable , so the same chunks can later be
  *  registered as InfiniBand MRs or bound to a multicast object — symmetric / multimem backing is a property
- *  added to @b this arena at creation, not a third allocator: running the identical carve program on every rank
- *  yields identical offsets, which is what makes a peer's buffer addressable as @c remote_base+offset .
+ *  added to @b this arena at creation, not a third allocator: running the identical allocation program on every
+ *  rank yields identical offsets, which is what makes a peer's buffer addressable as @c remote_base+offset .
  */
 #pragma once
 
@@ -49,9 +49,13 @@
 
 namespace unum::uform::primitives {
 
-/** @brief Byte alignment of every arena carve; matches the 256-byte guarantee of the CUDA allocators, so a
- *      carved slab base is always vector-load aligned. */
+/** @brief Byte alignment of every arena allocation; matches the 256-byte guarantee of the CUDA allocators, so
+ *      an allocation base is always vector-load aligned. */
 inline constexpr std::size_t arena_alignment_k = 256u;
+
+/** @brief Cache-line byte count — the region-isolation alignment of symmetric-heap layouts, so flags,
+ *      landings, and payloads never false-share a line. */
+inline constexpr std::size_t cache_line_bytes_k = 128u;
 
 /** @brief Round @p bytes up to the next multiple of @p granularity (any positive step). */
 [[nodiscard]] inline constexpr std::size_t round_up_to_multiple(std::size_t bytes, std::size_t granularity) noexcept {
@@ -91,7 +95,7 @@ struct gpu_memory_report_t {
 }
 
 /**
- *  @brief Growing bump arena over CUDA virtual memory — the owner of every long-lived device slab: weights,
+ *  @brief Growing bump arena over CUDA virtual memory — the owner of every long-lived device buffer: weights,
  *      activations, step scratch, and (later) the symmetric / multimem-bound heap.
  *
  *  Built for @b homogeneous fixed-shape workloads — model training and inference, where the batch shape is
@@ -106,8 +110,8 @@ struct gpu_memory_report_t {
  *  sequence deterministic across captured-graph replays. Growth must happen @b outside graph capture; a
  *  steady-state step performs none.
  *
- *  Not stream-ordered by design: a carve orders against nothing (the memory already exists), and the one
- *  hazard — rewinding a cursor while enqueued kernels still read the carves above it — is owned by the step
+ *  Not stream-ordered by design: an allocation orders against nothing (the memory already exists), and the one
+ *  hazard — rewinding a cursor while enqueued kernels still read the allocations above it — is owned by the step
  *  schedule, not the allocator. Move-only; the destructor unmaps and releases everything.
  *
  *  Requires a current CUDA context on the calling thread (retain the device's primary context at startup).
@@ -173,7 +177,7 @@ struct gpu_arena_t {
     /**
      *  @brief Reserve @p reserve_bytes of VA on @p device ; no physical memory is committed yet.
      *
-     *  The chunks later mapped in are created @c gpuDirectRDMACapable so the arena's slabs can be
+     *  The chunks later mapped in are created @c gpuDirectRDMACapable so the arena's allocations can be
      *  MR-registered or multicast-bound without re-allocation.
      *
      *  Cross-device visibility is @b construction-time configuration: every peer named in
@@ -205,7 +209,7 @@ struct gpu_arena_t {
         return expected<gpu_arena_t> {std::move(arena)};
     }
 
-    /** @brief Bytes carved so far. */
+    /** @brief Bytes allocated so far. */
     [[nodiscard]] std::size_t used() const noexcept { return used_bytes_; }
     /** @brief Physically committed bytes; grows monotonically, never shrinks before destruction. */
     [[nodiscard]] std::size_t mapped() const noexcept { return mapped_bytes_; }
@@ -320,9 +324,9 @@ struct gpu_arena_t {
 
 /**
  *  @brief Standard-allocator facade over a borrowed @ref gpu_arena_t , so owning containers size
- *      arena slabs without the bespoke carve spelling:
+ *      arena allocations without the bespoke allocation spelling:
  *      @c nk::tensor<f32_t,gpu_arena_alloc<f32_t>,2>::try_empty({rows,cols},gpu_arena_alloc<f32_t>{arena})
- *      carves — and grows the arena — automatically; @ref array composes the same way.
+ *      allocates — and grows the arena — automatically; @ref array composes the same way.
  *
  *  Deallocation is deliberately a no-op: a bump arena reclaims through @ref gpu_arena_t::rewind /
  *  @ref gpu_arena_t::release , never per buffer — so a container backed by this allocator must not outlive
@@ -342,7 +346,7 @@ struct gpu_arena_alloc {
         using other = gpu_arena_alloc<other_type_>;
     };
 
-    /** @brief The borrowed arena every allocation carves from. */
+    /** @brief The borrowed arena every allocation comes from. */
     gpu_arena_t *arena_ = nullptr;
 
     constexpr gpu_arena_alloc() noexcept = default;
@@ -362,6 +366,46 @@ struct gpu_arena_alloc {
     [[nodiscard]] constexpr bool operator==(gpu_arena_alloc const &other) const noexcept {
         return arena_ == other.arena_;
     }
+};
+
+/**
+ *  @brief Pinned host-memory allocator — page-locked pages the DMA engines read directly, for the two
+ *      host-side surfaces of a replayed step: epoch staging slots that captured copy nodes re-read at
+ *      every launch, and loss landings polled without a stream synchronize. Stateless; needs a current
+ *      context at the call, like every driver allocation here. Satisfies @c std::allocator_traits , so
+ *      NumKong's owning tensor composes directly:
+ *
+ *      nk::tensor<f32_t, pinned_alloc<f32_t>, 1> landings;
+ */
+template <typename value_type_>
+struct pinned_alloc {
+    using value_type = value_type_;
+    using size_type = std::size_t;
+    using difference_type = std::ptrdiff_t;
+    using propagate_on_container_move_assignment = std::true_type;
+
+    template <typename other_type_>
+    struct rebind {
+        using other = pinned_alloc<other_type_>;
+    };
+
+    constexpr pinned_alloc() noexcept = default;
+    template <typename other_type_>
+    constexpr pinned_alloc(pinned_alloc<other_type_> const &) noexcept {}
+
+    /** @brief Pin @p count elements of portable host memory; @c nullptr on failure. */
+    [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
+        void *base = nullptr;
+        if (cuMemHostAlloc(&base, count * sizeof(value_type), CU_MEMHOSTALLOC_PORTABLE) != CUDA_SUCCESS)
+            return nullptr;
+        return static_cast<value_type *>(base);
+    }
+
+    void deallocate(value_type *base, std::size_t) noexcept {
+        if (base != nullptr) cuMemFreeHost(base);
+    }
+
+    [[nodiscard]] constexpr bool operator==(pinned_alloc const &) const noexcept { return true; }
 };
 
 /**
