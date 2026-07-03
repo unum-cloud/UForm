@@ -19,7 +19,7 @@
 
 #include <cstddef> // `std::size_t`
 
-#include <memory>      // `std::alloc_traits`, `std::allocator`
+#include <memory>      // `std::allocator_traits`, `std::allocator`
 #include <new>         // placement `new`
 #include <span>        // `std::span`
 #include <type_traits> // `std::is_nothrow_move_constructible_v`
@@ -45,7 +45,7 @@ class array {
     using size_type = std::size_t;
     using alloc_type = alloc_type_;
 
-    using alloc_traits = std::alloc_traits<alloc_type>;
+    using alloc_traits = std::allocator_traits<alloc_type>;
     using allocated_type = typename alloc_traits::value_type;
     static_assert(sizeof(value_type) == sizeof(allocated_type),
                   "Allocator value type must be the same size as the array value type");
