@@ -28,7 +28,6 @@
 #include "cuda_core/types.cuh"    // `expected`, `status_t`, the scalar aliases, `sz::arrow_packed_view`, `sz::string`
 #include "cuda_core/array.cuh"    // `array` — the glob expansion result
 #include "cuda_core/schedule.cuh" // `gpu_stream_t`
-
 #include "cuda_loaders/direct_storage.hpp" // `gpu_direct_storage_session_t` — the reader's GDS precondition
 
 namespace unum::uform::loaders {
@@ -110,6 +109,52 @@ struct parquet_file_t {
     explicit parquet_file_t(std::unique_ptr<state_t> state) noexcept;
     std::unique_ptr<state_t> state_;
 };
+
+/**
+ *  @brief One newline-delimited JSON shard's chosen field, decoded and owned on device — the JSONL
+ *      sibling of @ref parquet_file_t , a @b separate type (no format punning). cuDF's line-JSON reader
+ *      decodes each line's @p field into the same device @ref column_view_t shape, so a consumer reads
+ *      it exactly like a Parquet column; only the decode entry and the @b absent footer differ. Holds
+ *      a single field, not a column set. Move-only, RAII; a default / moved-from file is empty.
+ */
+struct jsonl_file_t {
+
+    jsonl_file_t() noexcept;
+    jsonl_file_t(jsonl_file_t const &) = delete;
+    jsonl_file_t &operator=(jsonl_file_t const &) = delete;
+    jsonl_file_t(jsonl_file_t &&) noexcept;
+    jsonl_file_t &operator=(jsonl_file_t &&) noexcept;
+    ~jsonl_file_t();
+
+    /** @brief Decode @p field of the JSONL shard at @p path — one JSON object per line — into device
+     *      memory on @p stream over KvikIO / GDS. JSONL carries no footer, so a shard is always decoded
+     *      to learn its rows; @ref file_size_bytes is the cheap size the loader draws files by instead. */
+    [[nodiscard]] static expected<jsonl_file_t> make(gpu_direct_storage_session_t const &storage, sz::string_view path,
+                                                     sz::string_view field, gpu_stream_t const &stream) noexcept;
+
+    /** @brief Concatenate several decoded shards' fields into one reservoir — the footerless coverage
+     *      loop decodes one file at a time, then merges them here (a cuDF concatenate, one copy). */
+    [[nodiscard]] static expected<jsonl_file_t> concat(std::span<jsonl_file_t const> parts,
+                                                       gpu_stream_t const &stream) noexcept;
+
+    /** @brief Rows decoded — one per JSON line. */
+    [[nodiscard]] std::size_t rows() const noexcept;
+    /** @brief The chosen field's leaf bytes and offsets — the same shape @ref parquet_file_t::column
+     *      hands out, so the pack kernels are identical. */
+    [[nodiscard]] column_view_t column() const noexcept;
+    /** @brief Row → element grouping when @p field is a JSON array of strings; empty for a scalar
+     *      string field (row @c r @b is element @c r ). */
+    [[nodiscard]] std::span<u64_t const> groups() const noexcept;
+
+  private:
+    struct state_t; // The owned cuDF column plus its flattened view — defined in `parquet.cpp`.
+    explicit jsonl_file_t(std::unique_ptr<state_t> state) noexcept;
+    std::unique_ptr<state_t> state_;
+};
+
+/** @brief The byte size of @p path via POSIX @c stat — the cheap file-draw weight for the footerless
+ *      formats (JSONL, later CSV), which cannot know a row count without decoding. */
+[[nodiscard]] expected<std::size_t> file_size_bytes(sz::string_view path) noexcept;
 
 /** @brief Expand a @c directory/pattern (or a plain path) into the sorted paths it matches, via POSIX
  *      @c opendir / @c readdir + @c fnmatch — no glob library to link — sorted so the shard order is

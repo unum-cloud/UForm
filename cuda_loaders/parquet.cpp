@@ -10,11 +10,14 @@
 #include <string>
 #include <vector>
 
-#include <dirent.h>  // vendor-boundary: POSIX `opendir` / `readdir` — the raw directory scan, no glob to link
-#include <fnmatch.h> // vendor-boundary: POSIX `fnmatch` — the shard filename pattern match
+#include <dirent.h>   // vendor-boundary: POSIX `opendir` / `readdir` — the raw directory scan, no glob to link
+#include <fnmatch.h>  // vendor-boundary: POSIX `fnmatch` — the shard filename pattern match
+#include <sys/stat.h> // vendor-boundary: POSIX `stat` — the footerless formats' byte-size file weight
 
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_view.hpp>
+#include <cudf/concatenate.hpp>         // `cudf::concatenate` — merge decoded JSONL shards into one field
+#include <cudf/io/json.hpp>             // `cudf::io::read_json`, `json_reader_options`
 #include <cudf/io/parquet.hpp>          // `cudf::io::read_parquet`, `parquet_reader_options`
 #include <cudf/io/parquet_metadata.hpp> // `cudf::io::read_parquet_metadata`, `parquet_metadata`
 #include <cudf/io/types.hpp>            // `cudf::io::source_info`
@@ -24,36 +27,36 @@
 #include <cudf/unary.hpp> // `cudf::cast` — the one offset widening
 #include <rmm/cuda_stream_view.hpp>
 
-#include "cuda_core/array.cuh" // `array` — the owned per-column table
 #include "cuda_loaders/parquet.hpp"
+
+#include "cuda_core/array.cuh" // `array` — the owned per-column table
 
 namespace uc = unum::uform::core;
 namespace ul = unum::uform::loaders;
 using namespace uc;
 using namespace ul;
 
-/** @brief What a decoded file owns and lends: the cuDF table (payloads and native offsets) and, per
- *      column, cuDF's own widened-offset column when one was needed — everything RAII, nothing
- *      hand-freed. The payload and offsets each column lends out are @c std::span borrows into one of
- *      those owned buffers. */
+/** @brief One decoded column's device-resident spans and the cuDF columns that back them — everything
+ *      RAII, nothing hand-freed. A shared @b representation (not a shared type) behind both the Parquet
+ *      and JSONL readers: the payload and offsets are @c std::span borrows into an owned cuDF buffer. */
+struct column_span_t {
+    /** @brief cuDF's widened leaf-offset column, owned; the leaf offsets are always cast to @c u64 . */
+    std::unique_ptr<cudf::column> widened_offsets;
+    /** @brief cuDF's widened group-offset column, owned; non-null only for a nested @c list<string> . */
+    std::unique_ptr<cudf::column> widened_groups;
+    /** @brief The column's leaf bytes, back to back — borrowed from the owning table / column. */
+    std::span<b8_t const> payload;
+    /** @brief @b [elements+1] leaf offsets — owned by @ref widened_offsets . */
+    std::span<u64_t const> offsets;
+    /** @brief @b [rows+1] row → element offsets for a nested column — owned by @ref widened_groups ;
+     *      empty for a flat column. */
+    std::span<u64_t const> groups;
+};
+
+/** @brief What a decoded Parquet file owns and lends: the cuDF table (every column's payload + native
+ *      offsets) and one @ref column_span_t per requested column, in request order. */
 struct parquet_file_t::state_t {
-    struct column_span_t {
-        /** @brief cuDF's widened leaf-offset column, owned; non-null only when the offsets were 32-bit. */
-        std::unique_ptr<cudf::column> widened_offsets;
-        /** @brief cuDF's widened group-offset column, owned; non-null only for a nested column with
-         *      32-bit outer offsets. */
-        std::unique_ptr<cudf::column> widened_groups;
-        /** @brief The column's leaf bytes, back to back — borrowed from @ref table . */
-        std::span<b8_t const> payload;
-        /** @brief @b [elements+1] leaf offsets — owned by @ref widened_offsets . */
-        std::span<u64_t const> offsets;
-        /** @brief @b [rows+1] row → element offsets for a nested column — owned by @ref widened_groups ;
-         *      empty for a flat column. */
-        std::span<u64_t const> groups;
-    };
-    /** @brief The decoded table — owns every column's payload and its native offsets. */
     std::unique_ptr<cudf::table> table;
-    /** @brief One entry per requested column, in request order. */
     array<column_span_t> columns;
 };
 
@@ -68,7 +71,7 @@ std::size_t parquet_file_t::rows() const noexcept {
 }
 std::size_t parquet_file_t::columns() const noexcept { return state_ ? state_->columns.size() : 0; }
 column_view_t parquet_file_t::column(std::size_t index) const noexcept {
-    state_t::column_span_t const &column = state_->columns[index];
+    column_span_t const &column = state_->columns[index];
     return {{column.payload.data(), column.payload.size()}, {column.offsets.data(), column.offsets.size()}};
 }
 std::span<u64_t const> parquet_file_t::groups(std::size_t index) const noexcept {
@@ -174,7 +177,7 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
 
             // 64-bit offsets everywhere, both levels: borrow cuDF's when already i64, else keep the
             // column cuDF's own `cast` produced — the offsets stay in a cuDF-owned buffer, no copy.
-            state_t::column_span_t &column = state->columns[index];
+            column_span_t &column = state->columns[index];
             column.payload = flat->payload;
             widen_offsets_(flat->offsets, cudf_stream, column.offsets, column.widened_offsets);
             if (flat->groups.type().id() != cudf::type_id::EMPTY)
@@ -236,6 +239,117 @@ expected<parquet_length_metadata_t> parquet_file_t::column_metadata(gpu_direct_s
     catch (...) {
         return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
     }
+}
+
+/** @brief Widen a flattened column's offsets into an owned @ref column_span_t — the decode tail both
+ *      readers share once cuDF hands back a @ref flat_column_t . */
+static column_span_t adopt_flat_(flat_column_t const &flat, rmm::cuda_stream_view stream) {
+    column_span_t column;
+    column.payload = flat.payload;
+    widen_offsets_(flat.offsets, stream, column.offsets, column.widened_offsets);
+    if (flat.groups.type().id() != cudf::type_id::EMPTY)
+        widen_offsets_(flat.groups, stream, column.groups, column.widened_groups);
+    return column;
+}
+
+/** @brief A decoded JSONL field: the owned cuDF column — extracted from a shard's table, or the
+ *      concatenation of several — and its flattened device spans. */
+struct jsonl_file_t::state_t {
+    std::unique_ptr<cudf::column> field;
+    column_span_t span;
+};
+
+jsonl_file_t::jsonl_file_t() noexcept = default;
+jsonl_file_t::jsonl_file_t(jsonl_file_t &&) noexcept = default;
+jsonl_file_t &jsonl_file_t::operator=(jsonl_file_t &&) noexcept = default;
+jsonl_file_t::~jsonl_file_t() = default;
+jsonl_file_t::jsonl_file_t(std::unique_ptr<state_t> state) noexcept : state_(std::move(state)) {}
+
+std::size_t jsonl_file_t::rows() const noexcept {
+    if (!state_) return 0;
+    if (!state_->span.groups.empty()) return state_->span.groups.size() - 1;   // list<string>: rows+1 groups
+    return state_->span.offsets.empty() ? 0 : state_->span.offsets.size() - 1; // flat string: rows+1 offsets
+}
+column_view_t jsonl_file_t::column() const noexcept {
+    column_span_t const &field = state_->span;
+    return {{field.payload.data(), field.payload.size()}, {field.offsets.data(), field.offsets.size()}};
+}
+std::span<u64_t const> jsonl_file_t::groups() const noexcept {
+    return state_ ? state_->span.groups : std::span<u64_t const> {};
+}
+
+expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, sz::string_view path,
+                                          sz::string_view field, gpu_stream_t const &stream) noexcept {
+    using result_t = expected<jsonl_file_t>;
+    try {
+        rmm::cuda_stream_view const cudf_stream {reinterpret_cast<cudaStream_t>(stream.get())};
+        // One JSON object per line; KvikIO / GDS streams the bytes, cuDF decodes on the GPU.
+        auto options = cudf::io::json_reader_options::builder(
+                           cudf::io::source_info {std::string {path.data(), path.size()}}) // vendor-boundary
+                           .lines(true)
+                           .build();
+        cudf::io::table_with_metadata loaded = cudf::io::read_json(options, cudf_stream);
+        if (loaded.tbl == nullptr) return result_t::fail(status_t::io_error_k, "empty JSONL read of {}", path);
+
+        // Select `field` among the decoded top-level columns by name.
+        std::string const wanted {field.data(), field.size()}; // vendor-boundary
+        std::size_t const column_count = loaded.metadata.schema_info.size();
+        std::size_t field_index = column_count;
+        for (std::size_t index = 0; index != column_count; ++index) // vendor-boundary
+            if (loaded.metadata.schema_info[index].name == wanted) {
+                field_index = index;
+                break;
+            }
+        if (field_index == column_count)
+            return result_t::fail(status_t::invalid_input_k, "no field {} in JSONL {}", field, path);
+
+        // Own just that field's column and drop the rest of the decoded table.
+        std::vector<std::unique_ptr<cudf::column>> released = loaded.tbl->release(); // vendor-boundary
+        auto state = std::make_unique<state_t>();
+        state->field = std::move(released[field_index]);
+        auto flat = flatten_column_(state->field->view(), field, cudf_stream);
+        if (!flat) return result_t::fail(std::move(flat));
+        state->span = adopt_flat_(*flat, cudf_stream);
+        return result_t {jsonl_file_t {std::move(state)}};
+    }
+    catch (std::exception const &error) {
+        return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
+    }
+    catch (...) {
+        return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
+    }
+}
+
+expected<jsonl_file_t> jsonl_file_t::concat(std::span<jsonl_file_t const> parts, gpu_stream_t const &stream) noexcept {
+    using result_t = expected<jsonl_file_t>;
+    if (parts.empty()) return result_t::fail(status_t::invalid_input_k, "JSONL concat needs at least one shard");
+    try {
+        rmm::cuda_stream_view const cudf_stream {reinterpret_cast<cudaStream_t>(stream.get())};
+        std::vector<cudf::column_view> fields; // vendor-boundary: cudf::concatenate takes a column-view list
+        fields.reserve(parts.size());
+        for (jsonl_file_t const &part : parts) fields.push_back(part.state_->field->view());
+        auto state = std::make_unique<state_t>();
+        state->field = cudf::concatenate(fields, cudf_stream); // one copy into a single owned field column
+        auto flat = flatten_column_(state->field->view(), sz::string_view {"jsonl", 5}, cudf_stream);
+        if (!flat) return result_t::fail(std::move(flat));
+        state->span = adopt_flat_(*flat, cudf_stream);
+        return result_t {jsonl_file_t {std::move(state)}};
+    }
+    catch (std::exception const &error) {
+        return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
+    }
+    catch (...) {
+        return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
+    }
+}
+
+expected<std::size_t> ul::file_size_bytes(sz::string_view path) noexcept {
+    using result_t = expected<std::size_t>;
+    sz::string text; // null-terminated for the C stat call
+    if (!text.try_assign(path)) return result_t::fail(status_t::bad_alloc_k, "path allocation failed");
+    struct ::stat info {}; // vendor-boundary: POSIX stat
+    if (::stat(text.c_str(), &info) != 0) return result_t::fail(status_t::io_error_k, "stat failed for {}", path);
+    return result_t {static_cast<std::size_t>(info.st_size)};
 }
 
 expected<array<sz::string>> ul::expand_glob(sz::string_view path_or_glob) noexcept {

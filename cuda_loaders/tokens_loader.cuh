@@ -27,12 +27,11 @@
 #include <cstddef> // `std::size_t`
 #include <span>    // `std::span`
 
-#include "cuda_core/types.cuh"            // `expected`, `status_t`, `token_id_t`, `epoch_t`, `epoch_permutation`
-#include "cuda_core/array.cuh"            // `array` — the loader's footer metadata
-#include "cuda_core/multimodal_batch.cuh" // `multimodal_batch_on_gpu_t` — the packing target
-#include "cuda_core/schedule.cuh"         // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`, `grid_size_for`
-#include "cuda_core/gpu_allocators.cuh"   // `gpu_alloc` — the per-fill scratch allocator
-
+#include "cuda_core/types.cuh"             // `expected`, `status_t`, `token_id_t`, `epoch_t`, `epoch_permutation`
+#include "cuda_core/array.cuh"             // `array` — the loader's footer metadata
+#include "cuda_core/gpu_allocators.cuh"    // `gpu_alloc` — the per-fill scratch allocator
+#include "cuda_core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`, `grid_size_for`
+#include "cuda_core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t` — the packing target
 #include "cuda_loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
 #include "cuda_loaders/parquet.hpp"        // `parquet_file_t`, `expand_glob`, `column_view_t`
 
@@ -93,6 +92,55 @@ struct tokens_loader_parquet_t {
      *      @c upper_bound maps a keyed row position to its owning file) and, at its back, the dataset's
      *      total rows. Read once per dataset; shared across every GPU the loader serves. */
     array<std::size_t> row_prefix_ {};
+};
+
+/** @brief The JSONL tokens loader's baked knobs — a different config is a different loader. */
+struct tokens_base_loader_jsonl_config_t {
+    /** @brief The JSON field (one object per line) holding the UTF-8 documents. */
+    sz::string_view field = sz::string_view {"text", 4};
+};
+
+/**
+ *  @brief The JSONL sibling of @ref tokens_loader_parquet_t — a @b separate class (no format punning),
+ *      same dataset-scoped, rank-agnostic shape. The one difference is footerless: JSONL carries no row
+ *      count, so @ref make weighs files by @b byte size and @ref fill decodes files one at a time until
+ *      the reservoir covers the batch, rather than counting rows from a footer up front.
+ *
+ *  @warning Holds one dataset's shard sizes; keep one per input dataset. @ref fill allocates on demand
+ *      and is safe to call concurrently for different GPU ranks on different streams.
+ */
+struct tokens_loader_jsonl_t {
+
+    /** @brief Index all the shards' byte sizes (POSIX @c stat , host, once — no decode).
+     *  @param[inout] session GPU Direct Storage session for IO.
+     *  @param[in] path_or_glob Dataset's JSONL paths or a GLOB pattern for all the files.
+     *  @param[in] seed The training-run specific order-affecting seed. */
+    [[nodiscard]] static expected<tokens_loader_jsonl_t> make( //
+        gpu_direct_storage_session_t &session, sz::string_view path_or_glob, u64_t seed) noexcept;
+
+    /** @brief Fill the next few @p batches for the MLM objective on one GPU rank — @sa
+     *      multimodal_batch_mixer_t for the cross-GPU mixing. Draws files weighted by byte size and keyed
+     *      by @c (seed, step, rank) , decodes them until the pooled rows cover @p batches (≥2 files unless
+     *      the dataset is one), then packs many documents per row.
+     *  @param[in] config Which JSON field to take.
+     *  @param[inout] gpu_stream The GPU-specific stream the decode and packing run on.
+     *  @param[in] gpu_rank Ensures different GPUs draw different files from the same dataset.
+     *  @param[in] training_step Ensures subsequent steps sample different data.
+     *  @param[out] batches Output matrices populated with token segments. */
+    [[nodiscard]] expected_t fill(                                          //
+        gpu_stream_t &gpu_stream, tokens_base_loader_jsonl_config_t config, //
+        u32_t gpu_rank, u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
+
+  private:
+    /** @brief The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
+    gpu_direct_storage_session_t *storage_ = nullptr;
+    /** @brief The dataset's JSONL shard paths — owned, expanded from the glob at @ref make . */
+    array<sz::string> absolute_paths_ {};
+    /** @brief The run seed keying the random file and row draws. */
+    u64_t seed_ = 0;
+    /** @brief @b [shards+1] cumulative @b byte sizes — the weighted file draw's search table. JSONL has
+     *      no footer, so bytes (not rows) weigh the draw; the true row counts come from the decode. */
+    array<std::size_t> byte_prefix_ {};
 };
 
 } // namespace unum::uform::loaders
