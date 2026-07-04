@@ -5,7 +5,7 @@
  *  @author Ash Vardanian
  *  @date July 3, 2026
  */
-#include "multimodal_masking.cuh"
+#include "cuda_core/multimodal_masking.cuh"
 
 using namespace unum::uform::core;
 
@@ -131,7 +131,7 @@ static __global__ void masked_finalize_kernel_(f32r1_view_t position_loss, f32r1
     loss_summands[1] = scale_and_count[1];
 }
 
-expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, cublaslt_session_t const &blas,
+expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, cublaslt_session_t &blas,
                                                 masked_tokens_config_t config) noexcept {
     using result_t = expected<masked_tokens_t>;
     if (config.vocabulary == 0 || config.hidden == 0 || config.max_tokens == 0)
@@ -199,7 +199,7 @@ expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, cublaslt_ses
 
 expected_t masked_tokens_t::corrupt(tokens_view_t clean, tokens_span_t distorted, u32r1_span_t loss_weights,
                                     u32r1_view_t segment_offsets, u32r1_view_t segment_lengths, masking_recipe_t recipe,
-                                    epoch_t epoch, gpu_stream_t const &stream) noexcept {
+                                    epoch_t epoch, gpu_stream_t &stream) noexcept {
     std::size_t const tokens = clean.extent(0);
     if (distorted.extent(0) != tokens || loss_weights.extent(0) != tokens)
         return expected_t::fail(status_t::shape_unsupported_k, "corrupt buffers disagree on token count ({})", tokens);
@@ -222,7 +222,7 @@ expected_t masked_tokens_t::corrupt(tokens_view_t clean, tokens_span_t distorted
 
 expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t clean_targets, u32r1_view_t loss_weights,
                                        f32r1_span_t loss_summands, bf16r2_span_t normalized_grad,
-                                       gpu_stream_t const &stream) noexcept {
+                                       gpu_stream_t &stream) noexcept {
     u32_t const hidden = config_.hidden;
     std::size_t const tokens = config_.max_tokens;
     if (normalized.extent(0) != tokens || normalized_grad.extent(0) != tokens || clean_targets.extent(0) != tokens ||
@@ -351,7 +351,7 @@ static __global__ void patch_mae_loss_kernel_(bf16r2_view_t predicted, bf16r2_vi
     position_loss[row] = live ? total_loss * inverse_pixels : 0.0f;
 }
 
-expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, cublaslt_session_t const &blas,
+expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, cublaslt_session_t &blas,
                                                   masked_patches_config_t config) noexcept {
     using result_t = expected<masked_patches_t>;
     if (config.hidden == 0 || config.patch_pixels == 0 || config.max_patches == 0 || config.temporal_groups == 0 ||
@@ -422,8 +422,7 @@ expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, cublaslt_s
 }
 
 expected_t masked_patches_t::sample_and_corrupt(bf16r2_view_t clean_patches, bf16r2_span_t distorted_patches,
-                                                masking_recipe_t recipe, epoch_t epoch,
-                                                gpu_stream_t const &stream) noexcept {
+                                                masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept {
     u32_t const patches = config_.max_patches, patch_pixels = config_.patch_pixels;
     if (clean_patches.extent(0) != patches || distorted_patches.extent(0) != patches ||
         clean_patches.extent(1) != patch_pixels || distorted_patches.extent(1) != patch_pixels)
@@ -443,7 +442,7 @@ expected_t masked_patches_t::sample_and_corrupt(bf16r2_view_t clean_patches, bf1
 
 expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t clean_patches,
                                         f32r1_span_t loss_summands, bf16r2_span_t normalized_grad,
-                                        gpu_stream_t const &stream) noexcept {
+                                        gpu_stream_t &stream) noexcept {
     u32_t const hidden = config_.hidden, patch_pixels = config_.patch_pixels;
     std::size_t const patches = config_.max_patches;
     if (normalized.extent(0) != patches || normalized_grad.extent(0) != patches || clean_patches.extent(0) != patches)

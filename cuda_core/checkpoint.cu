@@ -5,14 +5,15 @@
  *  @author Ash Vardanian
  *  @date July 3, 2026
  */
-#include "checkpoint.cuh"
+#include <charconv> // `std::from_chars` — the step metadata parse
 
-#include <charconv>   // `std::from_chars` — the step metadata parse
+#include <unistd.h>   // `pwrite`, `pread`, `close`
 #include <fcntl.h>    // `open`
 #include <sys/stat.h> // `fstat` — the payload extent
-#include <unistd.h>   // `pwrite`, `pread`, `close`
 
 #include <yyjson.h> // the safetensors JSON header — exceptions-free C
+
+#include "cuda_core/checkpoint.cuh"
 
 namespace unum::uform::core {
 
@@ -201,7 +202,7 @@ expected_t checkpoint_to_save_t::try_reserve(u64_t total_scalars, u64_t tensor_c
 }
 
 expected_t checkpoint_to_save_t::try_insert(sz::string_view name, nk::tensor_view<bf16_t, 2> data,
-                                            gpu_stream_t const &stream) noexcept {
+                                            gpu_stream_t &stream) noexcept {
     if (name.empty() || data.empty())
         return expected_t::fail(status_t::invalid_input_k, "an entry needs a name and data");
     for (checkpoint_entry_t const &existing : entries_)
@@ -226,8 +227,10 @@ expected_t checkpoint_to_save_t::try_insert(sz::string_view name, nk::tensor_vie
 
     // Stream order places this copy after every training kernel already enqueued; the bounded
     // synchronize drains it, so the weights are snapshotted — and free to mutate — on return.
-    nk::tensor_view<bf16_t, 1> const device_source {data.data(), scalars};
-    nk::tensor_span<bf16_t, 1> const host_destination {payload_.data() + entry.scalar_offset, scalars};
+    nk::tensor_view<bf16_t, 1> const device_source = data.flatten<1>();
+    nk::tensor_span<bf16_t, 1> const payload_span {payload_.data(), payload_.size()};
+    nk::tensor_span<bf16_t, 1> const host_destination = payload_span(
+        nk::range(entry.scalar_offset, entry.scalar_offset + scalars), nk::slice);
     expected_t copied = copy_device_to_host(device_source, host_destination, stream);
     if (copied)
         if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)

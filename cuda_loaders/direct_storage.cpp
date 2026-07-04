@@ -3,12 +3,13 @@
  *      the contract. cuDF lives only in this translation unit and the sibling @c parquet.cpp .
  *  @file cuda_loaders/direct_storage.cpp
  */
-#include "direct_storage.hpp"
 
-#include <cstdlib> // `std::getenv` — the KvikIO compat-mode probe (read for diagnostics only)
 #include <cstring> // `std::strcmp`
+#include <cstdlib> // `std::getenv` — the KvikIO compat-mode probe (read for diagnostics only)
 
 #include <cudf/io/config_utils.hpp> // vendor-boundary: `cudf::io::kvikio_integration::set_up_kvikio`
+
+#include "cuda_loaders/direct_storage.hpp"
 
 namespace unum::uform::loaders {
 

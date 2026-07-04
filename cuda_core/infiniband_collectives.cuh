@@ -67,11 +67,11 @@
 #include <cstdint> // `std::uint8_t`, `std::uint16_t`, `std::uint64_t`
 #include <cstring> // `std::memcpy`, `std::strcmp`
 
+#include <utility>  // `std::exchange`
+#include <span>     // `std::span` — the DMA ring ranges inside the wire PODs
 #include <charconv> // `std::from_chars` — coordinate payload parsing
 #include <chrono>   // `std::chrono::steady_clock` — the completion-poll deadline
-#include <span>     // `std::span` — the DMA ring ranges inside the wire PODs
 #include <thread>   // `std::this_thread::sleep_for` — the completion-poll backoff
-#include <utility>  // `std::exchange`
 
 #include <cuda.h> // `cuMemGetHandleForAddressRange`, `cuMemHostRegister`, `cuMemHostGetDevicePointer`
 
@@ -82,10 +82,10 @@
 #include <infiniband/verbs.h>  // `ibv_context`, `ibv_pd`, `ibv_cq`, `ibv_qp` — the RC bring-up
 #endif
 
-#include "types.cuh"          // `expected`, `expected_t`, `status_t`, `format_into`
-#include "gpu_allocators.cuh" // `gpu_arena_t` carving the device producer / consumer counters
-#include "schedule.cuh"       // `b8r1_span_t` — the registered GPU range travels as one typed span
-#include "mesh.cuh"           // `mesh_topology_t` — the coordinate exchange rides the mesh rendezvous
+#include "cuda_core/types.cuh"          // `expected`, `expected_t`, `status_t`, `format_into`
+#include "cuda_core/gpu_allocators.cuh" // `gpu_arena_t` carving the device producer / consumer counters
+#include "cuda_core/schedule.cuh"       // `b8r1_span_t` — the registered GPU range travels as one typed span
+#include "cuda_core/mesh.cuh"           // `mesh_topology_t` — the coordinate exchange rides the mesh rendezvous
 
 namespace unum::uform::core {
 
@@ -1310,7 +1310,7 @@ struct infiniband_member_t {
      *      its upload — on @p stream , before this step's collective. Under capture this records a copy
      *      node that re-reads the pinned slot at every replay (see @ref advance_host ). A no-op on the
      *      zero-round single-domain identity. */
-    [[nodiscard]] expected_t advance(gpu_stream_t const &stream) noexcept {
+    [[nodiscard]] expected_t advance(gpu_stream_t &stream) noexcept {
         if (layout_.rounds == 0) return {};
         return epoch_counter_.advance(stream);
     }
@@ -1331,7 +1331,7 @@ struct infiniband_member_t {
      *  post-and-drain, wait, accumulate. Call @ref advance first, once per step. Zero rounds — the
      *  single-domain identity — enqueues nothing.
      */
-    [[nodiscard]] expected_t allreduce_sum(gpu_stream_t const &stream) noexcept {
+    [[nodiscard]] expected_t allreduce_sum(gpu_stream_t &stream) noexcept {
         if (layout_.rounds == 0) return {};
         if (layout_.landing_bytes == 0)
             return expected_t::fail(status_t::invalid_input_k,
@@ -1365,7 +1365,7 @@ struct infiniband_member_t {
      *      as capture-safe graph nodes. This domain's own block must already sit at its domain-major
      *      slot; after @c log2(D) rounds every block is filled. Call @ref advance first, once per step.
      */
-    [[nodiscard]] expected_t allgather(gpu_stream_t const &stream) noexcept {
+    [[nodiscard]] expected_t allgather(gpu_stream_t &stream) noexcept {
         if (layout_.rounds == 0) return {};
         if (layout_.landing_bytes != 0)
             return expected_t::fail(status_t::invalid_input_k,
@@ -1507,10 +1507,10 @@ struct colocated_domain_t {
 struct infiniband_member_t {
     [[nodiscard]] b8r1_span_t payload() noexcept { return {}; }
     [[nodiscard]] b8r1_span_t own_block() noexcept { return {}; }
-    [[nodiscard]] expected_t advance(gpu_stream_t const &) noexcept { return {}; }
+    [[nodiscard]] expected_t advance(gpu_stream_t &) noexcept { return {}; }
     void advance_host() noexcept {}
-    [[nodiscard]] expected_t allreduce_sum(gpu_stream_t const &) noexcept { return {}; }
-    [[nodiscard]] expected_t allgather(gpu_stream_t const &) noexcept { return {}; }
+    [[nodiscard]] expected_t allreduce_sum(gpu_stream_t &) noexcept { return {}; }
+    [[nodiscard]] expected_t allgather(gpu_stream_t &) noexcept { return {}; }
 };
 
 /** @brief The build-gate stub of the colocated domain: single-domain topologies work (nothing to

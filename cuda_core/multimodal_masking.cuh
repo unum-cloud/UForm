@@ -24,27 +24,17 @@
 #pragma once
 
 #include <cstddef> // `std::size_t`
-#include <array>   // `std::array` — the pinned matmul plans
+
+#include <array> // `std::array` — the pinned matmul plans
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "types.cuh"          // `expected`, `expected_t`, `status_t`, the scalar aliases
-#include "array.cuh"          // `array` — the parameter-table append
-#include "schedule.cuh"       // `gpu_stream_t`, `cublaslt_session_t`, `cublaslt_plan_t`, the view aliases
-#include "gpu_allocators.cuh" // `gpu_arena_t`, `gpu_arena_alloc`
+#include "cuda_core/types.cuh"          // `expected`, `expected_t`, `status_t`, the scalar aliases
+#include "cuda_core/array.cuh"          // `array` — the parameter-table append
+#include "cuda_core/gpu_allocators.cuh" // `gpu_arena_t`, `gpu_arena_alloc`
+#include "cuda_core/schedule.cuh"       // `gpu_stream_t`, `cublaslt_session_t`, `cublaslt_plan_t`, the view aliases
 
 namespace unum::uform::core {
-
-/** @brief Rank-2 BFloat16 device / host view, shaped @b [tokens,hidden] . */
-using bf16r2_view_t = nk::tensor_view<bf16_t, 2>;
-/** @brief Rank-2 BFloat16 mutable device / host span, shaped @b [tokens,hidden] . */
-using bf16r2_span_t = nk::tensor_span<bf16_t, 2>;
-/** @brief Rank-1 BFloat16 device-only buffer owned through a @ref gpu_arena_t . */
-using bf16r1_tensor_arena_t = nk::tensor<bf16_t, gpu_arena_alloc<bf16_t>, 1>;
-/** @brief Rank-2 BFloat16 device-only buffer owned through a @ref gpu_arena_t . */
-using bf16r2_tensor_arena_t = nk::tensor<bf16_t, gpu_arena_alloc<bf16_t>, 2>;
-/** @brief Rank-2 Float32 device-only buffer owned through a @ref gpu_arena_t . */
-using f32r2_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 2>;
 
 /** @brief The byte vocabulary: 256 UTF-8 byte values plus the PAD and MASK specials. */
 inline constexpr u32_t byte_vocabulary_k = 258u;
@@ -69,13 +59,12 @@ struct masking_recipe_t {
     u32_t video_tube_time = 2, video_tube_height = 16, video_tube_width = 16;
 };
 
-/** @brief One counter-based draw in @b [0,1) , keyed like the epoch shuffle through @ref permutation_round
- *      — pure, stateless, device-callable, bit-reproducible on every rank. */
+/** @brief One counter-based draw in @b [0,1) , keyed through the one @ref splitmix64_hash_t — pure,
+ *      stateless, device-callable, bit-reproducible on every rank. */
 [[nodiscard]] constexpr f32_t masking_draw(u64_t seed, u32_t epoch, u32_t sample_index, u32_t position,
                                            u32_t purpose) noexcept {
-    u32_t mixed = permutation_round(sample_index ^ static_cast<u32_t>(seed), epoch * 40503u + purpose);
-    mixed = permutation_round(mixed ^ position, static_cast<u32_t>(seed >> 32) + purpose * 2654435761u);
-    return static_cast<f32_t>(mixed >> 8) * 0x1.0p-24f; // The top 24 bits as a uniform [0,1).
+    u64_t const mixed = splitmix64_hash_t {}(seed, epoch, purpose, sample_index, position);
+    return static_cast<f32_t>(mixed >> 40) * 0x1.0p-24f; // The top 24 bits as a uniform [0,1).
 }
 
 /** @brief The baked geometry and weight of one byte masked-modeling head — a different config is a
@@ -108,7 +97,7 @@ struct masked_tokens_t {
 
     /** @brief Allocate the decoder, every scratch, and pin the three matmul plans — once, at setup.
      *  @param[in] blas The device's one tensor-core session, main-owned and borrowed. */
-    [[nodiscard]] static expected<masked_tokens_t> make(gpu_arena_t &arena, cublaslt_session_t const &blas,
+    [[nodiscard]] static expected<masked_tokens_t> make(gpu_arena_t &arena, cublaslt_session_t &blas,
                                                         masked_tokens_config_t config) noexcept;
 
     /**
@@ -126,7 +115,7 @@ struct masked_tokens_t {
      */
     [[nodiscard]] expected_t corrupt(tokens_view_t clean, tokens_span_t distorted, u32r1_span_t loss_weights,
                                      u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                     masking_recipe_t recipe, epoch_t epoch, gpu_stream_t const &stream) noexcept;
+                                     masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief Forward + backward over every token, gated by its loss weight — pure enqueue on @p stream .
@@ -140,7 +129,7 @@ struct masked_tokens_t {
      */
     [[nodiscard]] expected_t operator()(bf16r2_view_t normalized, tokens_view_t clean_targets,
                                         u32r1_view_t loss_weights, f32r1_span_t loss_summands,
-                                        bf16r2_span_t normalized_grad, gpu_stream_t const &stream) noexcept;
+                                        bf16r2_span_t normalized_grad, gpu_stream_t &stream) noexcept;
 
     /** @brief Append the decoder weight's optimizer slot. */
     [[nodiscard]] expected_t parameters(array<differentiable_weights_t> &slots) noexcept;
@@ -150,7 +139,7 @@ struct masked_tokens_t {
   private:
     masked_tokens_config_t config_ {};
     /** @brief The device's one main-owned tensor-core session — borrowed, never created here. */
-    cublaslt_session_t const *session_ = nullptr;
+    cublaslt_session_t *session_ = nullptr;
     /** @brief The untied decoder @b [vocabulary,hidden] and its gradient buffer. */
     bf16r2_tensor_arena_t decoder_weight_ {}, decoder_weight_grad_ {};
     /** @brief @b [max_tokens,vocabulary] Float32 logits — the cross-entropy's stable surface. */
@@ -205,7 +194,7 @@ struct masked_patches_config_t {
 struct masked_patches_t {
 
     /** @brief Allocate the recon head, every scratch, and pin the three matmul plans — once, at setup. */
-    [[nodiscard]] static expected<masked_patches_t> make(gpu_arena_t &arena, cublaslt_session_t const &blas,
+    [[nodiscard]] static expected<masked_patches_t> make(gpu_arena_t &arena, cublaslt_session_t &blas,
                                                          masked_patches_config_t config) noexcept;
 
     /**
@@ -217,8 +206,7 @@ struct masked_patches_t {
      *  @param[out] distorted_patches The tower's input @b [patches,patch_pixels] — clean or zeroed.
      */
     [[nodiscard]] expected_t sample_and_corrupt(bf16r2_view_t clean_patches, bf16r2_span_t distorted_patches,
-                                                masking_recipe_t recipe, epoch_t epoch,
-                                                gpu_stream_t const &stream) noexcept;
+                                                masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief Reconstruct and score the masked patches — pure enqueue on @p stream .
@@ -230,7 +218,7 @@ struct masked_patches_t {
      */
     [[nodiscard]] expected_t operator()(bf16r2_view_t normalized, bf16r2_view_t clean_patches,
                                         f32r1_span_t loss_summands, bf16r2_span_t normalized_grad,
-                                        gpu_stream_t const &stream) noexcept;
+                                        gpu_stream_t &stream) noexcept;
 
     /** @brief Append the recon weight's optimizer slot. */
     [[nodiscard]] expected_t parameters(array<differentiable_weights_t> &slots) noexcept;
@@ -240,7 +228,7 @@ struct masked_patches_t {
   private:
     masked_patches_config_t config_ {};
     /** @brief The device's one main-owned tensor-core session — borrowed, never created here. */
-    cublaslt_session_t const *session_ = nullptr;
+    cublaslt_session_t *session_ = nullptr;
     /** @brief The linear reconstruction head @b [patch_pixels,hidden] and its gradient buffer. */
     bf16r2_tensor_arena_t recon_weight_ {}, recon_weight_grad_ {};
     /** @brief @b [max_patches,patch_pixels] reconstructed patches and their loss gradient. */

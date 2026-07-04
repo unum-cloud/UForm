@@ -29,14 +29,15 @@
 #pragma once
 
 #include <cstddef> // `std::size_t`
-#include <span>    // `std::span` — device-ID and stream lists
+
+#include <span> // `std::span` — device-ID and stream lists
 
 #include <cuda.h> // `cuMulticastCreate`, `cuMulticastBindMem`, `cuMemMap`, `cuMemSetAccess`
 
-#include "types.cuh"          // `expected`, `expected_t`, `status_t`, the scalar aliases
-#include "array.cuh"          // `array` — the runtime-sized per-member tables
-#include "schedule.cuh"       // `gpu_stream_t`, `launch_kernel`, `current_context_t`, the rank-1 aliases
-#include "gpu_allocators.cuh" // `gpu_arena_t` conventions, `round_up_to_multiple`
+#include "cuda_core/types.cuh"          // `expected`, `expected_t`, `status_t`, the scalar aliases
+#include "cuda_core/array.cuh"          // `array` — the runtime-sized per-member tables
+#include "cuda_core/gpu_allocators.cuh" // `gpu_arena_t` conventions, `round_up_to_multiple`
+#include "cuda_core/schedule.cuh"       // `gpu_stream_t`, `launch_kernel`, `current_context_t`, the rank-1 aliases
 
 namespace unum::uform::core {
 
@@ -246,7 +247,10 @@ struct multimem_window_t {
  */
 struct multimem_domain_t {
 
+  private:
     multimem_domain_t() noexcept = default;
+
+  public:
     multimem_domain_t(multimem_domain_t const &) = delete;
     multimem_domain_t &operator=(multimem_domain_t const &) = delete;
     multimem_domain_t(multimem_domain_t &&other) noexcept { swap_(other); }
@@ -267,7 +271,7 @@ struct multimem_domain_t {
      *      @ref advance — consumers never allocate or upload epochs themselves.
      */
     [[nodiscard]] static expected<multimem_domain_t> make(std::span<i32_t const> devices, std::size_t payload_scalars,
-                                                          std::span<gpu_stream_t const> streams) noexcept;
+                                                          std::span<gpu_stream_t> streams) noexcept;
 
     /** @brief The reduction tier this domain runs — see @ref multimem_tier_t . */
     [[nodiscard]] multimem_tier_t tier() const noexcept {
@@ -297,7 +301,7 @@ struct multimem_domain_t {
 
     /** @brief The one enqueued host write of a step — see @ref epoch_counter_t::advance . Lead stream,
      *      before any member's barrier. */
-    [[nodiscard]] expected_t advance(gpu_stream_t const &stream) noexcept { return epoch_.advance(stream); }
+    [[nodiscard]] expected_t advance(gpu_stream_t &stream) noexcept { return epoch_.advance(stream); }
 
     /** @brief The replay-time sibling — see @ref epoch_counter_t::advance_host . Once before every
      *      @c cuGraphLaunch of a step that contains this domain's barriers. */
@@ -323,13 +327,13 @@ struct multimem_domain_t {
     /** @brief Enqueue the domain barrier for @p member_index — one arrival, one acquire-spin against
      *      the domain's own epoch (see @ref advance ). On the peer tier the arrival walks the members
      *      through the symmetric range instead. */
-    [[nodiscard]] expected_t barrier(std::size_t member_index, gpu_stream_t const &stream) noexcept;
+    [[nodiscard]] expected_t barrier(std::size_t member_index, gpu_stream_t &stream) noexcept;
 
     /** @brief Enqueue member @p member_index 's reduce-scatter shard: @p destination receives the
      *      domain-wide sum of @c [shard_begin,shard_begin+destination.extent(0)) . Call after the
      *      barrier proved every member's payload complete. */
     [[nodiscard]] expected_t reduce_scatter(std::size_t member_index, f32r1_span_t destination, std::size_t shard_begin,
-                                            gpu_stream_t const &stream) noexcept;
+                                            gpu_stream_t &stream) noexcept;
 
   private:
     /** @brief Byte offset of the arrival counter inside every replica — pure layout arithmetic over

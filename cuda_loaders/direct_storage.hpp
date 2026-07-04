@@ -16,7 +16,7 @@
  */
 #pragma once
 
-#include "types.cuh" // `expected`, `status_t`, the scalar aliases
+#include "cuda_core/types.cuh" // `expected`, `status_t`, the scalar aliases
 
 namespace unum::uform::loaders {
 
@@ -44,7 +44,10 @@ enum class storage_read_path_t : u8_t {
  */
 struct gpu_direct_storage_session_t {
 
+  private:
     gpu_direct_storage_session_t() noexcept = default;
+
+  public:
     gpu_direct_storage_session_t(gpu_direct_storage_session_t const &) = delete;
     gpu_direct_storage_session_t &operator=(gpu_direct_storage_session_t const &) = delete;
     gpu_direct_storage_session_t(gpu_direct_storage_session_t &&) noexcept = default;

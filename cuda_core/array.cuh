@@ -19,13 +19,13 @@
 
 #include <cstddef> // `std::size_t`
 
-#include <memory>      // `std::allocator_traits`, `std::allocator`
-#include <new>         // placement `new`
-#include <span>        // `std::span`
-#include <type_traits> // `std::is_nothrow_move_constructible_v`
 #include <utility>     // `std::move`, `std::exchange`
+#include <type_traits> // `std::is_nothrow_move_constructible_v`
+#include <new>         // placement `new`
+#include <memory>      // `std::allocator_traits`, `std::allocator`
+#include <span>        // `std::span`
 
-#include "types.cuh" // `status_t`
+#include "cuda_core/types.cuh" // `status_t`
 
 namespace unum::uform::core {
 

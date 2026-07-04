@@ -38,21 +38,23 @@
  */
 #pragma once
 
-#include <array>   // `std::array` — the deterministic-algorithm candidate table
 #include <cstddef> // `std::size_t`
 #include <cstring> // `std::memset` — zeroing pinned scalar slots
-#include <span>    // `std::span` — the multi-stream capture rank list
-#include <utility> // `std::exchange`, `std::forward`
 
-#include <cuda.h>     // `CUstream`, `CUgraph`, `CUgraphExec`, `CUevent`
-#include <cublasLt.h> // `cublasLtHandle_t`, `cublasLtMatmul` — the tensor-core matmul sessions
-#include <cudnn.h>    // `cudnnHandle_t` — the fused-attention session (graphs live with their consumers)
+#include <utility> // `std::exchange`, `std::forward`
+#include <array>   // `std::array` — the deterministic-algorithm candidate table
+#include <span>    // `std::span` — the multi-stream capture rank list
+
+#include <cuda.h>      // `CUstream`, `CUgraph`, `CUgraphExec`, `CUevent`
+#include <cuda_bf16.h> // `__nv_bfloat16` — the training-currency scalar of the rank-1 aliases
+#include <cublasLt.h>  // `cublasLtHandle_t`, `cublasLtMatmul` — the tensor-core matmul sessions
+#include <cudnn.h>     // `cudnnHandle_t` — the fused-attention session (graphs live with their consumers)
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span` for the typed transfer helpers
 
-#include "types.cuh"          // `expected`, `expected_t`, `status_t`
-#include "array.cuh"          // `array` for the node-guard walk
-#include "gpu_allocators.cuh" // `gpu_arena_alloc` backing the owning rank-1 tensor aliases
+#include "cuda_core/types.cuh"          // `expected`, `expected_t`, `status_t`
+#include "cuda_core/array.cuh"          // `array` for the node-guard walk
+#include "cuda_core/gpu_allocators.cuh" // `gpu_arena_alloc` backing the owning rank-1 tensor aliases
 
 namespace unum::uform::core {
 
@@ -60,32 +62,10 @@ namespace nk = ashvardanian::numkong;
 
 /** @brief Rank-1 token-id device / host view — the batch's token currency. */
 using tokens_view_t = nk::tensor_view<token_id_t, 1>;
-/** @brief Rank-1 UInt32 device / host view. */
-using u32r1_view_t = nk::tensor_view<u32_t, 1>;
-/** @brief Rank-1 Float32 device / host view. */
-using f32r1_view_t = nk::tensor_view<f32_t, 1>;
-/** @brief Rank-2 Float32 device / host view. */
-using f32r2_view_t = nk::tensor_view<f32_t, 2>;
-/** @brief Rank-1 raw-byte device / host view. */
-using b8r1_view_t = nk::tensor_view<std::byte, 1>;
 /** @brief Rank-1 token-id mutable device / host span — the batch's token currency. */
 using tokens_span_t = nk::tensor_span<token_id_t, 1>;
-/** @brief Rank-1 UInt32 mutable device / host span. */
-using u32r1_span_t = nk::tensor_span<u32_t, 1>;
-/** @brief Rank-1 Float32 mutable device / host span. */
-using f32r1_span_t = nk::tensor_span<f32_t, 1>;
-/** @brief Rank-2 Float32 mutable device / host span. */
-using f32r2_span_t = nk::tensor_span<f32_t, 2>;
-/** @brief Rank-1 raw-byte mutable device / host span — the workspace currency. */
-using b8r1_span_t = nk::tensor_span<std::byte, 1>;
 /** @brief Rank-1 token-id device-only buffer owned through a @ref gpu_arena_t — the token tape. */
 using tokens_tensor_arena_t = nk::tensor<token_id_t, gpu_arena_alloc<token_id_t>, 1>;
-/** @brief Rank-1 UInt32 device-only buffer owned through a @ref gpu_arena_t . */
-using u32r1_tensor_arena_t = nk::tensor<u32_t, gpu_arena_alloc<u32_t>, 1>;
-/** @brief Rank-1 Float32 device-only buffer owned through a @ref gpu_arena_t . */
-using f32r1_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 1>;
-/** @brief Rank-1 raw-byte device-only buffer owned through a @ref gpu_arena_t — vendor workspaces. */
-using b8r1_tensor_arena_t = nk::tensor<std::byte, gpu_arena_alloc<std::byte>, 1>;
 
 /**
  *  @brief A move-only owning wrapper over a real (non-null) @c CUstream on one device.
@@ -96,7 +76,10 @@ using b8r1_tensor_arena_t = nk::tensor<std::byte, gpu_arena_alloc<std::byte>, 1>
  */
 struct gpu_stream_t {
 
+  private:
     gpu_stream_t() noexcept = default;
+
+  public:
     gpu_stream_t(gpu_stream_t const &) = delete;
     gpu_stream_t &operator=(gpu_stream_t const &) = delete;
 
@@ -175,7 +158,7 @@ struct gpu_stream_t {
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_host_to_device(nk::tensor_view<value_type_, 1> host_source,
                                                     nk::tensor_span<value_type_, 1> device_destination,
-                                                    gpu_stream_t const &stream) noexcept {
+                                                    gpu_stream_t &stream) noexcept {
     if (host_source.empty()) return {};
     if (device_destination.extent(0) < host_source.extent(0))
         return expected_t::fail(status_t::invalid_input_k,
@@ -196,7 +179,7 @@ template <typename value_type_>
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_device_to_host(nk::tensor_view<value_type_, 1> device_source,
                                                     nk::tensor_span<value_type_, 1> host_destination,
-                                                    gpu_stream_t const &stream) noexcept {
+                                                    gpu_stream_t &stream) noexcept {
     if (device_source.empty()) return {};
     if (host_destination.extent(0) < device_source.extent(0))
         return expected_t::fail(status_t::invalid_input_k,
@@ -243,7 +226,7 @@ inline constexpr unsigned kernel_grid_cap_k = 4096u;
 
 template <typename... arg_types_>
 [[nodiscard]] inline expected_t launch_kernel(void const *kernel_symbol, dim3 grid_size, dim3 block_size,
-                                              gpu_stream_t const &stream, arg_types_ const &...args) noexcept {
+                                              gpu_stream_t &stream, arg_types_ const &...args) noexcept {
     static_assert(sizeof...(arg_types_) != 0, "a kernel without arguments has nothing to compute");
     CUfunction function = nullptr;
     if (int result = static_cast<int>(cudaGetFuncBySymbol(&function, kernel_symbol)); result != 0)
@@ -517,7 +500,10 @@ struct gpu_replay_graph_t {
  */
 struct cublaslt_session_t {
 
+  private:
     cublaslt_session_t() noexcept = default;
+
+  public:
     cublaslt_session_t(cublaslt_session_t const &) = delete;
     cublaslt_session_t &operator=(cublaslt_session_t const &) = delete;
     cublaslt_session_t(cublaslt_session_t &&other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
@@ -617,7 +603,7 @@ struct cublaslt_plan_t {
      *      the real constraint); determinism is enforced by name, never by a size cap: the pinned
      *      algorithm must be single-split with no cross-CTA reduction, so no atomics ever touch the
      *      accumulator. */
-    [[nodiscard]] static expected<cublaslt_plan_t> make(cublaslt_session_t const &session,
+    [[nodiscard]] static expected<cublaslt_plan_t> make(cublaslt_session_t &session,
                                                         cublaslt_plan_config_t config) noexcept {
         cublaslt_plan_t plan;
         if (cublasStatus_t status = cublasLtMatmulDescCreate(&plan.description_, CUBLAS_COMPUTE_32F, CUDA_R_32F);
@@ -709,8 +695,8 @@ struct cublaslt_plan_t {
 
     /** @brief Enqueue @c C = A·B + beta·C on @p stream — a fixed tensor-core kernel, no planning, no
      *      allocation. Operand pointers are the vendor boundary; extents were pinned at @ref make . */
-    [[nodiscard]] expected_t matmul(cublaslt_session_t const &session, void const *a, void const *b, void *c,
-                                    f32_t beta, b8r1_span_t workspace, gpu_stream_t const &stream) const noexcept {
+    [[nodiscard]] expected_t matmul(cublaslt_session_t &session, void const *a, void const *b, void *c, f32_t beta,
+                                    b8r1_span_t workspace, gpu_stream_t &stream) const noexcept {
         f32_t const alpha = 1.0f;
         if (cublasStatus_t status = cublasLtMatmul(session.get(), description_, &alpha, a, a_layout_, b, b_layout_,
                                                    &beta, c, c_layout_, c, c_layout_, &algorithm_, workspace.data(),
@@ -743,8 +729,8 @@ struct cublaslt_plan_t {
  */
 struct gpu_event_t {
     gpu_event_t() noexcept = default;
-    gpu_event_t(gpu_event_t const &) = delete;
-    gpu_event_t &operator=(gpu_event_t const &) = delete;
+    gpu_event_t(gpu_event_t const const &) = delete;
+    gpu_event_t &operator=(gpu_event_t const const &) = delete;
     gpu_event_t(gpu_event_t &&other) noexcept : event_(std::exchange(other.event_, nullptr)) {}
     gpu_event_t &operator=(gpu_event_t &&other) noexcept {
         if (this != &other) {
@@ -772,11 +758,6 @@ struct gpu_event_t {
     CUevent event_ = nullptr;
 };
 
-/** @brief Rank-1 UInt32 pinned-host buffer — epoch staging captured copy nodes re-read at replay. */
-using u32r1_tensor_pinned_t = nk::tensor<u32_t, pinned_alloc<u32_t>, 1>;
-/** @brief Rank-1 Float32 pinned-host buffer — synchronization-free loss landings. */
-using f32r1_tensor_pinned_t = nk::tensor<f32_t, pinned_alloc<f32_t>, 1>;
-
 /**
  *  @brief The monotonic step counter of one collective surface — the only mutable host state a
  *      captured step keys on. The pinned staging slot @b is the count (no shadow copy); the device
@@ -788,8 +769,8 @@ using f32r1_tensor_pinned_t = nk::tensor<f32_t, pinned_alloc<f32_t>, 1>;
 struct epoch_counter_t {
 
     epoch_counter_t() noexcept = default;
-    epoch_counter_t(epoch_counter_t const &) = delete;
-    epoch_counter_t &operator=(epoch_counter_t const &) = delete;
+    epoch_counter_t(epoch_counter_t const const &) = delete;
+    epoch_counter_t &operator=(epoch_counter_t const const &) = delete;
     epoch_counter_t(epoch_counter_t &&) noexcept = default;
     epoch_counter_t &operator=(epoch_counter_t &&) noexcept = default;
 
@@ -810,7 +791,7 @@ struct epoch_counter_t {
 
     /** @brief Bump the count and enqueue its upload — once per step, on the surface's lead stream,
      *      before any barrier. Under capture this records the copy node @ref advance_host refreshes. */
-    [[nodiscard]] expected_t advance(gpu_stream_t const &stream) noexcept {
+    [[nodiscard]] expected_t advance(gpu_stream_t &stream) noexcept {
         staging_[0] += increment_;
         if (CUresult result = cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(device_epoch_.data()), staging_.data(),
                                                 sizeof(u32_t), stream.get());
@@ -840,10 +821,9 @@ struct epoch_counter_t {
  *      never from a separate retain path. Check @ref ok() before relying on the scope.
  */
 struct switch_to_gpu_t {
-    explicit switch_to_gpu_t(gpu_stream_t const &stream) noexcept
-        : ok_(cuCtxPushCurrent(stream.context()) == CUDA_SUCCESS) {}
-    switch_to_gpu_t(switch_to_gpu_t const &) = delete;
-    switch_to_gpu_t &operator=(switch_to_gpu_t const &) = delete;
+    explicit switch_to_gpu_t(gpu_stream_t &stream) noexcept : ok_(cuCtxPushCurrent(stream.context()) == CUDA_SUCCESS) {}
+    switch_to_gpu_t(switch_to_gpu_t const const &) = delete;
+    switch_to_gpu_t &operator=(switch_to_gpu_t const const &) = delete;
     ~switch_to_gpu_t() noexcept {
         if (ok_) cuCtxPopCurrent(nullptr);
     }
@@ -862,7 +842,10 @@ struct switch_to_gpu_t {
  */
 struct cudnn_session_t {
 
+  private:
     cudnn_session_t() noexcept = default;
+
+  public:
     cudnn_session_t(cudnn_session_t const &) = delete;
     cudnn_session_t &operator=(cudnn_session_t const &) = delete;
     cudnn_session_t(cudnn_session_t &&other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
@@ -886,7 +869,7 @@ struct cudnn_session_t {
 
     /** @brief Bind the handle to @p stream — cuDNN executes on whatever stream the handle carries, so
      *      every consumer re-binds before its enqueue. */
-    [[nodiscard]] expected_t bind(gpu_stream_t const &stream) const noexcept {
+    [[nodiscard]] expected_t bind(gpu_stream_t &stream) noexcept {
         if (cudnnStatus_t status = cudnnSetStream(handle_, reinterpret_cast<cudaStream_t>(stream.get()));
             status != CUDNN_STATUS_SUCCESS)
             return expected_t::fail(status_t::cuda_error_k, "cuDNN stream binding failed ({})",

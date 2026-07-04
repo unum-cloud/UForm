@@ -57,11 +57,11 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor`, `nk::tensor_view` — owning columns and borrowed views
 
-#include "types.cuh"          // `expected`, `expected_t`, `status_t`
-#include "gpu_allocators.cuh" // `gpu_arena_t`, `gpu_arena_alloc` backing the owning tensors
-#include "schedule.cuh"       // `gpu_stream_t` ordering the uploads
+#include "cuda_core/types.cuh"          // `expected`, `expected_t`, `status_t`
+#include "cuda_core/gpu_allocators.cuh" // `gpu_arena_t`, `gpu_arena_alloc` backing the owning tensors
+#include "cuda_core/schedule.cuh"       // `gpu_stream_t` ordering the uploads
 
-namespace unum::uform::primitives {
+namespace unum::uform::core {
 
 namespace nk = ashvardanian::numkong;
 
@@ -160,6 +160,7 @@ struct contrastive_relations_view_t {
  *      check; the slot index of @p id , or @p end when absent. */
 [[nodiscard]] __device__ inline u32_t contrastive_run_find_(u32r1_view_t ids, u32_t begin, u32_t end,
                                                             u32_t id) noexcept {
+    // vendor-boundary: cub needs a raw pointer + count, not a view, into the CSR `ids` run.
     u32_t const slot = begin + cub::LowerBound(ids.data() + begin, end - begin, id);
     return slot < end && ids[slot] == id ? slot : end;
 }
@@ -282,7 +283,7 @@ struct contrastive_relations_t {
         u32r1_view_t ignore_offsets, u32r1_view_t ignore_ids,                                       //
         u32r1_view_t vertex_effective_lengths, u32r1_view_t neighbor_effective_lengths,             //
         std::size_t neighbors_per_mesh, std::size_t self_edge_base, f32_t ambient_repulsion_weight, //
-        gpu_stream_t const &stream) noexcept {
+        gpu_stream_t &stream) noexcept {
 
         if (attract_offsets.extent(0) < 2 || attract_offsets.extent(0) != repel_offsets.extent(0))
             return expected_t::fail( //
@@ -350,7 +351,7 @@ struct contrastive_relations_t {
      *      in @ref upload . */
     [[nodiscard]] expected_t upload_self_edges(u32_t vertices_per_gpu, u32r1_view_t vertex_effective_lengths,
                                                u32r1_view_t neighbor_effective_lengths, std::size_t self_edge_base,
-                                               f32_t ambient_repulsion_weight, gpu_stream_t const &stream) noexcept {
+                                               f32_t ambient_repulsion_weight, gpu_stream_t &stream) noexcept {
         bool resized = vertices_per_gpu != 0 && attract_offsets_.try_resize({vertices_per_gpu + 1u});
         resized = resized && repel_offsets_.try_resize({vertices_per_gpu + 1u});
         resized = resized && attract_ids_.try_resize({0}) && attract_scores_.try_resize({0});
@@ -444,4 +445,4 @@ struct contrastive_relations_t {
     f32_t ambient_repulsion_weight_ = 1.0f;
 };
 
-} // namespace unum::uform::primitives
+} // namespace unum::uform::core

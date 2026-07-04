@@ -38,14 +38,14 @@
 
 #include <cstddef> // `std::size_t`, `std::byte`
 
-#include <span>        // `std::span` — the `visible_to` device-ID list
-#include <type_traits> // `std::true_type`
 #include <utility>     // `std::exchange`
+#include <type_traits> // `std::true_type`
+#include <span>        // `std::span` — the `visible_to` device-ID list
 
 #include <cuda.h> // `CUdeviceptr`, `cuMemAddressReserve`, `cuMemCreate`, `cuMemMap`, `cuMemAllocAsync`
 
-#include "types.cuh" // `expected`, `status_t`
-#include "array.cuh" // `array` for exception-free chunk bookkeeping
+#include "cuda_core/types.cuh" // `expected`, `status_t`
+#include "cuda_core/array.cuh" // `array` for exception-free chunk bookkeeping
 
 namespace unum::uform::core {
 
@@ -148,7 +148,10 @@ struct gpu_arena_t {
      *      (present and future) is granted to; nothing appends to it after construction. */
     array<i32_t> visible_to_ {};
 
+  private:
     gpu_arena_t() noexcept = default;
+
+  public:
     gpu_arena_t(gpu_arena_t const &) = delete;
     gpu_arena_t &operator=(gpu_arena_t const &) = delete;
 
@@ -467,5 +470,26 @@ struct gpu_alloc {
 
 /** @brief The canonical byte-typed stream-ordered-allocator handle — what APIs receive and rebind. */
 using gpu_alloc_t = gpu_alloc<b8_t>;
+
+/** 
+ *  The rank-tagged owning-tensor vocabulary — @c *_tensor_arena_t owns device memory off a
+ *  @ref gpu_arena_t , @c *_tensor_pinned_t owns page-locked host memory; the borrowing @c *_view_t /
+ *  @c *_span_t counterparts live in @c types.cuh .
+ */
+using b8r1_tensor_arena_t = nk::tensor<b8_t, gpu_arena_alloc<b8_t>, 1>;
+using i16r2_tensor_arena_t = nk::tensor<i16_t, gpu_arena_alloc<i16_t>, 2>;
+using i32r1_tensor_arena_t = nk::tensor<i32_t, gpu_arena_alloc<i32_t>, 1>;
+using u32r1_tensor_arena_t = nk::tensor<u32_t, gpu_arena_alloc<u32_t>, 1>;
+using f32r1_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 1>;
+using f32r2_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 2>;
+using f32r3_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 3>;
+using bf16r1_tensor_arena_t = nk::tensor<bf16_t, gpu_arena_alloc<bf16_t>, 1>;
+using bf16r2_tensor_arena_t = nk::tensor<bf16_t, gpu_arena_alloc<bf16_t>, 2>;
+using bf16r3_tensor_arena_t = nk::tensor<bf16_t, gpu_arena_alloc<bf16_t>, 3>;
+using e4m3r1_tensor_arena_t = nk::tensor<e4m3_t, gpu_arena_alloc<e4m3_t>, 1>;
+using e4m3r2_tensor_arena_t = nk::tensor<e4m3_t, gpu_arena_alloc<e4m3_t>, 2>;
+
+using u32r1_tensor_pinned_t = nk::tensor<u32_t, pinned_alloc<u32_t>, 1>;
+using f32r1_tensor_pinned_t = nk::tensor<f32_t, pinned_alloc<f32_t>, 1>;
 
 } // namespace unum::uform::core

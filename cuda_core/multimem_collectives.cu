@@ -5,7 +5,7 @@
  *  @author Ash Vardanian
  *  @date July 3, 2026
  */
-#include "multimem_collectives.cuh"
+#include "cuda_core/multimem_collectives.cuh"
 
 namespace unum::uform::core {
 
@@ -139,7 +139,7 @@ expected<gpu_symmetric_arena_t> gpu_symmetric_arena_t::make(std::span<i32_t cons
 }
 
 expected<multimem_domain_t> multimem_domain_t::make(std::span<i32_t const> devices, std::size_t payload_scalars,
-                                                    std::span<gpu_stream_t const> streams) noexcept {
+                                                    std::span<gpu_stream_t> streams) noexcept {
     using result_t = expected<multimem_domain_t>;
     std::size_t const member_count = devices.size();
     if (member_count == 0) return result_t::fail(status_t::invalid_input_k, "a domain needs members");
@@ -234,7 +234,7 @@ expected<multimem_domain_t> multimem_domain_t::make(std::span<i32_t const> devic
     return result_t {std::move(domain)};
 }
 
-expected_t multimem_domain_t::barrier(std::size_t member_index, gpu_stream_t const &stream) noexcept {
+expected_t multimem_domain_t::barrier(std::size_t member_index, gpu_stream_t &stream) noexcept {
     dim3 const one {1u, 1u, 1u};
     dim3 const warp {warp_size_k, 1u, 1u};
     if (tier() == multimem_tier_t::switch_reduced_k)
@@ -245,7 +245,7 @@ expected_t multimem_domain_t::barrier(std::size_t member_index, gpu_stream_t con
 }
 
 expected_t multimem_domain_t::reduce_scatter(std::size_t member_index, f32r1_span_t destination,
-                                             std::size_t shard_begin, gpu_stream_t const &stream) noexcept {
+                                             std::size_t shard_begin, gpu_stream_t &stream) noexcept {
     std::size_t const shard_scalars = destination.extent(0);
     if (shard_begin + shard_scalars > payload_scalars_)
         return expected_t::fail(status_t::shape_unsupported_k, "shard [{},{}) exceeds the domain payload of {} scalars",

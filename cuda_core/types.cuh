@@ -14,16 +14,15 @@
 #include <cstddef> // `std::ptrdiff_t`
 #include <cstdint> // `std::int32_t`, `std::uint32_t`
 
+#include <utility>         // `std::move`, `std::forward`
 #include <format>          // `std::vformat_to`, `std::make_format_args`, `std::formatter`
 #include <source_location> // `std::source_location`
-#include <utility>         // `std::move`, `std::forward`
 
 #include <cuda.h>      // `CUresult`, `cuGetErrorString`
 #include <cuda_bf16.h> // `__nv_bfloat16` behind the `bf16_t` alias
 #include <cuda_fp8.h>  // `__nv_fp8_e4m3` behind the `e4m3_t` alias
 
-#include <numkong/tensor.hpp> // `nk::tensor_span`, `nk::tensor_view` — `differentiable_weights_t`
-
+#include <numkong/tensor.hpp>          // `nk::tensor_span`, `nk::tensor_view` — `differentiable_weights_t`
 #include <stringzilla/stringzilla.hpp> // `sz::string` — the exception-free diagnostics carrier
 
 /** @brief `std::format` support for StringZilla slices, so diagnostics interpolate them directly —
@@ -60,6 +59,44 @@ using i16_t = std::int16_t;
 using i32_t = std::int32_t;
 using i64_t = std::int64_t;
 
+using e4m3_t = __nv_fp8_e4m3;
+using bf16_t = __nv_bfloat16;
+using f32_t = float;
+using f64_t = double;
+
+/** 
+ *  The rank-tagged borrow vocabulary over the scalar dtypes — @c <dtype><rank>_view_t reads,
+ *  @c <dtype><rank>_span_t writes, each a borrow into memory owned elsewhere. The owning
+ *  @c *_tensor_arena_t / @c *_tensor_pinned_t counterparts live in @c gpu_allocators.cuh , beside the
+ *  allocator they bind. Concept-named views (a token rectangle, a pixel image) stay with their cell.
+ */
+using b8r1_view_t = nk::tensor_view<b8_t, 1>;
+using b8r1_span_t = nk::tensor_span<b8_t, 1>;
+using i16r2_view_t = nk::tensor_view<i16_t, 2>;
+using i16r2_span_t = nk::tensor_span<i16_t, 2>;
+using i32r1_view_t = nk::tensor_view<i32_t, 1>;
+using i32r1_span_t = nk::tensor_span<i32_t, 1>;
+using u32r1_view_t = nk::tensor_view<u32_t, 1>;
+using u32r1_span_t = nk::tensor_span<u32_t, 1>;
+using u64r1_view_t = nk::tensor_view<u64_t, 1>;
+using u64r1_span_t = nk::tensor_span<u64_t, 1>;
+using f32r1_view_t = nk::tensor_view<f32_t, 1>;
+using f32r1_span_t = nk::tensor_span<f32_t, 1>;
+using f32r2_view_t = nk::tensor_view<f32_t, 2>;
+using f32r2_span_t = nk::tensor_span<f32_t, 2>;
+using f32r3_view_t = nk::tensor_view<f32_t, 3>;
+using f32r3_span_t = nk::tensor_span<f32_t, 3>;
+using bf16r1_view_t = nk::tensor_view<bf16_t, 1>;
+using bf16r1_span_t = nk::tensor_span<bf16_t, 1>;
+using bf16r2_view_t = nk::tensor_view<bf16_t, 2>;
+using bf16r2_span_t = nk::tensor_span<bf16_t, 2>;
+using e4m3r1_view_t = nk::tensor_view<e4m3_t, 1>;
+using e4m3r1_span_t = nk::tensor_span<e4m3_t, 1>;
+using e4m3r2_view_t = nk::tensor_view<e4m3_t, 2>;
+using e4m3r2_span_t = nk::tensor_span<e4m3_t, 2>;
+using e4m3r3_view_t = nk::tensor_view<e4m3_t, 3>;
+using e4m3r3_span_t = nk::tensor_span<e4m3_t, 3>;
+
 /** @brief One vocabulary entry's index — the byte-level vocabulary (256 bytes + the special tokens)
  *      fits 16 bits, and every token tape, staging slot, and embedding lookup trades in this width. */
 using token_id_t = u16_t;
@@ -67,11 +104,6 @@ using token_id_t = u16_t;
 /** @brief One raw image / video channel sample, as decoders emit it — 8-bit, interleaved channels;
  *      normalization is the entry projection's job, inside the differentiated step. */
 using pixel_t = u8_t;
-
-using e4m3_t = __nv_fp8_e4m3;
-using bf16_t = __nv_bfloat16;
-using f32_t = float;
-using f64_t = double;
 
 /** @brief Thread count of one CUDA warp — the granularity of every shuffle-based reduction tree. */
 inline constexpr unsigned warp_size_k = 32u;
@@ -250,7 +282,9 @@ struct format_at_t {
  */
 template <typename value_type_>
 struct expected {
-    value_type_ value_ {};
+    union {
+        value_type_ value_; // Live only on the success path (status_ == success_k); managed by hand below.
+    };
     status_t status_ = status_t::success_k;
     CUresult cu_error_ = CUDA_SUCCESS;
     sz::string description_ {};
@@ -260,21 +294,49 @@ struct expected {
     expected(expected const &) noexcept = delete;
     expected &operator=(expected const &) noexcept = delete;
 
-    expected(expected &&) noexcept = default;
-    expected &operator=(expected &&) noexcept = default;
-
-    /** @brief Success: adopts @p value . */
+    /** @brief Success: adopts @p value , making the union member live. */
     expected(value_type_ value) noexcept : value_(std::move(value)) {}
+
+    /** @brief Move: the error channel travels unconditionally; the value is adopted only when @p other is
+     *      on the success path, since the union member is live only then. The @c noexcept is the same
+     *      compile-time proof that @c value_type_ moves without throwing. */
+    expected(expected &&other) noexcept
+        : status_(other.status_), cu_error_(other.cu_error_), description_(std::move(other.description_)),
+          location_(other.location_) {
+        if (status_ == status_t::success_k) ::new (static_cast<void *>(&value_)) value_type_(std::move(other.value_));
+    }
+    expected &operator=(expected &&other) noexcept {
+        if (this != &other) {
+            if (status_ == status_t::success_k) value_.~value_type_();
+            status_ = other.status_;
+            cu_error_ = other.cu_error_;
+            description_ = std::move(other.description_);
+            location_ = other.location_;
+            if (status_ == status_t::success_k)
+                ::new (static_cast<void *>(&value_)) value_type_(std::move(other.value_));
+        }
+        return *this;
+    }
+    ~expected() noexcept {
+        if (status_ == status_t::success_k) value_.~value_type_();
+    }
 
     /** @brief @c true iff the operation succeeded and @ref value_ is readable. */
     [[nodiscard]] explicit operator bool() const noexcept { return status_ == status_t::success_k; }
+
+    /** @brief Reach the held value on the success path — the @c std::optional / @c std::expected idiom,
+     *      so a consumer writes @c result->field or @c *result instead of @c result.value_ . Reading it
+     *      on a failed @ref expected is a logic error, gated by @ref operator bool . */
+    [[nodiscard]] value_type_ *operator->() noexcept { return &value_; }
+    [[nodiscard]] value_type_ const *operator->() const noexcept { return &value_; }
+    [[nodiscard]] value_type_ &operator*() noexcept { return value_; }
+    [[nodiscard]] value_type_ const &operator*() const noexcept { return value_; }
 
     /** @brief Failure tagged with a @ref status_t : materializes @p format + @p args into the description
      *      and records the failure site @ref format_at_t captured. */
     template <typename... arg_types_>
     [[nodiscard]] static expected fail(status_t status, format_at_t format, arg_types_ &&...args) noexcept {
-        expected result {value_type_ {}};
-        result.status_ = status;
+        expected result {failure_t {}, status};
         result.location_ = format.location;
         std::vformat_to(format_into_t {&result.description_}, format.format, std::make_format_args(args...));
         return result;
@@ -299,13 +361,18 @@ struct expected {
      *      forwarding never reformats and never loses the original location. */
     template <typename other_type_>
     [[nodiscard]] static expected fail(expected<other_type_> &&other) noexcept {
-        expected result {value_type_ {}};
-        result.status_ = other.status_;
+        expected result {failure_t {}, other.status_};
         result.cu_error_ = other.cu_error_;
         result.description_ = std::move(other.description_);
         result.location_ = other.location_;
         return result;
     }
+
+  private:
+    struct failure_t {};
+    /** @brief Failure ctor: sets a non-success @p status and leaves the union @ref value_ unconstructed,
+     *      so the @c status_==success_k ⇔ value_ live invariant the destructor relies on holds at once. */
+    expected(failure_t, status_t status) noexcept : status_(status) {}
 };
 
 /**

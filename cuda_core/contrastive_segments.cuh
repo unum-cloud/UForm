@@ -95,46 +95,24 @@
  */
 #pragma once
 
-#include <array>   // `std::array` — the fixed-capacity pinned-plan table
-#include <cmath>   // `sqrtf`, `expf`, `log1pf`, `fabsf`, `fmaxf`, `isfinite`
 #include <cstddef> // `std::size_t`, `std::byte`
-#include <span>    // `std::span` — per-rank object lists
+#include <cmath>   // `sqrtf`, `expf`, `log1pf`, `fabsf`, `fmaxf`, `isfinite`
+
+#include <array> // `std::array` — the fixed-capacity pinned-plan table
+#include <span>  // `std::span` — per-rank object lists
 
 #include <cuda.h>      // `cuMemsetD8Async`, `cuMemcpyDtoDAsync`
 #include <cuda_bf16.h> // `__nv_bfloat16`
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "types.cuh"                  // `expected_t`, `status_t`, `warp_size_k`, `kernel_block_size_default_k`
-#include "schedule.cuh"               // `gpu_stream_t`, `launch_kernel`, `cublaslt_session_t`, `cublaslt_plan_t`
-#include "multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 force surface
-#include "infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_member_t` — the level-2 surface
-#include "contrastive_relations.cuh"  // `contrastive_relations_view_t`, `contrastive_recipe_t`, the cell resolver
+#include "cuda_core/types.cuh"    // `expected_t`, `status_t`, `warp_size_k`, `kernel_block_size_default_k`
+#include "cuda_core/schedule.cuh" // `gpu_stream_t`, `launch_kernel`, `cublaslt_session_t`, `cublaslt_plan_t`
+#include "cuda_core/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 force surface
+#include "cuda_core/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_member_t` — the level-2 surface
+#include "cuda_core/contrastive_relations.cuh" // `contrastive_relations_view_t`, `contrastive_recipe_t`, the cell resolver
 
 namespace unum::uform::core {
-
-/** @brief Rank-2 BFloat16 device / host view, shaped @b [rows,hidden] — an embedding tower. */
-using bf16r2_view_t = nk::tensor_view<__nv_bfloat16, 2>;
-/** @brief Rank-2 BFloat16 mutable device / host span, shaped @b [rows,hidden] — a gradient tower. */
-using bf16r2_span_t = nk::tensor_span<__nv_bfloat16, 2>;
-/** @brief Rank-1 BFloat16 mutable device span — a flattened tower or gradient block. */
-using bf16r1_span_t = nk::tensor_span<__nv_bfloat16, 1>;
-/** @brief Rank-1 BFloat16 device-only buffer owned through a @ref gpu_arena_t . */
-using bf16r1_tensor_arena_t = nk::tensor<__nv_bfloat16, gpu_arena_alloc<__nv_bfloat16>, 1>;
-
-/** @brief Rank-3 Float32 device / host view, shaped @b [prefixes,rows,columns] — the per-prefix block-cell
- *      tensors (raw dots, similarity, logit and raw-dot gradients) shared by the segment matmuls and their
- *      epilogue kernels. */
-using f32r3_view_t = nk::tensor_view<f32_t, 3>;
-/** @brief Rank-3 Float32 mutable device / host span, the sibling of @ref f32r3_view_t . */
-using f32r3_span_t = nk::tensor_span<f32_t, 3>;
-/** @brief Rank-2 Float32 device-only buffer owned through a @ref gpu_arena_t . */
-using f32r2_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 2>;
-/** @brief Rank-3 Float32 device-only buffer owned through a @ref gpu_arena_t . */
-using f32r3_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 3>;
-/** @brief Rank-3 BFloat16 device-only buffer owned through a @ref gpu_arena_t — the cast mirror of a
- *      @ref f32r3_tensor_arena_t used as a tensor-core matmul operand. */
-using bf16r3_tensor_arena_t = nk::tensor<__nv_bfloat16, gpu_arena_alloc<__nv_bfloat16>, 3>;
 
 /** @brief Most Matryoshka prefix widths one loss supports; the dims travel to every kernel by value
  *      inside @ref matryoshka_prefixes_t , so the bound keeps the kernel-argument footprint fixed. */
@@ -251,7 +229,7 @@ struct contrastive_segments_t {
      *  @param[in] config The baked geometry (see @ref contrastive_segments_config_t ).
      *  @param[in] prefix_dims Matryoshka prefix widths, validated through @ref matryoshka_prefixes_t .
      */
-    [[nodiscard]] static expected<contrastive_segments_t> make(gpu_arena_t &arena, cublaslt_session_t const &blas,
+    [[nodiscard]] static expected<contrastive_segments_t> make(gpu_arena_t &arena, cublaslt_session_t &blas,
                                                                contrastive_segments_config_t config,
                                                                u32r1_view_t prefix_dims) noexcept;
 
@@ -274,7 +252,7 @@ struct contrastive_segments_t {
     [[nodiscard]] expected_t operator()(bf16r2_view_t vertices, nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
                                         contrastive_relations_view_t relations, contrastive_recipe_t recipe,
                                         std::size_t vertices_per_mesh, f32r1_span_t loss_out,
-                                        bf16r2_span_t vertices_grad, gpu_stream_t const &stream,
+                                        bf16r2_span_t vertices_grad, gpu_stream_t &stream,
                                         f32r1_span_t log_inverse_temperature_grad = {},
                                         f32r1_span_t bias_grad = {}) noexcept;
 
@@ -306,7 +284,7 @@ struct contrastive_segments_t {
     b8r1_tensor_arena_t cublaslt_workspace_ {};
 
     /** @brief The device's one main-owned tensor-core session — borrowed, never created here. */
-    cublaslt_session_t const *session_ = nullptr;
+    cublaslt_session_t *session_ = nullptr;
     /** @brief Three pinned plans per segment — dots, owned-vertex force, subgraph force — at slots
      *      @c [3s,3s+2] ; capacity is the prefix bound, the live count is @c 3·prefixes_.size() . */
     std::array<cublaslt_plan_t, 3 * max_matryoshka_prefixes_k> plans_ {};
@@ -359,10 +337,9 @@ struct distributed_contrastive_segments_t {
      */
     [[nodiscard]] static expected<distributed_contrastive_segments_t> make(
         multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
-        std::span<gpu_stream_t const> streams, std::span<cublaslt_session_t const> sessions,
-        std::span<bf16r2_view_t const> towers, std::span<contrastive_relations_view_t const> relations,
-        std::span<bf16r2_span_t const> vertices_grads, contrastive_segments_config_t config, u32r1_view_t prefix_dims,
-        f64_t timeout_seconds = 120.0) noexcept;
+        std::span<gpu_stream_t> streams, std::span<cublaslt_session_t> sessions, std::span<bf16r2_view_t const> towers,
+        std::span<contrastive_relations_view_t const> relations, std::span<bf16r2_span_t const> vertices_grads,
+        contrastive_segments_config_t config, u32r1_view_t prefix_dims, f64_t timeout_seconds = 120.0) noexcept;
 
     /** @brief The @b [gpus] rank-local loss summands of the last call — sum for the global mean. */
     [[nodiscard]] f32r1_view_t loss_outs() const noexcept { return loss_outs_.view(); }
@@ -376,11 +353,10 @@ struct distributed_contrastive_segments_t {
      *      stream waits on. All views were baked at @ref make ; the only per-call argument is the
      *      recipe. Ranks must be enqueued in order @c 0..gpus-1 within a step.
      */
-    [[nodiscard]] expected_t operator()(std::size_t rank, contrastive_recipe_t recipe,
-                                        gpu_stream_t const &stream) noexcept;
+    [[nodiscard]] expected_t operator()(std::size_t rank, contrastive_recipe_t recipe, gpu_stream_t &stream) noexcept;
 
     /** @brief The eager convenience: every rank's slice in order over the per-rank streams. */
-    [[nodiscard]] expected_t operator()(contrastive_recipe_t recipe, std::span<gpu_stream_t const> streams) noexcept;
+    [[nodiscard]] expected_t operator()(contrastive_recipe_t recipe, std::span<gpu_stream_t> streams) noexcept;
 
     /** @brief The replay-time bumps of every counter this consumer advances inside a captured step —
      *      once before every @c cuGraphLaunch , mirroring one evaluation. */
@@ -396,12 +372,12 @@ struct distributed_contrastive_segments_t {
     /** @brief Stage this domain's towers into the gather member's own block, all-gather the remote
      *      domains' blocks, and record the gather event every rank waits on. Gateway stream only,
      *      caller already inside its context. */
-    [[nodiscard]] expected_t gather_world_tower_(gpu_stream_t const &stream) noexcept;
+    [[nodiscard]] expected_t gather_world_tower_(gpu_stream_t &stream) noexcept;
 
     /** @brief Level-1 reduce of @p rank 's world columns — one switch-reduced window per domain into
      *      the rank's reduce member — then the level-2 recursive-doubling sum; @p column_force receives
      *      the rank's own reduced window. Caller holds the rank's context. */
-    [[nodiscard]] expected_t reduce_world_columns_(std::size_t rank, gpu_stream_t const &stream,
+    [[nodiscard]] expected_t reduce_world_columns_(std::size_t rank, gpu_stream_t &stream,
                                                    f32r1_view_t &column_force) noexcept;
 
     /** @brief The baked world geometry every capacity check keys on. */

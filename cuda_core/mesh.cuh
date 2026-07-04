@@ -78,9 +78,9 @@
 #pragma once
 
 #include <cstdint> // `std::uint32_t`
+#include <cstring> // `std::memcpy`, `std::strcmp`
 #include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fread`
 #include <cstdlib> // `std::getenv`
-#include <cstring> // `std::memcpy`, `std::strcmp`
 
 #include <charconv>   // `std::from_chars`
 #include <chrono>     // `std::chrono::steady_clock` — the exchange timeout clock
@@ -88,12 +88,13 @@
 #include <thread>     // `std::this_thread::sleep_for` — sleeping only; the process stays single-threaded
 
 #include <unistd.h> // `::gethostname`, `::fsync`
-#include <cuda.h>   // `CUdevice`, `cuDeviceGetAttribute`, `cuDeviceCanAccessPeer`
+
+#include <cuda.h> // `CUdevice`, `cuDeviceGetAttribute`, `cuDeviceCanAccessPeer`
 
 #include <stringzilla/stringzilla.hpp> // `sz::string`, `sz::string_view` — exception-free text handling
 
-#include "types.cuh" // `expected`, `expected_t`, `status_t`, `format_into`
-#include "array.cuh" // `array` for the exception-free host_domain table
+#include "cuda_core/types.cuh" // `expected`, `expected_t`, `status_t`, `format_into`
+#include "cuda_core/array.cuh" // `array` for the exception-free host_domain table
 
 namespace unum::uform::core {
 

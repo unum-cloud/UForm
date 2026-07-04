@@ -24,10 +24,10 @@
 
 #include <cstddef> // `std::size_t`
 
-#include "types.cuh"          // `expected`, `expected_t`, `status_t`, `sz::string`
-#include "array.cuh"          // `array` — the entry table and the payload
-#include "gpu_allocators.cuh" // `pinned_alloc` — page-locked staging the DMA engines read directly
-#include "schedule.cuh"       // `gpu_stream_t` — orders the snapshot after the training kernels
+#include "cuda_core/types.cuh"          // `expected`, `expected_t`, `status_t`, `sz::string`
+#include "cuda_core/array.cuh"          // `array` — the entry table and the payload
+#include "cuda_core/gpu_allocators.cuh" // `pinned_alloc` — page-locked staging the DMA engines read directly
+#include "cuda_core/schedule.cuh"       // `gpu_stream_t` — orders the snapshot after the training kernels
 
 namespace unum::uform::core {
 
@@ -75,7 +75,7 @@ struct checkpoint_to_save_t {
      *      synchronize, so the caller may keep updating the weights the moment this returns.
      *      @p name is copied into owned text; duplicates are rejected loudly. */
     [[nodiscard]] expected_t try_insert(sz::string_view name, nk::tensor_view<bf16_t, 2> data,
-                                        gpu_stream_t const &stream) noexcept;
+                                        gpu_stream_t &stream) noexcept;
 
     /** @brief Write the accumulated entries to @p path in the safetensors layout, with @c {"step": …}
      *      metadata — the JSON header space-padded to an 8-byte boundary like Hugging Face's own
