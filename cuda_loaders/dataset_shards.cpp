@@ -1,8 +1,8 @@
 /**
- *  @brief The Parquet cell's one firewalled body: @ref parquet_file_t::make . cuDF and RMM throw and
- *      allocate freely, so every call to them lives inside this translation unit's one @c try and
- *      their types stay behind @ref parquet_file_t::state_t . See the header for the contract.
- *  @file cuda_loaders/parquet.cpp
+ *  @brief The dataset-shard readers' one firewalled body: @ref parquet_file_t and @ref jsonl_file_t .
+ *      cuDF and RMM throw and allocate freely, so every call to them lives inside this translation unit's
+ *      @c try blocks and their types stay behind the readers' pimpls. See the header for the contract.
+ *  @file cuda_loaders/dataset_shards.cpp
  */
 
 #include <algorithm> // `std::sort` — the deterministic shard order
@@ -27,7 +27,7 @@
 #include <cudf/unary.hpp> // `cudf::cast` — the one offset widening
 #include <rmm/cuda_stream_view.hpp>
 
-#include "cuda_loaders/parquet.hpp"
+#include "cuda_loaders/dataset_shards.hpp"
 
 #include "cuda_core/array.cuh" // `array` — the owned per-column table
 

@@ -33,7 +33,7 @@
 #include "cuda_core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`, `grid_size_for`
 #include "cuda_core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t` — the packing target
 #include "cuda_loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
-#include "cuda_loaders/parquet.hpp"        // `parquet_file_t`, `expand_glob`, `column_view_t`
+#include "cuda_loaders/dataset_shards.hpp" // `parquet_file_t`, `jsonl_file_t`, `expand_glob`, `column_view_t`
 
 namespace unum::uform::loaders {
 

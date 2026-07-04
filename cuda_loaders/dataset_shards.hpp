@@ -1,10 +1,10 @@
 /**
- *  @brief The Parquet cell: the loader tier's single GPU-native reader. @ref parquet_file_t::make
- *      decodes the requested columns of one Parquet shard straight into device memory over KvikIO /
- *      GPU Direct Storage, then owns that decoded table for its lifetime and hands out @b zero-copy
- *      StringZilla views into it. No host bounce, no Apache Arrow, no bespoke tape — cuDF is a
- *      required dependency, and its owned columns are the tape.
- *  @file cuda_loaders/parquet.hpp
+ *  @brief The dataset-shard reader cell: the loader tier's GPU-native readers. @ref parquet_file_t and
+ *      @ref jsonl_file_t decode one shard — Parquet columns or a newline-delimited JSON field — straight
+ *      into device memory over KvikIO / GPU Direct Storage, own the decoded columns for their lifetime,
+ *      and hand out @b zero-copy StringZilla views. No host bounce, no Apache Arrow, no bespoke tape —
+ *      cuDF is a required dependency, and its owned columns are the tape.
+ *  @file cuda_loaders/dataset_shards.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
  *
@@ -15,7 +15,7 @@
  *  @c string and @c list<uint8> columns both flatten to the same @c (bytes, offsets) shape, so text
  *  documents and media blobs come back through one interface.
  *
- *  cuDF and RMM throw and allocate freely; that is confined to @c parquet.cpp behind an exception
+ *  cuDF and RMM throw and allocate freely; that is confined to @c dataset_shards.cpp behind an exception
  *  firewall, and the cuDF types never cross this header — they live behind a @c std::unique_ptr pimpl,
  *  so ownership is RAII end to end with no hand-rolled @c new / @c delete .
  */
