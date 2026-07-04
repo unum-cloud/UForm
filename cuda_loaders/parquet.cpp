@@ -5,10 +5,13 @@
  *  @file cuda_loaders/parquet.cpp
  */
 
-#include <optional> // `std::optional` — the flatten result, in place of out-parameters
-#include <span>     // `std::span` — the borrowed payload / offsets
+#include <algorithm> // `std::sort` — the deterministic shard order
+#include <span>      // `std::span` — the borrowed payload / offsets
 #include <string>
 #include <vector>
+
+#include <dirent.h>  // vendor-boundary: POSIX `opendir` / `readdir` — the raw directory scan, no glob to link
+#include <fnmatch.h> // vendor-boundary: POSIX `fnmatch` — the shard filename pattern match
 
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_view.hpp>
@@ -24,7 +27,10 @@
 #include "cuda_core/array.cuh" // `array` — the owned per-column table
 #include "cuda_loaders/parquet.hpp"
 
-namespace unum::uform::loaders {
+namespace uc = unum::uform::core;
+namespace ul = unum::uform::loaders;
+using namespace uc;
+using namespace ul;
 
 /** @brief What a decoded file owns and lends: the cuDF table (payloads and native offsets) and, per
  *      column, cuDF's own widened-offset column when one was needed — everything RAII, nothing
@@ -83,14 +89,17 @@ struct flat_column_t {
     cudf::column_view groups;
 };
 
-/** @brief Flatten @p decoded to its payload and offset levels, or @c nullopt when it is not one of
- *      @c string , @c list<uint8> , or @c list<string> . */
-[[nodiscard]] static std::optional<flat_column_t> flatten_column_(cudf::column_view const &decoded,
-                                                                  rmm::cuda_stream_view stream) noexcept {
+/** @brief Flatten the @p name column @p decoded to its payload and offset levels, or a
+ *      @c shape_unsupported_k failure naming it when it is not one of @c string , @c list<uint8> , or
+ *      @c list<string> . */
+[[nodiscard]] static expected<flat_column_t> flatten_column_(cudf::column_view const &decoded, sz::string_view name,
+                                                             rmm::cuda_stream_view stream) noexcept {
+    using result_t = expected<flat_column_t>;
     if (decoded.type().id() == cudf::type_id::STRING) {
         cudf::strings_column_view const strings {decoded};
         auto const *payload = reinterpret_cast<b8_t const *>(strings.chars_begin(stream));
-        return flat_column_t {{payload, static_cast<std::size_t>(strings.chars_size(stream))}, strings.offsets(), {}};
+        return result_t {
+            flat_column_t {{payload, static_cast<std::size_t>(strings.chars_size(stream))}, strings.offsets(), {}}};
     }
     if (decoded.type().id() == cudf::type_id::LIST) {
         cudf::lists_column_view const list {decoded};
@@ -98,7 +107,7 @@ struct flat_column_t {
         // list<uint8> — a flat media blob: the child bytes are the payload, the list offsets the leaf.
         if (child.type().id() == cudf::type_id::UINT8 || child.type().id() == cudf::type_id::INT8) {
             auto const *payload = static_cast<b8_t const *>(child.head());
-            return flat_column_t {{payload, static_cast<std::size_t>(child.size())}, list.offsets(), {}};
+            return result_t {flat_column_t {{payload, static_cast<std::size_t>(child.size())}, list.offsets(), {}}};
         }
         // list<string> — a nested column (K captions / negatives per row): the string child's chars are
         // the leaf payload, its offsets the element → bytes level, and the list offsets the row → element
@@ -106,12 +115,12 @@ struct flat_column_t {
         if (child.type().id() == cudf::type_id::STRING) {
             cudf::strings_column_view const strings {child};
             auto const *payload = reinterpret_cast<b8_t const *>(strings.chars_begin(stream));
-            return flat_column_t {{payload, static_cast<std::size_t>(strings.chars_size(stream))},
-                                  strings.offsets(),
-                                  list.offsets()};
+            return result_t {flat_column_t {{payload, static_cast<std::size_t>(strings.chars_size(stream))},
+                                            strings.offsets(),
+                                            list.offsets()}};
         }
     }
-    return std::nullopt;
+    return result_t::fail(status_t::shape_unsupported_k, "column {} is not string, list<uint8>, or list<string>", name);
 }
 
 /** @brief Own a @c u64_t copy of @p offsets — cuDF decodes 32- or 64-bit @b signed offsets, and byte
@@ -159,11 +168,9 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
         if (state->columns.try_resize(columns.size()) != status_t::success_k)
             return result_t::fail(status_t::bad_alloc_k, "column table allocation failed ({} columns)", columns.size());
         for (std::size_t index = 0; index != columns.size(); ++index) {
-            std::optional<flat_column_t> const flat = flatten_column_(
-                loaded.tbl->view().column(static_cast<cudf::size_type>(index)), cudf_stream);
-            if (!flat)
-                return result_t::fail(status_t::shape_unsupported_k, "column {} is not string or list<uint8>",
-                                      columns[index]);
+            auto flat = flatten_column_(loaded.tbl->view().column(static_cast<cudf::size_type>(index)), columns[index],
+                                        cudf_stream);
+            if (!flat) return result_t::fail(std::move(flat));
 
             // 64-bit offsets everywhere, both levels: borrow cuDF's when already i64, else keep the
             // column cuDF's own `cast` produced — the offsets stay in a cuDF-owned buffer, no copy.
@@ -186,21 +193,17 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
     }
 }
 
-expected<parquet_column_metadata_t> parquet_column_metadata(gpu_direct_storage_session_t const &, sz::string_view path,
-                                                            sz::string_view column) noexcept {
-    using result_t = expected<parquet_column_metadata_t>;
+expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_storage_session_t const &,
+                                                                   sz::string_view path) noexcept {
+    using result_t = expected<parquet_length_metadata_t>;
     try {
-        // Footer only — no row-group decode: the row count and the column's total uncompressed byte size.
+        // Footer only — no row-group decode: the row count and the whole table's uncompressed byte size.
         cudf::io::parquet_metadata const meta = cudf::io::read_parquet_metadata(
             cudf::io::source_info {std::string {path.data(), path.size()}}); // vendor-boundary
-        std::string const name {column.data(), column.size()}; // vendor-boundary
-        auto const &sizes = meta.columnchunk_metadata();
-        auto const found = sizes.find(name);
-        if (found == sizes.end())
-            return result_t::fail(status_t::invalid_input_k, "no column named {} in {}", column, path);
         std::size_t bytes = 0;
-        for (auto const chunk_bytes : found->second) bytes += static_cast<std::size_t>(chunk_bytes);
-        return result_t {parquet_column_metadata_t {static_cast<std::size_t>(meta.num_rows()), bytes}};
+        for (auto const &column : meta.columnchunk_metadata()) // vendor-boundary
+            for (auto const chunk_bytes : column.second) bytes += static_cast<std::size_t>(chunk_bytes);
+        return result_t {parquet_length_metadata_t {static_cast<std::size_t>(meta.num_rows()), bytes}};
     }
     catch (std::exception const &error) {
         return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
@@ -208,6 +211,67 @@ expected<parquet_column_metadata_t> parquet_column_metadata(gpu_direct_storage_s
     catch (...) {
         return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
     }
+}
+
+expected<parquet_length_metadata_t> parquet_file_t::column_metadata(gpu_direct_storage_session_t const &,
+                                                                    sz::string_view path,
+                                                                    sz::string_view column) noexcept {
+    using result_t = expected<parquet_length_metadata_t>;
+    try {
+        // Footer only — no row-group decode: the row count and the column's total uncompressed byte size.
+        cudf::io::parquet_metadata const meta = cudf::io::read_parquet_metadata(
+            cudf::io::source_info {std::string {path.data(), path.size()}}); // vendor-boundary
+        std::string const name {column.data(), column.size()};               // vendor-boundary
+        auto const &sizes = meta.columnchunk_metadata();
+        auto const found = sizes.find(name);
+        if (found == sizes.end())
+            return result_t::fail(status_t::invalid_input_k, "no column named {} in {}", column, path);
+        std::size_t bytes = 0;
+        for (auto const chunk_bytes : found->second) bytes += static_cast<std::size_t>(chunk_bytes);
+        return result_t {parquet_length_metadata_t {static_cast<std::size_t>(meta.num_rows()), bytes}};
+    }
+    catch (std::exception const &error) {
+        return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
+    }
+    catch (...) {
+        return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
+    }
+}
+
+expected<array<sz::string>> ul::expand_glob(sz::string_view path_or_glob) noexcept {
+    using result_t = expected<array<sz::string>>;
+
+    // Split "directory/pattern" at the last '/' with StringZilla's rpartition; a bare filename has no
+    // slash, so the match comes back empty and the directory defaults to ".".
+    auto const parts = path_or_glob.rpartition('/');
+    sz::string_view const directory = parts.match.empty() ? sz::string_view {".", 1} : parts.before;
+    sz::string_view const pattern = parts.match.empty() ? parts.before : parts.after;
+
+    sz::string directory_text, pattern_text; // null-terminated for opendir / fnmatch
+    if (!directory_text.try_assign(directory) || !pattern_text.try_assign(pattern))
+        return result_t::fail(status_t::bad_alloc_k, "glob split allocation failed");
+
+    ::DIR *const handle = ::opendir(directory_text.c_str());
+    if (handle == nullptr) return result_t::fail(status_t::io_error_k, "cannot open directory {}", directory);
+
+    array<sz::string> paths;
+    for (::dirent const *entry = ::readdir(handle); entry != nullptr; entry = ::readdir(handle)) {
+        if (entry->d_type == DT_DIR) continue;
+        if (::fnmatch(pattern_text.c_str(), entry->d_name, 0) != 0) continue;
+        sz::string full;
+        if (!full.try_assign(directory) || !full.try_append(sz::string_view {"/", 1}) ||
+            !full.try_append(sz::string_view {entry->d_name}) ||
+            paths.try_push_back(std::move(full)) != status_t::success_k) {
+            ::closedir(handle);
+            return result_t::fail(status_t::bad_alloc_k, "path string allocation failed");
+        }
+    }
+    ::closedir(handle);
+    if (paths.empty()) return result_t::fail(status_t::invalid_input_k, "no files match {}", path_or_glob);
+
+    // readdir order is filesystem-dependent; sort so the shard order is deterministic across every rank.
+    std::sort(paths.begin(), paths.end());
+    return result_t {std::move(paths)};
 }
 
 } // namespace unum::uform::loaders

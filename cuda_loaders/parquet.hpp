@@ -25,7 +25,8 @@
 #include <memory>  // `std::unique_ptr` — the pimpl owning the cuDF table
 #include <span>    // `std::span`
 
-#include "cuda_core/types.cuh"    // `expected`, `status_t`, the scalar aliases, `sz::arrow_packed_view`
+#include "cuda_core/types.cuh"    // `expected`, `status_t`, the scalar aliases, `sz::arrow_packed_view`, `sz::string`
+#include "cuda_core/array.cuh"    // `array` — the glob expansion result
 #include "cuda_core/schedule.cuh" // `gpu_stream_t`
 
 #include "cuda_loaders/direct_storage.hpp" // `gpu_direct_storage_session_t` — the reader's GDS precondition
@@ -39,6 +40,13 @@ using namespace unum::uform::core;
  *      @c [offsets[i], offsets[i+1]) span. Both text ( @c string ) and media ( @c list<uint8> )
  *      columns arrive as this. */
 using column_view_t = sz::arrow_packed_view<b8_t, u64_t>;
+
+/** @brief One shard's footer facts — the row count and a summed uncompressed byte size (the whole
+ *      table, or one column) — read without decoding, to size the loader's file pool. */
+struct parquet_length_metadata_t {
+    std::size_t rows = 0;
+    std::size_t bytes = 0;
+};
 
 /**
  *  @brief One Parquet shard's requested columns, decoded and owned on device. Move-only; the cuDF
@@ -72,6 +80,16 @@ struct parquet_file_t {
                                                        std::span<sz::string_view const> columns,
                                                        gpu_stream_t const &stream) noexcept;
 
+    /** @brief Read only the shard's Parquet footer at @p path — @c num_rows and the @b whole table's
+     *      summed column-chunk byte size — never touching the row groups or the GPU. */
+    [[nodiscard]] static expected<parquet_length_metadata_t> table_metadata(gpu_direct_storage_session_t const &storage,
+                                                                            sz::string_view path) noexcept;
+
+    /** @brief Read only the shard's Parquet footer at @p path — @c num_rows and @p column 's summed
+     *      column-chunk byte size — never touching the row groups or the GPU. */
+    [[nodiscard]] static expected<parquet_length_metadata_t> column_metadata(
+        gpu_direct_storage_session_t const &storage, sz::string_view path, sz::string_view column) noexcept;
+
     /** @brief Rows decoded — the same across every column. */
     [[nodiscard]] std::size_t rows() const noexcept;
     /** @brief How many columns were decoded. */
@@ -93,17 +111,9 @@ struct parquet_file_t {
     std::unique_ptr<state_t> state_;
 };
 
-/** @brief One shard column's footer facts — the row count and the column's total uncompressed byte
- *      length — read without decoding, to drive the loader's weighted random shard / row sampling. */
-struct parquet_column_metadata_t {
-    std::size_t rows = 0;
-    std::size_t bytes = 0;
-};
-
-/** @brief Read only the Parquet footer of the shard at @p path — @c num_rows and @p column 's summed
- *      column-chunk byte size — never touching the row groups or the GPU. */
-[[nodiscard]] expected<parquet_column_metadata_t> parquet_column_metadata(gpu_direct_storage_session_t const &storage,
-                                                                          sz::string_view path,
-                                                                          sz::string_view column) noexcept;
+/** @brief Expand a @c directory/pattern (or a plain path) into the sorted paths it matches, via POSIX
+ *      @c opendir / @c readdir + @c fnmatch — no glob library to link — sorted so the shard order is
+ *      deterministic across every rank. An empty match is a failure, not an empty list. */
+[[nodiscard]] expected<array<sz::string>> expand_glob(sz::string_view path_or_glob) noexcept;
 
 } // namespace unum::uform::loaders

@@ -7,6 +7,8 @@
  *  @author Ash Vardanian
  *  @date July 4, 2026
  */
+#include <algorithm> // `std::min` (floor), `std::upper_bound` (weighted file pick), `std::find` (dedup)
+
 #include "cuda_loaders/tokens_loader.cuh"
 
 using namespace unum::uform::core;
@@ -62,7 +64,7 @@ static __global__ void tokens_geometry_kernel_(u64r1_view_t reservoir_offsets, u
         if (slot < live_segments) {
             u64_t const source = record_indices[slot];
             u64_t const bytes = reservoir_offsets[source + 1] - reservoir_offsets[source];
-            columns = bytes < columns_per_row ? static_cast<u32_t>(bytes) : columns_per_row;
+            columns = static_cast<u32_t>(std::min<u64_t>(bytes, columns_per_row));
         }
         // A segment never crosses its row: jump the cursor to the next row when it would.
         u32_t const room_in_row = columns_per_row - cursor % columns_per_row;
@@ -101,34 +103,38 @@ static __global__ void tokens_gather_kernel_(b8r1_view_t reservoir_payload, u64r
             static_cast<u8_t>(reservoir_payload[source_begin + column]));
 }
 
-expected<tokens_loader_parquet_t> tokens_loader_parquet_t::make(gpu_direct_storage_session_t const &storage,
-                                                                std::span<sz::string_view const> shards, u64_t seed,
-                                                                tokens_loader_parquet_config_t config) noexcept {
+expected<tokens_loader_parquet_t> tokens_loader_parquet_t::make(gpu_direct_storage_session_t &session,
+                                                                sz::string_view path_or_glob, u64_t seed) noexcept {
     using result_t = expected<tokens_loader_parquet_t>;
-    if (shards.empty()) return result_t::fail(status_t::invalid_input_k, "the loader needs at least one shard");
+
+    // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths — POSIX glob(3).
+    auto paths = expand_glob(path_or_glob);
+    if (!paths) return result_t::fail(std::move(paths));
 
     tokens_loader_parquet_t loader;
-    loader.storage_ = &storage;
-    loader.shards_ = shards;
+    loader.storage_ = &session;
+    loader.absolute_paths_ = std::move(paths.value_);
     loader.seed_ = seed;
-    loader.config_ = config;
 
-    // Footer only — host-side, no GPU: per-file row counts drive coverage, byte sizes the budget.
-    if (loader.shard_rows_.try_resize(shards.size()) != status_t::success_k ||
-        loader.shard_bytes_.try_resize(shards.size()) != status_t::success_k)
-        return result_t::fail(status_t::bad_alloc_k, "shard metadata allocation failed ({} shards)", shards.size());
-    for (std::size_t index = 0; index != shards.size(); ++index) {
-        auto metadata = parquet_column_metadata(storage, shards[index], config.column);
+    // Footer only — host-side, no GPU, column-agnostic: a running prefix of each file's row count, the
+    // weighted file draw's search table. The column is chosen per fill, so this reads the whole-table
+    // footer, not a per-column one.
+    if (loader.row_prefix_.try_resize(loader.absolute_paths_.size() + 1) != status_t::success_k)
+        return result_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)",
+                              loader.absolute_paths_.size());
+    loader.row_prefix_[0] = 0;
+    for (std::size_t index = 0; index != loader.absolute_paths_.size(); ++index) {
+        auto metadata = parquet_file_t::table_metadata(session, loader.absolute_paths_[index]);
         if (!metadata) return result_t::fail(std::move(metadata));
-        if (metadata.value_.rows == 0)
-            return result_t::fail(status_t::invalid_input_k, "shard {} is empty", shards[index]);
-        loader.shard_rows_[index] = metadata.value_.rows;
-        loader.shard_bytes_[index] = metadata.value_.bytes;
+        if (metadata->rows == 0)
+            return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
+        loader.row_prefix_[index + 1] = loader.row_prefix_[index] + metadata->rows;
     }
     return result_t {std::move(loader)};
 }
 
-expected_t tokens_loader_parquet_t::fill(gpu_stream_t const &stream, u32_t rank, epoch_t epoch,
+expected_t tokens_loader_parquet_t::fill(gpu_stream_t &gpu_stream, tokens_base_loader_parquet_config_t config,
+                                         u32_t gpu_rank, u32_t training_step,
                                          std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (batches.empty()) return {};
     std::size_t const unroll = batches.size();
@@ -136,12 +142,14 @@ expected_t tokens_loader_parquet_t::fill(gpu_stream_t const &stream, u32_t rank,
     if (documents == 0u) return expected_t::fail(status_t::shape_unsupported_k, "the batch carries no segment slots");
     std::size_t const total_segments = unroll * documents;
 
-    std::size_t const shard_count = shards_.size();
-    std::size_t const floor_files = shard_count < 2u ? shard_count : 2u;
+    std::size_t const shard_count = absolute_paths_.size();
+    std::size_t const floor_files = std::min<std::size_t>(2, shard_count);
+    std::size_t const total_rows = row_prefix_[shard_count];
     constexpr splitmix64_hash_t hash {};
 
-    // Open distinct files, drawn from the keyed hash of (seed, epoch, rank, attempt), until the pool
-    // covers the fill's segments — never fewer than two, unless the whole dataset is one file.
+    // Open distinct files, drawn with probability proportional to their row count — a keyed row position
+    // over the whole dataset binary-searches the prefix to its owning file — until the pool covers the
+    // fill's segments; never fewer than two, unless the whole dataset is one file.
     array<sz::string_view> picked_paths;
     array<std::size_t> picked_shards;
     if (picked_paths.try_resize(shard_count) != status_t::success_k ||
@@ -151,21 +159,21 @@ expected_t tokens_loader_parquet_t::fill(gpu_stream_t const &stream, u32_t rank,
     std::size_t pooled_estimate = 0;
     std::size_t attempt = 0;
     while ((pooled_estimate < total_segments || picked_count < floor_files) && picked_count < shard_count) {
-        std::size_t const file = hash(seed_, epoch.index, rank, file_draw_salt_k, attempt) % shard_count;
+        std::size_t const position = hash(seed_, training_step, gpu_rank, file_draw_salt_k, attempt) % total_rows;
         ++attempt;
-        bool seen = false;
-        for (std::size_t index = 0; index != picked_count; ++index)
-            if (picked_shards[index] == file) seen = true;
-        if (seen) continue;
+        std::size_t const file = static_cast<std::size_t>(
+            std::upper_bound(row_prefix_.begin(), row_prefix_.end(), position) - row_prefix_.begin() - 1);
+        std::span<std::size_t const> const chosen {picked_shards.data(), picked_count};
+        if (std::find(chosen.begin(), chosen.end(), file) != chosen.end()) continue;
         picked_shards[picked_count] = file;
-        picked_paths[picked_count] = shards_[file];
-        pooled_estimate += shard_rows_[file];
+        picked_paths[picked_count] = absolute_paths_[file];
+        pooled_estimate += row_prefix_[file + 1] - row_prefix_[file];
         ++picked_count;
     }
 
     // Decode the picked files into one device reservoir; the true pool size is the decoded row count.
     auto reservoir_read = parquet_file_t::make(*storage_, picked_paths.view().subspan(0, picked_count),
-                                               {&config_.column, 1}, stream);
+                                               {&config.column, 1}, gpu_stream);
     if (!reservoir_read) return expected_t::fail(std::move(reservoir_read));
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();
@@ -175,17 +183,17 @@ expected_t tokens_loader_parquet_t::fill(gpu_stream_t const &stream, u32_t rank,
                                 pooled_rows, picked_count, total_segments);
 
     // Per-fill device index buffer, drawn on the GPU by the keyed permutation of the whole pool.
-    array<u64_t, gpu_alloc<u64_t>> record_indices {gpu_alloc<u64_t> {stream.get()}};
+    array<u64_t, gpu_alloc<u64_t>> record_indices {gpu_alloc<u64_t> {gpu_stream.get()}};
     if (record_indices.try_resize_uninitialized(total_segments) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "row index allocation failed ({} draws)", total_segments);
 
-    switch_to_gpu_t gpu_scope {stream};
+    switch_to_gpu_t gpu_scope {gpu_stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
-    u64_t const row_key = hash(seed_, rank, row_draw_salt_k);
+    u64_t const row_key = hash(seed_, gpu_rank, row_draw_salt_k);
     if (expected_t drawn = launch_kernel(
             reinterpret_cast<void const *>(&sample_rows_kernel_), dim3 {grid_size_for(total_segments), 1u, 1u},
-            dim3 {kernel_block_size_default_k, 1u, 1u}, stream, u64r1_span_t {record_indices.data(), total_segments},
-            row_key, epoch, pooled_rows);
+            dim3 {kernel_block_size_default_k, 1u, 1u}, gpu_stream,
+            u64r1_span_t {record_indices.data(), total_segments}, row_key, epoch_t {training_step}, pooled_rows);
         !drawn)
         return drawn;
 
@@ -207,11 +215,11 @@ expected_t tokens_loader_parquet_t::fill(gpu_stream_t const &stream, u32_t rank,
         u32r1_span_t const segment_lengths {loaded.segment_lengths.data(), loaded.segment_lengths.extent(0)};
         tokens_matrix_span_t const tokens {loaded.tokens.data(), loaded.tokens.extent(0), loaded.tokens.extent(1)};
         expected_t staged = launch_kernel(reinterpret_cast<void const *>(&tokens_geometry_kernel_), one_block,
-                                          one_block, stream, reservoir_offsets, batch_records, segment_offsets,
+                                          one_block, gpu_stream, reservoir_offsets, batch_records, segment_offsets,
                                           segment_lengths, tokens);
         if (staged)
             staged = launch_kernel(reinterpret_cast<void const *>(&tokens_gather_kernel_), document_grid, block_shape,
-                                   stream, reservoir_payload, reservoir_offsets, batch_records,
+                                   gpu_stream, reservoir_payload, reservoir_offsets, batch_records,
                                    u32r1_view_t {segment_offsets.data(), segment_offsets.extent(0)},
                                    u32r1_view_t {segment_lengths.data(), segment_lengths.extent(0)}, tokens);
         if (!staged) return staged;

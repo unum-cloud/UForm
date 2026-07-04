@@ -9,12 +9,11 @@
  *
  *  Each @ref fill opens @b as many randomly chosen files as it takes to pool at least as many rows as
  *  every batch's segments combined — at least two (unless the whole dataset is one file), so a batch is
- *  never drawn from a single homogeneous shard. The files are drawn by a seeded PRNG keyed by
- *  @c (seed, epoch, rank) , so different GPUs tend to work on different files (occasional overlap is
- *  fine) and a restart reproduces the exact draw. The pooled files decode into @b one device reservoir;
- *  a keyed permutation over the whole pool then hands every batch a scatter of rows across those files —
- *  the pool's row-uniform draw already gives a bigger file proportionally more rows, so the file pick
- *  itself needs no weighting.
+ *  never drawn from a single homogeneous shard. The files are drawn by a seeded hash keyed by
+ *  @c (seed, step, rank) with probability @b proportional to each file's row count, so a bigger file is
+ *  pooled more often, different GPUs tend to work on different files (occasional overlap is fine), and a
+ *  restart reproduces the exact draw. The pooled files decode into @b one device reservoir; a keyed
+ *  permutation over the whole pool then hands every batch a scatter of rows across those files.
  *
  *  A big part of the work is on the GPU: the decode (cuDF over GDS), the row-index permutation, and the
  *  geometry + gather packing are all kernels on the caller's stream; only choosing how many files to
@@ -35,53 +34,65 @@
 #include "cuda_core/gpu_allocators.cuh"   // `gpu_alloc` — the per-fill scratch allocator
 
 #include "cuda_loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
-#include "cuda_loaders/parquet.hpp"        // `parquet_file_t`, `parquet_column_metadata`, `column_view_t`
+#include "cuda_loaders/parquet.hpp"        // `parquet_file_t`, `expand_glob`, `column_view_t`
 
 namespace unum::uform::loaders {
 
 /** @brief The Parquet tokens loader's baked knobs — a different config is a different loader. */
-struct tokens_loader_parquet_config_t {
-    /** @brief The Parquet column holding the UTF-8 documents. */
+struct tokens_base_loader_parquet_config_t {
+    /** @brief The Parquet's column name holding the UTF-8 documents. */
     sz::string_view column = sz::string_view {"text", 4};
 };
 
 /**
- *  @brief The loader object: dataset-scoped, GPU-agnostic. Borrows the storage session and the shard
- *      paths, and owns only the host footer metadata — no stream, no device buffers, no event. Every
- *      GPU-touching resource is a per- @ref fill local on the passed stream.
+ *  @brief The loader object: dataset-scoped, rank-agnostic, GPU-accelerated. 
+ * 
+ *  @warning This class manages a considerable amount of metadata per dataset and you should only have one of them
+ *      per input dataset. The "fill" methods allocate memory on-demand and are safe to call concurrently for different
+ *      GPU ranks with different streams.
  */
 struct tokens_loader_parquet_t {
 
-    /** @brief Bind the loader to a dataset and read every shard's footer — once, host-side, no GPU.
-     *      @p shards are the dataset's Parquet paths; @p seed keys the random file and row draws. */
-    [[nodiscard]] static expected<tokens_loader_parquet_t> make(gpu_direct_storage_session_t const &storage,
-                                                                std::span<sz::string_view const> shards, u64_t seed,
-                                                                tokens_loader_parquet_config_t config) noexcept;
+    /**
+     *  @brief Failure-safe exception-free constructor, that indexes all the shards.
+     *  @note Synchronously reads metadata of a huge pool of files, may be slow.
+     * 
+     *  @param[in] path_or_glob Dataset's Parquet paths or a GLOB pattern for all the files.
+     *  @param[in] seed The training-run specific order-affecting seed.
+     *  @param[inout] session GPU Direct Storage session for IO.
+     */
+    [[nodiscard]] static expected<tokens_loader_parquet_t> make( //
+        gpu_direct_storage_session_t &session, sz::string_view path_or_glob, u64_t seed) noexcept;
 
-    /** @brief On @p stream (hence its GPU), open enough randomly chosen files to pool at least this
-     *      call's total segments (≥2 files unless the dataset is one), decode them into one reservoir,
-     *      and pack @b every batch in @p batches from a keyed permutation of the pool. @p rank keys the
-     *      draw so different GPUs diverge onto different files; @p epoch advances the epoch. Nothing about
-     *      the shape is configured — every count is read from @p batches . A pure enqueue on @p stream ;
-     *      the caller orders on that same stream. */
-    [[nodiscard]] expected_t fill(gpu_stream_t const &stream, u32_t rank, epoch_t epoch,
-                                  std::span<multimodal_batch_on_gpu_t> batches) noexcept;
+    /** 
+     *  @brief Fills the next few @p batches of training data for the MLM objective on one GPU rank.
+     *  @sa multimodal_batch_mixer_t for subsequent cross-GPU mixing.
+     * 
+     *  This method opens enough randomly chosen files to sample texts segments to fill all the rows in @p batches
+     *  and packs them efficiently, with many segments per row in each matrix. Unless the dataset contains just a
+     *  single shard, it takes ≥2 shards to ensure we don't samplehighly uniform data from the same shard.
+     * 
+     *  @param[in] config Describes which columns we need to take from Parquet tables.
+     *  @param[inout] gpu_stream The GPU-specific stream on which the staging and packing should happen.
+     *  @param[in] gpu_rank Ensures different GPUs won't take the same rows when sampling the same dataset.
+     *  @param[in] training_step Ensures subsequent steps sample different data.
+     *  @param[out] batches Output matrices to be populated with token segments, but not the media modalities.
+     */
+    [[nodiscard]] expected_t fill(                                            //
+        gpu_stream_t &gpu_stream, tokens_base_loader_parquet_config_t config, //
+        u32_t gpu_rank, u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
   private:
     /** @brief The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
-    gpu_direct_storage_session_t const *storage_ = nullptr;
+    gpu_direct_storage_session_t *storage_ = nullptr;
     /** @brief The dataset's Parquet shard paths — borrowed from the composition root. */
-    std::span<sz::string_view const> shards_ {};
+    array<sz::string> absolute_paths_ {};
     /** @brief The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
-    /** @brief The baked knobs. */
-    tokens_loader_parquet_config_t config_ {};
-
-    /** @brief @b [shards] each file's footer row count — the coverage accumulation that decides how many
-     *      files a fill opens. Read once per dataset; shared across every GPU the loader serves. */
-    array<std::size_t> shard_rows_ {};
-    /** @brief @b [shards] the document column's footer byte size per shard — the memory-budget signal. */
-    array<std::size_t> shard_bytes_ {};
+    /** @brief @b [shards+1] cumulative footer row counts — the weighted file draw's search table (an
+     *      @c upper_bound maps a keyed row position to its owning file) and, at its back, the dataset's
+     *      total rows. Read once per dataset; shared across every GPU the loader serves. */
+    array<std::size_t> row_prefix_ {};
 };
 
 } // namespace unum::uform::loaders
