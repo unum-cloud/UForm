@@ -65,6 +65,32 @@ enum modality_t : u32_t {
     audio_k = 3,
 };
 
+/** @brief The pixel side of the square image that exactly fills one @p columns -token row: with
+ *      @p patch_size -pixel patches, @p columns patches tile a @c sqrt(columns)×sqrt(columns) grid, one
+ *      encoder token each. Returns @c 0 when @p columns is not a perfect square — a row budget that
+ *      cannot tile a square image is a build-time error the caller rejects. Media geometry flows one
+ *      way: the tier fixes @c max_columns_per_row and the image resolution is sized so one image
+ *      occupies a whole row, never a baked constant. */
+[[nodiscard]] constexpr u32_t image_side(u32_t columns, u32_t patch_size) noexcept {
+    u32_t side = 0;
+    while ((side + 1u) * (side + 1u) <= columns) ++side;
+    return side * side == columns ? side * patch_size : 0u;
+}
+
+/** @brief Scalars in one image patch vector — @c channels·patch_size² , ordered (channel,row,column). */
+[[nodiscard]] constexpr u32_t patch_scalars(u32_t patch_size, u32_t channels) noexcept {
+    return channels * patch_size * patch_size;
+}
+
+/** @brief Scalars in one video tube vector — @c frames·channels·side² , ordered
+ *      (local_time,channel,row,column). */
+[[nodiscard]] constexpr u32_t tube_scalars(u32_t frames, u32_t side, u32_t channels) noexcept {
+    return frames * channels * side * side;
+}
+
+/** @brief Scalars in one mel patch vector — @c side² , a single-channel spectrogram tile. */
+[[nodiscard]] constexpr u32_t mel_patch_scalars(u32_t side) noexcept { return side * side; }
+
 /** @brief The baked capacities of one GPU's batch — a different shape is a different batch object.
  *      A batch is a @b [max_rows_per_gpu,max_columns_per_row] rectangle: every row is an independent
  *      attention sequence of fixed width, and every segment (a document, an image, a clip) occupies
@@ -122,6 +148,10 @@ struct multimodal_batch {
     nk::tensor<pixel_t, rebound<pixel_t>, 5> videos {};
     /** @brief @b [clips,samples] raw mono waveforms, one item per audio row. */
     nk::tensor<f32_t, rebound<f32_t>, 2> audios {};
+
+    std::size_t rows() const noexcept {
+        return tokens.extent(0) + images.extent(0) + videos.extent(0) + audios.extent(0);
+    }
 
     /** @brief Allocate every tensor the shape names — once, at setup. Modalities with zero caps
      *      allocate nothing; the geometry and token tensors always exist. */

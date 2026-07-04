@@ -87,10 +87,16 @@ using i32r1_view_t = nk::tensor_view<i32_t, 1>;
 using i32r1_span_t = nk::tensor_span<i32_t, 1>;
 using bf16r2_view_t = nk::tensor_view<__nv_bfloat16, 2>;
 using bf16r2_span_t = nk::tensor_span<__nv_bfloat16, 2>;
-using bf16r1_span_t = nk::tensor_span<__nv_bfloat16, 1>;
-using bf16r1_view_t = nk::tensor_view<__nv_bfloat16, 1>;
+using e4m3r1_view_t = nk::tensor_view<e4m3_t, 1>;
+using e4m3r1_span_t = nk::tensor_span<e4m3_t, 1>;
+using e4m3r2_view_t = nk::tensor_view<e4m3_t, 2>;
+using e4m3r2_span_t = nk::tensor_span<e4m3_t, 2>;
+using e4m3r3_view_t = nk::tensor_view<e4m3_t, 3>;
+using e4m3r3_span_t = nk::tensor_span<e4m3_t, 3>;
 using e4m3r1_tensor_arena_t = nk::tensor<e4m3_t, gpu_arena_alloc<e4m3_t>, 1>;
+using e4m3r2_tensor_arena_t = nk::tensor<e4m3_t, gpu_arena_alloc<e4m3_t>, 2>;
 using bf16r1_tensor_arena_t = nk::tensor<bf16_t, gpu_arena_alloc<bf16_t>, 1>;
+using bf16r2_tensor_arena_t = nk::tensor<bf16_t, gpu_arena_alloc<bf16_t>, 2>;
 using i32r1_tensor_arena_t = nk::tensor<i32_t, gpu_arena_alloc<i32_t>, 1>;
 
 /** @brief The one head width every SDPA engine tier supports here; heads = hidden / 128. */
@@ -116,6 +122,9 @@ struct transformer_block_config_t {
     u32_t max_segment_tokens = 0;
     /** @brief RMSNorm variance epsilon. */
     f32_t rms_eps = 1.0e-6f;
+    /** @brief Drop probability at each residual join; 0 disables the pass. Inverted (kept activations
+     *      scale by 1/(1−p)), so inference is identity and the E4M3 twin never launches it. */
+    f32_t residual_dropout = 0.0f;
 };
 
 /** @brief How @c head_dim divides across the three rotary axes, in channels (pairs × 2); the three
@@ -177,6 +186,54 @@ struct rope_angles_t {
 };
 
 #if defined(__CUDACC__)
+
+/**
+ *  @brief Learnable RMSNorm forward over strided rows: @c y = x·rsqrt(mean(x²)+eps)·γ , saving the
+ *      Float32 @c 1/rms per row for the backward.
+ *
+ *  The three @c rmsnorm_* kernels carry @b external linkage so both this block (its pre / post-attention
+ *  norms) and the encoder tower (its final and head norms) launch the same symbols through
+ *  @ref launch_kernel — one definition each, no wrapper, no extra file. RMSNorm is a shared primitive, so
+ *  the names take no @c transformer_ prefix; the block's unit QK-norm below is a different operator (no
+ *  learnable scale, per-head-vector) and stays file-local.
+ *
+ *  __grid_size__ @c [rows,1,1] ; one CTA per row; threads stripe the row's channels; no dynamic shared
+ *  memory.
+ */
+__global__ void rmsnorm_forward_kernel(bf16r2_view_t input, bf16r1_view_t scale, bf16r2_span_t output,
+                                       f32r1_span_t inverse_rms, f32_t epsilon);
+
+/**
+ *  @brief Learnable RMSNorm backward for the row gradient:
+ *      @c dx = (dy·γ − x̂·mean(dy·γ·x̂))·(1/rms) with @c x̂ = x·(1/rms) , optionally @b accumulating into
+ *      @p input_grad ( @p accumulate — a residual branch merges here for free).
+ *
+ *  __grid_size__ @c [rows,1,1] ; one CTA per row; no dynamic shared memory.
+ */
+__global__ void rmsnorm_backward_kernel(bf16r2_view_t input, bf16r1_view_t scale, f32r1_view_t inverse_rms,
+                                        bf16r2_view_t output_grad, bf16r2_span_t input_grad, bool accumulate);
+
+/**
+ *  @brief Learnable RMSNorm backward for the scale gradient: @c dγ[c] = Σ_r dy[r,c]·x̂[r,c] — one CTA per
+ *      channel chunk walking the rows serially, so the fold order is fixed and deterministic.
+ *
+ *  __grid_size__ @c [ceil(width/block),1,1] ; no dynamic shared memory.
+ */
+__global__ void rmsnorm_scale_grad_kernel(bf16r2_view_t input, f32r1_view_t inverse_rms, bf16r2_view_t output_grad,
+                                          bf16r1_span_t scale_grad);
+
+/**
+ *  @brief Inverted dropout, in place and keyed — declared here with @b external linkage (like the
+ *      @c rmsnorm_* family) so the block, the tower, and any future consumer launch the one shared symbol.
+ *      A single op serves both directions: forward runs it on the activations, backward on the same site's
+ *      branch gradient, and because the keep decision is re-derived from @p salt and the device @p epoch it
+ *      needs no stored mask — the two launches agree by construction. Keep with prob @c 1−p (a keyed draw
+ *      @c ≥ p ), scale kept values by @c 1/(1−p) , zero the rest; @p epoch is read from device memory so a
+ *      captured step re-keys per replay. Launch only when @c drop_probability > 0 .
+ *
+ *  __grid_size__ grid-stride over the flattened extent; no dynamic shared memory.
+ */
+__global__ void dropout_kernel(bf16r1_span_t values, u32r1_view_t epoch, u32_t salt, f32_t drop_probability);
 
 namespace fe = cudnn_frontend;
 
@@ -318,25 +375,21 @@ struct transformer_block_bf16_t {
     [[nodiscard]] transformer_block_config_t const &config() const noexcept { return config_; }
     /** @brief The four matmul weights, flattened, in declaration order — the mutable optimizer / IO
      *      boundary (initialization, checkpoint loads, updates). */
-    [[nodiscard]] bf16r1_span_t qkv_weight() noexcept { return {qkv_weight_.data(), qkv_weight_.extent(0)}; }
-    [[nodiscard]] bf16r1_span_t out_weight() noexcept { return {out_weight_.data(), out_weight_.extent(0)}; }
-    [[nodiscard]] bf16r1_span_t gate_up_weight() noexcept {
-        return {gate_up_weight_.data(), gate_up_weight_.extent(0)};
-    }
-    [[nodiscard]] bf16r1_span_t down_weight() noexcept { return {down_weight_.data(), down_weight_.extent(0)}; }
+    [[nodiscard]] bf16r1_span_t qkv_weight() noexcept { return qkv_weight_.span().flatten<1>(); }
+    [[nodiscard]] bf16r1_span_t out_weight() noexcept { return out_weight_.span().flatten<1>(); }
+    [[nodiscard]] bf16r1_span_t gate_up_weight() noexcept { return gate_up_weight_.span().flatten<1>(); }
+    [[nodiscard]] bf16r1_span_t down_weight() noexcept { return down_weight_.span().flatten<1>(); }
     /** @brief The two RMSNorm scales — same boundary. */
-    [[nodiscard]] bf16r1_span_t pre_norm_scale() noexcept {
-        return {pre_norm_scale_.data(), pre_norm_scale_.extent(0)};
-    }
-    [[nodiscard]] bf16r1_span_t post_norm_scale() noexcept {
-        return {post_norm_scale_.data(), post_norm_scale_.extent(0)};
-    }
+    [[nodiscard]] bf16r1_span_t pre_norm_scale() noexcept { return pre_norm_scale_.span(); }
+    [[nodiscard]] bf16r1_span_t post_norm_scale() noexcept { return post_norm_scale_.span(); }
     /** @brief The per-block gradient buffers the optimizer reduces — written by @ref backward with
      *      @c beta=0 , mirroring the weight accessors one-for-one. */
-    [[nodiscard]] bf16r1_view_t qkv_weight_grad() const noexcept { return qkv_weight_grad_.view(); }
-    [[nodiscard]] bf16r1_view_t out_weight_grad() const noexcept { return out_weight_grad_.view(); }
-    [[nodiscard]] bf16r1_view_t gate_up_weight_grad() const noexcept { return gate_up_weight_grad_.view(); }
-    [[nodiscard]] bf16r1_view_t down_weight_grad() const noexcept { return down_weight_grad_.view(); }
+    [[nodiscard]] bf16r1_view_t qkv_weight_grad() const noexcept { return qkv_weight_grad_.view().flatten<1>(); }
+    [[nodiscard]] bf16r1_view_t out_weight_grad() const noexcept { return out_weight_grad_.view().flatten<1>(); }
+    [[nodiscard]] bf16r1_view_t gate_up_weight_grad() const noexcept {
+        return gate_up_weight_grad_.view().flatten<1>();
+    }
+    [[nodiscard]] bf16r1_view_t down_weight_grad() const noexcept { return down_weight_grad_.view().flatten<1>(); }
     [[nodiscard]] bf16r1_view_t pre_norm_scale_grad() const noexcept { return pre_norm_scale_grad_.view(); }
     [[nodiscard]] bf16r1_view_t post_norm_scale_grad() const noexcept { return post_norm_scale_grad_.view(); }
 
@@ -383,20 +436,22 @@ struct transformer_block_bf16_t {
     cublaslt_session_t const *blas_ = nullptr;
     cudnn_session_t const *cudnn_ = nullptr;
 
-    /** @brief The four learnable weight buffers: fused QKV, out-projection, fused gate/up, down. */
-    bf16r1_tensor_arena_t qkv_weight_ {}, out_weight_ {}, gate_up_weight_ {}, down_weight_ {};
+    /** @brief The four learnable weight buffers: fused QKV, out-projection, fused gate/up, down —
+     *      @b [out,in] row-major each. */
+    bf16r2_tensor_arena_t qkv_weight_ {}, out_weight_ {}, gate_up_weight_ {}, down_weight_ {};
     /** @brief The two RMSNorm scale vectors @c γ , pre-attention and post-attention. */
     bf16r1_tensor_arena_t pre_norm_scale_ {}, post_norm_scale_ {};
     /** @brief The weight gradients, one per weight buffer, written @c beta=0 each backward. */
-    bf16r1_tensor_arena_t qkv_weight_grad_ {}, out_weight_grad_ {}, gate_up_weight_grad_ {}, down_weight_grad_ {};
+    bf16r2_tensor_arena_t qkv_weight_grad_ {}, out_weight_grad_ {}, gate_up_weight_grad_ {}, down_weight_grad_ {};
     /** @brief The two norm-scale gradients. */
     bf16r1_tensor_arena_t pre_norm_scale_grad_ {}, post_norm_scale_grad_ {};
     /** @brief Forward stashes the backward reads: the raw input, the pre-attention norm output, the
-     *      packed QKV, and the pre-QK-norm query / key slices. */
-    bf16r1_tensor_arena_t input_stash_ {}, normalized_ {}, qkv_ {}, query_prenorm_ {}, key_prenorm_ {};
+     *      packed QKV, and the pre-QK-norm query / key slices — all @b [tokens,·] , resized to the
+     *      step's live token count each forward. */
+    bf16r2_tensor_arena_t input_stash_ {}, normalized_ {}, qkv_ {}, query_prenorm_ {}, key_prenorm_ {};
     /** @brief Forward stashes: the SDPA output, the attention residual, the post-norm MLP input, and
-     *      the packed gate/up and SiLU·up activations. */
-    bf16r1_tensor_arena_t attn_output_ {}, attn_residual_ {}, mlp_normalized_ {}, gate_up_ {}, silu_up_ {};
+     *      the packed gate/up and SiLU·up activations — all @b [tokens,·] . */
+    bf16r2_tensor_arena_t attn_output_ {}, attn_residual_ {}, mlp_normalized_ {}, gate_up_ {}, silu_up_ {};
     /** @brief Float32 @c 1/rms stashes: the two RMSNorms (per token) and the unit QK-norms (per head
      *      vector), all recomputed-free in the backward. */
     f32r1_tensor_arena_t pre_inverse_rms_ {}, post_inverse_rms_ {}, query_inverse_rms_ {}, key_inverse_rms_ {};
@@ -408,8 +463,8 @@ struct transformer_block_bf16_t {
      *      @b [max_segments] Int32 lengths — the block-owned staging behind the vendor boundary. */
     i32r1_tensor_arena_t ragged_qkv_offsets_ {}, ragged_hidden_offsets_ {}, ragged_seq_lens_ {};
     /** @brief Backward transients: the packed QKV gradient, the two hidden-gradient ping-pong buffers,
-     *      and the gate/up and SiLU·up gradients. */
-    bf16r1_tensor_arena_t qkv_grad_ {}, hidden_grad_a_ {}, hidden_grad_b_ {}, gate_up_grad_ {}, silu_up_grad_ {};
+     *      and the gate/up and SiLU·up gradients — all @b [tokens,·] . */
+    bf16r2_tensor_arena_t qkv_grad_ {}, hidden_grad_a_ {}, hidden_grad_b_ {}, gate_up_grad_ {}, silu_up_grad_ {};
     /** @brief The shared cuBLASLt and cuDNN scratch, sized to the max any pinned plan / graph needs. */
     b8r1_tensor_arena_t blas_workspace_ {}, sdpa_workspace_ {};
     /** @brief The twelve pinned products, indexed by the @c plan_*_k slot constants. */
@@ -458,21 +513,27 @@ struct transformer_block_e4m3_t {
     cublaslt_session_t const *blas_ = nullptr;
     cudnn_session_t const *cudnn_ = nullptr;
 
-    /** @brief The four E4M3 shadow weights: fused QKV, out-projection, fused gate/up, down. */
-    e4m3r1_tensor_arena_t qkv_weight_e4m3_ {}, out_weight_e4m3_ {}, gate_up_weight_e4m3_ {}, down_weight_e4m3_ {};
+    /** @brief The four E4M3 shadow weights: fused QKV, out-projection, fused gate/up, down —
+     *      @b [out,in] row-major each. */
+    e4m3r2_tensor_arena_t qkv_weight_e4m3_ {}, out_weight_e4m3_ {}, gate_up_weight_e4m3_ {}, down_weight_e4m3_ {};
     /** @brief @b [4] Float32 weight descales, pinned into the matmul descriptors: qkv, out, gate_up, down. */
     f32r1_tensor_arena_t weight_descales_ {};
     /** @brief The two RMSNorm scale vectors @c γ , copied verbatim from the training block. */
     bf16r1_tensor_arena_t pre_norm_scale_ {}, post_norm_scale_ {};
-    /** @brief The BFloat16 activation ping-pong, sized once — no stashes and no gradients on this twin. */
-    bf16r1_tensor_arena_t normalized_ {}, qkv_ {}, attn_residual_ {}, gate_up_ {}, silu_up_ {};
-    /** @brief Throwaway pre-QK-norm stash the unit-norm kernel needs but no backward reads. */
-    bf16r1_tensor_arena_t prenorm_scratch_ {};
-    /** @brief The matmul operands ride per-token scales; the SDPA operands are dense zero-padded
-     *      @b [segments,seq_max,·] blocks (Q|K|V, then the attention output) under one dynamic
-     *      per-tensor scale — each format at its engine's own granularity. */
-    e4m3r1_tensor_arena_t normalized_e4m3_ {}, qkv_e4m3_ {}, attn_dense_e4m3_ {}, attn_output_e4m3_ {},
-        silu_up_e4m3_ {};
+    /** @brief The BFloat16 activation ping-pong, sized once — no stashes and no gradients on this twin;
+     *      all @b [tokens,·] . */
+    bf16r2_tensor_arena_t normalized_ {}, qkv_ {}, attn_residual_ {}, gate_up_ {}, silu_up_ {};
+    /** @brief Throwaway pre-QK-norm stash the unit-norm kernel needs but no backward reads —
+     *      @b [tokens,hidden] . */
+    bf16r2_tensor_arena_t prenorm_scratch_ {};
+    /** @brief The matmul operands ride per-token scales, @b [tokens,·] like their BFloat16 sources. */
+    e4m3r2_tensor_arena_t normalized_e4m3_ {}, attn_output_e4m3_ {}, silu_up_e4m3_ {};
+    /** @brief The SDPA operands: dense zero-padded @b [segments,seq_max,·] blocks (Q|K|V packed one
+     *      after another, then the attention output) under one dynamic per-tensor scale — the FP8
+     *      engine's own granularity, kept flat since no tensor owns the Q|K|V role split; the per-role
+     *      @ref e4m3r3_span_t / @ref e4m3r3_view_t rides a manual offset, mirroring @ref rope_angles_t
+     *      's per-axis slices. */
+    e4m3r1_tensor_arena_t qkv_e4m3_ {}, attn_dense_e4m3_ {};
     /** @brief The per-token activation scales the matmul fold reads, and the dynamic Q/K/V descale. */
     f32r1_tensor_arena_t token_scales_ {}, qkv_descale_ {};
     /** @brief @b [1] the packed maximum-absolute bits the dynamic descale is derived from. */
