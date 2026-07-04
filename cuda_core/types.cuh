@@ -104,21 +104,48 @@ struct epoch_t {
     return rounds;
 }
 
-/** @brief One keyed mixing round of the Feistel bijections every deterministic draw builds on —
- *      dataset shuffling, batch mixing, span masking. Pure and device-callable. */
-[[nodiscard]] constexpr u32_t permutation_round(u32_t half, u32_t key) noexcept {
-    u32_t mixed = half * 2654435761u + key;
-    mixed ^= mixed >> 15;
-    mixed *= 2246822519u;
-    mixed ^= mixed >> 13;
-    return mixed;
-}
+/**
+ *  @brief The project's one keyed hasher — a splitmix64 core, used three ways and nothing else, so no
+ *      free-standing @c mix / @c combine / @c derive helpers proliferate. Pure and device-callable;
+ *      stateless by design (no engine object to step, unlike @c std::minstd or a @c curandState ), so a
+ *      thread hashes @c (key, its own index) independently and any result is recomputable from its inputs
+ *      on any host or GPU and across restarts. Every keyed draw — dataset shuffling, batch mixing, span
+ *      masking, dropout — builds on this; @ref epoch_permutation is the one primitive it cannot be (a
+ *      hash collides, a permutation does not).
+ *
+ *  - @c hash(word) avalanches one word (the finalizer).
+ *  - @c hash(key, value) folds @p value into @p key (one mixing step).
+ *  - @c hash(a, b, c, ...) folds every argument left to right — the seeder over @c (seed, epoch, rank,
+ *    index, salt, ...) , and the indexed draw @c hash(key, index) is just the two-argument case.
+ */
+struct splitmix64_hash_t {
+    /** @brief Avalanche one 64-bit word — the splitmix64 finalizer. */
+    [[nodiscard]] constexpr u64_t operator()(u64_t word) const noexcept {
+        word = (word ^ (word >> 30)) * 0xBF58476D1CE4E5B9ull;
+        word = (word ^ (word >> 27)) * 0x94D049BB133111EBull;
+        return word ^ (word >> 31);
+    }
+    /** @brief Fold @p value into @p key — one order-dependent mixing step (golden-ratio increment). */
+    [[nodiscard]] constexpr u64_t operator()(u64_t key, u64_t value) const noexcept {
+        return (*this)(key + 0x9E3779B97F4A7C15ull + value);
+    }
+    /** @brief Fold three or more values left to right by recursing on the two-argument step. */
+    template <typename... rest_>
+        requires(sizeof...(rest_) >= 1)
+    [[nodiscard]] constexpr u64_t operator()(u64_t key, u64_t value, rest_... rest) const noexcept {
+        return (*this)((*this)(key, value), static_cast<u64_t>(rest)...);
+    }
+};
 
-/** @brief The keyed bijection over @c [0,count) : a 4-round Feistel over the smallest even-bit
- *      domain covering @p count , cycle-walked back into range — identical on every host and GPU
- *      for the same @c (seed,epoch) , so no shuffle, mix, or mask ever needs an exchange. */
+/** @brief The keyed bijection over @c [0,count) : a 4-round Feistel — its round the one
+ *      @ref splitmix64_hash_t — over the smallest even-bit domain covering @p count , cycle-walked back
+ *      into range. Identical on every host and GPU for the same @c (seed,epoch) , so no shuffle ever
+ *      needs an exchange, and @b without replacement (a bijection) — the guarantee the hasher's draws,
+ *      which collide, cannot give. */
 [[nodiscard]] constexpr std::size_t epoch_permutation(u64_t seed, epoch_t epoch, std::size_t index,
                                                       std::size_t count) noexcept {
+    splitmix64_hash_t const hash {};
+    u64_t const key = hash(seed, epoch.index);
     u32_t const half_bits = (ceil_log2(static_cast<u32_t>(count)) + 1u) / 2u;
     u32_t const half_mask = (1u << half_bits) - 1u;
     std::size_t value = index;
@@ -126,9 +153,9 @@ struct epoch_t {
         u32_t left = static_cast<u32_t>(value >> half_bits) & half_mask;
         u32_t right = static_cast<u32_t>(value) & half_mask;
         for (u32_t round = 0; round != 4; ++round) {
-            u32_t const key = static_cast<u32_t>(seed >> (16 * (round % 4))) + epoch.index * 40503u + round;
+            u32_t const mixed = static_cast<u32_t>(hash(key, round, right)) & half_mask;
             u32_t const swapped = right;
-            right = left ^ (permutation_round(right, key) & half_mask);
+            right = left ^ mixed;
             left = swapped;
         }
         value = (static_cast<std::size_t>(left) << half_bits) | right;

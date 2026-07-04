@@ -4,24 +4,25 @@
  *      their types stay behind @ref parquet_file_t::state_t . See the header for the contract.
  *  @file cuda_loaders/parquet.cpp
  */
-#include "parquet.hpp"
 
 #include <optional> // `std::optional` — the flatten result, in place of out-parameters
 #include <span>     // `std::span` — the borrowed payload / offsets
 #include <string>
 #include <vector>
 
-#include "array.cuh" // `array` — the owned per-column table
-
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_view.hpp>
-#include <cudf/io/parquet.hpp> // `cudf::io::read_parquet`, `parquet_reader_options`
-#include <cudf/io/types.hpp>   // `cudf::io::source_info`
+#include <cudf/io/parquet.hpp>          // `cudf::io::read_parquet`, `parquet_reader_options`
+#include <cudf/io/parquet_metadata.hpp> // `cudf::io::read_parquet_metadata`, `parquet_metadata`
+#include <cudf/io/types.hpp>            // `cudf::io::source_info`
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/table/table.hpp>
 #include <cudf/unary.hpp> // `cudf::cast` — the one offset widening
 #include <rmm/cuda_stream_view.hpp>
+
+#include "cuda_core/array.cuh" // `array` — the owned per-column table
+#include "cuda_loaders/parquet.hpp"
 
 namespace unum::uform::loaders {
 
@@ -38,11 +39,11 @@ struct parquet_file_t::state_t {
         std::unique_ptr<cudf::column> widened_groups;
         /** @brief The column's leaf bytes, back to back — borrowed from @ref table . */
         std::span<b8_t const> payload;
-        /** @brief @b [elements+1] leaf offsets — borrowed from @ref table or @ref widened_offsets . */
-        std::span<i64_t const> offsets;
-        /** @brief @b [rows+1] row → element offsets for a nested column — borrowed from @ref table or
-         *      @ref widened_groups ; empty for a flat column. */
-        std::span<i64_t const> groups;
+        /** @brief @b [elements+1] leaf offsets — owned by @ref widened_offsets . */
+        std::span<u64_t const> offsets;
+        /** @brief @b [rows+1] row → element offsets for a nested column — owned by @ref widened_groups ;
+         *      empty for a flat column. */
+        std::span<u64_t const> groups;
     };
     /** @brief The decoded table — owns every column's payload and its native offsets. */
     std::unique_ptr<cudf::table> table;
@@ -64,8 +65,8 @@ column_view_t parquet_file_t::column(std::size_t index) const noexcept {
     state_t::column_span_t const &column = state_->columns[index];
     return {{column.payload.data(), column.payload.size()}, {column.offsets.data(), column.offsets.size()}};
 }
-std::span<i64_t const> parquet_file_t::groups(std::size_t index) const noexcept {
-    return state_ ? state_->columns[index].groups : std::span<i64_t const> {};
+std::span<u64_t const> parquet_file_t::groups(std::size_t index) const noexcept {
+    return state_ ? state_->columns[index].groups : std::span<u64_t const> {};
 }
 
 /** @brief A decoded column flattened to its leaf payload, the leaf offsets child, and — for a nested
@@ -113,40 +114,46 @@ struct flat_column_t {
     return std::nullopt;
 }
 
-/** @brief Own an @c i64_t view of @p offsets : borrow cuDF's directly when it is already 64-bit,
- *      otherwise keep the column @c cudf::cast produced. Writes the borrow into @p span and the owner
- *      (when one was made) into @p owner . */
-static void widen_offsets_(cudf::column_view const &offsets, rmm::cuda_stream_view stream, std::span<i64_t const> &span,
+/** @brief Own a @c u64_t copy of @p offsets — cuDF decodes 32- or 64-bit @b signed offsets, and byte
+ *      positions are unsigned sizes, so the one @c cudf::cast to @c UINT64 both widens and unsigns.
+ *      Writes the borrow into @p span and the owning column into @p owner . */
+static void widen_offsets_(cudf::column_view const &offsets, rmm::cuda_stream_view stream, std::span<u64_t const> &span,
                            std::unique_ptr<cudf::column> &owner) {
-    std::size_t const count = static_cast<std::size_t>(offsets.size());
-    if (offsets.type().id() == cudf::type_id::INT64) span = {offsets.data<i64_t>(), count};
-    else {
-        owner = cudf::cast(offsets, cudf::data_type {cudf::type_id::INT64}, stream);
-        span = {owner->view().data<i64_t>(), count};
-    }
+    owner = cudf::cast(offsets, cudf::data_type {cudf::type_id::UINT64}, stream);
+    span = {owner->view().data<u64_t>(), static_cast<std::size_t>(offsets.size())};
 }
 
-expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &, sz::string_view path,
+expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &storage, sz::string_view path,
+                                              std::span<sz::string_view const> columns,
+                                              gpu_stream_t const &stream) noexcept {
+    return make(storage, {&path, 1}, columns, stream); // The single-shard convenience over the concatenating read.
+}
+
+expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &,
+                                              std::span<sz::string_view const> paths,
                                               std::span<sz::string_view const> columns,
                                               gpu_stream_t const &stream) noexcept {
     using result_t = expected<parquet_file_t>;
-    if (path.empty() || columns.empty())
-        return result_t::fail(status_t::invalid_input_k, "a read needs a shard path and at least one column");
+    if (paths.empty() || columns.empty())
+        return result_t::fail(status_t::invalid_input_k, "a read needs at least one shard path and one column");
     try {
-        std::vector<std::string> names; // vendor-boundary: cuDF's column selector takes std::strings
+        std::vector<std::string> path_texts; // vendor-boundary: cuDF's source_info takes std::strings
+        std::vector<std::string> names;      // vendor-boundary: cuDF's column selector takes std::strings
+        path_texts.reserve(paths.size());
         names.reserve(columns.size());
+        for (sz::string_view path : paths) path_texts.emplace_back(path.data(), path.size());
         for (sz::string_view column : columns) names.emplace_back(column.data(), column.size());
         rmm::cuda_stream_view const cudf_stream {reinterpret_cast<cudaStream_t>(stream.get())};
 
-        // KvikIO / GDS reads only the named columns' chunks straight to device; decode is on the GPU.
-        auto options = cudf::io::parquet_reader_options::builder(
-                           cudf::io::source_info {std::string {path.data(), path.size()}}) // vendor-boundary
+        // KvikIO / GDS reads only the named columns' chunks straight to device; multiple shards decode
+        // into one concatenated table, and decode is on the GPU.
+        auto options = cudf::io::parquet_reader_options::builder(cudf::io::source_info {std::move(path_texts)})
                            .column_names(names)
                            .build();
         auto loaded = cudf::io::read_parquet(options, cudf_stream);
         if (loaded.tbl == nullptr || static_cast<std::size_t>(loaded.tbl->num_columns()) != columns.size())
-            return result_t::fail(status_t::invalid_input_k, "read returned {} of {} requested columns from {}",
-                                  loaded.tbl == nullptr ? 0 : loaded.tbl->num_columns(), columns.size(), path);
+            return result_t::fail(status_t::invalid_input_k, "read returned {} of {} requested columns",
+                                  loaded.tbl == nullptr ? 0 : loaded.tbl->num_columns(), columns.size());
 
         auto state = std::make_unique<state_t>();
         if (state->columns.try_resize(columns.size()) != status_t::success_k)
@@ -170,6 +177,30 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
         // and free stream-ordered on destruction.
         state->table = std::move(loaded.tbl);
         return result_t {parquet_file_t {std::move(state)}};
+    }
+    catch (std::exception const &error) {
+        return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
+    }
+    catch (...) {
+        return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
+    }
+}
+
+expected<parquet_column_metadata_t> parquet_column_metadata(gpu_direct_storage_session_t const &, sz::string_view path,
+                                                            sz::string_view column) noexcept {
+    using result_t = expected<parquet_column_metadata_t>;
+    try {
+        // Footer only — no row-group decode: the row count and the column's total uncompressed byte size.
+        cudf::io::parquet_metadata const meta = cudf::io::read_parquet_metadata(
+            cudf::io::source_info {std::string {path.data(), path.size()}}); // vendor-boundary
+        std::string const name {column.data(), column.size()}; // vendor-boundary
+        auto const &sizes = meta.columnchunk_metadata();
+        auto const found = sizes.find(name);
+        if (found == sizes.end())
+            return result_t::fail(status_t::invalid_input_k, "no column named {} in {}", column, path);
+        std::size_t bytes = 0;
+        for (auto const chunk_bytes : found->second) bytes += static_cast<std::size_t>(chunk_bytes);
+        return result_t {parquet_column_metadata_t {static_cast<std::size_t>(meta.num_rows()), bytes}};
     }
     catch (std::exception const &error) {
         return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());

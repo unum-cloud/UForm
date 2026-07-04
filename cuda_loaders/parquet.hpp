@@ -9,9 +9,9 @@
  *  @date July 3, 2026
  *
  *  A file's payload — the concatenated bytes of every row of a column — is borrowed in place from the
- *  owned cuDF table, never copied out. cuDF emits 32-bit offsets below 2 GiB; where it does, the
- *  reader keeps cuDF's own widened @c i64_t offsets column alive alongside the table (again no copy),
- *  so every @ref column view carries 64-bit offsets and nothing downstream meets a 32-bit boundary.
+ *  owned cuDF table, never copied out. cuDF emits 32- or 64-bit @b signed offsets; the reader casts them
+ *  once to unsigned @c u64_t and keeps that column alive alongside the table, so every @ref column view
+ *  carries 64-bit unsigned offsets and nothing downstream meets a 32-bit or a signedness boundary.
  *  @c string and @c list<uint8> columns both flatten to the same @c (bytes, offsets) shape, so text
  *  documents and media blobs come back through one interface.
  *
@@ -25,20 +25,20 @@
 #include <memory>  // `std::unique_ptr` — the pimpl owning the cuDF table
 #include <span>    // `std::span`
 
-#include "types.cuh"    // `expected`, `status_t`, the scalar aliases, `sz::arrow_packed_view`
-#include "schedule.cuh" // `gpu_stream_t`
+#include "cuda_core/types.cuh"    // `expected`, `status_t`, the scalar aliases, `sz::arrow_packed_view`
+#include "cuda_core/schedule.cuh" // `gpu_stream_t`
 
-#include "direct_storage.hpp" // `gpu_direct_storage_session_t` — the reader's GDS precondition
+#include "cuda_loaders/direct_storage.hpp" // `gpu_direct_storage_session_t` — the reader's GDS precondition
 
 namespace unum::uform::loaders {
 
 using namespace unum::uform::core;
 
 /** @brief A decoded column, device-resident: every row's bytes back to back with @c rows+1
- *      terminator-free @c i64_t offsets — the raw Apache Arrow convention, so element @c i is the full
+ *      terminator-free @c u64_t offsets (byte positions are unsigned sizes) — element @c i is the full
  *      @c [offsets[i], offsets[i+1]) span. Both text ( @c string ) and media ( @c list<uint8> )
  *      columns arrive as this. */
-using column_view_t = sz::arrow_packed_view<b8_t, i64_t>;
+using column_view_t = sz::arrow_packed_view<b8_t, u64_t>;
 
 /**
  *  @brief One Parquet shard's requested columns, decoded and owned on device. Move-only; the cuDF
@@ -64,6 +64,14 @@ struct parquet_file_t {
                                                        sz::string_view path, std::span<sz::string_view const> columns,
                                                        gpu_stream_t const &stream) noexcept;
 
+    /** @brief Decode @p columns of @b several shards at once into @b one concatenated file — cuDF reads
+     *      all @p paths and returns a single table whose rows are the shards' rows back to back. The
+     *      row draw's reservoir. */
+    [[nodiscard]] static expected<parquet_file_t> make(gpu_direct_storage_session_t const &storage,
+                                                       std::span<sz::string_view const> paths,
+                                                       std::span<sz::string_view const> columns,
+                                                       gpu_stream_t const &stream) noexcept;
+
     /** @brief Rows decoded — the same across every column. */
     [[nodiscard]] std::size_t rows() const noexcept;
     /** @brief How many columns were decoded. */
@@ -77,12 +85,25 @@ struct parquet_file_t {
      *      @c [groups()[r], groups()[r+1]) . @b Empty for a flat column (row @c r @b is element @c r );
      *      @b [rows+1] for a nested @c list<string> column (multiple captions / negatives per row). All
      *      a consumer needs to see multi-positive / multi-negative structure and lay out segments. */
-    [[nodiscard]] std::span<i64_t const> groups(std::size_t index) const noexcept;
+    [[nodiscard]] std::span<u64_t const> groups(std::size_t index) const noexcept;
 
   private:
     struct state_t; // The owned cuDF table plus its column views — defined in `parquet.cpp`.
     explicit parquet_file_t(std::unique_ptr<state_t> state) noexcept;
     std::unique_ptr<state_t> state_;
 };
+
+/** @brief One shard column's footer facts — the row count and the column's total uncompressed byte
+ *      length — read without decoding, to drive the loader's weighted random shard / row sampling. */
+struct parquet_column_metadata_t {
+    std::size_t rows = 0;
+    std::size_t bytes = 0;
+};
+
+/** @brief Read only the Parquet footer of the shard at @p path — @c num_rows and @p column 's summed
+ *      column-chunk byte size — never touching the row groups or the GPU. */
+[[nodiscard]] expected<parquet_column_metadata_t> parquet_column_metadata(gpu_direct_storage_session_t const &storage,
+                                                                          sz::string_view path,
+                                                                          sz::string_view column) noexcept;
 
 } // namespace unum::uform::loaders
