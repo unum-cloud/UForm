@@ -17,6 +17,7 @@
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/concatenate.hpp>         // `cudf::concatenate` — merge decoded JSONL shards into one field
+#include <cudf/io/csv.hpp>              // `cudf::io::read_csv`, `csv_reader_options`
 #include <cudf/io/json.hpp>             // `cudf::io::read_json`, `json_reader_options`
 #include <cudf/io/parquet.hpp>          // `cudf::io::read_parquet`, `parquet_reader_options`
 #include <cudf/io/parquet_metadata.hpp> // `cudf::io::read_parquet_metadata`, `parquet_metadata`
@@ -334,6 +335,90 @@ expected<jsonl_file_t> jsonl_file_t::concat(std::span<jsonl_file_t const> parts,
         if (!flat) return result_t::fail(std::move(flat));
         state->span = adopt_flat_(*flat, cudf_stream);
         return result_t {jsonl_file_t {std::move(state)}};
+    }
+    catch (std::exception const &error) {
+        return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
+    }
+    catch (...) {
+        return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
+    }
+}
+
+struct csv_file_t::state_t {
+    std::unique_ptr<cudf::column> field;
+    column_span_t span;
+};
+
+csv_file_t::csv_file_t() noexcept = default;
+csv_file_t::csv_file_t(csv_file_t &&) noexcept = default;
+csv_file_t &csv_file_t::operator=(csv_file_t &&) noexcept = default;
+csv_file_t::~csv_file_t() = default;
+csv_file_t::csv_file_t(std::unique_ptr<state_t> state) noexcept : state_(std::move(state)) {}
+
+std::size_t csv_file_t::rows() const noexcept {
+    if (!state_) return 0;
+    return state_->span.offsets.empty() ? 0 : state_->span.offsets.size() - 1; // flat string: rows+1 offsets
+}
+column_view_t csv_file_t::column() const noexcept {
+    column_span_t const &field = state_->span;
+    return {{field.payload.data(), field.payload.size()}, {field.offsets.data(), field.offsets.size()}};
+}
+std::span<u64_t const> csv_file_t::groups() const noexcept {
+    return state_ ? state_->span.groups : std::span<u64_t const> {};
+}
+
+expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::string_view path,
+                                      sz::string_view column, char delimiter, bool has_header,
+                                      gpu_stream_t const &stream) noexcept {
+    using result_t = expected<csv_file_t>;
+    try {
+        rmm::cuda_stream_view const cudf_stream {reinterpret_cast<cudaStream_t>(stream.get())};
+        std::string const name {column.data(), column.size()}; // vendor-boundary
+        // Read only the wanted column, forced to string so type inference cannot surprise us; KvikIO /
+        // GDS streams the bytes, cuDF decodes on the GPU.
+        auto options =
+            cudf::io::csv_reader_options::builder(
+                cudf::io::source_info {std::string {path.data(), path.size()}}) // vendor-boundary
+                .delimiter(delimiter)
+                .header(has_header ? 0 : -1)
+                .use_cols_names({name})                                                         // vendor-boundary
+                .dtypes(std::vector<cudf::data_type> {cudf::data_type {cudf::type_id::STRING}}) // vendor-boundary
+                .build();
+        cudf::io::table_with_metadata loaded = cudf::io::read_csv(options, cudf_stream);
+        if (loaded.tbl == nullptr || loaded.tbl->num_columns() == 0)
+            return result_t::fail(status_t::invalid_input_k, "no column {} in CSV {}", column, path);
+
+        // Own the one decoded column and drop the rest of the table.
+        std::vector<std::unique_ptr<cudf::column>> released = loaded.tbl->release(); // vendor-boundary
+        auto state = std::make_unique<state_t>();
+        state->field = std::move(released[0]);
+        auto flat = flatten_column_(state->field->view(), column, cudf_stream);
+        if (!flat) return result_t::fail(std::move(flat));
+        state->span = adopt_flat_(*flat, cudf_stream);
+        return result_t {csv_file_t {std::move(state)}};
+    }
+    catch (std::exception const &error) {
+        return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
+    }
+    catch (...) {
+        return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
+    }
+}
+
+expected<csv_file_t> csv_file_t::concat(std::span<csv_file_t const> parts, gpu_stream_t const &stream) noexcept {
+    using result_t = expected<csv_file_t>;
+    if (parts.empty()) return result_t::fail(status_t::invalid_input_k, "CSV concat needs at least one shard");
+    try {
+        rmm::cuda_stream_view const cudf_stream {reinterpret_cast<cudaStream_t>(stream.get())};
+        std::vector<cudf::column_view> columns; // vendor-boundary: cudf::concatenate takes a column-view list
+        columns.reserve(parts.size());
+        for (csv_file_t const &part : parts) columns.push_back(part.state_->field->view());
+        auto state = std::make_unique<state_t>();
+        state->field = cudf::concatenate(columns, cudf_stream); // one copy into a single owned column
+        auto flat = flatten_column_(state->field->view(), sz::string_view {"csv", 3}, cudf_stream);
+        if (!flat) return result_t::fail(std::move(flat));
+        state->span = adopt_flat_(*flat, cudf_stream);
+        return result_t {csv_file_t {std::move(state)}};
     }
     catch (std::exception const &error) {
         return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());

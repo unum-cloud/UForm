@@ -143,4 +143,58 @@ struct tokens_loader_jsonl_t {
     array<std::size_t> byte_prefix_ {};
 };
 
+/** @brief The CSV tokens loader's baked knobs — a different config is a different loader. */
+struct tokens_base_loader_csv_config_t {
+    /** @brief The CSV column holding the UTF-8 documents — a header name, or a 0-based index string when
+     *      @ref has_header is false. */
+    sz::string_view column = sz::string_view {"text", 4};
+    /** @brief The field separator. */
+    char delimiter = ',';
+    /** @brief Whether row 0 names the columns (else they are positional). */
+    bool has_header = true;
+};
+
+/**
+ *  @brief The CSV sibling of @ref tokens_loader_parquet_t and @ref tokens_loader_jsonl_t — a @b separate
+ *      class (no format punning), same dataset-scoped, rank-agnostic shape. Footerless like JSONL: @ref
+ *      make weighs files by @b byte size and @ref fill decodes files one at a time until the reservoir
+ *      covers the batch.
+ *
+ *  @warning Holds one dataset's shard sizes; keep one per input dataset. @ref fill allocates on demand
+ *      and is safe to call concurrently for different GPU ranks on different streams.
+ */
+struct tokens_loader_csv_t {
+
+    /** @brief Index all the shards' byte sizes (POSIX @c stat , host, once — no decode).
+     *  @param[inout] session GPU Direct Storage session for IO.
+     *  @param[in] path_or_glob Dataset's CSV paths or a GLOB pattern for all the files.
+     *  @param[in] seed The training-run specific order-affecting seed. */
+    [[nodiscard]] static expected<tokens_loader_csv_t> make( //
+        gpu_direct_storage_session_t &session, sz::string_view path_or_glob, u64_t seed) noexcept;
+
+    /** @brief Fill the next few @p batches for the MLM objective on one GPU rank — @sa
+     *      multimodal_batch_mixer_t for the cross-GPU mixing. Draws files weighted by byte size and keyed
+     *      by @c (seed, step, rank) , decodes them until the pooled rows cover @p batches (≥2 files unless
+     *      the dataset is one), then packs many documents per row.
+     *  @param[in] config Which CSV column to take, its delimiter, and whether it has a header.
+     *  @param[inout] gpu_stream The GPU-specific stream the decode and packing run on.
+     *  @param[in] gpu_rank Ensures different GPUs draw different files from the same dataset.
+     *  @param[in] training_step Ensures subsequent steps sample different data.
+     *  @param[out] batches Output matrices populated with token segments. */
+    [[nodiscard]] expected_t fill(                                        //
+        gpu_stream_t &gpu_stream, tokens_base_loader_csv_config_t config, //
+        u32_t gpu_rank, u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
+
+  private:
+    /** @brief The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
+    gpu_direct_storage_session_t *storage_ = nullptr;
+    /** @brief The dataset's CSV shard paths — owned, expanded from the glob at @ref make . */
+    array<sz::string> absolute_paths_ {};
+    /** @brief The run seed keying the random file and row draws. */
+    u64_t seed_ = 0;
+    /** @brief @b [shards+1] cumulative @b byte sizes — the weighted file draw's search table. CSV has no
+     *      footer, so bytes (not rows) weigh the draw; the true row counts come from the decode. */
+    array<std::size_t> byte_prefix_ {};
+};
+
 } // namespace unum::uform::loaders

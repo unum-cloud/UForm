@@ -105,7 +105,7 @@ struct parquet_file_t {
     [[nodiscard]] std::span<u64_t const> groups(std::size_t index) const noexcept;
 
   private:
-    struct state_t; // The owned cuDF table plus its column views — defined in `parquet.cpp`.
+    struct state_t; // The owned cuDF table plus its column views — defined in `dataset_shards.cpp`.
     explicit parquet_file_t(std::unique_ptr<state_t> state) noexcept;
     std::unique_ptr<state_t> state_;
 };
@@ -147,13 +147,56 @@ struct jsonl_file_t {
     [[nodiscard]] std::span<u64_t const> groups() const noexcept;
 
   private:
-    struct state_t; // The owned cuDF column plus its flattened view — defined in `parquet.cpp`.
+    struct state_t; // The owned cuDF column plus its flattened view — defined in `dataset_shards.cpp`.
     explicit jsonl_file_t(std::unique_ptr<state_t> state) noexcept;
     std::unique_ptr<state_t> state_;
 };
 
+/**
+ *  @brief One CSV shard's chosen column, decoded and owned on device — the CSV sibling of
+ *      @ref parquet_file_t and @ref jsonl_file_t , a @b separate type (no format punning). cuDF's CSV
+ *      reader decodes @p column into the same device @ref column_view_t shape, so a consumer reads it
+ *      exactly like a Parquet column; only the decode entry (delimiter, header) and the @b absent footer
+ *      differ. Holds a single column. Move-only, RAII; a default / moved-from file is empty.
+ */
+struct csv_file_t {
+
+    csv_file_t() noexcept;
+    csv_file_t(csv_file_t const &) = delete;
+    csv_file_t &operator=(csv_file_t const &) = delete;
+    csv_file_t(csv_file_t &&) noexcept;
+    csv_file_t &operator=(csv_file_t &&) noexcept;
+    ~csv_file_t();
+
+    /** @brief Decode @p column of the CSV shard at @p path into device memory on @p stream over KvikIO /
+     *      GDS. @p delimiter is the field separator; @p has_header selects whether row 0 names the columns
+     *      (else they are positional and @p column is a 0-based index string). CSV carries no footer, so a
+     *      shard is always decoded to learn its rows; @ref file_size_bytes is the loader's cheap weight. */
+    [[nodiscard]] static expected<csv_file_t> make(gpu_direct_storage_session_t const &storage, sz::string_view path,
+                                                   sz::string_view column, char delimiter, bool has_header,
+                                                   gpu_stream_t const &stream) noexcept;
+
+    /** @brief Concatenate several decoded shards' columns into one reservoir — the footerless coverage
+     *      loop decodes one file at a time, then merges them here (a cuDF concatenate, one copy). */
+    [[nodiscard]] static expected<csv_file_t> concat(std::span<csv_file_t const> parts,
+                                                     gpu_stream_t const &stream) noexcept;
+
+    /** @brief Rows decoded — one per CSV record. */
+    [[nodiscard]] std::size_t rows() const noexcept;
+    /** @brief The chosen column's leaf bytes and offsets — the same shape @ref parquet_file_t::column
+     *      hands out, so the pack kernels are identical. */
+    [[nodiscard]] column_view_t column() const noexcept;
+    /** @brief Empty — a CSV column is a flat string, so row @c r @b is element @c r . */
+    [[nodiscard]] std::span<u64_t const> groups() const noexcept;
+
+  private:
+    struct state_t; // The owned cuDF column plus its flattened view — defined in `dataset_shards.cpp`.
+    explicit csv_file_t(std::unique_ptr<state_t> state) noexcept;
+    std::unique_ptr<state_t> state_;
+};
+
 /** @brief The byte size of @p path via POSIX @c stat — the cheap file-draw weight for the footerless
- *      formats (JSONL, later CSV), which cannot know a row count without decoding. */
+ *      formats (JSONL, CSV), which cannot know a row count without decoding. */
 [[nodiscard]] expected<std::size_t> file_size_bytes(sz::string_view path) noexcept;
 
 /** @brief Expand a @c directory/pattern (or a plain path) into the sorted paths it matches, via POSIX

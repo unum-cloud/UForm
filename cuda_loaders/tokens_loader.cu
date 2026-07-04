@@ -321,3 +321,83 @@ expected_t tokens_loader_jsonl_t::fill(gpu_stream_t &gpu_stream, tokens_base_loa
     return pack_reservoir_(reservoir.column(), reservoir.rows(), hash(seed_, gpu_rank, row_draw_salt_k),
                            epoch_t {training_step}, batches, gpu_stream);
 }
+
+expected<tokens_loader_csv_t> tokens_loader_csv_t::make(gpu_direct_storage_session_t &session,
+                                                        sz::string_view path_or_glob, u64_t seed) noexcept {
+    using result_t = expected<tokens_loader_csv_t>;
+
+    // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths — POSIX readdir.
+    auto paths = expand_glob(path_or_glob);
+    if (!paths) return result_t::fail(std::move(paths));
+
+    tokens_loader_csv_t loader;
+    loader.storage_ = &session;
+    loader.absolute_paths_ = std::move(paths.value_);
+    loader.seed_ = seed;
+
+    // No footer — weigh files by byte size (POSIX stat), a running prefix for the weighted file draw.
+    if (loader.byte_prefix_.try_resize(loader.absolute_paths_.size() + 1) != status_t::success_k)
+        return result_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)",
+                              loader.absolute_paths_.size());
+    loader.byte_prefix_[0] = 0;
+    for (std::size_t index = 0; index != loader.absolute_paths_.size(); ++index) {
+        auto bytes = file_size_bytes(loader.absolute_paths_[index]);
+        if (!bytes) return result_t::fail(std::move(bytes));
+        if (*bytes == 0)
+            return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
+        loader.byte_prefix_[index + 1] = loader.byte_prefix_[index] + *bytes;
+    }
+    return result_t {std::move(loader)};
+}
+
+expected_t tokens_loader_csv_t::fill(gpu_stream_t &gpu_stream, tokens_base_loader_csv_config_t config, u32_t gpu_rank,
+                                     u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept {
+    if (batches.empty()) return {};
+    std::size_t const unroll = batches.size();
+    std::size_t const documents = batches[0].segment_lengths.extent(0);
+    if (documents == 0u) return expected_t::fail(status_t::shape_unsupported_k, "the batch carries no segment slots");
+    std::size_t const total_segments = unroll * documents;
+
+    std::size_t const shard_count = absolute_paths_.size();
+    std::size_t const floor_files = std::min<std::size_t>(2, shard_count);
+    std::size_t const total_bytes = byte_prefix_[shard_count];
+    constexpr splitmix64_hash_t hash {};
+
+    // Pick distinct files weighted by BYTE size (CSV has no footer), decoding each until the pooled rows
+    // cover the fill — never fewer than two, unless the whole dataset is one file.
+    array<csv_file_t> parts;
+    array<std::size_t> picked_shards;
+    if (picked_shards.try_resize(shard_count) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "file pick allocation failed");
+    std::size_t picked_count = 0;
+    std::size_t pooled_rows = 0;
+    std::size_t attempt = 0;
+    while ((pooled_rows < total_segments || picked_count < floor_files) && picked_count < shard_count) {
+        std::size_t const position = hash(seed_, training_step, gpu_rank, file_draw_salt_k, attempt) % total_bytes;
+        ++attempt;
+        std::size_t const file = static_cast<std::size_t>(
+            std::upper_bound(byte_prefix_.begin(), byte_prefix_.end(), position) - byte_prefix_.begin() - 1);
+        std::span<std::size_t const> const chosen {picked_shards.data(), picked_count};
+        if (std::find(chosen.begin(), chosen.end(), file) != chosen.end()) continue;
+        // Decode this file to learn its rows (no footer), and keep it alive for the concat.
+        auto shard = csv_file_t::make(*storage_, absolute_paths_[file], config.column, config.delimiter,
+                                      config.has_header, gpu_stream);
+        if (!shard) return expected_t::fail(std::move(shard));
+        pooled_rows += shard->rows();
+        picked_shards[picked_count] = file;
+        if (parts.try_push_back(std::move(shard.value_)) != status_t::success_k)
+            return expected_t::fail(status_t::bad_alloc_k, "reservoir parts allocation failed");
+        ++picked_count;
+    }
+    if (pooled_rows < total_segments)
+        return expected_t::fail(status_t::shape_unsupported_k,
+                                "{} pooled rows across {} CSV files cover fewer than the {} segments this fill needs",
+                                pooled_rows, picked_count, total_segments);
+
+    // Merge the decoded shards into one reservoir column, then the shared pack.
+    auto reservoir_read = csv_file_t::concat(parts.view(), gpu_stream);
+    if (!reservoir_read) return expected_t::fail(std::move(reservoir_read));
+    csv_file_t const reservoir = std::move(reservoir_read.value_);
+    return pack_reservoir_(reservoir.column(), reservoir.rows(), hash(seed_, gpu_rank, row_draw_salt_k),
+                           epoch_t {training_step}, batches, gpu_stream);
+}
