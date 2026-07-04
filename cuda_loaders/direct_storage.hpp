@@ -44,6 +44,7 @@ enum class storage_read_path_t : u8_t {
  */
 struct gpu_direct_storage_session_t {
 
+    gpu_direct_storage_session_t() noexcept = default;
     gpu_direct_storage_session_t(gpu_direct_storage_session_t const &) = delete;
     gpu_direct_storage_session_t &operator=(gpu_direct_storage_session_t const &) = delete;
     gpu_direct_storage_session_t(gpu_direct_storage_session_t &&) noexcept = default;
@@ -56,7 +57,6 @@ struct gpu_direct_storage_session_t {
     [[nodiscard]] storage_read_path_t read_path() const noexcept { return read_path_; }
 
   private:
-    gpu_direct_storage_session_t() noexcept = default;
     storage_read_path_t read_path_ = storage_read_path_t::compatibility_k;
 };
 

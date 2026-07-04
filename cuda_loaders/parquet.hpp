@@ -68,8 +68,16 @@ struct parquet_file_t {
     [[nodiscard]] std::size_t rows() const noexcept;
     /** @brief How many columns were decoded. */
     [[nodiscard]] std::size_t columns() const noexcept;
-    /** @brief Column @p index as a zero-copy device view into the owned table. */
+    /** @brief Column @p index 's leaf bytes: element → bytes. A flat @c string / @c list<uint8> column
+     *      has one element per row (element @c i is row @c i ); a nested @c list<string> column lays
+     *      every row's strings back to back, so it has more elements than rows — @ref groups maps rows
+     *      to them. */
     [[nodiscard]] column_view_t column(std::size_t index) const noexcept;
+    /** @brief Column @p index 's row → element grouping: row @c r owns the leaf elements in
+     *      @c [groups()[r], groups()[r+1]) . @b Empty for a flat column (row @c r @b is element @c r );
+     *      @b [rows+1] for a nested @c list<string> column (multiple captions / negatives per row). All
+     *      a consumer needs to see multi-positive / multi-negative structure and lay out segments. */
+    [[nodiscard]] std::span<i64_t const> groups(std::size_t index) const noexcept;
 
   private:
     struct state_t; // The owned cuDF table plus its column views — defined in `parquet.cpp`.
