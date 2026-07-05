@@ -1,26 +1,46 @@
-/requirements.txt
+# Build outputs
+/build*/
 /dist/
 /test
-/build/
-yarn.lock
-*.egg-info
-__pycache__
 .build
-.swiftpm
+
+# CUDA / profiling / crashes
+*.nsys-rep
+*.ncu-rep
+*.qdrep
+*.sqlite
+core
+core.*
+*.log
+
+# Local & machine-specific config
+cmake/local.cmake
 .hf_token
-uv.lock
 
-dictionary*
-vocab*
+# Datasets (keep the directory, not its contents)
+data/*
+!data/.gitkeep
+
+# ML weights & tensors
 /models/
-
-# Tensors & ML Model
 *.onnx
 *.pt
 *.safetensors
 *.mlpackage
+dictionary*
+vocab*
 
-# NodeJS
+# Python
+/requirements.txt
+*.egg-info
+__pycache__
+uv.lock
+
+# Node
 node_modules
 node_build
+yarn.lock
 yarn-error.log
+
+# Swift
+.swiftpm
