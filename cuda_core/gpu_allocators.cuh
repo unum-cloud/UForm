@@ -376,8 +376,8 @@ using gpu_arena_alloc_t = gpu_arena_alloc<b8_t>;
 
 /**
  *  @brief Pinned host-memory allocator — page-locked pages the DMA engines read directly, for the two
- *      host-side surfaces of a replayed step: epoch staging slots that captured copy nodes re-read at
- *      every launch, and loss landings polled without a stream synchronize. Stateless; needs a current
+ *      host-side surfaces of a replayed step: generation staging cells that captured copy nodes re-read
+ *      at every launch, and loss landings polled without a stream synchronize. Stateless; needs a current
  *      context at the call, like every driver allocation here. Satisfies @c std::alloc_traits , so
  *      NumKong's owning tensor composes directly:
  *
@@ -413,7 +413,7 @@ struct pinned_alloc {
     [[nodiscard]] constexpr bool operator==(pinned_alloc const &) const noexcept { return true; }
 };
 
-/** @brief The canonical byte-typed pinned-allocator handle — what APIs receive and rebind. */
+/** @brief The canonical byte-typed pinned-allocator handle —å what APIs receive and rebind. */
 using pinned_alloc_t = pinned_alloc<b8_t>;
 
 /**
@@ -471,7 +471,7 @@ struct gpu_alloc {
 /** @brief The canonical byte-typed stream-ordered-allocator handle — what APIs receive and rebind. */
 using gpu_alloc_t = gpu_alloc<b8_t>;
 
-/** 
+/**
  *  The rank-tagged owning-tensor vocabulary — @c *_tensor_arena_t owns device memory off a
  *  @ref gpu_arena_t , @c *_tensor_pinned_t owns page-locked host memory; the borrowing @c *_view_t /
  *  @c *_span_t counterparts live in @c types.cuh .

@@ -64,7 +64,7 @@ using bf16_t = __nv_bfloat16;
 using f32_t = float;
 using f64_t = double;
 
-/** 
+/**
  *  The rank-tagged borrow vocabulary over the scalar dtypes — @c <dtype><rank>_view_t reads,
  *  @c <dtype><rank>_span_t writes, each a borrow into memory owned elsewhere. The owning
  *  @c *_tensor_arena_t / @c *_tensor_pinned_t counterparts live in @c gpu_allocators.cuh , beside the
@@ -98,7 +98,7 @@ using e4m3r3_view_t = nk::tensor_view<e4m3_t, 3>;
 using e4m3r3_span_t = nk::tensor_span<e4m3_t, 3>;
 
 /** @brief One vocabulary entry's index — the byte-level vocabulary (256 bytes + the special tokens)
- *      fits 16 bits, and every token tape, staging slot, and embedding lookup trades in this width. */
+ *      fits 16 bits, and every token tape, staging cell, and embedding lookup trades in this width. */
 using token_id_t = u16_t;
 
 /** @brief One raw image / video channel sample, as decoders emit it — 8-bit, interleaved channels;

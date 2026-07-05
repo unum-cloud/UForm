@@ -203,7 +203,8 @@ class stack_array {
     stack_array(stack_array const &) = delete;
     stack_array &operator=(stack_array const &) = delete;
     stack_array(stack_array &&other) noexcept {
-        for (size_type index = 0; index != other.size_; ++index) new (slot_(index)) value_type(std::move(other[index]));
+        for (size_type index = 0; index != other.size_; ++index)
+            new (pointer_at(index)) value_type(std::move(other[index]));
         size_ = other.size_;
         other.clear();
     }
@@ -211,7 +212,7 @@ class stack_array {
         if (this != &other) {
             clear();
             for (size_type index = 0; index != other.size_; ++index)
-                new (slot_(index)) value_type(std::move(other[index]));
+                new (pointer_at(index)) value_type(std::move(other[index]));
             size_ = other.size_;
             other.clear();
         }
@@ -222,10 +223,12 @@ class stack_array {
     [[nodiscard]] static constexpr size_type capacity() noexcept { return capacity_limit_; }
     [[nodiscard]] size_type size() const noexcept { return size_; }
 
-    [[nodiscard]] value_type &operator[](size_type index) noexcept { return *std::launder(slot_(index)); }
-    [[nodiscard]] value_type const &operator[](size_type index) const noexcept { return *std::launder(slot_(index)); }
-    [[nodiscard]] value_type *begin() noexcept { return std::launder(slot_(0)); }
-    [[nodiscard]] value_type const *begin() const noexcept { return std::launder(slot_(0)); }
+    [[nodiscard]] value_type &operator[](size_type index) noexcept { return *std::launder(pointer_at(index)); }
+    [[nodiscard]] value_type const &operator[](size_type index) const noexcept {
+        return *std::launder(pointer_at(index));
+    }
+    [[nodiscard]] value_type *begin() noexcept { return std::launder(pointer_at(0)); }
+    [[nodiscard]] value_type const *begin() const noexcept { return std::launder(pointer_at(0)); }
     [[nodiscard]] value_type *end() noexcept { return begin() + size_; }
     [[nodiscard]] value_type const *end() const noexcept { return begin() + size_; }
     [[nodiscard]] std::span<value_type> span() noexcept { return {begin(), size_}; }
@@ -234,7 +237,7 @@ class stack_array {
     /** @brief Move-append one element; @ref status_t::bad_alloc_k past the capacity limit. */
     [[nodiscard]] status_t try_push_back(value_type value) noexcept {
         if (size_ == capacity_limit_) return status_t::bad_alloc_k;
-        new (slot_(size_)) value_type(std::move(value));
+        new (pointer_at(size_)) value_type(std::move(value));
         ++size_;
         return status_t::success_k;
     }
@@ -243,21 +246,21 @@ class stack_array {
      *      @ref status_t::bad_alloc_k past the capacity limit. */
     [[nodiscard]] status_t try_resize(size_type new_size) noexcept {
         if (new_size > capacity_limit_) return status_t::bad_alloc_k;
-        for (; size_ > new_size; --size_) std::launder(slot_(size_ - 1))->~value_type();
-        for (; size_ < new_size; ++size_) new (slot_(size_)) value_type();
+        for (; size_ > new_size; --size_) std::launder(pointer_at(size_ - 1))->~value_type();
+        for (; size_ < new_size; ++size_) new (pointer_at(size_)) value_type();
         return status_t::success_k;
     }
 
     void clear() noexcept {
-        for (size_type index = size_; index != 0; --index) std::launder(slot_(index - 1))->~value_type();
+        for (size_type index = size_; index != 0; --index) std::launder(pointer_at(index - 1))->~value_type();
         size_ = 0;
     }
 
   private:
-    [[nodiscard]] value_type *slot_(size_type index) noexcept {
+    [[nodiscard]] value_type *pointer_at(size_type index) noexcept {
         return reinterpret_cast<value_type *>(storage_) + index;
     }
-    [[nodiscard]] value_type const *slot_(size_type index) const noexcept {
+    [[nodiscard]] value_type const *pointer_at(size_type index) const noexcept {
         return reinterpret_cast<value_type const *>(storage_) + index;
     }
 

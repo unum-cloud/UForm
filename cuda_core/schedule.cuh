@@ -17,7 +17,7 @@
  *
  *  A captured body must be a pure enqueue program: no host synchronization, no device-to-host reads, and
  *  @b no allocation. Per-step host-varying values travel through device memory the body reads at replay
- *  (learnable scalars, staged relation columns, epoch counters) — never through re-captured code. The
+ *  (learnable scalars, staged relation columns) — never through re-captured code. The
  *  contract is enforced, not trusted: after capture the graph's nodes are walked, and any
  *  allocation / free node is a @b loud failure — an allocating body escapes every arena budget and
  *  deadlocks device-local multi-GPU worlds at first launch, and there is no correct fallback.
@@ -26,6 +26,16 @@
  *  @ref gpu_replay_graph_t that exists is always launchable, with device staging already done. Uploading
  *  eagerly matters: lazily staged MMIO nodes are a measured first-launch deadlock on device-initiated
  *  transports.
+ *
+ *  @section schedule_regions The captured region is model math only
+ *
+ *  A captured graph holds @b model math only — entry / embedding, the block stack, the final RMSNorm, the
+ *  @b local loss, and backward. The distributed work — cross-GPU loss exchange, the gradient reduce, the
+ *  @ref barrier_generation_t barriers, and the optimizer's world step — is @b never fused into it; it is
+ *  its own region the parent scope sequences after the model region. UForm is a distributed-loss training
+ *  stack, so a monolithic all-in-one graph welds the pure math to world state, and the generation, the
+ *  reduce, and the loss exchange can no longer be reasoned about — or replayed — independently. Forward and
+ *  backward stay together (one contiguous, shape-stable computation); the only boundary is model-vs-collective.
  *
  *  @section schedule_fork Multi-GPU capture — fork / join
  *
@@ -39,7 +49,7 @@
 #pragma once
 
 #include <cstddef> // `std::size_t`
-#include <cstring> // `std::memset` — zeroing pinned scalar slots
+#include <cstring> // `std::memset` — zeroing pinned scalar cells
 
 #include <utility> // `std::exchange`, `std::forward`
 #include <array>   // `std::array` — the deterministic-algorithm candidate table
@@ -257,7 +267,7 @@ template <typename... arg_types_>
 }
 
 /** @brief All-threads-get-the-total CTA sum: per-warp shuffle trees, lane-0 partials staged through
- *      static shared memory, one final warp tree, one broadcast slot — fixed-order, deterministic,
+ *      static shared memory, one final warp tree, one broadcast cell — fixed-order, deterministic,
  *      sized for @p block_size_ threads. */
 template <unsigned block_size_>
 [[nodiscard]] __device__ inline f32_t block_reduce_broadcast(f32_t value) noexcept {
@@ -797,8 +807,8 @@ struct cublaslt_plan_t {
  */
 struct gpu_event_t {
     gpu_event_t() noexcept = default;
-    gpu_event_t(gpu_event_t const const &) = delete;
-    gpu_event_t &operator=(gpu_event_t const const &) = delete;
+    gpu_event_t(gpu_event_t const &) = delete;
+    gpu_event_t &operator=(gpu_event_t const &) = delete;
     gpu_event_t(gpu_event_t &&other) noexcept : event_(std::exchange(other.event_, nullptr)) {}
     gpu_event_t &operator=(gpu_event_t &&other) noexcept {
         if (this != &other) {
@@ -827,56 +837,47 @@ struct gpu_event_t {
 };
 
 /**
- *  @brief The monotonic step counter of one collective surface — the only mutable host state a
- *      captured step keys on. The pinned staging slot @b is the count (no shadow copy); the device
- *      destination is borrowed. Exactly two behaviors: @ref advance (bump + enqueue the upload, the
- *      eager / capture path) and @ref advance_host (bump only, the per-replay path — the captured
- *      copy node re-reads the pinned slot at every launch). Counts never reset; a replayed barrier's
+ *  @brief The monotonic step counter of one collective surface — the device generation scalar @b is
+ *      the count, and it is the sole source of truth (no host shadow, no pinned cell). One behavior:
+ *      @ref advance enqueues a one-thread device increment (@c generation += increment , then a
+ *      @c __threadfence_system() ), once per step on the surface's lead stream before any barrier.
+ *      Because the bump lives on the device, a captured collective region self-advances the generation
+ *      on every @c cuGraphLaunch replay with no host intervention. The scalar is seeded @c 0u-increment
+ *      at @ref make so the first advance yields generation 0. Counts never reset; a replayed barrier's
  *      target only grows.
  */
-struct epoch_counter_t {
+struct barrier_generation_t {
 
-    epoch_counter_t() noexcept = default;
-    epoch_counter_t(epoch_counter_t const const &) = delete;
-    epoch_counter_t &operator=(epoch_counter_t const const &) = delete;
-    epoch_counter_t(epoch_counter_t &&) noexcept = default;
-    epoch_counter_t &operator=(epoch_counter_t &&) noexcept = default;
+    barrier_generation_t() noexcept = default;
+    barrier_generation_t(barrier_generation_t const &) = delete;
+    barrier_generation_t &operator=(barrier_generation_t const &) = delete;
+    barrier_generation_t(barrier_generation_t &&) noexcept = default;
+    barrier_generation_t &operator=(barrier_generation_t &&) noexcept = default;
 
-    /** @brief Pin the staging slot — once, at setup, with a current context.
-     *  @param[in] device_epoch The one-scalar device destination, borrowed for this object's lifetime.
-     *  @param[in] increment How far one step advances the count (a member count, a round count). */
-    [[nodiscard]] static expected<epoch_counter_t> make(u32r1_span_t device_epoch, u32_t increment) noexcept {
-        epoch_counter_t counter;
-        counter.device_epoch_ = device_epoch;
+    /** @brief Seed the device generation scalar — once, at setup, with a current context.
+     *  @param[in] device_generation The one-scalar device destination, borrowed for this object's lifetime.
+     *  @param[in] increment How far one step advances the count (a member count, a round count).
+     *  @param[in] stream The lead stream the seed is enqueued on, ordered before the first @ref advance. */
+    [[nodiscard]] static expected<barrier_generation_t> make(u32r1_span_t device_generation, u32_t increment,
+                                                             gpu_stream_t &stream) noexcept {
+        barrier_generation_t counter;
+        counter.device_generation_ = device_generation;
         counter.increment_ = increment;
-        counter.staging_ = u32r1_tensor_pinned_t::try_empty({1}, pinned_alloc<u32_t> {});
-        if (!counter.staging_)
-            return expected<epoch_counter_t>::fail(status_t::bad_alloc_k, "pinned epoch staging failed");
-        // Seeded one step below zero (u32 wrap-around), so the first bump stages epoch 0.
-        counter.staging_[0] = 0u - increment;
-        return expected<epoch_counter_t> {std::move(counter)};
-    }
-
-    /** @brief Bump the count and enqueue its upload — once per step, on the surface's lead stream,
-     *      before any barrier. Under capture this records the copy node @ref advance_host refreshes. */
-    [[nodiscard]] expected_t advance(gpu_stream_t &stream) noexcept {
-        staging_[0] += increment_;
-        if (CUresult result = cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(device_epoch_.data()), staging_.data(),
-                                                sizeof(u32_t), stream.get());
+        // Seed one increment below zero so the first advance yields generation 0 (device is the sole source of truth).
+        if (CUresult result = cuMemsetD32Async(reinterpret_cast<CUdeviceptr>(device_generation.data()), 0u - increment,
+                                               1, stream.get());
             result != CUDA_SUCCESS)
-            return expected_t::fail(result, "epoch upload failed");
-        return {};
+            return expected<barrier_generation_t>::fail(result, "generation seed failed");
+        return expected<barrier_generation_t> {std::move(counter)};
     }
 
-    /** @brief The replay-time sibling of @ref advance : bump the pinned slot the captured copy node
-     *      reads — once before every @c cuGraphLaunch of a step containing this surface's barriers. */
-    void advance_host() noexcept { staging_[0] += increment_; }
+    /** @brief Enqueue the one-thread device increment — once per step, on the surface's lead stream,
+     *      before any barrier. Capture-safe: a captured region re-runs the bump on every replay. */
+    [[nodiscard]] expected_t advance(gpu_stream_t &stream) noexcept;
 
   private:
-    /** @brief The borrowed one-scalar device destination the barriers spin against. */
-    u32r1_span_t device_epoch_ {};
-    /** @brief The pinned slot holding THE count — the address the (possibly captured) upload reads. */
-    u32r1_tensor_pinned_t staging_ {};
+    /** @brief The borrowed one-scalar device destination the barriers spin against and @ref advance bumps. */
+    u32r1_span_t device_generation_ {};
     /** @brief One step's advance — the arrivals a barrier waits for. */
     u32_t increment_ = 0;
 };
@@ -890,8 +891,8 @@ struct epoch_counter_t {
  */
 struct switch_to_gpu_t {
     explicit switch_to_gpu_t(gpu_stream_t &stream) noexcept : ok_(cuCtxPushCurrent(stream.context()) == CUDA_SUCCESS) {}
-    switch_to_gpu_t(switch_to_gpu_t const const &) = delete;
-    switch_to_gpu_t &operator=(switch_to_gpu_t const const &) = delete;
+    switch_to_gpu_t(switch_to_gpu_t const &) = delete;
+    switch_to_gpu_t &operator=(switch_to_gpu_t const &) = delete;
     ~switch_to_gpu_t() noexcept {
         if (ok_) cuCtxPopCurrent(nullptr);
     }
