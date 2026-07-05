@@ -5,7 +5,7 @@
  *  @author Ash Vardanian
  *  @date July 3, 2026
  */
-#include "transformer_block.cuh"
+#include "cuda_core/transformer_block.cuh"
 
 namespace unum::uform::core {
 
@@ -71,7 +71,7 @@ __global__ void rmsnorm_scale_grad_kernel(bf16r2_view_t input, f32r1_view_t inve
 
 /** @brief Inverted keyed dropout, in place — external linkage; see the header. The @p salt selects the
  *      site (per layer, per residual join) and @p epoch , read from device memory, advances the mask per
- *      step; @ref keyed_uniform re-derives the identical keep decision wherever this runs. */
+ *      step; @ref splitmix64_hash_t re-derives the identical keep decision wherever this runs. */
 __global__ void dropout_kernel(bf16r1_span_t values, u32r1_view_t epoch, u32_t salt, f32_t drop_probability) {
     u32_t const key = salt ^ (epoch[0] * 2654435761u);
     f32_t const keep_scale = 1.0f / (1.0f - drop_probability);
@@ -79,7 +79,7 @@ __global__ void dropout_kernel(bf16r1_span_t values, u32r1_view_t epoch, u32_t s
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
     for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < total;
          index += stride) {
-        f32_t const draw = keyed_uniform(static_cast<u32_t>(index), key);
+        f32_t const draw = static_cast<f32_t>(splitmix64_hash_t {}(key, index) >> 40) * 0x1.0p-24f;
         f32_t const value = __bfloat162float(values[index]);
         values[index] = __float2bfloat16_rn(draw < drop_probability ? 0.0f : value * keep_scale);
     }
@@ -565,8 +565,8 @@ expected_t sdpa_plan_t::execute(cudnnHandle_t handle, void *workspace) noexcept 
     return {};
 }
 
-expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &arena, cublaslt_session_t const &blas,
-                                                                  cudnn_session_t const &cudnn,
+expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &arena, cublaslt_session_t &blas,
+                                                                  cudnn_session_t &cudnn,
                                                                   transformer_block_config_t config) noexcept {
     if (config.hidden == 0 || config.hidden % transformer_head_dim_k != 0)
         return expected<transformer_block_bf16_t>::fail(status_t::shape_unsupported_k,
@@ -667,7 +667,7 @@ expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &a
 
 expected_t transformer_block_bf16_t::forward(bf16r2_view_t input, bf16r2_span_t output, u32r1_view_t segment_offsets,
                                              u32r1_view_t segment_lengths, rope_angles_view_t angles,
-                                             i16r2_view_t coords, gpu_stream_t const &stream) noexcept {
+                                             i16r2_view_t coords, gpu_stream_t &stream) noexcept {
     std::size_t const tokens = input.extent(0);
     u32_t const hidden = config_.hidden;
     u32_t const ffn = config_.ffn_expansion * hidden;
@@ -688,12 +688,11 @@ expected_t transformer_block_bf16_t::forward(bf16r2_view_t input, bf16r2_span_t 
     // never a shadow scalar. Resizing within the reserved capacity moves no address, and the `tokens
     // <= max_tokens` check above guarantees every one of these succeeds.
 
-    bool const resized =
-        input_stash_.try_resize({tokens, hidden}) && normalized_.try_resize({tokens, hidden}) &&
-        qkv_.try_resize({tokens, 3 * hidden}) && query_prenorm_.try_resize({tokens, hidden}) &&
-        key_prenorm_.try_resize({tokens, hidden}) && attn_output_.try_resize({tokens, hidden}) &&
-        attn_residual_.try_resize({tokens, hidden}) && mlp_normalized_.try_resize({tokens, hidden}) &&
-        gate_up_.try_resize({tokens, 2 * ffn}) && silu_up_.try_resize({tokens, ffn});
+    bool const resized = input_stash_.try_resize({tokens, hidden}) && normalized_.try_resize({tokens, hidden}) &&
+                         qkv_.try_resize({tokens, 3 * hidden}) && query_prenorm_.try_resize({tokens, hidden}) &&
+                         key_prenorm_.try_resize({tokens, hidden}) && attn_output_.try_resize({tokens, hidden}) &&
+                         attn_residual_.try_resize({tokens, hidden}) && mlp_normalized_.try_resize({tokens, hidden}) &&
+                         gate_up_.try_resize({tokens, 2 * ffn}) && silu_up_.try_resize({tokens, ffn});
     if (!resized)
         return expected_t::fail(status_t::shape_unsupported_k, "activation stashes cannot hold {} tokens (baked {})",
                                 tokens, config_.max_tokens);
@@ -715,8 +714,8 @@ expected_t transformer_block_bf16_t::forward(bf16r2_view_t input, bf16r2_span_t 
                                         pre_inverse_rms_.span(), epsilon);
     if (!launched) return launched;
     // Fused QKV projection into the packed [tokens, 3·hidden] block.
-    if (expected_t product = plans_[plan_qkv_forward_k].matmul(*blas_, normalized_.data(), qkv_weight_.data(),
-                                                               qkv_.data(), 0.0f, blas_workspace_.span(), stream);
+    if (expected_t product = plans_[plan_qkv_forward_k].matmul(*blas_, normalized_.view(), qkv_weight_.view(),
+                                                               qkv_.span(), 0.0f, blas_workspace_.span(), stream);
         !product)
         return product;
     // Unit QK-norm (stashes pre-norm values), then rotation, in place on the packed slices.
@@ -725,12 +724,12 @@ expected_t transformer_block_bf16_t::forward(bf16r2_view_t input, bf16r2_span_t 
         static_cast<u32_t>(divide_round_up(head_vectors * warp_size_k, kernel_block_size_default_k)), 1u, 1u};
     u32_t const query_offset = 0u, key_offset = hidden;
     launched = launch_kernel(reinterpret_cast<void const *>(&transformer_qk_norm_forward_kernel_), vector_grid,
-                             block_shape, stream, qkv_.span(), query_prenorm_.span(), query_inverse_rms_.span(),
-                             heads, query_offset, epsilon);
+                             block_shape, stream, qkv_.span(), query_prenorm_.span(), query_inverse_rms_.span(), heads,
+                             query_offset, epsilon);
     if (launched)
         launched = launch_kernel(reinterpret_cast<void const *>(&transformer_qk_norm_forward_kernel_), vector_grid,
-                                 block_shape, stream, qkv_.span(), key_prenorm_.span(), key_inverse_rms_.span(),
-                                 heads, key_offset, epsilon);
+                                 block_shape, stream, qkv_.span(), key_prenorm_.span(), key_inverse_rms_.span(), heads,
+                                 key_offset, epsilon);
     if (!launched) return launched;
     f32_t const forward_sign = 1.0f;
     std::size_t const rope_slots = head_vectors * (transformer_head_dim_k >> 1u);
@@ -746,8 +745,8 @@ expected_t transformer_block_bf16_t::forward(bf16r2_view_t input, bf16r2_span_t 
     if (expected_t attended = run_sdpa_forward_(segment_offsets, segment_lengths, stream); !attended) return attended;
 
     // Out-projection, first residual, post-attention RMSNorm.
-    if (expected_t product = plans_[plan_out_forward_k].matmul(*blas_, attn_output_.data(), out_weight_.data(),
-                                                               attn_residual_.data(), 0.0f, blas_workspace_.span(),
+    if (expected_t product = plans_[plan_out_forward_k].matmul(*blas_, attn_output_.view(), out_weight_.view(),
+                                                               attn_residual_.span(), 0.0f, blas_workspace_.span(),
                                                                stream);
         !product)
         return product;
@@ -761,18 +760,18 @@ expected_t transformer_block_bf16_t::forward(bf16r2_view_t input, bf16r2_span_t 
     if (!launched) return launched;
 
     // SwiGLU MLP: fused gate/up product, SiLU·up, down product into the caller's output, residual.
-    if (expected_t product = plans_[plan_gate_up_forward_k].matmul(*blas_, mlp_normalized_.data(),
-                                                                   gate_up_weight_.data(), gate_up_.data(), 0.0f,
+    if (expected_t product = plans_[plan_gate_up_forward_k].matmul(*blas_, mlp_normalized_.view(),
+                                                                   gate_up_weight_.view(), gate_up_.span(), 0.0f,
                                                                    blas_workspace_.span(), stream);
         !product)
         return product;
-    launched = launch_kernel(reinterpret_cast<void const *>(&transformer_swiglu_forward_kernel_),
-                             dim3 {static_cast<u32_t>(divide_round_up(tokens * ffn, kernel_block_size_default_k)), 1u,
-                                   1u},
-                             block_shape, stream, gate_up_.view(), silu_up_.span());
+    launched = launch_kernel(
+        reinterpret_cast<void const *>(&transformer_swiglu_forward_kernel_),
+        dim3 {static_cast<u32_t>(divide_round_up(tokens * ffn, kernel_block_size_default_k)), 1u, 1u}, block_shape,
+        stream, gate_up_.view(), silu_up_.span());
     if (!launched) return launched;
-    if (expected_t product = plans_[plan_down_forward_k].matmul(*blas_, silu_up_.data(), down_weight_.data(),
-                                                                output.data(), 0.0f, blas_workspace_.span(), stream);
+    if (expected_t product = plans_[plan_down_forward_k].matmul(*blas_, silu_up_.view(), down_weight_.view(), output,
+                                                                0.0f, blas_workspace_.span(), stream);
         !product)
         return product;
     return launch_kernel(reinterpret_cast<void const *>(&transformer_residual_add_kernel_), cell_grid, block_shape,
@@ -782,7 +781,7 @@ expected_t transformer_block_bf16_t::forward(bf16r2_view_t input, bf16r2_span_t 
 expected_t transformer_block_bf16_t::backward(bf16r2_view_t output_grad, bf16r2_span_t input_grad,
                                               u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
                                               rope_angles_view_t angles, i16r2_view_t coords,
-                                              gpu_stream_t const &stream) noexcept {
+                                              gpu_stream_t &stream) noexcept {
     std::size_t const tokens = input_stash_.extent(0);
     u32_t const hidden = config_.hidden;
     u32_t const ffn = config_.ffn_expansion * hidden;
@@ -808,14 +807,12 @@ expected_t transformer_block_bf16_t::backward(bf16r2_view_t output_grad, bf16r2_
     dim3 const channel_grid {static_cast<u32_t>(divide_round_up(hidden, kernel_block_size_default_k)), 1u, 1u};
 
     // MLP backward: down → SiLU·up → gate/up, weight gradients along the way.
-    if (expected_t product = plans_[plan_down_data_grad_k].matmul(*blas_, output_grad.data(), down_weight_.data(),
-                                                                  silu_up_grad_.data(), 0.0f, blas_workspace_.span(),
-                                                                  stream);
+    if (expected_t product = plans_[plan_down_data_grad_k].matmul(
+            *blas_, output_grad, down_weight_.view(), silu_up_grad_.span(), 0.0f, blas_workspace_.span(), stream);
         !product)
         return product;
-    if (expected_t product = plans_[plan_down_weight_grad_k].matmul(*blas_, output_grad.data(), silu_up_.data(),
-                                                                    down_weight_grad_.data(), 0.0f,
-                                                                    blas_workspace_.span(), stream);
+    if (expected_t product = plans_[plan_down_weight_grad_k].matmul(
+            *blas_, output_grad, silu_up_.view(), down_weight_grad_.span(), 0.0f, blas_workspace_.span(), stream);
         !product)
         return product;
     expected_t launched = launch_kernel(
@@ -823,13 +820,13 @@ expected_t transformer_block_bf16_t::backward(bf16r2_view_t output_grad, bf16r2_
         dim3 {static_cast<u32_t>(divide_round_up(tokens * ffn, kernel_block_size_default_k)), 1u, 1u}, block_shape,
         stream, gate_up_.view(), silu_up_grad_.view(), gate_up_grad_.span());
     if (!launched) return launched;
-    if (expected_t product = plans_[plan_gate_up_data_grad_k].matmul(*blas_, gate_up_grad_.data(),
-                                                                     gate_up_weight_.data(), hidden_grad_a_.data(),
+    if (expected_t product = plans_[plan_gate_up_data_grad_k].matmul(*blas_, gate_up_grad_.view(),
+                                                                     gate_up_weight_.view(), hidden_grad_a_.span(),
                                                                      0.0f, blas_workspace_.span(), stream);
         !product)
         return product;
     if (expected_t product = plans_[plan_gate_up_weight_grad_k].matmul(
-            *blas_, gate_up_grad_.data(), mlp_normalized_.data(), gate_up_weight_grad_.data(), 0.0f,
+            *blas_, gate_up_grad_.view(), mlp_normalized_.view(), gate_up_weight_grad_.span(), 0.0f,
             blas_workspace_.span(), stream);
         !product)
         return product;
@@ -845,20 +842,20 @@ expected_t transformer_block_bf16_t::backward(bf16r2_view_t output_grad, bf16r2_
                              attn_residual_.view(), post_norm_scale_.view(), post_inverse_rms_.view(),
                              hidden_grad_a_.view(), hidden_grad_b_.span(), accumulate);
     if (launched)
-        launched = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_scale_grad_kernel), channel_grid,
-                                 block_shape, stream, attn_residual_.view(), post_inverse_rms_.view(),
-                                 hidden_grad_a_.view(), post_norm_scale_grad_.span());
+        launched = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_scale_grad_kernel), channel_grid, block_shape,
+                                 stream, attn_residual_.view(), post_inverse_rms_.view(), hidden_grad_a_.view(),
+                                 post_norm_scale_grad_.span());
     if (!launched) return launched;
     // The attn-residual gradient (hidden_grad_b_) now carries d(attn_residual).
 
     // Out-projection backward.
-    if (expected_t product = plans_[plan_out_data_grad_k].matmul(*blas_, hidden_grad_b_.data(), out_weight_.data(),
-                                                                 hidden_grad_a_.data(), 0.0f, blas_workspace_.span(),
+    if (expected_t product = plans_[plan_out_data_grad_k].matmul(*blas_, hidden_grad_b_.view(), out_weight_.view(),
+                                                                 hidden_grad_a_.span(), 0.0f, blas_workspace_.span(),
                                                                  stream);
         !product)
         return product;
-    if (expected_t product = plans_[plan_out_weight_grad_k].matmul(*blas_, hidden_grad_b_.data(), attn_output_.data(),
-                                                                   out_weight_grad_.data(), 0.0f,
+    if (expected_t product = plans_[plan_out_weight_grad_k].matmul(*blas_, hidden_grad_b_.view(), attn_output_.view(),
+                                                                   out_weight_grad_.span(), 0.0f,
                                                                    blas_workspace_.span(), stream);
         !product)
         return product;
@@ -889,11 +886,11 @@ expected_t transformer_block_bf16_t::backward(bf16r2_view_t output_grad, bf16r2_
 
     // QKV projection backward.
     if (expected_t product = plans_[plan_qkv_data_grad_k].matmul(
-            *blas_, qkv_grad_.data(), qkv_weight_.data(), hidden_grad_a_.data(), 0.0f, blas_workspace_.span(), stream);
+            *blas_, qkv_grad_.view(), qkv_weight_.view(), hidden_grad_a_.span(), 0.0f, blas_workspace_.span(), stream);
         !product)
         return product;
-    if (expected_t product = plans_[plan_qkv_weight_grad_k].matmul(*blas_, qkv_grad_.data(), normalized_.data(),
-                                                                   qkv_weight_grad_.data(), 0.0f,
+    if (expected_t product = plans_[plan_qkv_weight_grad_k].matmul(*blas_, qkv_grad_.view(), normalized_.view(),
+                                                                   qkv_weight_grad_.span(), 0.0f,
                                                                    blas_workspace_.span(), stream);
         !product)
         return product;
@@ -908,9 +905,9 @@ expected_t transformer_block_bf16_t::backward(bf16r2_view_t output_grad, bf16r2_
                              input_stash_.view(), pre_norm_scale_.view(), pre_inverse_rms_.view(),
                              hidden_grad_a_.view(), input_grad, accumulate);
     if (launched)
-        launched = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_scale_grad_kernel), channel_grid,
-                                 block_shape, stream, input_stash_.view(), pre_inverse_rms_.view(),
-                                 hidden_grad_a_.view(), pre_norm_scale_grad_.span());
+        launched = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_scale_grad_kernel), channel_grid, block_shape,
+                                 stream, input_stash_.view(), pre_inverse_rms_.view(), hidden_grad_a_.view(),
+                                 pre_norm_scale_grad_.span());
     return launched;
 }
 
@@ -1118,7 +1115,7 @@ expected_t transformer_block_bf16_t::build_sdpa_(gpu_arena_t &arena, gpu_arena_a
 }
 
 expected_t transformer_block_bf16_t::stage_ragged_offsets_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                                           gpu_stream_t const &stream) noexcept {
+                                                           gpu_stream_t &stream) noexcept {
     return launch_kernel(reinterpret_cast<void const *>(&transformer_ragged_offsets_kernel_), dim3 {1u, 1u, 1u},
                          dim3 {warp_size_k, 1u, 1u}, stream, segment_offsets, segment_lengths,
                          ragged_qkv_offsets_.span(), ragged_hidden_offsets_.span(), ragged_seq_lens_.span(),
@@ -1126,7 +1123,7 @@ expected_t transformer_block_bf16_t::stage_ragged_offsets_(u32r1_view_t segment_
 }
 
 expected_t transformer_block_bf16_t::run_sdpa_forward_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                                       gpu_stream_t const &stream) noexcept {
+                                                       gpu_stream_t &stream) noexcept {
     if (expected_t bound = cudnn_->bind(stream); !bound) return bound;
     if (expected_t staged = stage_ragged_offsets_(segment_offsets, segment_lengths, stream); !staged) return staged;
     forward_sdpa_.pointers[forward_seq_slot_] = ragged_seq_lens_.data();
@@ -1138,7 +1135,7 @@ expected_t transformer_block_bf16_t::run_sdpa_forward_(u32r1_view_t segment_offs
 }
 
 expected_t transformer_block_bf16_t::run_sdpa_backward_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                                        gpu_stream_t const &stream) noexcept {
+                                                        gpu_stream_t &stream) noexcept {
     if (expected_t bound = cudnn_->bind(stream); !bound) return bound;
     if (expected_t staged = stage_ragged_offsets_(segment_offsets, segment_lengths, stream); !staged) return staged;
     backward_sdpa_.pointers[backward_seq_slot_] = ragged_seq_lens_.data();
@@ -1154,7 +1151,7 @@ expected_t transformer_block_bf16_t::run_sdpa_backward_(u32r1_view_t segment_off
 
 expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t output, u32r1_view_t segment_offsets,
                                              u32r1_view_t segment_lengths, rope_angles_view_t angles,
-                                             i16r2_view_t coords, gpu_stream_t const &stream) noexcept {
+                                             i16r2_view_t coords, gpu_stream_t &stream) noexcept {
     std::size_t const tokens = input.extent(0);
     u32_t const hidden = config_.hidden;
     u32_t const ffn = config_.ffn_expansion * hidden;
@@ -1167,12 +1164,11 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
     // No backward reads any of these, but each still needs its live extent set before `.span()` /
     // `.view()` reflects this step's token count rather than the baked `max_tokens` capacity.
 
-    bool const resized =
-        normalized_.try_resize({tokens, hidden}) && qkv_.try_resize({tokens, 3 * hidden}) &&
-        attn_residual_.try_resize({tokens, hidden}) && gate_up_.try_resize({tokens, 2 * ffn}) &&
-        silu_up_.try_resize({tokens, ffn}) && prenorm_scratch_.try_resize({tokens, hidden}) &&
-        normalized_e4m3_.try_resize({tokens, hidden}) && attn_output_e4m3_.try_resize({tokens, hidden}) &&
-        silu_up_e4m3_.try_resize({tokens, ffn});
+    bool const resized = normalized_.try_resize({tokens, hidden}) && qkv_.try_resize({tokens, 3 * hidden}) &&
+                         attn_residual_.try_resize({tokens, hidden}) && gate_up_.try_resize({tokens, 2 * ffn}) &&
+                         silu_up_.try_resize({tokens, ffn}) && prenorm_scratch_.try_resize({tokens, hidden}) &&
+                         normalized_e4m3_.try_resize({tokens, hidden}) &&
+                         attn_output_e4m3_.try_resize({tokens, hidden}) && silu_up_e4m3_.try_resize({tokens, ffn});
     if (!resized)
         return expected_t::fail(status_t::shape_unsupported_k, "activation stashes cannot hold {} tokens (baked {})",
                                 tokens, config_.max_tokens);
@@ -1192,8 +1188,8 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
                                  block_shape, stream, normalized_.view(), normalized_e4m3_.span(),
                                  token_scales_.span());
     if (!launched) return launched;
-    if (expected_t product = plans_[plan_qkv_k].matmul(*blas_, normalized_e4m3_.data(), qkv_weight_e4m3_.data(),
-                                                       qkv_.data(), 0.0f, blas_workspace_.span(), stream);
+    if (expected_t product = plans_[plan_qkv_k].matmul(*blas_, normalized_e4m3_.view(), qkv_weight_e4m3_.view(),
+                                                       qkv_.span(), 0.0f, blas_workspace_.span(), stream);
         !product)
         return product;
     launched = launch_kernel(
@@ -1264,8 +1260,8 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
 
     // Out-projection consumes the unpacked E4M3 attention output; the SDPA's `scale_o` is the unit,
     // so no activation fold is owed here.
-    if (expected_t product = plans_[plan_out_k].matmul(*blas_, attn_output_e4m3_.data(), out_weight_e4m3_.data(),
-                                                       attn_residual_.data(), 0.0f, blas_workspace_.span(), stream);
+    if (expected_t product = plans_[plan_out_k].matmul(*blas_, attn_output_e4m3_.view(), out_weight_e4m3_.view(),
+                                                       attn_residual_.span(), 0.0f, blas_workspace_.span(), stream);
         !product)
         return product;
     launched = launch_kernel(reinterpret_cast<void const *>(&transformer_residual_add_kernel_), cell_grid, block_shape,
@@ -1279,8 +1275,8 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
                                  block_shape, stream, normalized_.view(), normalized_e4m3_.span(),
                                  token_scales_.span());
     if (!launched) return launched;
-    if (expected_t product = plans_[plan_gate_up_k].matmul(*blas_, normalized_e4m3_.data(), gate_up_weight_e4m3_.data(),
-                                                           gate_up_.data(), 0.0f, blas_workspace_.span(), stream);
+    if (expected_t product = plans_[plan_gate_up_k].matmul(*blas_, normalized_e4m3_.view(), gate_up_weight_e4m3_.view(),
+                                                           gate_up_.span(), 0.0f, blas_workspace_.span(), stream);
         !product)
         return product;
     dim3 const ffn_grid {static_cast<u32_t>(divide_round_up(tokens * ffn, kernel_block_size_default_k)), 1u, 1u};
@@ -1295,8 +1291,8 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
         launched = launch_kernel(reinterpret_cast<void const *>(&transformer_token_quantize_kernel_), token_grid,
                                  block_shape, stream, silu_up_.view(), silu_up_e4m3_.span(), token_scales_.span());
     if (!launched) return launched;
-    if (expected_t product = plans_[plan_down_k].matmul(*blas_, silu_up_e4m3_.data(), down_weight_e4m3_.data(),
-                                                        output.data(), 0.0f, blas_workspace_.span(), stream);
+    if (expected_t product = plans_[plan_down_k].matmul(*blas_, silu_up_e4m3_.view(), down_weight_e4m3_.view(), output,
+                                                        0.0f, blas_workspace_.span(), stream);
         !product)
         return product;
     launched = launch_kernel(reinterpret_cast<void const *>(&transformer_token_rescale_kernel_), cell_grid, block_shape,
@@ -1306,7 +1302,7 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
                          stream, output.flatten<1>(), attn_residual_.view().flatten<1>());
 }
 
-expected_t transformer_block_e4m3_t::run_sdpa_(u32r1_view_t segment_lengths, gpu_stream_t const &stream) noexcept {
+expected_t transformer_block_e4m3_t::run_sdpa_(u32r1_view_t segment_lengths, gpu_stream_t &stream) noexcept {
     if (expected_t bound = cudnn_->bind(stream); !bound) return bound;
     if (expected_t staged = launch_kernel(reinterpret_cast<void const *>(&transformer_seq_lens_cast_kernel_),
                                           dim3 {1u, 1u, 1u}, dim3 {warp_size_k, 1u, 1u}, stream, segment_lengths,
@@ -1319,7 +1315,7 @@ expected_t transformer_block_e4m3_t::run_sdpa_(u32r1_view_t segment_lengths, gpu
 }
 
 expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gpu_arena_t &arena,
-                                                                              gpu_stream_t const &stream) noexcept {
+                                                                              gpu_stream_t &stream) noexcept {
     using result_t = expected<transformer_block_e4m3_t>;
     transformer_block_e4m3_t block;
     block.config_ = config_;

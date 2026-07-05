@@ -48,17 +48,18 @@
  */
 #pragma once
 
-#include <array>   // `std::array` — the fixed-size pinned-plan tables
-#include <cmath>   // `sqrtf`, `expf`
 #include <cstddef> // `std::size_t`
+#include <cmath>   // `sqrtf`, `expf`
+
+#include <array> // `std::array` — the fixed-size pinned-plan tables
 
 #include <cuda.h> // `cuMemsetD8Async`, `cuMemcpyDtoDAsync`
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "types.cuh"             // `expected`, `expected_t`, `status_t`, `differentiable_weights_t`
-#include "multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`, `modality_t`
-#include "transformer_block.cuh" // the block stack, `rope_angles_t`, `sdpa_plan_t`, the shared `rmsnorm_*` kernels
+#include "cuda_core/types.cuh"            // `expected`, `expected_t`, `status_t`, `differentiable_weights_t`
+#include "cuda_core/multimodal_batch.cuh" // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`, `modality_t`
+#include "cuda_core/transformer_block.cuh" // the block stack, `rope_angles_t`, `sdpa_plan_t`, the shared `rmsnorm_*` kernels
 
 namespace unum::uform::core {
 
@@ -105,25 +106,25 @@ struct encoder_tower_bf16_t {
     /** @brief Allocate and plan the whole tower off @p arena — token / media entries, @c depth blocks,
      *      the attention pool, and the head — validating each present modality's patch count against
      *      @p shape 's @c max_columns_per_row . */
-    [[nodiscard]] static expected<encoder_tower_bf16_t> make(gpu_arena_t &arena, cublaslt_session_t const &blas,
-                                                             cudnn_session_t const &cudnn,
-                                                             encoder_tower_config_t config,
+    [[nodiscard]] static expected<encoder_tower_bf16_t> make(gpu_arena_t &arena, cublaslt_session_t &blas,
+                                                             cudnn_session_t &cudnn, encoder_tower_config_t config,
                                                              multimodal_batch_shape_t shape) noexcept;
 
     /** @brief One tower forward over @p batch — pure enqueue; every stash the backward reads is written
-     *      along the way. @p coords is the frontend-derived @b [tokens,3] per-token rotary @b (t,h,w) ,
-     *      borrowed. Empty @p vertices ⇒ masked path (stops after the final norm; @ref normalized
-     *      exposed). @b [segments,hidden] @p vertices ⇒ contrastive path (attention pool → head). */
-    [[nodiscard]] expected_t forward(multimodal_batch_on_gpu_t const &batch, i16r2_view_t coords,
-                                     bf16r2_span_t vertices, gpu_stream_t const &stream) noexcept;
+     *      along the way, including the per-token rotary @b (t,h,w) coordinates @ref coords_ derives fresh
+     *      from @p batch 's own geometry. Empty @p vertices ⇒ masked path (stops after the final norm;
+     *      @ref normalized exposed). @b [segments,hidden] @p vertices ⇒ contrastive path (attention pool
+     *      → head). */
+    [[nodiscard]] expected_t forward(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t vertices,
+                                     gpu_stream_t &stream) noexcept;
 
     /** @brief Tower backward from the loss's force to every weight-gradient buffer (and the embedding
      *      table's, deterministically). Populated @p vertices_grad drives the contrastive path; populated
      *      @p hidden_grad the masked path; both present ⇒ the masked force is added onto the pooled force
-     *      at the final-norm states. @p coords must match the forward's. */
+     *      at the final-norm states. Reuses @ref coords_ from the paired forward — the caller must not run
+     *      another forward in between. */
     [[nodiscard]] expected_t backward(bf16r2_view_t vertices_grad, bf16r2_view_t hidden_grad,
-                                      multimodal_batch_on_gpu_t const &batch, i16r2_view_t coords,
-                                      gpu_stream_t const &stream) noexcept;
+                                      multimodal_batch_on_gpu_t const &batch, gpu_stream_t &stream) noexcept;
 
     /** @brief Fill @p slots with every optimizer-facing weight in the canonical reduction order:
      *      entry → media projections → per-layer block weights → final norm → pool query → head. */
@@ -132,7 +133,7 @@ struct encoder_tower_bf16_t {
     /** @brief Quantize this tower's block stack into the E4M3 inference twin (entries / pool / head stay
      *      BFloat16) — the twin's only constructor. */
     [[nodiscard]] expected<struct encoder_tower_e4m3_t> quantize_weights(gpu_arena_t &arena,
-                                                                         gpu_stream_t const &stream) noexcept;
+                                                                         gpu_stream_t &stream) noexcept;
 
     /** @brief The per-token final-norm states — the masked head's input on the masked path. */
     [[nodiscard]] bf16r2_view_t normalized() const noexcept { return normalized_.view(); }
@@ -164,8 +165,8 @@ struct encoder_tower_bf16_t {
 
     /** @brief The baked geometry and the two borrowed vendor sessions — never owned here. */
     encoder_tower_config_t config_ {};
-    cublaslt_session_t const *blas_ = nullptr;
-    cudnn_session_t const *cudnn_ = nullptr;
+    cublaslt_session_t *blas_ = nullptr;
+    cudnn_session_t *cudnn_ = nullptr;
 
     /** @brief The @c depth transformer blocks, owned in order. */
     array<transformer_block_bf16_t> blocks_ {};
@@ -188,10 +189,13 @@ struct encoder_tower_bf16_t {
 
     /** @brief The learned attention-pool query @b [heads,head_dim]=[hidden] and its gradient. */
     bf16r1_tensor_arena_t pool_query_ {}, pool_query_grad_ {};
-    /** @brief The attention pool's cross-SDPA plans (a single broadcast query attends each segment's live
-     *      tokens) and its @b [segments+1]/[segments] Int32 ragged staging behind the one vendor boundary. */
+    /** @brief The attention pool's forward + backward cross-SDPA plans — a single broadcast query attends
+     *      each segment's live tokens. */
     sdpa_plan_t pool_forward_sdpa_ {}, pool_backward_sdpa_ {};
+    /** @brief The pool's @b [segments+1]/[segments] Int32 ragged staging, filled behind the one vendor
+     *      boundary. */
     i32r1_tensor_arena_t pool_ragged_offsets_ {}, pool_ragged_seq_lens_ {};
+    /** @brief The attention pool's SDPA workspace. */
     b8r1_tensor_arena_t pool_workspace_ {};
 
     /** @brief The head's learnable-scale RMSNorm @c γ and its gradient (@b [hidden] vectors). */
@@ -199,9 +203,12 @@ struct encoder_tower_bf16_t {
     /** @brief The head's two @b [hidden,hidden] projections and their gradients. */
     bf16r2_tensor_arena_t head_fc1_ {}, head_fc1_grad_ {}, head_fc2_ {}, head_fc2_grad_ {};
 
-    /** @brief RoPE angle tables (model state); the per-token @b (t,h,w) coordinates are frontend-derived
-     *      and borrowed per call, not owned here. */
+    /** @brief RoPE angle tables (model state). */
     rope_angles_t angles_ {};
+    /** @brief This step's owned per-token @b [tokens,3] rotary @b (t,h,w) coordinates — derived fresh
+     *      every @ref forward from @c batch 's own geometry, resized to the live extent, and reused by
+     *      the paired @ref backward (the caller must not run another forward in between). */
+    i16r2_tensor_arena_t coords_ {};
 
     /** @brief Forward stashes the backward reads, all @b [rows,hidden] : the entry output, the per-token
      *      final-norm states, and the pooled / head activations. */
@@ -238,9 +245,9 @@ struct encoder_tower_bf16_t {
 struct encoder_tower_e4m3_t {
 
     /** @brief One quantized tower forward over @p batch — same dual-mode contract as the training twin,
-     *      forward only. @p coords is the frontend-derived @b [tokens,3] rotary coordinates, borrowed. */
-    [[nodiscard]] expected_t forward(multimodal_batch_on_gpu_t const &batch, i16r2_view_t coords,
-                                     bf16r2_span_t vertices, gpu_stream_t const &stream) noexcept;
+     *      forward only, deriving its own per-token rotary @b (t,h,w) coordinates into @ref coords_ . */
+    [[nodiscard]] expected_t forward(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t vertices,
+                                     gpu_stream_t &stream) noexcept;
 
     /** @brief The per-token final-norm states — the masked head's input on the masked path. */
     [[nodiscard]] bf16r2_view_t normalized() const noexcept { return normalized_.view(); }
@@ -262,33 +269,60 @@ struct encoder_tower_e4m3_t {
     /** @brief Sentinel for a modality with no pinned projection plan. */
     static constexpr std::size_t plan_absent_k = ~std::size_t {0};
 
+    /** @brief The baked geometry and the two borrowed vendor sessions — never owned here. */
     encoder_tower_config_t config_ {};
-    cublaslt_session_t const *blas_ = nullptr;
-    cudnn_session_t const *cudnn_ = nullptr;
+    cublaslt_session_t *blas_ = nullptr;
+    cudnn_session_t *cudnn_ = nullptr;
 
+    /** @brief The @c depth E4M3 transformer blocks, owned in order — the quantized-precision tier. */
     array<transformer_block_e4m3_t> blocks_ {};
 
+    /** @brief The @b [vocabulary,hidden] BFloat16 token embedding table (forward only, no gradient). */
     bf16r2_tensor_arena_t entry_weight_ {};
+    /** @brief The three media patch-projection weights (present per configured modality), BFloat16 —
+     *      image @b [hidden, ph·pw·C] , video @b [hidden, tf·ph·pw·C] , audio @b [hidden, ws] . */
     bf16r2_tensor_arena_t image_projection_ {}, video_projection_ {}, audio_projection_ {};
+    /** @brief The device per-channel pixel mean and inverse-std, uploaded once at make. */
     f32r1_tensor_arena_t image_pixel_mean_ {}, image_pixel_inverse_std_ {};
+    /** @brief Recorded plan-slot bases per present media modality (or @c plan_absent_k ). */
     std::size_t image_plan_base_ = plan_absent_k, video_plan_base_ = plan_absent_k, audio_plan_base_ = plan_absent_k;
 
+    /** @brief The final norm scale — the norm tier stays BFloat16. */
     bf16r1_tensor_arena_t final_norm_scale_ {};
+    /** @brief The learned attention-pool query @b [heads,head_dim]=[hidden] , BFloat16. */
     bf16r1_tensor_arena_t pool_query_ {};
+    /** @brief The attention pool's forward cross-SDPA plan — a single broadcast query attends each
+     *      segment's live tokens (forward only). */
     sdpa_plan_t pool_forward_sdpa_ {};
+    /** @brief The pool's @b [segments+1]/[segments] Int32 ragged staging, filled behind the one vendor
+     *      boundary. */
     i32r1_tensor_arena_t pool_ragged_offsets_ {}, pool_ragged_seq_lens_ {};
+    /** @brief The attention pool's SDPA workspace. */
     b8r1_tensor_arena_t pool_workspace_ {};
+    /** @brief The head's learnable-scale RMSNorm @c γ ( @b [hidden] vector), BFloat16. */
     bf16r1_tensor_arena_t head_norm_scale_ {};
+    /** @brief The head's two @b [hidden,hidden] projections, BFloat16. */
     bf16r2_tensor_arena_t head_fc1_ {}, head_fc2_ {};
 
+    /** @brief RoPE angle tables (model state). */
     rope_angles_t angles_ {};
+    /** @brief This step's owned per-token @b [tokens,3] rotary @b (t,h,w) coordinates — derived fresh
+     *      every @ref forward from @c batch 's own geometry, resized to the live extent. */
+    i16r2_tensor_arena_t coords_ {};
 
+    /** @brief Forward activations, all @b [rows,hidden] : the entry output, the per-token final-norm
+     *      states, and the pooled / head activations — forward only, nothing stashed for a backward. */
     bf16r2_tensor_arena_t entry_output_ {}, normalized_ {}, pooled_ {}, head_normalized_ {}, head_hidden_ {},
         head_activated_ {};
+    /** @brief Float32 @c 1/rms for the final ( @b [tokens] ) and head ( @b [segments] ) norms. */
     f32r1_tensor_arena_t final_inverse_rms_ {}, head_inverse_rms_ {};
+    /** @brief The block stack's @b [tokens,hidden] activation ping-pong. */
     bf16r2_tensor_arena_t activations_a_ {}, activations_b_ {};
+    /** @brief The @b [rows,patch_pixels] patch-cut scratch the media entries fill before their projection. */
     bf16r2_tensor_arena_t patch_scratch_ {};
+    /** @brief The shared cuBLASLt scratch, sized to the max any pinned plan needs. */
     b8r1_tensor_arena_t workspace_ {};
+    /** @brief The pinned products, indexed by the @c plan_*_k slot constants. */
     std::array<cublaslt_plan_t, plan_capacity_k> plans_ {};
 };
 

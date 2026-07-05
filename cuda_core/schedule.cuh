@@ -582,7 +582,9 @@ struct cublaslt_plan_t {
     cublaslt_plan_t(cublaslt_plan_t &&other) noexcept
         : description_(std::exchange(other.description_, nullptr)), a_layout_(std::exchange(other.a_layout_, nullptr)),
           b_layout_(std::exchange(other.b_layout_, nullptr)), c_layout_(std::exchange(other.c_layout_, nullptr)),
-          algorithm_(other.algorithm_), workspace_bytes_(std::exchange(other.workspace_bytes_, 0)) {}
+          algorithm_(other.algorithm_), workspace_bytes_(std::exchange(other.workspace_bytes_, 0)),
+          a_cols_(std::exchange(other.a_cols_, 0)), b_cols_(std::exchange(other.b_cols_, 0)),
+          c_cols_(std::exchange(other.c_cols_, 0)) {}
     cublaslt_plan_t &operator=(cublaslt_plan_t &&other) noexcept {
         if (this != &other) {
             destroy_();
@@ -592,6 +594,9 @@ struct cublaslt_plan_t {
             c_layout_ = std::exchange(other.c_layout_, nullptr);
             algorithm_ = other.algorithm_;
             workspace_bytes_ = std::exchange(other.workspace_bytes_, 0);
+            a_cols_ = std::exchange(other.a_cols_, 0);
+            b_cols_ = std::exchange(other.b_cols_, 0);
+            c_cols_ = std::exchange(other.c_cols_, 0);
         }
         return *this;
     }
@@ -681,6 +686,9 @@ struct cublaslt_plan_t {
             if (splits > 1 || reduction != CUBLASLT_REDUCTION_SCHEME_NONE) continue;
             plan.algorithm_ = heuristic.algo;
             plan.workspace_bytes_ = heuristic.workspaceSize;
+            plan.a_cols_ = config.a_cols;
+            plan.b_cols_ = config.b_cols;
+            plan.c_cols_ = config.c_cols;
             return expected<cublaslt_plan_t> {std::move(plan)};
         }
         return expected<cublaslt_plan_t>::fail(
@@ -693,10 +701,38 @@ struct cublaslt_plan_t {
      *      maximum over its plans. */
     [[nodiscard]] std::size_t workspace_bytes() const noexcept { return workspace_bytes_; }
 
-    /** @brief Enqueue @c C = A·B + beta·C on @p stream — a fixed tensor-core kernel, no planning, no
-     *      allocation. Operand pointers are the vendor boundary; extents were pinned at @ref make . */
-    [[nodiscard]] expected_t matmul(cublaslt_session_t &session, void const *a, void const *b, void *c, f32_t beta,
-                                    b8r1_span_t workspace, gpu_stream_t &stream) const noexcept {
+  private:
+    /** @brief The shared enqueue: the row extent of each operand rides its view (set fresh every call —
+     *      no persistent layout state to revert), while the inner extents must equal the columns the
+     *      plan pinned at @ref make . */
+    /** @brief The row-major leading dimension (elements between consecutive rows) of an operand view —
+     *      @c extent(1) for a contiguous buffer, the parent width for a column slice. */
+    template <typename view_type_>
+    [[nodiscard]] static u32_t leading_dimension_(view_type_ const &view) noexcept {
+        using element_type = typename view_type_::value_type;
+        return static_cast<u32_t>(view.stride_bytes(0) /
+                                  static_cast<typename view_type_::difference_type>(sizeof(element_type)));
+    }
+
+    [[nodiscard]] expected_t run_(cublaslt_session_t const &session, void const *a, u32_t a_rows, u32_t a_cols,
+                                  u32_t a_ld, void const *b, u32_t b_rows, u32_t b_cols, u32_t b_ld, void *c,
+                                  u32_t c_rows, u32_t c_cols, u32_t c_ld, f32_t beta, b8r1_span_t workspace,
+                                  gpu_stream_t const &stream) const noexcept {
+        if (a_cols != a_cols_ || b_cols != b_cols_ || c_cols != c_cols_)
+            return expected_t::fail(status_t::shape_unsupported_k,
+                                    "operand columns {{{},{},{}}} disagree with the plan {{{},{},{}}}", a_cols, b_cols,
+                                    c_cols, a_cols_, b_cols_, c_cols_);
+        auto set_shape = [](cublasLtMatrixLayout_t layout, u32_t rows, u32_t leading) noexcept {
+            std::uint64_t const row_extent = rows;
+            std::int64_t const stride = leading;
+            return cublasLtMatrixLayoutSetAttribute(layout, CUBLASLT_MATRIX_LAYOUT_ROWS, &row_extent,
+                                                    sizeof(row_extent)) == CUBLAS_STATUS_SUCCESS &&
+                   cublasLtMatrixLayoutSetAttribute(layout, CUBLASLT_MATRIX_LAYOUT_LD, &stride, sizeof(stride)) ==
+                       CUBLAS_STATUS_SUCCESS;
+        };
+        if (!set_shape(a_layout_, a_rows, a_ld) || !set_shape(b_layout_, b_rows, b_ld) ||
+            !set_shape(c_layout_, c_rows, c_ld))
+            return expected_t::fail(status_t::cuda_error_k, "layout row/stride update failed");
         f32_t const alpha = 1.0f;
         if (cublasStatus_t status = cublasLtMatmul(session.get(), description_, &alpha, a, a_layout_, b, b_layout_,
                                                    &beta, c, c_layout_, c, c_layout_, &algorithm_, workspace.data(),
@@ -705,6 +741,35 @@ struct cublaslt_plan_t {
             return expected_t::fail(status_t::cuda_error_k, "tensor-core matmul failed (status={})",
                                     static_cast<int>(status));
         return {};
+    }
+
+  public:
+    /** @brief BFloat16 operands. Rows ride the views; the K/N columns are checked against the plan. */
+    [[nodiscard]] expected_t matmul(cublaslt_session_t const &session, bf16r2_view_t a, bf16r2_view_t b,
+                                    bf16r2_span_t c, f32_t beta, b8r1_span_t workspace,
+                                    gpu_stream_t const &stream) const noexcept {
+        return run_(session, a.data(), static_cast<u32_t>(a.extent(0)), static_cast<u32_t>(a.extent(1)),
+                    leading_dimension_(a), b.data(), static_cast<u32_t>(b.extent(0)), static_cast<u32_t>(b.extent(1)),
+                    leading_dimension_(b), c.data(), static_cast<u32_t>(c.extent(0)), static_cast<u32_t>(c.extent(1)),
+                    leading_dimension_(c), beta, workspace, stream);
+    }
+    /** @brief E4M3 operands (descales pinned at make); C is a BFloat16 activation surface. */
+    [[nodiscard]] expected_t matmul(cublaslt_session_t const &session, e4m3r2_view_t a, e4m3r2_view_t b,
+                                    bf16r2_span_t c, f32_t beta, b8r1_span_t workspace,
+                                    gpu_stream_t const &stream) const noexcept {
+        return run_(session, a.data(), static_cast<u32_t>(a.extent(0)), static_cast<u32_t>(a.extent(1)),
+                    leading_dimension_(a), b.data(), static_cast<u32_t>(b.extent(0)), static_cast<u32_t>(b.extent(1)),
+                    leading_dimension_(b), c.data(), static_cast<u32_t>(c.extent(0)), static_cast<u32_t>(c.extent(1)),
+                    leading_dimension_(c), beta, workspace, stream);
+    }
+    /** @brief BFloat16 operands accumulating into a Float32 surface — the loss-logit and gradient-fold
+     *      products whose plans pin @c c_type=CUDA_R_32F at @ref make . */
+    [[nodiscard]] expected_t matmul(cublaslt_session_t const &session, bf16r2_view_t a, bf16r2_view_t b, f32r2_span_t c,
+                                    f32_t beta, b8r1_span_t workspace, gpu_stream_t const &stream) const noexcept {
+        return run_(session, a.data(), static_cast<u32_t>(a.extent(0)), static_cast<u32_t>(a.extent(1)),
+                    leading_dimension_(a), b.data(), static_cast<u32_t>(b.extent(0)), static_cast<u32_t>(b.extent(1)),
+                    leading_dimension_(b), c.data(), static_cast<u32_t>(c.extent(0)), static_cast<u32_t>(c.extent(1)),
+                    leading_dimension_(c), beta, workspace, stream);
     }
 
   private:
@@ -721,6 +786,9 @@ struct cublaslt_plan_t {
     cublasLtMatrixLayout_t c_layout_ = nullptr;
     cublasLtMatmulAlgo_t algorithm_ {};
     std::size_t workspace_bytes_ = 0;
+    /** @brief The K/N columns pinned at @ref make — the inner extents a call's operands must match; the
+     *      row extents are the only per-call freedom (they ride the caller's views). */
+    u32_t a_cols_ = 0, b_cols_ = 0, c_cols_ = 0;
 };
 
 /**

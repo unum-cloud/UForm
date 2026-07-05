@@ -603,14 +603,20 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
                                  block_shape, stream, subgraph.vertices, neighbor_norms_.span(), prefixes_);
         if (!launched) return launched;
 
-        // Tensor-core dots per segment: the running block after segment p IS prefix p's raw dot. The
-        // segment column offsets feed cuBLASLt raw pointers directly (vendor boundary), so they stay
-        // pointer arithmetic; the destination plane is the arena's leading (prefix) axis, so it's a row.
+        // Tensor-core dots per segment: the running block after segment p IS prefix p's raw dot. Each
+        // operand is a column slice of the full @c [·,hidden] tile over this segment's prefix band — an
+        // honest strided view whose row stride is the parent width, which @ref cublaslt_plan_t::matmul
+        // forwards as the layout's leading dimension; the destination plane is the arena's leading
+        // (prefix) axis, so it's a row.
         for (u32_t segment = 0; segment != prefix_count; ++segment) {
-            __nv_bfloat16 const *vertex_segment = vertices.data() + prefixes_.segment_begin(segment);
-            __nv_bfloat16 const *neighbor_segment = subgraph.vertices.data() + prefixes_.segment_begin(segment);
-            if (expected_t product = plans_[3 * segment].matmul(*session_, vertex_segment, neighbor_segment,
-                                                                running_dots_.data(), segment == 0 ? 0.0f : 1.0f,
+            u32_t const segment_begin = prefixes_.segment_begin(segment);
+            u32_t const segment_width = prefixes_.segment_width(segment);
+            bf16r2_view_t const vertex_view = vertices(nk::all, nk::range(segment_begin, segment_begin + segment_width),
+                                                       nk::slice);
+            bf16r2_view_t const neighbor_view = subgraph.vertices(
+                nk::all, nk::range(segment_begin, segment_begin + segment_width), nk::slice);
+            if (expected_t product = plans_[3 * segment].matmul(*session_, vertex_view, neighbor_view,
+                                                                running_dots_.span(), segment == 0 ? 0.0f : 1.0f,
                                                                 cublaslt_workspace, stream);
                 !product)
                 return product;
@@ -660,21 +666,26 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
             result != CUDA_SUCCESS)
             return expected_t::fail(result, "subgraph force reset failed (subgraph={})", subgraph_index);
 
-        // Tensor-core gradients per segment: G_seg lives at the suffix-accumulated plane s, so its
-        // pointer is now the arena's leading (prefix) row; the column offsets stay pointer arithmetic
-        // (vendor boundary / external subgraph memory, same as the dots pass above).
+        // Tensor-core gradients per segment: G_seg lives at the suffix-accumulated plane s — a whole
+        // prefix row of the accumulator arena. The vertex / neighbor operands and the gradient
+        // destinations are honest column slices of their @c [·,hidden] tiles over this segment's prefix
+        // band, their row stride the parent width, which @ref cublaslt_plan_t::matmul forwards as the
+        // layout's leading dimension.
         for (u32_t segment = 0; segment != prefix_count; ++segment) {
-            __nv_bfloat16 const *gradient_segment = raw_grad_bf16_.row(segment).data();
-            __nv_bfloat16 const *vertex_segment = vertices.data() + prefixes_.segment_begin(segment);
-            __nv_bfloat16 const *neighbor_segment = subgraph.vertices.data() + prefixes_.segment_begin(segment);
+            u32_t const segment_begin = prefixes_.segment_begin(segment);
+            u32_t const segment_width = prefixes_.segment_width(segment);
+            auto const band = nk::range(segment_begin, segment_begin + segment_width);
+            bf16r2_view_t const gradient_view = raw_grad_bf16_.row(segment);
+            bf16r2_view_t const neighbor_view = subgraph.vertices(nk::all, band, nk::slice);
+            bf16r2_view_t const vertex_view = vertices(nk::all, band, nk::slice);
+            f32r2_span_t const vertices_grad_segment = vertices_grad_f32_.span()(nk::all, band, nk::slice);
+            f32r2_span_t const neighbor_grad_segment = subgraph.vertices_grad(nk::all, band, nk::slice);
             if (expected_t product = plans_[3 * segment + 1].matmul(
-                    *session_, gradient_segment, neighbor_segment,
-                    vertices_grad_f32_.data() + prefixes_.segment_begin(segment), 1.0f, cublaslt_workspace, stream);
+                    *session_, gradient_view, neighbor_view, vertices_grad_segment, 1.0f, cublaslt_workspace, stream);
                 !product)
                 return product;
             if (expected_t product = plans_[3 * segment + 2].matmul(
-                    *session_, gradient_segment, vertex_segment,
-                    subgraph.vertices_grad.data() + prefixes_.segment_begin(segment), 1.0f, cublaslt_workspace, stream);
+                    *session_, gradient_view, vertex_view, neighbor_grad_segment, 1.0f, cublaslt_workspace, stream);
                 !product)
                 return product;
         }

@@ -63,41 +63,24 @@
  */
 #pragma once
 
-#include <array>   // `std::array` — the fixed-size pinned-plan tables
-#include <cmath>   // `sqrtf`, `rsqrtf`, `fabsf`, `expf`, `std::pow`
 #include <cstddef> // `std::size_t`, `std::byte`
-#include <span>    // `std::span` — host staging views
+#include <cmath>   // `sqrtf`, `rsqrtf`, `fabsf`, `expf`, `std::pow`
 
-#include <cuda.h>      // `cuMemsetD8Async`, `cuMemcpyDtoDAsync`
-#include <cuda_bf16.h> // `__nv_bfloat16`
-#include <cuda_fp8.h>  // `__nv_fp8_e4m3`
+#include <array>         // `std::array` — the fixed-size pinned-plan tables
+#include <span>          // `std::span` — host staging views
+#include <unordered_map> // the frontend-dispatch fallback map (SDPA backward only), required by cuDNN
 
-#include <unordered_map>    // the frontend-dispatch fallback map (SDPA backward only), required by cuDNN
+#include <cuda.h>           // `cuMemsetD8Async`, `cuMemcpyDtoDAsync`
+#include <cuda_bf16.h>      // `__nv_bfloat16`
+#include <cuda_fp8.h>       // `__nv_fp8_e4m3`
 #include <cudnn_frontend.h> // the SDPA graph builder; execution is raw backend wherever provably exact
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "types.cuh"    // `expected`, `expected_t`, `status_t`, the integer aliases
-#include "schedule.cuh" // `gpu_stream_t`, `launch_kernel`, `cublaslt_*`, `cudnn_session_t`
+#include "cuda_core/types.cuh"    // `expected`, `expected_t`, `status_t`, the integer aliases
+#include "cuda_core/schedule.cuh" // `gpu_stream_t`, `launch_kernel`, `cublaslt_*`, `cudnn_session_t`
 
 namespace unum::uform::core {
-
-using i16r2_view_t = nk::tensor_view<i16_t, 2>;
-using i32r1_view_t = nk::tensor_view<i32_t, 1>;
-using i32r1_span_t = nk::tensor_span<i32_t, 1>;
-using bf16r2_view_t = nk::tensor_view<__nv_bfloat16, 2>;
-using bf16r2_span_t = nk::tensor_span<__nv_bfloat16, 2>;
-using e4m3r1_view_t = nk::tensor_view<e4m3_t, 1>;
-using e4m3r1_span_t = nk::tensor_span<e4m3_t, 1>;
-using e4m3r2_view_t = nk::tensor_view<e4m3_t, 2>;
-using e4m3r2_span_t = nk::tensor_span<e4m3_t, 2>;
-using e4m3r3_view_t = nk::tensor_view<e4m3_t, 3>;
-using e4m3r3_span_t = nk::tensor_span<e4m3_t, 3>;
-using e4m3r1_tensor_arena_t = nk::tensor<e4m3_t, gpu_arena_alloc<e4m3_t>, 1>;
-using e4m3r2_tensor_arena_t = nk::tensor<e4m3_t, gpu_arena_alloc<e4m3_t>, 2>;
-using bf16r1_tensor_arena_t = nk::tensor<bf16_t, gpu_arena_alloc<bf16_t>, 1>;
-using bf16r2_tensor_arena_t = nk::tensor<bf16_t, gpu_arena_alloc<bf16_t>, 2>;
-using i32r1_tensor_arena_t = nk::tensor<i32_t, gpu_arena_alloc<i32_t>, 1>;
 
 /** @brief The one head width every SDPA engine tier supports here; heads = hidden / 128. */
 inline constexpr u32_t transformer_head_dim_k = 128u;
@@ -344,8 +327,8 @@ struct transformer_block_bf16_t {
     /** @brief Allocate and plan everything: weights and their gradients, every stash the backward reads,
      *      twelve pinned matmul plans, the forward and backward SDPA graphs, and the shared workspace —
      *      construction is the validation and the planning; calls are pure enqueues. */
-    [[nodiscard]] static expected<transformer_block_bf16_t> make(gpu_arena_t &arena, cublaslt_session_t const &blas,
-                                                                 cudnn_session_t const &cudnn,
+    [[nodiscard]] static expected<transformer_block_bf16_t> make(gpu_arena_t &arena, cublaslt_session_t &blas,
+                                                                 cudnn_session_t &cudnn,
                                                                  transformer_block_config_t config) noexcept;
 
     /**
@@ -360,7 +343,7 @@ struct transformer_block_bf16_t {
      */
     [[nodiscard]] expected_t forward(bf16r2_view_t input, bf16r2_span_t output, u32r1_view_t segment_offsets,
                                      u32r1_view_t segment_lengths, rope_angles_view_t angles, i16r2_view_t coords,
-                                     gpu_stream_t const &stream) noexcept;
+                                     gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief One block backward, consuming the stashes @ref forward wrote — pure enqueue, capture-safe.
@@ -369,7 +352,7 @@ struct transformer_block_bf16_t {
      */
     [[nodiscard]] expected_t backward(bf16r2_view_t output_grad, bf16r2_span_t input_grad, u32r1_view_t segment_offsets,
                                       u32r1_view_t segment_lengths, rope_angles_view_t angles, i16r2_view_t coords,
-                                      gpu_stream_t const &stream) noexcept;
+                                      gpu_stream_t &stream) noexcept;
 
     /** @brief The baked geometry. */
     [[nodiscard]] transformer_block_config_t const &config() const noexcept { return config_; }
@@ -395,7 +378,7 @@ struct transformer_block_bf16_t {
 
     /** @brief Quantize this block's weights into the E4M3 inference twin — the twin's only constructor. */
     [[nodiscard]] expected<struct transformer_block_e4m3_t> quantize_weights(gpu_arena_t &arena,
-                                                                             gpu_stream_t const &stream) noexcept;
+                                                                             gpu_stream_t &stream) noexcept;
 
   private:
     friend struct transformer_block_e4m3_t;
@@ -418,23 +401,23 @@ struct transformer_block_bf16_t {
     /** @brief Fill the block-owned Int32 staging from the batch's u32 starts and lengths — the one
      *      vendor-boundary conversion; see @ref transformer_ragged_offsets_kernel_ . */
     [[nodiscard]] expected_t stage_ragged_offsets_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                                   gpu_stream_t const &stream) noexcept;
+                                                   gpu_stream_t &stream) noexcept;
 
     /** @brief Store the per-call pointers into the fixed binding table and raw-execute the forward
      *      plan — no map, no allocation, one backend call. Ragged slots 0..3 are Q, K, V (packed-QKV
      *      strides) and O (hidden strides). */
     [[nodiscard]] expected_t run_sdpa_forward_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                               gpu_stream_t const &stream) noexcept;
+                                               gpu_stream_t &stream) noexcept;
 
     /** @brief The backward sibling of @ref run_sdpa_forward_ — the Q / K / V gradients land in the
      *      packed @c qkv_grad_ block. Ragged slots 0..7 are Q, K, V, O, dO, dQ, dK, dV. */
     [[nodiscard]] expected_t run_sdpa_backward_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                                gpu_stream_t const &stream) noexcept;
+                                                gpu_stream_t &stream) noexcept;
 
     /** @brief The baked geometry and the two borrowed vendor sessions — never owned here. */
     transformer_block_config_t config_ {};
-    cublaslt_session_t const *blas_ = nullptr;
-    cudnn_session_t const *cudnn_ = nullptr;
+    cublaslt_session_t *blas_ = nullptr;
+    cudnn_session_t *cudnn_ = nullptr;
 
     /** @brief The four learnable weight buffers: fused QKV, out-projection, fused gate/up, down —
      *      @b [out,in] row-major each. */
@@ -492,7 +475,7 @@ struct transformer_block_e4m3_t {
      */
     [[nodiscard]] expected_t forward(bf16r2_view_t input, bf16r2_span_t output, u32r1_view_t segment_offsets,
                                      u32r1_view_t segment_lengths, rope_angles_view_t angles, i16r2_view_t coords,
-                                     gpu_stream_t const &stream) noexcept;
+                                     gpu_stream_t &stream) noexcept;
 
     /** @brief The baked geometry. */
     [[nodiscard]] transformer_block_config_t const &config() const noexcept { return config_; }
@@ -506,12 +489,12 @@ struct transformer_block_e4m3_t {
     /** @brief Bind and execute the FP8 SDPA graph over the dense packed operands; the Q / K / V descale
      *      is the shared dynamic scalar the pack pass just wrote. Lengths pass through the twin's own
      *      Int32 staging — the vendor boundary. */
-    [[nodiscard]] expected_t run_sdpa_(u32r1_view_t segment_lengths, gpu_stream_t const &stream) noexcept;
+    [[nodiscard]] expected_t run_sdpa_(u32r1_view_t segment_lengths, gpu_stream_t &stream) noexcept;
 
     /** @brief The baked geometry and the two borrowed vendor sessions — never owned here. */
     transformer_block_config_t config_ {};
-    cublaslt_session_t const *blas_ = nullptr;
-    cudnn_session_t const *cudnn_ = nullptr;
+    cublaslt_session_t *blas_ = nullptr;
+    cudnn_session_t *cudnn_ = nullptr;
 
     /** @brief The four E4M3 shadow weights: fused QKV, out-projection, fused gate/up, down —
      *      @b [out,in] row-major each. */

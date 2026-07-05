@@ -238,7 +238,7 @@ expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t c
     expected_t staged = launch_kernel(reinterpret_cast<void const *>(&masked_count_kernel_), one_block, block_shape,
                                       stream, loss_weights, gradient_scale_.span(), config_.weight);
     if (staged)
-        staged = plans_[0].matmul(*session_, normalized.data(), decoder_weight_.data(), logits_.data(), 0.0f,
+        staged = plans_[0].matmul(*session_, normalized, decoder_weight_.view(), logits_.span(), 0.0f,
                                   workspace_.span(), stream);
     if (staged)
         staged = launch_kernel(reinterpret_cast<void const *>(&masked_cross_entropy_kernel_), row_grid, block_shape,
@@ -248,10 +248,10 @@ expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t c
         staged = launch_kernel(reinterpret_cast<void const *>(&masked_finalize_kernel_), one_block, block_shape, stream,
                                position_loss_.view(), gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
-        staged = plans_[1].matmul(*session_, logit_grad_.data(), decoder_weight_.data(), normalized_grad.data(), 0.0f,
+        staged = plans_[1].matmul(*session_, logit_grad_.view(), decoder_weight_.view(), normalized_grad, 0.0f,
                                   workspace_.span(), stream);
     if (staged)
-        staged = plans_[2].matmul(*session_, logit_grad_.data(), normalized.data(), decoder_weight_grad_.data(), 0.0f,
+        staged = plans_[2].matmul(*session_, logit_grad_.view(), normalized, decoder_weight_grad_.span(), 0.0f,
                                   workspace_.span(), stream);
     return staged;
 }
@@ -458,7 +458,7 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
     expected_t staged = launch_kernel(reinterpret_cast<void const *>(&patch_count_kernel_), one_block, block_shape,
                                       stream, mask_.view(), gradient_scale_.span(), config_.weight, patch_pixels);
     if (staged)
-        staged = plans_[0].matmul(*session_, normalized.data(), recon_weight_.data(), predicted_.data(), 0.0f,
+        staged = plans_[0].matmul(*session_, normalized, recon_weight_.view(), predicted_.span(), 0.0f,
                                   workspace_.span(), stream);
     if (staged)
         staged = launch_kernel(reinterpret_cast<void const *>(&patch_mae_loss_kernel_), row_grid, block_shape, stream,
@@ -468,10 +468,10 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
         staged = launch_kernel(reinterpret_cast<void const *>(&masked_finalize_kernel_), one_block, block_shape, stream,
                                position_loss_.view(), gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
-        staged = plans_[1].matmul(*session_, predicted_grad_.data(), recon_weight_.data(), normalized_grad.data(), 0.0f,
+        staged = plans_[1].matmul(*session_, predicted_grad_.view(), recon_weight_.view(), normalized_grad, 0.0f,
                                   workspace_.span(), stream);
     if (staged)
-        staged = plans_[2].matmul(*session_, predicted_grad_.data(), normalized.data(), recon_weight_grad_.data(), 0.0f,
+        staged = plans_[2].matmul(*session_, predicted_grad_.view(), normalized, recon_weight_grad_.span(), 0.0f,
                                   workspace_.span(), stream);
     return staged;
 }
