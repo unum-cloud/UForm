@@ -1,0 +1,85 @@
+{
+  "mixture": "image_caption",
+  "datasets": [
+    {
+      "name": "cc12m",
+      "weight": 0.35,
+      "glob": "data/cc12m/cc12m-train-*.parquet",
+      "anchor": "caption",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "laion_cc3m",
+      "weight": 0.2,
+      "glob": "data/laion-cc3m/cc3m-train-*.parquet",
+      "anchor": "caption",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "coco_captions",
+      "weight": 0.18,
+      "glob": "data/coco_captions/data/*.parquet",
+      "anchor": "sentences_raw",
+      "positive": "image",
+      "media": "image",
+      "negative": "negative_indices",
+      "positives_per_caption": 5,
+      "min_epochs": 1
+    },
+    {
+      "name": "visual_genome",
+      "weight": 0.08,
+      "glob": "data/visual_genome/*.parquet",
+      "anchor": "captions",
+      "positive": "image",
+      "media": "image",
+      "positives_per_caption": 8
+    },
+    {
+      "name": "docci",
+      "weight": 0.05,
+      "glob": "data/docci/*.parquet",
+      "anchor": "captions",
+      "positive": "image",
+      "media": "image"
+    },
+    {
+      "name": "xm3600",
+      "weight": 0.05,
+      "glob": "data/xm3600/*.parquet",
+      "anchor": "captions",
+      "positive": "image",
+      "media": "image",
+      "positives_per_caption": 4,
+      "min_epochs": 1
+    },
+    {
+      "name": "rsicd",
+      "weight": 0.03,
+      "glob": "data/rsicd/*.parquet",
+      "anchor": "captions",
+      "positive": "image",
+      "media": "image",
+      "positives_per_caption": 5,
+      "min_epochs": 1
+    },
+    {
+      "name": "doclaynet",
+      "weight": 0.03,
+      "glob": "data/doclaynet/*.parquet",
+      "anchor": "captions",
+      "positive": "image",
+      "media": "image"
+    },
+    {
+      "name": "fashion_iq",
+      "weight": 0.03,
+      "glob": "data/fashion_iq/*.parquet",
+      "anchor": "captions",
+      "positive": "image",
+      "media": "image"
+    }
+  ]
+}

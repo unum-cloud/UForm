@@ -1,0 +1,188 @@
+{
+  "mixture": "text_contrastive",
+  "datasets": [
+    {
+      "name": "parallel_sent_wikimatrix",
+      "weight": 0.11,
+      "glob": "data/parallel-sent-wikimatrix/en-*/train-*.parquet",
+      "anchor": "english",
+      "positive": "non_english"
+    },
+    {
+      "name": "parallel_sent_tatoeba",
+      "weight": 0.07,
+      "glob": "data/parallel-sent-tatoeba/en-*/train-*.parquet",
+      "anchor": "english",
+      "positive": "non_english"
+    },
+    {
+      "name": "paws_x",
+      "weight": 0.05,
+      "glob": "data/paws-x/*/train-*.parquet",
+      "anchor": "sentence1",
+      "positive": "sentence2"
+    },
+    {
+      "name": "google_text_norm",
+      "weight": 0.03,
+      "glob": "data/google-text-norm/en_train.parquet",
+      "anchor": "written",
+      "positive": "spoken"
+    },
+    {
+      "name": "c4_200m",
+      "weight": 0.02,
+      "glob": "data/c4_200m/c4_200m-*.parquet",
+      "anchor": "corrupted",
+      "positive": "corrected"
+    },
+    {
+      "name": "github_typo",
+      "weight": 0.01,
+      "glob": "data/github-typo-corpus/**/*.parquet",
+      "anchor": "text",
+      "positive": "correction"
+    },
+    {
+      "name": "allnli_multipos",
+      "weight": 0.11,
+      "glob": "data/all-nli/pair/train-*.parquet",
+      "anchor": "anchor",
+      "positive": "positive"
+    },
+    {
+      "name": "quora_multipos",
+      "weight": 0.05,
+      "glob": "data/quora-duplicates/pair/train-*.parquet",
+      "anchor": "anchor",
+      "positive": "positive"
+    },
+    {
+      "name": "msmarco_triplet50",
+      "weight": 0.09,
+      "glob": "data/msmarco/triplet-50/*.parquet",
+      "anchor": "query",
+      "positive": "positive",
+      "negative": "negative",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "mr_tydi_multipos",
+      "weight": 0.05,
+      "glob": "data/mr-tydi/mrtydi-v1.1-*/train.parquet",
+      "anchor": "query",
+      "positive": "positive",
+      "negative": "negative",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "pubmedqa",
+      "weight": 0.06,
+      "glob": "data/pubmedqa/pqa_artificial/train-*.parquet",
+      "anchor": "question",
+      "positive": "long_answer",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "reddit_title_body",
+      "weight": 0.03,
+      "glob": "data/reddit-title-body/parquet/reddit_*.parquet",
+      "anchor": "title",
+      "positive": "body"
+    },
+    {
+      "name": "natural_questions",
+      "weight": 0.06,
+      "glob": "data/natural-questions/**/*.parquet",
+      "anchor": "query",
+      "positive": "answer",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "gooaq",
+      "weight": 0.04,
+      "glob": "data/gooaq/pair/train-*.parquet",
+      "anchor": "question",
+      "positive": "answer",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "hotpotqa",
+      "weight": 0.03,
+      "glob": "data/hotpotqa/distractor/train-*.parquet",
+      "anchor": "question",
+      "positive": "answer",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "paq",
+      "weight": 0.04,
+      "glob": "data/paq/pair/train-*.parquet",
+      "anchor": "query",
+      "positive": "answer",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "s2orc",
+      "weight": 0.02,
+      "glob": "data/s2orc/abstract-citation-pair/train-*.parquet",
+      "anchor": "abstract",
+      "positive": "citation",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "stackexchange_title_body",
+      "weight": 0.05,
+      "glob": "data/stackexchange-title-body/**/*.parquet",
+      "anchor": "0",
+      "positive": "1",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "webinstruct",
+      "weight": 0.03,
+      "glob": "data/webinstruct/data/train-*.parquet",
+      "anchor": "question",
+      "positive": "answer",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "wikianswers",
+      "weight": 0.04,
+      "glob": "data/wikianswers-duplicates/pair/train-*.parquet",
+      "anchor": "anchor",
+      "positive": "positive"
+    },
+    {
+      "name": "the_vault",
+      "weight": 0.04,
+      "glob": "data/the-vault/data/train/**/*.parquet",
+      "anchor": "docstring",
+      "positive": "code"
+    },
+    {
+      "name": "poj_104",
+      "weight": 0.02,
+      "glob": "data/poj-104/default/train/*.parquet",
+      "anchor": "label",
+      "positive": "code"
+    },
+    {
+      "name": "xlcost",
+      "weight": 0.02,
+      "glob": "data/xlcost/*-program-level/train/*.parquet",
+      "anchor": "text",
+      "positive": "code"
+    }
+  ]
+}

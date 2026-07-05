@@ -1,0 +1,13 @@
+{
+  "mixture": "audio_caption",
+  "datasets": [
+    {
+      "name": "audiocaps",
+      "weight": 1.0,
+      "glob": "data/audiocaps/data/*.parquet",
+      "anchor": "caption",
+      "positive": "audio",
+      "media": "audio"
+    }
+  ]
+}

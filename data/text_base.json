@@ -1,0 +1,65 @@
+{
+  "mixture": "text_base",
+  "datasets": [
+    {
+      "name": "fineweb_2",
+      "weight": 0.3,
+      "glob": "data/fineweb-2/data/*/train/*.parquet",
+      "text": "text"
+    },
+    {
+      "name": "fineweb_en",
+      "weight": 0.26,
+      "glob": "data/fineweb-100bt/sample/100BT/*.parquet",
+      "text": "text"
+    },
+    {
+      "name": "pes2o",
+      "weight": 0.18,
+      "glob": "data/peS2o/data/v3/train-*.parquet",
+      "text": "text"
+    },
+    {
+      "name": "finewiki_i18n",
+      "weight": 0.09,
+      "glob": "data/finewiki-100bt/data/*wiki/*.parquet",
+      "text": "text"
+    },
+    {
+      "name": "stackexchange_text",
+      "weight": 0.05,
+      "glob": "data/stackexchange-title-body/*.parquet",
+      "text": "body"
+    },
+    {
+      "name": "hackernews_text",
+      "weight": 0.04,
+      "glob": "data/hackernews/data/train-*.parquet",
+      "text": "text"
+    },
+    {
+      "name": "code_search_net_text",
+      "weight": 0.04,
+      "glob": "data/code_search_net/all/train-*.parquet",
+      "text": "func_code_string"
+    },
+    {
+      "name": "starcoderdata",
+      "weight": 0.04,
+      "glob": "data/starcoderdata/**/train-*.parquet",
+      "text": "content"
+    },
+    {
+      "name": "civil_comments",
+      "weight": 0.02,
+      "glob": "data/civil_comments/data/*.parquet",
+      "text": "text"
+    },
+    {
+      "name": "toxigen",
+      "weight": 0.01,
+      "glob": "data/toxigen/data/*.parquet",
+      "text": "text"
+    }
+  ]
+}

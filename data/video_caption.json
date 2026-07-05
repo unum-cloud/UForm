@@ -1,0 +1,15 @@
+{
+  "mixture": "video_caption",
+  "datasets": [
+    {
+      "name": "msrvtt_captions",
+      "weight": 1.0,
+      "glob": "data/msrvtt-captions/train_9k.parquet",
+      "anchor": "captions",
+      "positive": "mp4",
+      "media": "mp4",
+      "negative": "negative_indices",
+      "positives_per_caption": 8
+    }
+  ]
+}
