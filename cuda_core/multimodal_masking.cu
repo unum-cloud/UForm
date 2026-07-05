@@ -511,3 +511,222 @@ expected_t masked_patches_t::fill(array<differentiable_weights_t> &weights) noex
         return expected_t::fail(status_t::bad_alloc_k, "weight table growth failed");
     return {};
 }
+
+/** @brief Sample the frame mask: a frame is masked when its independent per-frame draw falls under
+ *      @p mask_ratio . Keyed on the frame index alone with the @c frame_mask_k salt — no tube concept, so
+ *      whole waveform frames are masked i.i.d.
+ *
+ *  __grid_size__ @c [grid_size_for(frames),1,1] , one thread per frame; no dynamic shared memory. */
+static __global__ void frame_mask_sample_kernel_(u32r1_span_t mask, u64_t seed, u32_t epoch, f32_t mask_ratio) {
+    u32_t const frame = blockIdx.x * blockDim.x + threadIdx.x;
+    if (frame >= mask.extent(0)) return;
+    f32_t const draw = masking_draw(seed, epoch, frame, 0u, static_cast<u32_t>(masking_draw_purpose_t::frame_mask_k));
+    mask[frame] = draw < mask_ratio ? 1u : 0u;
+}
+
+/** @brief Substitute the masked frames with the fixed-zero mask token; visible frames copy their clean
+ *      Float32 samples through.
+ *
+ *  __grid_size__ @c [grid_size_for(frames),1,1] , persistent stride; no dynamic shared memory. */
+static __global__ void frame_substitute_kernel_(f32r2_view_t clean, f32r2_span_t distorted, u32r1_view_t mask,
+                                                u32_t chunk_samples) {
+    std::size_t const frames = mask.extent(0);
+    for (std::size_t frame = blockIdx.x; frame < frames; frame += gridDim.x) {
+        bool const masked = mask[frame] != 0u;
+        for (u32_t index = threadIdx.x; index < chunk_samples; index += blockDim.x)
+            distorted[frame, index] = masked ? 0.0f : clean[frame, index];
+    }
+}
+
+/** @brief Count the masked frames and publish @c {λ·2/(chunk_samples·max(count,1)), count} — the MAE
+ *      gradient's per-element constant, so the count never visits the host.
+ *
+ *  __grid_size__ @c [1,1,1] , one block; no dynamic shared memory. */
+static __global__ void frame_count_kernel_(u32r1_view_t mask, f32r1_span_t scale_and_count, f32_t weight,
+                                           u32_t chunk_samples) {
+    f32_t live = 0.0f;
+    for (std::size_t index = threadIdx.x; index < mask.extent(0); index += blockDim.x)
+        live += static_cast<f32_t>(mask[index]);
+    f32_t const total = block_reduce_broadcast<kernel_block_size_default_k>(live);
+    if (threadIdx.x != 0u) return;
+    scale_and_count[0] = weight * 2.0f / (static_cast<f32_t>(chunk_samples) * fmaxf(total, 1.0f));
+    scale_and_count[1] = total;
+}
+
+/**
+ *  @brief Per-frame normalized-MSE over one masked audio frame: z-score the prediction and the raw Float32
+ *      target by their own mean / standard deviation, accumulate the squared difference, and write the
+ *      pre-scaled gradient — visible frames write zeros and score nothing. The prediction rides BFloat16
+ *      off the decode matmul; the target is the raw waveform frame, read as Float32.
+ *
+ *  __grid_size__ @c [max_frames,1,1] , one block per frame; no dynamic shared memory.
+ */
+static __global__ void frame_mae_loss_kernel_(bf16r2_view_t predicted, f32r2_view_t targets, u32r1_view_t mask,
+                                              f32r1_view_t scale_and_count, f32r1_span_t position_loss,
+                                              bf16r2_span_t predicted_grad) {
+    u32_t const row = blockIdx.x;
+    bool const live = mask[row] != 0u;
+    u32_t const chunk_samples = predicted.extent(1);
+    f32_t const inverse_samples = 1.0f / static_cast<f32_t>(chunk_samples);
+
+    f32_t sum_pred = 0.0f, sumsq_pred = 0.0f, sum_target = 0.0f, sumsq_target = 0.0f;
+    for (u32_t index = threadIdx.x; index < chunk_samples; index += blockDim.x) {
+        f32_t const p = __bfloat162float(predicted[row, index]), t = targets[row, index];
+        sum_pred += p, sumsq_pred += p * p, sum_target += t, sumsq_target += t * t;
+    }
+    f32_t const mean_pred = block_reduce_broadcast<kernel_block_size_default_k>(sum_pred) * inverse_samples;
+    f32_t const mean_sq_pred = block_reduce_broadcast<kernel_block_size_default_k>(sumsq_pred) * inverse_samples;
+    f32_t const mean_target = block_reduce_broadcast<kernel_block_size_default_k>(sum_target) * inverse_samples;
+    f32_t const mean_sq_target = block_reduce_broadcast<kernel_block_size_default_k>(sumsq_target) * inverse_samples;
+    f32_t const inverse_std_pred = rsqrtf(fmaxf(mean_sq_pred - mean_pred * mean_pred, 0.0f) + patch_variance_epsilon_k);
+    f32_t const inverse_std_target = rsqrtf(fmaxf(mean_sq_target - mean_target * mean_target, 0.0f) +
+                                            patch_variance_epsilon_k);
+
+    f32_t const scale = live ? scale_and_count[0] * inverse_std_pred : 0.0f;
+    f32_t thread_loss = 0.0f;
+    for (u32_t index = threadIdx.x; index < chunk_samples; index += blockDim.x) {
+        f32_t const pred_norm = (__bfloat162float(predicted[row, index]) - mean_pred) * inverse_std_pred;
+        f32_t const target_norm = (targets[row, index] - mean_target) * inverse_std_target;
+        f32_t const difference = pred_norm - target_norm;
+        thread_loss += difference * difference;
+        predicted_grad[row, index] = __float2bfloat16(scale * difference);
+    }
+    f32_t const total_loss = block_reduce_broadcast<kernel_block_size_default_k>(thread_loss);
+    if (threadIdx.x != 0u) return;
+    position_loss[row] = live ? total_loss * inverse_samples : 0.0f;
+}
+
+expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, cublaslt_session_t &blas,
+                                                masked_frames_config_t config) noexcept {
+    using result_t = expected<masked_frames_t>;
+    if (config.hidden == 0 || config.chunk_samples == 0 || config.max_frames == 0)
+        return result_t::fail(status_t::shape_unsupported_k,
+                              "the frame head needs a full geometry (hidden={} samples={} frames={})", config.hidden,
+                              config.chunk_samples, config.max_frames);
+    masked_frames_t head;
+    head.config_ = config;
+    head.session_ = &blas;
+
+    gpu_arena_alloc<bf16_t> bf16_alloc {arena};
+    gpu_arena_alloc<f32_t> f32_alloc {arena};
+    gpu_arena_alloc<u32_t> u32_alloc {arena};
+    gpu_arena_alloc<b8_t> byte_alloc {arena};
+    head.recon_weight_ = bf16r2_tensor_arena_t::try_empty({config.chunk_samples, config.hidden}, bf16_alloc);
+    head.recon_weight_grad_ = bf16r2_tensor_arena_t::try_empty({config.chunk_samples, config.hidden}, bf16_alloc);
+    head.predicted_ = bf16r2_tensor_arena_t::try_empty({config.max_frames, config.chunk_samples}, bf16_alloc);
+    head.predicted_grad_ = bf16r2_tensor_arena_t::try_empty({config.max_frames, config.chunk_samples}, bf16_alloc);
+    head.mask_ = u32r1_tensor_arena_t::try_empty({config.max_frames}, u32_alloc);
+    head.position_loss_ = f32r1_tensor_arena_t::try_empty({config.max_frames}, f32_alloc);
+    head.gradient_scale_ = f32r1_tensor_arena_t::try_empty({2}, f32_alloc);
+    if (!head.recon_weight_ || !head.recon_weight_grad_ || !head.predicted_ || !head.predicted_grad_ || !head.mask_ ||
+        !head.position_loss_ || !head.gradient_scale_)
+        return result_t::fail(status_t::bad_alloc_k, "frame head allocation failed (arena_used={})", arena.used());
+
+    cublaslt_plan_config_t predicted_config; // predicted[F,S] = normalized[F,H]·Wᵀ, S = chunk_samples
+    predicted_config.a_rows = config.max_frames, predicted_config.a_cols = config.hidden;
+    predicted_config.a_row_stride = config.hidden;
+    predicted_config.b_rows = config.chunk_samples, predicted_config.b_cols = config.hidden;
+    predicted_config.b_row_stride = config.hidden;
+    predicted_config.c_rows = config.max_frames, predicted_config.c_cols = config.chunk_samples;
+    predicted_config.c_row_stride = config.chunk_samples;
+    predicted_config.transpose_b = true;
+    predicted_config.c_type = CUDA_R_16BF;
+    cublaslt_plan_config_t data_grad_config; // d(normalized) = d(predicted) · W
+    data_grad_config.a_rows = config.max_frames, data_grad_config.a_cols = config.chunk_samples;
+    data_grad_config.a_row_stride = config.chunk_samples;
+    data_grad_config.b_rows = config.chunk_samples, data_grad_config.b_cols = config.hidden;
+    data_grad_config.b_row_stride = config.hidden;
+    data_grad_config.c_rows = config.max_frames, data_grad_config.c_cols = config.hidden;
+    data_grad_config.c_row_stride = config.hidden;
+    data_grad_config.c_type = CUDA_R_16BF;
+    cublaslt_plan_config_t weight_grad_config; // d(W) = d(predicted)ᵀ · normalized
+    weight_grad_config.a_rows = config.max_frames, weight_grad_config.a_cols = config.chunk_samples;
+    weight_grad_config.a_row_stride = config.chunk_samples;
+    weight_grad_config.b_rows = config.max_frames, weight_grad_config.b_cols = config.hidden;
+    weight_grad_config.b_row_stride = config.hidden;
+    weight_grad_config.c_rows = config.chunk_samples, weight_grad_config.c_cols = config.hidden;
+    weight_grad_config.c_row_stride = config.hidden;
+    weight_grad_config.transpose_a = true;
+    weight_grad_config.c_type = CUDA_R_16BF;
+    cublaslt_plan_config_t const configs[linear_matmul_family_count_k] = {predicted_config, data_grad_config,
+                                                                          weight_grad_config};
+    std::size_t workspace_bytes = 0;
+    for (u32_t family = 0; family != linear_matmul_family_count_k; ++family) {
+        expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(blas, configs[family]);
+        if (!plan) return result_t::fail(std::move(plan));
+        if (plan.value_.workspace_bytes() > workspace_bytes) workspace_bytes = plan.value_.workspace_bytes();
+        head.plans_[family] = std::move(plan.value_);
+    }
+    if (workspace_bytes != 0) {
+        head.workspace_ = b8r1_tensor_arena_t::try_empty({workspace_bytes}, byte_alloc);
+        if (!head.workspace_)
+            return result_t::fail(status_t::bad_alloc_k, "tensor-core workspace allocation failed ({} bytes)",
+                                  workspace_bytes);
+    }
+    return result_t {std::move(head)};
+}
+
+expected_t masked_frames_t::sample_and_corrupt(f32r2_view_t clean_frames, f32r2_span_t distorted_frames,
+                                               masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept {
+    u32_t const frames = config_.max_frames, chunk_samples = config_.chunk_samples;
+    if (clean_frames.extent(0) != frames || distorted_frames.extent(0) != frames ||
+        clean_frames.extent(1) != chunk_samples || distorted_frames.extent(1) != chunk_samples)
+        return expected_t::fail(status_t::shape_unsupported_k, "corrupt buffers must be [{},{}]", frames,
+                                chunk_samples);
+    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
+    dim3 const frame_grid {grid_size_for(frames), 1u, 1u};
+    expected_t staged = launch_kernel(reinterpret_cast<void const *>(&frame_mask_sample_kernel_), frame_grid,
+                                      block_shape, stream, mask_.span(), recipe.seed, epoch.index, config_.mask_ratio);
+    if (staged)
+        staged = launch_kernel(reinterpret_cast<void const *>(&frame_substitute_kernel_), frame_grid, block_shape,
+                               stream, clean_frames, distorted_frames, mask_.view(), chunk_samples);
+    return staged;
+}
+
+expected_t masked_frames_t::operator()(bf16r2_view_t normalized, f32r2_view_t clean_frames, f32r1_span_t loss_summands,
+                                       bf16r2_span_t normalized_grad, gpu_stream_t &stream) noexcept {
+    u32_t const hidden = config_.hidden, chunk_samples = config_.chunk_samples;
+    std::size_t const frames = config_.max_frames;
+    if (normalized.extent(0) != frames || normalized_grad.extent(0) != frames || clean_frames.extent(0) != frames)
+        return expected_t::fail(status_t::shape_unsupported_k, "frame head count mismatch (expected {})", frames);
+    if (normalized.extent(1) != hidden || normalized_grad.extent(1) != hidden ||
+        clean_frames.extent(1) != chunk_samples || loss_summands.extent(0) != 2)
+        return expected_t::fail(status_t::shape_unsupported_k, "frame head geometry mismatch (hidden={})", hidden);
+
+    dim3 const one_block {1u, 1u, 1u};
+    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
+    dim3 const row_grid {static_cast<u32_t>(frames), 1u, 1u};
+    bf16r2_view_t const predicted_view = predicted_.view();
+    bf16r2_span_t const predicted_grad_span = predicted_grad_.span();
+    expected_t staged = launch_kernel(reinterpret_cast<void const *>(&frame_count_kernel_), one_block, block_shape,
+                                      stream, mask_.view(), gradient_scale_.span(), config_.weight, chunk_samples);
+    if (staged)
+        staged = plan_for(linear_matmul_family_t::forward_k)
+                     .matmul(*session_, normalized, recon_weight_.view(), predicted_.span(), 0.0f, workspace_.span(),
+                             stream);
+    if (staged)
+        staged = launch_kernel(reinterpret_cast<void const *>(&frame_mae_loss_kernel_), row_grid, block_shape, stream,
+                               predicted_view, clean_frames, mask_.view(), gradient_scale_.view(),
+                               position_loss_.span(), predicted_grad_span);
+    if (staged)
+        staged = launch_kernel(reinterpret_cast<void const *>(&masked_finalize_kernel_), one_block, block_shape, stream,
+                               position_loss_.view(), gradient_scale_.view(), loss_summands, config_.weight);
+    if (staged)
+        staged = plan_for(linear_matmul_family_t::data_grad_k)
+                     .matmul(*session_, predicted_grad_.view(), recon_weight_.view(), normalized_grad, 0.0f,
+                             workspace_.span(), stream);
+    if (staged)
+        staged = plan_for(linear_matmul_family_t::weight_grad_k)
+                     .matmul(*session_, predicted_grad_.view(), normalized, recon_weight_grad_.span(), 0.0f,
+                             workspace_.span(), stream);
+    return staged;
+}
+
+expected_t masked_frames_t::fill(array<differentiable_weights_t> &weights) noexcept {
+    differentiable_weights_t weight;
+    weight.weights = recon_weight_.span();
+    weight.weights_grad = recon_weight_grad_.view();
+    if (weights.try_push_back(weight) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "weight table growth failed");
+    return {};
+}

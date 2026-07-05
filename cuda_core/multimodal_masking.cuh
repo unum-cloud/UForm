@@ -1,7 +1,8 @@
 /**
  *  @brief The multimodal masked-modeling objective: deterministic corruption of a clean batch into a
  *      distorted one, and the reconstruction heads that score the tower's states against the clean
- *      target — byte cross-entropy for tokens, normalized-pixel MSE for image / video patches.
+ *      target — byte cross-entropy for tokens, normalized-pixel MSE for image / video patches, and
+ *      normalized-sample MSE for 1-D audio frames.
  *  @file cuda_core/multimodal_masking.cuh
  *  @author Ash Vardanian
  *  @date July 3, 2026
@@ -12,7 +13,7 @@
  *  target, the distorted one is what the tower sees. Corruption is a pure function of @c (seed,epoch,
  *  position) through the epoch shuffle's mixer — identical on every host_domain, bit-reproducible, no
  *  cuRAND and no state. Tokens are corrupted in vocabulary space (MASK / random byte / kept); image /
- *  video patches are zeroed at masked rows before the tower's entry projection.
+ *  video patches and 1-D audio frames are zeroed at masked rows before the tower's entry projection.
  *
  *  @section masking_gradient The additive join with the tower
  *
@@ -58,14 +59,16 @@ struct masking_recipe_t {
 
 /** @brief The domain-separation salts that keep the independent draws at one corruption position from
  *      correlating: each purpose re-keys the hash so the span-open coin, the span-continue coin, the
- *      token-action coin, the random byte, and the patch-mask coin are statistically distinct streams. A
- *      future @c masked_frames_t path adds its own enumerator here rather than reusing an existing salt. */
+ *      token-action coin, the random byte, the patch-mask coin, and the audio-frame-mask coin are
+ *      statistically distinct streams. The @ref masked_frames_t frame path keys @c frame_mask_k rather
+ *      than reusing the 2-D @c patch_mask_k salt. */
 enum class masking_draw_purpose_t : u32_t {
     span_open_k = 0,
     span_continue_k = 1,
     token_action_k = 2,
     random_byte_k = 3,
     patch_mask_k = 4,
+    frame_mask_k = 5,
 };
 
 /** @brief One counter-based draw in @b [0,1) , keyed through the one @ref splitmix64_hash_t — pure,
@@ -93,9 +96,9 @@ struct masked_tokens_config_t {
 /** @brief The baked geometry and weight of one masked-patch (MAE) head — a different config is a
  *      different object. Image and video share this shape; they differ only in @c patch_pixels , the mask
  *      ratio, and whether the mask is tubed across time.
- *  @note Audio no longer rides this 2-D patch head: it is now raw 1-D frames, and its masking will follow a
- *      1-D frame path (mask the Float32 frames, raw-sample MSE) rather than this patch objective — on
- *      record, not built. */
+ *  @note Audio no longer rides this 2-D patch head: it is raw 1-D frames on the sibling @ref masked_frames_t ,
+ *      which masks whole Float32 frames and scores their raw samples with the same normalized MSE rather
+ *      than this patch objective. */
 struct masked_patches_config_t {
     /** @brief Embedding width — must match the tower's. */
     u32_t hidden = 0;
@@ -108,6 +111,23 @@ struct masked_patches_config_t {
     /** @brief One for per-patch random masking; the video temporal-group count for tube masking, where a
      *      masked spatial cell stays masked across all its time groups. @c max_patches must divide evenly. */
     u32_t temporal_groups = 1;
+    /** @brief λ — the objective's weight inside the composite loss, folded into the gradient scale. */
+    f32_t weight = 1.0f;
+};
+
+/** @brief The baked geometry and weight of one masked-frame (1-D raw-audio MAE) head — a different config is
+ *      a different object. Audio arrives as raw waveform frames, not 2-D patches, so this head masks whole
+ *      Float32 frames per-frame i.i.d. and reconstructs their raw samples; there is no tube concept. */
+struct masked_frames_config_t {
+    /** @brief Embedding width — must match the tower's. */
+    u32_t hidden = 0;
+    /** @brief Float32 samples per waveform frame — the innermost @c audio_samples extent and the recon
+     *      head's fan-out @c hidden→chunk_samples . */
+    u32_t chunk_samples = 0;
+    /** @brief Most frames one call carries — the @c normalized / frame-table extent. */
+    u32_t max_frames = 0;
+    /** @brief Fraction of frames masked and scored, each frame drawn independently. */
+    f32_t mask_ratio = 0.75f;
     /** @brief λ — the objective's weight inside the composite loss, folded into the gradient scale. */
     f32_t weight = 1.0f;
 };
@@ -278,6 +298,87 @@ struct masked_patches_t {
     /** @brief @b [max_patches] per-patch normalized-MSE summands. */
     f32r1_tensor_arena_t position_loss_ {};
     /** @brief @b [2] @c {λ·2/(patch_pixels·max(count,1)), count} — device-computed. */
+    f32r1_tensor_arena_t gradient_scale_ {};
+    /** @brief The shared tensor-core workspace of the three pinned plans. */
+    b8r1_tensor_arena_t workspace_ {};
+    /** @brief @ref linear_matmul_family_count_k pinned plans: predicted, @c d(normalized) , @c d(recon) . */
+    std::array<cublaslt_plan_t, linear_matmul_family_count_k> plans_ {};
+
+    /** @brief The one home of the plan-table indexing: this head's plan for @p family . */
+    [[nodiscard]] cublaslt_plan_t &plan_for(linear_matmul_family_t family) noexcept {
+        return plans_[static_cast<u32_t>(family)];
+    }
+};
+
+/**
+ *  @brief The masked-audio objective: a deterministic per-frame mask sampler with a fixed-zero
+ *      substitution, and a linear reconstruction head with a per-frame normalized-MSE loss over the raw
+ *      Float32 waveform. @ref sample_and_corrupt zeros the masked frames before the tower's entry
+ *      projection; @ref operator() reconstructs the clean frames from the tower's states and writes
+ *      @c d(normalized) for the additive join.
+ *
+ *  Audio is delivered raw as @c audio_samples[rows,columns,chunk_samples] — a run of 1-D waveform frames,
+ *  not 2-D patches — and the tower's audio entry linearly projects each @c chunk_samples -wide frame to
+ *  @c hidden . This head is the mirror on the way out: a plain linear projection @c hidden→chunk_samples
+ *  whose target is the raw frame. The states arrive already RMSNormed through @c normalized() , so no
+ *  pre-norm is repeated here, and the mask token is a fixed zero, so the objective stays orthogonal to the
+ *  entry projection.
+ *
+ *  The per-frame MSE z-scores both the prediction and the target by their own per-frame mean and standard
+ *  deviation — identical to @ref masked_patches_t and deliberately not target-only MAE. Two independent
+ *  zero-mean unit-variance frames give @c E[(pred_norm-targ_norm)^2]=1+1=2 , a closed-form chance baseline
+ *  of @c 2.0 that puts audio on the same @c [0,1] scale as the image / video MAE, the MLM ( @c ln256 ), and
+ *  the contrastive ( @c ln2 ) losses, so weighted multi-loss training stays balanced. The raw waveform (not
+ *  a mel spectrogram) is the target, but the loss is still the z-score-both normalized MSE — do not "fix" it
+ *  to target-only.
+ */
+struct masked_frames_t {
+
+    /** @brief Allocate the recon head, every scratch, and pin the three matmul plans — once, at setup. */
+    [[nodiscard]] static expected<masked_frames_t> make(gpu_arena_t &arena, cublaslt_session_t &blas,
+                                                        masked_frames_config_t config) noexcept;
+
+    /**
+     *  @brief Sample the frame mask and write @p distorted_frames — pure enqueue. A frame is masked with
+     *      probability @c mask_ratio , drawn independently per frame; a masked frame's samples are zeroed,
+     *      an unmasked one copies clean.
+     *
+     *  @param[in] clean_frames The frontend's raw waveform frames @b [frames,chunk_samples] Float32 — a
+     *      flattened view of @c audio_samples .
+     *  @param[out] distorted_frames The tower's input @b [frames,chunk_samples] Float32 — clean or zeroed.
+     */
+    [[nodiscard]] expected_t sample_and_corrupt(f32r2_view_t clean_frames, f32r2_span_t distorted_frames,
+                                                masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept;
+
+    /**
+     *  @brief Reconstruct and score the masked frames — pure enqueue on @p stream .
+     *
+     *  @param[in] normalized The tower's final-norm frame states @b [frames,hidden] .
+     *  @param[in] clean_frames The reconstruction target @b [frames,chunk_samples] Float32.
+     *  @param[out] loss_summands @b [2] Float32: @c {λ·Σ per-frame normalized-MSE, masked count} .
+     *  @param[out] normalized_grad @b [frames,hidden] @c d(normalized) — the tower's backward ADDS it.
+     */
+    [[nodiscard]] expected_t operator()(bf16r2_view_t normalized, f32r2_view_t clean_frames, f32r1_span_t loss_summands,
+                                        bf16r2_span_t normalized_grad, gpu_stream_t &stream) noexcept;
+
+    /** @brief Append the recon weight to @p weights . */
+    [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;
+    /** @brief The recon weights @b [chunk_samples·hidden] — the checkpoint enumerator's handle. */
+    [[nodiscard]] nk::tensor_span<bf16_t, 1> recon_weights() noexcept { return recon_weight_.span().flatten<1>(); }
+
+  private:
+    masked_frames_config_t config_ {};
+    /** @brief The device's one main-owned tensor-core session — borrowed, never created here. */
+    cublaslt_session_t *session_ = nullptr;
+    /** @brief The linear reconstruction head @b [chunk_samples,hidden] and its gradient buffer. */
+    bf16r2_tensor_arena_t recon_weight_ {}, recon_weight_grad_ {};
+    /** @brief @b [max_frames,chunk_samples] reconstructed frames and their loss gradient. */
+    bf16r2_tensor_arena_t predicted_ {}, predicted_grad_ {};
+    /** @brief @b [max_frames] the sampled mask (one masked, zero visible) the loss gates on. */
+    u32r1_tensor_arena_t mask_ {};
+    /** @brief @b [max_frames] per-frame normalized-MSE summands. */
+    f32r1_tensor_arena_t position_loss_ {};
+    /** @brief @b [2] @c {λ·2/(chunk_samples·max(count,1)), count} — device-computed. */
     f32r1_tensor_arena_t gradient_scale_ {};
     /** @brief The shared tensor-core workspace of the three pinned plans. */
     b8r1_tensor_arena_t workspace_ {};

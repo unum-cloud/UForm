@@ -10,12 +10,13 @@
  *
  *  @section multimodal_batch_rows Rectangular rows, segments of any modality
  *
- *  A batch is a @b [rows,columns] rectangle of fixed-width rows packing segments back to back, any
- *  modality mixing freely within one row — a row can hold thumbnails, a caption, and an audio clip —
- *  so each segment carries its own @ref segment_modality tag rather than a row band implying it.
- *  Media segments carry their @b raw signals — pixels, raw waveform frames — and every learnable transform
- *  (patch cut, spectral frontend, projection, embedding lookup) happens inside the differentiated step with
- *  fresh weights, never at packing time.
+ *  A batch is a @b [rows,columns] rectangle of fixed-width rows packing segments back to back; each segment
+ *  carries its own @ref segment_modality tag rather than a row band implying it, so a row can hold segments of
+ *  any modality — thumbnails, a caption, and an audio clip together. A single loader fills one modality (it
+ *  owns the whole segment table), and the @b mixer interleaves modalities across GPUs, so that free mixing is a
+ *  property of the @b post-mix batch, not of one loader's fill. Media segments carry their @b raw signals —
+ *  pixels, raw waveform frames — and every learnable transform (patch cut, spectral frontend, projection,
+ *  embedding lookup) happens inside the differentiated step with fresh weights, never at packing time.
  *
  *  @section multimodal_batch_pipeline How batches flow through a training step
  *

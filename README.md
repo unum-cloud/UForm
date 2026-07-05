@@ -119,7 +119,7 @@ All models are __tokenization-free__:
 
 - No Byte-Pair Encoding (BPE), SentencePiece, or WordPiece for text, just bytes!
 - No VQ tokenization (VQ-VAE, MAGVIT) for images and videos, just patch and tube projections!
-- No neural audio codec (EnCodec, SoundStream, residual-VQ) for audio, just continuous mel-spectrogram frames!
+- No neural audio codec (EnCodec, SoundStream, residual-VQ) for audio, just raw waveform frames — the spectral frontend is learned inside the encoder!
 
 There is no tokenizer drift across languages or model versions, no out-of-vocabulary tokens, and no vocabulary-update migration story — a checkpoint is bytes-in and bytes-out at deployment time, and the learned byte embedding and uniform encoder cluster bytes into effective subwords with no fixed pooling rule.
 
@@ -199,12 +199,12 @@ Corpora are read into device memory as Apache Arrow-compatible columns, byte-tok
 The binary-column path sustains 2–3 GB/s of media bytes at \~5 ms/batch, comfortably ahead of what a training step consumes, so the prefetcher rarely stalls.
 This easily supersedes single-process PyTorch `DataLoader`s by \~25× even for text processing, \~25× even for images, even without augmentations, and by a criminal number for videos.
 
-Each modality goes from raw bytes to a masked batch on-device:
+Each modality goes from raw bytes to a masked batch on-device, and every item — a caption, an image, a clip — becomes a variable-width __segment__ packed onto one shared `[rows, columns]` grid and tagged by modality, so a single uniform encoder ingests them all:
 
 - __Tokens__ — byte-tokenized, bucket-stratified, packed, and span-masked in CUDA; paired sentences average a few hundred bytes, so packing many into one 4 KiB row keeps the batch dense without wasting context on padding.
-- __Images__ — decoded from JPEG, PNG, or WebP by nvImageCodec, then __2D patchified__ and MAE-masked.
+- __Images__ — decoded from JPEG, PNG, or WebP by nvImageCodec into __4-channel RGBA__ (alpha is 255 where the codec carries none), then __2D patchified__ and MAE-masked.
 - __Video__ — decoded by NVDEC, NV12 → planar RGB, then __3D tube-extracted__ and tube-masked into a `[3, T, H, W]` tensor.
-- __Audio__ — decoded from WAV, FLAC, or OGG-Opus by a pool of libavcodec workers, then turned into log-mel frames on the GPU via cuFFT, and masked like the rest.
+- __Audio__ — decoded from WAV, FLAC, or OGG-Opus by a pool of libavcodec workers, then chunked into __raw waveform frames__ on the GPU — the mel / STFT frontend is a learnable layer of the encoder, not a fixed loader transform — and masked like the rest.
 - __Code__ – ...
 
 First-party NVIDIA libraries do the decode and IO:
@@ -212,7 +212,6 @@ First-party NVIDIA libraries do the decode and IO:
 - __[nvImageCodec](https://github.com/NVIDIA/nvImageCodec)__ — batched on-GPU decode of JPEG, PNG, and WebP into device RGB tensors.
 - __[nvJPEG](https://developer.nvidia.com/nvjpeg)__ — the hardware-JPEG fast path on Blackwell's decode engine, device-direct.
 - __[NVDEC](https://developer.nvidia.com/video-codec-sdk)__ — on-GPU video decode, NV12 → planar RGB.
-- __[cuFFT](https://developer.nvidia.com/cufft)__ — the FFT behind on-GPU STFT and log-mel feature extraction for audio.
 - __[cuFile](https://developer.nvidia.com/gpudirect-storage)__ — streams compressed bytes from disk straight to device memory on GDS-capable mounts, with a buffered fallback.
 - __[cuRAND](https://developer.nvidia.com/curand)__ — device-side RNG for span-, patch-, and tube-mask sampling and augmentation.
 - __[cuDF](https://github.com/rapidsai/cudf)__ — GPU dataframes that read and filter Parquet and JSONL corpora as Arrow-format columns and gather mined negatives with `series.take`, no CPU round-trip.
@@ -298,7 +297,7 @@ With the default `patch_size=16` and `max_seq=4096` this resolves to `image_side
 `omni-large` uses `max_seq=16384` → `image_side=2048 px` (128² = 16384 patches).
 Passing any other `--max-seq` value to an omni run aborts the forward pass with a `num_patches != max_seq` guard.
 
-The `text-*` configs use the byte-gather frontend only; the `omni-*` configs attach all frontends (vision patch projection, video tube projection, audio mel-frame projection) into the same uniform encoder backbone.
+The `text-*` configs use the byte-gather frontend only; the `omni-*` configs attach all frontends (vision patch projection, video tube projection, audio waveform-frame projection) into the same uniform encoder backbone.
 Every tier ships in three or more capability variants, warm-started in sequence — Net2Net width-doubles text-tiny → text-large, and each scale trains Base → Reranker → Embedder on top of its own Base:
 
 - __Base__ — span-masked byte modelling on the per-byte encoder output; the pretraining root.
@@ -321,9 +320,9 @@ All modalities share one uniform encoder via per-modality input frontends:
 - __Tokens__ — a byte-gather frontend embeds raw UTF-8 bytes directly, with no tokenizer step.
 - __Images__ — a vision patch-projection frontend converts 16×16 pixel patches into encoder-width vectors using 2D M-RoPE coordinates.
 - __Video__ — a tube-projection frontend lifts 16×16×2 spatio-temporal tubes into the same width using 3D M-RoPE, with absolute time on the temporal axis so clips sampled at any frame rate share one coordinate frame.
-- __Audio__ — a mel-frame frontend projects log-mel spectrogram frames into encoder-width vectors.
+- __Audio__ — a waveform-frame frontend projects raw sample chunks into encoder-width vectors, learning the spectral transform end to end rather than baking a fixed mel filterbank.
 
-Each frontend is a thin adapter (patch / tube / mel-frame projection or byte embedding lookup); the uniform encoder backbone is identical across all modalities — the same N blocks at the same width, the same M-RoPE, the same attention-pooled embedding.
+Each frontend is a thin adapter (patch / tube / waveform-frame projection or byte embedding lookup); the uniform encoder backbone is identical across all modalities — the same N blocks at the same width, the same M-RoPE, the same attention-pooled embedding.
 This is how the `omni-*` configs achieve cross-modal retrieval: image↔text, video↔text, and audio↔text pairs are scored using the same pooled-embedding space, so emergent cross-modal transfer (image↔video, audio↔text at zero-shot) follows from the shared encoder geometry.
 
 Cross-modal retrieval and the structured-output tasks — de-identification, segmentation, log normalization, document extraction — all run over the same backbone and the same GPU-accelerated scaffolding, at encoder throughput.
