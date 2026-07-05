@@ -5,7 +5,7 @@
  *  @author Ash Vardanian
  *  @date July 2, 2026
  *
- *  Both contrastive losses (segments and tokens) score a @b [vertices_per_gpu,neighbors_per_mesh] cell grid
+ *  Both contrastive losses (segments and tokens) score a @b [from_vertices_per_gpu,to_vertices_per_mesh] cell grid
  *  and need one answer per cell: the target sign and the weight. This file is that answer's single source
  *  of truth — a device-readable view, the per-cell resolver, and the host owner that stages it
  *  capture-safely.
@@ -66,41 +66,54 @@ namespace unum::uform::core {
 namespace nk = ashvardanian::numkong;
 
 /**
+ *  @brief A per-anchor temperature-group id — a runtime category selecting one learnable (β, bias) entry
+ *      from the recipe's device tables. Open by design: the group set is counted at runtime through
+ *      @ref contrastive_recipe_t::temperature_group_count , never a fixed compile-time enumeration.
+ */
+enum class temperature_group_t : u32_t {};
+
+/**
  *  @brief Scaling and labeling knobs of a contrastive loss — host fallbacks plus optional device views of
  *      the learnable scalars, so a captured step reads per-step-updated values without a host readback.
  *
  *  When @c inverse_temperature_device / @c bias_device are non-empty they override the host scalars;
- *  @c vertex_pair_type (when non-empty, @b [vertices_per_gpu] ) selects each vertex's slot — e.g. separate
- *  temperatures for text-text vs text-image pairs. An empty selector means every vertex uses slot 0,
- *  bit-identical to the single-slot path. Views instead of raw pointers: every device column carries its
- *  own extent, so the slot count is never a separately-carried integer that can disagree.
+ *  @c from_vertex_temperature_group (when non-empty, @b [from_vertices_per_gpu] ) selects each vertex's
+ *  entry — e.g. a per-modality or per-dataset temperature group, one learnable (β, bias) per group,
+ *  selected per anchor vertex. An empty selector means every vertex uses entry 0, bit-identical to the
+ *  single-entry path. Views instead of raw pointers: every device column carries its own extent, so the
+ *  entry count is never a separately-carried integer that can disagree.
  */
 struct contrastive_recipe_t {
     /** @brief Logit scale β applied to every cosine; overridden by @ref inverse_temperature_device . */
     f32_t inverse_temperature = 1.0f;
     /** @brief Additive logit bias; overridden by @ref bias_device . */
     f32_t bias = 0.0f;
-    /** @brief Weight of every pair the graph names no edge for — the ambient all-pairs repulsion. */
+    /** @brief Weight of every pair the graph names no edge for — the ambient all-pairs repulsion. The
+     *      kernels read the copy on @ref contrastive_relations_view_t (staged through @c upload ); this one
+     *      is inert after upload. */
     f32_t ambient_repulsion_weight = 1.0f;
-    /** @brief Optional @b [pair_type_count] Float32 device slots of the learnable β; empty falls back to
-     *      the host scalar. */
+    /** @brief Optional @b [temperature_group_count] Float32 device entries of the learnable β; empty falls
+     *      back to the host scalar. */
     f32r1_view_t inverse_temperature_device {};
-    /** @brief Optional @b [pair_type_count] Float32 device slots of the learnable bias; empty falls back
-     *      to the host scalar. */
+    /** @brief Optional @b [temperature_group_count] Float32 device entries of the learnable bias; empty
+     *      falls back to the host scalar. */
     f32r1_view_t bias_device {};
-    /** @brief Optional @b [vertices_per_gpu] UInt32 per-vertex slot selector; empty means slot 0 for all. */
-    u32r1_view_t vertex_pair_type {};
+    /** @brief Optional @b [from_vertices_per_gpu] per-anchor temperature-group selector; empty means group
+     *      0 for every vertex. */
+    nk::tensor_view<temperature_group_t, 1> from_vertex_temperature_group {};
 
-    /** @brief Number of (β, bias) slots — carried by the device views; 1 on the host-scalar fallback. */
-    [[nodiscard]] constexpr u32_t pair_type_count() const noexcept {
+    /** @brief Number of (β, bias) entries — carried by the device views; 1 on the host-scalar fallback. */
+    [[nodiscard]] constexpr u32_t temperature_group_count() const noexcept {
         return inverse_temperature_device.empty() ? 1u : static_cast<u32_t>(inverse_temperature_device.extent(0));
     }
 };
 
-/** @brief One resolved cell: the target sign (+1 attract, −1 repel) and the weight; @c weight==0 means
- *      the cell is skipped and the target carries no meaning. */
+/** @brief One resolved cell: the loss-sign multiplier and the weight; @c weight==0 means the cell is
+ *      skipped and the multiplier carries no meaning. */
 struct contrastive_pair_relation_t {
+    /** @brief Loss-sign multiplier (+1 attract / −1 repel) — multiplies the logit as @c target·logit . */
     f32_t target;
+    /** @brief Per-cell weight; 0 skips the cell entirely. */
     f32_t weight;
 };
 
@@ -110,81 +123,82 @@ struct contrastive_pair_relation_t {
  *
  *  Three CSR edge sets over the local vertex rows: attract and repel with per-edge scores, ignore
  *  without. Every
- *  extent is carried by its view: @ref vertices_per_gpu derives from the offsets row, and empty
+ *  extent is carried by its view: @ref from_vertices_per_gpu derives from the offsets row, and empty
  *  @ref ignore_offsets means no ignores. All ids are @b global vertex ids, sorted ascending within
  *  each row's run.
  */
 struct contrastive_relations_view_t {
-    /** @brief Attract @b [vertices_per_gpu+1] row pointers — always present; all-zero on the self-edge
-     *      default path. */
+    /** @brief Attract @b [from_vertices_per_gpu+1] row pointers — always present; all-zero on the
+     *      self-edge default path. */
     u32r1_view_t attract_offsets {};
     /** @brief Attract @b [attract_edge_count] global ids, sorted ascending per run; empty selects the
      *      self-edge default parity path. */
     u32r1_view_t attract_ids {};
     /** @brief Attract @b [attract_edge_count] per-edge weights. */
     f32r1_view_t attract_scores {};
-    /** @brief Repel @b [vertices_per_gpu+1] row pointers. */
+    /** @brief Repel @b [from_vertices_per_gpu+1] row pointers. */
     u32r1_view_t repel_offsets {};
     /** @brief Repel global ids, sorted ascending per run. */
     u32r1_view_t repel_ids {};
     /** @brief Repel per-edge weights. */
     f32r1_view_t repel_scores {};
-    /** @brief Ignore @b [vertices_per_gpu+1] row pointers; empty when there are no ignores. */
+    /** @brief Ignore @b [from_vertices_per_gpu+1] row pointers; empty when there are no ignores. */
     u32r1_view_t ignore_offsets {};
     /** @brief Ignore global ids, sorted ascending per run. */
     u32r1_view_t ignore_ids {};
-    /** @brief Optional @b [vertices_per_gpu] UInt32 device column of local-vertex effective lengths; 0
-     *      marks a PAD row no pair resolves against. Empty means every vertex is live. */
-    u32r1_view_t vertex_effective_lengths {};
-    /** @brief Optional @b [neighbors_per_mesh] UInt32 device column of effective lengths over the whole
-     *      global vertex axis, indexed by @b global id; 0 marks a PAD slot. Empty means all live. */
-    u32r1_view_t neighbor_effective_lengths {};
+    /** @brief Optional @b [from_vertices_per_gpu] UInt32 device column of from-vertex token counts; 0 == PAD
+     *      (magnitude unused), a row no pair resolves against. Empty means every vertex is live. */
+    u32r1_view_t from_vertex_effective_length {};
+    /** @brief Optional @b [to_vertices_per_mesh] UInt32 device column of to-vertex token counts over the
+     *      whole global vertex axis, indexed by @b global id; 0 == PAD (magnitude unused). Empty means all
+     *      live. */
+    u32r1_view_t to_vertex_effective_length {};
 
     /** @brief Global id of local vertex 0's own copy — the base of the implicit self-edges. */
     std::size_t self_edge_base = 0;
     /** @brief Weight of every unnamed cell; 0 removes in-batch negatives. */
     f32_t ambient_repulsion_weight = 1.0f;
 
-    /** @brief Number of local vertex rows the graph describes — one less than the offsets row. Like the views'
-     *      own accessors, @c constexpr and therefore device-callable. */
-    [[nodiscard]] constexpr u32_t vertices_per_gpu() const noexcept {
+    /** @brief Number of from-vertex rows the graph describes — one less than the offsets row. Like the
+     *      views' own accessors, @c constexpr and therefore device-callable. */
+    [[nodiscard]] constexpr u32_t from_vertices_per_gpu() const noexcept {
         return attract_offsets.empty() ? 0u : static_cast<u32_t>(attract_offsets.extent(0) - 1u);
     }
     /** @brief Whether explicit attract edges drive the labels (vs the self-edge default). */
-    [[nodiscard]] constexpr bool has_explicit_edges() const noexcept { return attract_ids.extent(0) != 0u; }
+    [[nodiscard]] constexpr bool has_explicit_attract_edges() const noexcept { return attract_ids.extent(0) != 0u; }
 };
 
 #if defined(__CUDACC__)
 
 /** @brief Membership search inside one sorted CSR run — CUB's thread-level lower bound plus the equality
- *      check; the slot index of @p id , or @p end when absent. */
+ *      check; the position of @p id , or @p end when absent. */
 [[nodiscard]] __device__ inline u32_t contrastive_run_find_(u32r1_view_t ids, u32_t begin, u32_t end,
                                                             u32_t id) noexcept {
     // vendor-boundary: cub needs a raw pointer + count, not a view, into the CSR `ids` run.
-    u32_t const slot = begin + cub::LowerBound(ids.data() + begin, end - begin, id);
-    return slot < end && ids[slot] == id ? slot : end;
+    u32_t const position = begin + cub::LowerBound(ids.data() + begin, end - begin, id);
+    return position < end && ids[position] == id ? position : end;
 }
 
-/** @brief Resolve one cell of the @b [vertices_per_gpu,neighbors_per_mesh] grid to its target and weight,
+/** @brief Resolve one cell of the @b [from_vertices_per_gpu,to_vertices_per_mesh] grid to its target and weight,
  *      in the file-header precedence: PAD > ignore > attract > repel > implicit negative. Padding is read
  *      from the view's own effective-length columns — the label grid carries its whole state.
  *
  *  @param[in] relations The graph views, taken by value at kernel launch.
- *  @param[in] vertex_index Row in @c [0,vertices_per_gpu) .
- *  @param[in] neighbor_global Slot on the @b global vertex axis. */
+ *  @param[in] vertex_index Row in @c [0,from_vertices_per_gpu) .
+ *  @param[in] neighbor_global Position on the @b global vertex axis. */
 [[nodiscard]] __device__ inline contrastive_pair_relation_t contrastive_pair_relation(
     contrastive_relations_view_t const &relations, u32_t vertex_index, u32_t neighbor_global) noexcept {
 
-    if (!relations.vertex_effective_lengths.empty() && relations.vertex_effective_lengths[vertex_index] == 0u)
+    if (!relations.from_vertex_effective_length.empty() && relations.from_vertex_effective_length[vertex_index] == 0u)
         return {0.0f, 0.0f};
-    if (!relations.neighbor_effective_lengths.empty() && relations.neighbor_effective_lengths[neighbor_global] == 0u)
+    if (!relations.to_vertex_effective_length.empty() && relations.to_vertex_effective_length[neighbor_global] == 0u)
         return {0.0f, 0.0f};
     if (!relations.ignore_offsets.empty()) {
         u32_t const begin = relations.ignore_offsets[vertex_index];
         u32_t const end = relations.ignore_offsets[vertex_index + 1];
         if (contrastive_run_find_(relations.ignore_ids, begin, end, neighbor_global) != end) return {0.0f, 0.0f};
     }
-    if (!relations.has_explicit_edges()) {
+    if (!relations.has_explicit_attract_edges()) {
         bool const is_self_edge = static_cast<std::size_t>(neighbor_global) ==
                                   relations.self_edge_base + static_cast<std::size_t>(vertex_index);
         return is_self_edge ? contrastive_pair_relation_t {1.0f, 1.0f}
@@ -194,15 +208,15 @@ struct contrastive_relations_view_t {
     {
         u32_t const begin = relations.attract_offsets[vertex_index];
         u32_t const end = relations.attract_offsets[vertex_index + 1];
-        u32_t const slot = contrastive_run_find_(relations.attract_ids, begin, end, neighbor_global);
-        if (slot != end) return {1.0f, relations.attract_scores[slot]};
+        u32_t const position = contrastive_run_find_(relations.attract_ids, begin, end, neighbor_global);
+        if (position != end) return {1.0f, relations.attract_scores[position]};
     }
     // Repel lookup: an explicit hard negative carrying its own weight.
     {
         u32_t const begin = relations.repel_offsets[vertex_index];
         u32_t const end = relations.repel_offsets[vertex_index + 1];
-        u32_t const slot = contrastive_run_find_(relations.repel_ids, begin, end, neighbor_global);
-        if (slot != end) return {-1.0f, relations.repel_scores[slot]};
+        u32_t const position = contrastive_run_find_(relations.repel_ids, begin, end, neighbor_global);
+        if (position != end) return {-1.0f, relations.repel_scores[position]};
     }
     return {-1.0f, relations.ambient_repulsion_weight};
 }
@@ -267,64 +281,64 @@ struct contrastive_relations_t {
      *  Every invariant is checked here, where the data is still host-resident, and every violation is a
      *  named failure: capacity overflow, offset rows of the wrong length, non-monotone or non-zero-based
      *  offsets, id/score length mismatches, unsorted or duplicate ids within a run, ids outside
-     *  @c [0,neighbors_per_mesh) , negative scores. There is no silent fallback.
+     *  @c [0,to_vertices_per_mesh) , negative scores. There is no silent fallback.
      *
      *  @param[in] ignore_offsets / @p ignore_ids Empty views mean no ignores.
-     *  @param[in] vertex_effective_lengths / @p neighbor_effective_lengths The per-step PAD columns the
-     *      resolver reads: @b [vertices_per_gpu] and @b [neighbors_per_mesh] (by global id) device views, 0
-     *      marking PAD, empty meaning all-live. @b Borrowed, never copied — the batch pipeline owns them
-     *      and keeps the addresses capture-stable.
+     *  @param[in] from_vertex_effective_length / @p to_vertex_effective_length The per-step PAD columns the
+     *      resolver reads: @b [from_vertices_per_gpu] and @b [to_vertices_per_mesh] (by global id) device
+     *      views, 0 marking PAD, empty meaning all-live. @b Borrowed, never copied — the batch pipeline owns
+     *      them and keeps the addresses capture-stable.
      */
-    [[nodiscard]] expected_t upload(                                                                //
-        u32r1_view_t attract_offsets, u32r1_view_t attract_ids,                                     //
-        f32r1_view_t attract_scores,                                                                //
-        u32r1_view_t repel_offsets, u32r1_view_t repel_ids,                                         //
-        f32r1_view_t repel_scores,                                                                  //
-        u32r1_view_t ignore_offsets, u32r1_view_t ignore_ids,                                       //
-        u32r1_view_t vertex_effective_lengths, u32r1_view_t neighbor_effective_lengths,             //
-        std::size_t neighbors_per_mesh, std::size_t self_edge_base, f32_t ambient_repulsion_weight, //
+    [[nodiscard]] expected_t upload(                                                                  //
+        u32r1_view_t attract_offsets, u32r1_view_t attract_ids,                                       //
+        f32r1_view_t attract_scores,                                                                  //
+        u32r1_view_t repel_offsets, u32r1_view_t repel_ids,                                           //
+        f32r1_view_t repel_scores,                                                                    //
+        u32r1_view_t ignore_offsets, u32r1_view_t ignore_ids,                                         //
+        u32r1_view_t from_vertex_effective_length, u32r1_view_t to_vertex_effective_length,           //
+        std::size_t to_vertices_per_mesh, std::size_t self_edge_base, f32_t ambient_repulsion_weight, //
         gpu_stream_t &stream) noexcept {
 
         if (attract_offsets.extent(0) < 2 || attract_offsets.extent(0) != repel_offsets.extent(0))
             return expected_t::fail( //
                 status_t::invalid_input_k,
-                "attract and repel offset rows must both span vertices_per_gpu+1 (got {} and {})",
+                "attract and repel offset rows must both span from_vertices_per_gpu+1 (got {} and {})",
                 attract_offsets.extent(0), repel_offsets.extent(0));
-        u32_t const vertices_per_gpu = static_cast<u32_t>(attract_offsets.extent(0) - 1u);
+        u32_t const from_vertices_per_gpu = static_cast<u32_t>(attract_offsets.extent(0) - 1u);
         bool const has_ignores = !ignore_offsets.empty();
         if (has_ignores && ignore_offsets.extent(0) != attract_offsets.extent(0))
             return expected_t::fail( //
                 status_t::invalid_input_k,
-                "ignore offsets must span vertices_per_gpu+1 like the others (got {}, expected {})",
+                "ignore offsets must span from_vertices_per_gpu+1 like the others (got {}, expected {})",
                 ignore_offsets.extent(0), attract_offsets.extent(0));
 
         if (expected_t checked = validate_edges_("attract", attract_offsets, attract_ids, attract_scores,
-                                                 neighbors_per_mesh);
+                                                 to_vertices_per_mesh);
             !checked)
             return checked;
-        if (expected_t checked = validate_edges_("repel", repel_offsets, repel_ids, repel_scores, neighbors_per_mesh);
+        if (expected_t checked = validate_edges_("repel", repel_offsets, repel_ids, repel_scores, to_vertices_per_mesh);
             !checked)
             return checked;
         if (has_ignores)
-            if (expected_t checked = validate_edges_("ignore", ignore_offsets, ignore_ids, {}, neighbors_per_mesh);
+            if (expected_t checked = validate_edges_("ignore", ignore_offsets, ignore_ids, {}, to_vertices_per_mesh);
                 !checked)
                 return checked;
 
         // Resize every column to the step's live extents — no address moves, and an overflow beyond the
         // reserved capacity fails here, loudly, before anything is staged.
-        bool resized = attract_offsets_.try_resize({vertices_per_gpu + 1u});
-        resized = resized && repel_offsets_.try_resize({vertices_per_gpu + 1u});
+        bool resized = attract_offsets_.try_resize({from_vertices_per_gpu + 1u});
+        resized = resized && repel_offsets_.try_resize({from_vertices_per_gpu + 1u});
         resized = resized && attract_ids_.try_resize({attract_ids.extent(0)});
         resized = resized && attract_scores_.try_resize({attract_scores.extent(0)});
         resized = resized && repel_ids_.try_resize({repel_ids.extent(0)});
         resized = resized && repel_scores_.try_resize({repel_scores.extent(0)});
-        resized = resized && ignore_offsets_.try_resize({has_ignores ? vertices_per_gpu + 1u : 0u});
+        resized = resized && ignore_offsets_.try_resize({has_ignores ? from_vertices_per_gpu + 1u : 0u});
         resized = resized && ignore_ids_.try_resize({has_ignores ? ignore_ids.extent(0) : 0u});
         if (!resized)
             return expected_t::fail( //
                 status_t::shape_unsupported_k,
                 "relations exceed the reserved capacities (vertices={}/{} attract={}/{} repel={}/{} ignore={}/{})",
-                vertices_per_gpu + 1u, attract_offsets_.capacity(), attract_ids.extent(0), attract_ids_.capacity(),
+                from_vertices_per_gpu + 1u, attract_offsets_.capacity(), attract_ids.extent(0), attract_ids_.capacity(),
                 repel_ids.extent(0), repel_ids_.capacity(), has_ignores ? ignore_ids.extent(0) : 0u,
                 ignore_ids_.capacity());
 
@@ -339,8 +353,8 @@ struct contrastive_relations_t {
         if (copied && has_ignores) copied = copy_host_to_device(ignore_ids, ignore_ids_.span(), stream);
         if (!copied) return copied;
 
-        vertex_effective_lengths_ = vertex_effective_lengths;
-        neighbor_effective_lengths_ = neighbor_effective_lengths;
+        from_vertex_effective_length_ = from_vertex_effective_length;
+        to_vertex_effective_length_ = to_vertex_effective_length;
         self_edge_base_ = self_edge_base;
         ambient_repulsion_weight_ = ambient_repulsion_weight;
         return {};
@@ -349,24 +363,25 @@ struct contrastive_relations_t {
     /** @brief Stage the zero-edge self-edge default: the offsets row is zeroed (every run empty), both
      *      edge sets collapse to empty extents, and the borrowed effective-length columns are adopted as
      *      in @ref upload . */
-    [[nodiscard]] expected_t upload_self_edges(u32_t vertices_per_gpu, u32r1_view_t vertex_effective_lengths,
-                                               u32r1_view_t neighbor_effective_lengths, std::size_t self_edge_base,
+    [[nodiscard]] expected_t upload_self_edges(u32_t from_vertices_per_gpu, u32r1_view_t from_vertex_effective_length,
+                                               u32r1_view_t to_vertex_effective_length, std::size_t self_edge_base,
                                                f32_t ambient_repulsion_weight, gpu_stream_t &stream) noexcept {
-        bool resized = vertices_per_gpu != 0 && attract_offsets_.try_resize({vertices_per_gpu + 1u});
-        resized = resized && repel_offsets_.try_resize({vertices_per_gpu + 1u});
+        bool resized = from_vertices_per_gpu != 0 && attract_offsets_.try_resize({from_vertices_per_gpu + 1u});
+        resized = resized && repel_offsets_.try_resize({from_vertices_per_gpu + 1u});
         resized = resized && attract_ids_.try_resize({0}) && attract_scores_.try_resize({0});
         resized = resized && repel_ids_.try_resize({0}) && repel_scores_.try_resize({0});
         resized = resized && ignore_offsets_.try_resize({0}) && ignore_ids_.try_resize({0});
         if (!resized)
             return expected_t::fail(status_t::shape_unsupported_k,
                                     "self-edge relations for {} vertices exceed the column capacity of {}",
-                                    vertices_per_gpu, attract_offsets_.capacity());
+                                    from_vertices_per_gpu, attract_offsets_.capacity());
         if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(attract_offsets_.data()), 0,
-                                              (vertices_per_gpu + 1u) * sizeof(u32_t), stream.get());
+                                              (from_vertices_per_gpu + 1u) * sizeof(u32_t), stream.get());
             result != CUDA_SUCCESS)
-            return expected_t::fail(result, "self-edge offsets reset failed (vertices_per_gpu={})", vertices_per_gpu);
-        vertex_effective_lengths_ = vertex_effective_lengths;
-        neighbor_effective_lengths_ = neighbor_effective_lengths;
+            return expected_t::fail(result, "self-edge offsets reset failed (from_vertices_per_gpu={})",
+                                    from_vertices_per_gpu);
+        from_vertex_effective_length_ = from_vertex_effective_length;
+        to_vertex_effective_length_ = to_vertex_effective_length;
         self_edge_base_ = self_edge_base;
         ambient_repulsion_weight_ = ambient_repulsion_weight;
         return {};
@@ -385,8 +400,8 @@ struct contrastive_relations_t {
         view.repel_scores = repel_scores_.view();
         view.ignore_offsets = ignore_offsets_.view();
         view.ignore_ids = ignore_ids_.view();
-        view.vertex_effective_lengths = vertex_effective_lengths_;
-        view.neighbor_effective_lengths = neighbor_effective_lengths_;
+        view.from_vertex_effective_length = from_vertex_effective_length_;
+        view.to_vertex_effective_length = to_vertex_effective_length_;
         view.self_edge_base = self_edge_base_;
         view.ambient_repulsion_weight = ambient_repulsion_weight_;
         return view;
@@ -396,7 +411,7 @@ struct contrastive_relations_t {
     /** @brief All host-side invariants of one edge set (attract / repel / ignore); every violation names
      *      the @p edge_kind and the row. */
     [[nodiscard]] expected_t validate_edges_(char const *edge_kind, u32r1_view_t offsets, u32r1_view_t ids,
-                                             f32r1_view_t scores, std::size_t neighbors_per_mesh) const noexcept {
+                                             f32r1_view_t scores, std::size_t to_vertices_per_mesh) const noexcept {
         std::size_t const rows = offsets.extent(0) - 1u;
         std::size_t const edge_count = ids.extent(0);
         if (!scores.empty() && scores.extent(0) != edge_count)
@@ -412,21 +427,21 @@ struct contrastive_relations_t {
             if (offsets[row] > offsets[row + 1])
                 return expected_t::fail(status_t::invalid_input_k, "{} offsets decrease at row {} ({} > {})", edge_kind,
                                         row, offsets[row], offsets[row + 1]);
-            for (u32_t slot = offsets[row]; slot < offsets[row + 1]; ++slot) {
-                u32_t const id = ids[slot];
-                if (id >= neighbors_per_mesh)
+            for (u32_t edge = offsets[row]; edge < offsets[row + 1]; ++edge) {
+                u32_t const id = ids[edge];
+                if (id >= to_vertices_per_mesh)
                     return expected_t::fail(status_t::invalid_input_k,
                                             "{} id {} at row {} is outside [0,{}) — ids are global", edge_kind, id, row,
-                                            neighbors_per_mesh);
-                if (slot > offsets[row] && ids[slot - 1] >= id)
+                                            to_vertices_per_mesh);
+                if (edge > offsets[row] && ids[edge - 1] >= id)
                     return expected_t::fail( //
                         status_t::invalid_input_k,
                         "{} run of row {} is not strictly ascending ({} then {}) — the kernel's binary search " //
                         "would silently mis-score",
-                        edge_kind, row, ids[slot - 1], id);
-                if (!scores.empty() && scores[slot] < 0.0f)
+                        edge_kind, row, ids[edge - 1], id);
+                if (!scores.empty() && scores[edge] < 0.0f)
                     return expected_t::fail(status_t::invalid_input_k, "{} score {} at row {} is negative", edge_kind,
-                                            scores[slot], row);
+                                            scores[edge], row);
             }
         }
         return {};
@@ -438,9 +453,9 @@ struct contrastive_relations_t {
     u32r1_tensor_arena_t attract_ids_ {}, repel_ids_ {}, ignore_ids_ {};
     f32r1_tensor_arena_t attract_scores_ {}, repel_scores_ {};
     // Borrowed per-step PAD state — the batch pipeline owns these at capture-stable addresses.
-    u32r1_view_t vertex_effective_lengths_ {};
-    u32r1_view_t neighbor_effective_lengths_ {};
-    // The self-edge default's anchor slot and the ambient repulsion — plain label scalars, not extents.
+    u32r1_view_t from_vertex_effective_length_ {};
+    u32r1_view_t to_vertex_effective_length_ {};
+    // The self-edge default's anchor base and the ambient repulsion — plain label scalars, not extents.
     std::size_t self_edge_base_ = 0;
     f32_t ambient_repulsion_weight_ = 1.0f;
 };

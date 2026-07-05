@@ -15,7 +15,7 @@
  *  segments loss defines; the two share the label-resolution boundary, never a common driver.
  *
  *  What makes this a separate file rather than a policy parameter is the resource profile: with @c S tokens
- *  per row, the peer-read traffic, the symmetric candidate slot, and the Float32 candidate gradient all grow
+ *  per row, the peer-read traffic, the symmetric candidate cell, and the Float32 candidate gradient all grow
  *  @c S× , and a token×token score tensor exists before the pair score does. The cohort loop is therefore
  *  mandatory banding here, not just a distribution boundary — a cohort block must be tiled so the per-wave
  *  transient never materialises the whole @b [rows,S,hidden] gradient of a remote shard.
