@@ -31,6 +31,9 @@ DATASETS: dict[str, dict] = datasets()
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+#: The `python_data/` directory holding the `download_*.py` acquisition scripts.
+PKG_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # The text trainers collapsed into one objective-weighted unified trainer (`python -m python_train`).
 # Its MLM + contrastive-pair mixtures are the single-source-of-truth `data/*.json` mixtures.
 #: Canonical mixture registry — keyed by the `<MODALITY>_<NATURE>` slug, each a `(corpus, weight)` list.
@@ -161,13 +164,44 @@ def _emit_json() -> None:
     print(json.dumps(payload, indent=2))
 
 
+def _acquire_plan() -> tuple[list[str], list[str]]:
+    """Split the per-dataset downloaders into `(shardable, whole)` stems for `python_data/acquire.sbatch`.
+
+    A shardable downloader calls the shared `acquire()`, so it rank-partitions its shards across the
+    acquisition workers; a whole downloader (YouTube fetch / TSV-CSV / multi-repo / the generic
+    `text_pairs`) cannot sub-shard and runs one-per-worker. `download_smokes.py` is excluded — it stages
+    eval probes, not a training corpus.
+    """
+    shardable: list[str] = []
+    whole: list[str] = []
+    for path in sorted(glob.glob(os.path.join(PKG_DIR, "download_*.py"))):
+        stem = os.path.basename(path)[len("download_") : -len(".py")]
+        if stem == "smokes":
+            continue
+        with open(path, encoding="utf-8") as handle:
+            bucket = shardable if "from acquire import acquire" in handle.read() else whole
+        bucket.append(stem)
+    return shardable, whole
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--trainers", action="store_true", help="Print trainer-to-data convention.")
     parser.add_argument("--mixtures", action="store_true", help="Print per-trainer corpus mixtures.")
     parser.add_argument("--sources", action="store_true", help="Print the DATASETS corpus registry.")
     parser.add_argument("--json", action="store_true", help="Machine-readable JSON dump.")
+    parser.add_argument(
+        "--acquire-shardable", action="store_true", help="Print shardable downloader stems, one per line."
+    )
+    parser.add_argument(
+        "--acquire-whole", action="store_true", help="Print whole-dataset downloader stems, one per line."
+    )
     args = parser.parse_args()
+
+    if args.acquire_shardable or args.acquire_whole:
+        shardable, whole = _acquire_plan()
+        print("\n".join(shardable if args.acquire_shardable else whole))
+        return
 
     if args.json:
         _emit_json()

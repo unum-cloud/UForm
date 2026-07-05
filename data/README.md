@@ -32,7 +32,11 @@ Each path writes into a rank-private scratch, commits through an atomic rename, 
 
 __Acquisition CLI.__
 Each dataset has its own thin script: `uv run python_data/download_<name>.py [--fraction F | --max-shards N]` calls the shared `acquire()` helper with that dataset's source constants and an optional `_transform`, which dispatches on `source_kind` and writes canonical parquet under `UFORM_DATA_ROOT/<out_name>` (falling back to the repository's `data/`); a handful of corpora that don't fit the single-repo-per-shard model (YouTube fetch, TSV/CSV, multi-repo, the generic `text_pairs.py`) keep a full bespoke downloader instead.
-It is single-threaded and rank-aware: under Slurm the array job `deploy/slurm/acquire.sbatch` runs one `download_<name>.py` per array task, each taking a disjoint shard stride via `python_data/sharding.py`, while a single-machine `uv run` is the identical code path pulling the whole capped set.
+It is single-threaded and rank-aware.
+`python_data/acquire.sbatch` acquires the whole corpus in one __shape-agnostic__ Slurm job: it grabs every idle node, spawns one worker per GPU (acquisition is CPU/IO — the GPUs go unused, the count is just a hardware-matched fan-out), and splits each node's cores evenly among its workers.
+Each worker takes a disjoint shard stride — `shards[$SLURM_PROCID::$SLURM_NTASKS]` via `python_data/sharding.py` — of every _shardable_ dataset, while the _whole-dataset_ downloaders that can't sub-shard (YouTube fetch, TSV/CSV, multi-repo, the generic `text_pairs.py`) are handed out one-per-worker, round-robin; the two lists come from `uv run python_data/list_registry.py --acquire-shardable | --acquire-whole`.
+Completion is the per-shard atomic rename, so the run is idempotent and requeue-safe: re-submit to fill gaps, raise the node range to add workers, nothing coordinates.
+A single-machine `uv run python_data/download_<name>.py` is the identical code path with no Slurm env, pulling the whole capped set.
 
 __Disk runbook.__
 The data root is typically a large scratch volume; keep headroom.
