@@ -57,6 +57,21 @@ if (CCACHE_PROGRAM)
     set(CMAKE_CUDA_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
 endif ()
 
+# Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any
+# cloned repo execute code), so point `core.hooksPath` at `.githooks` here — configuring the build arms
+# the `pre-commit` / `commit-msg` checks. Skipped when there is no `.git` (tarball / export builds).
+if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+    execute_process(
+        COMMAND git config core.hooksPath .githooks
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        RESULT_VARIABLE _uform_hooks_status
+        OUTPUT_QUIET ERROR_QUIET
+    )
+    if (_uform_hooks_status EQUAL 0)
+        message(STATUS "uform: Git hooks enabled (core.hooksPath -> .githooks)")
+    endif ()
+endif ()
+
 project(
     uform
     VERSION 4.0.0

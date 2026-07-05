@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+# UForm pre-commit: enforce the house style on staged changes before they land.
+#
+# A collection of targeted checks over the staged diff — CUDA Driver-API-only (no `<<<>>>` launches or
+# Runtime API includes), namespace / include-order / Doxygen conventions, banned vocabulary, the
+# no-exceptions container policy, decorative-ruler and formatter-off bans, and clang-format / cmake-format
+# cleanliness. Each check inspects only the added lines of a staged file, so legacy code migrates on its
+# own schedule while no new violation sneaks in, and each prints the specific reason when it fires.
+
+set -u
+
+failed=0
+while IFS= read -r file; do
+    case "$file" in
+    cuda_core/* | cuda_loaders/* | cuda_test/* | cuda_train/*) ;;
+    *) continue ;;
+    esac
+    added_lines=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++')
+    # Translation units (.cu / .cpp) never OPEN a namespace block — named or anonymous. They define
+    # entities already declared in the headers, so they reach the namespace with `using namespace ...;`
+    # or a `namespace alias = ...;` and qualify their definitions; the `namespace X { }` body lives only
+    # in the .cuh / .hpp. Matches a name-then-`{` or a bare `{`; aliases (`= ...;`), using-directives, and
+    # the closing `} // namespace` all lack the opening brace and pass.
+    case "$file" in
+    *.cu | *.cpp)
+        namespace_blocks=$(printf '%s\n' "$added_lines" |
+            grep -nE 'namespace[[:space:]]+[A-Za-z_][A-Za-z0-9_:]*[[:space:]]*\{|namespace[[:space:]]*\{' || true)
+        if [ -n "$namespace_blocks" ]; then
+            echo "pre-commit: $file opens a namespace block — a .cu/.cpp reaches its namespace with"
+            echo "            \`using namespace ...;\` or a \`namespace alias = ...;\`, never \`namespace X { }\`:"
+            printf '%s\n' "$namespace_blocks" | head -5
+            failed=1
+        fi
+        ;;
+    esac
+    # Include order: the groups run C stdlib -> C++ stdlib -> POSIX -> CUDA/GPU vendor -> first-party ->
+    # the unit's own header -> other internal, and a later group never precedes an earlier one. clang-format
+    # cannot enforce this (SortIncludes is off, so the internal group's semantic layering survives), so it is
+    # checked here against the file's full staged include block. `#if` / `extern "C"` guarded includes are
+    # exempt and skipped; within-group order (primitiveness) is convention, not machine-checked. See STYLE.md §5.
+    case "$file" in
+    *.cu | *.cuh | *.cpp | *.hpp)
+        include_stem=$(basename "$file" | sed -E 's/\.(cu|cuh|cpp|hpp)$//')
+        include_order=$(git show ":$file" 2> /dev/null | awk -v stem="$include_stem" '
+            BEGIN { depth = 0; prev = 0 }
+            /^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef)/ { depth++; next }
+            /^[[:space:]]*#[[:space:]]*endif/           { if (depth > 0) depth--; next }
+            depth > 0 { next }
+            /^[[:space:]]*#[[:space:]]*include/ {
+                line = $0
+                if (match(line, /<[^>]+>/))      { p = substr(line, RSTART + 1, RLENGTH - 2); kind = "sys" }
+                else if (match(line, /"[^"]+"/)) { p = substr(line, RSTART + 1, RLENGTH - 2); kind = "loc" }
+                else next
+                if (kind == "sys") {
+                    if (p ~ /^c(assert|ctype|errno|fenv|float|inttypes|limits|locale|math|setjmp|signal|stdarg|stddef|stdint|stdio|stdlib|string|time|uchar|wchar|wctype)$/) rank = 1
+                    else if (p ~ /^(numkong\/|stringzilla\/|fork_union|yyjson)/) rank = 5
+                    else if (p ~ /^(sys\/|netinet\/|arpa\/)/ || p ~ /^(unistd|fcntl|dirent|fnmatch|sched|pthread|poll|termios|libgen|glob|dlfcn)\.h$/) rank = 3
+                    else if (p ~ /\// || p ~ /\.h$/) rank = 4
+                    else rank = 2
+                } else {
+                    n = p; sub(/.*\//, "", n); sub(/\.[^.]+$/, "", n)
+                    rank = (n == stem) ? 6 : 7
+                }
+                if (rank < prev) printf "  %s   [group %d after group %d]\n", line, rank, prev
+                prev = rank
+            }' || true)
+        if [ -n "$include_order" ]; then
+            echo "pre-commit: $file breaks the include group order — C -> C++ -> POSIX -> CUDA/vendor ->"
+            echo "            first-party -> own header -> other internal (STYLE.md §5):"
+            printf '%s\n' "$include_order" | head -6
+            failed=1
+        fi
+        ;;
+    esac
+    # Every `@param` declares its direction — `[in]`, `[out]`, or `[inout]` — so a reader knows whether the
+    # callee reads, writes, or mutates the argument (STYLE.md §9). A bare `@param` with no bracket and the
+    # comma form `@param[in,out]` are both rejected; the one spelling for a mutated argument is `[inout]`.
+    case "$file" in
+    *.cu | *.cuh | *.cpp | *.hpp)
+        param_direction=$(printf '%s\n' "$added_lines" | grep -nE '@param' |
+            grep -vE '@param\[(in|out|inout)\]' || true)
+        if [ -n "$param_direction" ]; then
+            echo "pre-commit: $file has a @param without an [in]/[out]/[inout] direction — never a bare"
+            echo "            @param nor the comma form @param[in,out] (write @param[inout]):"
+            printf '%s\n' "$param_direction" | head -5
+            failed=1
+        fi
+        ;;
+    esac
+    chevrons=$(printf '%s\n' "$added_lines" | grep -nE '<<<.*>>>' || true)
+    runtime_includes=$(printf '%s\n' "$added_lines" | grep -nE '#include\s*<cuda_runtime(_api)?\.h>' || true)
+    # Detail namespaces fragment the cell's one namespace and hide symbols behind noise-qualifiers:
+    # use the project namespace or an unnamed namespace, never a named nested one.
+    detail_namespaces=$(printf '%s\n' "$added_lines" |
+        grep -nE 'namespace[[:space:]]+[A-Za-z_]*(detail|impl|internal)' || true)
+    # A split string literal whose fragment lacks the trailing `//` pin gets restitched by clang-format
+    # into unreadable staircases; every fragment except the last must end with `" //`.
+    unpinned_splits=$(printf '%s\n' "$added_lines" | awk '
+        prev ~ /"[[:space:]]*$/ && prev !~ /\/\/[[:space:]]*$/ && $0 ~ /^\+[[:space:]]*"/ { print NR": "prev }
+        { prev = $0 }' || true)
+    # Banned vocabulary: one word per concept — byte-granting is `allocate`, window-granting is
+    # `reserve`, contiguous regions are `buffer` / `chunk` / `plane`. See uform-style-guide.
+    banned_words=$(printf '%s\n' "$added_lines" | grep -inE 'carve|slab|seam' || true)
+    if [ -n "$banned_words" ]; then
+        echo "pre-commit: $file adds banned vocabulary (carve/slab/seam) — allocate/reserve/buffer/chunk/plane/boundary:"
+        printf '%s\n' "$banned_words" | head -5
+        failed=1
+    fi
+    # cstdio formatting is exception-blind and bypasses the cell's one diagnostics spelling: host text
+    # goes through `format_into` + POSIX `::write`. Device-side `printf` (the only device formatter)
+    # stays legal — this bans only `fprintf`.
+    fprintf_calls=$(printf '%s\n' "$added_lines" | grep -inE 'fprintf' || true)
+    if [ -n "$fprintf_calls" ]; then
+        echo "pre-commit: $file adds fprintf — host diagnostics are format_into + ::write(STDERR_FILENO, ...):"
+        printf '%s\n' "$fprintf_calls" | head -5
+        failed=1
+    fi
+    # STL smells: this stack is single-thread-dispatch (ForkUnion pools where parallelism is real), value
+    # types, and `expected<T>` ownership. `std::ranges` is a needless abstraction over the plain
+    # algorithms; `std::async` / `std::mutex` / coroutines are the banned threading model; `std::function`
+    # hides an allocation behind an indirect call; `std::shared_ptr` hides lifetimes behind shared
+    # ownership; `std::pair` / `std::tuple` are anonymous aggregates that hide a named type (return a
+    # struct, or a StringZilla slice / NumKong view for a span); `std::optional` is subsumed by `expected<T>`,
+    # which carries a typed error alongside the value-or-absence. Mark a genuine vendor boundary explicitly.
+    stl_smells=$(printf '%s\n' "$added_lines" | grep -v 'vendor-boundary' |
+        grep -nE 'std::ranges|std::async|std::function|std::mutex|std::shared_ptr|std::pair|std::tuple|std::optional|#include <coroutine>|\bco_(await|yield|return)\b' || true)
+    if [ -n "$stl_smells" ]; then
+        echo "pre-commit: $file uses a banned STL smell — std::ranges / std::async / std::mutex / coroutines /"
+        echo "            std::function / std::shared_ptr / std::pair / std::tuple / std::optional are smells here:"
+        printf '%s\n' "$stl_smells" | head -5
+        failed=1
+    fi
+    # Multidimensional tensor indexing is C++23 `tensor[row, column]`, never the `tensor(row, column)`
+    # call form (device is C++23 now, so the subscript is uniform with the host). The write form
+    # `name(i, j) = …` is the unambiguous tell — assigning into a parenthesised multi-index — so that is
+    # what we reject; defaulted / deleted members are exempt, comment lines are exempt.
+    paren_index=$(printf '%s\n' "$added_lines" | grep -vE '^\+\s*(\*|//)' | grep -vE '= *(default|delete)' |
+        grep -nE '[A-Za-z_][A-Za-z0-9_]*\([^()]*,[^()]*\)[[:space:]]*=[^=]' || true)
+    if [ -n "$paren_index" ]; then
+        echo "pre-commit: $file writes a tensor through the \`(row, column)\` call form — C++23 multidim"
+        echo "            indexing is \`tensor[row, column]\`:"
+        printf '%s\n' "$paren_index" | head -5
+        failed=1
+    fi
+    # Indexing a call result — `f(x)[i]`, `.data()[i]`, `.u32s()[0]` — hides the object being indexed;
+    # bind the returned view/span to a named local and index that. Comment lines are exempt.
+    call_indexing=$(printf '%s\n' "$added_lines" | grep -vE '^\+\s*(\*|//)' | grep -nE '\)\[' || true)
+    if [ -n "$call_indexing" ]; then
+        echo "pre-commit: $file indexes a function-call result (\`()[...]\`) — bind the returned span to"
+        echo "            a named local first:"
+        printf '%s\n' "$call_indexing" | head -5
+        failed=1
+    fi
+    if [ -n "$chevrons" ]; then
+        echo "pre-commit: $file adds triple-chevron kernel launches — use launch_kernel / cuLaunchKernel"
+        echo "            (<<<>>> fails silently and links libcudart; https://ashvardanian.com/posts/less-wrong-cuda-hello-world/):"
+        printf '%s\n' "$chevrons" | head -5
+        failed=1
+    fi
+    if [ -n "$runtime_includes" ]; then
+        echo "pre-commit: $file adds a CUDA Runtime API include — the primitives cell is Driver-API only:"
+        printf '%s\n' "$runtime_includes" | head -5
+        failed=1
+    fi
+    if [ -n "$detail_namespaces" ]; then
+        echo "pre-commit: $file adds a detail/impl/internal namespace — use the project namespace or an"
+        echo "            unnamed namespace; named nested namespaces are banned:"
+        printf '%s\n' "$detail_namespaces" | head -5
+        failed=1
+    fi
+    if [ -n "$unpinned_splits" ]; then
+        echo "pre-commit: $file splits a string literal without the trailing \`//\` pin — clang-format"
+        echo "            will restitch the fragments into a staircase; pin every fragment but the last:"
+        printf '%s\n' "$unpinned_splits" | head -5
+        failed=1
+    fi
+    # Exception policy: std::string / std::vector allocate through throwing paths, and this codebase is
+    # built noexcept end-to-end — a bad_alloc anywhere would terminate. Outside tests, strings are
+    # sz::string (try_append / try_push_back) and dynamic arrays are the cell's own array<T> (try_resize).
+    case "$file" in
+    cuda_test/*) ;;
+    *)
+        # Lines marked `vendor-boundary` are exempt: some vendor APIs (cudnn-frontend's set_stride,
+        # execute's variant pack) force std containers in their signatures; the marker keeps those
+        # exemptions explicit and greppable.
+        std_containers=$(printf '%s\n' "$added_lines" | grep -v 'vendor-boundary' |
+            grep -nE 'std::(string|vector)\b' || true)
+        if [ -n "$std_containers" ]; then
+            echo "pre-commit: $file adds std::string / std::vector — throwing containers violate the"
+            echo "            strict no-exceptions policy; use sz::string / primitives::array<T> instead:"
+            printf '%s\n' "$std_containers" | head -5
+            failed=1
+        fi
+        # API boundaries take sz::string_view (or typed views/spans), never raw C strings; only true
+        # vendor boundaries touch `char const *` internally, and they carry the marker.
+        c_string_parameters=$(printf '%s\n' "$added_lines" | grep -v 'vendor-boundary' |
+            grep -nE '[(,] *char const \*' || true)
+        case "$file" in
+        *.cuh | *.hpp)
+            if [ -n "$c_string_parameters" ]; then
+                echo "pre-commit: $file adds a \`char const *\` parameter — API boundaries take"
+                echo "            sz::string_view; mark genuine vendor boundaries explicitly:"
+                printf '%s\n' "$c_string_parameters" | head -5
+                failed=1
+            fi
+            # Member documentation is Doxygen: a bare `//` line directly above a declaration (a member or
+            # a type) is the banned doc style — those entities get `/** @brief ... */`. Scoped to headers
+            # on purpose: members and types are declared here, whereas the same `Type name = …;` shape in a
+            # `.cu` is a local variable inside a function body, and a `//` note above it is a legal
+            # implementation note (STYLE.md: "`//` is for implementation notes inside bodies"). The `\+?`
+            # prefix in each pattern matches the `+` that `git diff` prepends to every added line.
+            member_doc_comments=$(printf '%s\n' "$added_lines" |
+                awk '/^\+?[[:space:]]*\/\/[^\/]/ { pending=$0; next } \
+                     /^\+?[[:space:]]*[A-Za-z_][A-Za-z0-9_:<>,* ]* [A-Za-z_][A-Za-z0-9_]* *([={;]|$)/ && pending { print pending; pending="" ; next } \
+                     { pending="" }' || true)
+            if [ -n "$member_doc_comments" ]; then
+                echo "pre-commit: $file documents a declaration with a bare \`//\` comment — docs are"
+                echo "            /** @brief ... */ blocks; \`//\` is for implementation notes inside bodies:"
+                printf '%s\n' "$member_doc_comments" | head -5
+                failed=1
+            fi
+            ;;
+        esac
+        ;;
+    esac
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+# CMake sources must satisfy the checked-in .cmake-format.py profile when the formatter is available.
+if command -v cmake-format > /dev/null 2>&1; then
+    while IFS= read -r file; do
+        case "$file" in
+        CMakeLists.txt | *.cmake) ;;
+        *) continue ;;
+        esac
+        if ! cmake-format --check "$file" > /dev/null 2>&1; then
+            echo "pre-commit: $file is not cmake-format clean — run: cmake-format -i $file"
+            failed=1
+        fi
+    done < <(git diff --cached --name-only --diff-filter=ACM)
+fi
+
+# C++ sources must satisfy the checked-in .clang-format on their CHANGED lines — the same added-lines-only
+# discipline as the checks above (legacy formatting migrates on its own schedule; no new drift sneaks in),
+# so this uses `git clang-format --staged --diff` rather than a whole-file `clang-format --check`. Requires
+# clang-format >= 22 for the profile's BinPackLongBracedList / BreakAdjacentStringLiterals options; skipped
+# where the tooling is absent, mirroring the cmake-format gate.
+if command -v git-clang-format > /dev/null 2>&1 && command -v clang-format > /dev/null 2>&1; then
+    cpp_staged=$(git diff --cached --name-only --diff-filter=ACM -- '*.cu' '*.cuh' '*.cpp' '*.hpp')
+    if [ -n "$cpp_staged" ]; then
+        clang_diff=$(git clang-format --staged --diff --extensions cu,cuh,cpp,hpp -- $cpp_staged 2> /dev/null)
+        case "$clang_diff" in
+        "" | "no modified files to format" | "clang-format did not modify any files"*) ;;
+        *)
+            echo "pre-commit: staged C++ changes are not clang-format clean on their changed lines — restage after:"
+            echo "            git clang-format --staged   (or clang-format -i <file> for the whole file)"
+            failed=1
+            ;;
+        esac
+    fi
+fi
+
+# Project-wide, every staged file: no decorative banner rulers and no formatter-disabling directives.
+# A staged line that is only dashes or equals (a `# -----` / `// =====` ruler) is banned everywhere
+# except Markdown, where a run of dashes is legal (horizontal rules, table separators). Turning a
+# formatter off in-band is banned too — the checked-in .clang-format / .cmake-format.py profiles are the
+# law, so a file must format clean as a whole rather than fencing regions the tool is told to skip.
+# Patterns are line-anchored so prose that merely names a directive does not trip the check.
+while IFS= read -r file; do
+    added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++')
+    case "$file" in
+    *.md | *.markdown) ;;
+    *)
+        rulers=$(printf '%s\n' "$added" | grep -nE '^\+[[:space:]]*([#]+|//)?[[:space:]]*[-=]{3,}[[:space:]]*$' || true)
+        if [ -n "$rulers" ]; then
+            echo "pre-commit: $file adds a decorative ---/=== banner ruler (banned outside Markdown) — delete it:"
+            printf '%s\n' "$rulers" | head -5
+            failed=1
+        fi
+        ;;
+    esac
+    format_off=$(printf '%s\n' "$added" |
+        grep -nE '^\+[[:space:]]*(//[[:space:]]*clang-format[[:space:]]+(on|off)|#[[:space:]]*cmake-format:[[:space:]]*(on|off))[[:space:]]*$' || true)
+    if [ -n "$format_off" ]; then
+        echo "pre-commit: $file disables a formatter in-band — the .clang-format / .cmake-format.py profile is the law,"
+        echo "            teach the tool (additional_commands / config) instead of fencing a region off:"
+        printf '%s\n' "$format_off" | head -5
+        failed=1
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+if [ "$failed" -ne 0 ]; then
+    echo ""
+    echo "Staged changes violate the house style (see the reasons above). Fix and re-stage, or bypass"
+    echo "knowingly with: git commit --no-verify"
+    exit 1
+fi
+exit 0
