@@ -24,14 +24,18 @@
  *  @c hidden_grad the masked path, and when both are present the masked force is added onto the pooled
  *  force at the final-norm states so a co-trained step carries @c dL_pooled + dL_tokens exactly.
  *
- *  @section tower_entry Per-modality entry over live extents
+ *  @section tower_entry Per-segment entry over the packed grid
  *
- *  Rows are grouped by @ref modality_t order (token, image, video, audio), so each modality owns a
- *  @b contiguous slice of the packed @b [rows·columns,hidden] state buffer and the entry is four
- *  independent writes with no scatter. Live per-modality counts are the batch tensors' own leading
- *  extents ( @c batch.tokens.extent(0) , @c batch.images.extent(0) , …). Media entries patch-cut the raw
- *  signal (pixels normalised by per-channel mean / std, waveforms taken raw) and project it through a
- *  @ref cublaslt_plan_t ; token rows gather the embedding table.
+ *  Rows mix modalities and pack several items, so the entry walks the live segments instead of slicing
+ *  modality bands: @ref fill_coords writes every cell's @b (t,h,w) in one pass, then the packed
+ *  @b [rows·columns,hidden] state is zeroed and built modality by modality. Text segments gather the
+ *  embedding table into their cells; each media modality memsets its patch scratch, a segment-driven
+ *  kernel normalises only that modality's cells in place (a cell's content lives at the same flat grid
+ *  position as its state, so no gather offset is needed — image / video pixels by per-modality mean / std,
+ *  audio raw waveform frames as-is), and one @ref cublaslt_plan_t projection @b accumulates ( @c β=1 ) into the
+ *  state — its zero non-modality rows leave every other cell untouched, so the four writes compose with no
+ *  scatter and no atomics. The step processes the full @c max_tokens capacity; PAD and inter-segment gap
+ *  cells stay zero.
  *
  *  @section tower_determinism Determinism, including the embedding scatter
  *
@@ -57,9 +61,9 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "cuda_core/types.cuh"            // `expected`, `expected_t`, `status_t`, `differentiable_weights_t`
-#include "cuda_core/multimodal_batch.cuh" // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`, `modality_t`
-#include "cuda_core/transformer_block.cuh" // the block stack, `rope_angles_t`, `sdpa_plan_t`, the shared `rmsnorm_*` kernels
+#include "cuda_core/types.cuh"             // `expected`, `expected_t`, `status_t`, `differentiable_weights_t`
+#include "cuda_core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`, `modality_t`
+#include "cuda_core/transformer_block.cuh" // the block stack, `rope_angles_t`, `sdpa_plan_t`, shared `rmsnorm_*`
 
 namespace unum::uform::core {
 
@@ -77,15 +81,26 @@ struct encoder_tower_config_t {
 
     /** @brief Image patch extents in pixels; either 0 ⇒ no image entry. */
     u32_t image_patch_height = 0, image_patch_width = 0;
+    /** @brief The channel count every image pixel carries — RGBA end to end, the innermost projection rank. */
+    u32_t image_channels = 4;
     /** @brief Video tube extents (temporal × spatial); any 0 ⇒ no video entry. */
     u32_t video_tube_frames = 0, video_patch_height = 0, video_patch_width = 0;
-    /** @brief Audio window length in samples; 0 ⇒ no audio entry. */
-    u32_t audio_window_samples = 0;
+    /** @brief The channel count every video pixel carries — independent of image, the innermost content rank. */
+    u32_t video_channels = 3;
+    /** @brief Raw samples per audio frame; 0 ⇒ no audio entry. Audio is 1-D — a frame is a chunk of raw
+     *      waveform, not a patch — so this is the learnable-frontend projection fan-in directly. The mel /
+     *      spectral transform is that projection (and the blocks above it), learned, not a fixed loader step. */
+    u32_t audio_chunk_samples = 0;
 
-    /** @brief Per-channel pixel mean, ImageNet RGB — the entry normalises @c (u8/255 − mean)·(1/std) . */
-    f32_t image_pixel_mean[3] = {0.485f, 0.456f, 0.406f};
-    /** @brief Per-channel pixel standard deviation, ImageNet RGB. */
-    f32_t image_pixel_std[3] = {0.229f, 0.224f, 0.225f};
+    /** @brief Per-channel image pixel mean, ImageNet RGB plus a neutral alpha — the entry normalises
+     *      @c (u8/255 − mean)·(1/std) over @ref image_channels channels. */
+    f32_t image_pixel_mean[4] = {0.485f, 0.456f, 0.406f, 0.0f};
+    /** @brief Per-channel image pixel standard deviation, ImageNet RGB plus a unit alpha. */
+    f32_t image_pixel_std[4] = {0.229f, 0.224f, 0.225f, 1.0f};
+    /** @brief Per-channel video pixel mean, ImageNet RGB over @ref video_channels channels. */
+    f32_t video_pixel_mean[3] = {0.485f, 0.456f, 0.406f};
+    /** @brief Per-channel video pixel standard deviation, ImageNet RGB. */
+    f32_t video_pixel_std[3] = {0.229f, 0.224f, 0.225f};
 
     /** @brief The rotary axis split; the tower owns its @ref rope_angles_t from it. */
     rope_shape_t rope {};
@@ -126,9 +141,9 @@ struct encoder_tower_bf16_t {
     [[nodiscard]] expected_t backward(bf16r2_view_t vertices_grad, bf16r2_view_t hidden_grad,
                                       multimodal_batch_on_gpu_t const &batch, gpu_stream_t &stream) noexcept;
 
-    /** @brief Fill @p slots with every optimizer-facing weight in the canonical reduction order:
+    /** @brief Fill @p weights with every optimizer-facing weight in the canonical reduction order:
      *      entry → media projections → per-layer block weights → final norm → pool query → head. */
-    [[nodiscard]] expected_t fill(array<differentiable_weights_t> &slots) noexcept;
+    [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;
 
     /** @brief Quantize this tower's block stack into the E4M3 inference twin (entries / pool / head stay
      *      BFloat16) — the twin's only constructor. */
@@ -148,20 +163,31 @@ struct encoder_tower_bf16_t {
   private:
     friend struct encoder_tower_e4m3_t;
 
-    /** @brief The pinned @b cuBLASLt plan slots, in the order @ref make pins them: the three head
+    /** @brief The pinned @b cuBLASLt plan roles, in the order @ref make pins them: the three head
      *      products, then two per present media modality (projection forward, projection weight grad)
      *      from @ref plan_media_base_k , each modality's base recorded into @c *_plan_base_ . The token
      *      entry is a kernel, not a plan. */
-    enum cublaslt_plan_slot_t : std::size_t {
+    enum cublaslt_plan_role_t : std::size_t {
         plan_head_forward_k = 0,
         plan_head_data_grad_k = 1,
         plan_head_weight_grad_k = 2,
         plan_media_base_k = 3,
     };
-    /** @brief The @c plans_ capacity: the head slots plus two per media modality. */
+    /** @brief The @c plans_ capacity: the head roles plus two per media modality. */
     static constexpr std::size_t plan_capacity_k = plan_media_base_k + 2u * 3u;
     /** @brief Sentinel for a modality with no pinned projection plan. */
     static constexpr std::size_t plan_absent_k = ~std::size_t {0};
+
+    /** @brief Make one pinned cuBLASLt plan (forcing a BFloat16 @c C ), record it at @p role (post-incremented
+     *      into @c plans_ ), and grow @p workspace_bytes to its scratch demand — the plan-pinning step @ref make
+     *      repeats for the head and every media projection. */
+    [[nodiscard]] expected_t pin_plan(cublaslt_plan_config_t plan_config, std::size_t &role,
+                                      std::size_t &workspace_bytes) noexcept;
+    /** @brief Pin one present media modality's two plans (projection forward, projection weight grad) from
+     *      @p role , recording its base into @p plan_base ; the row extent is pinned at @p max_tokens (the worst
+     *      case) purely to size the heuristic + workspace, the live tile count coming from the operands. */
+    [[nodiscard]] expected_t pin_media_plans(std::size_t &plan_base, u32_t fan_in, u32_t max_tokens, u32_t hidden,
+                                             std::size_t &role, std::size_t &workspace_bytes) noexcept;
 
     /** @brief The baked geometry and the two borrowed vendor sessions — never owned here. */
     encoder_tower_config_t config_ {};
@@ -175,13 +201,17 @@ struct encoder_tower_bf16_t {
      *      @c config.vocabulary != 0 ). */
     bf16r2_tensor_arena_t entry_weight_ {}, entry_weight_grad_ {};
     /** @brief The three media patch-projection weights and their gradients (present per configured
-     *      modality): image @b [hidden, ph·pw·C] , video @b [hidden, tf·ph·pw·C] , audio @b [hidden, ws] . */
+     *      modality): image @b [hidden, ph·pw·image_channels] , video @b [hidden, tf·ph·pw·video_channels] ,
+     *      audio @b [hidden, chunk_samples] (a learnable linear frontend over one raw waveform frame) . */
     bf16r2_tensor_arena_t image_projection_ {}, image_projection_grad_ {};
     bf16r2_tensor_arena_t video_projection_ {}, video_projection_grad_ {};
     bf16r2_tensor_arena_t audio_projection_ {}, audio_projection_grad_ {};
-    /** @brief The device per-channel pixel mean and inverse-std, uploaded once at make. */
+    /** @brief The device per-channel image and video pixel mean and inverse-std, uploaded once at make
+     *      ( @b [image_channels] and @b [video_channels] ); audio frames are raw waveform with no per-channel
+     *      statistics, so audio uploads no mean/inverse-std. */
     f32r1_tensor_arena_t image_pixel_mean_ {}, image_pixel_inverse_std_ {};
-    /** @brief Recorded plan-slot bases per present media modality (or @c plan_absent_k ). */
+    f32r1_tensor_arena_t video_pixel_mean_ {}, video_pixel_inverse_std_ {};
+    /** @brief Recorded plan-role bases per present media modality (or @c plan_absent_k ). */
     std::size_t image_plan_base_ = plan_absent_k, video_plan_base_ = plan_absent_k, audio_plan_base_ = plan_absent_k;
 
     /** @brief The final norm scale and its gradient. */
@@ -234,7 +264,7 @@ struct encoder_tower_bf16_t {
 
     /** @brief The shared cuBLASLt scratch, sized to the max any pinned plan needs. */
     b8r1_tensor_arena_t workspace_ {};
-    /** @brief The pinned products, indexed by the @c plan_*_k slot constants. */
+    /** @brief The pinned products, indexed by the @c plan_*_k role constants. */
     std::array<cublaslt_plan_t, plan_capacity_k> plans_ {};
 };
 
@@ -258,13 +288,13 @@ struct encoder_tower_e4m3_t {
   private:
     friend struct encoder_tower_bf16_t;
 
-    /** @brief The pinned @b cuBLASLt plan slots: the fused head product, then one projection per present
+    /** @brief The pinned @b cuBLASLt plan roles: the fused head product, then one projection per present
      *      media modality from @ref plan_media_base_k . The token entry is a kernel, not a plan. */
-    enum cublaslt_plan_slot_t : std::size_t {
+    enum cublaslt_plan_role_t : std::size_t {
         plan_head_forward_k = 0,
         plan_media_base_k = 1,
     };
-    /** @brief The @c plans_ capacity: the head slot plus one per media modality. */
+    /** @brief The @c plans_ capacity: the head role plus one per media modality. */
     static constexpr std::size_t plan_capacity_k = plan_media_base_k + 3u;
     /** @brief Sentinel for a modality with no pinned projection plan. */
     static constexpr std::size_t plan_absent_k = ~std::size_t {0};
@@ -280,11 +310,13 @@ struct encoder_tower_e4m3_t {
     /** @brief The @b [vocabulary,hidden] BFloat16 token embedding table (forward only, no gradient). */
     bf16r2_tensor_arena_t entry_weight_ {};
     /** @brief The three media patch-projection weights (present per configured modality), BFloat16 —
-     *      image @b [hidden, ph·pw·C] , video @b [hidden, tf·ph·pw·C] , audio @b [hidden, ws] . */
+     *      image @b [hidden, ph·pw·image_channels] , video @b [hidden, tf·ph·pw·video_channels] ,
+     *      audio @b [hidden, chunk_samples] (a learnable linear frontend over one raw waveform frame) . */
     bf16r2_tensor_arena_t image_projection_ {}, video_projection_ {}, audio_projection_ {};
-    /** @brief The device per-channel pixel mean and inverse-std, uploaded once at make. */
+    /** @brief The device per-channel image and video pixel mean and inverse-std, uploaded once at make. */
     f32r1_tensor_arena_t image_pixel_mean_ {}, image_pixel_inverse_std_ {};
-    /** @brief Recorded plan-slot bases per present media modality (or @c plan_absent_k ). */
+    f32r1_tensor_arena_t video_pixel_mean_ {}, video_pixel_inverse_std_ {};
+    /** @brief Recorded plan-role bases per present media modality (or @c plan_absent_k ). */
     std::size_t image_plan_base_ = plan_absent_k, video_plan_base_ = plan_absent_k, audio_plan_base_ = plan_absent_k;
 
     /** @brief The final norm scale — the norm tier stays BFloat16. */
@@ -322,7 +354,7 @@ struct encoder_tower_e4m3_t {
     bf16r2_tensor_arena_t patch_scratch_ {};
     /** @brief The shared cuBLASLt scratch, sized to the max any pinned plan needs. */
     b8r1_tensor_arena_t workspace_ {};
-    /** @brief The pinned products, indexed by the @c plan_*_k slot constants. */
+    /** @brief The pinned products, indexed by the @c plan_*_k role constants. */
     std::array<cublaslt_plan_t, plan_capacity_k> plans_ {};
 };
 

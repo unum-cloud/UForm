@@ -15,35 +15,67 @@
 using namespace unum::uform::core;
 
 /**
- *  @brief Token-embedding lookup: @c x[t,:] = table[token[t],:] .
+ *  @brief Token-embedding lookup over one segment: for each @b text segment, @c x[offset+k,:] =
+ *      table[tokens[offset+k],:] . Segments of other modalities exit at once, so only text cells are
+ *      written and the packed state's media / PAD cells keep whatever the caller pre-zeroed.
  *
- *  __grid_size__ @c [tokens,1,1] , threads stripe the hidden channels; no dynamic shared memory.
+ *  __grid_size__ @c [segments,1,1] , threads stripe the hidden channels for each of the segment's cells;
+ *      no dynamic shared memory.
  */
-static __global__ void tower_embedding_lookup_kernel_(tokens_view_t tokens, bf16r2_span_t table,
-                                                      bf16r2_span_t destination) {
-    std::size_t const token = blockIdx.x;
+static __global__ void tower_text_entry_kernel_(tokens_view_t tokens, bf16r2_span_t table, u32r1_view_t offsets,
+                                                u32r1_view_t lengths, modality_view_t modality,
+                                                bf16r2_span_t destination) {
+    u32_t const segment = blockIdx.x;
+    if (modality[segment] != modality_t::text_k) return;
+    u32_t const length = lengths[segment];
+    if (length == 0u) return;
+    u32_t const offset = offsets[segment];
     u32_t const hidden = static_cast<u32_t>(destination.extent(1));
-    std::size_t const id = static_cast<std::size_t>(tokens[token]);
-    for (u32_t channel = threadIdx.x; channel < hidden; channel += blockDim.x)
-        destination[token, channel] = table[id, channel];
+    for (u32_t k = 0; k != length; ++k) {
+        std::size_t const row = static_cast<std::size_t>(offset) + k;
+        std::size_t const id = static_cast<std::size_t>(tokens[row]);
+        for (u32_t channel = threadIdx.x; channel < hidden; channel += blockDim.x)
+            destination[row, channel] = table[id, channel];
+    }
+}
+
+/**
+ *  @brief Stage the embedding-scatter sort keys from one @b text segment: @c keys[offset+k] =
+ *      tokens[offset+k] . Non-text segments exit, leaving their cells at the sentinel the caller pre-filled
+ *      so they sort into one skipped run — the packed grid interleaves modalities, so the text token ids are
+ *      not a leading slice any more.
+ *
+ *  __grid_size__ @c [segments,1,1] , threads stripe the segment's length; no dynamic shared memory.
+ */
+static __global__ void tower_text_keys_kernel_(tokens_view_t tokens, u32r1_view_t offsets, u32r1_view_t lengths,
+                                               modality_view_t modality, tokens_span_t keys) {
+    u32_t const segment = blockIdx.x;
+    if (modality[segment] != modality_t::text_k) return;
+    u32_t const length = lengths[segment];
+    if (length == 0u) return;
+    u32_t const offset = offsets[segment];
+    for (u32_t k = threadIdx.x; k < length; k += blockDim.x) keys[offset + k] = tokens[offset + k];
 }
 
 /**
  *  @brief Deterministic embedding-gradient scatter over the pre-sorted (token, position) pairs: one CTA
  *      per position range start walks its whole duplicate run serially — fixed order, no atomics.
  *
- *  __grid_size__ @c [tokens,1,1] ; a CTA whose slot is not a run head exits immediately.
+ *  __grid_size__ @c [tokens,1,1] ; a CTA whose row is not a run head exits immediately.
  */
 static __global__ void tower_embedding_scatter_kernel_(tokens_view_t sorted_tokens, u32r1_view_t sorted_positions,
                                                        bf16r2_view_t token_grad, bf16r2_span_t table_grad) {
-    std::size_t const slot = blockIdx.x;
+    std::size_t const row = blockIdx.x;
     std::size_t const tokens = sorted_tokens.extent(0);
-    token_id_t const token = sorted_tokens[slot];
-    if (slot != 0 && sorted_tokens[slot - 1] == token) return; // Not this run's head.
+    token_id_t const token = sorted_tokens[row];
+    // Non-text cells carry the sentinel id (>= vocabulary); they sort into one trailing run with no table
+    // row to fold into, so the whole run is skipped and no media / PAD gradient leaks into the table.
+    if (static_cast<std::size_t>(token) >= table_grad.extent(0)) return;
+    if (row != 0 && sorted_tokens[row - 1] == token) return; // Not this run's head.
     u32_t const hidden = static_cast<u32_t>(table_grad.extent(1));
     for (u32_t channel = threadIdx.x; channel < hidden; channel += blockDim.x) {
         f32_t total = 0.0f;
-        for (std::size_t run = slot; run < tokens && sorted_tokens[run] == token; ++run)
+        for (std::size_t run = row; run < tokens && sorted_tokens[run] == token; ++run)
             total += __bfloat162float(token_grad[static_cast<std::size_t>(sorted_positions[run]), channel]);
         table_grad[static_cast<std::size_t>(token), channel] = __float2bfloat16_rn(total);
     }
@@ -90,6 +122,279 @@ static __global__ void tower_silu_backward_kernel_(bf16r1_span_t input, bf16r1_s
         input_grad[index] = __float2bfloat16_rn(__bfloat162float(output_grad[index]) * sigmoid *
                                                 (1.0f + value * (1.0f - sigmoid)));
     }
+}
+
+/**
+ *  @brief Normalize one @b pixel segment's cells in place into the projection's BFloat16 fan-in. CTA @c s
+ *      owns segment @c s , exits unless @p target matches its @ref modality_t , and otherwise walks its
+ *      @c length cells at flat grid rows @c [offset,offset+length) — a cell's raw pixels live at the same
+ *      flat position as its state, so the peel is a zero-copy slice — writing each channel as
+ *      @c (byte/255 − mean[channel])·inverse_std[channel] over the rank-3 peel @c [rows,spatial,channels] ,
+ *      @c channels innermost so @p mean / @p inverse_std index by the channel coordinate directly. The scratch
+ *      is pre-zeroed, so every cell this pass skips stays zero and the projection's non-modality rows vanish.
+ *
+ *  __grid_size__ @c [segments,1,1] , threads stripe the segment's @c length·spatial cells; no dynamic shared memory.
+ */
+static __global__ void tower_normalize_segment_kernel_(nk::tensor_view<pixel_t, 3> content, u32r1_view_t offsets,
+                                                       u32r1_view_t lengths, modality_view_t modality,
+                                                       modality_t target, f32r1_view_t mean, f32r1_view_t inverse_std,
+                                                       nk::tensor_span<bf16_t, 3> patches) {
+    u32_t const segment = blockIdx.x;
+    if (modality[segment] != target) return;
+    u32_t const length = lengths[segment];
+    if (length == 0u) return;
+    u32_t const offset = offsets[segment];
+    u32_t const spatial = static_cast<u32_t>(content.extent(1));
+    u32_t const channels = static_cast<u32_t>(content.extent(2));
+    std::size_t const cells = static_cast<std::size_t>(length) * spatial;
+    f32_t const inverse_byte_max = 1.0f / 255.0f;
+    for (std::size_t cell = threadIdx.x; cell < cells; cell += blockDim.x) {
+        u32_t const spatial_position = static_cast<u32_t>(cell % spatial);
+        std::size_t const row = static_cast<std::size_t>(offset) + cell / spatial;
+        for (u32_t channel = 0; channel != channels; ++channel) {
+            f32_t const value = (static_cast<f32_t>(content[row, spatial_position, channel]) * inverse_byte_max -
+                                 mean[channel]) *
+                                inverse_std[channel];
+            patches[row, spatial_position, channel] = __float2bfloat16(value);
+        }
+    }
+}
+
+/**
+ *  @brief Stage one @b audio segment's raw waveform frames in place into the projection's BFloat16 fan-in. Like
+ *      @ref tower_normalize_segment_kernel_ but raw samples carry no per-channel statistics to subtract, so the
+ *      cast is the whole staging ( @c f32 → BFloat16 ) over the flat @c [rows,scalars] peel (a frame is
+ *      @c chunk_samples raw samples); non-audio segments and the pre-zeroed remainder stay zero.
+ *
+ *  __grid_size__ @c [segments,1,1] , threads stripe the segment's @c length·scalars cells; no dynamic shared memory.
+ */
+static __global__ void tower_audio_segment_kernel_(nk::tensor_view<f32_t, 2> content, u32r1_view_t offsets,
+                                                   u32r1_view_t lengths, modality_view_t modality,
+                                                   nk::tensor_span<bf16_t, 2> patches) {
+    u32_t const segment = blockIdx.x;
+    if (modality[segment] != modality_t::audio_k) return;
+    u32_t const length = lengths[segment];
+    if (length == 0u) return;
+    u32_t const offset = offsets[segment];
+    u32_t const scalars = static_cast<u32_t>(content.extent(1));
+    std::size_t const cells = static_cast<std::size_t>(length) * scalars;
+    for (std::size_t cell = threadIdx.x; cell < cells; cell += blockDim.x) {
+        u32_t const scalar = static_cast<u32_t>(cell % scalars);
+        std::size_t const row = static_cast<std::size_t>(offset) + cell / scalars;
+        patches[row, scalar] = __float2bfloat16(content[row, scalar]);
+    }
+}
+
+/** @brief File-scope mirror of the towers' @c plan_absent_k sentinel, so the shared media helpers below can
+ *      skip an absent modality without reaching into either tower's private constants. */
+static constexpr std::size_t plan_absent_k = ~std::size_t {0};
+
+/**
+ *  @brief Upload one modality's per-channel pixel mean and inverse-std to the device, allocating the two
+ *      @b [channels] arenas off @p f32_alloc — the shared upload @ref encoder_tower_bf16_t::make runs for
+ *      image and video (audio frames are raw waveform with no per-channel statistics, so they never call this).
+ */
+static expected_t upload_pixel_constants(f32r1_tensor_arena_t &mean_arena, f32r1_tensor_arena_t &inverse_std_arena,
+                                         f32_t const *mean_source, f32_t const *std_source, u32_t channels,
+                                         gpu_arena_alloc<f32_t> &f32_alloc, gpu_arena_t &arena) noexcept {
+    mean_arena = f32r1_tensor_arena_t::try_empty({channels}, f32_alloc);
+    inverse_std_arena = f32r1_tensor_arena_t::try_empty({channels}, f32_alloc);
+    if (!mean_arena || !inverse_std_arena)
+        return expected_t::fail(status_t::bad_alloc_k, "pixel constant allocation failed (arena_used={})",
+                                arena.used());
+    f32_t mean[4] {}, inverse_std[4] {};
+    for (u32_t channel = 0; channel != channels; ++channel) {
+        mean[channel] = mean_source[channel];
+        inverse_std[channel] = 1.0f / std_source[channel];
+    }
+    if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(mean_arena.data()), mean,
+                                       channels * sizeof(f32_t));
+        result != CUDA_SUCCESS)
+        return expected_t::fail(result, "pixel mean upload failed");
+    if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(inverse_std_arena.data()), inverse_std,
+                                       channels * sizeof(f32_t));
+        result != CUDA_SUCCESS)
+        return expected_t::fail(result, "pixel inverse-std upload failed");
+    return {};
+}
+
+/**
+ *  @brief Project every present media modality's raw signal into the packed entry state: for each present
+ *      modality zero @p patch_scratch , stage only that modality's cells in place (image / video pixels
+ *      normalized by their per-channel mean / inverse-std, audio raw frames cast as-is — a cell's content
+ *      shares the flat grid position of its state), and accumulate the pinned projection ( @c β=1 ) so the
+ *      zero non-modality rows leave every other cell untouched — no scatter, no atomics. Shared verbatim by
+ *      both towers' forwards; the text entry (a kernel) is the caller's.
+ */
+static expected_t project_media_entries(
+    multimodal_batch_on_gpu_t const &batch, cublaslt_plan_t *plans, std::size_t image_plan_base,
+    std::size_t video_plan_base, std::size_t audio_plan_base, bf16r2_tensor_arena_t &patch_scratch,
+    b8r1_tensor_arena_t &workspace, bf16r2_tensor_arena_t &entry_output, f32r1_tensor_arena_t &image_mean,
+    f32r1_tensor_arena_t &image_inverse_std, bf16r2_tensor_arena_t &image_projection, f32r1_tensor_arena_t &video_mean,
+    f32r1_tensor_arena_t &video_inverse_std, bf16r2_tensor_arena_t &video_projection,
+    bf16r2_tensor_arena_t &audio_projection, cublaslt_session_t &blas, gpu_stream_t &stream) noexcept {
+    std::size_t const columns = batch.tokens.extent(1);
+    std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
+    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
+    dim3 const segment_grid {static_cast<u32_t>(batch.live_segments()), 1u, 1u};
+    u32r1_view_t const segment_offsets = batch.segment_offsets.view();
+    u32r1_view_t const segment_lengths = batch.segment_lengths.view();
+    modality_view_t const segment_modality = batch.segment_modality.view();
+
+    // One pixel modality's forward: zero the scratch, normalize its cells in place, accumulate the projection.
+    auto project_pixels = [&](std::size_t plan_base, nk::tensor_view<pixel_t, 3> raw, modality_t target,
+                              f32r1_view_t mean, f32r1_view_t inverse_std,
+                              bf16r2_view_t projection) noexcept -> expected_t {
+        u32_t const spatial = static_cast<u32_t>(raw.extent(1));
+        u32_t const channels = static_cast<u32_t>(raw.extent(2));
+        u32_t const scalars = spatial * channels;
+        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(patch_scratch.data()), 0,
+                                              live_tokens * scalars * sizeof(bf16_t), stream.get());
+            result != CUDA_SUCCESS)
+            return expected_t::fail(result, "pixel patch scratch reset failed");
+        bf16r2_span_t const patches {patch_scratch.data(), live_tokens, scalars};
+        expected_t normalized = launch_kernel(reinterpret_cast<void const *>(&tower_normalize_segment_kernel_),
+                                              segment_grid, block_shape, stream, raw, segment_offsets, segment_lengths,
+                                              segment_modality, target, mean, inverse_std,
+                                              patches.reshape<3>({live_tokens, spatial, channels}));
+        if (!normalized) return normalized;
+        return plans[plan_base].matmul(blas, bf16r2_view_t {patches}, projection, entry_output.span(), 1.0f,
+                                       workspace.span(), stream);
+    };
+
+    expected_t staged {};
+    if (image_plan_base != plan_absent_k && batch.images.data() != nullptr) {
+        std::size_t const spatial = static_cast<std::size_t>(batch.images.extent(2)) * batch.images.extent(3);
+        staged = project_pixels(
+            image_plan_base, batch.images.view().reshape<3>({live_tokens, spatial, batch.images.extent(4)}),
+            modality_t::image_k, image_mean.view(), image_inverse_std.view(), image_projection.view());
+        if (!staged) return staged;
+    }
+    if (video_plan_base != plan_absent_k && batch.videos.data() != nullptr) {
+        std::size_t const spatial = static_cast<std::size_t>(batch.videos.extent(2)) * batch.videos.extent(3) *
+                                    batch.videos.extent(4);
+        staged = project_pixels(
+            video_plan_base, batch.videos.view().reshape<3>({live_tokens, spatial, batch.videos.extent(5)}),
+            modality_t::video_k, video_mean.view(), video_inverse_std.view(), video_projection.view());
+        if (!staged) return staged;
+    }
+    if (audio_plan_base != plan_absent_k && batch.audio_samples.data() != nullptr) {
+        u32_t const scalars = static_cast<u32_t>(batch.audio_samples.extent(2));
+        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(patch_scratch.data()), 0,
+                                              live_tokens * scalars * sizeof(bf16_t), stream.get());
+            result != CUDA_SUCCESS)
+            return expected_t::fail(result, "audio patch scratch reset failed");
+        nk::tensor_view<f32_t, 2> const raw = batch.audio_samples.view().reshape<2>({live_tokens, scalars});
+        bf16r2_span_t const patches {patch_scratch.data(), live_tokens, scalars};
+        staged = launch_kernel(reinterpret_cast<void const *>(&tower_audio_segment_kernel_), segment_grid, block_shape,
+                               stream, raw, segment_offsets, segment_lengths, segment_modality, patches);
+        if (!staged) return staged;
+        staged = plans[audio_plan_base].matmul(blas, bf16r2_view_t {patches}, audio_projection.view(),
+                                               entry_output.span(), 1.0f, workspace.span(), stream);
+        if (!staged) return staged;
+    }
+    return staged;
+}
+
+/**
+ *  @brief Fold the packed entry gradient against each present media modality's re-staged patches into that
+ *      modality's projection weight gradient: re-stage exactly as @ref project_media_entries (segment-driven,
+ *      so non-modality rows stay zero), then run each modality's weight-grad product ( @c plan_base+1 , @c β=0 )
+ *      — the backward twin of @ref project_media_entries , differing only in the matmul direction and offset.
+ */
+static expected_t project_media_weight_grads(multimodal_batch_on_gpu_t const &batch, cublaslt_plan_t *plans,
+                                             std::size_t image_plan_base, std::size_t video_plan_base,
+                                             std::size_t audio_plan_base, bf16r2_tensor_arena_t &patch_scratch,
+                                             b8r1_tensor_arena_t &workspace, bf16r2_view_t entry_grad,
+                                             f32r1_tensor_arena_t &image_mean, f32r1_tensor_arena_t &image_inverse_std,
+                                             bf16r2_tensor_arena_t &image_projection_grad,
+                                             f32r1_tensor_arena_t &video_mean, f32r1_tensor_arena_t &video_inverse_std,
+                                             bf16r2_tensor_arena_t &video_projection_grad,
+                                             bf16r2_tensor_arena_t &audio_projection_grad, cublaslt_session_t &blas,
+                                             gpu_stream_t &stream) noexcept {
+    std::size_t const columns = batch.tokens.extent(1);
+    std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
+    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
+    dim3 const segment_grid {static_cast<u32_t>(batch.live_segments()), 1u, 1u};
+    u32r1_view_t const segment_offsets = batch.segment_offsets.view();
+    u32r1_view_t const segment_lengths = batch.segment_lengths.view();
+    modality_view_t const segment_modality = batch.segment_modality.view();
+
+    // One pixel modality's weight grad: re-stage its cells, then fold the whole entry gradient against them.
+    auto project_pixels_grad = [&](std::size_t plan_base, nk::tensor_view<pixel_t, 3> raw, modality_t target,
+                                   f32r1_view_t mean, f32r1_view_t inverse_std,
+                                   bf16r2_span_t projection_grad) noexcept -> expected_t {
+        u32_t const spatial = static_cast<u32_t>(raw.extent(1));
+        u32_t const channels = static_cast<u32_t>(raw.extent(2));
+        u32_t const scalars = spatial * channels;
+        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(patch_scratch.data()), 0,
+                                              live_tokens * scalars * sizeof(bf16_t), stream.get());
+            result != CUDA_SUCCESS)
+            return expected_t::fail(result, "pixel patch scratch reset failed");
+        bf16r2_span_t const patches {patch_scratch.data(), live_tokens, scalars};
+        expected_t normalized = launch_kernel(reinterpret_cast<void const *>(&tower_normalize_segment_kernel_),
+                                              segment_grid, block_shape, stream, raw, segment_offsets, segment_lengths,
+                                              segment_modality, target, mean, inverse_std,
+                                              patches.reshape<3>({live_tokens, spatial, channels}));
+        if (!normalized) return normalized;
+        return plans[plan_base + 1].matmul(blas, entry_grad, bf16r2_view_t {patches}, projection_grad, 0.0f,
+                                           workspace.span(), stream);
+    };
+
+    expected_t staged {};
+    if (image_plan_base != plan_absent_k && batch.images.data() != nullptr) {
+        std::size_t const spatial = static_cast<std::size_t>(batch.images.extent(2)) * batch.images.extent(3);
+        staged = project_pixels_grad(
+            image_plan_base, batch.images.view().reshape<3>({live_tokens, spatial, batch.images.extent(4)}),
+            modality_t::image_k, image_mean.view(), image_inverse_std.view(), image_projection_grad.span());
+        if (!staged) return staged;
+    }
+    if (video_plan_base != plan_absent_k && batch.videos.data() != nullptr) {
+        std::size_t const spatial = static_cast<std::size_t>(batch.videos.extent(2)) * batch.videos.extent(3) *
+                                    batch.videos.extent(4);
+        staged = project_pixels_grad(
+            video_plan_base, batch.videos.view().reshape<3>({live_tokens, spatial, batch.videos.extent(5)}),
+            modality_t::video_k, video_mean.view(), video_inverse_std.view(), video_projection_grad.span());
+        if (!staged) return staged;
+    }
+    if (audio_plan_base != plan_absent_k && batch.audio_samples.data() != nullptr) {
+        u32_t const scalars = static_cast<u32_t>(batch.audio_samples.extent(2));
+        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(patch_scratch.data()), 0,
+                                              live_tokens * scalars * sizeof(bf16_t), stream.get());
+            result != CUDA_SUCCESS)
+            return expected_t::fail(result, "audio patch scratch reset failed");
+        nk::tensor_view<f32_t, 2> const raw = batch.audio_samples.view().reshape<2>({live_tokens, scalars});
+        bf16r2_span_t const patches {patch_scratch.data(), live_tokens, scalars};
+        staged = launch_kernel(reinterpret_cast<void const *>(&tower_audio_segment_kernel_), segment_grid, block_shape,
+                               stream, raw, segment_offsets, segment_lengths, segment_modality, patches);
+        if (!staged) return staged;
+        staged = plans[audio_plan_base + 1].matmul(blas, entry_grad, bf16r2_view_t {patches},
+                                                   audio_projection_grad.span(), 0.0f, workspace.span(), stream);
+        if (!staged) return staged;
+    }
+    return staged;
+}
+
+expected_t encoder_tower_bf16_t::pin_plan(cublaslt_plan_config_t plan_config, std::size_t &role,
+                                          std::size_t &workspace_bytes) noexcept {
+    plan_config.c_type = CUDA_R_16BF;
+    expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(*blas_, plan_config);
+    if (!plan) return expected_t::fail(std::move(plan));
+    workspace_bytes = std::max(workspace_bytes, plan.value_.workspace_bytes());
+    plans_[role++] = std::move(plan.value_);
+    return {};
+}
+
+expected_t encoder_tower_bf16_t::pin_media_plans(std::size_t &plan_base, u32_t fan_in, u32_t max_tokens, u32_t hidden,
+                                                 std::size_t &role, std::size_t &workspace_bytes) noexcept {
+    plan_base = role;
+    expected_t pinned = pin_plan(
+        {max_tokens, fan_in, fan_in, hidden, fan_in, fan_in, max_tokens, hidden, hidden, false, true}, role,
+        workspace_bytes);
+    if (pinned)
+        pinned = pin_plan({max_tokens, hidden, hidden, max_tokens, fan_in, fan_in, hidden, fan_in, fan_in, true, false},
+                          role, workspace_bytes);
+    return pinned;
 }
 
 expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cublaslt_session_t &blas,
@@ -196,104 +501,102 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
     // The head's pinned products: forward (fc1 and fc2 share the [H,H] shape), data grad, weight grad.
 
     std::size_t workspace_bytes = 0;
-    std::size_t plan_slot = 0;
-    auto pin_plan = [&](cublaslt_plan_config_t plan_config) noexcept -> expected_t {
-        plan_config.c_type = CUDA_R_16BF;
-        expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(blas, plan_config);
-        if (!plan) return expected_t::fail(std::move(plan));
-        workspace_bytes = std::max(workspace_bytes, plan.value_.workspace_bytes());
-        tower.plans_[plan_slot++] = std::move(plan.value_);
-        return {};
-    };
+    std::size_t plan_role = 0;
     u32_t const hidden32 = config.block.hidden;
     u32_t const segments32 = config.block.max_segments;
-    expected_t pinned = pin_plan(
-        {segments32, hidden32, hidden32, hidden32, hidden32, hidden32, segments32, hidden32, hidden32, false, true});
+    expected_t pinned = tower.pin_plan(
+        {segments32, hidden32, hidden32, hidden32, hidden32, hidden32, segments32, hidden32, hidden32, false, true},
+        plan_role, workspace_bytes);
     if (pinned)
-        pinned = pin_plan({segments32, hidden32, hidden32, hidden32, hidden32, hidden32, segments32, hidden32, hidden32,
-                           false, false});
+        pinned = tower.pin_plan({segments32, hidden32, hidden32, hidden32, hidden32, hidden32, segments32, hidden32,
+                                 hidden32, false, false},
+                                plan_role, workspace_bytes);
     if (pinned)
-        pinned = pin_plan({segments32, hidden32, hidden32, segments32, hidden32, hidden32, hidden32, hidden32, hidden32,
-                           true, false});
+        pinned = tower.pin_plan(
+            {segments32, hidden32, hidden32, segments32, hidden32, hidden32, hidden32, hidden32, hidden32, true, false},
+            plan_role, workspace_bytes);
     if (!pinned) return result_t::fail(std::move(pinned));
 
-    // Media entries: image and video patch-cut their raw signal and project it through a pinned cuBLASLt
-    // plan; audio stays deferred (no allocation, no plan). A modality is present iff its patch geometry is
-    // fully specified — zero extents leave its projection, plan, and scratch untouched.
+    // Media entries: each present modality patch-cuts its raw signal and projects it through pinned cuBLASLt
+    // plans. A modality is present iff its geometry is fully specified — zero extents leave its projection,
+    // plan, and scratch untouched. Fan-ins are per-modality: image is ph·pw·image_channels, video folds
+    // video_tube_frames ahead of ph·pw·video_channels, and audio — a 1-D signal, unpatched — is just
+    // chunk_samples raw samples per frame (its projection is the learnable spectral frontend). Image and video
+    // pixels carry an ImageNet-style per-channel normalization; audio raw frames upload no constants.
 
     bool const image_present = config.image_patch_height != 0 && config.image_patch_width != 0;
     bool const video_present = config.video_tube_frames != 0 && config.video_patch_height != 0 &&
                                config.video_patch_width != 0;
+    bool const audio_present = config.audio_chunk_samples != 0;
     if (image_present && config.image_patch_height != config.image_patch_width)
         return result_t::fail(status_t::invalid_input_k, "image patches must be square ({}x{})",
                               config.image_patch_height, config.image_patch_width);
+    if (image_present && (config.image_channels == 0 || config.image_channels > 4))
+        return result_t::fail(status_t::invalid_input_k, "image_channels must be 1..4 ({})", config.image_channels);
+    if (video_present && (config.video_channels == 0 || config.video_channels > 3))
+        return result_t::fail(status_t::invalid_input_k, "video_channels must be 1..3 ({})", config.video_channels);
 
-    u32_t const image_patch_pixels = image_present ? patch_scalars(config.image_patch_height, 3u) : 0u;
-    u32_t const video_tube_pixels =
-        video_present ? config.video_tube_frames * 3u * config.video_patch_height * config.video_patch_width : 0u;
+    u32_t const image_patch_scalars = image_present ? patch_scalars(config.image_patch_height, config.image_channels)
+                                                    : 0u;
+    u32_t const video_tube_scalars = video_present ? config.video_tube_frames * config.video_channels *
+                                                         config.video_patch_height * config.video_patch_width
+                                                   : 0u;
+    u32_t const audio_frame_scalars = audio_present ? config.audio_chunk_samples : 0u;
     u32_t const max_tokens32 = config.block.max_tokens;
 
-    if (image_present || video_present) {
-        tower.image_pixel_mean_ = f32r1_tensor_arena_t::try_empty({3}, f32_alloc);
-        tower.image_pixel_inverse_std_ = f32r1_tensor_arena_t::try_empty({3}, f32_alloc);
-        if (!tower.image_pixel_mean_ || !tower.image_pixel_inverse_std_)
-            return result_t::fail(status_t::bad_alloc_k, "pixel constant allocation failed (arena_used={})",
-                                  arena.used());
-        f32_t const mean[3] = {config.image_pixel_mean[0], config.image_pixel_mean[1], config.image_pixel_mean[2]};
-        f32_t const inverse_std[3] = {1.0f / config.image_pixel_std[0], 1.0f / config.image_pixel_std[1],
-                                      1.0f / config.image_pixel_std[2]};
-        if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(tower.image_pixel_mean_.data()), mean,
-                                           sizeof(mean));
-            result != CUDA_SUCCESS)
-            return result_t::fail(result, "pixel mean upload failed");
-        if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(tower.image_pixel_inverse_std_.data()),
-                                           inverse_std, sizeof(inverse_std));
-            result != CUDA_SUCCESS)
-            return result_t::fail(result, "pixel inverse-std upload failed");
-    }
     if (image_present) {
-        tower.image_projection_ = bf16r2_tensor_arena_t::try_empty({hidden, image_patch_pixels}, bf16_alloc);
-        tower.image_projection_grad_ = bf16r2_tensor_arena_t::try_empty({hidden, image_patch_pixels}, bf16_alloc);
+        if (expected_t uploaded = upload_pixel_constants(tower.image_pixel_mean_, tower.image_pixel_inverse_std_,
+                                                         config.image_pixel_mean, config.image_pixel_std,
+                                                         config.image_channels, f32_alloc, arena);
+            !uploaded)
+            return result_t::fail(std::move(uploaded));
+        tower.image_projection_ = bf16r2_tensor_arena_t::try_empty({hidden, image_patch_scalars}, bf16_alloc);
+        tower.image_projection_grad_ = bf16r2_tensor_arena_t::try_empty({hidden, image_patch_scalars}, bf16_alloc);
         if (!tower.image_projection_ || !tower.image_projection_grad_)
             return result_t::fail(status_t::bad_alloc_k, "image projection allocation failed (arena_used={})",
                                   arena.used());
     }
     if (video_present) {
-        tower.video_projection_ = bf16r2_tensor_arena_t::try_empty({hidden, video_tube_pixels}, bf16_alloc);
-        tower.video_projection_grad_ = bf16r2_tensor_arena_t::try_empty({hidden, video_tube_pixels}, bf16_alloc);
+        if (expected_t uploaded = upload_pixel_constants(tower.video_pixel_mean_, tower.video_pixel_inverse_std_,
+                                                         config.video_pixel_mean, config.video_pixel_std,
+                                                         config.video_channels, f32_alloc, arena);
+            !uploaded)
+            return result_t::fail(std::move(uploaded));
+        tower.video_projection_ = bf16r2_tensor_arena_t::try_empty({hidden, video_tube_scalars}, bf16_alloc);
+        tower.video_projection_grad_ = bf16r2_tensor_arena_t::try_empty({hidden, video_tube_scalars}, bf16_alloc);
         if (!tower.video_projection_ || !tower.video_projection_grad_)
             return result_t::fail(status_t::bad_alloc_k, "video projection allocation failed (arena_used={})",
                                   arena.used());
     }
-
-    // Media projection plans, pinned from plan_media_base_k in modality order (image, then video): a
-    // forward product (patches·Wᵀ → entry) and a weight-grad product (d_entryᵀ·patches → dW) each — no
-    // data-grad plan exists, since raw pixels are never differentiated. Batches are heterogeneous — any
-    // mix of modalities fills the one row budget, so each plan's row extent is pinned at the WORST case
-    // (max_tokens) purely to size the heuristic + workspace; the view-driven @ref cublaslt_plan_t::matmul
-    // then takes the live per-step tile count from the operand extents, the same algorithm serving any M.
-
-    if (pinned && image_present) {
-        tower.image_plan_base_ = plan_slot;
-        pinned = pin_plan({max_tokens32, image_patch_pixels, image_patch_pixels, hidden32, image_patch_pixels,
-                           image_patch_pixels, max_tokens32, hidden32, hidden32, false, true});
-        if (pinned)
-            pinned = pin_plan({max_tokens32, hidden32, hidden32, max_tokens32, image_patch_pixels, image_patch_pixels,
-                               hidden32, image_patch_pixels, image_patch_pixels, true, false});
+    if (audio_present) {
+        tower.audio_projection_ = bf16r2_tensor_arena_t::try_empty({hidden, audio_frame_scalars}, bf16_alloc);
+        tower.audio_projection_grad_ = bf16r2_tensor_arena_t::try_empty({hidden, audio_frame_scalars}, bf16_alloc);
+        if (!tower.audio_projection_ || !tower.audio_projection_grad_)
+            return result_t::fail(status_t::bad_alloc_k, "audio projection allocation failed (arena_used={})",
+                                  arena.used());
     }
-    if (pinned && video_present) {
-        tower.video_plan_base_ = plan_slot;
-        pinned = pin_plan({max_tokens32, video_tube_pixels, video_tube_pixels, hidden32, video_tube_pixels,
-                           video_tube_pixels, max_tokens32, hidden32, hidden32, false, true});
-        if (pinned)
-            pinned = pin_plan({max_tokens32, hidden32, hidden32, max_tokens32, video_tube_pixels, video_tube_pixels,
-                               hidden32, video_tube_pixels, video_tube_pixels, true, false});
-    }
+
+    // Media projection plans, pinned from plan_media_base_k in modality order (image, video, audio): a forward
+    // product (patches·Wᵀ → entry) and a weight-grad product (d_entryᵀ·patches → dW) each — no data-grad plan
+    // exists, since raw pixels are never differentiated. Batches are heterogeneous — any mix of modalities
+    // fills the one row budget, so each plan's row extent is pinned at the WORST case (max_tokens) purely to
+    // size the heuristic + workspace; the view-driven @ref cublaslt_plan_t::matmul then takes the live per-step
+    // tile count from the operand extents, the same algorithm serving any M.
+
+    if (pinned && image_present)
+        pinned = tower.pin_media_plans(tower.image_plan_base_, image_patch_scalars, max_tokens32, hidden32, plan_role,
+                                       workspace_bytes);
+    if (pinned && video_present)
+        pinned = tower.pin_media_plans(tower.video_plan_base_, video_tube_scalars, max_tokens32, hidden32, plan_role,
+                                       workspace_bytes);
+    if (pinned && audio_present)
+        pinned = tower.pin_media_plans(tower.audio_plan_base_, audio_frame_scalars, max_tokens32, hidden32, plan_role,
+                                       workspace_bytes);
     if (!pinned) return result_t::fail(std::move(pinned));
 
-    if (image_present || video_present) {
-        u32_t const max_patch_pixels = std::max(image_patch_pixels, video_tube_pixels);
-        tower.patch_scratch_ = bf16r2_tensor_arena_t::try_empty({max_tokens32, max_patch_pixels}, bf16_alloc);
+    if (image_present || video_present || audio_present) {
+        u32_t const max_entry_scalars = std::max({image_patch_scalars, video_tube_scalars, audio_frame_scalars});
+        tower.patch_scratch_ = bf16r2_tensor_arena_t::try_empty({max_tokens32, max_entry_scalars}, bf16_alloc);
         if (!tower.patch_scratch_)
             return result_t::fail(status_t::bad_alloc_k, "patch scratch allocation failed (arena_used={})",
                                   arena.used());
@@ -311,22 +614,17 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
 expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t vertices,
                                          gpu_stream_t &stream) noexcept {
     u32_t const hidden = config_.block.hidden;
-    std::size_t const token_rows = batch.tokens.extent(0);
-    std::size_t const image_rows = batch.images.extent(0);
-    std::size_t const video_rows = batch.videos.extent(0);
     std::size_t const columns = batch.tokens.extent(1);
-    std::size_t const token_entries = token_rows * columns;
-    std::size_t const image_entries = image_rows * columns;
-    std::size_t const video_entries = video_rows * columns;
-    std::size_t const live_tokens = token_entries + image_entries + video_entries;
-    std::size_t const segments = batch.segment_lengths.extent(0);
+    std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
+    std::size_t const segments = batch.live_segments();
     if (live_tokens == 0 || live_tokens > config_.block.max_tokens || segments != config_.block.max_segments)
         return expected_t::fail(status_t::shape_unsupported_k,
                                 "batch disagrees with the baked capacities (tokens={} segments={})", live_tokens,
                                 segments);
 
-    // The step's live extent, resized within each arena's reserved capacity — no address moves, and the
-    // capacity check above makes this resize infallible; the bool is still checked, never assumed.
+    // The step's live extent is the whole packed grid — modalities interleave, so there is no per-modality
+    // row band to trim; PAD and inter-segment gap cells ride through as zeros. Resized within each arena's
+    // reserved capacity (the check above makes this infallible; the bool is still verified, never assumed).
 
     bool const resized = entry_output_.try_resize({live_tokens, hidden}) &&
                          normalized_.try_resize({live_tokens, hidden}) &&
@@ -336,63 +634,52 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
         return expected_t::fail(status_t::shape_unsupported_k, "tower scratch cannot hold {} live tokens (capacity {})",
                                 live_tokens, entry_output_.capacity() / hidden);
 
-    // The per-token rotary coordinates every adapter below writes into — zeroed first so PAD rows and any
-    // position an adapter skips stay (0,0,0).
+    // Zero the coordinates (PAD / gap cells stay (0,0,0)) and the packed entry state (cells no segment writes
+    // stay 0, and the media projections accumulate onto that zero with β=1).
     if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(coords_.data()), 0,
                                           live_tokens * 3u * sizeof(i16_t), stream.get());
         result != CUDA_SUCCESS)
         return expected_t::fail(result, "coordinate reset failed");
+    if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(entry_output_.data()), 0,
+                                          live_tokens * hidden * sizeof(bf16_t), stream.get());
+        result != CUDA_SUCCESS)
+        return expected_t::fail(result, "entry state reset failed");
 
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const token_grid {static_cast<u32_t>(live_tokens), 1u, 1u};
+    dim3 const segment_grid {static_cast<u32_t>(segments), 1u, 1u};
     u32r1_view_t const segment_offsets = batch.segment_offsets.view();
     u32r1_view_t const segment_lengths = batch.segment_lengths.view();
+    modality_view_t const segment_modality = batch.segment_modality.view();
 
-    // Entry: rows are grouped modality-first (token, image, video) inside the packed [rows*columns,hidden]
-    // buffer, each a contiguous slice with its own independent write — no scatter, no atomics.
-
-    i16r2_span_t const token_coords_slice = coords_(nk::range(0, token_entries), nk::slice);
-    i16r2_span_t const image_coords_slice = coords_(nk::range(token_entries, token_entries + image_entries), nk::slice);
-    i16r2_span_t const video_coords_slice = coords_(nk::range(token_entries + image_entries, live_tokens), nk::slice);
-    bf16r2_span_t const token_entry_slice = entry_output_(nk::range(0, token_entries), nk::slice);
-    bf16r2_span_t const image_entry_slice = entry_output_(nk::range(token_entries, token_entries + image_entries),
-                                                          nk::slice);
-    bf16r2_span_t const video_entry_slice = entry_output_(nk::range(token_entries + image_entries, live_tokens),
-                                                          nk::slice);
-
-    expected_t staged = token_coords(segment_offsets, segment_lengths, token_coords_slice, stream);
+    // Coordinates: one segment-driven fill dispatching on modality replaces the three per-modality adapters.
+    // fill_coords reads its descriptors through span-typed parameters, so the const batch's read views are
+    // bridged to spans (the kernel only reads them; nothing here writes the batch).
+    u32r1_span_t const offsets_span {const_cast<u32_t *>(segment_offsets.data()), segment_offsets.extent(0)};
+    u32r1_span_t const lengths_span {const_cast<u32_t *>(segment_lengths.data()), segment_lengths.extent(0)};
+    modality_span_t const modality_span {const_cast<modality_t *>(segment_modality.data()), segment_modality.extent(0)};
+    expected_t staged = fill_coords(offsets_span, lengths_span, modality_span, batch.image_shapes.view(),
+                                    batch.video_shapes.view(), config_.video_tube_frames, coords_.span(), stream);
     if (!staged) return staged;
+
+    // Entry, per-segment gather: text segments look up the embedding table into their cells; each present
+    // media modality zeroes the scratch, stages only its own cells in place (image / video pixels normalized,
+    // audio raw frames cast as-is; content shares the flat grid position of its state), and accumulates its
+    // projection (β=1) so the zero non-modality rows leave every other cell untouched — no scatter, no atomics.
 
     live_token_ids_ = batch.tokens.flatten<1>();
-    dim3 const token_only_grid {static_cast<u32_t>(token_entries), 1u, 1u};
-    staged = launch_kernel(reinterpret_cast<void const *>(&tower_embedding_lookup_kernel_), token_only_grid,
-                           block_shape, stream, live_token_ids_, entry_weight_.span(), token_entry_slice);
+    staged = launch_kernel(reinterpret_cast<void const *>(&tower_text_entry_kernel_), segment_grid, block_shape, stream,
+                           live_token_ids_, entry_weight_.span(), segment_offsets, segment_lengths, segment_modality,
+                           entry_output_.span());
     if (!staged) return staged;
 
-    if (image_plan_base_ != plan_absent_k && image_rows != 0) {
-        u32_t const patch_size = config_.image_patch_height;
-        u32_t const patch_pixels = patch_scalars(patch_size, 3u);
-        patch_span_t const patches {patch_scratch_.data(), image_entries, patch_pixels};
-        staged = patchify_images(batch.images.view(), batch.image_shapes.view(), patches, image_coords_slice,
-                                 image_pixel_mean_.view(), image_pixel_inverse_std_.view(), patch_size, stream);
-        if (!staged) return staged;
-        staged = plans_[image_plan_base_].matmul(*blas_, bf16r2_view_t {patches}, image_projection_.view(),
-                                                 image_entry_slice, 0.0f, workspace_.span(), stream);
-        if (!staged) return staged;
-    }
-
-    if (video_plan_base_ != plan_absent_k && video_rows != 0) {
-        u32_t const tube_pixels = config_.video_tube_frames * 3u * config_.video_patch_height *
-                                  config_.video_patch_width;
-        patch_span_t const tubes {patch_scratch_.data(), video_entries, tube_pixels};
-        staged = patchify_videos(batch.videos.view(), tubes, video_coords_slice, image_pixel_mean_.view(),
-                                 image_pixel_inverse_std_.view(), config_.video_tube_frames, config_.video_patch_height,
-                                 config_.video_patch_width, stream);
-        if (!staged) return staged;
-        staged = plans_[video_plan_base_].matmul(*blas_, bf16r2_view_t {tubes}, video_projection_.view(),
-                                                 video_entry_slice, 0.0f, workspace_.span(), stream);
-        if (!staged) return staged;
-    }
+    // One β=1 projection accumulate per present media modality (zero non-modality rows compose); the shared
+    // helper stages each modality's cells and folds its projection, identical to the E4M3 twin's forward.
+    staged = project_media_entries(batch, plans_.data(), image_plan_base_, video_plan_base_, audio_plan_base_,
+                                   patch_scratch_, workspace_, entry_output_, image_pixel_mean_,
+                                   image_pixel_inverse_std_, image_projection_, video_pixel_mean_,
+                                   video_pixel_inverse_std_, video_projection_, audio_projection_, *blas_, stream);
+    if (!staged) return staged;
 
     // The block stack: layer n reads layer n-1's output, ping-ponging two dedicated buffers; the last
     // output is a stash the backward reads.
@@ -422,14 +709,8 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
 expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_view_t hidden_grad,
                                           multimodal_batch_on_gpu_t const &batch, gpu_stream_t &stream) noexcept {
     u32_t const hidden = config_.block.hidden;
-    std::size_t const token_rows = batch.tokens.extent(0);
-    std::size_t const image_rows = batch.images.extent(0);
-    std::size_t const video_rows = batch.videos.extent(0);
     std::size_t const columns = batch.tokens.extent(1);
-    std::size_t const token_entries = token_rows * columns;
-    std::size_t const image_entries = image_rows * columns;
-    std::size_t const video_entries = video_rows * columns;
-    std::size_t const live_tokens = token_entries + image_entries + video_entries;
+    std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
     if (vertices_grad.data() != nullptr)
         return expected_t::fail(status_t::shape_unsupported_k,
                                 "the contrastive pool + head backward are not yet built (masked path only)");
@@ -447,10 +728,11 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
 
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const row_grid {static_cast<u32_t>(live_tokens), 1u, 1u};
-    dim3 const token_grid {static_cast<u32_t>(token_entries), 1u, 1u};
+    dim3 const segment_grid {static_cast<u32_t>(batch.live_segments()), 1u, 1u};
     dim3 const channel_grid {static_cast<u32_t>(divide_round_up(hidden, kernel_block_size_default_k)), 1u, 1u};
     u32r1_view_t const segment_offsets = batch.segment_offsets.view();
     u32r1_view_t const segment_lengths = batch.segment_lengths.view();
+    modality_view_t const segment_modality = batch.segment_modality.view();
 
     // Final-norm backward: d(normalized) → d(stack output) into token_grad_b_, plus the scale grad. The
     // caller's hidden_grad may carry a wider capacity than the live extent, so it is narrowed to match.
@@ -480,8 +762,10 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     }
     bf16r2_view_t const entry_grad = flowing;
 
-    // Entry backward, token slice: deterministic embedding scatter (sort (token, position), then serial
-    // per-run fold), restricted to the token rows — the leading slice of the packed entry.
+    // Entry backward, text cells: deterministic embedding scatter over the whole packed grid. Keys start at
+    // the sentinel (max token id) so every non-text cell folds into one trailing run the scatter skips; the
+    // text segments overwrite their keys, positions are the flat cell indices, and the sort + serial per-run
+    // fold stay deterministic with no atomics.
 
     std::size_t const table_scalars = static_cast<std::size_t>(config_.vocabulary) * hidden;
     if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(entry_weight_grad_.data()), 0,
@@ -491,105 +775,92 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     // The sort scratch is one arena split into two halves, max_tokens apart: [0,live) and [max,max+live).
 
     std::size_t const max_tokens = config_.block.max_tokens;
-    tokens_span_t const keys_in = sort_keys_(nk::range(0, token_entries), nk::slice);
-    tokens_span_t const keys_out = sort_keys_(nk::range(max_tokens, max_tokens + token_entries), nk::slice);
-    u32r1_span_t const values_in = sort_values_(nk::range(0, token_entries), nk::slice);
-    u32r1_span_t const values_out = sort_values_(nk::range(max_tokens, max_tokens + token_entries), nk::slice);
-    if (CUresult result = cuMemcpyDtoDAsync(reinterpret_cast<CUdeviceptr>(keys_in.data()),
-                                            reinterpret_cast<CUdeviceptr>(live_token_ids_.data()),
-                                            token_entries * sizeof(token_id_t), stream.get());
+    tokens_span_t const keys_in = sort_keys_(nk::range(0, live_tokens), nk::slice);
+    tokens_span_t const keys_out = sort_keys_(nk::range(max_tokens, max_tokens + live_tokens), nk::slice);
+    u32r1_span_t const values_in = sort_values_(nk::range(0, live_tokens), nk::slice);
+    u32r1_span_t const values_out = sort_values_(nk::range(max_tokens, max_tokens + live_tokens), nk::slice);
+    if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(keys_in.data()), 0xFF,
+                                          live_tokens * sizeof(token_id_t), stream.get());
         result != CUDA_SUCCESS)
-        return expected_t::fail(result, "token id staging failed");
-    staged = launch_kernel(reinterpret_cast<void const *>(&tower_iota_kernel_), token_grid, dim3 {warp_size_k, 1u, 1u},
-                           stream, values_in);
+        return expected_t::fail(result, "sentinel key reset failed");
+    staged = launch_kernel(reinterpret_cast<void const *>(&tower_text_keys_kernel_), segment_grid, block_shape, stream,
+                           live_token_ids_, segment_offsets, segment_lengths, segment_modality, keys_in);
+    if (staged)
+        staged = launch_kernel(reinterpret_cast<void const *>(&tower_iota_kernel_),
+                               dim3 {grid_size_for(live_tokens), 1u, 1u}, dim3 {warp_size_k, 1u, 1u}, stream,
+                               values_in);
     if (!staged) return staged;
     std::size_t sort_bytes = sort_workspace_.extent(0);
     if (cudaError_t sorted = cub::DeviceRadixSort::SortPairs(
             sort_workspace_.data(), sort_bytes, keys_in.data(), keys_out.data(), values_in.data(), values_out.data(),
-            static_cast<int>(token_entries), 0, sizeof(token_id_t) * 8, reinterpret_cast<cudaStream_t>(stream.get()));
+            static_cast<int>(live_tokens), 0, sizeof(token_id_t) * 8, reinterpret_cast<cudaStream_t>(stream.get()));
         sorted != cudaSuccess)
         return expected_t::fail(status_t::cuda_error_k, "embedding sort failed (code={})", static_cast<int>(sorted));
-    bf16r2_view_t const token_entry_grad = entry_grad(nk::range(0, token_entries), nk::slice);
-    staged = launch_kernel(reinterpret_cast<void const *>(&tower_embedding_scatter_kernel_), token_grid, block_shape,
-                           stream, tokens_view_t {keys_out}, u32r1_view_t {values_out}, token_entry_grad,
+    staged = launch_kernel(reinterpret_cast<void const *>(&tower_embedding_scatter_kernel_), row_grid, block_shape,
+                           stream, tokens_view_t {keys_out}, u32r1_view_t {values_out}, entry_grad,
                            entry_weight_grad_.span());
     if (!staged) return staged;
 
-    // Media weight grads: re-run each present modality's patch-cut into patch_scratch_ (cheap, capture-safe
-    // — patch_scratch_ was overwritten by the last forward) and fold the entry gradient's slice against it.
-    // No pixel/data grad exists: raw pixels are never differentiated.
-
-    if (image_plan_base_ != plan_absent_k && image_rows != 0) {
-        u32_t const patch_size = config_.image_patch_height;
-        u32_t const patch_pixels = patch_scalars(patch_size, 3u);
-        patch_span_t const patches {patch_scratch_.data(), image_entries, patch_pixels};
-        i16r2_span_t const image_coords_slice = coords_(nk::range(token_entries, token_entries + image_entries),
-                                                        nk::slice);
-        staged = patchify_images(batch.images.view(), batch.image_shapes.view(), patches, image_coords_slice,
-                                 image_pixel_mean_.view(), image_pixel_inverse_std_.view(), patch_size, stream);
-        if (!staged) return staged;
-        bf16r2_view_t const image_entry_grad = entry_grad(nk::range(token_entries, token_entries + image_entries),
-                                                          nk::slice);
-        staged = plans_[image_plan_base_ + 1].matmul(*blas_, image_entry_grad, bf16r2_view_t {patches},
-                                                     image_projection_grad_.span(), 0.0f, workspace_.span(), stream);
-        if (!staged) return staged;
-    }
-
-    if (video_plan_base_ != plan_absent_k && video_rows != 0) {
-        u32_t const tube_pixels = config_.video_tube_frames * 3u * config_.video_patch_height *
-                                  config_.video_patch_width;
-        patch_span_t const tubes {patch_scratch_.data(), video_entries, tube_pixels};
-        i16r2_span_t const video_coords_slice = coords_(nk::range(token_entries + image_entries, live_tokens),
-                                                        nk::slice);
-        staged = patchify_videos(batch.videos.view(), tubes, video_coords_slice, image_pixel_mean_.view(),
-                                 image_pixel_inverse_std_.view(), config_.video_tube_frames, config_.video_patch_height,
-                                 config_.video_patch_width, stream);
-        if (!staged) return staged;
-        bf16r2_view_t const video_entry_grad = entry_grad(nk::range(token_entries + image_entries, live_tokens),
-                                                          nk::slice);
-        staged = plans_[video_plan_base_ + 1].matmul(*blas_, video_entry_grad, bf16r2_view_t {tubes},
-                                                     video_projection_grad_.span(), 0.0f, workspace_.span(), stream);
-        if (!staged) return staged;
-    }
+    // Media weight grads: re-stage each present modality's cells (segment-driven, so non-modality rows stay
+    // zero) and fold the whole entry gradient against them — the zero patch rows drop every non-modality term,
+    // so dW gathers exactly its modality's cells. The backward twin of project_media_entries; coords_ was
+    // filled by the paired forward, so the backward derives no coordinates.
+    staged = project_media_weight_grads(
+        batch, plans_.data(), image_plan_base_, video_plan_base_, audio_plan_base_, patch_scratch_, workspace_,
+        entry_grad, image_pixel_mean_, image_pixel_inverse_std_, image_projection_grad_, video_pixel_mean_,
+        video_pixel_inverse_std_, video_projection_grad_, audio_projection_grad_, *blas_, stream);
+    if (!staged) return staged;
 
     return staged;
 }
 
-expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &slots) noexcept {
+expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) noexcept {
     u32_t const hidden = config_.block.hidden;
     u32_t const ffn = config_.block.ffn_expansion * hidden;
     // A block weight arrives as a rank-1 accessor; it joins as its logical [rows,cols] rectangle (a tower
     // matrix is already rank-2 and joins through its own span / view).
 
-    auto make_slot = [](bf16r1_span_t weight, bf16r1_view_t grad, std::size_t rows, std::size_t cols) noexcept {
+    auto make_weight = [](bf16r1_span_t weight, bf16r1_view_t grad, std::size_t rows, std::size_t cols) noexcept {
         return differentiable_weights_t {bf16r2_span_t {weight.data(), rows, cols},
                                          bf16r2_view_t {grad.data(), rows, cols}};
     };
-    status_t pushed = slots.try_push_back({entry_weight_.span(), entry_weight_grad_.view()});
+    status_t pushed = weights.try_push_back({entry_weight_.span(), entry_weight_grad_.view()});
+    // Media projections next, in modality order — each present iff its plan base was pinned. These rank-2
+    // [hidden, fan_in] matrices join directly (like the head products), replica-identical with the grads
+    // backward() produces, so the optimizer trains what was frozen before.
+    if (pushed == status_t::success_k && image_plan_base_ != plan_absent_k)
+        pushed = weights.try_push_back({image_projection_.span(), image_projection_grad_.view()});
+    if (pushed == status_t::success_k && video_plan_base_ != plan_absent_k)
+        pushed = weights.try_push_back({video_projection_.span(), video_projection_grad_.view()});
+    if (pushed == status_t::success_k && audio_plan_base_ != plan_absent_k)
+        pushed = weights.try_push_back({audio_projection_.span(), audio_projection_grad_.view()});
     for (u32_t layer_index = 0; pushed == status_t::success_k && layer_index != config_.depth; ++layer_index) {
         transformer_block_bf16_t &layer = blocks_[layer_index];
-        pushed = slots.try_push_back(make_slot(layer.qkv_weight(), layer.qkv_weight_grad(), 3u * hidden, hidden));
+        pushed = weights.try_push_back(make_weight(layer.qkv_weight(), layer.qkv_weight_grad(), 3u * hidden, hidden));
         if (pushed == status_t::success_k)
-            pushed = slots.try_push_back(make_slot(layer.out_weight(), layer.out_weight_grad(), hidden, hidden));
+            pushed = weights.try_push_back(make_weight(layer.out_weight(), layer.out_weight_grad(), hidden, hidden));
         if (pushed == status_t::success_k)
-            pushed = slots.try_push_back(
-                make_slot(layer.gate_up_weight(), layer.gate_up_weight_grad(), 2u * ffn, hidden));
+            pushed = weights.try_push_back(
+                make_weight(layer.gate_up_weight(), layer.gate_up_weight_grad(), 2u * ffn, hidden));
         if (pushed == status_t::success_k)
-            pushed = slots.try_push_back(make_slot(layer.down_weight(), layer.down_weight_grad(), hidden, ffn));
+            pushed = weights.try_push_back(make_weight(layer.down_weight(), layer.down_weight_grad(), hidden, ffn));
         if (pushed == status_t::success_k)
-            pushed = slots.try_push_back(make_slot(layer.pre_norm_scale(), layer.pre_norm_scale_grad(), 1u, hidden));
+            pushed = weights.try_push_back(
+                make_weight(layer.pre_norm_scale(), layer.pre_norm_scale_grad(), 1u, hidden));
         if (pushed == status_t::success_k)
-            pushed = slots.try_push_back(make_slot(layer.post_norm_scale(), layer.post_norm_scale_grad(), 1u, hidden));
+            pushed = weights.try_push_back(
+                make_weight(layer.post_norm_scale(), layer.post_norm_scale_grad(), 1u, hidden));
     }
     if (pushed == status_t::success_k)
-        pushed = slots.try_push_back(make_slot(final_norm_scale_.span(), final_norm_scale_grad_.view(), 1u, hidden));
+        pushed = weights.try_push_back(
+            make_weight(final_norm_scale_.span(), final_norm_scale_grad_.view(), 1u, hidden));
     if (pushed == status_t::success_k)
-        pushed = slots.try_push_back(make_slot(pool_query_.span(), pool_query_grad_.view(), 1u, hidden));
+        pushed = weights.try_push_back(make_weight(pool_query_.span(), pool_query_grad_.view(), 1u, hidden));
     if (pushed == status_t::success_k)
-        pushed = slots.try_push_back(make_slot(head_norm_scale_.span(), head_norm_scale_grad_.view(), 1u, hidden));
-    if (pushed == status_t::success_k) pushed = slots.try_push_back({head_fc1_.span(), head_fc1_grad_.view()});
-    if (pushed == status_t::success_k) pushed = slots.try_push_back({head_fc2_.span(), head_fc2_grad_.view()});
-    if (pushed != status_t::success_k) return expected_t::fail(status_t::bad_alloc_k, "weight slot table overflowed");
+        pushed = weights.try_push_back(make_weight(head_norm_scale_.span(), head_norm_scale_grad_.view(), 1u, hidden));
+    if (pushed == status_t::success_k) pushed = weights.try_push_back({head_fc1_.span(), head_fc1_grad_.view()});
+    if (pushed == status_t::success_k) pushed = weights.try_push_back({head_fc2_.span(), head_fc2_grad_.view()});
+    if (pushed != status_t::success_k) return expected_t::fail(status_t::bad_alloc_k, "weight table overflowed");
     return {};
 }
 
@@ -601,15 +872,9 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
 expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t vertices,
                                          gpu_stream_t &stream) noexcept {
     u32_t const hidden = config_.block.hidden;
-    std::size_t const token_rows = batch.tokens.extent(0);
-    std::size_t const image_rows = batch.images.extent(0);
-    std::size_t const video_rows = batch.videos.extent(0);
     std::size_t const columns = batch.tokens.extent(1);
-    std::size_t const token_entries = token_rows * columns;
-    std::size_t const image_entries = image_rows * columns;
-    std::size_t const video_entries = video_rows * columns;
-    std::size_t const live_tokens = token_entries + image_entries + video_entries;
-    std::size_t const segments = batch.segment_lengths.extent(0);
+    std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
+    std::size_t const segments = batch.live_segments();
     if (live_tokens == 0 || live_tokens > config_.block.max_tokens || segments != config_.block.max_segments)
         return expected_t::fail(status_t::shape_unsupported_k,
                                 "batch disagrees with the baked capacities (tokens={} segments={})", live_tokens,
@@ -626,53 +891,38 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
                                           live_tokens * 3u * sizeof(i16_t), stream.get());
         result != CUDA_SUCCESS)
         return expected_t::fail(result, "coordinate reset failed");
+    if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(entry_output_.data()), 0,
+                                          live_tokens * hidden * sizeof(bf16_t), stream.get());
+        result != CUDA_SUCCESS)
+        return expected_t::fail(result, "entry state reset failed");
 
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
+    dim3 const segment_grid {static_cast<u32_t>(segments), 1u, 1u};
     u32r1_view_t const segment_offsets = batch.segment_offsets.view();
     u32r1_view_t const segment_lengths = batch.segment_lengths.view();
+    modality_view_t const segment_modality = batch.segment_modality.view();
 
-    i16r2_span_t const token_coords_slice = coords_(nk::range(0, token_entries), nk::slice);
-    i16r2_span_t const image_coords_slice = coords_(nk::range(token_entries, token_entries + image_entries), nk::slice);
-    i16r2_span_t const video_coords_slice = coords_(nk::range(token_entries + image_entries, live_tokens), nk::slice);
-    bf16r2_span_t const token_entry_slice = entry_output_(nk::range(0, token_entries), nk::slice);
-    bf16r2_span_t const image_entry_slice = entry_output_(nk::range(token_entries, token_entries + image_entries),
-                                                          nk::slice);
-    bf16r2_span_t const video_entry_slice = entry_output_(nk::range(token_entries + image_entries, live_tokens),
-                                                          nk::slice);
-
-    expected_t staged = token_coords(segment_offsets, segment_lengths, token_coords_slice, stream);
+    // Coordinates + per-segment entry, mirroring the training twin: one fill_coords, a text-only embedding
+    // gather, and a β=1 projection accumulate per present media modality (zero non-modality rows compose).
+    u32r1_span_t const offsets_span {const_cast<u32_t *>(segment_offsets.data()), segment_offsets.extent(0)};
+    u32r1_span_t const lengths_span {const_cast<u32_t *>(segment_lengths.data()), segment_lengths.extent(0)};
+    modality_span_t const modality_span {const_cast<modality_t *>(segment_modality.data()), segment_modality.extent(0)};
+    expected_t staged = fill_coords(offsets_span, lengths_span, modality_span, batch.image_shapes.view(),
+                                    batch.video_shapes.view(), config_.video_tube_frames, coords_.span(), stream);
     if (!staged) return staged;
 
     tokens_view_t const token_ids = batch.tokens.flatten<1>();
-    dim3 const token_only_grid {static_cast<u32_t>(token_entries), 1u, 1u};
-    staged = launch_kernel(reinterpret_cast<void const *>(&tower_embedding_lookup_kernel_), token_only_grid,
-                           block_shape, stream, token_ids, entry_weight_.span(), token_entry_slice);
+    staged = launch_kernel(reinterpret_cast<void const *>(&tower_text_entry_kernel_), segment_grid, block_shape, stream,
+                           token_ids, entry_weight_.span(), segment_offsets, segment_lengths, segment_modality,
+                           entry_output_.span());
     if (!staged) return staged;
 
-    if (image_plan_base_ != plan_absent_k && image_rows != 0) {
-        u32_t const patch_size = config_.image_patch_height;
-        u32_t const patch_pixels = patch_scalars(patch_size, 3u);
-        patch_span_t const patches {patch_scratch_.data(), image_entries, patch_pixels};
-        staged = patchify_images(batch.images.view(), batch.image_shapes.view(), patches, image_coords_slice,
-                                 image_pixel_mean_.view(), image_pixel_inverse_std_.view(), patch_size, stream);
-        if (!staged) return staged;
-        staged = plans_[image_plan_base_].matmul(*blas_, bf16r2_view_t {patches}, image_projection_.view(),
-                                                 image_entry_slice, 0.0f, workspace_.span(), stream);
-        if (!staged) return staged;
-    }
-
-    if (video_plan_base_ != plan_absent_k && video_rows != 0) {
-        u32_t const tube_pixels = config_.video_tube_frames * 3u * config_.video_patch_height *
-                                  config_.video_patch_width;
-        patch_span_t const tubes {patch_scratch_.data(), video_entries, tube_pixels};
-        staged = patchify_videos(batch.videos.view(), tubes, video_coords_slice, image_pixel_mean_.view(),
-                                 image_pixel_inverse_std_.view(), config_.video_tube_frames, config_.video_patch_height,
-                                 config_.video_patch_width, stream);
-        if (!staged) return staged;
-        staged = plans_[video_plan_base_].matmul(*blas_, bf16r2_view_t {tubes}, video_projection_.view(),
-                                                 video_entry_slice, 0.0f, workspace_.span(), stream);
-        if (!staged) return staged;
-    }
+    // One β=1 projection accumulate per present media modality — the same shared helper the training twin runs.
+    staged = project_media_entries(batch, plans_.data(), image_plan_base_, video_plan_base_, audio_plan_base_,
+                                   patch_scratch_, workspace_, entry_output_, image_pixel_mean_,
+                                   image_pixel_inverse_std_, image_projection_, video_pixel_mean_,
+                                   video_pixel_inverse_std_, video_projection_, audio_projection_, *blas_, stream);
+    if (!staged) return staged;
 
     // The E4M3 block stack: layer n reads layer n-1's output, ping-ponging two dedicated buffers.
     bf16r2_view_t layer_input = entry_output_.view();

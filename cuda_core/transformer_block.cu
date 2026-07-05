@@ -187,23 +187,21 @@ static __global__ void transformer_qk_norm_backward_kernel_(bf16r2_span_t grads,
     }
 }
 
-/** @brief Pick the axis table and angle for one channel pair — the rotary storage invariant.
- *      Multi-argument indexing spells @c operator() here: device code follows nvcc's C++20 ceiling
- *      until a C++23-capable toolkit lands. */
-[[nodiscard]] __device__ inline f32_t transformer_rope_angle_(u32_t pair_index, i16r2_view_t coords, std::size_t token,
+/** @brief Pick the axis table and angle for one within-head channel pair — the rotary storage invariant. */
+[[nodiscard]] __device__ inline f32_t transformer_rope_angle_(u32_t head_pair, i16r2_view_t coords, std::size_t token,
                                                               rope_angles_view_t const &angles) noexcept {
     u32_t const temporal_pairs = static_cast<u32_t>(angles.temporal.extent(1));
     u32_t const height_pairs = static_cast<u32_t>(angles.height.extent(1));
-    if (pair_index < temporal_pairs) {
-        std::size_t const coord = static_cast<std::size_t>(coords(token, 0));
-        return angles.temporal(coord, pair_index);
+    if (head_pair < temporal_pairs) {
+        std::size_t const coord = static_cast<std::size_t>(coords[token, 0]);
+        return angles.temporal[coord, head_pair];
     }
-    if (pair_index < temporal_pairs + height_pairs) {
-        std::size_t const coord = static_cast<std::size_t>(coords(token, 1));
-        return angles.height(coord, pair_index - temporal_pairs);
+    if (head_pair < temporal_pairs + height_pairs) {
+        std::size_t const coord = static_cast<std::size_t>(coords[token, 1]);
+        return angles.height[coord, head_pair - temporal_pairs];
     }
-    std::size_t const coord = static_cast<std::size_t>(coords(token, 2));
-    return angles.width(coord, pair_index - temporal_pairs - height_pairs);
+    std::size_t const coord = static_cast<std::size_t>(coords[token, 2]);
+    return angles.width[coord, head_pair - temporal_pairs - height_pairs];
 }
 
 /**
@@ -211,7 +209,7 @@ static __global__ void transformer_qk_norm_backward_kernel_(bf16r2_span_t grads,
  *      channel pair @b (2k,2k+1) rotates by the axis angle its index selects; @p angle_sign @c -1 gives
  *      the inverse rotation the backward applies to the post-RoPE gradients.
  *
- *  __grid_size__ @c [ceil(tokens·heads·64/block),1,1] grid-stride over channel-pair slots; no dynamic
+ *  __grid_size__ @c [ceil(tokens·heads·64/block),1,1] grid-stride over channel pairs; no dynamic
  *  shared memory.
  *
  *  @note @p values is read-modified in place (the rotation overwrites each channel pair here).
@@ -220,14 +218,14 @@ static __global__ void transformer_rope_kernel_(bf16r2_span_t values, rope_angle
                                                 u32_t heads, u32_t role_offset, f32_t angle_sign) {
     std::size_t const tokens = values.extent(0);
     u32_t const pairs_per_head = transformer_head_dim_k >> 1u;
-    std::size_t const slots_per_token = static_cast<std::size_t>(pairs_per_head) * heads;
-    std::size_t const total_slots = slots_per_token * tokens;
+    std::size_t const pairs_per_token = static_cast<std::size_t>(pairs_per_head) * heads;
+    std::size_t const total_pairs = pairs_per_token * tokens;
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t slot = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; slot < total_slots;
-         slot += stride) {
-        std::size_t const token = slot / slots_per_token;
-        u32_t const head = static_cast<u32_t>((slot % slots_per_token) / pairs_per_head);
-        u32_t const pair = static_cast<u32_t>(slot % pairs_per_head);
+    for (std::size_t pair_index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+         pair_index < total_pairs; pair_index += stride) {
+        std::size_t const token = pair_index / pairs_per_token;
+        u32_t const head = static_cast<u32_t>((pair_index % pairs_per_token) / pairs_per_head);
+        u32_t const pair = static_cast<u32_t>(pair_index % pairs_per_head);
         u32_t const channel = role_offset + head * transformer_head_dim_k + 2u * pair;
         f32_t const real = __bfloat162float(values[token, channel]);
         f32_t const imaginary = __bfloat162float(values[token, channel + 1u]);
@@ -329,8 +327,7 @@ static __global__ void transformer_descale_from_max_kernel_(u32r1_span_t max_bit
 
 /**
  *  @brief Quantise BFloat16 into the E4M3 shadow, dividing by the descale scalar the matmuls will
- *      multiply back through their native scale pointers. With a null @p descale (empty view) the cast
- *      is scale-free — the activation path.
+ *      multiply back through their native scale pointers.
  *
  *  __grid_size__ grid-stride; no dynamic shared memory.
  */
@@ -514,6 +511,28 @@ static __global__ void transformer_seq_lens_cast_kernel_(u32r1_view_t segment_le
                             .set_data_type(fe::DataType_t::INT32));
 }
 
+/** @brief Attach a @b [1,1,1,1] Float32 scalar input to @p graph under @p uid — the attention scale
+ *      and the FP8 descale / rescale scalars all share this shape. */
+[[nodiscard]] inline auto sdpa_scalar(fe::graph::Graph &graph, i64_t uid, char const *name) {
+    return graph.tensor(fe::graph::Tensor_attributes()
+                            .set_name(name)
+                            .set_uid(uid)
+                            .set_dim({1, 1, 1, 1})
+                            .set_stride({1, 1, 1, 1})
+                            .set_data_type(fe::DataType_t::FLOAT));
+}
+
+/** @brief Mark one SDPA-backward gradient output ( @c dQ / @c dK / @c dV ): the packed-QKV THD @p dims
+ *      and @p strides of its operand, plus the ragged offset under @p ragged_uid . */
+inline void configure_sdpa_grad_output(std::shared_ptr<fe::graph::Tensor_attributes> const &node, // vendor-boundary
+                                       fe::graph::Graph &graph, i64_t uid, i64_t ragged_uid,
+                                       std::vector<i64_t> const &dims,    // vendor-boundary
+                                       std::vector<i64_t> const &strides, // vendor-boundary
+                                       i64_t segments) {
+    node->set_output(true).set_uid(uid).set_dim(dims).set_stride(strides);
+    node->set_ragged_offset(sdpa_ragged_offset(graph, ragged_uid, segments));
+}
+
 expected_t sdpa_graph_t::verify_raw_bindings(i64_t const *uids, u32_t count) noexcept {
     if (variant_pack_uids.size() != count)
         return expected_t::fail(status_t::other_k,
@@ -522,7 +541,7 @@ expected_t sdpa_graph_t::verify_raw_bindings(i64_t const *uids, u32_t count) noe
                                 variant_pack_uids.size(), count);
     for (i64_t const uid : variant_pack_uids) {
         bool named = false;
-        for (u32_t slot = 0; slot != count && !named; ++slot) named = uids[slot] == uid;
+        for (u32_t entry = 0; entry != count && !named; ++entry) named = uids[entry] == uid;
         if (!named)
             return expected_t::fail(status_t::other_k, "SDPA graph demands uid {} the raw table never names", uid);
     }
@@ -539,7 +558,7 @@ expected_t sdpa_graph_t::verify_raw_bindings(i64_t const *uids, u32_t count) noe
 
 expected_t sdpa_plan_t::execute(cudnnHandle_t handle, void *workspace) noexcept {
     if (!raw) {
-        for (u32_t slot = 0; slot != binding_count; ++slot) fallback_bindings[uids[slot]] = pointers[slot];
+        for (u32_t entry = 0; entry != binding_count; ++entry) fallback_bindings[uids[entry]] = pointers[entry];
         if (auto status = graph.execute(handle, fallback_bindings, workspace); status.is_bad())
             return expected_t::fail(status_t::cuda_error_k, "SDPA fallback execute failed: {}",
                                     status.get_message().c_str()); // vendor-boundary
@@ -732,8 +751,8 @@ expected_t transformer_block_bf16_t::forward(bf16r2_view_t input, bf16r2_span_t 
                                  key_offset, epsilon);
     if (!launched) return launched;
     f32_t const forward_sign = 1.0f;
-    std::size_t const rope_slots = head_vectors * (transformer_head_dim_k >> 1u);
-    dim3 const rope_grid {static_cast<u32_t>(divide_round_up(rope_slots, kernel_block_size_default_k)), 1u, 1u};
+    std::size_t const rope_pairs = head_vectors * (transformer_head_dim_k >> 1u);
+    dim3 const rope_grid {static_cast<u32_t>(divide_round_up(rope_pairs, kernel_block_size_default_k)), 1u, 1u};
     launched = launch_kernel(reinterpret_cast<void const *>(&transformer_rope_kernel_), rope_grid, block_shape, stream,
                              qkv_.span(), angles, coords, heads, query_offset, forward_sign);
     if (launched)
@@ -864,8 +883,8 @@ expected_t transformer_block_bf16_t::backward(bf16r2_view_t output_grad, bf16r2_
     if (expected_t attended = run_sdpa_backward_(segment_offsets, segment_lengths, stream); !attended) return attended;
     f32_t const inverse_sign = -1.0f;
     std::size_t const head_vectors = tokens * heads;
-    std::size_t const rope_slots = head_vectors * (transformer_head_dim_k >> 1u);
-    dim3 const rope_grid {static_cast<u32_t>(divide_round_up(rope_slots, kernel_block_size_default_k)), 1u, 1u};
+    std::size_t const rope_pairs = head_vectors * (transformer_head_dim_k >> 1u);
+    dim3 const rope_grid {static_cast<u32_t>(divide_round_up(rope_pairs, kernel_block_size_default_k)), 1u, 1u};
     dim3 const vector_grid {
         static_cast<u32_t>(divide_round_up(head_vectors * warp_size_k, kernel_block_size_default_k)), 1u, 1u};
     u32_t const query_offset = 0u, key_offset = hidden;
@@ -911,46 +930,48 @@ expected_t transformer_block_bf16_t::backward(bf16r2_view_t output_grad, bf16r2_
     return launched;
 }
 
+expected_t transformer_block_bf16_t::pin_matmul_plan_(cublaslt_plan_config_t config, std::span<cublaslt_plan_t> plans,
+                                                      std::size_t &role, std::size_t &workspace_bytes) noexcept {
+    config.c_type = CUDA_R_16BF;
+    expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(*blas_, config);
+    if (!plan) return expected_t::fail(std::move(plan));
+    if (plan.value_.workspace_bytes() > workspace_bytes) workspace_bytes = plan.value_.workspace_bytes();
+    plans[role++] = std::move(plan.value_);
+    return {};
+}
+
 expected_t transformer_block_bf16_t::plan_matmuls_(gpu_arena_t &arena) noexcept {
     u32_t const hidden = config_.hidden;
     u32_t const ffn = config_.ffn_expansion * hidden;
     u32_t const tokens = config_.max_tokens;
     std::size_t workspace_bytes = 0;
-    std::size_t plan_slot = 0;
-    auto pin_plan = [&](cublaslt_plan_config_t plan_config) noexcept -> expected_t {
-        plan_config.c_type = CUDA_R_16BF;
-        expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(*blas_, plan_config);
-        if (!plan) return expected_t::fail(std::move(plan));
-        if (plan.value_.workspace_bytes() > workspace_bytes) workspace_bytes = plan.value_.workspace_bytes();
-        plans_[plan_slot++] = std::move(plan.value_);
-        return {};
+    std::size_t plan_role = 0;
+    auto pin = [&](cublaslt_plan_config_t config) noexcept -> expected_t {
+        return pin_matmul_plan_(config, plans_, plan_role, workspace_bytes);
     };
     // Forward: Y[T,O] = X[T,I]·W[O,I]ᵀ.
-    expected_t pinned = pin_plan(
+    expected_t pinned = pin(
         {tokens, hidden, hidden, 3u * hidden, hidden, hidden, tokens, 3u * hidden, 3u * hidden, false, true});
+    if (pinned) pinned = pin({tokens, hidden, hidden, hidden, hidden, hidden, tokens, hidden, hidden, false, true});
     if (pinned)
-        pinned = pin_plan({tokens, hidden, hidden, hidden, hidden, hidden, tokens, hidden, hidden, false, true});
-    if (pinned)
-        pinned = pin_plan({tokens, hidden, hidden, 2u * ffn, hidden, hidden, tokens, 2u * ffn, 2u * ffn, false, true});
-    if (pinned) pinned = pin_plan({tokens, ffn, ffn, hidden, ffn, ffn, tokens, hidden, hidden, false, true});
+        pinned = pin({tokens, hidden, hidden, 2u * ffn, hidden, hidden, tokens, 2u * ffn, 2u * ffn, false, true});
+    if (pinned) pinned = pin({tokens, ffn, ffn, hidden, ffn, ffn, tokens, hidden, hidden, false, true});
     // Data gradients: dX[T,I] = dY[T,O]·W[O,I].
     if (pinned)
-        pinned = pin_plan(
+        pinned = pin(
             {tokens, 3u * hidden, 3u * hidden, 3u * hidden, hidden, hidden, tokens, hidden, hidden, false, false});
+    if (pinned) pinned = pin({tokens, hidden, hidden, hidden, hidden, hidden, tokens, hidden, hidden, false, false});
     if (pinned)
-        pinned = pin_plan({tokens, hidden, hidden, hidden, hidden, hidden, tokens, hidden, hidden, false, false});
-    if (pinned)
-        pinned = pin_plan({tokens, 2u * ffn, 2u * ffn, 2u * ffn, hidden, hidden, tokens, hidden, hidden, false, false});
-    if (pinned) pinned = pin_plan({tokens, hidden, hidden, hidden, ffn, ffn, tokens, ffn, ffn, false, false});
+        pinned = pin({tokens, 2u * ffn, 2u * ffn, 2u * ffn, hidden, hidden, tokens, hidden, hidden, false, false});
+    if (pinned) pinned = pin({tokens, hidden, hidden, hidden, ffn, ffn, tokens, ffn, ffn, false, false});
     // Weight gradients: dW[O,I] = dY[T,O]ᵀ·X[T,I].
     if (pinned)
-        pinned = pin_plan(
+        pinned = pin(
             {tokens, 3u * hidden, 3u * hidden, tokens, hidden, hidden, 3u * hidden, hidden, hidden, true, false});
+    if (pinned) pinned = pin({tokens, hidden, hidden, tokens, hidden, hidden, hidden, hidden, hidden, true, false});
     if (pinned)
-        pinned = pin_plan({tokens, hidden, hidden, tokens, hidden, hidden, hidden, hidden, hidden, true, false});
-    if (pinned)
-        pinned = pin_plan({tokens, 2u * ffn, 2u * ffn, tokens, hidden, hidden, 2u * ffn, hidden, hidden, true, false});
-    if (pinned) pinned = pin_plan({tokens, hidden, hidden, tokens, ffn, ffn, hidden, ffn, ffn, true, false});
+        pinned = pin({tokens, 2u * ffn, 2u * ffn, tokens, hidden, hidden, 2u * ffn, hidden, hidden, true, false});
+    if (pinned) pinned = pin({tokens, hidden, hidden, tokens, ffn, ffn, hidden, ffn, ffn, true, false});
     if (!pinned) return pinned;
     if (workspace_bytes != 0) {
         gpu_arena_alloc<b8_t> b8_alloc {arena};
@@ -972,18 +993,10 @@ expected_t transformer_block_bf16_t::build_sdpa_(gpu_arena_t &arena, gpu_arena_a
     u32_t const hidden = config_.hidden;
     auto const strides = sdpa_thd_strides(heads, token_stride);
     auto const log_sum_exp_strides = std::vector<i64_t> {heads * seq, seq, 1, 1}; // vendor-boundary
-    // The scale rides a device scalar tensor we own — never the frontend's pass-by-value cache,
-    // which lives behind private members the raw execution path cannot reach.
-    auto make_scale = [&](fe::graph::Graph &graph) {
-        return graph.tensor(fe::graph::Tensor_attributes()
-                                .set_name("attn_scale")
-                                .set_uid(sdpa_uid_attn_scale_k)
-                                .set_dim({1, 1, 1, 1})
-                                .set_stride({1, 1, 1, 1})
-                                .set_data_type(fe::DataType_t::FLOAT));
-    };
+    // The scale rides a device scalar tensor we own (bound via @ref sdpa_scalar ) — never the frontend's
+    // pass-by-value cache, which lives behind private members the raw execution path cannot reach.
 
-    // Forward graph: owned bindings pinned now, per-call slots recorded for the dispatch stores.
+    // Forward graph: owned bindings pinned now, per-call entries recorded for the dispatch stores.
     {
         fe::graph::Graph &graph = forward_sdpa_.graph;
         graph.set_io_data_type(fe::DataType_t::BFLOAT16)
@@ -1007,7 +1020,7 @@ expected_t transformer_block_bf16_t::build_sdpa_(gpu_arena_t &arena, gpu_arena_a
         auto options = fe::graph::SDPA_attributes()
                            .set_name("uform_block_sdpa_fwd")
                            .set_generate_stats(true)
-                           .set_attn_scale(make_scale(graph))
+                           .set_attn_scale(sdpa_scalar(graph, sdpa_uid_attn_scale_k, "attn_scale"))
                            .set_padding_mask(true)
                            .set_seq_len_q(seq_q)
                            .set_seq_len_kv(seq_kv);
@@ -1032,9 +1045,9 @@ expected_t transformer_block_bf16_t::build_sdpa_(gpu_arena_t &arena, gpu_arena_a
         forward_sdpa_.bind(sdpa_uid_output_k, attn_output_.data());
         forward_sdpa_.bind(sdpa_uid_stats_k, softmax_log_sum_exp_.data());
         forward_sdpa_.bind(sdpa_uid_attn_scale_k, attn_scale_.data());
-        forward_seq_slot_ = forward_sdpa_.bind(sdpa_uid_seq_len_q_k);
+        forward_seq_entry_ = forward_sdpa_.bind(sdpa_uid_seq_len_q_k);
         forward_sdpa_.bind(sdpa_uid_seq_len_kv_k);
-        forward_ragged_slot_ = forward_sdpa_.bind(sdpa_uid_ragged_base_k + 0);
+        forward_ragged_entry_ = forward_sdpa_.bind(sdpa_uid_ragged_base_k + 0);
         forward_sdpa_.bind(sdpa_uid_ragged_base_k + 1);
         forward_sdpa_.bind(sdpa_uid_ragged_base_k + 2);
         forward_sdpa_.bind(sdpa_uid_ragged_base_k + 3);
@@ -1070,19 +1083,19 @@ expected_t transformer_block_bf16_t::build_sdpa_(gpu_arena_t &arena, gpu_arena_a
         auto seq_kv = sdpa_seq_lengths(graph, sdpa_uid_seq_len_kv_k, "seq_len_kv", segments);
         auto options = fe::graph::SDPA_backward_attributes()
                            .set_name("uform_block_sdpa_bwd")
-                           .set_attn_scale(make_scale(graph))
+                           .set_attn_scale(sdpa_scalar(graph, sdpa_uid_attn_scale_k, "attn_scale"))
                            .set_padding_mask(true)
                            .set_seq_len_q(seq_q)
                            .set_seq_len_kv(seq_kv);
         auto [query_grad, key_grad, value_grad] = graph.sdpa_backward(queries, keys, values, output, output_grad, stats,
                                                                       options);
-        auto configure_grad_output = [&](auto &node, i64_t uid, i64_t ragged_uid) {
-            node->set_output(true).set_uid(uid).set_dim({segments, heads, seq, dim}).set_stride(strides);
-            node->set_ragged_offset(sdpa_ragged_offset(graph, ragged_uid, segments));
-        };
-        configure_grad_output(query_grad, sdpa_uid_query_grad_k, sdpa_uid_ragged_base_k + 5);
-        configure_grad_output(key_grad, sdpa_uid_key_grad_k, sdpa_uid_ragged_base_k + 6);
-        configure_grad_output(value_grad, sdpa_uid_value_grad_k, sdpa_uid_ragged_base_k + 7);
+        std::vector<i64_t> const grad_dims {segments, heads, seq, dim}; // vendor-boundary
+        configure_sdpa_grad_output(query_grad, graph, sdpa_uid_query_grad_k, sdpa_uid_ragged_base_k + 5, grad_dims,
+                                   strides, segments);
+        configure_sdpa_grad_output(key_grad, graph, sdpa_uid_key_grad_k, sdpa_uid_ragged_base_k + 6, grad_dims, strides,
+                                   segments);
+        configure_sdpa_grad_output(value_grad, graph, sdpa_uid_value_grad_k, sdpa_uid_ragged_base_k + 7, grad_dims,
+                                   strides, segments);
         if (auto status = graph.build(cudnn_->get(), {fe::HeurMode_t::A}); status.is_bad())
             return expected_t::fail(status_t::cuda_error_k, "SDPA backward graph build failed: {}",
                                     status.get_message().c_str()); // vendor-boundary
@@ -1096,9 +1109,9 @@ expected_t transformer_block_bf16_t::build_sdpa_(gpu_arena_t &arena, gpu_arena_a
         backward_sdpa_.bind(sdpa_uid_key_grad_k, qkv_grad_.data() + hidden);
         backward_sdpa_.bind(sdpa_uid_value_grad_k, qkv_grad_.data() + 2u * hidden);
         backward_sdpa_.bind(sdpa_uid_attn_scale_k, attn_scale_.data());
-        backward_seq_slot_ = backward_sdpa_.bind(sdpa_uid_seq_len_q_k);
+        backward_seq_entry_ = backward_sdpa_.bind(sdpa_uid_seq_len_q_k);
         backward_sdpa_.bind(sdpa_uid_seq_len_kv_k);
-        backward_ragged_slot_ = backward_sdpa_.bind(sdpa_uid_ragged_base_k + 0);
+        backward_ragged_entry_ = backward_sdpa_.bind(sdpa_uid_ragged_base_k + 0);
         for (i64_t ragged = 1; ragged != 8; ++ragged) backward_sdpa_.bind(sdpa_uid_ragged_base_k + ragged);
         if (expected_t finalized = backward_sdpa_.finalize_dispatch(); !finalized) return finalized;
     }
@@ -1126,11 +1139,11 @@ expected_t transformer_block_bf16_t::run_sdpa_forward_(u32r1_view_t segment_offs
                                                        gpu_stream_t &stream) noexcept {
     if (expected_t bound = cudnn_->bind(stream); !bound) return bound;
     if (expected_t staged = stage_ragged_offsets_(segment_offsets, segment_lengths, stream); !staged) return staged;
-    forward_sdpa_.pointers[forward_seq_slot_] = ragged_seq_lens_.data();
-    forward_sdpa_.pointers[forward_seq_slot_ + 1u] = ragged_seq_lens_.data();
+    forward_sdpa_.pointers[forward_seq_entry_] = ragged_seq_lens_.data();
+    forward_sdpa_.pointers[forward_seq_entry_ + 1u] = ragged_seq_lens_.data();
     for (u32_t ragged = 0; ragged != 3u; ++ragged)
-        forward_sdpa_.pointers[forward_ragged_slot_ + ragged] = ragged_qkv_offsets_.data();
-    forward_sdpa_.pointers[forward_ragged_slot_ + 3u] = ragged_hidden_offsets_.data();
+        forward_sdpa_.pointers[forward_ragged_entry_ + ragged] = ragged_qkv_offsets_.data();
+    forward_sdpa_.pointers[forward_ragged_entry_ + 3u] = ragged_hidden_offsets_.data();
     return forward_sdpa_.execute(cudnn_->get(), sdpa_workspace_.data());
 }
 
@@ -1138,14 +1151,14 @@ expected_t transformer_block_bf16_t::run_sdpa_backward_(u32r1_view_t segment_off
                                                         gpu_stream_t &stream) noexcept {
     if (expected_t bound = cudnn_->bind(stream); !bound) return bound;
     if (expected_t staged = stage_ragged_offsets_(segment_offsets, segment_lengths, stream); !staged) return staged;
-    backward_sdpa_.pointers[backward_seq_slot_] = ragged_seq_lens_.data();
-    backward_sdpa_.pointers[backward_seq_slot_ + 1u] = ragged_seq_lens_.data();
+    backward_sdpa_.pointers[backward_seq_entry_] = ragged_seq_lens_.data();
+    backward_sdpa_.pointers[backward_seq_entry_ + 1u] = ragged_seq_lens_.data();
     i32_t *const qkv_offsets = ragged_qkv_offsets_.data();
     i32_t *const hidden_offsets = ragged_hidden_offsets_.data();
     i32_t *const per_operand[8] = {qkv_offsets,    qkv_offsets, qkv_offsets, hidden_offsets,
                                    hidden_offsets, qkv_offsets, qkv_offsets, qkv_offsets};
     for (u32_t ragged = 0; ragged != 8u; ++ragged)
-        backward_sdpa_.pointers[backward_ragged_slot_ + ragged] = per_operand[ragged];
+        backward_sdpa_.pointers[backward_ragged_entry_ + ragged] = per_operand[ragged];
     return backward_sdpa_.execute(cudnn_->get(), sdpa_workspace_.data());
 }
 
@@ -1211,8 +1224,8 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
                                  heads, key_offset, epsilon);
     if (!launched) return launched;
     f32_t const forward_sign = 1.0f;
-    std::size_t const rope_slots = head_vectors * (transformer_head_dim_k >> 1u);
-    dim3 const rope_grid {static_cast<u32_t>(divide_round_up(rope_slots, kernel_block_size_default_k)), 1u, 1u};
+    std::size_t const rope_pairs = head_vectors * (transformer_head_dim_k >> 1u);
+    dim3 const rope_grid {static_cast<u32_t>(divide_round_up(rope_pairs, kernel_block_size_default_k)), 1u, 1u};
     launched = launch_kernel(reinterpret_cast<void const *>(&transformer_rope_kernel_), rope_grid, block_shape, stream,
                              qkv_.span(), angles, coords, heads, query_offset, forward_sign);
     if (launched)
@@ -1309,8 +1322,8 @@ expected_t transformer_block_e4m3_t::run_sdpa_(u32r1_view_t segment_lengths, gpu
                                           ragged_seq_lens_.span());
         !staged)
         return staged;
-    sdpa_.pointers[seq_slot_] = ragged_seq_lens_.data();
-    sdpa_.pointers[seq_slot_ + 1u] = ragged_seq_lens_.data();
+    sdpa_.pointers[seq_entry_] = ragged_seq_lens_.data();
+    sdpa_.pointers[seq_entry_ + 1u] = ragged_seq_lens_.data();
     return sdpa_.execute(cudnn_->get(), sdpa_workspace_.data());
 }
 
@@ -1400,7 +1413,7 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
     struct quantize_job_t {
         bf16r2_tensor_arena_t const *source;
         e4m3r2_tensor_arena_t *shadow;
-        u32_t descale_slot;
+        u32_t descale_index;
     };
     quantize_job_t const jobs[4] = {{&qkv_weight_, &block.qkv_weight_e4m3_, 0u},
                                     {&out_weight_, &block.out_weight_e4m3_, 1u},
@@ -1416,12 +1429,12 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
         bf16r1_view_t const source_flat = job.source->view().flatten<1>();
         expected_t launched = launch_kernel(reinterpret_cast<void const *>(&transformer_absolute_max_kernel_), grid,
                                             block_shape, stream, source_flat, max_bits.span());
-        f32r1_span_t const descale_slot {block.weight_descales_.data() + job.descale_slot, 1};
+        f32r1_span_t const descale {block.weight_descales_.data() + job.descale_index, 1};
         if (launched)
             launched = launch_kernel(reinterpret_cast<void const *>(&transformer_descale_from_max_kernel_),
-                                     dim3 {1u, 1u, 1u}, dim3 {1u, 1u, 1u}, stream, max_bits.span(), descale_slot);
+                                     dim3 {1u, 1u, 1u}, dim3 {1u, 1u, 1u}, stream, max_bits.span(), descale);
         if (launched) {
-            f32r1_view_t const descale_view = descale_slot;
+            f32r1_view_t const descale_view = descale;
             e4m3r1_span_t const shadow_flat = job.shadow->span().flatten<1>();
             launched = launch_kernel(reinterpret_cast<void const *>(&transformer_quantize_e4m3_kernel_), grid,
                                      block_shape, stream, source_flat, shadow_flat, descale_view);
@@ -1434,24 +1447,19 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
     u32_t const ffn32 = config_.ffn_expansion * hidden32;
     u32_t const tokens32 = config_.max_tokens;
     std::size_t workspace_bytes = 0;
-    std::size_t plan_slot = 0;
-    auto pin_plan = [&](u32_t out_width, u32_t in_width, u32_t descale_slot) noexcept -> expected_t {
-        cublaslt_plan_config_t plan_config {tokens32, in_width,  in_width,  out_width, in_width, in_width,
-                                            tokens32, out_width, out_width, false,     true};
-        plan_config.a_type = CUDA_R_8F_E4M3;
-        plan_config.b_type = CUDA_R_8F_E4M3;
-        plan_config.c_type = CUDA_R_16BF;
-        plan_config.b_descale = block.weight_descales_.data() + descale_slot;
-        expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(*blas_, plan_config);
-        if (!plan) return expected_t::fail(std::move(plan));
-        if (plan.value_.workspace_bytes() > workspace_bytes) workspace_bytes = plan.value_.workspace_bytes();
-        block.plans_[plan_slot++] = std::move(plan.value_);
-        return {};
+    std::size_t plan_role = 0;
+    auto pin = [&](u32_t out_width, u32_t in_width, u32_t descale_index) noexcept -> expected_t {
+        cublaslt_plan_config_t config {tokens32, in_width,  in_width,  out_width, in_width, in_width,
+                                       tokens32, out_width, out_width, false,     true};
+        config.a_type = CUDA_R_8F_E4M3;
+        config.b_type = CUDA_R_8F_E4M3;
+        config.b_descale = block.weight_descales_.data() + descale_index;
+        return pin_matmul_plan_(config, block.plans_, plan_role, workspace_bytes);
     };
-    expected_t pinned = pin_plan(3u * hidden32, hidden32, 0u);
-    if (pinned) pinned = pin_plan(hidden32, hidden32, 1u);
-    if (pinned) pinned = pin_plan(2u * ffn32, hidden32, 2u);
-    if (pinned) pinned = pin_plan(hidden32, ffn32, 3u);
+    expected_t pinned = pin(3u * hidden32, hidden32, 0u);
+    if (pinned) pinned = pin(hidden32, hidden32, 1u);
+    if (pinned) pinned = pin(2u * ffn32, hidden32, 2u);
+    if (pinned) pinned = pin(hidden32, ffn32, 3u);
     if (!pinned) return result_t::fail(std::move(pinned));
     if (workspace_bytes != 0) {
         block.blas_workspace_ = b8r1_tensor_arena_t::try_empty({workspace_bytes}, b8_alloc);
@@ -1461,8 +1469,8 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
     }
 
     // The FP8 SDPA graph: dense BSHD per segment row (the FP8 engines reject ragged offsets), padding
-    // masked by the per-segment lengths, output emitted straight in E4M3. The attention scale rides
-    // descale_q (descales compose multiplicatively), so no separate scale scalar exists anywhere.
+    // masked by the per-segment lengths, output emitted straight in E4M3. The attention scale is a
+    // pass-by-value float (set_attn_scale below), which is why this graph arms the frontend fallback.
     {
         i64_t const segments = config_.max_segments;
         i64_t const seq = config_.max_segment_tokens;
@@ -1480,23 +1488,15 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
                                     .set_dim({segments, heads64, seq, dim})
                                     .set_stride(dense));
         };
-        auto make_scalar = [&](i64_t uid, char const *name) {
-            return graph.tensor(fe::graph::Tensor_attributes()
-                                    .set_name(name)
-                                    .set_uid(uid)
-                                    .set_dim({1, 1, 1, 1})
-                                    .set_stride({1, 1, 1, 1})
-                                    .set_data_type(fe::DataType_t::FLOAT));
-        };
         auto queries = make_operand(sdpa_uid_query_k, "Q");
         auto keys = make_operand(sdpa_uid_key_k, "K");
         auto values = make_operand(sdpa_uid_value_k, "V");
-        auto descale_q = make_scalar(sdpa_uid_descale_q_k, "descale_q");
-        auto descale_k = make_scalar(sdpa_uid_descale_k_k, "descale_k");
-        auto descale_v = make_scalar(sdpa_uid_descale_v_k, "descale_v");
-        auto descale_s = make_scalar(sdpa_uid_descale_s_k, "descale_s");
-        auto scale_s = make_scalar(sdpa_uid_scale_s_k, "scale_s");
-        auto scale_o = make_scalar(sdpa_uid_scale_o_k, "scale_o");
+        auto descale_q = sdpa_scalar(graph, sdpa_uid_descale_q_k, "descale_q");
+        auto descale_k = sdpa_scalar(graph, sdpa_uid_descale_k_k, "descale_k");
+        auto descale_v = sdpa_scalar(graph, sdpa_uid_descale_v_k, "descale_v");
+        auto descale_s = sdpa_scalar(graph, sdpa_uid_descale_s_k, "descale_s");
+        auto scale_s = sdpa_scalar(graph, sdpa_uid_scale_s_k, "scale_s");
+        auto scale_o = sdpa_scalar(graph, sdpa_uid_scale_o_k, "scale_o");
         auto seq_q = sdpa_seq_lengths(graph, sdpa_uid_seq_len_q_k, "seq_len_q", segments);
         auto seq_kv = sdpa_seq_lengths(graph, sdpa_uid_seq_len_kv_k, "seq_len_kv", segments);
         // The FP8 attribute set accepts only a float scale (its tensor overload is disabled in the
@@ -1545,7 +1545,7 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
         block.sdpa_.bind(sdpa_uid_scale_o_k, block.ones_.data());
         block.sdpa_.bind(sdpa_uid_amax_s_k, block.absolute_max_scratch_.data());
         block.sdpa_.bind(sdpa_uid_amax_o_k, block.absolute_max_scratch_.data() + 1u);
-        block.seq_slot_ = block.sdpa_.bind(sdpa_uid_seq_len_q_k);
+        block.seq_entry_ = block.sdpa_.bind(sdpa_uid_seq_len_q_k);
         block.sdpa_.bind(sdpa_uid_seq_len_kv_k);
         if (expected_t finalized = block.sdpa_.finalize_dispatch(); !finalized)
             return result_t::fail(std::move(finalized));

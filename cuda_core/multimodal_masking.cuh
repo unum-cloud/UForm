@@ -1,7 +1,7 @@
 /**
  *  @brief The multimodal masked-modeling objective: deterministic corruption of a clean batch into a
  *      distorted one, and the reconstruction heads that score the tower's states against the clean
- *      target — byte cross-entropy for tokens, normalized-pixel MSE for image / video / audio patches.
+ *      target — byte cross-entropy for tokens, normalized-pixel MSE for image / video patches.
  *  @file cuda_core/multimodal_masking.cuh
  *  @author Ash Vardanian
  *  @date July 3, 2026
@@ -11,8 +11,8 @@
  *  The objective runs on two instances of the same representation: the clean one is the reconstruction
  *  target, the distorted one is what the tower sees. Corruption is a pure function of @c (seed,epoch,
  *  position) through the epoch shuffle's mixer — identical on every host_domain, bit-reproducible, no
- *  cuRAND and no state. Tokens are corrupted in vocabulary space (MASK / random byte / kept); media
- *  patches are zeroed at masked rows before the tower's entry projection.
+ *  cuRAND and no state. Tokens are corrupted in vocabulary space (MASK / random byte / kept); image /
+ *  video patches are zeroed at masked rows before the tower's entry projection.
  *
  *  @section masking_gradient The additive join with the tower
  *
@@ -29,10 +29,11 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "cuda_core/types.cuh"          // `expected`, `expected_t`, `status_t`, the scalar aliases
-#include "cuda_core/array.cuh"          // `array` — the parameter-table append
-#include "cuda_core/gpu_allocators.cuh" // `gpu_arena_t`, `gpu_arena_alloc`
-#include "cuda_core/schedule.cuh"       // `gpu_stream_t`, `cublaslt_session_t`, `cublaslt_plan_t`, the view aliases
+#include "cuda_core/types.cuh"            // `expected`, `expected_t`, `status_t`, the scalar aliases
+#include "cuda_core/array.cuh"            // `array` — the parameter-table append
+#include "cuda_core/gpu_allocators.cuh"   // `gpu_arena_t`, `gpu_arena_alloc`
+#include "cuda_core/schedule.cuh"         // `gpu_stream_t`, `cublaslt_session_t`, `cublaslt_plan_t`, the view aliases
+#include "cuda_core/multimodal_batch.cuh" // `modality_t`, `modality_view_t` — the per-segment routing tag
 
 namespace unum::uform::core {
 
@@ -53,14 +54,23 @@ struct masking_recipe_t {
     f32_t token_mean_span = 16.0f;
     /** @brief Of covered token positions: shown as MASK / replaced by a random byte / kept clean. */
     f32_t replace_fraction = 0.80f, random_fraction = 0.10f;
-    /** @brief Per-patch mask fractions for the media MAE heads. */
-    f32_t image_mask_ratio = 0.75f, video_mask_ratio = 0.90f, audio_mask_ratio = 0.75f;
-    /** @brief The video tube extent — a masked spatial cell is masked across all @c video_tube_time frames. */
-    u32_t video_tube_time = 2, video_tube_height = 16, video_tube_width = 16;
+};
+
+/** @brief The domain-separation salts that keep the independent draws at one corruption position from
+ *      correlating: each purpose re-keys the hash so the span-open coin, the span-continue coin, the
+ *      token-action coin, the random byte, and the patch-mask coin are statistically distinct streams. A
+ *      future @c masked_frames_t path adds its own enumerator here rather than reusing an existing salt. */
+enum class masking_draw_purpose_t : u32_t {
+    span_open_k = 0,
+    span_continue_k = 1,
+    token_action_k = 2,
+    random_byte_k = 3,
+    patch_mask_k = 4,
 };
 
 /** @brief One counter-based draw in @b [0,1) , keyed through the one @ref splitmix64_hash_t — pure,
- *      stateless, device-callable, bit-reproducible on every rank. */
+ *      stateless, device-callable, bit-reproducible on every rank. @p purpose is a
+ *      @ref masking_draw_purpose_t salt cast to @c u32_t . */
 [[nodiscard]] constexpr f32_t masking_draw(u64_t seed, u32_t epoch, u32_t sample_index, u32_t position,
                                            u32_t purpose) noexcept {
     u64_t const mixed = splitmix64_hash_t {}(seed, epoch, purpose, sample_index, position);
@@ -79,6 +89,40 @@ struct masked_tokens_config_t {
     /** @brief λ — the objective's weight inside the composite loss, folded into the gradient scale. */
     f32_t weight = 1.0f;
 };
+
+/** @brief The baked geometry and weight of one masked-patch (MAE) head — a different config is a
+ *      different object. Image and video share this shape; they differ only in @c patch_pixels , the mask
+ *      ratio, and whether the mask is tubed across time.
+ *  @note Audio no longer rides this 2-D patch head: it is now raw 1-D frames, and its masking will follow a
+ *      1-D frame path (mask the Float32 frames, raw-sample MSE) rather than this patch objective — on
+ *      record, not built. */
+struct masked_patches_config_t {
+    /** @brief Embedding width — must match the tower's. */
+    u32_t hidden = 0;
+    /** @brief Scalars per patch vector: image @c 3·p² , video @c tube_time·3·th·tw . */
+    u32_t patch_pixels = 0;
+    /** @brief Most patches one call carries — the @c normalized / patch-table extent. */
+    u32_t max_patches = 0;
+    /** @brief Fraction of patches masked and scored — 0.75 image, 0.90 video. */
+    f32_t mask_ratio = 0.75f;
+    /** @brief One for per-patch random masking; the video temporal-group count for tube masking, where a
+     *      masked spatial cell stays masked across all its time groups. @c max_patches must divide evenly. */
+    u32_t temporal_groups = 1;
+    /** @brief λ — the objective's weight inside the composite loss, folded into the gradient scale. */
+    f32_t weight = 1.0f;
+};
+
+/** @brief The three tensor-core matmul families pinned per reconstruction head — the roles line up across
+ *      both the byte-token and the patch head: @c forward_k is the decode (logits / predicted),
+ *      @c data_grad_k is @c d(normalized) handed back to the tower, and @c weight_grad_k is the head's own
+ *      weight gradient (@c d(decoder) / @c d(recon) ). */
+enum class linear_matmul_family_t : u32_t {
+    forward_k = 0,
+    data_grad_k = 1,
+    weight_grad_k = 2,
+};
+/** @brief How many matmul families exist per head — the length of the pinned-plan table. */
+inline constexpr u32_t linear_matmul_family_count_k = 3u;
 
 #if defined(__CUDACC__)
 
@@ -102,20 +146,25 @@ struct masked_tokens_t {
 
     /**
      *  @brief Corrupt @p clean into @p distorted and emit the per-position @p loss_weights — pure enqueue.
-     *      Each segment's tokens are walked left-to-right: geometric spans open at
-     *      @c token_mask_probability/token_mean_span and continue at @c 1-1/token_mean_span ; a covered
-     *      position is shown MASK / a random byte / its clean self per the recipe fractions, and carries a
-     *      loss weight of one. PAD is never eligible; uncovered positions copy clean with weight zero.
+     *      Only @c text_k segments are corrupted; a segment whose @p segment_modality is any media kind is
+     *      skipped outright, leaving its tokens clean with weight zero (mixed rows form at mix time, so this
+     *      routes on the tag rather than trusting media positions to hold PAD). Each text segment's tokens
+     *      are walked left-to-right: geometric spans open at @c token_mask_probability/token_mean_span and
+     *      continue at @c 1-1/token_mean_span ; a covered position is shown MASK / a random byte / its clean
+     *      self per the recipe fractions, and carries a loss weight of one. PAD is never eligible; uncovered
+     *      positions copy clean with weight zero.
      *
      *  @param[in] clean The clean token stream @b [tokens] in flat @c segment_offsets space.
      *  @param[out] distorted The tower's input @b [tokens] — clean elsewhere, corrupted at covered spans.
      *  @param[out] loss_weights @b [tokens] : one where the loss scores this position, zero elsewhere.
      *  @param[in] segment_offsets @b [segments+1] flat start positions; @p segment_lengths @b [segments]
      *      live token counts (a segment never crosses its row).
+     *  @param[in] segment_modality @b [segments] per-segment routing tag; only @c text_k segments corrupt.
      */
     [[nodiscard]] expected_t corrupt(tokens_view_t clean, tokens_span_t distorted, u32r1_span_t loss_weights,
                                      u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                     masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept;
+                                     modality_view_t segment_modality, masking_recipe_t recipe, epoch_t epoch,
+                                     gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief Forward + backward over every token, gated by its loss weight — pure enqueue on @p stream .
@@ -131,8 +180,8 @@ struct masked_tokens_t {
                                         u32r1_view_t loss_weights, f32r1_span_t loss_summands,
                                         bf16r2_span_t normalized_grad, gpu_stream_t &stream) noexcept;
 
-    /** @brief Append the decoder weight's optimizer slot. */
-    [[nodiscard]] expected_t parameters(array<differentiable_weights_t> &slots) noexcept;
+    /** @brief Append the decoder weight to @p weights . */
+    [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;
     /** @brief The decoder weights @b [vocabulary·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> decoder_weights() noexcept { return decoder_weight_.span().flatten<1>(); }
 
@@ -152,35 +201,17 @@ struct masked_tokens_t {
     f32r1_tensor_arena_t gradient_scale_ {};
     /** @brief The shared tensor-core workspace of the three pinned plans. */
     b8r1_tensor_arena_t workspace_ {};
-    /** @brief Pinned plans: logits, @c d(normalized) , @c d(decoder) . */
-    std::array<cublaslt_plan_t, 3> plans_ {};
+    /** @brief @ref linear_matmul_family_count_k pinned plans: logits, @c d(normalized) , @c d(decoder) . */
+    std::array<cublaslt_plan_t, linear_matmul_family_count_k> plans_ {};
+
+    /** @brief The one home of the plan-table indexing: this head's plan for @p family . */
+    [[nodiscard]] cublaslt_plan_t &plan_for(linear_matmul_family_t family) noexcept {
+        return plans_[static_cast<u32_t>(family)];
+    }
 };
-
-#endif // defined(__CUDACC__)
-
-/** @brief The baked geometry and weight of one masked-patch (MAE) head — a different config is a
- *      different object. Image, video, and audio share this shape; they differ only in @c patch_pixels ,
- *      the mask ratio, and whether the mask is tubed across time. */
-struct masked_patches_config_t {
-    /** @brief Embedding width — must match the tower's. */
-    u32_t hidden = 0;
-    /** @brief Scalars per patch vector: image @c 3·p² , video @c tube_time·3·th·tw , audio @c mel_h·mel_w . */
-    u32_t patch_pixels = 0;
-    /** @brief Most patches one call carries — the @c normalized / patch-table extent. */
-    u32_t max_patches = 0;
-    /** @brief Fraction of patches masked and scored — 0.75 image / audio, 0.90 video. */
-    f32_t mask_ratio = 0.75f;
-    /** @brief One for per-patch random masking; the video temporal-group count for tube masking, where a
-     *      masked spatial cell stays masked across all its time groups. @c max_patches must divide evenly. */
-    u32_t temporal_groups = 1;
-    /** @brief λ — the objective's weight inside the composite loss, folded into the gradient scale. */
-    f32_t weight = 1.0f;
-};
-
-#if defined(__CUDACC__)
 
 /**
- *  @brief The masked-image / video / audio objective: a deterministic patch-mask sampler with a
+ *  @brief The masked-image / video objective: a deterministic patch-mask sampler with a
  *      fixed-zero substitution, and a linear reconstruction head with a per-patch normalized-MSE loss.
  *      @ref sample_and_corrupt zeros the masked patch vectors before the tower's entry projection;
  *      @ref operator() reconstructs the clean patches from the tower's states and writes @c d(normalized)
@@ -188,8 +219,17 @@ struct masked_patches_config_t {
  *
  *  The head is a plain linear projection @c hidden→patch_pixels : the tower already RMSNorms the states it
  *  hands back through @c normalized() , so a second pre-norm here would only re-normalize. The mask token
- *  is a fixed zero (UFormTrain zero-inits it too) — no @c d(patches) is needed from the tower, so the
+ *  is a fixed zero — no @c d(patches) is needed from the tower, so the
  *  objective stays fully orthogonal to the entry projection.
+ *
+ *  The per-patch MSE z-scores both the prediction and the target by their own per-patch mean and
+ *  standard deviation — deliberately, not He-et-al. MAE (which normalizes the target only). Two
+ *  independent zero-mean unit-variance patches give @c E[(pred_norm-targ_norm)^2]=1+1=2 , so the loss has
+ *  a closed-form chance baseline of @c 2.0 . That constant lets the multi-objective composer divide this
+ *  term by its baseline onto the same @c [0,1] scale as the MLM ( @c ln256 ) and contrastive ( @c ln2 )
+ *  losses, so weighted multi-loss training stays balanced. Target-only normalization would leave the
+ *  prediction's scale unbounded and init-dependent, with no closed-form baseline — do not "fix" it to
+ *  target-only.
  */
 struct masked_patches_t {
 
@@ -220,8 +260,8 @@ struct masked_patches_t {
                                         f32r1_span_t loss_summands, bf16r2_span_t normalized_grad,
                                         gpu_stream_t &stream) noexcept;
 
-    /** @brief Append the recon weight's optimizer slot. */
-    [[nodiscard]] expected_t parameters(array<differentiable_weights_t> &slots) noexcept;
+    /** @brief Append the recon weight to @p weights . */
+    [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;
     /** @brief The recon weights @b [patch_pixels·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> recon_weights() noexcept { return recon_weight_.span().flatten<1>(); }
 
@@ -241,8 +281,13 @@ struct masked_patches_t {
     f32r1_tensor_arena_t gradient_scale_ {};
     /** @brief The shared tensor-core workspace of the three pinned plans. */
     b8r1_tensor_arena_t workspace_ {};
-    /** @brief Pinned plans: predicted, @c d(normalized) , @c d(recon) . */
-    std::array<cublaslt_plan_t, 3> plans_ {};
+    /** @brief @ref linear_matmul_family_count_k pinned plans: predicted, @c d(normalized) , @c d(recon) . */
+    std::array<cublaslt_plan_t, linear_matmul_family_count_k> plans_ {};
+
+    /** @brief The one home of the plan-table indexing: this head's plan for @p family . */
+    [[nodiscard]] cublaslt_plan_t &plan_for(linear_matmul_family_t family) noexcept {
+        return plans_[static_cast<u32_t>(family)];
+    }
 };
 
 #endif // defined(__CUDACC__)

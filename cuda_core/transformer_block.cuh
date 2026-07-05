@@ -41,8 +41,9 @@
  *  RMSNorm statistics ( @c 1/rms ) and the SDPA @c softmax_log_sum_exp_ stash in Float32. Inference quantisation
  *  is per-tensor @b static E4M3: each weight is scaled by @c max_abs/240 into its shadow, the Float32
  *  descale scalar rides the matmul descriptor's native scale pointer (no post-matmul descale kernel),
- *  and activations quantise scale-free — the norms bound their range. Weight gradients are written with
- *  @c beta=0 into per-block BFloat16 buffers; cross-microbatch accumulation is the optimizer's concern.
+ *  and activations carry per-token activation scales, folded back after each product. Weight gradients
+ *  are written with @c beta=0 into per-block BFloat16 buffers; cross-microbatch accumulation is the
+ *  optimizer's concern.
  *
  *  @section transformer_rope Rotary position embedding
  *
@@ -286,7 +287,7 @@ struct sdpa_plan_t {
     std::unordered_map<fe::graph::Tensor_attributes::uid_t, void *> fallback_bindings {}; // vendor-boundary
     bool raw = true;
 
-    /** @brief Append one binding at construction; returns its pointer-table slot for per-call stores. */
+    /** @brief Append one binding at construction; returns its pointer-table entry for per-call stores. */
     u32_t bind(i64_t uid, void *pointer = nullptr) noexcept {
         uids[binding_count] = uid;
         pointers[binding_count] = pointer;
@@ -307,7 +308,7 @@ struct sdpa_plan_t {
             return {};
         }
         fallback_bindings.reserve(binding_count);
-        for (u32_t slot = 0; slot != binding_count; ++slot) fallback_bindings.emplace(uids[slot], pointers[slot]);
+        for (u32_t entry = 0; entry != binding_count; ++entry) fallback_bindings.emplace(uids[entry], pointers[entry]);
         return graph.get_workspace_size(workspace_bytes).is_good()
                    ? expected_t {}
                    : expected_t::fail(status_t::cuda_error_k, "SDPA workspace query failed");
@@ -383,12 +384,18 @@ struct transformer_block_bf16_t {
   private:
     friend struct transformer_block_e4m3_t;
 
-    /** @brief Plan slots, in the order @ref plan_matmuls_ builds them. */
+    /** @brief Plan roles, in the order @ref plan_matmuls_ builds them. */
     static constexpr std::size_t plan_qkv_forward_k = 0, plan_out_forward_k = 1, plan_gate_up_forward_k = 2,
                                  plan_down_forward_k = 3, plan_qkv_data_grad_k = 4, plan_out_data_grad_k = 5,
                                  plan_gate_up_data_grad_k = 6, plan_down_data_grad_k = 7, plan_qkv_weight_grad_k = 8,
                                  plan_out_weight_grad_k = 9, plan_gate_up_weight_grad_k = 10,
                                  plan_down_weight_grad_k = 11;
+
+    /** @brief Pin one matmul plan into @p plans at @p role (advancing it) and track the largest
+     *      @p workspace_bytes; the caller sets the operand types on @p config , this stamps the
+     *      BFloat16 @c c_type shared by every product. Reused by the BFloat16 and the FP8 twin's plans. */
+    [[nodiscard]] expected_t pin_matmul_plan_(cublaslt_plan_config_t config, std::span<cublaslt_plan_t> plans,
+                                              std::size_t &role, std::size_t &workspace_bytes) noexcept;
 
     /** @brief Pin the twelve BFloat16 matmul plans: four forward products, four data gradients
      *      ( @c dX=dY·W ), four weight gradients ( @c dW=dYᵀ·X ), and allocate the shared workspace. */
@@ -404,13 +411,13 @@ struct transformer_block_bf16_t {
                                                    gpu_stream_t &stream) noexcept;
 
     /** @brief Store the per-call pointers into the fixed binding table and raw-execute the forward
-     *      plan — no map, no allocation, one backend call. Ragged slots 0..3 are Q, K, V (packed-QKV
+     *      plan — no map, no allocation, one backend call. Ragged entries 0..3 are Q, K, V (packed-QKV
      *      strides) and O (hidden strides). */
     [[nodiscard]] expected_t run_sdpa_forward_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
                                                gpu_stream_t &stream) noexcept;
 
     /** @brief The backward sibling of @ref run_sdpa_forward_ — the Q / K / V gradients land in the
-     *      packed @c qkv_grad_ block. Ragged slots 0..7 are Q, K, V, O, dO, dQ, dK, dV. */
+     *      packed @c qkv_grad_ block. Ragged entries 0..7 are Q, K, V, O, dO, dQ, dK, dV. */
     [[nodiscard]] expected_t run_sdpa_backward_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
                                                 gpu_stream_t &stream) noexcept;
 
@@ -450,18 +457,18 @@ struct transformer_block_bf16_t {
     bf16r2_tensor_arena_t qkv_grad_ {}, hidden_grad_a_ {}, hidden_grad_b_ {}, gate_up_grad_ {}, silu_up_grad_ {};
     /** @brief The shared cuBLASLt and cuDNN scratch, sized to the max any pinned plan / graph needs. */
     b8r1_tensor_arena_t blas_workspace_ {}, sdpa_workspace_ {};
-    /** @brief The twelve pinned products, indexed by the @c plan_*_k slot constants. */
+    /** @brief The twelve pinned products, indexed by the @c plan_*_k role constants. */
     std::array<cublaslt_plan_t, 12> plans_ {};
     /** @brief The two SDPA plans built once at construction — forward (stats-generating) and backward. */
     sdpa_plan_t forward_sdpa_ {}, backward_sdpa_ {};
-    /** @brief Pointer-table slots of the per-call bindings: the seq-length pair and the first ragged
+    /** @brief Pointer-table entries of the per-call bindings: the seq-length pair and the first ragged
      *      offset of each graph (the rest follow contiguously). */
-    u32_t forward_seq_slot_ = 0, forward_ragged_slot_ = 0, backward_seq_slot_ = 0, backward_ragged_slot_ = 0;
+    u32_t forward_seq_entry_ = 0, forward_ragged_entry_ = 0, backward_seq_entry_ = 0, backward_ragged_entry_ = 0;
 };
 
 /**
  *  @brief The quantized forward-only inference twin: E4M3 shadow weights with pinned native descale
- *      pointers, scale-free E4M3 activations, and the FP8 SDPA graph — @b no gradients, @b no stashes,
+ *      pointers, per-token activation scales, and the FP8 SDPA graph — @b no gradients, @b no stashes,
  *      roughly a quarter of the training block's memory. Constructed only through
  *      @ref transformer_block_bf16_t::quantize_weights , so an instance is always fully quantized.
  */
@@ -483,7 +490,7 @@ struct transformer_block_e4m3_t {
   private:
     friend struct transformer_block_bf16_t;
 
-    /** @brief Plan slots, in the order the FP8 plans are built. */
+    /** @brief Plan roles, in the order the FP8 plans are built. */
     static constexpr std::size_t plan_qkv_k = 0, plan_out_k = 1, plan_gate_up_k = 2, plan_down_k = 3;
 
     /** @brief Bind and execute the FP8 SDPA graph over the dense packed operands; the Q / K / V descale
@@ -524,15 +531,15 @@ struct transformer_block_e4m3_t {
     /** @brief Float32 @c 1/rms scratch the norms write and discard — per token for @c inverse_rms_ ,
      *      per QK-norm head vector for @c inverse_rms_heads_ ; no backward reads either. */
     f32r1_tensor_arena_t inverse_rms_ {}, inverse_rms_heads_ {};
-    /** @brief @b [1] the unit scale bound to the FP8 graph's scale slots, and the mandatory amax output. */
+    /** @brief @b [1] the unit scale bound to the FP8 graph's scale entries, and the mandatory amax output. */
     f32r1_tensor_arena_t ones_ {}, absolute_max_scratch_ {};
     /** @brief @b [max_segments] Int32 padding-mask lengths — the twin's slice of the vendor boundary. */
     i32r1_tensor_arena_t ragged_seq_lens_ {};
     /** @brief The shared cuBLASLt and cuDNN scratch, sized to the max any pinned plan / graph needs. */
     b8r1_tensor_arena_t blas_workspace_ {}, sdpa_workspace_ {};
-    /** @brief Pointer-table slot of the per-call seq-length pair. */
-    u32_t seq_slot_ = 0;
-    /** @brief The four pinned FP8 products, indexed by the @c plan_*_k slot constants. */
+    /** @brief Pointer-table entry of the per-call seq-length pair. */
+    u32_t seq_entry_ = 0;
+    /** @brief The four pinned FP8 products, indexed by the @c plan_*_k role constants. */
     std::array<cublaslt_plan_t, 4> plans_ {};
     /** @brief The FP8 SDPA plan built once at construction. */
     sdpa_plan_t sdpa_ {};

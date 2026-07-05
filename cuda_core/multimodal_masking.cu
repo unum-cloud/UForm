@@ -11,7 +11,7 @@ using namespace unum::uform::core;
 
 /** @brief All-threads-get-the-total CTA max — the fixed-order sibling of @ref block_reduce_broadcast for
  *      the softmax's row maximum: per-warp shuffle trees, lane-0 partials through static shared memory,
- *      one final warp tree, one broadcast slot. Deterministic, sized for @p block_size_ threads. */
+ *      one final warp tree, one broadcast cell. Deterministic, sized for @p block_size_ threads. */
 template <unsigned block_size_>
 [[nodiscard]] static __device__ f32_t block_reduce_max_broadcast_(f32_t value) noexcept {
     static_assert(block_size_ % warp_size_k == 0, "the staging array assumes whole warps");
@@ -38,16 +38,18 @@ template <unsigned block_size_>
  *  @brief Corrupt one segment in place: walk its tokens left-to-right, open geometric spans, and at each
  *      covered position write the distorted byte (MASK / random / kept clean) and a loss weight of one.
  *      PAD breaks and never opens a span; uncovered positions were already copied clean with weight zero.
+ *      A non- @c text_k segment is skipped outright — media rows keep their clean tokens and zero weight.
  *
  *  __grid_size__ @c [grid_size_for(segments),1,1] , one thread per segment; no dynamic shared memory.
  */
 static __global__ void masked_token_corrupt_kernel_(tokens_view_t clean, tokens_span_t distorted,
                                                     u32r1_span_t loss_weights, u32r1_view_t segment_offsets,
-                                                    u32r1_view_t segment_lengths, u64_t seed, u32_t epoch,
-                                                    f32_t open_rate, f32_t continue_rate, f32_t replace_fraction,
-                                                    f32_t random_fraction) {
+                                                    u32r1_view_t segment_lengths, modality_view_t segment_modality,
+                                                    u64_t seed, u32_t epoch, f32_t open_rate, f32_t continue_rate,
+                                                    f32_t replace_fraction, f32_t random_fraction) {
     u32_t const segment = blockIdx.x * blockDim.x + threadIdx.x;
     if (segment >= segment_lengths.extent(0)) return;
+    if (segment_modality[segment] != modality_t::text_k) return; // media segments stay clean, weight zero
     u32_t const base = segment_offsets[segment];
     u32_t const length = segment_lengths[segment];
     bool in_span = false;
@@ -57,13 +59,20 @@ static __global__ void masked_token_corrupt_kernel_(tokens_view_t clean, tokens_
             in_span = false;
             continue;
         }
-        if (in_span) in_span = masking_draw(seed, epoch, segment, column, 1u) < continue_rate;
-        if (!in_span) in_span = masking_draw(seed, epoch, segment, column, 0u) < open_rate;
+        if (in_span)
+            in_span = masking_draw(seed, epoch, segment, column,
+                                   static_cast<u32_t>(masking_draw_purpose_t::span_continue_k)) < continue_rate;
+        if (!in_span)
+            in_span = masking_draw(seed, epoch, segment, column,
+                                   static_cast<u32_t>(masking_draw_purpose_t::span_open_k)) < open_rate;
         if (!in_span) continue;
-        f32_t const action = masking_draw(seed, epoch, segment, column, 2u);
+        f32_t const action = masking_draw(seed, epoch, segment, column,
+                                          static_cast<u32_t>(masking_draw_purpose_t::token_action_k));
         if (action < replace_fraction) { distorted[position] = byte_mask_k; }
         else if (action < replace_fraction + random_fraction)
-            distorted[position] = static_cast<token_id_t>(masking_draw(seed, epoch, segment, column, 3u) * 256.0f);
+            distorted[position] = static_cast<token_id_t>(
+                masking_draw(seed, epoch, segment, column, static_cast<u32_t>(masking_draw_purpose_t::random_byte_k)) *
+                256.0f);
         loss_weights[position] = 1u; // the remaining fraction keeps the clean byte, still scored
     }
 }
@@ -180,9 +189,10 @@ expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, cublaslt_ses
     weight_grad_config.c_row_stride = config.hidden;
     weight_grad_config.transpose_a = true;
     weight_grad_config.c_type = CUDA_R_16BF;
-    cublaslt_plan_config_t const configs[3] = {logits_config, data_grad_config, weight_grad_config};
+    cublaslt_plan_config_t const configs[linear_matmul_family_count_k] = {logits_config, data_grad_config,
+                                                                          weight_grad_config};
     std::size_t workspace_bytes = 0;
-    for (u32_t family = 0; family != 3u; ++family) {
+    for (u32_t family = 0; family != linear_matmul_family_count_k; ++family) {
         expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(blas, configs[family]);
         if (!plan) return result_t::fail(std::move(plan));
         if (plan.value_.workspace_bytes() > workspace_bytes) workspace_bytes = plan.value_.workspace_bytes();
@@ -198,11 +208,18 @@ expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, cublaslt_ses
 }
 
 expected_t masked_tokens_t::corrupt(tokens_view_t clean, tokens_span_t distorted, u32r1_span_t loss_weights,
-                                    u32r1_view_t segment_offsets, u32r1_view_t segment_lengths, masking_recipe_t recipe,
-                                    epoch_t epoch, gpu_stream_t &stream) noexcept {
+                                    u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
+                                    modality_view_t segment_modality, masking_recipe_t recipe, epoch_t epoch,
+                                    gpu_stream_t &stream) noexcept {
     std::size_t const tokens = clean.extent(0);
     if (distorted.extent(0) != tokens || loss_weights.extent(0) != tokens)
         return expected_t::fail(status_t::shape_unsupported_k, "corrupt buffers disagree on token count ({})", tokens);
+    if (recipe.token_mean_span == 0.0f) // the geometric open / continue rates divide by it below
+        return expected_t::fail(status_t::shape_unsupported_k, "masking recipe needs a non-zero token_mean_span");
+    if (recipe.replace_fraction + recipe.random_fraction > 1.0f) // the kept fraction is the remainder, must stay ≥ 0
+        return expected_t::fail(status_t::shape_unsupported_k,
+                                "masking recipe replace+random fractions exceed one ({} + {})", recipe.replace_fraction,
+                                recipe.random_fraction);
     if (cuMemcpyDtoDAsync(reinterpret_cast<CUdeviceptr>(distorted.data()), reinterpret_cast<CUdeviceptr>(clean.data()),
                           tokens * sizeof(token_id_t), stream.get()) != CUDA_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "distorted seed copy failed ({} tokens)", tokens);
@@ -216,8 +233,9 @@ expected_t masked_tokens_t::corrupt(tokens_view_t clean, tokens_span_t distorted
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const segment_grid {grid_size_for(segments), 1u, 1u};
     return launch_kernel(reinterpret_cast<void const *>(&masked_token_corrupt_kernel_), segment_grid, block_shape,
-                         stream, clean, distorted, loss_weights, segment_offsets, segment_lengths, recipe.seed,
-                         epoch.index, open_rate, continue_rate, recipe.replace_fraction, recipe.random_fraction);
+                         stream, clean, distorted, loss_weights, segment_offsets, segment_lengths, segment_modality,
+                         recipe.seed, epoch.index, open_rate, continue_rate, recipe.replace_fraction,
+                         recipe.random_fraction);
 }
 
 expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t clean_targets, u32r1_view_t loss_weights,
@@ -238,8 +256,9 @@ expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t c
     expected_t staged = launch_kernel(reinterpret_cast<void const *>(&masked_count_kernel_), one_block, block_shape,
                                       stream, loss_weights, gradient_scale_.span(), config_.weight);
     if (staged)
-        staged = plans_[0].matmul(*session_, normalized, decoder_weight_.view(), logits_.span(), 0.0f,
-                                  workspace_.span(), stream);
+        staged = plan_for(linear_matmul_family_t::forward_k)
+                     .matmul(*session_, normalized, decoder_weight_.view(), logits_.span(), 0.0f, workspace_.span(),
+                             stream);
     if (staged)
         staged = launch_kernel(reinterpret_cast<void const *>(&masked_cross_entropy_kernel_), row_grid, block_shape,
                                stream, logits_.view(), clean_targets, loss_weights, gradient_scale_.view(),
@@ -248,20 +267,22 @@ expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t c
         staged = launch_kernel(reinterpret_cast<void const *>(&masked_finalize_kernel_), one_block, block_shape, stream,
                                position_loss_.view(), gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
-        staged = plans_[1].matmul(*session_, logit_grad_.view(), decoder_weight_.view(), normalized_grad, 0.0f,
-                                  workspace_.span(), stream);
+        staged = plan_for(linear_matmul_family_t::data_grad_k)
+                     .matmul(*session_, logit_grad_.view(), decoder_weight_.view(), normalized_grad, 0.0f,
+                             workspace_.span(), stream);
     if (staged)
-        staged = plans_[2].matmul(*session_, logit_grad_.view(), normalized, decoder_weight_grad_.span(), 0.0f,
-                                  workspace_.span(), stream);
+        staged = plan_for(linear_matmul_family_t::weight_grad_k)
+                     .matmul(*session_, logit_grad_.view(), normalized, decoder_weight_grad_.span(), 0.0f,
+                             workspace_.span(), stream);
     return staged;
 }
 
-expected_t masked_tokens_t::parameters(array<differentiable_weights_t> &slots) noexcept {
-    differentiable_weights_t slot;
-    slot.weights = decoder_weight_.span();
-    slot.weights_grad = decoder_weight_grad_.view();
-    if (slots.try_push_back(slot) != status_t::success_k)
-        return expected_t::fail(status_t::bad_alloc_k, "parameter table growth failed");
+expected_t masked_tokens_t::fill(array<differentiable_weights_t> &weights) noexcept {
+    differentiable_weights_t weight;
+    weight.weights = decoder_weight_.span();
+    weight.weights_grad = decoder_weight_grad_.view();
+    if (weights.try_push_back(weight) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "weight table growth failed");
     return {};
 }
 
@@ -278,7 +299,8 @@ static __global__ void patch_mask_sample_kernel_(u32r1_span_t mask, u64_t seed, 
     u32_t const patch = blockIdx.x * blockDim.x + threadIdx.x;
     if (patch >= mask.extent(0)) return;
     u32_t const key = patch % spatial_patches; // == patch when spatial_patches == max_patches (random)
-    mask[patch] = masking_draw(seed, epoch, key, 0u, 4u) < mask_ratio ? 1u : 0u;
+    f32_t const draw = masking_draw(seed, epoch, key, 0u, static_cast<u32_t>(masking_draw_purpose_t::patch_mask_k));
+    mask[patch] = draw < mask_ratio ? 1u : 0u;
 }
 
 /** @brief Substitute the masked patch vectors with the fixed-zero mask token; visible patches copy clean.
@@ -404,9 +426,10 @@ expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, cublaslt_s
     weight_grad_config.c_row_stride = config.hidden;
     weight_grad_config.transpose_a = true;
     weight_grad_config.c_type = CUDA_R_16BF;
-    cublaslt_plan_config_t const configs[3] = {predicted_config, data_grad_config, weight_grad_config};
+    cublaslt_plan_config_t const configs[linear_matmul_family_count_k] = {predicted_config, data_grad_config,
+                                                                          weight_grad_config};
     std::size_t workspace_bytes = 0;
-    for (u32_t family = 0; family != 3u; ++family) {
+    for (u32_t family = 0; family != linear_matmul_family_count_k; ++family) {
         expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(blas, configs[family]);
         if (!plan) return result_t::fail(std::move(plan));
         if (plan.value_.workspace_bytes() > workspace_bytes) workspace_bytes = plan.value_.workspace_bytes();
@@ -447,7 +470,8 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
     std::size_t const patches = config_.max_patches;
     if (normalized.extent(0) != patches || normalized_grad.extent(0) != patches || clean_patches.extent(0) != patches)
         return expected_t::fail(status_t::shape_unsupported_k, "patch head count mismatch (expected {})", patches);
-    if (normalized.extent(1) != hidden || clean_patches.extent(1) != patch_pixels || loss_summands.extent(0) != 2)
+    if (normalized.extent(1) != hidden || normalized_grad.extent(1) != hidden ||
+        clean_patches.extent(1) != patch_pixels || loss_summands.extent(0) != 2)
         return expected_t::fail(status_t::shape_unsupported_k, "patch head geometry mismatch (hidden={})", hidden);
 
     dim3 const one_block {1u, 1u, 1u};
@@ -458,8 +482,9 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
     expected_t staged = launch_kernel(reinterpret_cast<void const *>(&patch_count_kernel_), one_block, block_shape,
                                       stream, mask_.view(), gradient_scale_.span(), config_.weight, patch_pixels);
     if (staged)
-        staged = plans_[0].matmul(*session_, normalized, recon_weight_.view(), predicted_.span(), 0.0f,
-                                  workspace_.span(), stream);
+        staged = plan_for(linear_matmul_family_t::forward_k)
+                     .matmul(*session_, normalized, recon_weight_.view(), predicted_.span(), 0.0f, workspace_.span(),
+                             stream);
     if (staged)
         staged = launch_kernel(reinterpret_cast<void const *>(&patch_mae_loss_kernel_), row_grid, block_shape, stream,
                                predicted_view, clean_patches, mask_.view(), gradient_scale_.view(),
@@ -468,19 +493,21 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
         staged = launch_kernel(reinterpret_cast<void const *>(&masked_finalize_kernel_), one_block, block_shape, stream,
                                position_loss_.view(), gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
-        staged = plans_[1].matmul(*session_, predicted_grad_.view(), recon_weight_.view(), normalized_grad, 0.0f,
-                                  workspace_.span(), stream);
+        staged = plan_for(linear_matmul_family_t::data_grad_k)
+                     .matmul(*session_, predicted_grad_.view(), recon_weight_.view(), normalized_grad, 0.0f,
+                             workspace_.span(), stream);
     if (staged)
-        staged = plans_[2].matmul(*session_, predicted_grad_.view(), normalized, recon_weight_grad_.span(), 0.0f,
-                                  workspace_.span(), stream);
+        staged = plan_for(linear_matmul_family_t::weight_grad_k)
+                     .matmul(*session_, predicted_grad_.view(), normalized, recon_weight_grad_.span(), 0.0f,
+                             workspace_.span(), stream);
     return staged;
 }
 
-expected_t masked_patches_t::parameters(array<differentiable_weights_t> &slots) noexcept {
-    differentiable_weights_t slot;
-    slot.weights = recon_weight_.span();
-    slot.weights_grad = recon_weight_grad_.view();
-    if (slots.try_push_back(slot) != status_t::success_k)
-        return expected_t::fail(status_t::bad_alloc_k, "parameter table growth failed");
+expected_t masked_patches_t::fill(array<differentiable_weights_t> &weights) noexcept {
+    differentiable_weights_t weight;
+    weight.weights = recon_weight_.span();
+    weight.weights_grad = recon_weight_grad_.view();
+    if (weights.try_push_back(weight) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "weight table growth failed");
     return {};
 }
