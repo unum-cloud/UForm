@@ -1,58 +1,136 @@
 {
-    "cSpell.words": [
-        "arange",
-        "ashvardanian",
-        "astype",
-        "CFURL",
-        "coreml",
-        "crossattn",
-        "cumsum",
-        "dtype",
-        "embs",
-        "finfo",
-        "huggingface",
-        "keepdim",
-        "linalg",
-        "logits",
-        "Matryoshka",
-        "mlmodel",
-        "mlpackage",
-        "mlprogram",
-        "multimodal",
-        "ndarray",
-        "numpy",
-        "ONNX",
-        "onnxconverter",
-        "onnxruntime",
-        "opset",
-        "packbits",
-        "preprocess",
-        "pretrained",
-        "probs",
-        "pypi",
-        "pytest",
-        "randn",
-        "rerank",
-        "reranker",
-        "reranking",
-        "sandbeach",
-        "sess",
-        "SIMD",
-        "softmax",
-        "Tensorrt",
-        "torchvision",
-        "transfromers",
-        "uform",
-        "unimodal",
-        "unsqueeze",
-        "Vardanian",
-        "whitespaces"
-    ],
-    "[python]": {
-        "editor.defaultFormatter": "ms-python.black-formatter"
-    },
-    "python.formatting.provider": "none",
-    "window.autoDetectColorScheme": true,
-    "workbench.colorTheme": "Default Dark+",
-    "workbench.preferredDarkColorTheme": "Default Dark+"
+  // C / C++ / CUDA — clangd fed by the CMake compile database. Every real flag (compiler, -std=c++23,
+  // --expt-relaxed-constexpr, arch codes, and all include paths: CUDA, NumKong, StringZilla, cuDNN
+  // frontend, RAPIDS) comes from build/compile_commands.json, so nothing machine-specific is hardcoded
+  // here. The MS C/C++ IntelliSense engine is disabled so the two language servers do not fight.
+  "clangd.arguments": [
+    "--compile-commands-dir=${workspaceFolder}/build",
+    "--background-index",
+    "--header-insertion=never"
+  ],
+  "C_Cpp.intelliSenseEngine": "disabled",
+  "files.associations": {
+    "*.cu": "cuda-cpp",
+    "*.cuh": "cuda-cpp"
+  },
+  "[cpp]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+  },
+  "[cuda-cpp]": {
+    "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd"
+  },
+  // Python — the repo-local venv, ruff as both linter and formatter.
+  "python.defaultInterpreterPath": "${workspaceFolder}/.venv/bin/python",
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff",
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    }
+  },
+  // JSON / YAML — format with the language default so config files stay canonical, the way clang-format
+  // keeps C++ canonical. JSON and JSONC use the built-in formatter; YAML uses the Red Hat YAML extension.
+  "[json]": {
+    "editor.defaultFormatter": "vscode.json-language-features"
+  },
+  "[jsonc]": {
+    "editor.defaultFormatter": "vscode.json-language-features"
+  },
+  "[yaml]": {
+    "editor.defaultFormatter": "redhat.vscode-yaml"
+  },
+  // Editor — 120-column rule matching .clang-format, format on save, clean line endings
+  // (insertFinalNewline matches the profile's InsertNewlineAtEOF).
+  "editor.formatOnSave": true,
+  "editor.rulers": [
+    120
+  ],
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  // Keep the generated build tree, the multi-terabyte data/ tree, and the venv out of search and the
+  // file watcher — crawling them is the main source of editor lag in this repo.
+  "search.exclude": {
+    "build*/**": true,
+    "data/**": true,
+    ".venv/**": true,
+    "**/__pycache__": true
+  },
+  "files.watcherExclude": {
+    "**/build*/**": true,
+    "**/data/**": true,
+    "**/.venv/**": true,
+    "**/__pycache__": true
+  },
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.pytest_cache": true,
+    "**/.ruff_cache": true,
+    "**/.mypy_cache": true
+  },
+  "cSpell.words": [
+    "arange",
+    "ashvardanian",
+    "astype",
+    "avcodec",
+    "avformat",
+    "avutil",
+    "bfloat",
+    "Blackwell",
+    "cccl",
+    "cpublas",
+    "cublasLt",
+    "cudf",
+    "cudnn",
+    "cufile",
+    "cumsum",
+    "cuvid",
+    "dtype",
+    "embs",
+    "finfo",
+    "Hopper",
+    "hooksPath",
+    "huggingface",
+    "ibverbs",
+    "keepdim",
+    "kvikio",
+    "linalg",
+    "logits",
+    "Matryoshka",
+    "multimem",
+    "multimodal",
+    "ndarray",
+    "nppig",
+    "numkong",
+    "numpy",
+    "nvcc",
+    "nvcomp",
+    "nvcuvid",
+    "nvimgcodec",
+    "nvjpeg",
+    "nvrtc",
+    "opset",
+    "parquet",
+    "preprocess",
+    "pretrained",
+    "probs",
+    "ptxas",
+    "pypi",
+    "pytest",
+    "randn",
+    "rerank",
+    "reranker",
+    "RMSNorm",
+    "rmm",
+    "safetensors",
+    "SIMD",
+    "softmax",
+    "stringzilla",
+    "swresample",
+    "torchvision",
+    "uform",
+    "unimodal",
+    "unsqueeze",
+    "Vardanian",
+    "yyjson",
+    "zstandard"
+  ]
 }

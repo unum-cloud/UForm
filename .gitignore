@@ -33,8 +33,14 @@ vocab*
 # Python
 /requirements.txt
 *.egg-info
+*.egg
 __pycache__
-uv.lock
+*.pyc
+*.pyo
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 # Node
 node_modules
