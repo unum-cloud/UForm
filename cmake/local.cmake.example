@@ -1,0 +1,18 @@
+# Per-checkout dependency overrides — the `.cargo/config.toml` of this repository.
+#
+# Copy this file to `cmake/local.cmake` (git-ignored) and point the variables at your working checkouts; every unset
+# variable falls back to a pinned FetchContent download (source deps) or the layered wheel/system discovery (cuDF). The
+# file is included before any dependency resolution, so plain `set(... CACHE ... FORCE)` here wins over stale caches.
+#
+
+# Source dependencies fetched by cmake/dependency.cmake — point at sibling checkouts to develop against a fork.
+# set(UFORM_NUMKONG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../NumKong" CACHE PATH "" FORCE)
+# set(UFORM_STRINGZILLA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../StringZilla" CACHE PATH "" FORCE)
+# set(UFORM_YYJSON_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../yyjson" CACHE PATH "" FORCE)
+# set(UFORM_CUDNN_FRONTEND_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../cudnn-frontend" CACHE PATH "" FORCE)
+# set(UFORM_FORKUNION_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../fork_union" CACHE PATH "" FORCE)
+
+# RAPIDS cuDF wheels — override the auto-discovered site-packages root, or point straight at the library prefix.
+# set(UFORM_SITE_PACKAGES "/path/to/site-packages" CACHE PATH "" FORCE)
+# set(UFORM_CUDF_ROOT "/path/to/prefix/holding/libcudf/lib64" CACHE PATH "" FORCE)
+
