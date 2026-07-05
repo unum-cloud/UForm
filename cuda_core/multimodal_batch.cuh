@@ -39,42 +39,42 @@
  *  existence is always read from the data, and a captured step replays against freshly copied
  *  contents at stable addresses.
  *
- *  @section multimodal_batch_adapters An adapter is a modality's translation — for content AND for position
+ *  @section multimodal_batch_adapters Content is loader-tiled and patch-arranged; the batch only derives position
  *
- *  A token carries two things: its @b content (the normalized patch vector, the raw byte) and its
- *  @b position (where it sits in the encoder's shared coordinate space). @ref patchify_images ,
- *  @ref patchify_videos , and @ref token_coords are the adapters that produce both in one pass — the
- *  patchify loop computes @c (patch_row,patch_col) to gather pixels, so that same index @b is the
- *  token's coordinate, emitted in the same pass. This is why one uniform encoder serves every
- *  modality: each adapter projects a heterogeneous input into one shared @c (temporal,height,width)
- *  coordinate frame, and the encoder rotates against it blind to which modality produced it.
+ *  A token carries two things: its @b content (a patch vector, or a scalar id) and its @b position (where
+ *  it sits in the encoder's shared coordinate space). The content is stored ready — the data-loader tiles
+ *  each modality into the uniform patch grid ( @ref images , @ref videos ) and the batch keeps only the
+ *  small per-item @ref image_shapes / @ref video_shapes descriptor. @ref image_coords , @ref video_coords ,
+ *  and @ref token_coords are the batch's whole contribution to position: each reads the descriptor (or the
+ *  segment geometry) and writes the shared @c (temporal,height,width) coordinate, so one uniform encoder
+ *  serves every modality, rotating against the coordinate blind to which modality produced it.
  *
- *      Modality    Content           Coordinate @c (t,h,w)
- *      --------    --------------    -------------------------------------------------
- *      text        byte embedding    @c (pos,0,0) — 1-D, the temporal axis is sequence
- *      image       patch vector      @c (0,row,col) — 2-D spatial
- *      video       tube vector       @c (frame,row,col) — 3-D
- *      audio       mel patch         @c (frame,mel_band,0) — time on the temporal axis
+ *      Modality    Content stored as     Coordinate @c (t,h,w)
+ *      --------    ------------------    -------------------------------------------------
+ *      text        a scalar token id     @c (pos,0,0) — 1-D, the temporal axis is sequence
+ *      image       a patch vector        @c (0,row,col) — 2-D spatial
+ *      video       a tube vector         @c (frame,row,col) — 3-D
+ *      audio       a mel patch           @c (frame,mel_band,0) — time on the temporal axis
  *
  *  @section multimodal_batch_grid Geometry is a factorization of the row budget, not a baked shape
  *
  *  The token count per media item is fixed — it equals @c max_columns_per_row (one encoder token per
  *  patch), so a media item fills a whole row. But the @b grid that count factors into is free: 4096
  *  patches can tile a 64×64 image, a 32×128 one, or a 128×32 one, and the encoder cannot tell — it is
- *  still 4096 tokens at one width. The only thing that changes is the coordinates the adapter emits.
- *  So @b aspect ratio is a positional-encoding-shape choice (the image's own @c height / @c width
- *  extents pick the factorization), and @b video spatial-vs-temporal resolution is likewise a runtime
- *  grid choice: the same clip fed at @c (T=16,16×16) and @c (T=4,32×32) both fill the row, differing
- *  only in coordinates. Absolute time on the temporal axis (a tube at real frame @c T carries coord
- *  @c T regardless of sampling density) is what makes those multi-resolution views commensurable — one
- *  video file can drive several inputs at different tradeoffs, sharing one coordinate frame.
+ *  still 4096 tokens at one width. The only thing that changes is the coordinate the descriptor drives.
+ *  So @b aspect ratio is a positional-encoding-shape choice (the item's @ref image_shapes picks the
+ *  factorization), and @b video spatial-vs-temporal resolution is likewise a runtime grid choice: the
+ *  same clip fed at @c (T=16,16×16) and @c (T=4,32×32) both fill the row, differing only in coordinates.
+ *  Absolute time on the temporal axis (a tube at real frame @c T carries coord @c T regardless of
+ *  sampling density) is what makes those multi-resolution views commensurable — one video file can drive
+ *  several inputs at different tradeoffs, sharing one coordinate frame.
  *
  *  A corollary the masking cell reuses: tube masking is just a @b key the mask draws on @c (h,w) and
  *  broadcasts over @c t — derived from the coordinates, never a separate temporal-group parameter.
  *
- *  The adapters own no learnable weights — the projection into the hidden width is the tower's entry,
- *  and M-RoPE rotation is the tower's too. Each adapter is a pure content-plus-coordinate translation,
- *  a @ref launch_kernel enqueue with no vendor plan.
+ *  The batch owns no learnable weights and cuts no pixels — tiling is the loader's, projection and M-RoPE
+ *  rotation are the tower's. The coordinate adapters are pure @ref launch_kernel enqueues over the
+ *  descriptor, carrying no content and no vendor plan.
  */
 #pragma once
 
@@ -103,27 +103,16 @@ enum modality_t : u32_t {
     audio_k = 3,
 };
 
-/** @brief The pixel side of the square image that exactly fills one @p columns -token row: with
- *      @p patch_size -pixel patches, @p columns patches tile a @c sqrt(columns)×sqrt(columns) grid, one
- *      encoder token each. Returns @c 0 when @p columns is not a perfect square — a row budget that
- *      cannot tile a square image is a build-time error the caller rejects. Media geometry flows one
- *      way: the tier fixes @c max_columns_per_row and the image resolution is sized so one image
- *      occupies a whole row, never a baked constant. */
-[[nodiscard]] constexpr u32_t image_side(u32_t columns, u32_t patch_size) noexcept {
-    u32_t side = 0;
-    while ((side + 1u) * (side + 1u) <= columns) ++side;
-    return side * side == columns ? side * patch_size : 0u;
-}
-
-/** @brief Scalars in one image patch vector — @c channels·patch_size² , ordered (channel,row,column). */
+/** @brief Scalars in one image patch — @c patch_size²·channels , the projection fan-in the tower peels
+ *      @c (patch_side,patch_side,channels) into; channels are the innermost rank. */
 [[nodiscard]] constexpr u32_t patch_scalars(u32_t patch_size, u32_t channels) noexcept {
-    return channels * patch_size * patch_size;
+    return patch_size * patch_size * channels;
 }
 
-/** @brief Scalars in one video tube vector — @c frames·channels·side² , ordered
- *      (local_time,channel,row,column). */
-[[nodiscard]] constexpr u32_t tube_scalars(u32_t frames, u32_t side, u32_t channels) noexcept {
-    return frames * channels * side * side;
+/** @brief Scalars in one video tube — @c tube_frames·patch_scalars(side,channels) , the projection fan-in
+ *      the tower peels @c (tube_frames,patch_side,patch_side,channels) into. */
+[[nodiscard]] constexpr u32_t tube_scalars(u32_t tube_frames, u32_t side, u32_t channels) noexcept {
+    return tube_frames * patch_scalars(side, channels);
 }
 
 /** @brief Scalars in one mel patch vector — @c side² , a single-channel spectrogram tile. */
@@ -145,16 +134,17 @@ struct multimodal_batch_shape_t {
     /** @brief How many positions one row spans — what most of the literature calls @c seq_len . */
     u32_t max_columns_per_row = 0;
 
-    /** @brief One video frame's raw extents (the not-yet-migrated video path's spatial size);
-     *      @c image_channels is shared by the image modality. */
-    u32_t image_height = 0, image_width = 0, image_channels = 3;
-    /** @brief The square patch side the image modality tiles into. Zero leaves the image tensors
-     *      unallocated; nonzero sizes the uniform per-image pixel run to
-     *      @c max_columns_per_row·patch_scalars(image_patch_size,image_channels) — every image is that
-     *      many patches whatever its aspect, so the run length is one across the batch. */
+    /** @brief The RGB channel count every image / video pixel carries — the innermost content rank. */
+    u32_t image_channels = 3;
+    /** @brief The square patch side the image modality tiles into, in pixels. Zero leaves the image
+     *      tensors unallocated; nonzero sizes @ref multimodal_batch::images to
+     *      @c [rows,columns,patch_size,patch_size,channels] — every image is @c max_columns_per_row square
+     *      patches whatever its aspect. */
     u32_t image_patch_size = 0;
-    /** @brief One clip's frame count; frames share the image extents. Zero leaves videos unallocated. */
-    u32_t video_frames = 0;
+    /** @brief The temporal depth of one video tube in frames and its spatial patch side in pixels. Either
+     *      being zero leaves the video tensors unallocated; nonzero sizes @ref multimodal_batch::videos to
+     *      @c [rows,columns,tube_frames,patch_size,patch_size,channels] . */
+    u32_t video_tube_frames = 0, video_patch_size = 0;
     /** @brief One clip's mono sample count (the loader downmixes at decode); zero leaves audio
      *      unallocated. */
     u32_t clip_samples = 0;
@@ -184,20 +174,38 @@ struct multimodal_batch {
      *      between consecutive segments make adjacent offset differences overestimates. PAD segments
      *      carry 0. */
     nk::tensor<u32_t, rebound<u32_t>, 1> segment_lengths {};
-    /** @brief @b [rows,columns] the discrete inputs of token rows. */
+    /** @brief @b [rows,columns] discrete token ids — text is the degenerate modality, a scalar per grid
+     *      position whose coordinate is @c (position,0,0) . Every media modality lifts this same
+     *      @c [rows,columns] grid one rank higher, replacing the scalar with a patch vector; one encoder
+     *      then serves them all because they share the grid and differ only in what a cell holds and where
+     *      its coordinate places it. */
     nk::tensor<token_id_t, rebound<token_id_t>, 2> tokens {};
-    /** @brief @b [images,columns·patch_scalars] the uniform per-image pixel run — every image is exactly
-     *      @c max_columns_per_row patches, so its byte count is one across the batch whatever its aspect;
-     *      @ref image_shapes carries the aspect. Raw pixels, ordered @c (row,column,channel) at the
-     *      image's own resolution. */
-    nk::tensor<pixel_t, rebound<pixel_t>, 2> images {};
-    /** @brief @b [images,2] each image's @c (patch_rows,patch_cols) factorization of
-     *      @c max_columns_per_row — its resolution is @c (patch_rows·patch_size,patch_cols·patch_size) ,
-     *      the aspect the patchify's M-RoPE coordinates read. */
+    /** @brief @b [rows,columns,patch_side,patch_side,channels] patch-arranged pixels — every image is
+     *      exactly @c max_columns_per_row square patches whatever its source aspect or resolution, so this
+     *      content tensor keeps one fixed shape the whole batch through. A data-loader only tiles pixels
+     *      into this grid and records @ref image_shapes ; it never learns the encoder's coordinate
+     *      convention or rotary geometry — loader and model share only the @c (content,shapes) contract, and
+     *      M-RoPE stays the tower's business. @c channels is the innermost rank, so the entry peels
+     *      @c (patch_side,patch_side,channels) into one projection fan-in with a @c reshape<2> . */
+    nk::tensor<pixel_t, rebound<pixel_t>, 5> images {};
+    /** @brief @b [rows,2] each image's @c (patch_rows,patch_cols) factorization of @c max_columns_per_row —
+     *      the @b only place an image's aspect ratio survives. A 64×64, a 32×128, and a 128×32 image are
+     *      the same @c columns -patch @ref images tensor and differ solely in this descriptor, which the
+     *      tower turns into M-RoPE @c (t,h,w) coordinates. Aspect is a positional-encoding fact, not a
+     *      storage one, so the model eats arbitrarily shaped inputs with no change to the loader, the tensor
+     *      rank, or the batch geometry. */
     nk::tensor<u16_t, rebound<u16_t>, 2> image_shapes {};
-    /** @brief @b [videos,frames,height,width,channels] raw pixels, one item per video row. */
-    nk::tensor<pixel_t, rebound<pixel_t>, 5> videos {};
-    /** @brief @b [clips,samples] raw mono waveforms, one item per audio row. */
+    /** @brief @b [rows,columns,tube_frames,patch_side,patch_side,channels] patch-arranged video tubes —
+     *      images with a temporal depth folded into the content axis, still exactly @c columns tubes per
+     *      row and carrying the same @c (content,shapes) contract as @ref images . */
+    nk::tensor<pixel_t, rebound<pixel_t>, 6> videos {};
+    /** @brief @b [rows,3] each clip's @c (temporal_groups,patch_rows,patch_cols) factorization of
+     *      @c columns . One clip fed at different spatial-versus-temporal resolutions is one @ref videos
+     *      tensor differing only in this descriptor and the absolute-frame temporal coordinate the tower
+     *      derives from it, so multi-resolution views of a single file stay commensurable. */
+    nk::tensor<u16_t, rebound<u16_t>, 2> video_shapes {};
+    /** @brief @b [clips,samples] raw mono waveforms, one item per audio row — the audio modality's
+     *      mel-patch storage lands with the Phase-6 loader; this raw-waveform staging is interim. */
     nk::tensor<f32_t, rebound<f32_t>, 2> audios {};
 
     std::size_t rows() const noexcept {
@@ -224,24 +232,26 @@ struct multimodal_batch {
             return result_t::fail(status_t::bad_alloc_k, "batch allocation failed (rows={} segments={} columns={})",
                                   shape.max_rows_per_gpu, shape.max_segments_per_gpu, shape.max_columns_per_row);
         if (shape.image_patch_size != 0) {
-            u32_t const image_run = shape.max_columns_per_row *
-                                    patch_scalars(shape.image_patch_size, shape.image_channels);
-            batch.images = nk::tensor<pixel_t, rebound<pixel_t>, 2>::try_empty({shape.max_rows_per_gpu, image_run},
-                                                                               rebound<pixel_t> {allocator});
+            batch.images = nk::tensor<pixel_t, rebound<pixel_t>, 5>::try_empty(
+                {shape.max_rows_per_gpu, shape.max_columns_per_row, shape.image_patch_size, shape.image_patch_size,
+                 shape.image_channels},
+                rebound<pixel_t> {allocator});
             batch.image_shapes = nk::tensor<u16_t, rebound<u16_t>, 2>::try_empty({shape.max_rows_per_gpu, 2u},
                                                                                  rebound<u16_t> {allocator});
             if (!batch.images || !batch.image_shapes)
-                return result_t::fail(status_t::bad_alloc_k, "image allocation failed ({} rows of {} pixels)",
-                                      shape.max_rows_per_gpu, image_run);
+                return result_t::fail(status_t::bad_alloc_k, "image allocation failed ({} rows of {} patches)",
+                                      shape.max_rows_per_gpu, shape.max_columns_per_row);
         }
-        if (shape.video_frames != 0) {
-            batch.videos = nk::tensor<pixel_t, rebound<pixel_t>, 5>::try_empty(
-                {shape.max_rows_per_gpu, shape.video_frames, shape.image_height, shape.image_width,
-                 shape.image_channels},
+        if (shape.video_tube_frames != 0 && shape.video_patch_size != 0) {
+            batch.videos = nk::tensor<pixel_t, rebound<pixel_t>, 6>::try_empty(
+                {shape.max_rows_per_gpu, shape.max_columns_per_row, shape.video_tube_frames, shape.video_patch_size,
+                 shape.video_patch_size, shape.image_channels},
                 rebound<pixel_t> {allocator});
-            if (!batch.videos)
-                return result_t::fail(status_t::bad_alloc_k, "video allocation failed ({} of {} frames)",
-                                      shape.max_rows_per_gpu, shape.video_frames);
+            batch.video_shapes = nk::tensor<u16_t, rebound<u16_t>, 2>::try_empty({shape.max_rows_per_gpu, 3u},
+                                                                                 rebound<u16_t> {allocator});
+            if (!batch.videos || !batch.video_shapes)
+                return result_t::fail(status_t::bad_alloc_k, "video allocation failed ({} rows of {} tubes)",
+                                      shape.max_rows_per_gpu, shape.max_columns_per_row);
         }
         if (shape.clip_samples != 0) {
             batch.audios = nk::tensor<f32_t, rebound<f32_t>, 2>::try_empty({shape.max_rows_per_gpu, shape.clip_samples},
@@ -259,36 +269,33 @@ using multimodal_batch_on_gpu_t = multimodal_batch<gpu_arena_alloc_t>;
 /** @brief The pinned-host batch a host packer writes before one @c copy_from to the device twin. */
 using multimodal_batch_on_cpu_t = multimodal_batch<pinned_alloc_t>;
 
-/** @brief The uniform per-image pixel run, shaped @b [images,columns·patch_scalars] — one image's pixels
- *      at its own resolution @c (row,column,channel) , the run length constant across the batch. */
-using pixel_run_view_t = nk::tensor_view<pixel_t, 2>;
-/** @brief Per-image @c (patch_rows,patch_cols) shapes, shaped @b [images,2] — the aspect factorization
- *      the patchify's coordinates read. */
+/** @brief Rank-5 pixel view of an image group, shaped @b [rows,columns,patch_side,patch_side,channels] —
+ *      the patch-arranged content the tower entry peels ( @c reshape<2> ) and projects. */
+using pixel_patches_view_t = nk::tensor_view<pixel_t, 5>;
+/** @brief Rank-6 pixel view of a video group, shaped
+ *      @b [rows,columns,tube_frames,patch_side,patch_side,channels] . */
+using pixel_tubes_view_t = nk::tensor_view<pixel_t, 6>;
+/** @brief Per-image @c (patch_rows,patch_cols) shapes, shaped @b [rows,2] — the aspect factorization the
+ *      tower's coordinate derivation reads. */
 using image_shape_view_t = nk::tensor_view<u16_t, 2>;
-/** @brief Rank-5 pixel view of a video group, shaped @b [videos,frames,height,width,channels] . */
-using pixel_video_view_t = nk::tensor_view<pixel_t, 5>;
-/** @brief Rank-2 BFloat16 patch table, shaped @b [patches,patch_pixels] . */
-using patch_span_t = nk::tensor_span<bf16_t, 2>;
+/** @brief Per-clip @c (temporal_groups,patch_rows,patch_cols) shapes, shaped @b [rows,3] . */
+using video_shape_view_t = nk::tensor_view<u16_t, 2>;
 
-/** @brief Raster the uniform @p images run into @p patches @b [n·num_patches,patch_scalars] , normalized
- *      and ordered @c (channel,row,column) , and write each patch's coordinate @c (0,patch_row,patch_col)
- *      into @p coords @b [n·num_patches,3] — pure enqueue. Every image is exactly @c num_patches patches;
- *      its @c (patch_rows,patch_cols) grid comes from @p image_shapes , so any aspect rides the coordinates
- *      with no crop or distortion. @p pixel_mean / @p pixel_inverse_std are borrowed per-channel
- *      normalization constants — the tower owns them. */
-[[nodiscard]] expected_t patchify_images(pixel_run_view_t images, image_shape_view_t image_shapes, patch_span_t patches,
-                                         i16r2_span_t coords, f32r1_view_t pixel_mean, f32r1_view_t pixel_inverse_std,
-                                         u32_t patch_size, gpu_stream_t &stream) noexcept;
+/** @brief Write each image patch's coordinate @c (0,patch_row,patch_col) into @p coords @b [tokens,3] ,
+ *      one image per @p image_shapes row — a pure enqueue and the only thing the batch derives for images,
+ *      the content itself being stored patch-arranged (loader-tiled) in @ref multimodal_batch::images .
+ *      Each image's @c (patch_rows,patch_cols) grid comes from @p image_shapes , so any aspect rides the
+ *      coordinates with no crop or distortion. PAD rows write nothing, so the caller pre-zeroes @p coords . */
+[[nodiscard]] expected_t image_coords(image_shape_view_t image_shapes, i16r2_span_t coords,
+                                      gpu_stream_t &stream) noexcept;
 
-/** @brief Raster @p videos @b [n,f,h,w,c] into @p tubes @b [n·num_tubes,tube_scalars] , ordered
- *      @c (local_time,channel,row,column) , and write each tube's coordinate @c (frame,tube_row,
- *      tube_col) into @p coords @b [n·num_tubes,3] — pure enqueue. The temporal coordinate is the
- *      tube's absolute start frame @c (time_group·tube_time) , so a clip sampled at any temporal
- *      resolution shares one coordinate frame. @p pixel_mean / @p pixel_inverse_std are borrowed
- *      per-channel normalization constants — the tower owns them. */
-[[nodiscard]] expected_t patchify_videos(pixel_video_view_t videos, patch_span_t tubes, i16r2_span_t coords,
-                                         f32r1_view_t pixel_mean, f32r1_view_t pixel_inverse_std, u32_t tube_time,
-                                         u32_t tube_height, u32_t tube_width, gpu_stream_t &stream) noexcept;
+/** @brief Write each video tube's coordinate @c (time_group·tube_frames,row_group,col_group) into
+ *      @p coords @b [tokens,3] , one clip per @p video_shapes row — a pure enqueue. The temporal axis
+ *      carries the tube's absolute start frame, so a clip sampled at any temporal resolution shares one
+ *      coordinate frame; @p video_shapes gives each clip's @c (temporal_groups,patch_rows,patch_cols) .
+ *      PAD rows write nothing. */
+[[nodiscard]] expected_t video_coords(video_shape_view_t video_shapes, i16r2_span_t coords, u32_t tube_frames,
+                                      gpu_stream_t &stream) noexcept;
 
 /** @brief Write each text token's coordinate @c (position,0,0) into @p coords @b [tokens,3] , one
  *      segment's positions restarting at 0 — pure enqueue. @p segment_offsets / @p segment_lengths
