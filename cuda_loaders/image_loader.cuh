@@ -5,7 +5,7 @@
  *      Each @ref fill opens @b as many randomly chosen shards as it takes to pool the images it needs — at
  *      least two unless the dataset is one file — decodes their blob column into one device reservoir over
  *      GDS, draws rows by a keyed bijection over the whole pool, and decodes the drawn compressed blobs
- *      into the batches' uniform @c images run with @ref nvjpeg_session_t .
+ *      into the batch's shared patch grid with @ref nvjpeg_session_t .
  *  @file cuda_loaders/image_loader.cuh
  *  @author Ash Vardanian
  *  @date July 4, 2026
@@ -19,15 +19,17 @@
  *  hops to a pinned tape, a @c fork_union pool decodes it on the CPU (libjpeg-turbo / libpng / libwebp) into
  *  a pinned pixel tape, and one bulk copy lands it on device. Both roads meet at the resize.
  *
- *  @section image_aspect One uniform run, per-image aspect on the side
+ *  @section image_aspect Sub-row segments, per-image budget and aspect on the side
  *
- *  The loader bakes @b no resolution. Every image becomes exactly @c max_columns_per_row square patches, so
- *  its decoded pixels resize to its @b own @c (patch_rows·patch_size,patch_cols·patch_size) — the factor
- *  pair of @c max_columns_per_row nearest the native aspect, clamped to the @c [1×N,N×1] the batch's own
- *  patch budget @c N allows. Because the patch count is fixed, the byte count is one across the batch: pixels
- *  land in the batch's uniform @c images run and each row's @c (patch_rows,patch_cols) in @c image_shapes ,
- *  the aspect @ref patchify_images ' M-RoPE coordinates read downstream — never a crop or stretch toward a
- *  square here. Patchify and projection happen later, in the differentiated step, never in the loader.
+ *  The loader bakes @b no resolution. Each drawn image is @b one segment whose column budget is derived from
+ *  its native resolution (a bigger image earns more patches, monotonically, clamped to
+ *  @c [max_columns/max_segments,max_columns] so many small images pack into a row), then factored toward the
+ *  native aspect into @c (patch_rows,patch_cols) — its decoded pixels resize to
+ *  @c (patch_rows·patch_side,patch_cols·patch_side) . A serial cursor packs the segments row-safe (never
+ *  crossing a row); each scatters its patches into a column sub-range of the shared @c [rows,columns,P,P,4]
+ *  grid, its @c (patch_rows,patch_cols) landing in @c image_shapes and its placement in
+ *  @c segment_offsets/lengths — the aspect the M-RoPE coordinates read downstream, never a crop or stretch
+ *  toward a square here. Patchify and projection happen later, in the differentiated step, never in the loader.
  */
 #pragma once
 
@@ -48,14 +50,43 @@
 
 namespace unum::uform::loaders {
 
-/** @brief The writable uniform pixel run of one batch's image rows, shaped @b [images,columns·patch_scalars]
- *      — the decode's destination, one image's pixels @c (row,column,channel) at its own resolution. */
-using pixel_run_span_t = nk::tensor_span<pixel_t, 2>;
-/** @brief The writable per-image @c (patch_rows,patch_cols) shapes of one batch, shaped @b [images,2] . */
-using image_shape_span_t = nk::tensor_span<u16_t, 2>;
+/** @brief The writable patch-arranged pixel grid of one batch, shaped
+ *      @b [rows,columns,patch_side,patch_side,channels] (RGBA, @c channels=4 ) — the decode's destination.
+ *      Each drawn image is one segment that scatters its @c patch_rows·patch_cols patches into a contiguous
+ *      column sub-range of a single row @c [column_begin,column_begin+len) , several images sharing a row;
+ *      the grid is the whole @c rows·columns cell space, not one image per row. */
+using pixel_patches_span_t = nk::tensor_span<pixel_t, 5>;
 /** @brief The host-side worker pool the CPU fallback fans PNG / WebP / progressive-JPEG decodes across —
  *      one per run, owned at the composition root (the @b only sanctioned host-thread pool), borrowed here. */
 using cpu_decode_pool_t = ashvardanian::fork_union::basic_pool_t;
+
+/** @brief Which nvJPEG device backend @ref nvjpeg_session_t::make landed. Only the hardware engine honors the
+ *      decode-time scale factor, so @ref decode_images gates scaling on it — a named tier, never a bool. */
+enum class nvjpeg_backend_t : u8_t {
+    /** @brief The hardware decode engine — device bitstream input, honors the decode-time scale factor. */
+    hardware_k = 0,
+    /** @brief The GPU-hybrid fallback — device bitstream input, no per-image scale factor. */
+    gpu_hybrid_k = 1,
+};
+
+/** @brief One JPEG batch entry: the compressed bitstream and length, the plan it maps back to (for fallback
+ *      marking and RGBA expansion), its byte offset into the packed-RGB scratch, its decode scale, and the
+ *      interleaved-RGB destination wired once that scratch is allocated — the session's decode input item, whose
+ *      parallel arrays @ref nvjpeg_session_t::decode_jpeg_batch fills straight from an owning table of these. */
+struct jpeg_entry_t {
+    /** @brief Device bitstream pointer into the reservoir tape. */
+    unsigned char const *bitstream;
+    /** @brief The bitstream's byte count. */
+    std::size_t length;
+    /** @brief The plan this entry decodes — maps back for fallback marking / RGBA expansion. */
+    std::size_t plan_index;
+    /** @brief The entry's byte offset into the packed-RGB scratch. */
+    std::size_t rgb_offset;
+    /** @brief The decode scale factor for this entry. */
+    nvjpegScaleFactor_t scale;
+    /** @brief The interleaved-RGB destination, wired once the RGB scratch is allocated. */
+    nvjpegImage_t destination;
+};
 
 /**
  *  @brief The nvJPEG session: the device-native batched JPEG decoder, one per GPU at the composition root,
@@ -70,7 +101,7 @@ struct nvjpeg_session_t {
     nvjpeg_session_t &operator=(nvjpeg_session_t const &) = delete;
     nvjpeg_session_t(nvjpeg_session_t &&other) noexcept
         : handle_(std::exchange(other.handle_, nullptr)), jpeg_state_(std::exchange(other.jpeg_state_, nullptr)),
-          hardware_(other.hardware_) {}
+          backend_(other.backend_) {}
     nvjpeg_session_t &operator=(nvjpeg_session_t &&other) noexcept;
     ~nvjpeg_session_t() noexcept;
 
@@ -78,56 +109,57 @@ struct nvjpeg_session_t {
      *      setup. The whole thing is the two handles; every fill's staging is a per-call local. */
     [[nodiscard]] static expected<nvjpeg_session_t> make() noexcept;
 
-    /** @brief Whether the handle drives the hardware decode engine (vs the GPU-hybrid fallback) — only the
-     *      hardware backend honors the decode-time scale factor, so @ref decode_images gates scaling on it. */
-    [[nodiscard]] bool hardware_decode() const noexcept { return hardware_; }
+    /** @brief Which device backend the handle drives — only @ref nvjpeg_backend_t::hardware_k honors the
+     *      decode-time scale factor, so @ref decode_images gates scaling on it. */
+    [[nodiscard]] nvjpeg_backend_t backend() const noexcept { return backend_; }
 
     /**
-     *  @brief Decode one assembled JPEG batch — the session's nvJPEG-only slice of @ref decode_images .
-     *      Fails as a whole (the batch is atomic), leaving the caller to route a rejected batch to the CPU.
+     *  @brief Decode one assembled JPEG batch — the session's nvJPEG-only slice of @ref decode_images . Fails as
+     *      a whole (the batch is atomic), leaving the caller to route a rejected batch to the CPU.
      *
-     *  @param[in] data Per-image device bitstream pointers into the reservoir tape.
-     *  @param[in] lengths Per-image bitstream byte counts, matching @p data .
-     *  @param[out] destinations Per-image RGB targets (interleaved, one plane), sized to each image's scaled output.
-     *  @param[in] scales Per-image decode scale factor — honored only under @ref hardware_decode , else must be NONE.
+     *  @param[in] entries The batch's decode entries — each a bitstream, length, RGB destination, and scale;
+     *      the method fills nvJPEG's parallel arrays straight from them at the vendor boundary.
      *  @param[inout] stream The stream the decode enqueues on.
      */
-    [[nodiscard]] expected_t decode_jpeg_batch(std::span<unsigned char const *const> data,
-                                               std::span<std::size_t const> lengths,
-                                               std::span<nvjpegImage_t> destinations,
-                                               std::span<nvjpegScaleFactor_t const> scales,
-                                               gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t decode_jpeg_batch(std::span<jpeg_entry_t const> entries, gpu_stream_t &stream) noexcept;
 
   private:
     /** @brief The nvJPEG library handle, created on a device-bitstream backend. */
     nvjpegHandle_t handle_ = nullptr;
     /** @brief The batched-decode state, re-initialized per decode to that fill's JPEG count. */
     nvjpegJpegState_t jpeg_state_ = nullptr;
-    /** @brief Whether @ref make landed the hardware backend (vs the GPU-hybrid fallback). */
-    bool hardware_ = false;
+    /** @brief Which device backend @ref make landed — defaults to the GPU-hybrid fallback. */
+    nvjpeg_backend_t backend_ = nvjpeg_backend_t::gpu_hybrid_k;
 };
 
 /**
- *  @brief Decode a batch's drawn image rows into its uniform pixel run and per-image shapes — the media
- *      decode every image loader shares (Parquet today, tarball next). Routes each drawn blob by its magic
+ *  @brief Decode a batch's drawn images into its shared patch grid as sub-row segments — the media decode
+ *      every image loader shares (Parquet today, tarball next). Each drawn blob becomes @b one segment whose
+ *      column budget is derived from its native resolution (bigger images get more patches, clamped so many
+ *      pack into a row); a serial cursor packs the segments row-safe, never crossing a row, and each image's
+ *      @c patch_rows·patch_cols patches scatter into its column sub-range. Routes each blob by its magic
  *      bytes: JPEG through @p jpeg (device-native, scaled toward the target at decode), PNG / WebP / rejected
  *      JPEG across @p pool on the CPU, then one NPP batch crops each to its factor-pair aspect and resizes it
- *      into the run. Pure enqueue on @p stream but for the triage and CPU-fallback host hops.
+ *      into the grid. Pure enqueue on @p stream but for the triage and CPU-fallback host hops.
  *
  *  @param[inout] jpeg This GPU's nvJPEG session, borrowed for the JPEG rows.
  *  @param[inout] pool The run's CPU-decode worker pool, borrowed for the non-JPEG / rejected-JPEG rows.
  *  @param[in] tape The pooled blob column with its offsets landed on host — device bytes, host-indexable, so
  *      @c tape[row] is a device slice computed on the host.
- *  @param[in] drawn_rows The tape rows to decode, one per output image row.
- *  @param[out] pixels The uniform per-image pixel run to fill; its leading extent must cover @p drawn_rows .
- *  @param[out] shapes Each image's @c (patch_rows,patch_cols) factorization of @p num_patches ; matches @p pixels .
- *  @param[in] patch_size The square patch side each image's grid tiles into.
- *  @param[in] num_patches The fixed patch budget per image; its factor pair nearest the aspect sets the crop.
+ *  @param[in] drawn_rows The tape rows to decode; each becomes one live image segment, in draw order.
+ *  @param[out] pixels The patch-arranged @b [rows,columns,P,P,C] grid to fill; its extents give the row width
+ *      (columns), the square patch side (extent 2), and the RGBA channel count (extent 4).
+ *  @param[out] shapes Each segment's @c (patch_rows,patch_cols) factorization of its column budget, shaped
+ *      @b [max_segments,2] ; segment @c s is meaningful iff @p segment_modality is @c image_k .
+ *  @param[out] segment_offsets @b [max_segments+1] flat start positions (the cursor's terminal at the back).
+ *  @param[out] segment_lengths @b [max_segments] each segment's column budget (0 for PAD or overflow-dropped).
+ *  @param[out] segment_modality @b [max_segments] @c image_k for a live image, @c text_k for a PAD segment.
  *  @param[inout] stream The stream the staging, decode, resize, and copies run on.
  */
 [[nodiscard]] expected_t decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, column_view_t tape,
-                                       std::span<u64_t const> drawn_rows, pixel_run_span_t pixels,
-                                       image_shape_span_t shapes, u32_t patch_size, u32_t num_patches,
+                                       std::span<u64_t const> drawn_rows, pixel_patches_span_t pixels,
+                                       image_shape_span_t shapes, u32r1_span_t segment_offsets,
+                                       u32r1_span_t segment_lengths, modality_span_t segment_modality,
                                        gpu_stream_t &stream) noexcept;
 
 /** @brief The Parquet image loader's baked knobs — a different config is a different loader. */
@@ -156,21 +188,22 @@ struct image_loader_parquet_t {
                                                                cpu_decode_pool_t &pool) noexcept;
 
     /**
-     *  @brief Fill the next few @p batches ' @c images run on one GPU rank, one decoded image per row.
+     *  @brief Fill the next few @p batches ' @c images grid on one GPU rank, each image one sub-row segment.
      *  @sa multimodal_batch_mixer_t for the subsequent cross-GPU mixing.
      *
      *  Opens ≥2 randomly chosen shards (keyed by @c (seed,step,rank) ), pools their blob column into one
-     *  reservoir, draws a scatter of rows across it, and decodes each batch's drawn blobs into its image
-     *  rows — each resized to its own factor pair of the batch's patch budget — writing @c image_shapes and
-     *  one full-row segment per image.
+     *  reservoir, draws up to @c max_segments_per_gpu rows across it, and decodes each batch's drawn blobs
+     *  into its patch grid — each resized to its own factor pair of a native-resolution-derived column budget
+     *  and packed row-safe into a column sub-range — writing @c image_shapes , @c segment_offsets/lengths ,
+     *  and @c segment_modality @c=image_k per live image.
      *
      *  @param[inout] gpu_stream The GPU-specific stream the staging, decode, resize, and segmenting run on.
      *  @param[inout] decoder This GPU's nvJPEG session, borrowed for the decode.
      *  @param[in] config Which Parquet column holds the image blobs.
      *  @param[in] gpu_rank Ensures different GPUs draw different rows from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
-     *  @param[out] batches Output batches whose @c images run, @c image_shapes , and segment geometry get
-     *      populated.
+     *  @param[out] batches Output batches whose @c images grid, @c image_shapes , @c segment_offsets/lengths ,
+     *      and @c segment_modality get populated.
      */
     [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, nvjpeg_session_t &decoder,
                                   image_loader_parquet_config_t config, u32_t gpu_rank, u32_t training_step,
