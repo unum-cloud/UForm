@@ -1,168 +1,150 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
-#     "huggingface_hub",
+#     "ijson",
+#     "pyarrow>=21.0.0",
+#     "yt-dlp",
 # ]
 # ///
-"""Idempotent downloader for a HowTo100M narration subset (~16k rows, text-only, a few MB).
+"""Build a bounded slice of the HowTo100M instructional video corpus by fetching clips from YouTube.
 
-Modality: text (instructional narration). HowTo100M is an instructional video + ASR caption corpus
-(~100M clips at full scale, ~12 TB). The clip-bearing mirrors left HuggingFace (the original
-`OmniMMI/HowTo100M-100k` was removed; the official `HuggingFaceM4/howto100m` is now a streaming
-loading script that fetches raw YouTube URLs, not snapshot-pullable shards), so this downloader now
-targets `diyarhamedi/HowTo100M-subtitles-small`: a single parquet of ASR narration with columns
-`video_id` (YouTube id), `category`, `subcategory`, `rank`, `task_id`, and `text` (the narration).
-There are NO clip bytes here — only the narration text keyed by `video_id`, suitable for the
-text-side of the video-text contrastive / reranker smokes (pair the `text` with externally fetched
-clips by `video_id` if vision is needed).
+Modality: video + text.  HowTo100M is ~136M instructional video clips — each a `(video_id, [start, end]
+window, ASR narration)` — mined from ~1.2M YouTube videos.  The clip BYTES live only on YouTube (no
+snapshot mirror redistributes them), so a builder needs a clip-level caption index carrying the per-clip
+`(video_id, start, end, text)` and then fetches each window itself.
 
-Shard cap.
-This subset is a single small parquet shard, so `--max-shards N` / `--fraction F` are effectively
-no-ops here, but they are kept (and still cap the leading `.parquet` / `.tar` / `.tar.gz` / `.zip`
-shards BEFORE transfer, mirroring `download_cc12m.py`) so a future clip-bearing mirror can be slotted
-in via `--repo-id` without changing the interface. With NEITHER flag the whole subset is pulled.
+Caption source.
+This builder reads `Jazzcharles/HowTo100M_llama3_refined_caption` — a HuggingFace mirror of HowTo100M's
+ASR narration re-aligned to per-clip windows and cleaned by Llama-3.  It ships ONE JSON object,
+`htm_llama3_refined.json` (~9 GB), mapping a running integer index to a per-clip record:
+
+    {"<i>": {"vid": <youtube_id>, "start_second": <float>, "end_second": <float>,
+             "text": <raw ASR narration>, "refined_text": <Llama-3-cleaned instruction>, ...}, ...}
+
+We prefer `refined_text` (falling back to `text`) as the caption.  This mirror was chosen over the
+official `caption.json` (a 5 GB monolithic dict inside `HowTo100M.zip` on the INRIA/Willow host) because
+it is directly HuggingFace-hosted, per-clip already, and — crucially — streamable: the records appear in
+file order, so a leading slice can be read WITHOUT downloading or parsing the whole 9 GB.
+
+Bounded index (the 100M-clip trap).
+HowTo100M is far too large to materialise; `_clip_records` therefore STREAMS the JSON with `ijson` and
+stops after `_INDEX_CAP` distinct `(vid, start, end)` windows (default 200k, overridable via
+`UFORM_HOWTO100M_INDEX_CAP`), reading only the leading bytes of the remote file.  Records that share a
+window are folded into one clip whose captions are joined, so no window is fetched twice.  The tiny built
+index (a few hundred-k small dicts) is cached under `<out-dir>/.captions/` keyed by the cap so re-runs and
+`--print-plan` are instant.
+
+The rest is the shared `fetch_media_clips.acquire_clips` orchestrator: a Slurm `(rank, world)` split so each
+worker fetches a disjoint `clips[rank::world]` stride, intra-host GNU-`parallel` fan-out, per-shard yt-dlp
+fetch (an H.264 `bestvideo+bestaudio` mux trimmed to the clip's window), and the uniform registry parquet:
+
+    caption: string                                (the clip's refined narration, joined per window)
+    mp4:     struct<bytes: binary, path: string>   (the trimmed clip bytes + a `<id>.mp4` path tag)
+
+Sizing.
+A bare run fetches the whole capped index (~200k clips); `--fraction` / `--max-clips` cap the fetch BELOW
+that ceiling (they cannot raise it — raise `UFORM_HOWTO100M_INDEX_CAP` to index more).  Per-shard yields
+merge into `<out-dir>/fetch_manifest.json`; dead / private / geo-blocked ids are dropped (never silently
+truncated), so expect a real-world video yield around 60-80%.
+
+This corpus is research-only: fetching is subject to YouTube's Terms of Service and the per-video rights,
+and the clips are not redistributable.
 
 CLI usage:
-    uv run python_data/download_howto100m.py                  # whole subset (a few MB)
-    uv run python_data/download_howto100m.py --max-shards 16  # first 16 archive shards
-    uv run python_data/download_howto100m.py --fraction 0.25  # leading 25% of the shards
-    uv run python_data/download_howto100m.py --out-dir $UFORM_DATA_ROOT/howto100m
+    uv run python_data/download_howto100m.py                                # ~200k-clip slice, parallel fetch
+    uv run python_data/download_howto100m.py --print-plan --max-clips 8     # dry-run the clip index, no fetch
+    uv run python_data/download_howto100m.py --fraction 0.05 --num-shards 8 # ~5% of the capped index
+    uv run python_data/download_howto100m.py --rank 0 --world 16            # this worker's disjoint stride
+    UFORM_HOWTO100M_INDEX_CAP=1000000 uv run python_data/download_howto100m.py  # index a larger slice
 """
 
 from __future__ import annotations
 
-import argparse
-import math
+import json
 import os
-import sys
+import urllib.request
 from pathlib import Path
 
-from huggingface_hub import list_repo_files, snapshot_download
+import ijson
+from fetch_media_clips import MediaClip, MediaKind, acquire_clips
 
-_PRIMARY_REPO_ID = "diyarhamedi/HowTo100M-subtitles-small"
-_DEFAULT_OUT_DIR = (
-    Path(os.environ.get("UFORM_DATA_ROOT", Path(__file__).resolve().parents[1] / "data")) / "howto100m"
+#: HuggingFace `resolve` URL of the single per-clip refined-caption JSON (streamed, never fully downloaded).
+_REFINED_CAPTION_URL = (
+    "https://huggingface.co/datasets/Jazzcharles/HowTo100M_llama3_refined_caption/"
+    "resolve/main/htm_llama3_refined.json"
 )
-#: Archive shard suffixes; everything else (README, metadata json/csv) is always kept.
-_SHARD_SUFFIXES = (".parquet", ".tar", ".tar.gz", ".zip")
+#: Default ceiling on distinct `(vid, start, end)` windows the streamed index materialises — HowTo100M has
+#: ~136M clips, so this hard bound (overridable via `UFORM_HOWTO100M_INDEX_CAP`) keeps the list small and a
+#: bare run's fetch conservative. `--fraction` / `--max-clips` cap the fetch BELOW this, never above it.
+_DEFAULT_INDEX_CAP = 200_000
 
 
-def _shard_allow_patterns(repo_id: str, max_shards: int | None, fraction: float | None) -> list[str] | None:
-    """Return the `allow_patterns` capping the pull to the leading archive shards, or `None` for all.
-
-    Probes the repo's file list, partitions it into sorted archive shards and non-shard metadata
-    (always kept), then keeps the first `keep_count` shards where `keep_count` is the tighter of
-    `--fraction` and `--max-shards`. Returns `None` when neither cap is set.
-
-    Args:
-        repo_id: HuggingFace dataset repo id.
-        max_shards: Hard cap on the number of archive shards, or `None` for no hard cap.
-        fraction: Share of the shards to keep in (0, 1], or `None` for no fractional cap.
-
-    Returns:
-        The `allow_patterns` list for `snapshot_download`, or `None` to pull the whole repo.
-    """
-    if max_shards is None and fraction is None:
-        return None
-    all_files = list(list_repo_files(repo_id, repo_type="dataset"))
-    shards = sorted(name for name in all_files if name.endswith(_SHARD_SUFFIXES))
-    metadata = [name for name in all_files if not name.endswith(_SHARD_SUFFIXES)]
-    keep_count = len(shards)
-    if fraction is not None:
-        keep_count = min(keep_count, max(1, math.ceil(len(shards) * fraction)))
-    if max_shards is not None:
-        keep_count = min(keep_count, max_shards)
-    kept = shards[:keep_count]
-    print(
-        f"download_howto100m: limiting to {len(kept)} of {len(shards)} archive shards "
-        f"+ {len(metadata)} metadata files"
-    )
-    return kept + metadata
+def _index_cap() -> int:
+    """Return the distinct-window index ceiling from `UFORM_HOWTO100M_INDEX_CAP`, else `_DEFAULT_INDEX_CAP`."""
+    raw = os.environ.get("UFORM_HOWTO100M_INDEX_CAP")
+    return max(1, int(raw)) if raw else _DEFAULT_INDEX_CAP
 
 
-def _snapshot_one(repo_id: str, out_dir: Path, allow_patterns: list[str] | None) -> bool:
-    """Try a single HuggingFace snapshot pull, optionally restricted to `allow_patterns`.
+def _stream_leading_records(cap: int) -> list[dict[str, object]]:
+    """Stream the leading portion of the refined-caption JSON into up to `cap` windowed clip records.
+
+    Opens the remote 9 GB JSON as a byte stream and walks its top-level `{index: clip}` entries in file
+    order with `ijson`, folding records that share a `(vid, start, end)` window into a single clip whose
+    captions are joined. Stops as soon as `cap` DISTINCT windows have been seen, so only the leading bytes
+    of the file are ever transferred and the in-memory footprint stays bounded by `cap`.
 
     Args:
-        repo_id: The HuggingFace dataset repository id.
-        out_dir: Local destination directory for the snapshot.
-        allow_patterns: Shard/metadata allow-list, or `None` for the whole repo.
+        cap: Maximum number of distinct `(vid, start, end)` windows to materialise.
 
     Returns:
-        `True` on a successful pull, `False` if the pull raised.
+        One `{...MediaClip.to_json(), "caption": str}` record per distinct window, in first-seen order.
     """
-    try:
-        snapshot_download(
-            repo_id=repo_id,
-            repo_type="dataset",
-            local_dir=str(out_dir),
-            allow_patterns=allow_patterns,
-        )
-    except Exception as exc:  # noqa: BLE001
-        print(f"download_howto100m: {repo_id} failed ({exc})")
-        return False
-    return True
+    grouped: dict[tuple[str, float, float], list[str]] = {}
+    request = urllib.request.Request(_REFINED_CAPTION_URL, headers={"User-Agent": "uform-howto100m"})
+    print(f"download_howto100m: streaming up to {cap} clip windows from {_REFINED_CAPTION_URL}")
+    with urllib.request.urlopen(request) as stream:  # noqa: S310 — fixed trusted https HuggingFace host
+        for _index, entry in ijson.kvitems(stream, ""):
+            window = (str(entry["vid"]), float(entry["start_second"]), float(entry["end_second"]))
+            caption = str(entry.get("refined_text") or entry.get("text") or "")
+            captions = grouped.get(window)
+            if captions is None:
+                if len(grouped) >= cap:
+                    break
+                grouped[window] = [caption] if caption else []
+            elif caption:
+                captions.append(caption)
+    records: list[dict[str, object]] = []
+    for (vid, start, end), captions in grouped.items():
+        record = MediaClip(source_id=vid, kind=MediaKind.VIDEO, start_seconds=start, end_seconds=end).to_json()
+        record["caption"] = "\n".join(dict.fromkeys(captions))
+        records.append(record)
+    return records
 
 
-def download(
-    out_dir: Path,
-    repo_id: str | None = None,
-    force: bool = False,
-    max_shards: int | None = None,
-    fraction: float | None = None,
-) -> int:
-    """Download the HowTo100M sample (or a leading shard slice) to out_dir. Skip if populated unless force=True."""
-    out_dir.mkdir(parents=True, exist_ok=True)
-    sentinel = out_dir / ".downloaded"
-    if sentinel.exists() and not force:
-        print(f"download_howto100m: already at {out_dir}; skip (pass --force to redownload)")
-        return 0
-    chosen_repo = repo_id or _PRIMARY_REPO_ID
-    allow_patterns = _shard_allow_patterns(chosen_repo, max_shards, fraction)
-    if _snapshot_one(chosen_repo, out_dir, allow_patterns):
-        sentinel.touch()
-        print(f"download_howto100m: HowTo100M sample ready at {out_dir} (repo={chosen_repo})")
-        return 0
-    print("download_howto100m: HuggingFace mirror failed", file=sys.stderr)
-    return 1
-
-
-def _parse_cli_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Idempotent downloader for a HowTo100M narration subset; --max-shards / --fraction cap the pull.",
-    )
-    parser.add_argument(
-        "--out-dir",
-        type=Path,
-        default=_DEFAULT_OUT_DIR,
-        help=f"Destination directory (default: {_DEFAULT_OUT_DIR}).",
-    )
-    parser.add_argument(
-        "--repo-id",
-        type=str,
-        default=None,
-        help=f"Override HuggingFace dataset id (default: {_PRIMARY_REPO_ID}).",
-    )
-    parser.add_argument(
-        "--max-shards",
-        type=int,
-        default=None,
-        help="Cap the pull to the first N archive shards (default: whole sample).",
-    )
-    parser.add_argument(
-        "--fraction",
-        type=float,
-        default=None,
-        help="Cap the pull to the leading fraction (0, 1] of the archive shards (default: whole sample).",
-    )
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="Redownload even if the sentinel file exists.",
-    )
-    return parser.parse_args()
+def _clip_records(out_dir: Path) -> list[dict[str, object]]:
+    """Build (and cache) the bounded HowTo100M clip index — up to `_index_cap()` `{...MediaClip, caption}`."""
+    cap = _index_cap()
+    cache_path = out_dir / ".captions" / f"htm_refined_index_{cap}.jsonl"
+    if cache_path.exists():
+        records = [json.loads(line) for line in cache_path.read_text().splitlines() if line.strip()]
+        print(f"download_howto100m: reusing cached index of {len(records)} clips at {cache_path}")
+        return records
+    records = _stream_leading_records(cap)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text("\n".join(json.dumps(record, ensure_ascii=False) for record in records))
+    print(f"download_howto100m: indexed {len(records)} clip windows (cached at {cache_path})")
+    return records
 
 
 if __name__ == "__main__":
-    args = _parse_cli_args()
-    sys.exit(download(args.out_dir, args.repo_id, args.force, args.max_shards, args.fraction))
+    raise SystemExit(
+        acquire_clips(
+            "howto100m",
+            clip_records=_clip_records,
+            media_kind=MediaKind.VIDEO,
+            out_name="howto100m",
+            media_column="mp4",
+            script=Path(__file__).resolve(),
+            default_num_shards=128,
+        )
+    )

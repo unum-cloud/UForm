@@ -59,6 +59,10 @@ SOURCES: dict[str, tuple[str, str]] = {
     # High lexical overlap / different meaning = the hardest fuzzy positives+negatives; the
     # registry extractor keeps only `label==1` (true paraphrase) rows.
     "paws-x": ("google-research-datasets/paws-x", "multilingual"),
+    # Natural Questions — Google search queries paired to their Wikipedia answer passage. One `pair/`
+    # config, flat `(query, answer)` parquet — exactly the text_contrastive columns, so a plain snapshot
+    # reproduces `data/natural-questions/pair/train-*.parquet` with no transform. Ungated.
+    "natural-questions": ("sentence-transformers/natural-questions", "multilingual"),
     # PubMedQA — niche MEDICAL retrieval, the biggest distinctive-domain gap (no biomedical signal in
     # the prior mixture). Flat `(question, long_answer)` parquet under `pqa_artificial/` (211K synthetic)
     # + `pqa_labeled/` (1K expert) subdirs; the registry extractor pairs question -> long_answer. The

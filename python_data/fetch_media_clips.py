@@ -39,15 +39,19 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+
+from sharding import already_done, resolve_rank_world
 
 #: Default retry budget for a single clip before it is dropped as failed.
 DEFAULT_RETRIES: int = 3
@@ -539,6 +543,187 @@ def fetch_shard(
         )
         manifest.record(result)
         yield record, result
+
+
+#: One clip's work record consumed by the shared orchestrator: the `MediaClip.to_json()` fields plus a
+#: single `caption` string. The dataset's `clip_records` builds these; the shared repack writes them as a
+#: uniform `{caption: string, <media_column>: struct<bytes, path>}` parquet.
+ClipRecords = Callable[[Path], list[dict[str, object]]]
+
+
+def _clips_data_root() -> Path:
+    """The acquisition output root: `$UFORM_DATA_ROOT`, else the repo's `data/` directory (mirrors acquire.py)."""
+    return Path(os.environ.get("UFORM_DATA_ROOT", Path(__file__).resolve().parents[1] / "data"))
+
+
+def _record_start_key(record: dict[str, object]) -> float:
+    """Sort key component: the record's start second, or `-1.0` for a whole-clip record with no window."""
+    start = record.get("start_seconds")
+    return float(start) if start is not None else -1.0  # type: ignore[arg-type]
+
+
+def _cap_records(records: list[dict[str, object]], fraction: float | None, max_clips: int | None) -> list[dict[str, object]]:
+    """Return the leading slice of `records` under the tighter of `--fraction` and `--max-clips` (or all)."""
+    keep = len(records)
+    if fraction is not None and records:
+        keep = min(keep, max(1, math.ceil(len(records) * fraction)))
+    if max_clips is not None:
+        keep = min(keep, max_clips)
+    return records[:keep]
+
+
+def _repack_clip_shard(
+    input_jsonl: Path,
+    output_parquet: Path,
+    manifest_path: Path,
+    *,
+    media_column: str,
+    row_group_size: int,
+    retries: int,
+    timeout_seconds: float,
+) -> int:
+    """Shared `--repack-shard` worker: fetch one shard's clips and write the uniform registry parquet.
+
+    Writes `{caption: string, <media_column>: struct<bytes, path>}` (mp3 for AUDIO, mp4 for VIDEO) through
+    a `.partial` sibling + atomic replace — the final parquet appearing IS the shard's commit record — plus
+    the per-shard `FetchManifest`. Dropped ids are recorded, never silently truncated.
+    """
+    import pyarrow as pa  # lazy: the smoke CLI needs only yt-dlp; the dataset builders declare pyarrow
+    import pyarrow.parquet as pq
+
+    media_struct = pa.struct([("bytes", pa.binary()), ("path", pa.string())])
+    manifest = FetchManifest()
+    captions: list[str] = []
+    media: list[dict[str, object]] = []
+    for record, result in fetch_shard(input_jsonl, manifest=manifest, retries=retries, timeout_seconds=timeout_seconds):
+        if not result.succeeded or result.payload is None:
+            continue
+        captions.append(str(record.get("caption", "")))
+        media.append({"bytes": result.payload, "path": f"{result.clip.source_id}.{result.extension}"})
+    manifest.write(manifest_path)
+    if captions:
+        table = pa.table(
+            {"caption": pa.array(captions, type=pa.string()), media_column: pa.array(media, type=media_struct)}
+        )
+        output_parquet.parent.mkdir(parents=True, exist_ok=True)
+        partial = output_parquet.with_suffix(".parquet.partial")
+        pq.write_table(table, partial, compression="zstd", row_group_size=row_group_size)
+        partial.replace(output_parquet)
+    print(
+        f"acquire_clips: shard {input_jsonl.name} -> {len(captions)} clips "
+        f"({len(manifest.succeeded)}/{len(manifest.attempted)} yield)"
+    )
+    return 0
+
+
+def _print_clip_plan(
+    name: str, rank: int, world: int, total: int, capped: int, mine: list[dict[str, object]]
+) -> None:
+    """Dry-run hook: report this rank's disjoint clip stride (count + `(id, start)` keys) without fetching."""
+    keys = [(str(record["source_id"]), _record_start_key(record)) for record in mine]
+    print(f"acquire_clips[{name}]: rank {rank}/{world} — {total} indexed, {capped} after cap, {len(mine)} this rank")
+    print(f"acquire_clips[{name}]: selected keys = {keys}")
+
+
+def acquire_clips(
+    name: str,
+    *,
+    clip_records: ClipRecords,
+    media_kind: MediaKind,
+    out_name: str,
+    media_column: str,
+    script: Path,
+    default_fraction: float = 1.0,
+    default_num_shards: int = 128,
+    default_jobs: int = 8,
+    row_group_size: int = 256,
+) -> int:
+    """Shared Slurm-sharded YouTube-clip acquirer the thin per-dataset builders delegate to.
+
+    One dataset's whole job: parse the uniform CLI, resolve `(rank, world)` from Slurm (`sharding`), build
+    the full clip list via the dataset's `clip_records`, sort it into a deterministic order, cap it by
+    `--fraction` / `--max-clips`, take THIS worker's disjoint stride `clips[rank::world]`, sub-shard that
+    stride into `--num-shards` JSONLs, and fan the yt-dlp fetch out intra-host with GNU `parallel` by
+    self-invoking `script --repack-shard` (the shared `_repack_clip_shard` worker). Output identity ties to
+    `(rank, world)` — a shard named `<out_name>-r{rank}w{world}-{i:05d}.parquet` — and its atomic rename is
+    the commit: a re-run of the same world skips finished shards (`already_done`) unless `--force`. There is
+    no per-dataset `.built` sentinel (wrong under multi-rank).
+
+    @param[in] name The catalog / mixture dataset name (used only in log lines).
+    @param[in] clip_records `out_dir -> list[{source_id, kind, start_seconds, end_seconds, caption}]` index reader.
+    @param[in] media_kind Whether the clips are audio (mp3) or video (mp4); the records also carry it per clip.
+    @param[in] out_name The `data/<out_name>` output subdirectory and shard-name prefix.
+    @param[in] media_column The struct column the payload lands in (e.g. `audio` / `mp4`).
+    @param[in] script The calling builder's `__file__` (self-invoked in `--repack-shard` mode by GNU parallel).
+    @param[in] default_fraction The `--fraction` default when the caller omits it (some corpora are huge).
+    @param[in] default_num_shards The `--num-shards` default (intra-host fan-out width per worker).
+    @param[in] default_jobs The `--jobs` default (concurrent shard processes under GNU parallel).
+    @param[in] row_group_size The parquet row-group size for the written shards.
+    @return Process exit code (`0` on success).
+    """
+    parser = argparse.ArgumentParser(description=f"Fetch + repack {name} YouTube clips into rank-sharded parquet.")
+    parser.add_argument("--fraction", type=float, default=default_fraction, help="leading-slice clip cap in (0, 1].")
+    parser.add_argument("--max-clips", type=int, default=None, help="hard cap on the number of clips (leading slice).")
+    parser.add_argument("--rank", type=int, default=None, help="usually Slurm-derived; explicit for local N-way runs.")
+    parser.add_argument("--world", type=int, default=None, help="usually Slurm-derived; explicit for local N-way runs.")
+    parser.add_argument("--jobs", type=int, default=default_jobs, help="concurrent shard processes under GNU parallel.")
+    parser.add_argument("--num-shards", type=int, default=default_num_shards, help="JSONL sub-shards per worker.")
+    parser.add_argument("--force", action="store_true", help="re-fetch shards whose parquet already exists.")
+    parser.add_argument("--print-plan", action="store_true", help="print this rank's clip stride and exit (no fetch).")
+    parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="per-clip transient retry budget.")
+    parser.add_argument(
+        "--timeout-seconds", type=float, default=DEFAULT_TIMEOUT_SECONDS, help="wall-clock ceiling per yt-dlp call."
+    )
+    parser.add_argument("--repack-shard", type=Path, default=None, help="internal: fetch+repack a single shard JSONL.")
+    parser.add_argument("--shard-output", type=Path, default=None, help="internal: output parquet for --repack-shard.")
+    parser.add_argument("--shard-manifest", type=Path, default=None, help="internal: manifest path for --repack-shard.")
+    args = parser.parse_args()
+
+    if args.repack_shard is not None:
+        if args.shard_output is None or args.shard_manifest is None:
+            print(f"acquire_clips[{name}]: --repack-shard needs --shard-output and --shard-manifest", file=sys.stderr)
+            return 2
+        return _repack_clip_shard(
+            args.repack_shard,
+            args.shard_output,
+            args.shard_manifest,
+            media_column=media_column,
+            row_group_size=row_group_size,
+            retries=args.retries,
+            timeout_seconds=args.timeout_seconds,
+        )
+
+    rank, world = resolve_rank_world(args.rank, args.world)
+    out_dir = _clips_data_root() / out_name
+    records = clip_records(out_dir)
+    records.sort(key=lambda record: (str(record["source_id"]), _record_start_key(record)))
+    capped = _cap_records(records, args.fraction, args.max_clips)
+    mine = capped[rank::world] if world > 1 else capped
+    if args.print_plan:
+        _print_clip_plan(name, rank, world, len(records), len(capped), mine)
+        return 0
+
+    output_dir = out_dir / "data"
+    staging_dir = out_dir / ".staging" / f"r{rank}w{world}"
+    if args.force and staging_dir.exists():
+        shutil.rmtree(staging_dir, ignore_errors=True)
+    plans = plan_shards(
+        mine,
+        num_shards=args.num_shards,
+        staging_dir=staging_dir,
+        output_dir=output_dir,
+        output_prefix=f"{out_name}-r{rank}w{world}",
+    )
+    pending = [plan for plan in plans if args.force or not already_done(plan.output_parquet)]
+    run_shard_workers(script, pending, jobs=args.jobs)
+    summary = summarise_shard_manifests(plans)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "fetch_manifest.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False))
+    print(
+        f"acquire_clips[{name}]: rank {rank}/{world} built {summary['succeeded_count']} {media_kind} clips of "
+        f"{summary['attempted_count']} attempted ({float(summary['yield_fraction']) * 100:.1f}% yield) under {output_dir}"
+    )
+    return 0
 
 
 def _read_clips_jsonl(path: Path) -> list[MediaClip]:

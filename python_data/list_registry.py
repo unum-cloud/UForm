@@ -167,11 +167,15 @@ def _emit_json() -> None:
 def _acquire_plan() -> tuple[list[str], list[str]]:
     """Split the per-dataset downloaders into `(shardable, whole)` stems for `python_data/acquire.sbatch`.
 
-    A shardable downloader calls the shared `acquire()`, so it rank-partitions its shards across the
-    acquisition workers; a whole downloader (YouTube fetch / TSV-CSV / multi-repo / the generic
+    A shardable downloader reads a Slurm `(rank, world)` split, so it rank-partitions its work across the
+    acquisition workers — the HuggingFace-shard path (`from acquire import acquire`), the shared YouTube-clip
+    path (`acquire_clips`, striding `clips[rank::world]`), or a direct `resolve_rank_world` (e.g. the msmarco
+    derived-join). A whole downloader (TSV-CSV / multi-repo / the HF-mirror media sets / the generic
     `text_pairs`) cannot sub-shard and runs one-per-worker. `download_smokes.py` is excluded — it stages
     eval probes, not a training corpus.
     """
+    #: Any of these tokens in a downloader means it consumes a Slurm `(rank, world)` split.
+    rank_world_markers = ("from acquire import acquire", "acquire_clips", "resolve_rank_world")
     shardable: list[str] = []
     whole: list[str] = []
     for path in sorted(glob.glob(os.path.join(PKG_DIR, "download_*.py"))):
@@ -179,7 +183,8 @@ def _acquire_plan() -> tuple[list[str], list[str]]:
         if stem == "smokes":
             continue
         with open(path, encoding="utf-8") as handle:
-            bucket = shardable if "from acquire import acquire" in handle.read() else whole
+            text = handle.read()
+        bucket = shardable if any(marker in text for marker in rank_world_markers) else whole
         bucket.append(stem)
     return shardable, whole
 

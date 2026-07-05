@@ -18,6 +18,14 @@
       "media": "jpg"
     },
     {
+      "name": "datacomp_small",
+      "weight": 0.1,
+      "glob": "data/datacomp-small/*.parquet",
+      "anchor": "caption",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
       "name": "coco_captions",
       "weight": 0.18,
       "glob": "data/coco_captions/data/*.parquet",

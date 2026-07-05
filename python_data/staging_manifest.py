@@ -156,6 +156,7 @@ STAGING_ROWS: list[StagingRow] = [
     ),
     StagingRow(
         dataset="s2orc_abstract",
+        glob_override="data/s2orc/abstract-citation-pair/train-*.parquet",  # no s2orc_abstract entry in any mixture
         modality="text",
         fraction=1.00,
         estimated_full_gigabytes=31.0,
@@ -203,6 +204,7 @@ STAGING_ROWS: list[StagingRow] = [
     ),
     StagingRow(
         dataset="compile_ir",
+        glob_override="data/compile-ir/data/**/*.parquet",  # no compile_ir entry in any mixture
         modality="text",
         fraction=0.012,
         estimated_full_gigabytes=2700.0,  # full ComPile LLVM-IR corpus.
@@ -323,6 +325,7 @@ STAGING_ROWS: list[StagingRow] = [
     ),
     StagingRow(
         dataset="flickr30k",
+        glob_override="data/flickr30k/flickr30k-*.parquet",  # no flickr30k entry in any mixture
         modality="image",
         fraction=1.00,
         estimated_full_gigabytes=9.0,  # nlphuji/flickr30k, 31K images x 5 captions.
@@ -395,6 +398,7 @@ STAGING_ROWS: list[StagingRow] = [
     ),
     StagingRow(
         dataset="droid",
+        glob_override="data/droid_100/droid_*.parquet",  # no droid entry in any mixture; flat repacked parquet only
         modality="image",
         fraction=1.00,
         estimated_full_gigabytes=5.0,  # droid_100 1K-trajectory subset.
@@ -406,6 +410,7 @@ STAGING_ROWS: list[StagingRow] = [
     ),
     StagingRow(
         dataset="funsd",
+        glob_override="data/funsd/funsd/data/*.parquet",  # no funsd entry in any mixture
         modality="image",
         fraction=1.00,
         estimated_full_gigabytes=0.5,  # 149 train + 50 test scanned forms.
@@ -417,6 +422,7 @@ STAGING_ROWS: list[StagingRow] = [
     # Video modality, ~750 GB target.
     StagingRow(
         dataset="webvid_10m",
+        glob_override="data/webvid-10m/data/train-*.parquet",  # no webvid_10m entry in any mixture
         modality="video",
         fraction=0.24,
         estimated_full_gigabytes=385.0,  # ~452 parquet shards; on-disk 108 shards measured at ~92 GB.
@@ -430,6 +436,7 @@ STAGING_ROWS: list[StagingRow] = [
     ),
     StagingRow(
         dataset="kinetics400",
+        glob_override="data/kinetics400/train/*.parquet",  # no kinetics400 entry in any mixture
         modality="video",
         fraction=0.30,
         estimated_full_gigabytes=467.0,  # 242 train tar.gz shards, ~240K clips.
@@ -444,6 +451,7 @@ STAGING_ROWS: list[StagingRow] = [
     ),
     StagingRow(
         dataset="panda70m_testing",
+        glob_override="data/panda70m-wds/**/*.parquet",  # no panda70m_testing entry in any mixture; repacked tars
         modality="video",
         fraction=1.00,
         estimated_full_gigabytes=12.0,  # testing split only (~70K clips).
@@ -468,6 +476,7 @@ STAGING_ROWS: list[StagingRow] = [
     ),
     StagingRow(
         dataset="didemo",
+        glob_override="data/didemo/data/didemo-train.parquet",  # no didemo entry in any mixture; train split only
         modality="video",
         fraction=1.00,
         estimated_full_gigabytes=48.0,  # test tar ~5 GB + 8-part train tar ~43 GB assembled.
@@ -479,6 +488,7 @@ STAGING_ROWS: list[StagingRow] = [
     ),
     StagingRow(
         dataset="mevis",
+        glob_override="data/mevis/train/data/*.parquet",  # no mevis entry in any mixture
         modality="video",
         fraction=1.00,
         estimated_full_gigabytes=17.0,  # train JPEGImages.tar ~16 GB; re-encoded MP4 parquet is smaller.
@@ -490,6 +500,7 @@ STAGING_ROWS: list[StagingRow] = [
     ),
     StagingRow(
         dataset="vatex",
+        glob_override="data/vatex/data/*.parquet",  # no vatex entry in any mixture; fetched-clip parquet shards
         modality="video",
         fraction=1.00,
         estimated_full_gigabytes=50.0,  # ~29K clips x 10s H.264 mp4 (~1.7 MB/clip) fetched from YouTube.
@@ -501,6 +512,7 @@ STAGING_ROWS: list[StagingRow] = [
     ),
     StagingRow(
         dataset="activitynet_captions",
+        glob_override="data/activitynet-captions/data/*.parquet",  # no activitynet_captions entry in any mixture
         modality="video",
         fraction=0.20,
         estimated_full_gigabytes=450.0,  # ~15K FULL-length videos (~30 MB/video) fetched from YouTube.
@@ -519,6 +531,7 @@ STAGING_ROWS: list[StagingRow] = [
     # Audio modality, ~750 GB target.
     StagingRow(
         dataset="audioset",
+        glob_override="data/audioset/data/**/*.parquet",  # no audioset entry in any mixture; bal_train/eval splits
         modality="audio",
         fraction=0.02,
         estimated_full_gigabytes=2400.0,  # full AudioSet (943 parquet shards: bal_train/eval/unbal_train).
@@ -552,6 +565,7 @@ STAGING_ROWS: list[StagingRow] = [
     ),
     StagingRow(
         dataset="auto_acd",
+        glob_override="data/auto-acd/data/*.parquet",  # no auto_acd entry in any mixture; fetched-clip parquet shards
         modality="audio",
         fraction=0.05,
         estimated_full_gigabytes=230.0,  # 1.9M x ~10s mp3 (~120 KB/clip) fetched from YouTube.

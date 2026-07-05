@@ -55,6 +55,11 @@ download_aliases = {
     "enron_email": "enron",
     "panda70m_testing": "panda70m_wds",
     "msrvtt_captions": "msrvtt",
+    "finewiki_i18n": "finewiki",
+    "stackexchange_text": "stackexchange_title_body",
+    "hackernews_text": "hackernews",
+    "code_search_net_text": "code_search_net",
+    "msmarco_triplet50": "msmarco",
 }
 
 #: Relative tolerance when reporting how far a mixture's weights sum from 1.0 (informational, not asserted).

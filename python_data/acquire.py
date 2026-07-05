@@ -13,8 +13,9 @@
 # ///
 """Shared acquisition helper the thin per-dataset downloaders call — one function, one dataset to parquet.
 
-Folds the four per-source-kind fetch engines (`hf_snapshot` / `webdataset` / `text_jsonl` / the
-`url_index` seam of media-fetch) into a single `acquire(...)`. A downloader is now a one-liner:
+Folds the per-source-kind fetch engines (`hf_snapshot` / `webdataset` / `text_jsonl` / the `url_index`
+metadata pass-through / the `url_crawl` image fetch over those URLs) into a single `acquire(...)`. A
+downloader is now a one-liner:
 
     from acquire import acquire
     raise SystemExit(acquire("coco_captions", repo_id="HuggingFaceM4/COCO",
@@ -40,11 +41,14 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
 import mixtures
 import pyarrow as pa
+import pyarrow.compute as compute
 import pyarrow.parquet as parquet
 from engine_base import artifact_path, cap_shards
 from huggingface_hub import list_repo_files, snapshot_download
@@ -55,9 +59,10 @@ from sharding import already_done, atomic_write, partition, resolve_rank_world
 # only huggingface_hub + pyarrow can `import acquire` without those heavier deps in its uv env.
 
 #: Source kinds whose shards enumerate as sorted repo files filtered by suffix (a HuggingFace dataset repo).
-#: `url_index` normalizes its URL-index parquet exactly like a snapshot (the media crawl over the URLs is a
-#: deferred next step); `youtube_fetch` still needs the per-dataset index-column names and is unimplemented.
-_repo_source_kinds = ("hf_snapshot", "webdataset", "text_jsonl", "url_index")
+#: `url_index` normalizes its URL-index parquet exactly like a snapshot (a metadata pass-through); `url_crawl`
+#: enumerates the same index parquet but then fetches the images those URLs point at (see `_crawl_url_index`);
+#: `youtube_fetch` still needs the per-dataset index-column names and is unimplemented.
+_repo_source_kinds = ("hf_snapshot", "webdataset", "text_jsonl", "url_index", "url_crawl")
 
 
 def _data_root() -> Path:
@@ -95,6 +100,64 @@ def _enumerate_shards(source_kind: str, repo_id: str | None, revision: str, shar
     return sorted(name for name in files if name.endswith(shard_suffix))
 
 
+#: img2dataset writes the fetched image bytes under `jpg` and the passed-through caption under `caption`, the
+#: same pair the WebDataset image sets (cc12m / laion_cc3m) commit — so a crawled shard is schema-identical to
+#: a muxed one and drops straight into the `image_caption` mixture (`anchor=caption`, `positive=media=jpg`).
+_CRAWL_IMAGE_COLUMN = "jpg"
+_CRAWL_CAPTION_COLUMN = "caption"
+
+
+def _crawl_url_index(index_shard: Path, crawl_dir: Path, *, url_column: str, caption_column: str) -> pa.Table:
+    """Fetch the images one URL-index parquet shard points at and return the canonical `{jpg, caption}` table.
+
+    The crawl itself is delegated to `img2dataset` — the LAION/DataComp downloader that owns the concurrency,
+    retries, timeouts, content-type checks, and resize/re-encode we must not reimplement with the stylebook-
+    banned Python threads. It is invoked as a subprocess (like the repackers' GNU-parallel fan-out), fed this
+    shard's `url_column` + `caption_column`, and told to emit parquet into a rank-private scratch directory.
+
+    Its parquet output carries a row per input URL — `jpg` holds the re-encoded bytes on success and null on a
+    dead link (`status != "success"`) — plus the `caption` it passed through. Web crawls yield partially, so we
+    keep only the rows that actually downloaded (`jpg` non-null) and project to the two canonical columns; an
+    all-dead shard collapses to a valid empty parquet, which the atomic-rename skip still records as done.
+
+    @param[in] index_shard The already-snapshotted URL-index parquet (the img2dataset `--url_list`).
+    @param[in] crawl_dir A fresh rank-private directory for img2dataset's output shards (created by the tool).
+    @param[in] url_column The index column holding the image URL to fetch.
+    @param[in] caption_column The index column holding the caption to carry onto each fetched image.
+    @return A `pyarrow.Table` of the successfully fetched rows with columns `jpg` (image bytes) and `caption`.
+    """
+    img2dataset = shutil.which("img2dataset") or str(Path(sys.executable).with_name("img2dataset"))
+    command = [
+        img2dataset,
+        "--url_list", str(index_shard),
+        "--input_format", "parquet",
+        "--url_col", url_column,
+        "--caption_col", caption_column,
+        "--output_folder", str(crawl_dir),
+        "--output_format", "parquet",
+        "--processes_count", "1",  # concurrency is img2dataset's threads, not ours; one worker per shard
+        "--thread_count", "64",
+        "--image_size", "256",
+        "--resize_mode", "keep_ratio",
+        "--encode_format", "jpg",
+        "--encode_quality", "90",
+        "--retries", "2",
+        "--timeout", "20",
+        "--number_sample_per_shard", "100000",
+        "--disallowed_header_directives", "[]",  # honor no robots opt-out header; crawl every reachable URL
+    ]
+    subprocess.run(command, check=True)  # non-zero only on bad args; partial download yield is a clean exit
+
+    written = sorted(crawl_dir.glob("*.parquet"))  # one or more output shards; `*_stats.json` is ignored
+    columns = [_CRAWL_IMAGE_COLUMN, _CRAWL_CAPTION_COLUMN]
+    if not written:
+        empty = {_CRAWL_IMAGE_COLUMN: pa.array([], pa.binary()), _CRAWL_CAPTION_COLUMN: pa.array([], pa.string())}
+        return pa.table(empty)
+    table = pa.concat_tables(parquet.read_table(path, columns=columns) for path in written)
+    table = table.filter(compute.is_valid(table.column(_CRAWL_IMAGE_COLUMN)))  # drop the dead-link rows
+    return pa.table({name: table.column(name) for name in columns})
+
+
 def _fetch_one_shard(
     source: str,
     *,
@@ -105,13 +168,16 @@ def _fetch_one_shard(
     out_dir: Path,
     final: Path,
     rank: int,
+    url_column: str,
+    caption_column: str,
     transform: Callable | None,
 ) -> set[str]:
     """Pull one source shard, apply `transform`, commit one canonical parquet, and return its column names.
 
     `hf_snapshot` / `url_index` read the shard's parquet directly; `webdataset` muxes the tar and verifies
     the xxhash round trip; `text_jsonl` takes repack_one's dual path (streaming CPU zstd vs the cuDF GPU
-    read). The returned column set feeds the post-transform column assert.
+    read); `url_crawl` snapshots the URL-index parquet like `url_index` but then fetches the images those
+    URLs point at (`_crawl_url_index`). The returned column set feeds the post-transform column assert.
     """
     scratch = out_dir / f".{source_kind}_raw" / f"rank{rank}"  # rank-private so disjoint pulls never collide
     snapshot_download(
@@ -123,6 +189,13 @@ def _fetch_one_shard(
     )
     shard = scratch / source
     try:
+        if source_kind == "url_crawl":
+            table = _crawl_url_index(shard, scratch / "crawl", url_column=url_column, caption_column=caption_column)
+            table = transform(table) if transform is not None else table
+            with atomic_write(final, rank=rank) as temporary:
+                parquet.write_table(table, temporary, compression="zstd")
+            return set(table.column_names)
+
         if source_kind == "webdataset":
             from repack_webdataset_to_parquet import (  # lazy: pulls orjson/xxhash
                 ROW_GROUP_SIZE,
@@ -190,6 +263,8 @@ def acquire(
     shard_suffix: tuple[str, ...] = (".parquet",),
     source_kind: str,
     out_name: str,
+    url_column: str = "url",
+    caption_column: str = "caption",
     transform: Callable[[pa.Table], pa.Table] | None = None,
 ) -> int:
     """Acquire and normalize one dataset to canonical parquet, one artifact per source shard.
@@ -198,8 +273,10 @@ def acquire(
     @param[in] repo_id The upstream HuggingFace dataset repo id.
     @param[in] revision The repo revision / branch (e.g. `refs/convert/parquet`).
     @param[in] shard_suffix Shard-file suffixes to enumerate (a tuple `str.endswith` accepts).
-    @param[in] source_kind One of hf_snapshot / webdataset / text_jsonl / url_index / youtube_fetch.
+    @param[in] source_kind One of hf_snapshot / webdataset / text_jsonl / url_index / url_crawl / youtube_fetch.
     @param[in] out_name The `data/<out_name>` output subdirectory and artifact prefix.
+    @param[in] url_column For `url_crawl`: the index column holding the image URL to fetch (default `url`).
+    @param[in] caption_column For `url_crawl`: the index column holding the caption to carry (default `caption`).
     @param[in] transform Optional per-dataset reshape of each shard's `pyarrow.Table | cudf.DataFrame`.
     @return Process exit code (`0` on success).
     """
@@ -232,6 +309,8 @@ def acquire(
             out_dir=out_dir,
             final=final,
             rank=rank,
+            url_column=url_column,
+            caption_column=caption_column,
             transform=transform,
         )
         _assert_columns(name, produced_columns)
