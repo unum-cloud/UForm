@@ -43,13 +43,15 @@ using namespace unum::uform::core;
 using namespace unum::uform::train;
 using namespace unum::uform::test;
 
-/** @brief The tiny shared geometry — a @c 2×64 rectangle, @c depth=2 , @c hidden=256 , @c 8 steps, and a
- *      two-step warmup so even the tiny run crosses both schedule phases. The omni variant fills every media
- *      slice of the batch envelope; presence flows from the shape alone. */
+/** @brief The tiny shared geometry — @c depth=2 , @c hidden=256 , @c 8 steps, and a two-step warmup so even
+ *      the tiny run crosses both schedule phases. Tokens ride a @c 2×64 rectangle; the omni variant fills
+ *      every media slice over a @c 4×64 one, so the keyed partition holds all four modalities live at every
+ *      step and the composite loss measures the same mixture throughout — descent stays comparable. */
 [[nodiscard]] static base_config_t test_geometry_(bool omni) noexcept {
     base_config_t config;
     config.batch = multimodal_batch_shape_t {2u, 2u, 64u};
     if (omni) {
+        config.batch = multimodal_batch_shape_t {4u, 4u, 64u};
         config.batch.image = image_batch_shape_t {8u, 3u};
         config.batch.video = video_batch_shape_t {8u, 3u, 2u, 1u};
         config.batch.audio = audio_batch_shape_t {256u, 16000u};
@@ -64,11 +66,13 @@ using namespace unum::uform::test;
 /** @brief The one multimem domain over @p windows disjoint optimizer windows of one replica's payload — one
  *      window suffices for a single run, two let the captured and the assertion-C eager optimizers each reserve
  *      their own fresh moments from the same domain. */
-[[nodiscard]] static expected<multimem_domain_t> make_domain_(base_trainer_t &trainer, u32_t windows) noexcept {
+[[nodiscard]] static expected<multimem_domain_t> make_domain_(mesh_topology_t const &topology, base_trainer_t &trainer,
+                                                              u32_t windows) noexcept {
     array<differentiable_weights_t> const &lead = trainer.replicas[0].weights;
     std::span<differentiable_weights_t const> const list {lead.view().data(), lead.size()};
     std::size_t const window = distributed_adafactor_t::payload_scalars_needed(list);
-    return multimem_domain_t::make(trainer.devices.view(), static_cast<std::size_t>(windows) * window, trainer.streams);
+    return multimem_domain_t::make(topology, trainer.devices.view(), static_cast<std::size_t>(windows) * window,
+                                   trainer.streams);
 }
 
 /** @brief The distributed Adafactor over the transient flat replica-major registration table — the same
@@ -169,12 +173,15 @@ static void synchronize_(base_trainer_t &trainer) noexcept {
     return left.size() == right.size() && std::memcmp(left.data(), right.data(), left.size() * sizeof(bf16_t)) == 0;
 }
 
-/** @brief DtoH the domain's barrier round through member @p member_index 's accessor — zero when absent
- *      or when the readback slips (assertion B treats zero as "never advanced"). */
+/** @brief DtoH member @p member_index 's own barrier round through its accessor, on its own stream and
+ *      context — zero when absent or when the readback slips (assertion B treats zero as "never
+ *      advanced"). */
 [[nodiscard]] static concurrency_round_t read_round_(multimem_domain_t &domain, u32_t member_index,
                                                      gpu_stream_t &stream) noexcept {
     u32_t const *const round = domain.member(member_index).round;
     if (round == nullptr) return concurrency_round_t {0u};
+    switch_to_gpu_t gpu_scope {stream};
+    if (!gpu_scope.ok()) return concurrency_round_t {0u};
     u32r1_tensor_pinned_t staging = u32r1_tensor_pinned_t::try_empty({1}, pinned_alloc<u32_t> {});
     nk::tensor_view<u32_t, 1> const source {round, 1};
     if (!staging || !copy_device_to_host(source, staging.span(), stream)) return concurrency_round_t {0u};
@@ -270,7 +277,7 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
     check_weight_naming_(suite, label, config, trainer.replicas[0].weights.view());
 
     // Two disjoint windows so the captured optimizer and the assertion-C eager optimizer get fresh moments.
-    expected<multimem_domain_t> domain = make_domain_(trainer, 2u);
+    expected<multimem_domain_t> domain = make_domain_(topology, trainer, 2u);
     if (!domain) return suite.check(false, "[{}] domain setup: {}", label, domain.description_);
     expected<colocated_domain_t> colocated = colocated_domain_t::make(topology);
     if (!colocated) return suite.check(false, "[{}] colocated setup: {}", label, colocated.description_);
@@ -280,21 +287,38 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
     if (expected_t captured = trainer.capture(graphs); !captured)
         return suite.check(false, "[{}] model-region capture: {}", label, captured.description_);
 
-    // The captured run, telemetry every step: step 0 seeds assertion D's baseline, and every head's loss
-    // readout accumulates into assertion E's per-modality coverage.
-    f32_t baseline_loss = 0.0f, final_loss = 0.0f;
-    bool token_trained = false, image_trained = false, video_trained = false, audio_trained = false;
+    // The captured run, telemetry every step. Assertion D compares each head against itself — its first
+    // and last scored (nonzero) readouts — so a step whose keyed draw masked nothing for one head (a
+    // routine event on short token rows) never skews the comparison with a missing term. Assertion E's
+    // per-modality coverage accumulates from the same readouts.
+    f32_t first_scored_sum = 0.0f, last_scored_sum = 0.0f;
+    f32_t token_first = 0.0f, token_last = 0.0f, image_first = 0.0f, image_last = 0.0f;
+    f32_t video_first = 0.0f, video_last = 0.0f, audio_first = 0.0f, audio_last = 0.0f;
     for (u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
         if (expected_t ran = trainer.step(optimizer_step_t {ordinal}, optimizer.value_, graphs); !ran)
             return suite.check(false, "[{}] captured step {}: {}", label, ordinal, ran.description_);
         base_trainer_t::telemetry_t const telemetry = trainer.telemetry(domain.value_, optimizer_step_t {ordinal});
-        if (ordinal == 0u) baseline_loss = telemetry.composite();
-        final_loss = telemetry.composite();
-        token_trained = token_trained || telemetry.token_ce != 0.0f;
-        image_trained = image_trained || telemetry.image_mse != 0.0f;
-        video_trained = video_trained || telemetry.video_mse != 0.0f;
-        audio_trained = audio_trained || telemetry.audio_mse != 0.0f;
+        if (telemetry.token_ce != 0.0f) {
+            if (token_first == 0.0f) token_first = telemetry.token_ce;
+            token_last = telemetry.token_ce;
+        }
+        if (telemetry.image_mse != 0.0f) {
+            if (image_first == 0.0f) image_first = telemetry.image_mse;
+            image_last = telemetry.image_mse;
+        }
+        if (telemetry.video_mse != 0.0f) {
+            if (video_first == 0.0f) video_first = telemetry.video_mse;
+            video_last = telemetry.video_mse;
+        }
+        if (telemetry.audio_mse != 0.0f) {
+            if (audio_first == 0.0f) audio_first = telemetry.audio_mse;
+            audio_last = telemetry.audio_mse;
+        }
     }
+    bool const token_trained = token_first != 0.0f, image_trained = image_first != 0.0f;
+    bool const video_trained = video_first != 0.0f, audio_trained = audio_first != 0.0f;
+    first_scored_sum = token_first + image_first + video_first + audio_first;
+    last_scored_sum = token_last + image_last + video_last + audio_last;
     synchronize_(trainer);
     expected<array<bf16_t>> captured_lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
     if (!captured_lead) return suite.check(false, "[{}] lead snapshot: {}", label, captured_lead.description_);
@@ -308,19 +332,22 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
     }
     suite.check(replicas_identical, "[{}] every replica matches the lead bitwise (A)", label);
 
-    // B — the barrier round advanced off zero and reads identically through every member's accessor.
+    // B — every member's own barrier round advanced off zero and they all agree: with self-advancing
+    //     rounds the uniformity is a real invariant (each member's scalar counts its own passed barriers).
     concurrency_round_t const lead_round = read_round_(domain.value_, 0u, trainer.streams[0]);
     bool round_uniform = true;
     for (u32_t member_index = 0; member_index < gpus; ++member_index)
         round_uniform = round_uniform &&
-                        read_round_(domain.value_, member_index, trainer.streams[0]).ordinal == lead_round.ordinal;
+                        read_round_(domain.value_, member_index, trainer.streams[member_index]).ordinal ==
+                            lead_round.ordinal;
     suite.check(lead_round.ordinal > 0u, "[{}] barrier round advanced off zero: got {} (B)", label, lead_round.ordinal);
     suite.check(round_uniform, "[{}] barrier round reads identically through every member (B)", label);
 
-    // D — the composite masked loss fell. Loose by design — one deterministic descent, not convergence.
-    suite.check(std::isfinite(final_loss) && final_loss < baseline_loss,
-                "[{}] mean loss fell over {} steps: got {} want < {} (D)", label, config.steps, final_loss,
-                baseline_loss);
+    // D — the summed per-head loss fell between each head's first and last scored steps. Loose by
+    //     design — one deterministic descent, not convergence; each head is measured against itself.
+    suite.check(std::isfinite(last_scored_sum) && last_scored_sum < first_scored_sum,
+                "[{}] mean loss fell over {} steps: got {} want < {} (D)", label, config.steps, last_scored_sum,
+                first_scored_sum);
 
     // E — every live head's loss read nonzero at least once: the keyed partition fed every modality rows, and
     //     every head actually trained.
@@ -356,7 +383,7 @@ static void run_sweep_cell_(test_suite_t &suite, mesh_topology_t const &topology
     if (expected_t built = base_trainer_t::make(trainer, config, topology); !built)
         return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
     if (trainer.replicas.size() == 0) return suite.check(false, "[{}] no visible GPU", label);
-    expected<multimem_domain_t> domain = make_domain_(trainer, 1u);
+    expected<multimem_domain_t> domain = make_domain_(topology, trainer, 1u);
     if (!domain) return suite.check(false, "[{}] domain setup: {}", label, domain.description_);
     expected<colocated_domain_t> colocated = colocated_domain_t::make(topology);
     if (!colocated) return suite.check(false, "[{}] colocated setup: {}", label, colocated.description_);
@@ -448,7 +475,7 @@ static void gradient_propagation(test_suite_t &suite, mesh_topology_t const &top
     expected<array<bf16_t>> seed_snapshot = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
     if (!seed_snapshot) return suite.check(false, "gradient seed snapshot: {}", seed_snapshot.description_);
 
-    expected<multimem_domain_t> domain = make_domain_(trainer, 1u);
+    expected<multimem_domain_t> domain = make_domain_(topology, trainer, 1u);
     if (!domain) return suite.check(false, "gradient domain setup: {}", domain.description_);
     expected<colocated_domain_t> colocated = colocated_domain_t::make(topology);
     if (!colocated) return suite.check(false, "gradient colocated setup: {}", colocated.description_);

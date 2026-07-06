@@ -298,10 +298,8 @@ expected_t multimodal_batch_mixer_t::operator()(std::size_t member_index, data_e
         sources.entries[member] = source;
     }
 
-    // The shared phase rides the lead member's slice — see the ordering contract: this consumer's
-    // advance/barrier bracket is the step's first, ordering "everyone loaded" before any peer read.
-    if (member_index == 0)
-        if (expected_t advanced = multimem_->advance(stream); !advanced) return advanced;
+    // The step's first barrier orders "everyone loaded" before any peer read; the round is the member's
+    // own, self-advanced inside the barrier kernel.
     if (expected_t arrived = multimem_->barrier(member_index, stream); !arrived) return arrived;
 
     // This member's mixed batch is the scatter target — a modality absent from it leaves a null pointer.

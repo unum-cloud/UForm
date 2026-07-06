@@ -33,9 +33,10 @@ static bool parse_fabric_handle_(sz::string_view token, CUmemFabricHandle &handl
 
 /**
  *  @brief Domain barrier: lane 0 release-adds 1 into every replica's counter, then acquire-spins on its
- *      @b own counter until all @c member_count arrivals of this round landed. Monotonic — the
- *      counter never resets, so a captured step replays cleanly; the round itself is device
- *      self-advanced by @ref barrier_round_t::advance , not host-bumped.
+ *      @b own counter until all @c member_count arrivals of this round landed, and finally self-advances
+ *      its @b own round scalar. Monotonic — neither counter ever resets, so a captured step replays
+ *      cleanly, and every round read and write stays on the member's own stream: no enqueue order can
+ *      hand a barrier a stale round.
  *
  *  __grid_size__ @c [1,1,1] , one warp; no dynamic shared memory.
  */
@@ -47,6 +48,7 @@ static __global__ void multimem_barrier_kernel_(multimem_member_t member) {
         // Spin until every member's arrival of this round reached our replica.
     }
     __threadfence_system();
+    *member.round = target; // Self-advance: only this member's own kernels ever read its round.
 }
 
 /**
@@ -66,6 +68,7 @@ static __global__ void multimem_barrier_peer_kernel_(multimem_member_t member) {
         // Spin until every member's arrival of this round reached our replica.
     }
     __threadfence_system();
+    *member.round = target; // Self-advance: only this member's own kernels ever read its round.
 }
 
 /**
@@ -278,14 +281,14 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
         }
         if (expected_t published = topology.publish_text("multimem.slice", slices_text.view()); !published)
             return result_t::fail(std::move(published));
-        for (u32_t block = 0; block != host_domains_per_domain; ++block) {
-            u32_t const peer_host = domain_first_host + block;
+        for (u32_t peer_host = domain_first_host; peer_host != domain_first_host + host_domains_per_domain;
+             ++peer_host) {
             if (peer_host == topology.host_domain_index) continue;
             sz::string peer_text;
             if (expected_t awaited = topology.await_text(peer_host, "multimem.slice", peer_text, timeout_seconds);
                 !awaited)
                 return result_t::fail(std::move(awaited));
-            u32_t const peer_member_base = block * gpus_per_host;
+            u32_t const peer_member_base = (peer_host - domain_first_host) * gpus_per_host;
             u32_t adopted_count = 0;
             for (sz::string_view token : peer_text.view().split(sz::whitespaces_set())) {
                 if (token.empty()) continue;
@@ -377,7 +380,9 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
             return result_t::fail(std::move(granted));
     }
 
-    // 4. Zero this process's local slices' arrival counters — each process owns its physical replicas.
+    // 4. Zero this process's local slices' arrival flag and round scalar — each process owns its
+    //    physical replicas, and a zero round makes the first barrier's target exactly one round of
+    //    arrivals; the barrier kernels self-advance from there.
     for (std::size_t local = 0; local != local_count; ++local) {
         u32_t const member = member_offset + static_cast<u32_t>(local);
         std::span<std::byte> member_slice = domain.replicas_.member_slice(member);
@@ -386,16 +391,7 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
             return result_t::fail(result, "arrival counter reset failed (member={})", member);
     }
 
-    // 5. The lead host_domain seeds the round scalar (it lives in member 0's replica, which the lead owns);
-    //    non-lead processes read it but never advance it (see @ref advance ).
-    if (is_lead) {
-        expected<barrier_round_t> round = barrier_round_t::make(u32r1_span_t {domain.round_pointer_(), 1}, member_count,
-                                                                local_streams[0]);
-        if (!round) return result_t::fail(std::move(round));
-        domain.round_ = std::move(round.value_);
-    }
-
-    // 6. Every process has finished binding before the first collective runs.
+    // 5. Every process has finished binding before the first collective runs.
     if (expected_t synchronized = topology.barrier("multimem", timeout_seconds); !synchronized)
         return result_t::fail(std::move(synchronized));
     return result_t {std::move(domain)};

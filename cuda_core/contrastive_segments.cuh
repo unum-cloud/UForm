@@ -389,9 +389,9 @@ struct distributed_contrastive_segments_t {
     /**
      *  @brief Rank @p rank 's slice of one distributed evaluation — pure enqueue onto @p stream , the
      *      shape a fork/join capture body composes directly. Rank 0's slice carries the shared phase:
-     *      the domain's round advance and (across domains) the world-tower gather every other rank's
-     *      stream waits on. All views were baked at @ref make ; the only per-call argument is the
-     *      recipe. Ranks must be enqueued in order @c 0..gpus-1 within a step.
+     *      (across domains) the world-tower gather every other rank's stream waits on. All views were
+     *      baked at @ref make ; the only per-call argument is the recipe. Ranks must be enqueued in
+     *      order @c 0..gpus-1 within a step.
      */
     [[nodiscard]] expected_t operator()(std::size_t rank, contrastive_recipe_t recipe, gpu_stream_t &stream) noexcept;
 

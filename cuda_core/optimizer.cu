@@ -321,9 +321,6 @@ expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, 
     if (rank >= gpus) return expected_t::fail(status_t::invalid_input_k, "rank {} of {}", rank, gpus);
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed ({})", rank);
-    // The shared phase rides the lead rank's slice — see the ordering contract.
-    if (rank == 0)
-        if (expected_t advanced = domain_->advance(stream); !advanced) return advanced;
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     expected_t staged {};
     f32_t *const window_base = domain_->payload(rank).data() + window_.offset;

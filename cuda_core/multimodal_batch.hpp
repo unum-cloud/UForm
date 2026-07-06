@@ -407,9 +407,9 @@ struct multimodal_batch_mixer_t {
 
     /**
      *  @brief Member @p member_index 's slice of one mix — pure enqueue onto @p stream : gather its
-     *      incoming segments from all members' @p loaded batches into its own @p mixed batch. Member
-     *      0's slice carries the multimem_domain's round advance; every member barriers before its
-     *      peer reads, and members are enqueued in order @c 0..members-1 within a step.
+     *      incoming segments from all members' @p loaded batches into its own @p mixed batch. Every
+     *      member barriers (its own self-advancing round) before its peer reads, and members are
+     *      enqueued in order @c 0..members-1 within a step.
      *
      *  @param[in] member_index This GPU's index inside the borrowed @b multimem_domain —
      *      @c [0,multimem_domain_t::member_count()) , the same axis @c member() and @c barrier()

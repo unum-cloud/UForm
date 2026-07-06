@@ -890,12 +890,9 @@ expected_t distributed_contrastive_segments_t::operator()(std::size_t rank, cont
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed ({})", rank);
 
-    // The shared phase rides the lead rank's slice — see the ordering contract.
-    if (rank == 0) {
-        if (expected_t advanced = domain_->advance(stream); !advanced) return advanced;
-        if (world_domains() > 1u)
-            if (expected_t gathered = gather_world_tower_(stream); !gathered) return gathered;
-    }
+    // The cross-domain gather rides the lead rank's slice — see the ordering contract.
+    if (rank == 0 && world_domains() > 1u)
+        if (expected_t gathered = gather_world_tower_(stream); !gathered) return gathered;
     if (world_domains() > 1u)
         if (CUresult result = cuStreamWaitEvent(stream.get(), gather_ready_.get(), 0); result != CUDA_SUCCESS)
             return expected_t::fail(result, "gather wait failed (rank={})", rank);
