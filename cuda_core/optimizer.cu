@@ -219,7 +219,7 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
         f32r1_span_t const master {optimizer.masters_.data() + state.master_offset, cols};
         if (expected_t seeded = launch_kernel(
                 reinterpret_cast<void const *>(&adafactor_seed_master_kernel_), dim3 {grid_size_for(cols), 1u, 1u},
-                dim3 {kernel_block_size_default_k, 1u, 1u}, stream, state.weights.weights, master);
+                dim3 {kernel_block_size_default_k, 1u, 1u}, stream, state.weights.weights.flatten<1>(), master);
             !seeded)
             return result_t::fail(std::move(seeded));
     }
