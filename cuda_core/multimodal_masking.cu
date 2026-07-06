@@ -303,16 +303,16 @@ static __global__ void patch_mask_sample_kernel_(u32r1_span_t mask, u64_t seed, 
     mask[patch] = draw < mask_ratio ? 1u : 0u;
 }
 
-/** @brief Substitute the masked patch vectors with the fixed-zero mask token; visible patches copy clean.
+/** @brief Zero the raw patch rows the mask selects, in place; visible rows keep their pixels. The driver
+ *      calls this on the live batch media so the tower re-patchifies the corrupted pixels.
  *
  *  __grid_size__ @c [grid_size_for(patches),1,1] , persistent stride; no dynamic shared memory. */
-static __global__ void patch_substitute_kernel_(bf16r2_view_t clean, bf16r2_span_t distorted, u32r1_view_t mask,
-                                                u32_t patch_pixels) {
+static __global__ void patch_corrupt_raw_kernel_(nk::tensor_span<pixel_t, 2> raw, u32r1_view_t mask) {
     std::size_t const patches = mask.extent(0);
+    u32_t const patch_scalars = raw.extent(1);
     for (std::size_t patch = blockIdx.x; patch < patches; patch += gridDim.x) {
-        bool const masked = mask[patch] != 0u;
-        for (u32_t index = threadIdx.x; index < patch_pixels; index += blockDim.x)
-            distorted[patch, index] = masked ? __float2bfloat16(0.0f) : clean[patch, index];
+        if (mask[patch] == 0u) continue;
+        for (u32_t index = threadIdx.x; index < patch_scalars; index += blockDim.x) raw[patch, index] = pixel_t {0};
     }
 }
 
@@ -444,23 +444,24 @@ expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, cublaslt_s
     return result_t {std::move(head)};
 }
 
-expected_t masked_patches_t::sample_and_corrupt(bf16r2_view_t clean_patches, bf16r2_span_t distorted_patches,
-                                                masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept {
-    u32_t const patches = config_.max_patches, patch_pixels = config_.patch_pixels;
-    if (clean_patches.extent(0) != patches || distorted_patches.extent(0) != patches ||
-        clean_patches.extent(1) != patch_pixels || distorted_patches.extent(1) != patch_pixels)
-        return expected_t::fail(status_t::shape_unsupported_k, "corrupt buffers must be [{},{}]", patches,
-                                patch_pixels);
+expected_t masked_patches_t::sample_mask(masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept {
+    u32_t const patches = config_.max_patches;
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const patch_grid {grid_size_for(patches), 1u, 1u};
     u32_t const spatial_patches = patches / config_.temporal_groups;
-    expected_t staged = launch_kernel(reinterpret_cast<void const *>(&patch_mask_sample_kernel_), patch_grid,
-                                      block_shape, stream, mask_.span(), recipe.seed, epoch.index, config_.mask_ratio,
-                                      spatial_patches);
-    if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&patch_substitute_kernel_), patch_grid, block_shape,
-                               stream, clean_patches, distorted_patches, mask_.view(), patch_pixels);
-    return staged;
+    return launch_kernel(reinterpret_cast<void const *>(&patch_mask_sample_kernel_), patch_grid, block_shape, stream,
+                         mask_.span(), recipe.seed, epoch.index, config_.mask_ratio, spatial_patches);
+}
+
+expected_t masked_patches_t::corrupt_raw(nk::tensor_span<pixel_t, 2> raw_patches, gpu_stream_t &stream) noexcept {
+    u32_t const patches = config_.max_patches;
+    if (raw_patches.extent(0) != patches)
+        return expected_t::fail(status_t::shape_unsupported_k, "corrupt_raw expects [{},patch_scalars] patch rows",
+                                patches);
+    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
+    dim3 const patch_grid {grid_size_for(patches), 1u, 1u};
+    return launch_kernel(reinterpret_cast<void const *>(&patch_corrupt_raw_kernel_), patch_grid, block_shape, stream,
+                         raw_patches, mask_.view());
 }
 
 expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t clean_patches,
@@ -494,7 +495,7 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
                                position_loss_.view(), gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
         staged = plan_for(linear_matmul_family_t::data_grad_k)
-                     .matmul(*session_, predicted_grad_.view(), recon_weight_.view(), normalized_grad, 0.0f,
+                     .matmul(*session_, predicted_grad_.view(), recon_weight_.view(), normalized_grad, 1.0f,
                              workspace_.span(), stream);
     if (staged)
         staged = plan_for(linear_matmul_family_t::weight_grad_k)
@@ -524,17 +525,16 @@ static __global__ void frame_mask_sample_kernel_(u32r1_span_t mask, u64_t seed, 
     mask[frame] = draw < mask_ratio ? 1u : 0u;
 }
 
-/** @brief Substitute the masked frames with the fixed-zero mask token; visible frames copy their clean
- *      Float32 samples through.
+/** @brief Zero the raw waveform frames the mask selects, in place; visible frames keep their Float32
+ *      samples. The driver calls this on the live batch audio so the tower re-projects the corrupted samples.
  *
  *  __grid_size__ @c [grid_size_for(frames),1,1] , persistent stride; no dynamic shared memory. */
-static __global__ void frame_substitute_kernel_(f32r2_view_t clean, f32r2_span_t distorted, u32r1_view_t mask,
-                                                u32_t chunk_samples) {
+static __global__ void frame_corrupt_raw_kernel_(f32r2_span_t raw, u32r1_view_t mask) {
     std::size_t const frames = mask.extent(0);
+    u32_t const chunk_samples = raw.extent(1);
     for (std::size_t frame = blockIdx.x; frame < frames; frame += gridDim.x) {
-        bool const masked = mask[frame] != 0u;
-        for (u32_t index = threadIdx.x; index < chunk_samples; index += blockDim.x)
-            distorted[frame, index] = masked ? 0.0f : clean[frame, index];
+        if (mask[frame] == 0u) continue;
+        for (u32_t index = threadIdx.x; index < chunk_samples; index += blockDim.x) raw[frame, index] = 0.0f;
     }
 }
 
@@ -666,21 +666,23 @@ expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, cublaslt_ses
     return result_t {std::move(head)};
 }
 
-expected_t masked_frames_t::sample_and_corrupt(f32r2_view_t clean_frames, f32r2_span_t distorted_frames,
-                                               masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept {
-    u32_t const frames = config_.max_frames, chunk_samples = config_.chunk_samples;
-    if (clean_frames.extent(0) != frames || distorted_frames.extent(0) != frames ||
-        clean_frames.extent(1) != chunk_samples || distorted_frames.extent(1) != chunk_samples)
-        return expected_t::fail(status_t::shape_unsupported_k, "corrupt buffers must be [{},{}]", frames,
-                                chunk_samples);
+expected_t masked_frames_t::sample_mask(masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept {
+    u32_t const frames = config_.max_frames;
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const frame_grid {grid_size_for(frames), 1u, 1u};
-    expected_t staged = launch_kernel(reinterpret_cast<void const *>(&frame_mask_sample_kernel_), frame_grid,
-                                      block_shape, stream, mask_.span(), recipe.seed, epoch.index, config_.mask_ratio);
-    if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&frame_substitute_kernel_), frame_grid, block_shape,
-                               stream, clean_frames, distorted_frames, mask_.view(), chunk_samples);
-    return staged;
+    return launch_kernel(reinterpret_cast<void const *>(&frame_mask_sample_kernel_), frame_grid, block_shape, stream,
+                         mask_.span(), recipe.seed, epoch.index, config_.mask_ratio);
+}
+
+expected_t masked_frames_t::corrupt_raw(f32r2_span_t raw_frames, gpu_stream_t &stream) noexcept {
+    u32_t const frames = config_.max_frames;
+    if (raw_frames.extent(0) != frames)
+        return expected_t::fail(status_t::shape_unsupported_k, "corrupt_raw expects [{},chunk_samples] frame rows",
+                                frames);
+    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
+    dim3 const frame_grid {grid_size_for(frames), 1u, 1u};
+    return launch_kernel(reinterpret_cast<void const *>(&frame_corrupt_raw_kernel_), frame_grid, block_shape, stream,
+                         raw_frames, mask_.view());
 }
 
 expected_t masked_frames_t::operator()(bf16r2_view_t normalized, f32r2_view_t clean_frames, f32r1_span_t loss_summands,
@@ -713,7 +715,7 @@ expected_t masked_frames_t::operator()(bf16r2_view_t normalized, f32r2_view_t cl
                                position_loss_.view(), gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
         staged = plan_for(linear_matmul_family_t::data_grad_k)
-                     .matmul(*session_, predicted_grad_.view(), recon_weight_.view(), normalized_grad, 0.0f,
+                     .matmul(*session_, predicted_grad_.view(), recon_weight_.view(), normalized_grad, 1.0f,
                              workspace_.span(), stream);
     if (staged)
         staged = plan_for(linear_matmul_family_t::weight_grad_k)

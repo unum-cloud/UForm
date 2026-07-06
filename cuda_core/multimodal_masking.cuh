@@ -12,8 +12,9 @@
  *  The objective runs on two instances of the same representation: the clean one is the reconstruction
  *  target, the distorted one is what the tower sees. Corruption is a pure function of @c (seed,epoch,
  *  position) through the epoch shuffle's mixer — identical on every host_domain, bit-reproducible, no
- *  cuRAND and no state. Tokens are corrupted in vocabulary space (MASK / random byte / kept); image /
- *  video patches and 1-D audio frames are zeroed at masked rows before the tower's entry projection.
+ *  cuRAND and no state. Tokens are corrupted in vocabulary space (MASK / random byte / kept); for image /
+ *  video patches and 1-D audio frames the driver zeros the masked raw media rows in place before the tower
+ *  re-patchifies.
  *
  *  @section masking_gradient The additive join with the tower
  *
@@ -231,16 +232,16 @@ struct masked_tokens_t {
 };
 
 /**
- *  @brief The masked-image / video objective: a deterministic patch-mask sampler with a
- *      fixed-zero substitution, and a linear reconstruction head with a per-patch normalized-MSE loss.
- *      @ref sample_and_corrupt zeros the masked patch vectors before the tower's entry projection;
- *      @ref operator() reconstructs the clean patches from the tower's states and writes @c d(normalized)
- *      for the additive join.
+ *  @brief The masked-image / video objective: a deterministic patch-mask sampler and a raw-media corruptor,
+ *      plus a linear reconstruction head with a per-patch normalized-MSE loss. @ref sample_mask draws the
+ *      patch mask and @ref corrupt_raw zeros the masked raw media rows in place before the tower
+ *      re-patchifies; @ref operator() reconstructs the clean patches from the tower's states and writes
+ *      @c d(normalized) for the additive join.
  *
  *  The head is a plain linear projection @c hidden→patch_pixels : the tower already RMSNorms the states it
- *  hands back through @c normalized() , so a second pre-norm here would only re-normalize. The mask token
- *  is a fixed zero — no @c d(patches) is needed from the tower, so the
- *  objective stays fully orthogonal to the entry projection.
+ *  hands back through @c normalized() , so a second pre-norm here would only re-normalize. A masked patch's
+ *  raw row is zeroed — no @c d(patches) is needed from the tower, so the objective stays fully orthogonal to
+ *  the entry projection.
  *
  *  The per-patch MSE z-scores both the prediction and the target by their own per-patch mean and
  *  standard deviation — deliberately, not He-et-al. MAE (which normalizes the target only). Two
@@ -258,15 +259,21 @@ struct masked_patches_t {
                                                          masked_patches_config_t config) noexcept;
 
     /**
-     *  @brief Sample the patch mask and write @p distorted_patches — pure enqueue. A patch is masked with
-     *      probability @c mask_ratio (tubed across time groups when @c temporal_groups > 1 ); a masked
-     *      patch's vector is zeroed, an unmasked one copies clean.
-     *
-     *  @param[in] clean_patches The frontend's normalized patch vectors @b [patches,patch_pixels] .
-     *  @param[out] distorted_patches The tower's input @b [patches,patch_pixels] — clean or zeroed.
+     *  @brief Sample the patch mask into @c mask_ — pure enqueue, nothing else. A patch is masked with
+     *      probability @c mask_ratio , tubed across time groups when @c temporal_groups > 1 so a masked
+     *      spatial cell stays masked across all its time groups.
      */
-    [[nodiscard]] expected_t sample_and_corrupt(bf16r2_view_t clean_patches, bf16r2_span_t distorted_patches,
-                                                masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t sample_mask(masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept;
+
+    /**
+     *  @brief Corrupt the raw batch media in place — pure enqueue. Zeros every raw patch row whose @c mask_
+     *      entry is one and leaves the visible rows untouched, so the tower re-patchifies the corrupted
+     *      pixels. Call after @ref sample_mask , on the live batch media the tower reads.
+     *
+     *  @param[inout] raw_patches The batch's image / video patches @b [patches,patch_scalars] of raw
+     *      @ref pixel_t — @c batch.images / @c batch.videos flattened to one row per patch.
+     */
+    [[nodiscard]] expected_t corrupt_raw(nk::tensor_span<pixel_t, 2> raw_patches, gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief Reconstruct and score the masked patches — pure enqueue on @p stream .
@@ -311,18 +318,18 @@ struct masked_patches_t {
 };
 
 /**
- *  @brief The masked-audio objective: a deterministic per-frame mask sampler with a fixed-zero
- *      substitution, and a linear reconstruction head with a per-frame normalized-MSE loss over the raw
- *      Float32 waveform. @ref sample_and_corrupt zeros the masked frames before the tower's entry
- *      projection; @ref operator() reconstructs the clean frames from the tower's states and writes
- *      @c d(normalized) for the additive join.
+ *  @brief The masked-audio objective: a deterministic per-frame mask sampler and a raw-media corruptor,
+ *      plus a linear reconstruction head with a per-frame normalized-MSE loss over the raw Float32 waveform.
+ *      @ref sample_mask draws the frame mask and @ref corrupt_raw zeros the masked raw waveform rows in place
+ *      before the tower re-projects; @ref operator() reconstructs the clean frames from the tower's states and
+ *      writes @c d(normalized) for the additive join.
  *
  *  Audio is delivered raw as @c audio_samples[rows,columns,chunk_samples] — a run of 1-D waveform frames,
  *  not 2-D patches — and the tower's audio entry linearly projects each @c chunk_samples -wide frame to
  *  @c hidden . This head is the mirror on the way out: a plain linear projection @c hidden→chunk_samples
  *  whose target is the raw frame. The states arrive already RMSNormed through @c normalized() , so no
- *  pre-norm is repeated here, and the mask token is a fixed zero, so the objective stays orthogonal to the
- *  entry projection.
+ *  pre-norm is repeated here, and a masked frame's raw row is zeroed, so the objective stays orthogonal to
+ *  the entry projection.
  *
  *  The per-frame MSE z-scores both the prediction and the target by their own per-frame mean and standard
  *  deviation — identical to @ref masked_patches_t and deliberately not target-only MAE. Two independent
@@ -339,16 +346,20 @@ struct masked_frames_t {
                                                         masked_frames_config_t config) noexcept;
 
     /**
-     *  @brief Sample the frame mask and write @p distorted_frames — pure enqueue. A frame is masked with
-     *      probability @c mask_ratio , drawn independently per frame; a masked frame's samples are zeroed,
-     *      an unmasked one copies clean.
-     *
-     *  @param[in] clean_frames The frontend's raw waveform frames @b [frames,chunk_samples] Float32 — a
-     *      flattened view of @c audio_samples .
-     *  @param[out] distorted_frames The tower's input @b [frames,chunk_samples] Float32 — clean or zeroed.
+     *  @brief Sample the frame mask into @c mask_ — pure enqueue, nothing else. A frame is masked with
+     *      probability @c mask_ratio , drawn independently per frame.
      */
-    [[nodiscard]] expected_t sample_and_corrupt(f32r2_view_t clean_frames, f32r2_span_t distorted_frames,
-                                                masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t sample_mask(masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept;
+
+    /**
+     *  @brief Corrupt the raw batch media in place — pure enqueue. Zeros every raw waveform frame whose
+     *      @c mask_ entry is one and leaves the visible frames untouched, so the tower re-projects the
+     *      corrupted samples. Call after @ref sample_mask , on the live batch audio the tower reads.
+     *
+     *  @param[inout] raw_frames The batch's audio frames @b [frames,chunk_samples] Float32 — @c audio_samples
+     *      flattened to one row per frame.
+     */
+    [[nodiscard]] expected_t corrupt_raw(f32r2_span_t raw_frames, gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief Reconstruct and score the masked frames — pure enqueue on @p stream .

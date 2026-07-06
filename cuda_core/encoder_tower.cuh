@@ -141,6 +141,16 @@ struct encoder_tower_bf16_t {
     [[nodiscard]] expected_t backward(bf16r2_view_t vertices_grad, bf16r2_view_t hidden_grad,
                                       multimodal_batch_on_gpu_t const &batch, gpu_stream_t &stream) noexcept;
 
+    /** @brief Stage each present media modality's raw pixels into the @b clean per-channel-normalized patch
+     *      vectors a masked-autoencoder step reconstructs against — the same @c (byte/255 − mean)·inverse_std
+     *      normalization the entry projects from, written straight into the caller's @b [live_tokens,patch_scalars]
+     *      @p image_patches / @p video_patches over the packed grid (non-modality and gap rows left zero), with no
+     *      projection and without running @ref forward . A modality is staged only when its projection is
+     *      configured, its @p batch tensor is present, and its output span is non-empty; audio is not staged here —
+     *      its reconstruction target is the raw @c batch.audio_samples frames the caller reshapes directly. */
+    [[nodiscard]] expected_t patchify_media_targets(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t image_patches,
+                                                    bf16r2_span_t video_patches, gpu_stream_t &stream) noexcept;
+
     /** @brief Fill @p weights with every optimizer-facing weight in the canonical reduction order:
      *      entry → media projections → per-layer block weights → final norm → pool query → head. */
     [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;

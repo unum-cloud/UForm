@@ -219,6 +219,33 @@ static expected_t upload_pixel_constants(f32r1_tensor_arena_t &mean_arena, f32r1
 }
 
 /**
+ *  @brief Stage one pixel modality's raw cells into per-channel-normalized BFloat16 patch vectors over the
+ *      caller's @b [rows,scalars] @p patches — zero the whole span, then run @ref tower_normalize_segment_kernel_
+ *      so only @p target 's cells are written ( @c (byte/255 − mean)·inverse_std , @c channels innermost) and every
+ *      non-modality row stays zero. The one normalize launch @ref project_media_entries folds behind its
+ *      projection and @ref encoder_tower_bf16_t::patchify_media_targets hands out as the masked-autoencoder
+ *      reconstruction target — the two differ only in where @p patches lands and whether a projection follows,
+ *      never in the staging itself.
+ */
+static expected_t stage_pixel_patches(nk::tensor_view<pixel_t, 3> raw, modality_t target, f32r1_view_t mean,
+                                      f32r1_view_t inverse_std, u32r1_view_t offsets, u32r1_view_t lengths,
+                                      modality_view_t modality, dim3 segment_grid, bf16r2_span_t patches,
+                                      gpu_stream_t &stream) noexcept {
+    std::size_t const rows = patches.extent(0);
+    u32_t const spatial = static_cast<u32_t>(raw.extent(1));
+    u32_t const channels = static_cast<u32_t>(raw.extent(2));
+    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
+    if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(patches.data()), 0,
+                                          rows * static_cast<std::size_t>(spatial) * channels * sizeof(bf16_t),
+                                          stream.get());
+        result != CUDA_SUCCESS)
+        return expected_t::fail(result, "pixel patch reset failed");
+    return launch_kernel(reinterpret_cast<void const *>(&tower_normalize_segment_kernel_), segment_grid, block_shape,
+                         stream, raw, offsets, lengths, modality, target, mean, inverse_std,
+                         patches.reshape<3>({rows, spatial, channels}));
+}
+
+/**
  *  @brief Project every present media modality's raw signal into the packed entry state: for each present
  *      modality zero @p patch_scratch , stage only that modality's cells in place (image / video pixels
  *      normalized by their per-channel mean / inverse-std, audio raw frames cast as-is — a cell's content
@@ -245,19 +272,11 @@ static expected_t project_media_entries(
     auto project_pixels = [&](std::size_t plan_base, nk::tensor_view<pixel_t, 3> raw, modality_t target,
                               f32r1_view_t mean, f32r1_view_t inverse_std,
                               bf16r2_view_t projection) noexcept -> expected_t {
-        u32_t const spatial = static_cast<u32_t>(raw.extent(1));
-        u32_t const channels = static_cast<u32_t>(raw.extent(2));
-        u32_t const scalars = spatial * channels;
-        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(patch_scratch.data()), 0,
-                                              live_tokens * scalars * sizeof(bf16_t), stream.get());
-            result != CUDA_SUCCESS)
-            return expected_t::fail(result, "pixel patch scratch reset failed");
+        u32_t const scalars = static_cast<u32_t>(raw.extent(1)) * static_cast<u32_t>(raw.extent(2));
         bf16r2_span_t const patches {patch_scratch.data(), live_tokens, scalars};
-        expected_t normalized = launch_kernel(reinterpret_cast<void const *>(&tower_normalize_segment_kernel_),
-                                              segment_grid, block_shape, stream, raw, segment_offsets, segment_lengths,
-                                              segment_modality, target, mean, inverse_std,
-                                              patches.reshape<3>({live_tokens, spatial, channels}));
-        if (!normalized) return normalized;
+        expected_t staged = stage_pixel_patches(raw, target, mean, inverse_std, segment_offsets, segment_lengths,
+                                                segment_modality, segment_grid, patches, stream);
+        if (!staged) return staged;
         return plans[plan_base].matmul(blas, bf16r2_view_t {patches}, projection, entry_output.span(), 1.0f,
                                        workspace.span(), stream);
     };
@@ -704,6 +723,43 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
     if (vertices.data() == nullptr) return {};
     return expected_t::fail(status_t::shape_unsupported_k,
                             "the contrastive attention pool + head are not yet built (masked path only)");
+}
+
+expected_t encoder_tower_bf16_t::patchify_media_targets(multimodal_batch_on_gpu_t const &batch,
+                                                        bf16r2_span_t image_patches, bf16r2_span_t video_patches,
+                                                        gpu_stream_t &stream) noexcept {
+    // The masked-autoencoder reconstruction target: the same per-channel-normalized patch vectors the entry
+    // stages before its projection, but written into the caller's clean-batch spans with no projection and no
+    // forward — one shared stage per present pixel modality, non-modality and gap rows left zero. Audio's target
+    // is the raw waveform frames, so the caller reshapes batch.audio_samples directly and passes nothing here.
+    std::size_t const columns = batch.tokens.extent(1);
+    std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
+    dim3 const segment_grid {static_cast<u32_t>(batch.live_segments()), 1u, 1u};
+    u32r1_view_t const segment_offsets = batch.segment_offsets.view();
+    u32r1_view_t const segment_lengths = batch.segment_lengths.view();
+    modality_view_t const segment_modality = batch.segment_modality.view();
+
+    expected_t staged {};
+    if (image_plan_base_ != plan_absent_k && batch.images.data() != nullptr && image_patches.data() != nullptr &&
+        image_patches.extent(0) != 0) {
+        std::size_t const spatial = static_cast<std::size_t>(batch.images.extent(2)) * batch.images.extent(3);
+        staged = stage_pixel_patches(batch.images.view().reshape<3>({live_tokens, spatial, batch.images.extent(4)}),
+                                     modality_t::image_k, image_pixel_mean_.view(), image_pixel_inverse_std_.view(),
+                                     segment_offsets, segment_lengths, segment_modality, segment_grid, image_patches,
+                                     stream);
+        if (!staged) return staged;
+    }
+    if (video_plan_base_ != plan_absent_k && batch.videos.data() != nullptr && video_patches.data() != nullptr &&
+        video_patches.extent(0) != 0) {
+        std::size_t const spatial = static_cast<std::size_t>(batch.videos.extent(2)) * batch.videos.extent(3) *
+                                    batch.videos.extent(4);
+        staged = stage_pixel_patches(batch.videos.view().reshape<3>({live_tokens, spatial, batch.videos.extent(5)}),
+                                     modality_t::video_k, video_pixel_mean_.view(), video_pixel_inverse_std_.view(),
+                                     segment_offsets, segment_lengths, segment_modality, segment_grid, video_patches,
+                                     stream);
+        if (!staged) return staged;
+    }
+    return staged;
 }
 
 expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_view_t hidden_grad,
