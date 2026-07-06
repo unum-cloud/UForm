@@ -235,11 +235,13 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
     multimem_domain_t domain;
     domain.payload_scalars_ = payload_scalars;
     domain.member_offset_ = member_offset;
-    // Replica layout: [payload f32×N | flag u32 | round u32], regions cache-line aligned. The round
-    // scalar is live only in the lead replica (member 0), peer-read by every barrier.
+    // Replica layout: [payload f32×N | flag u32 | round u32], regions cache-line aligned. Each member's
+    // round scalar lives in its own replica, self-advanced by its barrier kernels.
     std::size_t const replica_bytes = domain.flag_offset_() + 2 * sizeof(u32_t);
 
-    bool multimem_everywhere = true;
+    // A 1-member domain takes the peer-read tier outright: cuMulticastCreate rejects a single-device
+    // object, and a 1-member "multicast" is a self-read anyway.
+    bool multimem_everywhere = member_count > 1;
     for (i32_t const device : local_devices) {
         int supported = 0;
         if (CUresult result = cuDeviceGetAttribute(&supported, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, device);

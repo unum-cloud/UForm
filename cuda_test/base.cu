@@ -16,16 +16,17 @@
  *  The case matrix:
  *
  *      - @ref learning_rate_schedule — the warmup / cosine policy's properties, pure host math, no GPU.
- *      - @ref run_base_conformance for the tokens and omni mixtures — @b A every replica bitwise-matches the
- *        lead, @b B the barrier round advanced and reads identically, @b C a reseeded eager rerun lands
- *        bitwise on the captured run, @b D the composite loss fell, @b E every live head's loss read nonzero at
- *        least once (the keyed partition fed every modality).
- *      - @ref mixture_sweep — the cross-product of every media subset (2³) with one-row and two-row budgets;
- *        each cell steps eagerly, then captures and replays over the same trainer, so both model-region modes
- *        run under every mixture, including the zero-live-rows cells a one-row omni batch produces.
- *      - @ref graph_capture — the capture contract holds and two replays are bitwise-identical; needs no
- *        domain, so it stays green even where multicast is not provisioned.
- *      - @ref gradient_propagation — one step moves the weights off their seed.
+ *      - @ref run_base_conformance for the tokens and omni mixtures at full width — @b A every replica
+ *        bitwise-matches the lead, @b B every member's barrier round advanced and they all agree, @b C a
+ *        reseeded eager rerun lands bitwise on the captured run, @b D each head's loss fell between its first
+ *        and last scored steps, @b E every live head's loss read nonzero at least once, @b F the captured
+ *        window moved the weights off their seed.
+ *      - @ref mixture_sweep — two width tiers: every media subset (2³) crossed with one-row and two-row
+ *        budgets on an isolated one-GPU world (plus the uneven five-row and 96-column omni corners), then
+ *        every subset again at the bootstrapped world's full width. Each cell steps eagerly, then captures
+ *        and replays over the same trainer, so both model-region modes run under every mixture.
+ *      - @ref graph_capture — the capture contract holds and two replays are bitwise-identical; runs on the
+ *        one-GPU world and needs no domain, so it stays green even where multicast is not provisioned.
  */
 #include <cmath>   // `std::isfinite`
 #include <cstdlib> // `std::getenv`, `std::atoi` — the distributed tier's host_domain count
@@ -61,6 +62,25 @@ using namespace unum::uform::test;
     config.steps = 8;
     config.warmup_steps = 2;
     return config;
+}
+
+/** @brief A narrowed copy of the bootstrapped world: this process alone drives @p gpus GPUs as an isolated
+ *      one-host-domain mesh — the sweep's cheap tier and the capture case's world. Safe because a single-host
+ *      topology carries no rendezvous state; the one cross-field invariant is that @c host_domains sizes to
+ *      @c shape.host_domain_count() . */
+[[nodiscard]] static expected<mesh_topology_t> narrowed_topology_(mesh_topology_t const &world, u32_t gpus) noexcept {
+    using result_t = expected<mesh_topology_t>;
+    mesh_topology_t narrowed;
+    narrowed.shape.gpus_per_host_domain = gpus;
+    narrowed.shape.gpus_per_multimem_domain = gpus;
+    narrowed.shape.gpus_per_colocated_domain = gpus;
+    narrowed.host_domain_index = 0;
+    if (narrowed.host_domains.try_resize(1) != status_t::success_k)
+        return result_t::fail(status_t::bad_alloc_k, "narrowed host-domain table allocation failed");
+    narrowed.host_domains[0] = world.host_domains[world.host_domain_index];
+    narrowed.host_domains[0].host_domain_index = 0;
+    narrowed.host_domains[0].device_count = gpus;
+    return result_t {std::move(narrowed)};
 }
 
 /** @brief The one multimem domain over @p windows disjoint optimizer windows of one replica's payload — one
@@ -286,6 +306,9 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
     per_gpu_array<gpu_replay_graph_t> graphs;
     if (expected_t captured = trainer.capture(graphs); !captured)
         return suite.check(false, "[{}] model-region capture: {}", label, captured.description_);
+    // Assertion F's reference: the lead replica's freshly seeded weights, untouched by the capture.
+    expected<array<bf16_t>> seed_lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
+    if (!seed_lead) return suite.check(false, "[{}] seed snapshot: {}", label, seed_lead.description_);
 
     // The captured run, telemetry every step. Assertion D compares each head against itself — its first
     // and last scored (nonzero) readouts — so a step whose keyed draw masked nothing for one head (a
@@ -359,6 +382,11 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
     if (config.batch.contains(modality_t::audio_k))
         suite.check(audio_trained, "[{}] the audio head trained (E)", label);
 
+    // F — the captured window moved the weights off their seed: gradients propagated through the whole
+    //     backbone and the optimizer applied them.
+    suite.check(!snapshots_match_(seed_lead.value_, captured_lead.value_),
+                "[{}] the captured window moved the weights off their seed (F)", label);
+
     // C — capture == eager: reseed the replicas identically, take fresh moments on the second window, rerun the
     //     same steps eagerly, and land bitwise on the captured run's weights. The strongest single check.
     if (expected_t reseeded = trainer.reseed(); !reseeded)
@@ -412,26 +440,45 @@ static void run_sweep_cell_(test_suite_t &suite, mesh_topology_t const &topology
                 normalized.extent(1), max_tokens, config.hidden);
 }
 
-/** @brief The cross-product sweep: every media subset (2³, from tokens-only to the full omni mixture) crossed
- *      with one-row and two-row budgets. The one-row omni cells deterministically leave most heads with zero
- *      live rows, and the two-row cells rotate modalities across epochs — the dynamic-M edges arise inside the
- *      grid, not as hand-picked corners. */
-static void mixture_sweep(test_suite_t &suite, mesh_topology_t const &topology) {
+/** @brief One sweep cell's config: @p subset 's media bits over @p rows full-width rows of @p columns cells. */
+[[nodiscard]] static base_config_t sweep_config_(u32_t subset, u32_t rows, u32_t columns) noexcept {
+    base_config_t config = test_geometry_(false);
+    config.batch = multimodal_batch_shape_t {rows, rows, columns};
+    config.steps = 4;
+    if (subset & 1u) config.batch.image = image_batch_shape_t {8u, 3u};
+    if (subset & 2u) config.batch.video = video_batch_shape_t {8u, 3u, 2u, 1u};
+    if (subset & 4u) config.batch.audio = audio_batch_shape_t {256u, 16000u};
+    return config;
+}
+
+/** @brief The two-tier sweep. The cheap tier walks every media subset (2³) crossed with one-row and two-row
+ *      budgets on an isolated one-GPU world — every modality-presence combination, the zero-live-rows corner,
+ *      and the 1-member peer-read domain — plus two corners the cross-product never reaches: an omni cell with
+ *      five rows over four live modalities (the uneven partition, whose extra row rotates across epochs) and an
+ *      omni cell at 96 columns (the non-square patch factorization). The wide tier reruns every subset at the
+ *      bootstrapped world's full width, so shape handling composes with the real collectives — and widens to
+ *      the multi-node world automatically under the sbatch launcher. */
+static void mixture_sweep(test_suite_t &suite, mesh_topology_t const &world, mesh_topology_t const &narrow) {
     for (u32_t subset = 0; subset != 8u; ++subset)
         for (u32_t rows = 1; rows != 3u; ++rows) {
-            base_config_t config = test_geometry_(false);
-            config.batch.max_rows_per_gpu = rows;
-            config.batch.max_segments_per_gpu = rows;
-            config.steps = 4;
-            if (subset & 1u) config.batch.image = image_batch_shape_t {8u, 3u};
-            if (subset & 2u) config.batch.video = video_batch_shape_t {8u, 3u, 2u, 1u};
-            if (subset & 4u) config.batch.audio = audio_batch_shape_t {256u, 16000u};
             sz::string label;
-            if (!format_into(label, "tokens{}{}{} rows={}", (subset & 1u) ? "+image" : "",
+            if (!format_into(label, "1gpu:tokens{}{}{} rows={}", (subset & 1u) ? "+image" : "",
                              (subset & 2u) ? "+video" : "", (subset & 4u) ? "+audio" : "", rows))
                 return suite.check(false, "sweep label format failed");
-            run_sweep_cell_(suite, topology, label.view(), config);
+            run_sweep_cell_(suite, narrow, label.view(), sweep_config_(subset, rows, 64u));
         }
+    run_sweep_cell_(suite, narrow, "1gpu:omni rows=5", sweep_config_(7u, 5u, 64u));
+    run_sweep_cell_(suite, narrow, "1gpu:omni rows=2 columns=96", sweep_config_(7u, 2u, 96u));
+    base_config_t tuned = sweep_config_(7u, 2u, 64u);
+    tuned.algo_pick = algo_pick_t::benchmarked_k;
+    run_sweep_cell_(suite, narrow, "1gpu:omni rows=2 tuned", tuned);
+    for (u32_t subset = 0; subset != 8u; ++subset) {
+        sz::string label;
+        if (!format_into(label, "wide:tokens{}{}{} rows=2", (subset & 1u) ? "+image" : "",
+                         (subset & 2u) ? "+video" : "", (subset & 4u) ? "+audio" : ""))
+            return suite.check(false, "sweep label format failed");
+        run_sweep_cell_(suite, world, label.view(), sweep_config_(subset, 2u, 64u));
+    }
 }
 
 /** @brief The capture contract holds — one replay graph per replica builds — and two replays over one fixed
@@ -463,34 +510,6 @@ static void graph_capture(test_suite_t &suite, mesh_topology_t const &topology) 
                 "two captured replays are bitwise identical");
 }
 
-/** @brief After one step the lead replica's weights differ from their seed (gradients propagated through the
- *      whole backbone) and the composite masked loss is finite. */
-static void gradient_propagation(test_suite_t &suite, mesh_topology_t const &topology) {
-    base_config_t config = test_geometry_(false);
-    config.steps = 1;
-    base_trainer_t trainer;
-    if (expected_t built = base_trainer_t::make(trainer, config, topology); !built)
-        return suite.check(false, "gradient trainer bring-up: {}", built.description_);
-    if (trainer.replicas.size() == 0) return suite.check(false, "gradient: no visible GPU");
-    expected<array<bf16_t>> seed_snapshot = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
-    if (!seed_snapshot) return suite.check(false, "gradient seed snapshot: {}", seed_snapshot.description_);
-
-    expected<multimem_domain_t> domain = make_domain_(topology, trainer, 1u);
-    if (!domain) return suite.check(false, "gradient domain setup: {}", domain.description_);
-    expected<colocated_domain_t> colocated = colocated_domain_t::make(topology);
-    if (!colocated) return suite.check(false, "gradient colocated setup: {}", colocated.description_);
-    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain.value_, colocated.value_);
-    if (!optimizer) return suite.check(false, "gradient optimizer setup: {}", optimizer.description_);
-    if (expected_t ran = run_steps_(trainer, optimizer.value_, {}, 0u, 1u); !ran)
-        return suite.check(false, "gradient step: {}", ran.description_);
-    synchronize_(trainer);
-    expected<array<bf16_t>> stepped_snapshot = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
-    suite.check(stepped_snapshot && !snapshots_match_(seed_snapshot.value_, stepped_snapshot.value_),
-                "one step moved the weights off their seed (gradients propagated)");
-    f32_t const loss = trainer.telemetry(domain.value_, optimizer_step_t {0u}).composite();
-    suite.check(std::isfinite(loss), "composite loss is finite after one step: got {}", loss);
-}
-
 int main() {
     test_suite_t suite {"base"};
 
@@ -514,10 +533,15 @@ int main() {
         return suite.finish();
     }
 
+    expected<mesh_topology_t> narrow = narrowed_topology_(topology.value_, 1u);
+    if (!narrow) {
+        suite.check(false, "narrowed topology: {}", narrow.description_);
+        return suite.finish();
+    }
+
     run_base_conformance(suite, "tokens", test_geometry_(false), topology.value_);
     run_base_conformance(suite, "omni", test_geometry_(true), topology.value_);
-    mixture_sweep(suite, topology.value_);
-    graph_capture(suite, topology.value_);
-    gradient_propagation(suite, topology.value_);
+    mixture_sweep(suite, topology.value_, narrow.value_);
+    graph_capture(suite, narrow.value_);
     return suite.finish();
 }
