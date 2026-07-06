@@ -7,11 +7,12 @@
  *  @date July 6, 2026
  *
  *  This is a test: a plain @c int @c main builds one @ref test_suite_t and threads it by reference into every
- *  case, consuming @c cuda_train/base.cuh 's typed surface instead of copying the driver. The domain, colocated
- *  surface, and optimizer are locals in each case's frame, threaded by reference, exactly as
- *  @ref base_trainer_t::run owns them. Launched under Slurm via @c cuda_test/base-4-8-16.sbatch , the same
- *  binary runs the distributed tiers: @c main honors @c UFORM_HOST_DOMAIN_COUNT , so a two-node world exercises
- *  the InfiniBand reduce under every case below.
+ *  case, consuming @c cuda_train/base.cuh 's typed surface instead of copying the driver. The collective
+ *  surfaces — one multimem domain and one colocated surface per width tier — are created once in @c main and
+ *  threaded by reference into every case, exactly as @ref base_trainer_t::run composes production; each case
+ *  keeps only its own trainer and optimizer. Launched under Slurm via @c cuda_test/base-4-8-16.sbatch , the
+ *  same binary runs the distributed tiers: @c main honors @c UFORM_HOST_DOMAIN_COUNT , so a two-node world
+ *  exercises the InfiniBand reduce under every case below.
  *
  *  The case matrix:
  *
@@ -83,16 +84,40 @@ using namespace unum::uform::test;
     return result_t {std::move(narrowed)};
 }
 
-/** @brief The one multimem domain over @p windows disjoint optimizer windows of one replica's payload — one
- *      window suffices for a single run, two let the captured and the assertion-C eager optimizers each reserve
- *      their own fresh moments from the same domain. */
-[[nodiscard]] static expected<multimem_domain_t> make_domain_(mesh_topology_t const &topology, base_trainer_t &trainer,
-                                                              u32_t windows) noexcept {
-    array<differentiable_weights_t> const &lead = trainer.replicas[0].weights;
-    std::span<differentiable_weights_t const> const list {lead.view().data(), lead.size()};
-    std::size_t const window = distributed_adafactor_t::payload_scalars_needed(list);
-    return multimem_domain_t::make(topology, trainer.devices.view(), static_cast<std::size_t>(windows) * window,
-                                   trainer.streams);
+/** @brief One optimizer window's payload budget at the tiny test geometry, with generous margin — the omni
+ *      mixture's registration list needs ~1.7M scalars. A tier's shared domain multiplies this by its
+ *      window count; @c reserve fails loudly if a geometry change ever outgrows it. */
+inline constexpr std::size_t tier_window_scalars_k = 4u << 20;
+
+/** @brief One width tier's shared surfaces: the topology plus the collective state every cell of the tier
+ *      reuses instead of re-creating — threaded by reference from @c main , like production. */
+struct tier_t {
+    mesh_topology_t const &topology;
+    multimem_domain_t &domain;
+    colocated_domain_t &colocated;
+};
+
+/** @brief One collective surface shared by every consumer of a tier — multicast objects are a scarce
+ *      fabric resource, so the suite creates one per tier in @c main and threads it by reference, exactly
+ *      as @ref base_trainer_t::run composes production. Bring-up streams are transient locals (the domain
+ *      retains no stream), and the self-advancing barrier rounds make reuse across many optimizer
+ *      instances safe by construction: every barrier derives its target from its own member's scalar. */
+[[nodiscard]] static expected<multimem_domain_t> make_tier_domain_(mesh_topology_t const &topology,
+                                                                   u32_t windows) noexcept {
+    using result_t = expected<multimem_domain_t>;
+    u32_t const gpus = topology.shape.gpus_per_host_domain;
+    array<i32_t> devices;
+    per_gpu_array<gpu_stream_t> streams;
+    for (u32_t device = 0; device != gpus; ++device) {
+        if (devices.try_push_back(static_cast<i32_t>(device)) != status_t::success_k)
+            return result_t::fail(status_t::bad_alloc_k, "tier device table allocation failed");
+        expected<gpu_stream_t> stream = gpu_stream_t::make(static_cast<i32_t>(device));
+        if (!stream) return result_t::fail(std::move(stream));
+        if (streams.try_push_back(std::move(stream.value_)) != status_t::success_k)
+            return result_t::fail(status_t::bad_alloc_k, "tier stream table full");
+    }
+    return multimem_domain_t::make(topology, devices.view(), static_cast<std::size_t>(windows) * tier_window_scalars_k,
+                                   streams);
 }
 
 /** @brief The distributed Adafactor over the transient flat replica-major registration table — the same
@@ -287,7 +312,8 @@ static void check_weight_naming_(test_suite_t &suite, char const *label, base_co
  *      and fold the five invariants (A replica identity, B round progression, C capture == eager, D loss
  *      descent, E every live head trained) into @p suite . */
 static void run_base_conformance(test_suite_t &suite, char const *label, base_config_t const &config,
-                                 mesh_topology_t const &topology) {
+                                 mesh_topology_t const &topology, multimem_domain_t &domain,
+                                 colocated_domain_t &colocated) {
     base_trainer_t trainer;
     if (expected_t built = base_trainer_t::make(trainer, config, topology); !built)
         return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
@@ -296,12 +322,9 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
     if (gpus == 0u) return;
     check_weight_naming_(suite, label, config, trainer.replicas[0].weights.view());
 
-    // Two disjoint windows so the captured optimizer and the assertion-C eager optimizer get fresh moments.
-    expected<multimem_domain_t> domain = make_domain_(topology, trainer, 2u);
-    if (!domain) return suite.check(false, "[{}] domain setup: {}", label, domain.description_);
-    expected<colocated_domain_t> colocated = colocated_domain_t::make(topology);
-    if (!colocated) return suite.check(false, "[{}] colocated setup: {}", label, colocated.description_);
-    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain.value_, colocated.value_);
+    // The captured optimizer and the assertion-C eager optimizer each reserve a fresh disjoint window
+    // from the tier's shared domain.
+    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain, colocated);
     if (!optimizer) return suite.check(false, "[{}] optimizer setup: {}", label, optimizer.description_);
     per_gpu_array<gpu_replay_graph_t> graphs;
     if (expected_t captured = trainer.capture(graphs); !captured)
@@ -320,7 +343,7 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
     for (u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
         if (expected_t ran = trainer.step(optimizer_step_t {ordinal}, optimizer.value_, graphs); !ran)
             return suite.check(false, "[{}] captured step {}: {}", label, ordinal, ran.description_);
-        base_trainer_t::telemetry_t const telemetry = trainer.telemetry(domain.value_, optimizer_step_t {ordinal});
+        base_trainer_t::telemetry_t const telemetry = trainer.telemetry(domain, optimizer_step_t {ordinal});
         if (telemetry.token_ce != 0.0f) {
             if (token_first == 0.0f) token_first = telemetry.token_ce;
             token_last = telemetry.token_ce;
@@ -357,12 +380,11 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
 
     // B — every member's own barrier round advanced off zero and they all agree: with self-advancing
     //     rounds the uniformity is a real invariant (each member's scalar counts its own passed barriers).
-    concurrency_round_t const lead_round = read_round_(domain.value_, 0u, trainer.streams[0]);
+    concurrency_round_t const lead_round = read_round_(domain, 0u, trainer.streams[0]);
     bool round_uniform = true;
     for (u32_t member_index = 0; member_index < gpus; ++member_index)
         round_uniform = round_uniform &&
-                        read_round_(domain.value_, member_index, trainer.streams[member_index]).ordinal ==
-                            lead_round.ordinal;
+                        read_round_(domain, member_index, trainer.streams[member_index]).ordinal == lead_round.ordinal;
     suite.check(lead_round.ordinal > 0u, "[{}] barrier round advanced off zero: got {} (B)", label, lead_round.ordinal);
     suite.check(round_uniform, "[{}] barrier round reads identically through every member (B)", label);
 
@@ -391,7 +413,7 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
     //     same steps eagerly, and land bitwise on the captured run's weights. The strongest single check.
     if (expected_t reseeded = trainer.reseed(); !reseeded)
         return suite.check(false, "[{}] reseed: {}", label, reseeded.description_);
-    expected<distributed_adafactor_t> eager_optimizer = make_optimizer_(trainer, domain.value_, colocated.value_);
+    expected<distributed_adafactor_t> eager_optimizer = make_optimizer_(trainer, domain, colocated);
     if (!eager_optimizer)
         return suite.check(false, "[{}] eager optimizer setup: {}", label, eager_optimizer.description_);
     if (expected_t ran = run_steps_(trainer, eager_optimizer.value_, {}, 0u, config.steps); !ran)
@@ -405,30 +427,26 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
 /** @brief One sweep cell: bring up the trainer, run two eager steps, then capture and replay two more over the
  *      same trainer — both model-region modes under one mixture — asserting finite losses and the final-norm
  *      extents every head reconstructs against. */
-static void run_sweep_cell_(test_suite_t &suite, mesh_topology_t const &topology, sz::string_view label,
-                            base_config_t const &config) {
+static void run_sweep_cell_(test_suite_t &suite, mesh_topology_t const &topology, multimem_domain_t &domain,
+                            colocated_domain_t &colocated, sz::string_view label, base_config_t const &config) {
     base_trainer_t trainer;
     if (expected_t built = base_trainer_t::make(trainer, config, topology); !built)
         return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
     if (trainer.replicas.size() == 0) return suite.check(false, "[{}] no visible GPU", label);
-    expected<multimem_domain_t> domain = make_domain_(topology, trainer, 1u);
-    if (!domain) return suite.check(false, "[{}] domain setup: {}", label, domain.description_);
-    expected<colocated_domain_t> colocated = colocated_domain_t::make(topology);
-    if (!colocated) return suite.check(false, "[{}] colocated setup: {}", label, colocated.description_);
-    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain.value_, colocated.value_);
+    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain, colocated);
     if (!optimizer) return suite.check(false, "[{}] optimizer setup: {}", label, optimizer.description_);
 
     // The eager state first, then the captured one over the same trainer — capture must also hold after the
     // optimizer has stepped (the capture-stable addresses survive weight updates).
     if (expected_t ran = run_steps_(trainer, optimizer.value_, {}, 0u, 2u); !ran)
         return suite.check(false, "[{}] eager steps: {}", label, ran.description_);
-    f32_t const eager_loss = trainer.telemetry(domain.value_, optimizer_step_t {1u}).composite();
+    f32_t const eager_loss = trainer.telemetry(domain, optimizer_step_t {1u}).composite();
     per_gpu_array<gpu_replay_graph_t> graphs;
     if (expected_t captured = trainer.capture(graphs); !captured)
         return suite.check(false, "[{}] capture: {}", label, captured.description_);
     if (expected_t ran = run_steps_(trainer, optimizer.value_, graphs, 2u, 4u); !ran)
         return suite.check(false, "[{}] replayed steps: {}", label, ran.description_);
-    f32_t const replayed_loss = trainer.telemetry(domain.value_, optimizer_step_t {3u}).composite();
+    f32_t const replayed_loss = trainer.telemetry(domain, optimizer_step_t {3u}).composite();
 
     suite.check(std::isfinite(eager_loss) && std::isfinite(replayed_loss),
                 "[{}] losses finite through both modes: eager {} replayed {}", label, eager_loss, replayed_loss);
@@ -458,26 +476,30 @@ static void run_sweep_cell_(test_suite_t &suite, mesh_topology_t const &topology
  *      omni cell at 96 columns (the non-square patch factorization). The wide tier reruns every subset at the
  *      bootstrapped world's full width, so shape handling composes with the real collectives — and widens to
  *      the multi-node world automatically under the sbatch launcher. */
-static void mixture_sweep(test_suite_t &suite, mesh_topology_t const &world, mesh_topology_t const &narrow) {
+static void mixture_sweep(test_suite_t &suite, tier_t wide, tier_t cheap) {
     for (u32_t subset = 0; subset != 8u; ++subset)
         for (u32_t rows = 1; rows != 3u; ++rows) {
             sz::string label;
             if (!format_into(label, "1gpu:tokens{}{}{} rows={}", (subset & 1u) ? "+image" : "",
                              (subset & 2u) ? "+video" : "", (subset & 4u) ? "+audio" : "", rows))
                 return suite.check(false, "sweep label format failed");
-            run_sweep_cell_(suite, narrow, label.view(), sweep_config_(subset, rows, 64u));
+            run_sweep_cell_(suite, cheap.topology, cheap.domain, cheap.colocated, label.view(),
+                            sweep_config_(subset, rows, 64u));
         }
-    run_sweep_cell_(suite, narrow, "1gpu:omni rows=5", sweep_config_(7u, 5u, 64u));
-    run_sweep_cell_(suite, narrow, "1gpu:omni rows=2 columns=96", sweep_config_(7u, 2u, 96u));
+    run_sweep_cell_(suite, cheap.topology, cheap.domain, cheap.colocated, "1gpu:omni rows=5",
+                    sweep_config_(7u, 5u, 64u));
+    run_sweep_cell_(suite, cheap.topology, cheap.domain, cheap.colocated, "1gpu:omni rows=2 columns=96",
+                    sweep_config_(7u, 2u, 96u));
     base_config_t tuned = sweep_config_(7u, 2u, 64u);
     tuned.algo_pick = algo_pick_t::benchmarked_k;
-    run_sweep_cell_(suite, narrow, "1gpu:omni rows=2 tuned", tuned);
+    run_sweep_cell_(suite, cheap.topology, cheap.domain, cheap.colocated, "1gpu:omni rows=2 tuned", tuned);
     for (u32_t subset = 0; subset != 8u; ++subset) {
         sz::string label;
         if (!format_into(label, "wide:tokens{}{}{} rows=2", (subset & 1u) ? "+image" : "",
                          (subset & 2u) ? "+video" : "", (subset & 4u) ? "+audio" : ""))
             return suite.check(false, "sweep label format failed");
-        run_sweep_cell_(suite, world, label.view(), sweep_config_(subset, 2u, 64u));
+        run_sweep_cell_(suite, wide.topology, wide.domain, wide.colocated, label.view(),
+                        sweep_config_(subset, 2u, 64u));
     }
 }
 
@@ -539,9 +561,35 @@ int main() {
         return suite.finish();
     }
 
-    run_base_conformance(suite, "tokens", test_geometry_(false), topology.value_);
-    run_base_conformance(suite, "omni", test_geometry_(true), topology.value_);
-    mixture_sweep(suite, topology.value_, narrow.value_);
+    // The collective surfaces are created once per width tier and threaded by reference — multicast
+    // objects are a scarce fabric resource, and the self-advancing barrier rounds make one domain safe
+    // for every consumer in turn. Window budget: 2 per conformance case + 8 wide cells, 19 cheap cells.
+    expected<multimem_domain_t> wide_domain = make_tier_domain_(topology.value_, 16u);
+    if (!wide_domain) {
+        suite.check(false, "wide-tier domain: {}", wide_domain.description_);
+        return suite.finish();
+    }
+    expected<colocated_domain_t> wide_colocated = colocated_domain_t::make(topology.value_);
+    if (!wide_colocated) {
+        suite.check(false, "wide-tier colocated surface: {}", wide_colocated.description_);
+        return suite.finish();
+    }
+    expected<multimem_domain_t> cheap_domain = make_tier_domain_(narrow.value_, 24u);
+    if (!cheap_domain) {
+        suite.check(false, "cheap-tier domain: {}", cheap_domain.description_);
+        return suite.finish();
+    }
+    expected<colocated_domain_t> cheap_colocated = colocated_domain_t::make(narrow.value_);
+    if (!cheap_colocated) {
+        suite.check(false, "cheap-tier colocated surface: {}", cheap_colocated.description_);
+        return suite.finish();
+    }
+    tier_t const wide {topology.value_, wide_domain.value_, wide_colocated.value_};
+    tier_t const cheap {narrow.value_, cheap_domain.value_, cheap_colocated.value_};
+
+    run_base_conformance(suite, "tokens", test_geometry_(false), wide.topology, wide.domain, wide.colocated);
+    run_base_conformance(suite, "omni", test_geometry_(true), wide.topology, wide.domain, wide.colocated);
+    mixture_sweep(suite, wide, cheap);
     graph_capture(suite, narrow.value_);
     return suite.finish();
 }

@@ -226,8 +226,9 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
     bool const is_lead = member_offset == 0;
     f64_t const timeout_seconds = 120.0;
 
-    // Host-side staging (creates, binds, memsets, the round seed) needs a current context; the lead
-    // local stream owns one — every VMM call names its device explicitly, so one context serves all.
+    // Host-side staging (creates, binds, memsets) needs a current context; the lead local stream owns
+    // one — every VMM call names its device explicitly, so one context serves all. No stream is
+    // retained: the domain outlives its bring-up streams by design.
     switch_to_gpu_t gpu_scope {local_streams[0]};
     if (!gpu_scope.ok())
         return result_t::fail(status_t::cuda_error_k, "context entry failed (device={})", local_devices[0]);
