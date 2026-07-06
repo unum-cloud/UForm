@@ -38,6 +38,8 @@
 #include "cuda_core/array.hpp"          // `array` — the runtime-sized per-member tables
 #include "cuda_core/gpu_allocators.hpp" // `gpu_arena_t` conventions, `round_up_to_multiple`
 #include "cuda_core/schedule.cuh"       // `gpu_stream_t`, `launch_kernel`, `current_context_t`, the rank-1 aliases
+#include "cuda_core/mesh.hpp"           // `mesh_topology_t` — the multimem_domain may span processes; the fabric
+                                        //     handles ride the mesh rendezvous
 
 namespace unum::uform::core {
 
@@ -48,10 +50,15 @@ namespace unum::uform::core {
  *      carving, no growth. Lives here, beside its one consumer @ref multimem_domain_t , not with the
  *      single-GPU allocators.
  *
- *  The slices' physical handles are created shareable ( @c POSIX_FILE_DESCRIPTOR ) and are exposed
- *  through @ref member_handle so a multicast object can bind them — the one capability @ref gpu_arena_t
- *  chunks deliberately lack. Every member device is granted access to the whole range (the peer-read
- *  tier and debugging read straight through it).
+ *  A multimem_domain may span @b more @b than @b one @b process — on an NVL72 the 72-GPU island is 18
+ *  tray processes, and even a `{4,8,16}` HGX box runs two 4-GPU processes over one 8-GPU island. So the
+ *  arena is @b per @b process: it reserves the whole @c member_count·stride VA, but each process
+ *  @ref make -s only its @b local slices (physically resident on the GPUs it drives) and @ref adopt_peer -s
+ *  every remote member's slice from the fabric handle its owner published. The slices' physical handles
+ *  are created @c CU_MEM_HANDLE_TYPE_FABRIC — the NVLink-fabric shareable form NVL72 needs and a single
+ *  passthrough box also honors — exported through @ref export_local_fabric_handle and exposed through
+ *  @ref member_handle so a multicast object can bind them. Every local device is granted access to the
+ *  whole range, so the peer-read tier reads every replica straight through it.
  */
 struct gpu_symmetric_arena_t {
 
@@ -69,21 +76,37 @@ struct gpu_symmetric_arena_t {
     ~gpu_symmetric_arena_t() noexcept { destroy_(); }
 
     /**
-     *  @brief Reserve and map the whole symmetric range — once, at setup, with a current context.
+     *  @brief Reserve the whole @c member_count·stride symmetric range and create @b this process's local
+     *      slices — once, at setup, with a current context. Remote members' slices are filled afterwards
+     *      through @ref adopt_peer .
      *
-     *  @param[in] devices Member device ordinals, slice order.
+     *  @param[in] local_devices The device ordinals this process drives — the slices it creates; they
+     *      occupy domain members @c [member_offset,member_offset+local_devices.size()) .
+     *  @param[in] member_count The whole multimem_domain's member count (may exceed @p local_devices ).
+     *  @param[in] member_offset Where this process's slices sit inside the domain — the first member index.
      *  @param[in] bytes_per_member Usable bytes of one member's slice.
      *  @param[in] alignment_granularity An extra stride-alignment requirement (e.g. the multicast
-     *      granularity the caller queried); the stride also honors every member's physical granularity.
+     *      granularity the caller queried); the stride also honors every local device's physical granularity.
      */
-    [[nodiscard]] static expected<gpu_symmetric_arena_t> make(std::span<i32_t const> devices,
-                                                              std::size_t bytes_per_member,
+    [[nodiscard]] static expected<gpu_symmetric_arena_t> make(std::span<i32_t const> local_devices, u32_t member_count,
+                                                              u32_t member_offset, std::size_t bytes_per_member,
                                                               std::size_t alignment_granularity = 1) noexcept;
 
-    /** @brief Member count, matching the @c devices order of @ref make . */
-    [[nodiscard]] std::size_t member_count() const noexcept { return devices_.size(); }
-    /** @brief Member @p member 's device ordinal. */
-    [[nodiscard]] i32_t member_device(std::size_t member) const noexcept { return devices_[member]; }
+    /** @brief Export domain member @p member 's slice as a fabric handle — what its owner publishes so the
+     *      domain's other processes can @ref adopt_peer it. @p member must be one this process created. */
+    [[nodiscard]] expected<CUmemFabricHandle> export_fabric_handle(std::size_t member) const noexcept;
+
+    /** @brief Import a remote member's slice from the fabric @p handle its owner exported and map it at
+     *      domain member @p member 's offset — the peer half of the cross-process symmetric range. */
+    [[nodiscard]] expected_t adopt_peer(std::size_t member, CUmemFabricHandle const &handle) noexcept;
+
+    /** @brief The whole multimem_domain's member count — the symmetric range's extent; the handle table's
+     *      size @b is this, so it is derived, never stored. */
+    [[nodiscard]] std::size_t member_count() const noexcept { return handles_.size(); }
+    /** @brief How many of them this process created locally. */
+    [[nodiscard]] std::size_t local_member_count() const noexcept { return devices_.size(); }
+    /** @brief Local slice @p local_index 's device ordinal (this process's own devices, slice order). */
+    [[nodiscard]] i32_t local_device(std::size_t local_index) const noexcept { return devices_[local_index]; }
     /** @brief Byte distance between adjacent members' slices — the peer-address arithmetic constant. */
     [[nodiscard]] std::size_t member_stride() const noexcept { return member_stride_; }
     /** @brief The whole range's base — member @p m 's slice starts at @c base()+m·member_stride() . */
@@ -106,7 +129,7 @@ struct gpu_symmetric_arena_t {
         properties.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
         properties.location.id = device;
         properties.allocFlags.gpuDirectRDMACapable = 1;
-        properties.requestedHandleTypes = CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR;
+        properties.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
         return properties;
     }
 
@@ -120,13 +143,14 @@ struct gpu_symmetric_arena_t {
 
     void destroy_() noexcept {
         if (base_ == 0) return;
-        // A published handle implies a mapped slice — `make` publishes only after the map succeeds.
+        // A non-zero handle implies a mapped slice — local ones created, remote ones adopted; either way
+        // unmap then release. `make` / `adopt_peer` publish a handle only after the map succeeds.
         for (std::size_t member = 0; member != handles_.size(); ++member) {
             if (handles_[member] == 0) continue;
             cuMemUnmap(base_ + member * member_stride_, member_stride_);
             cuMemRelease(handles_[member]);
         }
-        cuMemAddressFree(base_, member_stride_ * devices_.size());
+        cuMemAddressFree(base_, member_stride_ * handles_.size());
         base_ = 0;
         devices_.reset();
         handles_.reset();
@@ -138,9 +162,10 @@ struct gpu_symmetric_arena_t {
     std::size_t bytes_per_member_ = 0;
     /** @brief Granularity-rounded slice stride; also each slice's physical size. */
     std::size_t member_stride_ = 0;
-    /** @brief Member devices, slice order. */
+    /** @brief This process's local devices, slice order — the slices it created (not the whole domain). */
     array<i32_t> devices_ {};
-    /** @brief The shareable physical handles, one per member. */
+    /** @brief The physical handles indexed by @b domain member: local ones created, remote ones adopted;
+     *      0 for a member not yet filled. */
     array<CUmemGenericAllocationHandle> handles_ {};
 };
 
@@ -264,14 +289,26 @@ struct multimem_domain_t {
     ~multimem_domain_t() noexcept { destroy_(); }
 
     /**
-     *  @brief Build the domain over @p devices with @p payload_scalars Float32 per replica: the
-     *      symmetric replica range, the multicast object binding every slice, one multicast mapping,
-     *      and the zeroed arrival counters. Runs once, at setup, outside any capture. The barrier
-     *      round is the domain's own: a scalar inside the lead replica, advanced once per step
-     *      through @ref advance — consumers never allocate or upload rounds themselves.
+     *  @brief Build the domain with @p payload_scalars Float32 per replica: the symmetric replica range
+     *      (this process's slices created, every peer's adopted over the mesh), the multicast object the
+     *      domain lead creates and every process imports and binds its local slices into, one multicast
+     *      mapping, and the zeroed arrival counters. Runs once, at setup, outside any capture.
+     *
+     *  The multimem_domain may span processes ( @c gpus_per_multimem_domain > the local device count on a
+     *  `{4,8,16}` box or an NVL72), so the world @p topology — not the length of @p local_devices — sets
+     *  the member count, this process's member offset, and the rendezvous the fabric handles ride. The
+     *  barrier round is the domain's own: a scalar inside the lead replica, advanced once per step by the
+     *  @b lead host_domain through @ref advance — consumers never allocate or upload rounds themselves.
+     *
+     *  @param[in] topology The bootstrapped world (see @ref mesh_topology_t ).
+     *  @param[in] local_devices The device ordinals this process drives — the slices it creates and binds.
+     *  @param[in] payload_scalars Float32 payload scalars per replica, sized for every consumer's window.
+     *  @param[in] local_streams One stream per local device; @c local_streams[0] carries the host staging.
      */
-    [[nodiscard]] static expected<multimem_domain_t> make(std::span<i32_t const> devices, std::size_t payload_scalars,
-                                                          std::span<gpu_stream_t> streams) noexcept;
+    [[nodiscard]] static expected<multimem_domain_t> make(mesh_topology_t const &topology,
+                                                          std::span<i32_t const> local_devices,
+                                                          std::size_t payload_scalars,
+                                                          std::span<gpu_stream_t> local_streams) noexcept;
 
     /** @brief The reduction tier this domain runs — see @ref multimem_tier_t . */
     [[nodiscard]] multimem_tier_t tier() const noexcept {
@@ -299,9 +336,13 @@ struct multimem_domain_t {
         return expected<multimem_window_t> {window};
     }
 
-    /** @brief The one enqueued host write of a step — see @ref barrier_round_t::advance . Lead
-     *      stream, before any member's barrier. */
-    [[nodiscard]] expected_t advance(gpu_stream_t &stream) noexcept { return round_.advance(stream); }
+    /** @brief The one enqueued host write of a step — see @ref barrier_round_t::advance . Only the @b lead
+     *      host_domain owns the round scalar (it lives in member 0's replica), so a non-lead process's
+     *      @ref advance is a no-op; the call stays uniform across the SPMD program. Lead stream, before any
+     *      member's barrier. */
+    [[nodiscard]] expected_t advance(gpu_stream_t &stream) noexcept {
+        return member_offset_ == 0 ? round_.advance(stream) : expected_t {};
+    }
 
     /** @brief Member @p member_index 's kernel-facing addresses. */
     [[nodiscard]] multimem_member_t member(std::size_t member_index) noexcept {
@@ -352,9 +393,11 @@ struct multimem_domain_t {
         std::swap(round_, other.round_);
         std::swap(payload_scalars_, other.payload_scalars_);
         std::swap(reserved_scalars_, other.reserved_scalars_);
+        std::swap(member_offset_, other.member_offset_);
     }
 
-    /** @brief Reverse the multicast machinery; the symmetric arena member tears itself down after. */
+    /** @brief Reverse the multicast machinery; the symmetric arena member tears itself down after. This
+     *      process unbinds only the slices it bound — its @b local devices. */
     void destroy_() noexcept {
         std::size_t const bound_bytes = replicas_.member_stride();
         if (multimem_pointer_ != 0) {
@@ -363,9 +406,9 @@ struct multimem_domain_t {
             multimem_pointer_ = 0;
         }
         if (multimem_handle_ != 0) {
-            for (std::size_t member = 0; member != replicas_.member_count(); ++member) {
+            for (std::size_t local = 0; local != replicas_.local_member_count(); ++local) {
                 CUdevice device_handle = 0;
-                if (cuDeviceGet(&device_handle, replicas_.member_device(member)) == CUDA_SUCCESS)
+                if (cuDeviceGet(&device_handle, replicas_.local_device(local)) == CUDA_SUCCESS)
                     cuMulticastUnbind(multimem_handle_, device_handle, 0, bound_bytes);
             }
             cuMemRelease(multimem_handle_);
@@ -386,6 +429,8 @@ struct multimem_domain_t {
     std::size_t payload_scalars_ = 0;
     /** @brief The window-reservation cursor; see @ref reserve . */
     std::size_t reserved_scalars_ = 0;
+    /** @brief This process's first domain member — 0 iff it is the domain lead (which owns the round). */
+    u32_t member_offset_ = 0;
 };
 
 } // namespace unum::uform::core
