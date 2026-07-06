@@ -107,6 +107,28 @@ static __global__ void infiniband_allgather_post_kernel_(infiniband_links_view_t
     infiniband_drain_one(link.completion);
 }
 
+/** @brief Post one all-to-all round: ship this domain's send block destined for the round's partner to that
+ *      partner's landing, then a completion flag. The partner is baked in @c links[round] — its
+ *      @c remote_multimem_domain_index selects which send block to ship — and the symmetric heap puts each
+ *      side's round landing at the same @c landing_offset , so the write needs no partner-specific arithmetic.
+ *
+ *  __grid_size__ @c [1,1,1] , one warp; no dynamic shared memory. */
+static __global__ void infiniband_alltoall_post_kernel_(infiniband_links_view_t links, u32_t round,
+                                                        infiniband_alltoall_plan_t plan, char const *send_bytes,
+                                                        infiniband_round_view_t flag_round) {
+    if (threadIdx.x != 0) return;
+    infiniband_link_t const link = links[round];
+    std::size_t const send_byte_offset = static_cast<std::size_t>(link.remote_multimem_domain_index) * plan.block_bytes;
+    u32_t const flag_value = flag_round[0] + round + 1u;
+
+    infiniband_post_write(link.queue, reinterpret_cast<u64_t>(send_bytes + send_byte_offset), link.local_access_key,
+                          link.remote_heap_base + link.landing_offset, link.remote_access_key,
+                          static_cast<u32_t>(plan.block_bytes), false, nullptr);
+    infiniband_post_write(link.queue, 0u, link.local_access_key, link.remote_heap_base + link.remote_flag_offset,
+                          link.remote_access_key, sizeof(u32_t), true, &flag_value);
+    infiniband_drain_one(link.completion);
+}
+
 expected<infiniband_nic_t> infiniband_nic_t::make(u32_t local_gpu_index, u8_t infiniband_port) noexcept {
     infiniband_nic_t nic;
     nic.port_ = infiniband_port;
@@ -477,9 +499,8 @@ expected<infiniband_member_t> infiniband_member_t::make_(mesh_topology_t const &
 
 expected_t infiniband_member_t::allreduce_sum(gpu_stream_t &stream) noexcept {
     if (layout_.rounds == 0) return {};
-    if (layout_.landing_bytes == 0)
-        return expected_t::fail(status_t::invalid_input_k,
-                                "this member is wired for the all-gather, not the all-reduce");
+    if (layout_.role != collective_allreduce_k)
+        return expected_t::fail(status_t::invalid_input_k, "this member is not wired for the all-reduce");
     std::size_t const shard_scalars = layout_.payload_bytes / sizeof(f32_t);
     f32_t *const shard = reinterpret_cast<f32_t *>(heap_.data());
     unsigned const accumulate_grid = grid_size_for(shard_scalars);
@@ -505,9 +526,8 @@ expected_t infiniband_member_t::allreduce_sum(gpu_stream_t &stream) noexcept {
 
 expected_t infiniband_member_t::allgather(gpu_stream_t &stream) noexcept {
     if (layout_.rounds == 0) return {};
-    if (layout_.landing_bytes != 0)
-        return expected_t::fail(status_t::invalid_input_k,
-                                "this member is wired for the all-reduce, not the all-gather");
+    if (layout_.role != collective_allgather_k)
+        return expected_t::fail(status_t::invalid_input_k, "this member is not wired for the all-gather");
     infiniband_allgather_plan_t plan;
     plan.block_bytes = layout_.payload_bytes >> layout_.rounds;
     plan.this_multimem_domain = multimem_domain_index_;
@@ -519,6 +539,29 @@ expected_t infiniband_member_t::allgather(gpu_stream_t &stream) noexcept {
     for (u32_t round = 0; round != layout_.rounds; ++round) {
         expected_t launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_allgather_post_kernel_),
                                             doorbell_grid, doorbell_block, stream, links, round, plan, payload_bytes,
+                                            round_view);
+        if (launched)
+            launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_flag_wait_kernel_), doorbell_grid,
+                                     doorbell_block, stream, links, round, round_view);
+        if (!launched) return launched;
+    }
+    return {};
+}
+
+expected_t infiniband_member_t::alltoall(gpu_stream_t &stream) noexcept {
+    if (layout_.rounds == 0) return {};
+    if (layout_.role != collective_alltoall_k)
+        return expected_t::fail(status_t::invalid_input_k, "this member is not wired for the all-to-all");
+    infiniband_alltoall_plan_t plan;
+    plan.block_bytes = layout_.landing_bytes;
+    char const *send_bytes = reinterpret_cast<char const *>(heap_.data());
+    dim3 const doorbell_grid {1u, 1u, 1u};
+    dim3 const doorbell_block {infiniband_doorbell_block_threads_k, 1u, 1u};
+    infiniband_links_view_t const links {links_.data(), layout_.rounds};
+    infiniband_round_view_t const round_view {round_scalar_.data(), 1};
+    for (u32_t round = 0; round != layout_.rounds; ++round) {
+        expected_t launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_alltoall_post_kernel_),
+                                            doorbell_grid, doorbell_block, stream, links, round, plan, send_bytes,
                                             round_view);
         if (launched)
             launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_flag_wait_kernel_), doorbell_grid,
@@ -555,6 +598,7 @@ expected<infiniband_member_t> colocated_domain_t::wire_allreduce(u32_t member_in
     layout.payload_bytes = shard_bytes;
     layout.landing_bytes = shard_bytes;
     layout.rounds = ceil_log2(topology_->shape.multimem_domain_count());
+    layout.role = collective_allreduce_k;
     return infiniband_member_t::make_(*topology_, member_index, nics_[member_index], arena, stream, layout, key_prefix,
                                       timeout_seconds);
 }
@@ -569,6 +613,29 @@ expected<infiniband_member_t> colocated_domain_t::wire_allgather(u32_t member_in
     layout.payload_bytes = static_cast<std::size_t>(topology_->shape.multimem_domain_count()) * block_bytes;
     layout.landing_bytes = 0;
     layout.rounds = ceil_log2(topology_->shape.multimem_domain_count());
+    layout.role = collective_allgather_k;
+    return infiniband_member_t::make_(*topology_, member_index, nics_[member_index], arena, stream, layout, key_prefix,
+                                      timeout_seconds);
+}
+
+expected<infiniband_member_t> colocated_domain_t::wire_alltoall(u32_t member_index, gpu_arena_t &arena,
+                                                                gpu_stream_t &stream, std::size_t block_bytes,
+                                                                sz::string_view key_prefix,
+                                                                f64_t timeout_seconds) noexcept {
+    using result_t = expected<infiniband_member_t>;
+    // The single-domain identity: no partners exist, every collective is a no-op.
+    if (multimem_domain_count() == 1) return result_t {infiniband_member_t {}};
+    // Recursive-doubling reaches every peer only when D-1 == log2(D), i.e. two domains; beyond that a direct
+    // all-to-all needs the D-1 links (or a multi-hop schedule) the round wiring does not lay down.
+    if (multimem_domain_count() != 2)
+        return result_t::fail(status_t::shape_unsupported_k,
+                              "all-to-all is wired for two domains; {} needs the multi-hop schedule",
+                              multimem_domain_count());
+    infiniband_member_t::heap_layout_t layout;
+    layout.payload_bytes = static_cast<std::size_t>(multimem_domain_count()) * block_bytes; // per-peer send blocks
+    layout.landing_bytes = block_bytes;                                                     // one incoming block/round
+    layout.rounds = ceil_log2(topology_->shape.multimem_domain_count());
+    layout.role = collective_alltoall_k;
     return infiniband_member_t::make_(*topology_, member_index, nics_[member_index], arena, stream, layout, key_prefix,
                                       timeout_seconds);
 }

@@ -1132,4 +1132,16 @@ struct cudnn_session_t {
     algo_pick_t algo_pick_ = algo_pick_t::heuristic_k;
 };
 
+/** @brief The unifying shape across the collective tiers — a typed handle bundling specialized symmetric memory
+ *      with an enqueue-only collective op. Every buffer names its element type and is invocable on a stream
+ *      (multimem or infiniband); the per-buffer typed memory accessors ( @c payload / @c own_block /
+ *      @c send_block / @c recv_block ) expose the specialized memory. Each buffer @c static_assert s it, so a
+ *      drifted signature fails at compile time and generic code (mixer, telemetry, tests) can name any collective
+ *      uniformly. */
+template <typename buffer_type_>
+concept collective_buffer = requires(buffer_type_ buffer, gpu_stream_t &stream) {
+    typename buffer_type_::value_type;
+    { buffer(stream) };
+};
+
 } // namespace unum::uform::core

@@ -801,6 +801,21 @@ struct infiniband_allgather_plan_t {
     u32_t this_multimem_domain = 0;
 };
 
+/** @brief Which cross-domain collective a member's heap and rounds are wired for — the role its factory bakes,
+ *      checked by each argument-free method so a member can never run a collective its layout can't serve.
+ *      @c allreduce and @c alltoall both carry per-round landings, so the role, not the landing size,
+ *      disambiguates them. */
+enum collective_role_t : u32_t { collective_allreduce_k = 0, collective_allgather_k = 1, collective_alltoall_k = 2 };
+
+/** @brief The static description of one all-to-all invocation — this domain's per-peer send blocks live at
+ *      @b [D·block_bytes] ( block @c p is what this domain sends domain @c p ; block @c self stays local ), and
+ *      each round's landing receives that round's partner's block. Internal to @ref infiniband_member_t 's
+ *      dispatch; consumers never construct one. */
+struct infiniband_alltoall_plan_t {
+    /** @brief Bytes this domain sends to (and receives from) any one peer — the per-pair block size. */
+    std::size_t block_bytes = 0;
+};
+
 #if defined(UFORM_WITH_INFINIBAND)
 
 /** @brief Rank-1 device-only table of fabric links owned through a @ref gpu_arena_t . */
@@ -838,6 +853,8 @@ struct infiniband_member_t {
         std::size_t landing_bytes = 0;
         /** @brief Recursive-doubling rounds — the link, landing, and flag count. */
         u32_t rounds = 0;
+        /** @brief The collective this heap serves — the method dispatch validates against it. */
+        collective_role_t role = collective_allreduce_k;
 
         [[nodiscard]] std::size_t landings_offset() const noexcept {
             return round_up_to_multiple(payload_bytes, cache_line_bytes_k);
@@ -895,6 +912,29 @@ struct infiniband_member_t {
      *      cell; after @c log2(D) rounds every block is filled. Call @ref advance first, once per step.
      */
     [[nodiscard]] expected_t allgather(gpu_stream_t &stream) noexcept;
+
+    /** @brief This domain's outgoing block for @p destination_domain inside the send region — where the caller
+     *      stages what @ref alltoall ships to that domain. @c destination_domain equal to this domain's own index
+     *      is the local block, kept in place and read directly. Meaningful only on an all-to-all-wired member. */
+    [[nodiscard]] b8r1_span_t send_block(u32_t destination_domain) noexcept {
+        std::size_t const block_bytes = layout_.landing_bytes;
+        return {heap_.data() + static_cast<std::size_t>(destination_domain) * block_bytes, block_bytes};
+    }
+    /** @brief The block @ref alltoall received from round @p round 's partner ( @c multimem_domain_index ^ 2^round )
+     *      — that round's landing. Meaningful only on an all-to-all-wired member. */
+    [[nodiscard]] b8r1_span_t recv_block(u32_t round) noexcept {
+        std::size_t const block_bytes = layout_.landing_bytes;
+        return {heap_.data() + layout_.landings_offset() + static_cast<std::size_t>(round) * block_bytes, block_bytes};
+    }
+
+    /**
+     *  @brief Device-initiated inter-domain all-to-all: ship each peer this domain's send block for it and land
+     *      the peer's block for this domain, enqueued on @p stream as capture-safe graph nodes. Stage every
+     *      @ref send_block first; after the rounds each @ref recv_block holds its partner's block and the local
+     *      block ( @ref send_block for this domain ) stays in place. Call @ref advance first, once per step. Two
+     *      domains today — one pairwise exchange; beyond two needs the multi-hop schedule.
+     */
+    [[nodiscard]] expected_t alltoall(gpu_stream_t &stream) noexcept;
 
   private:
     /** @brief The heap's byte-offset formula — identical on every domain, baked by the role factory. */
@@ -965,16 +1005,149 @@ struct colocated_domain_t {
                                                                sz::string_view key_prefix,
                                                                f64_t timeout_seconds = 120.0) noexcept;
 
+    /** @brief Wire one member for the cross-domain all-to-all of per-peer @p block_bytes blocks: the send region
+     *      spans @b [domains·block_bytes] ( block @c p ships to domain @c p , block for this domain stays local )
+     *      and each round lands its partner's block. Same contract as @ref wire_allreduce otherwise. Two domains
+     *      today (one pairwise exchange); beyond two fails loudly until the multi-hop schedule lands. */
+    [[nodiscard]] expected<infiniband_member_t> wire_alltoall(u32_t member_index, gpu_arena_t &arena,
+                                                              gpu_stream_t &stream, std::size_t block_bytes,
+                                                              sz::string_view key_prefix,
+                                                              f64_t timeout_seconds = 120.0) noexcept;
+
     /** @brief The bootstrapped world this domain was wired against. */
     [[nodiscard]] mesh_topology_t const &topology() const noexcept { return *topology_; }
     /** @brief How many multimem_domains the world spans — 1 means no member ever posts. */
     [[nodiscard]] u32_t multimem_domain_count() const noexcept { return topology_->shape.multimem_domain_count(); }
+
+    /** @brief Mint the next collective handle's rendezvous namespace — a monotonic per-domain id, rank-consistent
+     *      because every rank constructs its collectives in the same SPMD order. Replaces the caller-supplied
+     *      @c key_prefix : the typed handles pass this into the wire path, so keys never leave the API. */
+    [[nodiscard]] bool next_collective_key(sz::string &out) noexcept {
+        return static_cast<bool>(format_into(out, "collective.{}", next_collective_id_++));
+    }
 
   private:
     /** @brief The bootstrapped world — borrowed; main owns it for the process lifetime. */
     mesh_topology_t const *topology_ = nullptr;
     /** @brief One opened adapter per local GPU, member order. */
     per_gpu_array<infiniband_nic_t> nics_ {};
+    /** @brief Monotonic id handed to each collective handle at make — the auto-derived rendezvous namespace. */
+    u32_t next_collective_id_ = 0;
+};
+
+/** @brief Cross-domain Float32 all-reduce-sum in place — the typed op-handle over @ref colocated_domain_t . Wires
+ *      one endpoint per recursive-doubling round at @ref make (no lazy-init), auto-keys its rendezvous, and exposes
+ *      the shard as a typed @c nk::tensor_span the caller stages before each step. @c operator() folds @c advance
+ *      and the reduce into one enqueue. (Phase 1 wraps @ref infiniband_member_t ; the shared body is renamed to
+ *      @c infiniband_reach_t when the legacy wire_* surface retires.) */
+template <typename value_type_>
+struct infiniband_all_reduce {
+    using value_type = value_type_;
+    [[nodiscard]] static expected<infiniband_all_reduce> make(colocated_domain_t &domain, u32_t member_index,
+                                                              gpu_arena_t &arena, std::size_t scalars,
+                                                              gpu_stream_t &stream,
+                                                              f64_t timeout_seconds = 120.0) noexcept {
+        using result_t = expected<infiniband_all_reduce>;
+        sz::string key;
+        if (!domain.next_collective_key(key)) return result_t::fail(status_t::bad_alloc_k, "collective key failed");
+        auto wired = domain.wire_allreduce(member_index, arena, stream, scalars * sizeof(value_type_), key.view(),
+                                           timeout_seconds);
+        if (!wired) return result_t::fail(std::move(wired));
+        infiniband_all_reduce handle;
+        handle.reach_ = std::move(wired.value_);
+        return result_t {std::move(handle)};
+    }
+    /** @brief The typed shard summed in place — the caller stages its contribution here before each step. */
+    [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept {
+        b8r1_span_t const bytes = reach_.payload();
+        return nk::tensor_span<value_type_, 1> {reinterpret_cast<value_type_ *>(bytes.data()),
+                                                bytes.extent(0) / sizeof(value_type_)};
+    }
+    /** @brief Advance the round and enqueue the in-place cross-domain sum — one op per step, capture-safe. */
+    [[nodiscard]] expected_t operator()(gpu_stream_t &stream) noexcept {
+        if (expected_t advanced = reach_.advance(stream); !advanced) return advanced;
+        return reach_.allreduce_sum(stream);
+    }
+
+  private:
+    infiniband_member_t reach_ {};
+};
+
+/** @brief Cross-domain all-gather of domain-major blocks — the typed op-handle. This domain's block sits at
+ *      @ref own_block before @c operator() ; after, every domain's block fills @ref payload . */
+template <typename value_type_>
+struct infiniband_all_gather {
+    using value_type = value_type_;
+    [[nodiscard]] static expected<infiniband_all_gather> make(colocated_domain_t &domain, u32_t member_index,
+                                                              gpu_arena_t &arena, std::size_t block_scalars,
+                                                              gpu_stream_t &stream,
+                                                              f64_t timeout_seconds = 120.0) noexcept {
+        using result_t = expected<infiniband_all_gather>;
+        sz::string key;
+        if (!domain.next_collective_key(key)) return result_t::fail(status_t::bad_alloc_k, "collective key failed");
+        auto wired = domain.wire_allgather(member_index, arena, stream, block_scalars * sizeof(value_type_), key.view(),
+                                           timeout_seconds);
+        if (!wired) return result_t::fail(std::move(wired));
+        infiniband_all_gather handle;
+        handle.reach_ = std::move(wired.value_);
+        return result_t {std::move(handle)};
+    }
+    /** @brief The whole domain-major world buffer — @b [domains·block] , filled after @c operator() . */
+    [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept { return typed_(reach_.payload()); }
+    /** @brief This domain's own block — staged here before the gather. */
+    [[nodiscard]] nk::tensor_span<value_type_, 1> own_block() noexcept { return typed_(reach_.own_block()); }
+    /** @brief Advance the round and enqueue the domain-major all-gather — one op per step, capture-safe. */
+    [[nodiscard]] expected_t operator()(gpu_stream_t &stream) noexcept {
+        if (expected_t advanced = reach_.advance(stream); !advanced) return advanced;
+        return reach_.allgather(stream);
+    }
+
+  private:
+    [[nodiscard]] static nk::tensor_span<value_type_, 1> typed_(b8r1_span_t bytes) noexcept {
+        return {reinterpret_cast<value_type_ *>(bytes.data()), bytes.extent(0) / sizeof(value_type_)};
+    }
+    infiniband_member_t reach_ {};
+};
+
+/** @brief Cross-domain all-to-all of per-peer blocks — the typed op-handle. The caller stages each
+ *      @ref send_block before @c operator() ; after, each @ref recv_block holds its round-partner's block, and this
+ *      domain's own block stays in place. Two domains today (a pairwise exchange); beyond two fails loud. */
+template <typename value_type_>
+struct infiniband_all_to_all {
+    using value_type = value_type_;
+    [[nodiscard]] static expected<infiniband_all_to_all> make(colocated_domain_t &domain, u32_t member_index,
+                                                              gpu_arena_t &arena, std::size_t block_scalars,
+                                                              gpu_stream_t &stream,
+                                                              f64_t timeout_seconds = 120.0) noexcept {
+        using result_t = expected<infiniband_all_to_all>;
+        sz::string key;
+        if (!domain.next_collective_key(key)) return result_t::fail(status_t::bad_alloc_k, "collective key failed");
+        auto wired = domain.wire_alltoall(member_index, arena, stream, block_scalars * sizeof(value_type_), key.view(),
+                                          timeout_seconds);
+        if (!wired) return result_t::fail(std::move(wired));
+        infiniband_all_to_all handle;
+        handle.reach_ = std::move(wired.value_);
+        return result_t {std::move(handle)};
+    }
+    /** @brief The outgoing block for @p destination_domain — staged before the exchange. */
+    [[nodiscard]] nk::tensor_span<value_type_, 1> send_block(u32_t destination_domain) noexcept {
+        return typed_(reach_.send_block(destination_domain));
+    }
+    /** @brief The block received from round @p round 's partner — valid after @c operator() . */
+    [[nodiscard]] nk::tensor_span<value_type_, 1> recv_block(u32_t round) noexcept {
+        return typed_(reach_.recv_block(round));
+    }
+    /** @brief Advance the round and enqueue the all-to-all exchange — one op per step, capture-safe. */
+    [[nodiscard]] expected_t operator()(gpu_stream_t &stream) noexcept {
+        if (expected_t advanced = reach_.advance(stream); !advanced) return advanced;
+        return reach_.alltoall(stream);
+    }
+
+  private:
+    [[nodiscard]] static nk::tensor_span<value_type_, 1> typed_(b8r1_span_t bytes) noexcept {
+        return {reinterpret_cast<value_type_ *>(bytes.data()), bytes.extent(0) / sizeof(value_type_)};
+    }
+    infiniband_member_t reach_ {};
 };
 
 #else // !defined(UFORM_WITH_INFINIBAND)
@@ -987,6 +1160,9 @@ struct infiniband_member_t {
     [[nodiscard]] expected_t advance(gpu_stream_t &) noexcept { return {}; }
     [[nodiscard]] expected_t allreduce_sum(gpu_stream_t &) noexcept { return {}; }
     [[nodiscard]] expected_t allgather(gpu_stream_t &) noexcept { return {}; }
+    [[nodiscard]] expected_t alltoall(gpu_stream_t &) noexcept { return {}; }
+    [[nodiscard]] b8r1_span_t send_block(u32_t) noexcept { return {}; }
+    [[nodiscard]] b8r1_span_t recv_block(u32_t) noexcept { return {}; }
 };
 
 /** @brief The build-gate stub of the colocated domain: single-domain topologies work (nothing to
@@ -1010,13 +1186,61 @@ struct colocated_domain_t {
                                                                sz::string_view, f64_t = 120.0) noexcept {
         return expected<infiniband_member_t> {infiniband_member_t {}};
     }
+    [[nodiscard]] expected<infiniband_member_t> wire_alltoall(u32_t, gpu_arena_t &, gpu_stream_t &, std::size_t,
+                                                              sz::string_view, f64_t = 120.0) noexcept {
+        return expected<infiniband_member_t> {infiniband_member_t {}};
+    }
     [[nodiscard]] mesh_topology_t const &topology() const noexcept { return *topology_; }
     [[nodiscard]] u32_t multimem_domain_count() const noexcept { return 1u; }
+    [[nodiscard]] bool next_collective_key(sz::string &out) noexcept {
+        return static_cast<bool>(format_into(out, "collective.{}", next_collective_id_++));
+    }
 
   private:
     mesh_topology_t const *topology_ = nullptr;
+    u32_t next_collective_id_ = 0;
+};
+
+/** @brief Build-gate stubs of the typed collective handles — the zero-round identity: @c make succeeds with a
+ *      no-op handle, the payload accessors return empty spans, and @c operator() enqueues nothing. */
+template <typename value_type_>
+struct infiniband_all_reduce {
+    using value_type = value_type_;
+    [[nodiscard]] static expected<infiniband_all_reduce> make(colocated_domain_t &, u32_t, gpu_arena_t &, std::size_t,
+                                                              gpu_stream_t &, f64_t = 120.0) noexcept {
+        return expected<infiniband_all_reduce> {infiniband_all_reduce {}};
+    }
+    [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept { return {}; }
+    [[nodiscard]] expected_t operator()(gpu_stream_t &) noexcept { return {}; }
+};
+template <typename value_type_>
+struct infiniband_all_gather {
+    using value_type = value_type_;
+    [[nodiscard]] static expected<infiniband_all_gather> make(colocated_domain_t &, u32_t, gpu_arena_t &, std::size_t,
+                                                              gpu_stream_t &, f64_t = 120.0) noexcept {
+        return expected<infiniband_all_gather> {infiniband_all_gather {}};
+    }
+    [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept { return {}; }
+    [[nodiscard]] nk::tensor_span<value_type_, 1> own_block() noexcept { return {}; }
+    [[nodiscard]] expected_t operator()(gpu_stream_t &) noexcept { return {}; }
+};
+template <typename value_type_>
+struct infiniband_all_to_all {
+    using value_type = value_type_;
+    [[nodiscard]] static expected<infiniband_all_to_all> make(colocated_domain_t &, u32_t, gpu_arena_t &, std::size_t,
+                                                              gpu_stream_t &, f64_t = 120.0) noexcept {
+        return expected<infiniband_all_to_all> {infiniband_all_to_all {}};
+    }
+    [[nodiscard]] nk::tensor_span<value_type_, 1> send_block(u32_t) noexcept { return {}; }
+    [[nodiscard]] nk::tensor_span<value_type_, 1> recv_block(u32_t) noexcept { return {}; }
+    [[nodiscard]] expected_t operator()(gpu_stream_t &) noexcept { return {}; }
 };
 
 #endif // defined(UFORM_WITH_INFINIBAND)
+
+/** @brief The three InfiniBand buffers share the unified enqueue-only shape — a drifted signature fails here. */
+static_assert(collective_buffer<infiniband_all_reduce<f32_t>>, "infiniband_all_reduce must model collective_buffer");
+static_assert(collective_buffer<infiniband_all_gather<bf16_t>>, "infiniband_all_gather must model collective_buffer");
+static_assert(collective_buffer<infiniband_all_to_all<b8_t>>, "infiniband_all_to_all must model collective_buffer");
 
 } // namespace unum::uform::core

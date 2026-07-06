@@ -340,6 +340,19 @@ struct multimem_domain_t {
         return expected<multimem_window_t> {window};
     }
 
+    /** @brief Bump-reserve @p count elements of @p value_type_ inside member @p member 's replica and return the
+     *      typed pointer — the primitive @ref multimem_alloc drives, so a payload becomes an ordinary typed
+     *      @c nk::tensor . Reservation is Float32-granular, keeping f32 windows symmetric across ranks; returns
+     *      @c nullptr past capacity (the allocator surfaces that as an empty tensor). No per-window free. */
+    template <typename value_type_>
+    [[nodiscard]] value_type_ *reserve_window(u32_t member, std::size_t count) noexcept {
+        std::size_t const scalars = divide_round_up(count * sizeof(value_type_), sizeof(f32_t));
+        if (reserved_scalars_ + scalars > payload_scalars_) return nullptr;
+        std::size_t const offset_scalars = reserved_scalars_;
+        reserved_scalars_ += scalars;
+        return reinterpret_cast<value_type_ *>(replicas_.member_slice(member).data() + offset_scalars * sizeof(f32_t));
+    }
+
     /** @brief Member @p member_index 's kernel-facing addresses. */
     [[nodiscard]] multimem_member_t member(std::size_t member_index) noexcept {
         std::size_t const flag_offset = flag_offset_();
@@ -368,6 +381,17 @@ struct multimem_domain_t {
      *      barrier proved every member's payload complete. */
     [[nodiscard]] expected_t reduce_scatter(std::size_t member_index, f32r1_span_t destination, std::size_t shard_begin,
                                             gpu_stream_t &stream) noexcept;
+
+    /** @brief Typed reduce-scatter: @p source_window is member @p member_index 's own payload subrange to sum
+     *      across the domain — a subrange of a @ref multimem_alloc tensor, replacing the raw @c shard_begin
+     *      offset. @p destination receives the domain-wide sum. Delegates to the offset form. */
+    [[nodiscard]] expected_t reduce_scatter(std::size_t member_index, f32r1_span_t destination,
+                                            f32r1_view_t source_window, gpu_stream_t &stream) noexcept {
+        std::size_t const shard_begin = static_cast<std::size_t>(
+            static_cast<f32_t const *>(source_window.data()) -
+            static_cast<f32_t const *>(payload(member_index).data()));
+        return reduce_scatter(member_index, destination, shard_begin, stream);
+    }
 
   private:
     /** @brief Byte offset of the arrival counter inside every replica — pure layout arithmetic over
@@ -418,5 +442,50 @@ struct multimem_domain_t {
     /** @brief This process's first domain member — 0 iff it is the domain lead. */
     u32_t member_offset_ = 0;
 };
+
+/** @brief Borrowed-domain facade allocating a member's typed window inside the shared multicast payload — the
+ *      symmetric/multicast analogue of @ref gpu_arena_alloc . Every rank running the identical allocation program
+ *      lands identical offsets, so a peer's window is @c remote_base+offset ; @c deallocate is a no-op, the domain
+ *      outlives its consumers and never frees a window (bump cursor). Rebindable per element type, so a payload is
+ *      an ordinary typed @c nk::tensor the reduces read and write in place. */
+template <typename value_type_ = b8_t>
+struct multimem_alloc {
+    using value_type = value_type_;
+    using size_type = std::size_t;
+    using difference_type = std::ptrdiff_t;
+    using propagate_on_container_move_assignment = std::true_type;
+
+    /** @brief Rebind to another element type — the @c std::allocator_traits handle the tensor uses. */
+    template <typename other_type_>
+    struct rebind {
+        using other = multimem_alloc<other_type_>;
+    };
+
+    /** @brief The composition-root domain the window is reserved from — borrowed, never owned. */
+    multimem_domain_t *domain_ = nullptr;
+    /** @brief This allocation's domain member — the replica the window lives in. */
+    u32_t member_ = 0;
+
+    constexpr multimem_alloc() noexcept = default;
+    explicit constexpr multimem_alloc(multimem_domain_t &domain, u32_t member) noexcept
+        : domain_(&domain), member_(member) {}
+    template <typename other_type_>
+    constexpr multimem_alloc(multimem_alloc<other_type_> const &other) noexcept
+        : domain_(other.domain_), member_(other.member_) {}
+
+    [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
+        return domain_ != nullptr ? domain_->reserve_window<value_type>(member_, count) : nullptr;
+    }
+    void deallocate(value_type *, std::size_t) noexcept {}
+
+    [[nodiscard]] constexpr bool operator==(multimem_alloc const &other) const noexcept {
+        return domain_ == other.domain_ && member_ == other.member_;
+    }
+};
+
+/** @brief Canonical byte-typed multimem allocator handle — rebind per element type via @c std::allocator_traits . */
+using multimem_alloc_t = multimem_alloc<b8_t>;
+/** @brief A Float32 rank-1 payload tensor over the multicast-symmetric window — the reduce / scatter surface. */
+using f32r1_tensor_multimem_t = nk::tensor<f32_t, multimem_alloc<f32_t>, 1>;
 
 } // namespace unum::uform::core
