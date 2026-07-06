@@ -23,10 +23,9 @@
 #include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fclose` — planting a simulated peer's exchange files
 #include <cstdlib> // `std::getenv`, `std::atoi`
 
-#include <utility>    // `std::move`
-#include <string>     // `std::string` — the planted-payload plumbing (tests may use the STL, minus streams)
-#include <format>     // `std::format` — assembling the simulated peers' wire payloads
-#include <filesystem> // `std::filesystem` — the temporary exchange directory
+#include <utility>      // `std::move`
+#include <system_error> // `std::error_code` — the out-param every `std::filesystem` call reports through
+#include <filesystem>   // `std::filesystem` — the temporary exchange directory
 
 #include <unistd.h> // `::getpid`
 
@@ -41,27 +40,35 @@ namespace fs = std::filesystem;
 
 /** @brief One host_domain's facts in the exact line-oriented wire format `build_facts_` emits — what a
  *      peer publishes under its `mesh` key for the lead to read. */
-static std::string facts_payload(char const *job, u32_t index, u32_t count, u32_t multimem, u32_t devices,
-                                 char const *hostname, char const *device_name) {
-    return std::format("schema {}\njob {}\nhost_domain_index {}\nhost_domain_count {}\n" //
-                       "multimem {}\nhostname {}\ndevices {}\ndevice_name {}",
-                       mesh_schema_k, job, index, count, multimem, hostname, devices, device_name);
+static sz::string facts_payload(sz::string_view job, u32_t index, u32_t count, u32_t multimem, u32_t devices,
+                                sz::string_view hostname, sz::string_view device_name) {
+    sz::string text;
+    (void)format_into(text,
+                      "schema {}\njob {}\nhost_domain_index {}\nhost_domain_count {}\n" //
+                      "multimem {}\nhostname {}\ndevices {}\ndevice_name {}\nuuids",
+                      mesh_schema_k, job, index, count, multimem, hostname, devices, device_name);
+    // Synthetic per-GPU UUIDs, distinct across host_domains and never colliding with a real GPU id, so the
+    // lead's world-uniqueness check sees this faux peer's devices as its own disjoint set.
+    for (u32_t gpu = 0; gpu != devices; ++gpu)
+        (void)format_into(text, " fa11ba55fa11ba55fa11ba55{:08x}", (index << 16) | gpu);
+    return text;
 }
 
 /** @brief A merged manifest in the wire format `build_manifest_` emits — what the lead publishes for every
  *      follower to adopt; every row carries @p device_name so a follower's self-row agrees with its probe. */
-static std::string manifest_payload(char const *job, u32_t multimem, u32_t rows, u32_t devices,
-                                    char const *device_name) {
-    std::string text = std::format("schema {}\njob {}\nmultimem {}\n", mesh_schema_k, job, multimem);
+static sz::string manifest_payload(sz::string_view job, u32_t multimem, u32_t rows, u32_t devices,
+                                   sz::string_view device_name) {
+    sz::string text;
+    (void)format_into(text, "schema {}\njob {}\nmultimem {}\n", mesh_schema_k, job, multimem);
     for (u32_t row = 0; row != rows; ++row)
-        text += std::format("host_domain {} hostname faux-{} devices {} device_name {}\n", row, row, devices,
-                            device_name);
+        (void)format_into(text, "host_domain {} hostname faux-{} devices {} device_name {}\n", row, row, devices,
+                          device_name);
     return text;
 }
 
 /** @brief Write @p content into @p path — one simulated peer's exchange file, planted before the bootstrap
  *      under test reads it. Uses stdio, never a `std::*stream`. */
-static void plant(fs::path const &path, std::string const &content) {
+static void plant(fs::path const &path, sz::string const &content) {
     std::FILE *file = std::fopen(path.c_str(), "wb");
     if (file == nullptr) return;
     (void)std::fwrite(content.data(), 1, content.size(), file);
@@ -71,7 +78,7 @@ static void plant(fs::path const &path, std::string const &content) {
 /** @brief The device-0 model name with spaces replaced by underscores — exactly what
  *      `probe_local_host_domain_` records, so a planted peer's `device_name` matches this box's probe and
  *      the uniformity check passes. */
-static bool probe_local_device_name(std::string &name) {
+static bool probe_local_device_name(sz::string &name) {
     CUdevice device = 0;
     if (cuDeviceGet(&device, 0) != CUDA_SUCCESS) return false;
     char raw[64] = {};
@@ -93,7 +100,7 @@ static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
     mesh_topology_t topology;
     if (topology.host_domains.try_resize(2) != status_t::success_k) return suite.check(false, "topology table alloc");
     topology.host_domain_index = 0;
-    (void)format_into(topology.exchange_directory, "{}", directory.string());
+    (void)format_into(topology.exchange_directory, "{}", directory.c_str());
 
     sz::string_view const payload = "qpn 42\npsn 7\nrkey 3735928559\n";
     suite.check(static_cast<bool>(topology.publish_text("wiring", payload)), "publish_text should succeed");
@@ -104,7 +111,7 @@ static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
     suite.check(received.view() == payload, "payload should round-trip verbatim: got {}", received);
 
     sz::string_view const replacement = "qpn 99\n";
-    (void)topology.publish_text("wiring", replacement);
+    suite.check(static_cast<bool>(topology.publish_text("wiring", replacement)), "republish_text should succeed");
     sz::string again;
     (void)topology.await_text(0, "wiring", again, 5.0);
     suite.check(again.view() == replacement, "republish should atomically replace: got {}", again);
@@ -113,7 +120,7 @@ static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
 /** @brief The single-host_domain world: `bootstrap(0,1)` assembles the whole topology from the local probe
  *      and never opens the exchange directory — the common one-box case. */
 static void single_box_world(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
-    std::string const base_str = base.string();
+    sz::string const base_str {base.c_str()};
     auto result = mesh_topology_t::bootstrap(0, 1, local_devices, base_str.c_str(), "single_box", 10.0);
     if (!result) return suite.check(false, "single-box bootstrap should succeed: {}", result.description_);
     mesh_topology_t topology = std::move(*result);
@@ -130,9 +137,9 @@ static void single_box_world(test_suite_t &suite, fs::path const &base, u32_t lo
  *      world; a follower adopts the lead's manifest. Both halves run against a matching simulated peer
  *      carrying this box's real GPU identity, and each must arrive at the correct world table. */
 static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
-    std::string device_name;
+    sz::string device_name;
     if (!probe_local_device_name(device_name)) return suite.check(false, "probing the local GPU name");
-    std::string const base_str = base.string();
+    sz::string const base_str {base.c_str()};
     std::error_code error;
 
     // The lead assembles the world by reading a peer's facts, then publishing the merged manifest.
@@ -141,7 +148,7 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
         fs::path const directory = base / job;
         fs::create_directories(directory, error);
         plant(directory / "host_domain1.mesh",
-              facts_payload(job, 1, 2, local_devices, local_devices, "faux-peer", device_name.c_str()));
+              facts_payload(job, 1, 2, local_devices, local_devices, "faux-peer", device_name));
         plant(directory / "host_domain1.mesh.arrive", "1\n"); // the peer's arrival at the closing barrier
         auto result = mesh_topology_t::bootstrap(0, 2, local_devices, base_str.c_str(), job, 10.0);
         if (!result) suite.check(false, "lead should assemble the world: {}", result.description_);
@@ -152,8 +159,8 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
             suite.check(lead.host_domain_count() == 2, "lead world size: got {} want 2", lead.host_domain_count());
             suite.check(lead.host_domains[0].device_count == local_devices, "lead self row should reflect the probe");
             suite.check(peer_host == sz::string_view {"faux-peer"}, "peer hostname: got {} want faux-peer", peer_host);
-            suite.check(sz::string_view {peer.device_name} == sz::string_view {device_name.c_str()},
-                        "peer device_name: got {} want {}", sz::string_view {peer.device_name}, device_name);
+            suite.check(sz::string_view {peer.device_name} == device_name.view(), "peer device_name: got {} want {}",
+                        sz::string_view {peer.device_name}, device_name);
         }
     }
 
@@ -162,8 +169,7 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
         char const *job = "reconcile_follower";
         fs::path const directory = base / job;
         fs::create_directories(directory, error);
-        plant(directory / "host_domain0.manifest",
-              manifest_payload(job, local_devices, 2, local_devices, device_name.c_str()));
+        plant(directory / "host_domain0.manifest", manifest_payload(job, local_devices, 2, local_devices, device_name));
         plant(directory / "host_domain0.mesh.release", "1\n"); // the lead's release at the closing barrier
         auto result = mesh_topology_t::bootstrap(1, 2, local_devices, base_str.c_str(), job, 10.0);
         if (!result) suite.check(false, "follower should adopt the world: {}", result.description_);
@@ -172,8 +178,7 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
             mesh_host_domain_t const &self = follower.self();
             suite.check(follower.host_domain_count() == 2, "follower world size: got {} want 2",
                         follower.host_domain_count());
-            suite.check(self.device_count == local_devices &&
-                            sz::string_view {self.device_name} == sz::string_view {device_name.c_str()},
+            suite.check(self.device_count == local_devices && sz::string_view {self.device_name} == device_name.view(),
                         "follower self row should agree with its probe: got {}", sz::string_view {self.device_name});
         }
     }
@@ -221,7 +226,9 @@ int main() {
     test_suite_t suite {"mesh conformance"};
     bool const cluster = std::getenv("UFORM_HOST_DOMAIN_INDEX") != nullptr;
 
-    fs::path const base = fs::temp_directory_path() / ("uform_mesh_test_" + std::to_string(::getpid()));
+    sz::string base_name;
+    (void)format_into(base_name, "uform_mesh_test_{}", ::getpid());
+    fs::path const base = fs::temp_directory_path() / base_name.c_str();
     std::error_code error;
     fs::remove_all(base, error);
     fs::create_directories(base, error);

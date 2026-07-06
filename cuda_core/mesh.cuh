@@ -84,6 +84,8 @@
 
 #include <charconv>   // `std::from_chars`
 #include <chrono>     // `std::chrono::steady_clock` — the exchange timeout clock
+#include <span>       // `std::span` — the probed GPU-uuid list handed to `build_facts_`
+#include <algorithm>  // `std::sort` — the world-GPU-uniqueness check
 #include <filesystem> // `std::filesystem::create_directories` / `rename` — the `std::error_code` overloads
 #include <thread>     // `std::this_thread::sleep_for` — sleeping only; the process stays single-threaded
 
@@ -300,6 +302,7 @@ struct mesh_host_domain_t {
  *  hostname nvl72-rack0-tray7
  *  devices 4
  *  device_name NVIDIA_GB200
+ *  uuids 5c1e0a...c9 5c1e0a...ca 5c1e0a...cb 5c1e0a...cc
  *
  *  $ cat /shared/exchange/20260702-193412-8841/host_domain0.manifest
  *  schema uform.mesh.1
@@ -390,7 +393,7 @@ struct mesh_topology_t {
                                                        local_devices * host_domain_count);
         if (!shape) return expected<mesh_topology_t>::fail(std::move(shape));
 
-        expected<mesh_host_domain_t> probed = probe_local_host_domain_(host_domain_index, local_devices);
+        expected<local_probe_t> probed = probe_local_host_domain_(host_domain_index, local_devices);
         if (!probed) return expected<mesh_topology_t>::fail(std::move(probed));
 
         mesh_topology_t topology;
@@ -399,7 +402,7 @@ struct mesh_topology_t {
         if (topology.host_domains.try_resize(host_domain_count) != status_t::success_k)
             return expected<mesh_topology_t>::fail(
                 status_t::bad_alloc_k, "host_domain table allocation failed (host_domains={})", host_domain_count);
-        topology.host_domains[host_domain_index] = probed.value_;
+        topology.host_domains[host_domain_index] = probed.value_.facts;
         if (host_domain_count == 1) return expected<mesh_topology_t> {std::move(topology)};
 
         // The exchange root and the job id are explicit configuration; guessing either is how worlds hang
@@ -428,7 +431,7 @@ struct mesh_topology_t {
                                                    topology.exchange_directory, directory_error.value());
 
         sz::string facts_text;
-        if (!build_facts_(facts_text, probed.value_, topology.shape, job))
+        if (!build_facts_(facts_text, probed.value_.facts, topology.shape, job, probed.value_.uuids.view()))
             return expected<mesh_topology_t>::fail(status_t::bad_alloc_k, "facts assembly failed (host_domain={})",
                                                    host_domain_index);
         if (expected_t published = topology.publish_text("mesh", facts_text.view()); !published)
@@ -436,7 +439,7 @@ struct mesh_topology_t {
 
         expected_t exchanged = host_domain_index == 0
                                    ? topology.collect_world_as_lead_(job, probed.value_, timeout_seconds)
-                                   : topology.adopt_manifest_(job, probed.value_, timeout_seconds);
+                                   : topology.adopt_manifest_(job, probed.value_.facts, timeout_seconds);
         if (!exchanged) return expected<mesh_topology_t>::fail(std::move(exchanged));
 
         if (expected_t synchronized = topology.barrier("mesh", timeout_seconds); !synchronized)
@@ -528,10 +531,28 @@ struct mesh_topology_t {
         sz::string_view job {};
         sz::string_view hostname {};
         sz::string_view device_name {};
+        /** @brief The space-separated 32-hex GPU UUIDs (one per device), borrowing from the payload text —
+         *      the physical GPU identities the lead proves disjoint across host_domains. */
+        sz::string_view uuids {};
         u32_t host_domain_index = 0;
         u32_t host_domain_count = 0;
         u32_t multimem = 0;
         u32_t devices = 0;
+    };
+
+    /** @brief One probed physical GPU identity paired with the host_domain that claims it — the flat table
+     *      the lead sorts once to prove no GPU is owned twice (an unpartitioned @c CUDA_VISIBLE_DEVICES ). */
+    struct claimed_gpu_t {
+        CUuuid uuid {};
+        u32_t owner = 0;
+    };
+
+    /** @brief The local hardware probe: this host_domain's published facts plus the CUDA UUIDs of its
+     *      visible GPUs — kept @b probe-local (the world table stores identity, not per-GPU uuids), fed to
+     *      @ref build_facts_ on publish and to @ref collect_world_as_lead_ for the uniqueness proof. */
+    struct local_probe_t {
+        mesh_host_domain_t facts {};
+        per_gpu_array<CUuuid> uuids {};
     };
 
     /** @brief Parse a whole decimal token; @c false on anything but a clean number. */
@@ -547,50 +568,80 @@ struct mesh_topology_t {
         destination[count] = '\0';
     }
 
+    /** @brief Append one GPU UUID as 32 lowercase hex characters — the wire form of a @c CUuuid . */
+    [[nodiscard]] static bool format_uuid_(sz::string &text, CUuuid const &uuid) noexcept {
+        bool built = true;
+        for (char const byte : uuid.bytes) built = built && format_into(text, "{:02x}", static_cast<u8_t>(byte));
+        return built;
+    }
+
+    /** @brief Parse a 32-hex GPU UUID token back into a @c CUuuid ; @c false on any non-hex or short token. */
+    [[nodiscard]] static bool parse_uuid_(sz::string_view token, CUuuid &uuid) noexcept {
+        if (token.size() != 2u * sizeof(uuid.bytes)) return false;
+        for (std::size_t byte_index = 0; byte_index != sizeof(uuid.bytes); ++byte_index) {
+            char const *pair = token.data() + 2u * byte_index;
+            unsigned value = 0;
+            std::from_chars_result const result = std::from_chars(pair, pair + 2, value, 16);
+            if (result.ec != std::errc {} || result.ptr != pair + 2) return false;
+            uuid.bytes[byte_index] = static_cast<char>(value);
+        }
+        return true;
+    }
+
     /** @brief Probe this host_domain's own facts: hostname plus the GPU model, verified uniform across
      *      the local devices too — the shape describes identical GPUs, and a box with mixed cards would
      *      break every "three integers describe the world" derivation downstream. */
-    [[nodiscard]] static expected<mesh_host_domain_t> probe_local_host_domain_(u32_t host_domain_index,
-                                                                               u32_t device_count) noexcept {
-        mesh_host_domain_t self;
+    [[nodiscard]] static expected<local_probe_t> probe_local_host_domain_(u32_t host_domain_index,
+                                                                          u32_t device_count) noexcept {
+        local_probe_t probe;
+        mesh_host_domain_t &self = probe.facts;
         self.host_domain_index = host_domain_index;
         self.device_count = device_count;
         if (::gethostname(self.hostname, sizeof(self.hostname) - 1u) != 0) self.hostname[0] = '\0';
         for (u32_t device_ordinal = 0; device_ordinal != device_count; ++device_ordinal) {
             CUdevice device = 0;
             if (CUresult result = cuDeviceGet(&device, static_cast<int>(device_ordinal)); result != CUDA_SUCCESS)
-                return expected<mesh_host_domain_t>::fail(result, "device handle query failed (device={})",
-                                                          device_ordinal);
+                return expected<local_probe_t>::fail(result, "device handle query failed (device={})", device_ordinal);
             char name[device_name_capacity_k] = {};
             if (CUresult result = cuDeviceGetName(name, sizeof(name) - 1u, device); result != CUDA_SUCCESS)
-                return expected<mesh_host_domain_t>::fail(result, "device name query failed (device={})",
-                                                          device_ordinal);
+                return expected<local_probe_t>::fail(result, "device name query failed (device={})", device_ordinal);
             for (char *character = name; *character != '\0'; ++character)
                 if (*character == ' ') *character = '_';
             if (device_ordinal == 0) std::memcpy(self.device_name, name, sizeof(name));
             else if (std::strcmp(self.device_name, name) != 0)
-                return expected<mesh_host_domain_t>::fail(status_t::shape_unsupported_k,
-                                                          "mixed local GPUs: device 0 is {}, device {} is {}",
-                                                          self.device_name, device_ordinal, name);
+                return expected<local_probe_t>::fail(status_t::shape_unsupported_k,
+                                                     "mixed local GPUs: device 0 is {}, device {} is {}",
+                                                     self.device_name, device_ordinal, name);
+            CUuuid uuid {};
+            // The globally-unique physical id — the token the lead proves no two host_domains share.
+            if (CUresult result = cuDeviceGetUuid(&uuid, device); result != CUDA_SUCCESS)
+                return expected<local_probe_t>::fail(result, "device uuid query failed (device={})", device_ordinal);
+            if (probe.uuids.try_push_back(uuid) != status_t::success_k)
+                return expected<local_probe_t>::fail(status_t::shape_unsupported_k,
+                                                     "a host_domain drives {} GPUs, over the {} cap", device_count,
+                                                     max_gpus_per_host_k);
         }
-        return self;
+        return probe;
     }
 
     /** @brief Assemble the line-oriented facts payload — the exact inverse of @ref parse_facts_ .
      *      @c false only on allocation failure. */
     [[nodiscard]] static bool build_facts_(sz::string &text, mesh_host_domain_t const &self, mesh_shape_t const &shape,
-                                           sz::string_view job) noexcept {
-        return format_into(text,
-                           "schema {}\n"            //
-                           "job {}\n"               //
-                           "host_domain_index {}\n" //
-                           "host_domain_count {}\n" //
-                           "multimem {}\n"          //
-                           "hostname {}\n"          //
-                           "devices {}\n"           //
-                           "device_name {}",
-                           mesh_schema_k, job, self.host_domain_index, shape.host_domain_count(),
-                           shape.gpus_per_multimem_domain, self.hostname, self.device_count, self.device_name);
+                                           sz::string_view job, std::span<CUuuid const> uuids) noexcept {
+        bool built = format_into(text,
+                                 "schema {}\n"            //
+                                 "job {}\n"               //
+                                 "host_domain_index {}\n" //
+                                 "host_domain_count {}\n" //
+                                 "multimem {}\n"          //
+                                 "hostname {}\n"          //
+                                 "devices {}\n"           //
+                                 "device_name {}\n"       //
+                                 "uuids",
+                                 mesh_schema_k, job, self.host_domain_index, shape.host_domain_count(),
+                                 shape.gpus_per_multimem_domain, self.hostname, self.device_count, self.device_name);
+        for (CUuuid const &uuid : uuids) built = built && format_into(text, " ") && format_uuid_(text, uuid);
+        return built;
     }
 
     /** @brief Parse a line-oriented @c <key> @c <value> facts payload with the partition API — SIMD
@@ -606,13 +657,14 @@ struct mesh_topology_t {
             else if (key == "job") facts.job = value;
             else if (key == "hostname") facts.hostname = value;
             else if (key == "device_name") facts.device_name = value;
+            else if (key == "uuids") facts.uuids = value;
             else if (key == "host_domain_index") index_parsed = parse_u32_(value, facts.host_domain_index);
             else if (key == "host_domain_count") count_parsed = parse_u32_(value, facts.host_domain_count);
             else if (key == "multimem") multimem_parsed = parse_u32_(value, facts.multimem);
             else if (key == "devices") devices_parsed = parse_u32_(value, facts.devices);
         }
         return index_parsed && count_parsed && multimem_parsed && devices_parsed && !facts.schema.empty() &&
-               !facts.job.empty() && !facts.hostname.empty() && !facts.device_name.empty();
+               !facts.job.empty() && !facts.hostname.empty() && !facts.device_name.empty() && !facts.uuids.empty();
     }
 
     /** @brief Assemble the manifest payload from a complete table — the exact inverse of
@@ -675,8 +727,19 @@ struct mesh_topology_t {
     /** @brief The lead's half of the exchange: read every peer's facts, validate agreement against this
      *      host_domain's own @p probed facts and the world @ref shape , fill @ref host_domains , and
      *      publish the merged manifest. */
-    [[nodiscard]] expected_t collect_world_as_lead_(sz::string_view job, mesh_host_domain_t const &probed,
+    [[nodiscard]] expected_t collect_world_as_lead_(sz::string_view job, local_probe_t const &probed,
                                                     f64_t timeout_seconds) noexcept {
+        mesh_host_domain_t const &self = probed.facts;
+        array<claimed_gpu_t> claimed;
+        // The world's physical GPU identities, this host_domain's first; sorted once at the end to prove
+        // none is claimed twice — O(world log world), never a pairwise scan.
+        if (claimed.try_reserve(shape.gpus_per_colocated_domain) != status_t::success_k)
+            return expected_t::fail(status_t::bad_alloc_k, "GPU-uniqueness table allocation failed ({} GPUs)",
+                                    shape.gpus_per_colocated_domain);
+        for (CUuuid const &uuid : probed.uuids.view())
+            if (claimed.try_push_back({uuid, 0u}) != status_t::success_k)
+                return expected_t::fail(status_t::bad_alloc_k, "GPU-uniqueness table push failed");
+
         for (u32_t peer_index = 1; peer_index != host_domain_count(); ++peer_index) {
             sz::string peer_facts;
             if (expected_t awaited = await_text(peer_index, "mesh", peer_facts, timeout_seconds); !awaited)
@@ -709,14 +772,47 @@ struct mesh_topology_t {
             peer.device_count = facts.devices;
             copy_token_(facts.hostname, peer.hostname, hostname_capacity_k);
             copy_token_(facts.device_name, peer.device_name, device_name_capacity_k);
-            if (peer.device_count != probed.device_count || std::strcmp(peer.device_name, probed.device_name) != 0)
+            if (peer.device_count != self.device_count || std::strcmp(peer.device_name, self.device_name) != 0)
                 return expected_t::fail( //
                     status_t::shape_unsupported_k,
                     "the mesh must be uniform: host_domain {} ({}) has {}×{}, host_domain 0 ({}) has {}×{}", peer_index,
-                    peer.hostname, peer.device_count, peer.device_name, probed.hostname, probed.device_count,
-                    probed.device_name);
+                    peer.hostname, peer.device_count, peer.device_name, self.hostname, self.device_count,
+                    self.device_name);
+            std::size_t peer_uuids = 0;
+            // The peer's physical GPU identities join the world table; one uuid per claimed device.
+            for (sz::string_view token : facts.uuids.split(sz::whitespaces_set())) {
+                if (token.empty()) continue;
+                CUuuid uuid {};
+                if (!parse_uuid_(token, uuid))
+                    return expected_t::fail(status_t::io_error_k,
+                                            "host_domain {} published a malformed GPU uuid \"{}\"", peer_index, token);
+                if (claimed.try_push_back({uuid, peer_index}) != status_t::success_k)
+                    return expected_t::fail(status_t::bad_alloc_k, "GPU-uniqueness table push failed");
+                ++peer_uuids;
+            }
+            if (peer_uuids != facts.devices)
+                return expected_t::fail(status_t::io_error_k, "host_domain {} listed {} GPU uuids for {} devices",
+                                        peer_index, peer_uuids, facts.devices);
             host_domains[peer_index] = peer;
         }
+
+        auto const by_uuid = [](claimed_gpu_t const &left, claimed_gpu_t const &right) noexcept {
+            return std::memcmp(left.uuid.bytes, right.uuid.bytes, sizeof(left.uuid.bytes)) < 0;
+        };
+        // No physical GPU is owned by two host_domains — the guard against an unpartitioned
+        // CUDA_VISIBLE_DEVICES (co-located processes seeing the same devices). One sort, one adjacent scan.
+        std::sort(claimed.data(), claimed.data() + claimed.size(), by_uuid);
+        for (std::size_t index = 1; index < claimed.size(); ++index)
+            if (std::memcmp(claimed[index].uuid.bytes, claimed[index - 1u].uuid.bytes,
+                            sizeof(claimed[index].uuid.bytes)) == 0) {
+                sz::string uuid_hex;
+                (void)format_uuid_(uuid_hex, claimed[index].uuid);
+                return expected_t::fail( //
+                    status_t::shape_unsupported_k,
+                    "GPU {} is claimed by both host_domain {} and host_domain {} — the launcher did not partition " "CU" "DA" "_V" "IS" "IB" "LE" "_D" "EV" "IC" "ES" " a" "cr" "os" "s " "co" "-l" "oc" "at" "ed" " p" "ro" "ce" "ss" "e" "s",
+                    uuid_hex, claimed[index - 1u].owner, claimed[index].owner);
+            }
+
         sz::string manifest;
         if (!build_manifest_(manifest, host_domains, shape, job))
             return expected_t::fail(status_t::bad_alloc_k, "manifest assembly failed (rows={})", host_domain_count());
