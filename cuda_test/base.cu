@@ -533,6 +533,11 @@ static void graph_capture(test_suite_t &suite, mesh_topology_t const &topology) 
 }
 
 int main() {
+    // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins: the spinning
+    // wait blocks its context, the peer's next launch blocks on module loading behind it, and neither
+    // side progresses. Eager loading before `cuInit` front-loads every module — the mixer suite's fix.
+    ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
+
     test_suite_t suite {"base"};
 
     // The schedule's properties are pure host math — asserted before any GPU work.

@@ -13,8 +13,15 @@
  *  warm-start from — and @c --mixture @c omni adds the raw-media masked-autoencoder heads (image /
  *  video patches, 1-D audio frames) over one heterogeneous batch. @c --eager drops the model-region capture.
  */
+#include <cstdlib> // `::setenv` — eager module loading before `cuInit`
+
 #include "cuda_train/base.cuh"
 
 using namespace unum::uform::train;
 
-int main(int argc, char **argv) { return base_trainer_t::run(base_config_t::parse(argc, argv)); }
+int main(int argc, char **argv) {
+    // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins (see the mixer
+    // and base conformance suites); eager loading before `cuInit` front-loads every module.
+    ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
+    return base_trainer_t::run(base_config_t::parse(argc, argv));
+}
