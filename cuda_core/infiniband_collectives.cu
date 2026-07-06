@@ -15,7 +15,7 @@
 
 #include <infiniband/mlx5dv.h> // `mlx5dv_init_obj`, `mlx5_wqe_*`, `mlx5_cqe64` — the direct-verbs layer
 #include <infiniband/verbs.h>  // `ibv_context`, `ibv_pd`, `ibv_cq`, `ibv_qp` — the RC bring-up
-#endifå
+#endif
 
 #include "cuda_core/infiniband_collectives.cuh" // the declarations these bodies define
 

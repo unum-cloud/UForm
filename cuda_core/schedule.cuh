@@ -291,6 +291,15 @@ template <unsigned block_size_>
 
 #endif // defined(__CUDACC__)
 
+/** @brief How a §10 model region runs: captured once into a @ref gpu_replay_graph_t and replayed every step
+ *      (the production default), or re-enqueued eagerly each step — the bring-up / debugging path, and the
+ *      other half of every capture-vs-eager parity test. A trainer carries it as a run knob; the two modes must
+ *      land on bitwise-identical weights over identical seeds. */
+enum capture_t : u32_t {
+    replayed_k = 0,
+    eager_k = 1,
+};
+
 /**
  *  @brief The capture-once / replay-forever graph: @ref make turns a body of enqueues into one
  *      uploaded @c CUgraphExec , and every later step is a single @c cuGraphLaunch .
@@ -617,7 +626,10 @@ struct cublaslt_plan_t {
      *      needs ( @ref workspace_bytes — the caller allocates exactly that, and the arena budget is
      *      the real constraint); determinism is enforced by name, never by a size cap: the pinned
      *      algorithm must be single-split with no cross-CTA reduction, so no atomics ever touch the
-     *      accumulator. */
+     *      accumulator. The preference restricts the search to reduction-free algorithms up front and
+     *      scans a deep candidate pool — for unaligned shapes (the 258-wide byte-vocabulary decoder)
+     *      the deterministic pick ranks well below every split-K candidate, so an unrestricted or
+     *      shallow scan would surface nothing the gate accepts. */
     [[nodiscard]] static expected<cublaslt_plan_t> make(cublaslt_session_t &session,
                                                         cublaslt_plan_config_t config) noexcept {
         cublaslt_plan_t plan;
@@ -669,7 +681,11 @@ struct cublaslt_plan_t {
         std::uint64_t const unbounded = ~std::uint64_t {0};
         cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &unbounded,
                                              sizeof(unbounded));
-        std::array<cublasLtMatmulHeuristicResult_t, 8> heuristics {};
+        std::uint32_t const reduction_none = CUBLASLT_REDUCTION_SCHEME_NONE;
+        // Reduction-free picks only — see the brief: split-K would outrank the deterministic algorithm.
+        cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK, &reduction_none,
+                                             sizeof(reduction_none));
+        std::array<cublasLtMatmulHeuristicResult_t, 64> heuristics {};
         int heuristic_count = 0;
         cublasStatus_t const searched = cublasLtMatmulAlgoGetHeuristic(
             session.get(), plan.description_, plan.a_layout_, plan.b_layout_, plan.c_layout_, plan.c_layout_,
