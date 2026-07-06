@@ -27,8 +27,10 @@ The per-dataset variance that used to live on a catalog row is now explicit para
 `pyarrow.Table | cudf.DataFrame -> same` reshape that replaces the old declarative `column_map`.
 
 The flow is the same for every dataset and single-threaded (parallelism is one `uv run` per Slurm array
-task, resolved through `sharding`): parse the uniform CLI, enumerate the sorted upstream shards, cap by
-fraction/max (composing, tighter wins), take this rank's disjoint stride, and per assigned shard pull it,
+task, resolved through `sharding`): parse the uniform CLI, enumerate the sorted upstream shards, optionally
+narrow them to named splits/languages (`--only`) or a per-language depth (`--shards`) and redirect the
+output (`--out-dir` / `--data-root`), cap by fraction/max (composing, tighter wins), take this rank's
+disjoint stride, and per assigned shard pull it,
 apply `transform`, and commit one canonical parquet through the atomic rename — skipping shards already
 committed. The one addition over the old engines is the column ASSERT: after `transform`, every column the
 mixture JSONs declare for this dataset (`mixtures.dataset_columns`) must be present in the produced shard,
@@ -98,6 +100,37 @@ def _enumerate_shards(source_kind: str, repo_id: str | None, revision: str, shar
         raise ValueError(f"acquire: source_kind {source_kind!r} needs a repo_id to enumerate shards")
     files = list(list_repo_files(repo_id, repo_type="dataset", revision=revision))
     return sorted(name for name in files if name.endswith(shard_suffix))
+
+
+def _matches_only(shard: str, tokens: list[str]) -> bool:
+    """Whether a shard belongs to one of the named `--only` groups (split / language).
+
+    Matches on PATH COMPONENTS, not raw substrings, so `bal_train` selects `data/bal_train/…` but not
+    `data/unbal_train/…`, and also accepts a filename-prefix layout where the group is a `<token>-` /
+    `<token>_` / `<token>.` prefix of a component (e.g. `bal_train-00007.parquet`).
+    """
+    prefixes = tuple(f"{token}{sep}" for token in tokens for sep in ("-", "_", "."))
+    for component in shard.split("/"):
+        if component in tokens or component.startswith(prefixes):
+            return True
+    return False
+
+
+def _cap_per_group(shards: list[str], per_group: int) -> list[str]:
+    """Keep the leading `per_group` shards WITHIN each top-level directory group (e.g. per language).
+
+    The shards are already sorted, so grouping by the first path segment and keeping each group's leading
+    slice gives a balanced per-language / per-config depth cap — distinct from the global `--max-shards`,
+    which would otherwise spend the whole budget on the alphabetically-first language.
+    """
+    kept: list[str] = []
+    counts: dict[str, int] = {}
+    for shard in shards:
+        group = shard.split("/", 1)[0]
+        if counts.get(group, 0) < per_group:
+            kept.append(shard)
+            counts[group] = counts.get(group, 0) + 1
+    return kept
 
 
 #: img2dataset writes the fetched image bytes under `jpg` and the passed-through caption under `caption`, the
@@ -283,15 +316,34 @@ def acquire(
     parser = argparse.ArgumentParser(description=f"Acquire and normalize {name} to canonical parquet.")
     parser.add_argument("--fraction", type=float, default=None, help="leading-slice volume cap in (0, 1]")
     parser.add_argument("--max-shards", type=int, default=None, help="hard cap on the number of shards")
+    parser.add_argument("--out-dir", type=Path, default=None, help="explicit output dir; overrides <data-root>/<out_name>")
+    parser.add_argument("--data-root", type=Path, default=None, help="root the <out_name> output dir is created under")
+    parser.add_argument(
+        "--only",
+        default=None,
+        help="comma-separated path tokens; keep only shards whose relative path contains one (split / language subset)",
+    )
+    parser.add_argument(
+        "--shards",
+        type=int,
+        default=None,
+        help="per-top-level-group leading cap (e.g. per-language depth); applied before --fraction / --max-shards",
+    )
     parser.add_argument("--rank", type=int, default=None, help="usually env-derived; explicit for local N-way runs")
     parser.add_argument("--world", type=int, default=None)
     parser.add_argument("--force", action="store_true", help="re-fetch shards whose artifact already exists")
     args = parser.parse_args()
 
     rank, world = resolve_rank_world(args.rank, args.world)
-    out_dir = _data_root() / out_name
+    root = args.data_root if args.data_root is not None else _data_root()
+    out_dir = args.out_dir if args.out_dir is not None else root / out_name
 
     shards = _enumerate_shards(source_kind, repo_id, revision, shard_suffix)  # sorted
+    if args.only:
+        tokens = [token for token in args.only.split(",") if token]
+        shards = [shard for shard in shards if _matches_only(shard, tokens)]
+    if args.shards is not None:
+        shards = _cap_per_group(shards, args.shards)
     capped = cap_shards(shards, args.fraction, args.max_shards)
     mine = partition(capped, rank, world)  # this rank's disjoint stride of the capped set
 

@@ -48,12 +48,11 @@ from pathlib import Path
 
 import pyarrow
 import pyarrow.parquet
+from engine_base import data_root
 
 #: Default host data root — overridable via `UFORM_DATA_ROOT`; the symlink target `data/enron`
 #: points at.
-DEFAULT_DATA_ROOT = os.environ.get(
-    "UFORM_DATA_ROOT", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-)
+DEFAULT_DATA_ROOT = str(data_root())
 #: CMU's FERC Enron release tarball.
 SOURCE_URL = "https://www.cs.cmu.edu/~enron/enron_mail_20150507.tar.gz"
 
@@ -221,7 +220,7 @@ def main() -> int:
         help=f"Host data root that `data/enron` symlinks to (default: {DEFAULT_DATA_ROOT}).",
     )
     parser.add_argument(
-        "--max-messages",
+        "--max-records",
         type=int,
         default=50_000,
         help="Stop after this many pairs (0 = whole corpus); a bounded cap stages the parse-gate sample.",
@@ -229,7 +228,7 @@ def main() -> int:
     parser.add_argument("--overwrite", action="store_true", help="Re-repack even if the target parquet exists.")
     args = parser.parse_args()
     destination = download_enron(args.data_root)
-    code = repack(Path(destination) / TARBALL_NAME, Path(destination), args.max_messages, args.overwrite)
+    code = repack(Path(destination) / TARBALL_NAME, Path(destination), args.max_records, args.overwrite)
     if code != 0:
         return code
     return 0

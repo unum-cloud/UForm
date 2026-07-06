@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import math
 import os
 import subprocess
 import sys
@@ -45,10 +44,11 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import xxhash
+from engine_base import cap_shards, data_root
 from huggingface_hub import list_repo_files, snapshot_download
 
 _PRIMARY_REPO_ID = "kiyoonkim/kinetics-400-targz"
-_DEFAULT_OUT_DIR = Path(os.environ.get("UFORM_DATA_ROOT", Path(__file__).resolve().parents[1] / "data")) / "kinetics400"
+_DEFAULT_OUT_DIR = data_root() / "kinetics400"
 #: tar.gz shard suffix; everything else (README, label csv) is always kept.
 _SHARD_SUFFIXES = (".tar.gz",)
 #: Parquet row-group size — small enough for streaming sub-shard reads in the loader.
@@ -78,12 +78,7 @@ def _shard_allow_patterns(repo_id: str, max_shards: int | None, fraction: float 
     all_files = list(list_repo_files(repo_id, repo_type="dataset"))
     shards = sorted(name for name in all_files if name.endswith(_SHARD_SUFFIXES))
     metadata = [name for name in all_files if not name.endswith(_SHARD_SUFFIXES)]
-    keep_count = len(shards)
-    if fraction is not None:
-        keep_count = min(keep_count, max(1, math.ceil(len(shards) * fraction)))
-    if max_shards is not None:
-        keep_count = min(keep_count, max_shards)
-    kept = shards[:keep_count]
+    kept = cap_shards(shards, fraction, max_shards)
     print(
         f"download_kinetics400: limiting to {len(kept)} of {len(shards)} tar.gz shards + {len(metadata)} metadata files"
     )

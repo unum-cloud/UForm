@@ -51,7 +51,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import subprocess
 import sys
@@ -60,12 +59,11 @@ import tempfile
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from engine_base import cap_shards, data_root
 from huggingface_hub import snapshot_download
 
 #: Default host data root — overridable via `UFORM_DATA_ROOT`; the symlink target `data/mevis`.
-DEFAULT_DATA_ROOT = os.environ.get(
-    "UFORM_DATA_ROOT", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-)
+DEFAULT_DATA_ROOT = str(data_root())
 #: HF mirror that ships per-split JPEG frame tars plus the expression/frame-order JSON.
 MEVIS_REPO = "xing0047/mevis"
 #: Splits the mirror exposes with BOTH frames and expressions (we skip the mask-only `mask_dict.json`).
@@ -79,12 +77,7 @@ DEFAULT_FPS = 5
 def _selected_splits(max_shards: int | None, fraction: float | None) -> list[str]:
     """Return the leading slice of sorted split names kept under the volume cap."""
     splits = sorted(SPLITS)
-    keep_count = len(splits)
-    if fraction is not None:
-        keep_count = min(keep_count, max(1, math.ceil(len(splits) * fraction)))
-    if max_shards is not None:
-        keep_count = min(keep_count, max_shards)
-    kept = splits[:keep_count]
+    kept = cap_shards(splits, fraction, max_shards)
     print(f"[mevis] staging {len(kept)} of {len(splits)} split(s): {kept}", flush=True)
     return kept
 

@@ -28,7 +28,7 @@ rights, and the clips are not redistributable.
 
 CLI usage:
     uv run python_data/download_vatex.py                                  # all caption clips, parallel fetch
-    uv run python_data/download_vatex.py --fraction 0.01 --num-shards 8   # ~1% slice
+    uv run python_data/download_vatex.py --fraction 0.01 --fanout 8       # ~1% slice
     uv run python_data/download_vatex.py --rank 0 --world 16              # this worker's disjoint stride
 """
 
@@ -72,12 +72,18 @@ def _download_json(url: str, destination: Path) -> list[dict[str, object]]:
     return json.loads(destination.read_text())
 
 
-def _clip_records(out_dir: Path) -> list[dict[str, object]]:
-    """Pull every caption JSON and build one `{...MediaClip, caption}` record per captioned clip."""
+def _clip_records(out_dir: Path, index_cap: int | None) -> list[dict[str, object]]:
+    """Pull every caption JSON and build one `{...MediaClip, caption}` record per captioned clip.
+
+    VATEX is naturally small (~41k clips), so `index_cap` is a harmless upper bound honoured for
+    uniformity with the other clip datasets; `index_cap=None` reads every entry.
+    """
     cache_dir = out_dir / ".captions"
     records: list[dict[str, object]] = []
     for url in _CAPTION_JSON_URLS:
         for entry in _download_json(url, cache_dir / Path(url).name):
+            if index_cap is not None and len(records) >= index_cap:
+                return records
             watch_id, start, end = _parse_video_id(str(entry["videoID"]))
             captions = list(entry.get("enCap", [])) + list(entry.get("chCap", []))
             record = MediaClip(
@@ -97,6 +103,6 @@ if __name__ == "__main__":
             out_name="vatex",
             media_column="mp4",
             script=Path(__file__).resolve(),
-            default_num_shards=128,
+            default_fanout=128,
         )
     )

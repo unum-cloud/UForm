@@ -26,8 +26,8 @@ GPU-readable Parquet sibling.  The repack is a light CSV-to-columns projection, 
 separate script).  The CSV is kept (not deleted) so a re-run can rebuild the parquet without re-fetch.
 
 VOLUME CONTROL: the source is a SINGLE `en_train.csv`, so there is no shard cap on the download and
-deliberately no fake `--fraction` flag.  Corpus volume is the full token table; identity rows are
-dropped ON DEVICE by the registry extractor, not here.
+deliberately no fake `--fraction` flag; `--max-records N` caps the repacked token pairs (0 = the whole
+table).  Identity rows are dropped ON DEVICE by the registry extractor, not here.
 
 Layout: the source CSV lands under `<DATA_ROOT>/google-text-norm/en_train.csv` with a
 `data/google-text-norm` symlink.
@@ -48,13 +48,12 @@ from pathlib import Path
 
 import pyarrow
 import pyarrow.parquet
+from engine_base import data_root
 from huggingface_hub import hf_hub_download
 
 #: Default host data root — overridable via `UFORM_DATA_ROOT`; the symlink target
 #: `data/google-text-norm` points at.
-DEFAULT_DATA_ROOT = os.environ.get(
-    "UFORM_DATA_ROOT", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-)
+DEFAULT_DATA_ROOT = str(data_root())
 #: Community mirror carrying the Sproat English token table with the full `class` / `after` columns.
 SOURCE_REPO = "pavanBuduguppa/asr_inverse_text_normalization"
 
@@ -102,12 +101,14 @@ def download_google_text_norm(data_root: str) -> str:
     return destination
 
 
-def repack(csv_path: Path, overwrite: bool) -> int:
+def repack(csv_path: Path, overwrite: bool, max_records: int) -> int:
     """Project the text-normalization CSV to a `(written, spoken, semiotic_class)` Parquet, atomically.
 
     Args:
         csv_path: Path to `en_train.csv`.
         overwrite: Re-repack even if the `.parquet` sibling already exists.
+        max_records: Stop after this many token pairs (`0` = the whole table); a small cap stages a
+            quick parse-gate sample without materialising the full ~10M-row projection.
 
     Returns:
         Process exit code (0 on success / skip, 1 on a missing source file).
@@ -169,6 +170,8 @@ def repack(csv_path: Path, overwrite: bool) -> int:
                 kept += 1
                 if len(written_col) >= ROW_GROUP_SIZE:
                     flush()
+                if max_records and kept >= max_records:
+                    break
         flush()
     finally:
         writer.close()
@@ -185,9 +188,15 @@ def main() -> int:
         help=f"Host data root that `data/google-text-norm` symlinks to (default: {DEFAULT_DATA_ROOT}).",
     )
     parser.add_argument("--overwrite", action="store_true", help="Re-repack even if the .parquet sibling exists.")
+    parser.add_argument(
+        "--max-records",
+        type=int,
+        default=0,
+        help="Stop after this many token pairs (0 = whole table); a small cap stages a parse-gate sample.",
+    )
     args = parser.parse_args()
     destination = download_google_text_norm(args.data_root)
-    code = repack(Path(destination) / SOURCE_FILE, args.overwrite)
+    code = repack(Path(destination) / SOURCE_FILE, args.overwrite, args.max_records)
     if code != 0:
         return code
     return 0

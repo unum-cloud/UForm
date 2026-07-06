@@ -51,7 +51,7 @@ import mixtures
 import pyarrow as pa
 import pyarrow.compute as compute
 import pyarrow.parquet as parquet
-from engine_base import cap_shards
+from engine_base import cap_shards, data_root
 from huggingface_hub import hf_hub_download, list_repo_files
 from sharding import already_done, atomic_write, partition, resolve_rank_world
 
@@ -61,13 +61,6 @@ _REPO_ID = "sentence-transformers/msmarco"
 _DATASET_NAME = "msmarco_triplet50"
 #: Output subdirectory under the data root — the `msmarco_triplet50` glob is `data/msmarco/triplet-50/*.parquet`.
 _OUT_SUBDIR = ("msmarco", "triplet-50")
-
-
-def _data_root() -> Path:
-    """The acquisition output root: `$UFORM_DATA_ROOT`, else the repo's `data/` directory (matches `acquire`)."""
-    import os  # noqa: PLC0415 — local to keep the module top-level import list minimal, mirroring acquire helpers
-
-    return Path(os.environ.get("UFORM_DATA_ROOT", Path(__file__).resolve().parents[1] / "data"))
 
 
 def _labeled_list_shards() -> list[str]:
@@ -202,7 +195,7 @@ def main() -> int:
     args = parser.parse_args()
 
     rank, world = resolve_rank_world(args.rank, args.world)
-    out_dir = _data_root().joinpath(*_OUT_SUBDIR)
+    out_dir = data_root().joinpath(*_OUT_SUBDIR)
 
     shards = _labeled_list_shards()
     capped = cap_shards(shards, args.fraction, args.max_shards)

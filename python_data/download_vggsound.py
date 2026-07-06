@@ -27,15 +27,14 @@ CLI usage:
 from __future__ import annotations
 
 import argparse
-import math
-import os
 import sys
 from pathlib import Path
 
+from engine_base import cap_shards, data_root
 from huggingface_hub import list_repo_files, snapshot_download
 
 _PRIMARY_REPO_ID = "Loie/VGGSound"
-_DEFAULT_OUT_DIR = Path(os.environ.get("UFORM_DATA_ROOT", Path(__file__).resolve().parents[1] / "data")) / "vggsound"
+_DEFAULT_OUT_DIR = data_root() / "vggsound"
 #: Archive shard suffixes; everything else (README, csv labels) is always kept.
 _SHARD_SUFFIXES = (".zip", ".tar", ".tar.gz", ".parquet")
 
@@ -60,12 +59,7 @@ def _shard_allow_patterns(repo_id: str, max_shards: int | None, fraction: float 
     all_files = list(list_repo_files(repo_id, repo_type="dataset"))
     shards = sorted(name for name in all_files if name.endswith(_SHARD_SUFFIXES))
     metadata = [name for name in all_files if not name.endswith(_SHARD_SUFFIXES)]
-    keep_count = len(shards)
-    if fraction is not None:
-        keep_count = min(keep_count, max(1, math.ceil(len(shards) * fraction)))
-    if max_shards is not None:
-        keep_count = min(keep_count, max_shards)
-    kept = shards[:keep_count]
+    kept = cap_shards(shards, fraction, max_shards)
     print(
         f"download_vggsound: limiting to {len(kept)} of {len(shards)} archive shards + {len(metadata)} metadata files"
     )

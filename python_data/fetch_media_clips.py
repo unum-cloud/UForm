@@ -51,7 +51,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
-from sharding import already_done, resolve_rank_world
+from sharding import already_done, partition, resolve_rank_world
 
 #: Default retry budget for a single clip before it is dropped as failed.
 DEFAULT_RETRIES: int = 3
@@ -546,9 +546,10 @@ def fetch_shard(
 
 
 #: One clip's work record consumed by the shared orchestrator: the `MediaClip.to_json()` fields plus a
-#: single `caption` string. The dataset's `clip_records` builds these; the shared repack writes them as a
-#: uniform `{caption: string, <media_column>: struct<bytes, path>}` parquet.
-ClipRecords = Callable[[Path], list[dict[str, object]]]
+#: single `caption` string. The dataset's `clip_records(out_dir, index_cap)` builds these — enumerating at
+#: most `index_cap` records (None = the source's natural size) so a streaming reader can stop early — and
+#: the shared repack writes them as a uniform `{caption: string, <media_column>: struct<bytes, path>}` parquet.
+ClipRecords = Callable[[Path, int | None], list[dict[str, object]]]
 
 
 def _clips_data_root() -> Path:
@@ -570,6 +571,23 @@ def _cap_records(records: list[dict[str, object]], fraction: float | None, max_c
     if max_clips is not None:
         keep = min(keep, max_clips)
     return records[:keep]
+
+
+def resolve_index_cap(cli_index_cap: int | None, default_index_cap: int | None) -> int | None:
+    """Resolve the index materialisation cap: `--index-cap` > `$UFORM_INDEX_CAP` > the dataset default.
+
+    Distinct from the `--fraction` / `--max-clips` FETCH cap: this bounds how many records a dataset's
+    `clip_records` callback enumerates at all, so a streaming reader can stop early instead of building the
+    whole index and trimming it afterwards. `None` means the source's natural size — only safe for bounded
+    corpora. The fetch cap layers below it: `--fraction` / `--max-clips` lower the fetch, never raise it
+    above the materialised index.
+    """
+    if cli_index_cap is not None:
+        return max(1, cli_index_cap)
+    raw = os.environ.get("UFORM_INDEX_CAP")
+    if raw:
+        return max(1, int(raw))
+    return default_index_cap
 
 
 def _repack_clip_shard(
@@ -634,7 +652,8 @@ def acquire_clips(
     media_column: str,
     script: Path,
     default_fraction: float = 1.0,
-    default_num_shards: int = 128,
+    default_index_cap: int | None = None,
+    default_fanout: int = 128,
     default_jobs: int = 8,
     row_group_size: int = 256,
 ) -> int:
@@ -643,7 +662,7 @@ def acquire_clips(
     One dataset's whole job: parse the uniform CLI, resolve `(rank, world)` from Slurm (`sharding`), build
     the full clip list via the dataset's `clip_records`, sort it into a deterministic order, cap it by
     `--fraction` / `--max-clips`, take THIS worker's disjoint stride `clips[rank::world]`, sub-shard that
-    stride into `--num-shards` JSONLs, and fan the yt-dlp fetch out intra-host with GNU `parallel` by
+    stride into `--fanout` JSONLs, and fan the yt-dlp fetch out intra-host with GNU `parallel` by
     self-invoking `script --repack-shard` (the shared `_repack_clip_shard` worker). Output identity ties to
     `(rank, world)` — a shard named `<out_name>-r{rank}w{world}-{i:05d}.parquet` — and its atomic rename is
     the commit: a re-run of the same world skips finished shards (`already_done`) unless `--force`. There is
@@ -656,7 +675,9 @@ def acquire_clips(
     @param[in] media_column The struct column the payload lands in (e.g. `audio` / `mp4`).
     @param[in] script The calling builder's `__file__` (self-invoked in `--repack-shard` mode by GNU parallel).
     @param[in] default_fraction The `--fraction` default when the caller omits it (some corpora are huge).
-    @param[in] default_num_shards The `--num-shards` default (intra-host fan-out width per worker).
+    @param[in] default_index_cap The `--index-cap` default: how many windows the index materialises when
+        neither `--index-cap` nor `$UFORM_INDEX_CAP` is set (None = the source's natural size, bounded corpora only).
+    @param[in] default_fanout The `--fanout` default (intra-host sub-shard fan-out width per worker).
     @param[in] default_jobs The `--jobs` default (concurrent shard processes under GNU parallel).
     @param[in] row_group_size The parquet row-group size for the written shards.
     @return Process exit code (`0` on success).
@@ -664,10 +685,21 @@ def acquire_clips(
     parser = argparse.ArgumentParser(description=f"Fetch + repack {name} YouTube clips into rank-sharded parquet.")
     parser.add_argument("--fraction", type=float, default=default_fraction, help="leading-slice clip cap in (0, 1].")
     parser.add_argument("--max-clips", type=int, default=None, help="hard cap on the number of clips (leading slice).")
+    parser.add_argument(
+        "--index-cap",
+        type=int,
+        default=None,
+        help="materialisation bound: how many clip windows the index enumerates (before the fetch cap).",
+    )
     parser.add_argument("--rank", type=int, default=None, help="usually Slurm-derived; explicit for local N-way runs.")
     parser.add_argument("--world", type=int, default=None, help="usually Slurm-derived; explicit for local N-way runs.")
     parser.add_argument("--jobs", type=int, default=default_jobs, help="concurrent shard processes under GNU parallel.")
-    parser.add_argument("--num-shards", type=int, default=default_num_shards, help="JSONL sub-shards per worker.")
+    parser.add_argument(
+        "--fanout",
+        type=int,
+        default=default_fanout,
+        help="JSONL sub-shards fanned out per worker (fetch parallelism, not a volume cap).",
+    )
     parser.add_argument("--force", action="store_true", help="re-fetch shards whose parquet already exists.")
     parser.add_argument("--print-plan", action="store_true", help="print this rank's clip stride and exit (no fetch).")
     parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="per-clip transient retry budget.")
@@ -695,10 +727,11 @@ def acquire_clips(
 
     rank, world = resolve_rank_world(args.rank, args.world)
     out_dir = _clips_data_root() / out_name
-    records = clip_records(out_dir)
+    index_cap = resolve_index_cap(args.index_cap, default_index_cap)
+    records = clip_records(out_dir, index_cap)
     records.sort(key=lambda record: (str(record["source_id"]), _record_start_key(record)))
     capped = _cap_records(records, args.fraction, args.max_clips)
-    mine = capped[rank::world] if world > 1 else capped
+    mine = partition(capped, rank, world)
     if args.print_plan:
         _print_clip_plan(name, rank, world, len(records), len(capped), mine)
         return 0
@@ -709,7 +742,7 @@ def acquire_clips(
         shutil.rmtree(staging_dir, ignore_errors=True)
     plans = plan_shards(
         mine,
-        num_shards=args.num_shards,
+        num_shards=args.fanout,
         staging_dir=staging_dir,
         output_dir=output_dir,
         output_prefix=f"{out_name}-r{rank}w{world}",

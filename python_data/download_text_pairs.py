@@ -25,17 +25,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import sys
 
+from engine_base import cap_shards, data_root
 from huggingface_hub import list_repo_files, snapshot_download
 
 #: Default host data root — overridable via `UFORM_DATA_ROOT`; the symlink target every existing
 #: `data/<name>` points at.
-DEFAULT_DATA_ROOT = os.environ.get(
-    "UFORM_DATA_ROOT", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-)
+DEFAULT_DATA_ROOT = str(data_root())
 #: Suffixes that mark a downloadable data shard (everything else — README, metadata — is always kept).
 SHARD_SUFFIXES = (".parquet", ".json", ".jsonl", ".gz")
 
@@ -96,17 +94,16 @@ def _fraction_allow_patterns(repo: str, fraction: float) -> list[str] | None:
     repo_files = list_repo_files(repo, repo_type="dataset")
     shards = sorted(name for name in repo_files if name.endswith(SHARD_SUFFIXES))
     non_shards = [name for name in repo_files if not name.endswith(SHARD_SUFFIXES)]
-    keep_count = max(1, math.ceil(len(shards) * fraction))
-    return non_shards + shards[:keep_count]
+    return non_shards + cap_shards(shards, fraction, None)
 
 
-def _link_into_data(data_root: str, name: str) -> None:
-    """Create or refresh the `data/<name>` → `<data_root>/<name>` symlink, idempotently.
+def _link_into_data(root: str, name: str) -> None:
+    """Create or refresh the `data/<name>` → `<root>/<name>` symlink, idempotently.
 
     Ensures both the target directory and the repo `data/` dir exist, skips when the symlink
     already points at the right target, and replaces a stale or broken symlink in place.
     """
-    target = os.path.join(data_root, name)
+    target = os.path.join(root, name)
     os.makedirs(target, exist_ok=True)
     os.makedirs("data", exist_ok=True)
     link = os.path.join("data", name)

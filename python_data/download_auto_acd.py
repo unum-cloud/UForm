@@ -29,7 +29,7 @@ rights, and the audio is not redistributable.
 
 CLI usage:
     uv run python_data/download_auto_acd.py                                  # ~5% of 1.9M, parallel fetch
-    uv run python_data/download_auto_acd.py --fraction 0.001 --num-shards 4  # tiny slice
+    uv run python_data/download_auto_acd.py --fraction 0.001 --fanout 4      # tiny slice
     uv run python_data/download_auto_acd.py --rank 0 --world 16              # this worker's disjoint stride
     uv run python_data/download_auto_acd.py --print-plan --world 2 --rank 0  # dry-run: show the clip stride
 """
@@ -78,12 +78,18 @@ def _parse_clip_id(raw_id: str) -> tuple[str, float | None, float | None]:
     return watch_id, window[0], window[1]
 
 
-def _clip_records(out_dir: Path) -> list[dict[str, object]]:
-    """Pull the Auto-ACD CSV and build one `{...MediaClip, caption}` record per `(youtube_id, caption)` row."""
+def _clip_records(out_dir: Path, index_cap: int | None) -> list[dict[str, object]]:
+    """Pull the Auto-ACD CSV and build one `{...MediaClip, caption}` record per `(youtube_id, caption)` row.
+
+    Streams the CSV row by row and stops once `index_cap` records are built, so a capped run never
+    materialises all 1.9M rows before the fetch cap trims them; `index_cap=None` reads the whole CSV.
+    """
     csv_path = Path(hf_hub_download(repo_id=_REPO_ID, filename=_CSV_FILENAME, repo_type="dataset"))
     records: list[dict[str, object]] = []
     with open(csv_path, newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
+            if index_cap is not None and len(records) >= index_cap:
+                break
             raw_id, caption = row.get("youtube_id"), row.get("caption")
             if not raw_id or not caption:
                 continue
@@ -104,7 +110,7 @@ if __name__ == "__main__":
             media_column="audio",
             script=Path(__file__).resolve(),
             default_fraction=0.05,
-            default_num_shards=256,
+            default_fanout=256,
             row_group_size=512,
         )
     )

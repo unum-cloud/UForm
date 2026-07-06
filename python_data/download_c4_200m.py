@@ -48,13 +48,12 @@ from pathlib import Path
 
 import pyarrow
 import pyarrow.parquet
+from engine_base import data_root
 from huggingface_hub import snapshot_download
 
 #: Default host data root — overridable via `UFORM_DATA_ROOT`; the symlink target `data/c4_200m`
 #: points at.
-DEFAULT_DATA_ROOT = os.environ.get(
-    "UFORM_DATA_ROOT", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-)
+DEFAULT_DATA_ROOT = str(data_root())
 #: C4_200M repository on the hub.
 SOURCE_REPO = "liweili/c4_200m"
 #: Rows per Parquet row group — bounds writer memory on the ~18M-pair shard.
@@ -170,14 +169,14 @@ def main() -> int:
     parser.add_argument("--shard", type=int, default=0, help="Zero-based TSV shard index (0..9) to repack.")
     parser.add_argument("--overwrite", action="store_true", help="Re-repack even if the target parquet exists.")
     parser.add_argument(
-        "--max-rows",
+        "--max-records",
         type=int,
         default=0,
         help="Stop after this many pairs (0 = whole shard); a small cap stages a quick parse-gate sample.",
     )
     args = parser.parse_args()
     destination = download_c4_200m(args.data_root)
-    code = repack(Path(destination) / "data.zip", args.shard, Path(destination), args.overwrite, args.max_rows)
+    code = repack(Path(destination) / "data.zip", args.shard, Path(destination), args.overwrite, args.max_records)
     if code != 0:
         return code
     return 0

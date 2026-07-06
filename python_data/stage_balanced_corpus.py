@@ -36,8 +36,11 @@ from pathlib import Path
 import staging_manifest
 from staging_manifest import (
     MODALITIES,
-    MODALITY_TARGET_GIGABYTES,
+    MODALITY_WEIGHTS,
     StagingRow,
+    allocate_targets,
+    derive_cap,
+    resolve_budget_gigabytes,
     rows_for_modality,
 )
 
@@ -79,23 +82,26 @@ def run_shell(command: str, dry_run: bool) -> int:
     return completed.returncode
 
 
-def stage_row(row: StagingRow, dry_run: bool) -> tuple[str, float]:
+def stage_row(row: StagingRow, dry_run: bool, target_gigabytes: float) -> tuple[str, float]:
     """Plan or stage one dataset row.
 
     Args:
         row: The manifest row to stage.
         dry_run: When True, only print the commands that would run.
+        target_gigabytes: The budget allocator's target on-disk GB for this row.
 
     Returns:
         `(status, gigabytes_planned)` where status is one of "present" / "planned" / "staged" /
-        "blocked" / "failed", and gigabytes_planned is the row's planned download GB (0 when already
-        present or blocked with no command).
+        "blocked" / "failed", and gigabytes_planned is the row's target GB (0 when already present or
+        blocked with no command).
     """
     present_shards = staged_shard_count(row.registry_glob)
+    cap = derive_cap(row, target_gigabytes)
+    cap_text = f" cap={cap[0]} {cap[1]}" if cap else ""
     header = (
-        f"  [{row.dataset}] modality={row.modality} fraction={row.fraction:.3f} "
-        f"plan={row.estimated_download_gigabytes:.0f} GB  (full~{row.estimated_full_gigabytes:.0f} GB, "
-        f"mechanism={row.fraction_mechanism}, on-disk shards={present_shards})"
+        f"  [{row.dataset}] modality={row.modality} target={target_gigabytes:.0f} GB{cap_text} "
+        f"(full~{row.estimated_full_gigabytes:.0f} GB, mechanism={row.fraction_mechanism}, "
+        f"on-disk shards={present_shards})"
     )
     print(header, flush=True)
     if row.flag:
@@ -105,11 +111,12 @@ def stage_row(row: StagingRow, dry_run: bool) -> tuple[str, float]:
         print("    -> SKIP: already staged (resumable).", flush=True)
         return "present", 0.0
 
-    if row.download_command is None:
+    command = row.resolved_download_command(target_gigabytes)
+    if command is None:
         print("    -> BLOCKED: no download command (see FLAG above) — staged 0 GB.", flush=True)
         return "blocked", 0.0
 
-    download_code = run_command(row.download_command, dry_run)
+    download_code = run_command(command, dry_run)
     if download_code != 0 and not dry_run:
         print(f"    -> FAILED: downloader exited {download_code}.", flush=True)
         return "failed", 0.0
@@ -118,31 +125,30 @@ def stage_row(row: StagingRow, dry_run: bool) -> tuple[str, float]:
         repack_code = run_shell(row.repack_command, dry_run)
         if repack_code != 0 and not dry_run:
             print(f"    -> FAILED: repack exited {repack_code}.", flush=True)
-            return "failed", row.estimated_download_gigabytes
+            return "failed", target_gigabytes
 
-    return ("planned" if dry_run else "staged"), row.estimated_download_gigabytes
+    return ("planned" if dry_run else "staged"), target_gigabytes
 
 
-def print_balance_table(rows: list[StagingRow]) -> None:
-    """Print the per-modality planned-GB vs target table plus the grand total for the given rows."""
-    print("\nBalance table (planned download GB):", flush=True)
-    print(f"  {'modality':<8} {'planned GB':>11} {'target GB':>10} {'datasets':>9}  blockers", flush=True)
+def print_balance_table(rows: list[StagingRow], budget_gigabytes: float, targets: dict[str, float]) -> None:
+    """Print the per-modality allocated-GB vs budget-share table plus the grand total for the given rows."""
+    print(f"\nBalance table (budget-allocated GB; total budget {budget_gigabytes:.0f} GB):", flush=True)
+    print(f"  {'modality':<8} {'alloc GB':>10} {'share GB':>10} {'datasets':>9}  blockers", flush=True)
     grand_total = 0.0
     for modality in MODALITIES:
         modality_rows = [row for row in rows if row.modality == modality]
         if not modality_rows:
             continue
-        planned = sum(row.estimated_download_gigabytes for row in modality_rows)
-        grand_total += planned
+        allocated = sum(targets.get(row.dataset, 0.0) for row in modality_rows)
+        share = budget_gigabytes * MODALITY_WEIGHTS.get(modality, 0.0)
+        grand_total += allocated
         blockers = sum(1 for row in modality_rows if row.requires_new_knob or row.fraction_mechanism == "no-downloader")
-        shortfall = "" if planned >= 0.9 * MODALITY_TARGET_GIGABYTES else "  <-- SHORTFALL"
         print(
-            f"  {modality:<8} {planned:>11.0f} {MODALITY_TARGET_GIGABYTES:>10.0f} "
-            f"{len(modality_rows):>9} {blockers:>3} blocker(s){shortfall}",
+            f"  {modality:<8} {allocated:>10.0f} {share:>10.0f} {len(modality_rows):>9} {blockers:>3} blocker(s)",
             flush=True,
         )
     print(f"  {'-' * 50}", flush=True)
-    print(f"  {'TOTAL':<8} {grand_total:>11.0f} {MODALITY_TARGET_GIGABYTES * len(MODALITIES):>10.0f}", flush=True)
+    print(f"  {'TOTAL':<8} {grand_total:>10.0f} {budget_gigabytes:>10.0f}", flush=True)
 
 
 def print_blocker_summary(rows: list[StagingRow]) -> None:
@@ -174,25 +180,33 @@ def main() -> int:
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print the exact download/repack commands and planned GB without downloading anything.",
+        help="Print the exact download/repack commands and allocated GB without downloading anything.",
+    )
+    parser.add_argument(
+        "--budget-gb",
+        type=float,
+        default=None,
+        help="Total on-disk budget in GB; default auto-detects free disk * SAFETY_MARGIN (or $UFORM_DATA_BUDGET_GB).",
     )
     args = parser.parse_args()
 
+    budget_gigabytes = resolve_budget_gigabytes(args.budget_gb)
+    targets = allocate_targets(budget_gigabytes)
     rows = rows_for_modality(args.modality)
     print(
         f"[stage] modality={args.modality}  datasets={len(rows)}  dry_run={args.dry_run}  "
-        f"data_root={staging_manifest.DATA_ROOT}",
+        f"budget={budget_gigabytes:.0f} GB  data_root={staging_manifest.DATA_ROOT}",
         flush=True,
     )
 
     statuses: dict[str, int] = {}
     staged_gigabytes: dict[str, float] = dict.fromkeys(MODALITIES, 0.0)
     for row in rows:
-        status, gigabytes = stage_row(row, args.dry_run)
+        status, gigabytes = stage_row(row, args.dry_run, targets.get(row.dataset, row.estimated_download_gigabytes))
         statuses[status] = statuses.get(status, 0) + 1
         staged_gigabytes[row.modality] += gigabytes
 
-    print_balance_table(rows)
+    print_balance_table(rows, budget_gigabytes, targets)
     print_blocker_summary(rows)
     print(f"\n[stage] status counts: {statuses}", flush=True)
 

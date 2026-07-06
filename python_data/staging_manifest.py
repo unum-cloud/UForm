@@ -6,8 +6,8 @@
 
 This module is the single declarative source the staging driver
 (`python_data.stage_balanced_corpus`) reads. It carries one `StagingRow` per dataset the owner
-wants staged, grouped into four modalities — text / image / video / audio — each targeted at
-`MODALITY_TARGET_GIGABYTES` (~750 GB) so the grand total lands near 3 TB. Each row's shard glob is
+wants staged, grouped into four modalities — text / image / video / audio — each sized by the disk-aware
+budget allocator (see "Budget model" below), not a flat per-modality target. Each row's shard glob is
 sourced from the stdlib-only JSON `python_data.mixtures` reader (no cudf / cupy), so the driver still
 runs under a lightweight `uv run` environment while dropping the previously duplicated glob strings.
 
@@ -24,8 +24,7 @@ Fraction mechanism.
 `fraction_mechanism` records HOW the fraction is realised on the wire for each downloader:
 
   - "fraction"      — downloader has a true `--fraction` flag (shards * fraction).
-  - "num-shards"    — downloader caps by `--num-shards N` (compile_ir, post_ocr).
-  - "max-shards"    — downloader caps by `--max-shards N` (audioset).
+  - "max-shards"    — downloader caps by `--max-shards N` (compile_ir, cc12m, laion_cc3m, kinetics, webvid).
   - "shards"        — fineweb2 per-language depth `--shards N` (+ `--fraction` over languages).
   - "language-subset" — starcoderdata `--top10` / `--only` language gate.
   - "pre-staged"    — already fully on `$UFORM_DATA_ROOT`; no download script exists (and none needed).
@@ -34,13 +33,29 @@ Fraction mechanism.
                       must be added (see `requires_new_knob`).
   - "no-downloader" — NO download script exists for this registry dataset yet (gap; `flag` says so).
 
-Every row whose `requires_new_knob` is True or whose `fraction_mechanism` is "no-downloader" is a
-BLOCKER for reaching the 750 GB target cleanly and is surfaced by the driver's balance table.
+Budget model.
+`resolve_budget_gigabytes` derives ONE total on-disk budget (`--budget-gb` > `$UFORM_DATA_BUDGET_GB` > free
+disk * `SAFETY_MARGIN`), `MODALITY_WEIGHTS` splits it across modalities (favouring cross-modal video/image,
+keeping text substantial, audio thin), and `allocate_targets` water-fills each modality's share across its
+growable rows (`weight > 0`) up to each row's full size. A row's GB target then converts to a concrete
+`--max-shards` / `--max-clips` / `--fraction` value via `derive_cap` using its `cap_flag` / `full_units`, so
+the per-dataset caps live in one allocator that reads the disk rather than as constants across 52 downloaders.
+
+Downloader CLI.
+`acquire` accepts `--fraction` / `--max-shards` / `--out-dir` / `--data-root` / `--only` (split or language
+subset, matched on path COMPONENTS) / `--shards` (per-language depth) / `--rank` / `--world` / `--force`; the
+`acquire_clips` fetchers take `--fraction` / `--max-clips` / `--index-cap` / `--fanout` and write to
+`data_root()/<out_name>`. Each row's `download_command` holds the base argv; `resolved_download_command`
+injects the allocator's derived cap before the driver runs it.
+
+Every row whose `requires_new_knob` is True or whose `fraction_mechanism` is "no-downloader" is a BLOCKER
+surfaced by the driver's balance table.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,8 +64,13 @@ import mixtures
 #: Repo root a relative `glob_override` is anchored under (mirrors `mixtures._resolve_glob`).
 PROJECT_ROOT: Path = Path(__file__).resolve().parents[1]
 
-#: Per-modality on-disk budget; the four modalities each target this, summing to ~3 TB.
-MODALITY_TARGET_GIGABYTES: float = 750.0
+#: Fraction of FREE disk the auto-detected budget targets when neither `--budget-gb` nor
+#: `$UFORM_DATA_BUDGET_GB` is set — half, leaving headroom for repack scratch and checkpoints.
+SAFETY_MARGIN: float = 0.5
+
+#: How the disk budget is split across modalities. Cross-modal paired video / image lead; text is kept
+#: substantial (foundational, lots of high-value corpora) and audio is the thinnest slice. Sums to 1.0.
+MODALITY_WEIGHTS: dict[str, float] = {"video": 0.35, "image": 0.30, "text": 0.22, "audio": 0.13}
 
 #: Host data root every registry `data/<name>` glob is anchored under.
 DATA_ROOT: str = os.environ.get("UFORM_DATA_ROOT", str(Path(__file__).resolve().parents[1] / "data"))
@@ -76,6 +96,12 @@ class StagingRow:
         flag: Human-readable blocker / caveat surfaced in the balance table, or "" when clean.
         glob_override: Repo-relative shard glob for rows no mixture references (synthetic rollups or
             eval/smoke corpora); when set it supplies `registry_glob` in place of the mixture lookup.
+        weight: Growth priority WITHIN the modality — the disk budget left after the always-full rows is
+            split across the growable rows in proportion to this. 0 marks an always-full / pre-staged row.
+        full_units: Total upstream units (shards or clips) the FULL dataset has, so a GB target converts to
+            a `cap_flag` count; None for `--fraction`-capped or always-full rows.
+        cap_flag: The CLI flag the derived cap is injected through (`--max-shards` / `--max-clips` /
+            `--fraction`); None for always-full / pre-staged rows.
     """
 
     dataset: str
@@ -89,6 +115,9 @@ class StagingRow:
     requires_new_knob: bool = False
     flag: str = ""
     glob_override: str | None = None
+    weight: float = 0.0
+    full_units: int | None = None
+    cap_flag: str | None = None
 
     @property
     def registry_glob(self) -> str:
@@ -100,6 +129,26 @@ class StagingRow:
         if self.glob_override is not None:
             return self.glob_override if Path(self.glob_override).is_absolute() else str(PROJECT_ROOT / self.glob_override)
         return mixtures.dataset_glob(self.dataset)
+
+    def resolved_download_command(self, target_gigabytes: float) -> list[str] | None:
+        """The `download_command` with its cap flag set to the budget allocator's derived value.
+
+        For a row with a `cap_flag`, `derive_cap` computes the `(flag, value)` for `target_gigabytes` and it
+        replaces that flag's value in the stored argv (appending the flag if absent); rows without a
+        `cap_flag` (always-full, or feature-capped like fineweb_2's `--shards`) return the argv unchanged.
+        """
+        if self.download_command is None:
+            return None
+        argv = list(self.download_command)
+        cap = derive_cap(self, target_gigabytes)
+        if cap is None:
+            return argv
+        flag, value = cap
+        if flag in argv:
+            argv[argv.index(flag) + 1] = value
+        else:
+            argv += [flag, value]
+        return argv
 
 
 def _uv(*args: str) -> list[str]:
@@ -123,6 +172,7 @@ STAGING_ROWS: list[StagingRow] = [
         estimated_download_gigabytes=336.0,  # 42 langs x 4 shards already staged (~40% depth design).
         fraction_mechanism="shards",
         download_command=_uv("python_data/download_fineweb2.py", "--data-root", DATA_ROOT, "--shards", "4"),
+        weight=3.0,  # grows via --shards per-language depth; cap_flag None (depth is not a single-ratio cap).
     ),
     StagingRow(
         dataset="finewiki_i18n",
@@ -153,6 +203,8 @@ STAGING_ROWS: list[StagingRow] = [
         fraction_mechanism="fraction",
         download_command=_uv("python_data/download_pes2o.py", "--out-dir", f"{DATA_ROOT}/peS2o", "--fraction", "0.40"),
         flag="download_pes2o.py pulls + repacks (self-parallel) 54 of 136 v3-train zst shards (~32 GB) to parquet.",
+        weight=1.0,
+        cap_flag="--fraction",
     ),
     StagingRow(
         dataset="s2orc_abstract",
@@ -175,6 +227,8 @@ STAGING_ROWS: list[StagingRow] = [
         download_command=_uv(
             "python_data/download_text_pairs.py", "--only", "paq", "--fraction", "0.40", "--data-root", DATA_ROOT
         ),
+        weight=1.0,
+        cap_flag="--fraction",
     ),
     StagingRow(
         dataset="wikianswers",
@@ -192,6 +246,8 @@ STAGING_ROWS: list[StagingRow] = [
             "--data-root",
             DATA_ROOT,
         ),
+        weight=1.0,
+        cap_flag="--fraction",
     ),
     StagingRow(
         dataset="starcoderdata",
@@ -199,8 +255,11 @@ STAGING_ROWS: list[StagingRow] = [
         fraction=0.05,
         estimated_full_gigabytes=783.0,  # full 86-language BigCode slice.
         estimated_download_gigabytes=40.0,  # --top10 high-volume languages only.
-        fraction_mechanism="language-subset",
-        download_command=_uv("python_data/download_starcoderdata.py", "--top10", "--data-root", DATA_ROOT),
+        fraction_mechanism="fraction",
+        # A --fraction slice across all 86 languages; pass --only <langs> or --shards N for per-language curation.
+        download_command=_uv("python_data/download_starcoderdata.py", "--data-root", DATA_ROOT, "--fraction", "0.05"),
+        weight=2.0,
+        cap_flag="--fraction",
     ),
     StagingRow(
         dataset="compile_ir",
@@ -209,8 +268,11 @@ STAGING_ROWS: list[StagingRow] = [
         fraction=0.012,
         estimated_full_gigabytes=2700.0,  # full ComPile LLVM-IR corpus.
         estimated_download_gigabytes=32.0,  # first 50 of ~2700 shards.
-        fraction_mechanism="num-shards",
-        download_command=_uv("python_data/download_compile_ir.py", "--num-shards", "50", "--data-root", DATA_ROOT),
+        fraction_mechanism="max-shards",
+        download_command=_uv("python_data/download_compile_ir.py", "--max-shards", "50"),
+        weight=1.0,
+        full_units=2700,
+        cap_flag="--max-shards",
     ),
     StagingRow(
         dataset="poj_104",
@@ -229,8 +291,11 @@ STAGING_ROWS: list[StagingRow] = [
         estimated_full_gigabytes=40.0,  # full tier across 10 languages; the small tier is ~2 GB.
         estimated_download_gigabytes=2.0,
         fraction_mechanism="fraction",
-        download_command=_uv("python_data/download_the_vault.py", "--tier", "small", "--data-root", DATA_ROOT),
-        flag="multilingual docstring<->code, 10 languages; small tier staged (--tier medium/full for more).",
+        # ~5% --fraction slice approximates the small tier; pass --only <langs> for per-language selection.
+        download_command=_uv("python_data/download_the_vault.py", "--data-root", DATA_ROOT, "--fraction", "0.05"),
+        weight=0.5,
+        cap_flag="--fraction",
+        flag="multilingual docstring<->code, 10 languages; staged as a --fraction slice (per-tier curation dropped).",
     ),
     StagingRow(
         dataset="xlcost",
@@ -279,7 +344,19 @@ STAGING_ROWS: list[StagingRow] = [
         download_command=None,
         flag="rollup of small pair corpora already staged (msmarco/eli5/arxiv/all-nli/quora/...).",
     ),
-    # Image modality, ~750 GB target.
+    # Image modality — budget-allocated across MODALITY_WEIGHTS; cross-modal image+text.
+    StagingRow(
+        dataset="datacomp_small",
+        modality="image",
+        fraction=0.10,
+        estimated_full_gigabytes=450.0,  # ~12.8M image-text pairs (DataComp-small), decoded bytes in parquet.
+        estimated_download_gigabytes=45.0,
+        fraction_mechanism="fraction",
+        download_command=_uv("python_data/download_datacomp_small.py", "--fraction", "0.10"),
+        weight=1.5,
+        cap_flag="--fraction",
+        flag="url_crawl via acquire (img2dataset over the URL index); carried by data/image_caption.json (weight 0.10).",
+    ),
     StagingRow(
         dataset="cc12m",
         modality="image",
@@ -293,6 +370,9 @@ STAGING_ROWS: list[StagingRow] = [
             "parallel -j8 uv run python_data/repack_webdataset_to_parquet.py {}"
         ),
         flag="has --max-shards knob; 762 of ~2176 tars (~525 GB) carries the image modality; repack is per-tar.",
+        weight=3.0,
+        full_units=2176,
+        cap_flag="--max-shards",
     ),
     StagingRow(
         dataset="laion_cc3m",
@@ -309,6 +389,9 @@ STAGING_ROWS: list[StagingRow] = [
             "parallel -j8 uv run python_data/repack_webdataset_to_parquet.py {}"
         ),
         flag="has --max-shards knob; 200 of ~575 tars (~175 GB) carries the image modality; repack is per-tar.",
+        weight=1.5,
+        full_units=575,
+        cap_flag="--max-shards",
     ),
     StagingRow(
         dataset="coco_captions",
@@ -433,6 +516,9 @@ STAGING_ROWS: list[StagingRow] = [
         ),
         flag="has --max-shards knob; 108 of ~452 parquet shards (~92 GB measured) carries the video modality. "
         "Already parquet — no repack.",
+        weight=2.0,
+        full_units=452,
+        cap_flag="--max-shards",
     ),
     StagingRow(
         dataset="kinetics400",
@@ -448,6 +534,9 @@ STAGING_ROWS: list[StagingRow] = [
         flag="has --max-shards knob; 73 of ~242 tar.gz shards (~140 GB) carries the video modality; "
         "download_kinetics400.py pulls + self-repacks (--repack-shard fan-out under GNU parallel), "
         "train split only, joined to annotations/train.csv.",
+        weight=2.0,
+        full_units=242,
+        cap_flag="--max-shards",
     ),
     StagingRow(
         dataset="panda70m_testing",
@@ -506,7 +595,7 @@ STAGING_ROWS: list[StagingRow] = [
         estimated_full_gigabytes=50.0,  # ~29K clips x 10s H.264 mp4 (~1.7 MB/clip) fetched from YouTube.
         estimated_download_gigabytes=35.0,  # x ~0.7 real-world fetch yield.
         fraction_mechanism="fraction",
-        download_command=_uv("python_data/download_vatex.py", "--out-dir", f"{DATA_ROOT}/vatex", "--fraction", "1.0"),
+        download_command=_uv("python_data/download_vatex.py", "--fraction", "1.0"),
         flag="research-only (YouTube ToS): download_vatex.py pulls bilingual caption JSON (10 EN + 10 ZH/clip), "
         "then fetches an H.264 mp4 per 10s window via fetch_media_clips.py under GNU parallel; ~60-80% yield.",
     ),
@@ -518,15 +607,27 @@ STAGING_ROWS: list[StagingRow] = [
         estimated_full_gigabytes=450.0,  # ~15K FULL-length videos (~30 MB/video) fetched from YouTube.
         estimated_download_gigabytes=63.0,  # 0.20 x 450 GB x ~0.7 yield.
         fraction_mechanism="fraction",
-        download_command=_uv(
-            "python_data/download_activitynet_captions.py",
-            "--out-dir",
-            f"{DATA_ROOT}/activitynet-captions",
-            "--fraction",
-            "0.20",
-        ),
+        download_command=_uv("python_data/download_activitynet_captions.py", "--fraction", "0.20"),
         flag="research-only (YouTube ToS): download_activitynet_captions.py pulls densevid caption metadata, "
         "then fetches the full H.264 mp4 per video via fetch_media_clips.py under GNU parallel; ~60-80% yield.",
+        weight=2.0,
+        cap_flag="--fraction",
+    ),
+    StagingRow(
+        dataset="howto100m",
+        glob_override="data/howto100m/*.parquet",  # no howto100m entry in any mixture; fetched-clip parquet shards
+        modality="video",
+        fraction=0.25,  # ~50k of the ~200k default index-cap ceiling (the full ~136M-clip corpus is impractical)
+        estimated_full_gigabytes=400.0,  # ~200k index-capped clips x ~2 MB H.264 windows
+        estimated_download_gigabytes=70.0,  # 50k clips x ~2 MB x ~0.7 fetch yield
+        fraction_mechanism="max-clips",
+        download_command=_uv("python_data/download_howto100m.py", "--max-clips", "50000"),
+        flag="research-only (YouTube ToS): download_howto100m.py streams a bounded per-clip ASR-caption parquet "
+        "index, then fetches an H.264 mp4 per window via acquire_clips (rank/world split, GNU parallel); bulk "
+        "YouTube fetch needs yt-dlp cookies (bot-wall), ~60-80% yield when authenticated.",
+        weight=2.5,
+        full_units=200_000,  # ~200k index-capped clips at ~2 MB = the estimated_full ceiling; raise via --index-cap.
+        cap_flag="--max-clips",
     ),
     # Audio modality, ~750 GB target.
     StagingRow(
@@ -536,12 +637,14 @@ STAGING_ROWS: list[StagingRow] = [
         fraction=0.02,
         estimated_full_gigabytes=2400.0,  # full AudioSet (943 parquet shards: bal_train/eval/unbal_train).
         estimated_download_gigabytes=48.0,
-        fraction_mechanism="splits",
+        fraction_mechanism="fraction",
         download_command=_uv(
-            "python_data/download_audioset.py", "--out-dir", f"{DATA_ROOT}/audioset", "--splits", "bal_train,eval"
+            "python_data/download_audioset.py", "--out-dir", f"{DATA_ROOT}/audioset", "--fraction", "0.02"
         ),
-        flag="has --splits/--fraction knobs; bal_train+eval only (73 shards, ~48 GB) — audio intentionally small "
-        "(unbal_train's 2.2 TB dropped).",
+        flag="bal_train+eval sort FIRST, so a --fraction slice keeps the curated ~48 GB first and spills into "
+        "unbal_train as the budget grows; `--only bal_train,eval` would pin it to the curated splits only.",
+        weight=3.0,
+        cap_flag="--fraction",
     ),
     StagingRow(
         dataset="audiocaps",
@@ -571,13 +674,84 @@ STAGING_ROWS: list[StagingRow] = [
         estimated_full_gigabytes=230.0,  # 1.9M x ~10s mp3 (~120 KB/clip) fetched from YouTube.
         estimated_download_gigabytes=8.0,  # 0.05 x 230 GB x ~0.7 real-world fetch yield.
         fraction_mechanism="fraction",
-        download_command=_uv(
-            "python_data/download_auto_acd.py", "--out-dir", f"{DATA_ROOT}/auto-acd", "--fraction", "0.05"
-        ),
+        download_command=_uv("python_data/download_auto_acd.py", "--fraction", "0.05"),
         flag="research-only (YouTube ToS): download_auto_acd.py fetches bestaudio->mp3 per clip via "
         "fetch_media_clips.py under GNU parallel; ~60-80% audio yield audited in fetch_manifest.json.",
+        weight=1.5,
+        cap_flag="--fraction",
     ),
 ]
+
+
+def resolve_budget_gigabytes(cli_budget_gigabytes: float | None = None) -> float:
+    """Resolve the total on-disk budget: `--budget-gb` > `$UFORM_DATA_BUDGET_GB` > free-disk * SAFETY_MARGIN.
+
+    The auto-detected default reads the free space on `$UFORM_DATA_ROOT`, so the same manifest sizes itself
+    to whatever machine it runs on; pin `--budget-gb` (or the env var) for an exactly reproducible plan.
+    """
+    if cli_budget_gigabytes is not None:
+        return max(0.0, cli_budget_gigabytes)
+    raw = os.environ.get("UFORM_DATA_BUDGET_GB")
+    if raw:
+        return max(0.0, float(raw))
+    return shutil.disk_usage(DATA_ROOT).free / 1e9 * SAFETY_MARGIN
+
+
+def allocate_targets(budget_gigabytes: float) -> dict[str, float]:
+    """Map each dataset to its target on-disk GB under `budget_gigabytes`.
+
+    Per modality: the always-full rows (`weight <= 0`) take their `estimated_full_gigabytes` off the top,
+    then the remaining modality budget is water-filled across the growable rows in proportion to `weight`,
+    each capped at its own `estimated_full_gigabytes` — a dataset never stages more than exists upstream,
+    and a row that maxes out spills its unused share back to the others rather than wasting the budget.
+    """
+    targets: dict[str, float] = {}
+    for modality, modality_weight in MODALITY_WEIGHTS.items():
+        rows = [row for row in STAGING_ROWS if row.modality == modality]
+        fixed = [row for row in rows if row.weight <= 0.0]
+        for row in fixed:
+            targets[row.dataset] = row.estimated_full_gigabytes
+        remaining = max(0.0, budget_gigabytes * modality_weight - sum(row.estimated_full_gigabytes for row in fixed))
+        unfilled = [row for row in rows if row.weight > 0.0]
+        for row in unfilled:
+            targets.setdefault(row.dataset, 0.0)
+        while unfilled and remaining > 1e-6:
+            weight_sum = sum(row.weight for row in unfilled)
+            if weight_sum <= 0.0:
+                break
+            shares = {row.dataset: remaining * row.weight / weight_sum for row in unfilled}
+            progressed = False
+            for row in list(unfilled):
+                room = row.estimated_full_gigabytes - targets[row.dataset]
+                grant = min(shares[row.dataset], room)
+                if grant > 1e-9:
+                    targets[row.dataset] += grant
+                    remaining -= grant
+                    progressed = True
+                if room - grant <= 1e-9:
+                    unfilled.remove(row)
+                    progressed = True
+            if not progressed:
+                break
+    return targets
+
+
+def derive_cap(row: StagingRow, target_gigabytes: float) -> tuple[str, str] | None:
+    """Turn a row's target GB into the `(cap_flag, value)` it should pass, or None for always-full rows.
+
+    `--fraction` yields a share of the full dataset; `--max-shards` / `--max-clips` yield an integer unit
+    count via `full_units`. The value is clamped so a target at or above full stages everything (fraction
+    1.0 / all units), and at least one unit / a positive fraction otherwise.
+    """
+    if row.cap_flag is None or row.estimated_full_gigabytes <= 0.0:
+        return None
+    ratio = min(1.0, max(0.0, target_gigabytes / row.estimated_full_gigabytes))
+    if row.cap_flag == "--fraction":
+        return ("--fraction", f"{ratio:.3f}")
+    if row.full_units is None:
+        return None
+    units = max(1, min(row.full_units, round(ratio * row.full_units)))
+    return (row.cap_flag, str(units))
 
 
 def rows_for_modality(modality: str) -> list[StagingRow]:

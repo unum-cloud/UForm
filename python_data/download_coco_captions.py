@@ -39,13 +39,12 @@ CLI usage:
 from __future__ import annotations
 
 import argparse
-import math
-import os
 import shutil
 import sys
 from pathlib import Path
 
 import pyarrow.parquet as pq
+from engine_base import cap_shards, data_root
 from huggingface_hub import list_repo_files, snapshot_download
 
 _PRIMARY_REPO_ID = "HuggingFaceM4/COCO"
@@ -54,9 +53,7 @@ _PARQUET_REVISION = "refs/convert/parquet"
 _CONFIG_PREFIX = "2014_captions/"
 #: Only the train + validation splits carry captions; the test split is held out / unlabelled.
 _CAPTION_SPLIT_MARKERS = ("coco-train", "coco-validation")
-_DEFAULT_OUT_DIR = (
-    Path(os.environ.get("UFORM_DATA_ROOT", Path(__file__).resolve().parents[1] / "data")) / "coco_captions"
-)
+_DEFAULT_OUT_DIR = data_root() / "coco_captions"
 _REGISTRY_IMAGE_FIELD = "image"
 _REGISTRY_CAPTION_FIELD = "sentences_raw"
 
@@ -89,12 +86,7 @@ def _shard_allow_patterns(repo_id: str, max_shards: int | None, fraction: float 
         The `allow_patterns` list of caption parquet paths for `snapshot_download`.
     """
     shards = _caption_shards(repo_id)
-    keep_count = len(shards)
-    if fraction is not None:
-        keep_count = min(keep_count, max(1, math.ceil(len(shards) * fraction)))
-    if max_shards is not None:
-        keep_count = min(keep_count, max_shards)
-    kept = shards[:keep_count]
+    kept = cap_shards(shards, fraction, max_shards)
     print(f"download_coco_captions: pulling {len(kept)} of {len(shards)} caption shards (train + validation)")
     return kept
 

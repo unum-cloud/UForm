@@ -23,14 +23,14 @@ CLI usage:
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
+from engine_base import data_root
 from huggingface_hub import snapshot_download
 
 _REPOS = ("nielsr/funsd", "nielsr/funsd-layoutlmv3")
-_DEFAULT_OUT_DIR = Path(os.environ.get("UFORM_DATA_ROOT", Path(__file__).resolve().parents[1] / "data")) / "funsd"
+_DEFAULT_OUT_DIR = data_root() / "funsd"
 
 
 def download(out_dir: Path, force: bool = False) -> int:

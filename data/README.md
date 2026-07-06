@@ -11,17 +11,21 @@ The `Format` column reads `downloaded → stored`; every corpus is converted on 
 
 The tables above list what _exists_; this section is how a balanced slice of it lands on disk.
 The host data root comes from the `UFORM_DATA_ROOT` env var, falling back to the repository's own `data/` tree.
-The declarative plan lives in `python_data/staging_manifest.py` — one `StagingRow` per dataset, grouped into four modalities (text / image / video / audio) each targeted at ~750 GB so the grand total lands near 3 TB.
+The declarative plan lives in `python_data/staging_manifest.py` — one `StagingRow` per dataset, grouped into four modalities (text / image / video / audio).
+Sizing is disk-aware: `resolve_budget_gigabytes` derives one total budget (`--budget-gb` > `$UFORM_DATA_BUDGET_GB` > free disk × `SAFETY_MARGIN`), `MODALITY_WEIGHTS` splits it across modalities (cross-modal video / image lead, text stays substantial, audio is thinnest), and `allocate_targets` water-fills each modality's share across its growable rows.
 `python_data/stage_balanced_corpus.py` reads that manifest and, per row, runs that row's `download_command` — a `uv run python_data/download_<name>.py` invocation that pulls and repacks each assigned shard to parquet in one pass.
 `--dry-run` prints the exact commands and a per-modality balance table without downloading anything.
 
 ```sh
-uv run python_data/stage_balanced_corpus.py --dry-run      # plan + balance table, no download
-uv run python_data/stage_balanced_corpus.py --modality all # stage everything for real (resumable)
+uv run python_data/stage_balanced_corpus.py --dry-run                  # plan + balance table (auto-detect budget)
+uv run python_data/stage_balanced_corpus.py --dry-run --budget-gb 6000 # pin a 6 TB budget, reproducible plan
+uv run python_data/stage_balanced_corpus.py --modality all             # stage everything for real (resumable)
 ```
 
-__Budgets via fractions.__
-No source is pulled whole — each `StagingRow` carries a `fraction` of its full size, realized on the wire by each downloader's uniform `--fraction` (a leading `shards × f` slice) and `--max-shards N` cap, which compose with the tighter one winning (`engine_base.cap_shards`).
+__Budgets and the cap vocabulary.__
+No source is pulled whole; the allocator's per-dataset GB target converts to one uniform cap flag.
+`--fraction F` (a leading `units × f` slice) and `--max-shards N` compose with the tighter one winning (`engine_base.cap_shards`); `--max-clips N` is the clip-native spelling for the YouTube-fetch datasets; and `--index-cap N` (`$UFORM_INDEX_CAP`) bounds how many windows an unbounded clip index even enumerates — distinct from the fetch cap, so `--fraction` / `--max-clips` lower the fetch below it, never above.
+`--fanout N` on the clip fetchers is a parallelism knob, not a cap; the record repackers (C4-200M, Enron, Google Text-Norm) cap by `--max-records N`.
 A downloader caps _before_ transfer: it enumerates the sorted upstream shard list and keeps only the leading slice, so a fraction never downloads-then-deletes.
 
 __Lifecycle: acquire → repack → clean.__
@@ -41,7 +45,7 @@ A single-machine `uv run python_data/download_<name>.py` is the identical code p
 __Disk runbook.__
 The data root is typically a large scratch volume; keep headroom.
 Over-pulls are trimmed by deleting the unwanted split or shards (`snapshot_download` only adds, never removes) — e.g. AudioSet's `unbal_train` (2.2 TB) is dropped so audio stays curated.
-Audio is intentionally the smallest modality (~90 GB: AudioCaps + AudioSet `bal_train`+`eval`); its balance-table "shortfall" is by design, not a gap.
+Audio is intentionally the thinnest modality (`MODALITY_WEIGHTS` gives it the smallest share); growing it into AudioSet's `unbal_train` (2.2 TB) is available via a larger `--fraction`, but deliberately down-weighted.
 
 ## Text
 
@@ -352,11 +356,11 @@ CSAM is entirely out of scope.
 | ✅ [VATEX][vatex]                        | video-text    | YouTube fetch → parquet | \~29K clips, 20 captions each (10 EN + 10 ZH) ⁶        |
 | ✅ [ActivityNet Captions][activitynet]   | video-text    | YouTube fetch → parquet | \~15K videos, \~3.65 dense captions each ⁶             |
 | 🔜 [Something-Something v2][somethingv2] | video, action | webm → parquet          | temporal action, 220K clips                            |
-| 🔜 [HowTo100M][howto100m]                | video-text    | video → parquet         | 100M narrated clips ³                                  |
+| ✅ [HowTo100M][howto100m]                | video-text    | YouTube fetch → parquet | \~136M narrated clips, per-clip ASR captions ³         |
 
 > ¹ Fetched and repacked on demand via `uv run python_data/download_msrvtt.py` (its media-fetch downloader) because the license blocks redistribution, with an in-batch shuffle synthesizing rerank negatives.
 > ² Repacked to parquet by the `webdataset` source kind (Panda-70M's tars), the `hf_snapshot` source kind (WebVid's snapshot parquet), or its media-fetch downloader (Kinetics-400's CSV-joined action label); WebVid is Shutterstock-licensed stock video.
-> ³ Wishlist narrated instructional clips; HMDB-51 (`uv run python_data/download_hmdb51.py`) is kept only as a small VideoMAE smoke, not a training corpus.
+> ³ Acquired via `uv run python_data/download_howto100m.py`: streams a bounded per-clip ASR-caption parquet index (`bpiyush/howto100m_captions_with_verb_nouns`, capped by `--index-cap` / `$UFORM_INDEX_CAP` windows), then fetches an H.264 mp4 per window via `acquire_clips` (rank/world split); bulk YouTube fetch needs `yt-dlp` cookies. HMDB-51 (`uv run python_data/download_hmdb51.py`) is kept only as a small VideoMAE smoke, not a training corpus.
 > ⁴ The per-moment descriptions are packed into a `captions` list<string> by the `webdataset` source kind, which muxes the MP4 tars to parquet inline; no external fetch.
 > ⁵ The `webdataset` source kind re-encodes each clip's JPEG frames to MP4 (ffmpeg) and packs the referring motion expressions into a `captions` list<string>; the dense masks are dropped (mask-head loader out of scope), and expressions refer to sub-clip object motion, so treat MeViS as supplementary video-text rather than a precision benchmark.
 > ⁶ Fetched on demand from YouTube by its media-fetch downloader — `uv run python_data/download_vatex.py` / `uv run python_data/download_activitynet_captions.py` — because the media is not redistributable. Real-world yield is ~60-80% (dead / private / geo-blocked / bot-gated ids are dropped and audited in each build's `fetch_manifest.json`, never silently truncated); research-only under YouTube's Terms of Service.

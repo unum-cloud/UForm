@@ -29,7 +29,7 @@ rights, and the videos are not redistributable.
 
 CLI usage:
     uv run python_data/download_activitynet_captions.py                                 # all videos, parallel
-    uv run python_data/download_activitynet_captions.py --fraction 0.01 --num-shards 8  # ~1% slice
+    uv run python_data/download_activitynet_captions.py --fraction 0.01 --fanout 8      # ~1% slice
     uv run python_data/download_activitynet_captions.py --rank 0 --world 16             # this worker's stride
 """
 
@@ -65,11 +65,17 @@ def _load_caption_metadata(out_dir: Path) -> dict[str, dict[str, object]]:
     return merged
 
 
-def _clip_records(out_dir: Path) -> list[dict[str, object]]:
-    """Load the caption metadata and build one `{...MediaClip, caption}` record per video."""
+def _clip_records(out_dir: Path, index_cap: int | None) -> list[dict[str, object]]:
+    """Load the caption metadata and build one `{...MediaClip, caption}` record per video.
+
+    ActivityNet Captions is naturally small (~20k videos), so `index_cap` is a harmless upper bound
+    honoured for uniformity with the other clip datasets; `index_cap=None` reads every video.
+    """
     metadata = _load_caption_metadata(out_dir)
     records: list[dict[str, object]] = []
     for key, info in metadata.items():
+        if index_cap is not None and len(records) >= index_cap:
+            break
         # Keys are `v_<youtube_id>`; the leading `v_` is the ActivityNet prefix, not part of the id.
         watch_id = key[2:] if key.startswith("v_") else key
         record = MediaClip(source_id=watch_id, kind=MediaKind.VIDEO).to_json()
@@ -87,6 +93,6 @@ if __name__ == "__main__":
             out_name="activitynet-captions",
             media_column="mp4",
             script=Path(__file__).resolve(),
-            default_num_shards=128,
+            default_fanout=128,
         )
     )

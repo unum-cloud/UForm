@@ -48,7 +48,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import os
 import shutil
 import subprocess
@@ -58,12 +57,11 @@ import tarfile
 import pyarrow as pa
 import pyarrow.parquet as pq
 import xxhash
+from engine_base import cap_shards, data_root
 from huggingface_hub import snapshot_download
 
 #: Default host data root — overridable via `UFORM_DATA_ROOT`; the symlink target `data/didemo`.
-DEFAULT_DATA_ROOT = os.environ.get(
-    "UFORM_DATA_ROOT", os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
-)
+DEFAULT_DATA_ROOT = str(data_root())
 #: HF mirror that ships the DiDeMo MP4 tars plus the per-moment caption JSON.
 DIDEMO_REPO = "friedrichor/DiDeMo"
 #: Per-split caption JSON whose `caption` field is already a LIST of ordered moment descriptions.
@@ -96,12 +94,7 @@ def _selected_splits(max_shards: int | None, fraction: float | None) -> list[str
         The kept split names (a prefix of `sorted(SPLIT_TAR_PATTERNS)`).
     """
     splits = sorted(SPLIT_TAR_PATTERNS)
-    keep_count = len(splits)
-    if fraction is not None:
-        keep_count = min(keep_count, max(1, math.ceil(len(splits) * fraction)))
-    if max_shards is not None:
-        keep_count = min(keep_count, max_shards)
-    kept = splits[:keep_count]
+    kept = cap_shards(splits, fraction, max_shards)
     print(f"[didemo] staging {len(kept)} of {len(splits)} split(s): {kept}", flush=True)
     return kept
 
