@@ -82,10 +82,10 @@
 #include <infiniband/verbs.h>  // `ibv_context`, `ibv_pd`, `ibv_cq`, `ibv_qp` — the RC bring-up
 #endif
 
-#include "cuda_core/types.cuh"          // `expected`, `expected_t`, `status_t`, `format_into`
-#include "cuda_core/gpu_allocators.cuh" // `gpu_arena_t` carving the device producer / consumer counters
+#include "cuda_core/types.hpp"          // `expected`, `expected_t`, `status_t`, `format_into`
+#include "cuda_core/gpu_allocators.hpp" // `gpu_arena_t` backing the device producer / consumer counters
 #include "cuda_core/schedule.cuh"       // `b8r1_span_t` — the registered GPU range travels as one typed span
-#include "cuda_core/mesh.cuh"           // `mesh_topology_t` — the coordinate exchange rides the mesh rendezvous
+#include "cuda_core/mesh.hpp"           // `mesh_topology_t` — the coordinate exchange rides the mesh rendezvous
 
 namespace unum::uform::core {
 

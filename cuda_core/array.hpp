@@ -1,6 +1,6 @@
 /**
  *  @brief Exception-free allocator-aware resizable array — the primitives cell's `std::vector` replacement.
- *  @file cuda/primitives/array.cuh
+ *  @file cuda_core/array.hpp
  *  @author Ash Vardanian
  *  @date July 2, 2026
  *
@@ -25,7 +25,7 @@
 #include <memory>      // `std::allocator_traits`, `std::allocator`
 #include <span>        // `std::span`
 
-#include "cuda_core/types.cuh" // `status_t`
+#include "cuda_core/types.hpp" // `status_t`
 
 namespace unum::uform::core {
 

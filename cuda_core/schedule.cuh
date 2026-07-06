@@ -62,9 +62,9 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span` for the typed transfer helpers
 
-#include "cuda_core/types.cuh"          // `expected`, `expected_t`, `status_t`
-#include "cuda_core/array.cuh"          // `array` for the node-guard walk
-#include "cuda_core/gpu_allocators.cuh" // `gpu_arena_alloc` backing the owning rank-1 tensor aliases
+#include "cuda_core/types.hpp"          // `expected`, `expected_t`, `status_t`
+#include "cuda_core/array.hpp"          // `array` for the node-guard walk
+#include "cuda_core/gpu_allocators.hpp" // `gpu_arena_alloc` backing the owning rank-1 tensor aliases
 
 namespace unum::uform::core {
 

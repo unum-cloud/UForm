@@ -3,7 +3,7 @@
  *      distorted one, and the reconstruction heads that score the tower's states against the clean
  *      target — byte cross-entropy for tokens, normalized-pixel MSE for image / video patches, and
  *      normalized-sample MSE for 1-D audio frames.
- *  @file cuda_core/multimodal_masking.cuh
+ *  @file cuda_core/multimodal_masking.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
  *
@@ -31,11 +31,11 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "cuda_core/types.cuh"            // `expected`, `expected_t`, `status_t`, the scalar aliases
-#include "cuda_core/array.cuh"            // `array` — the parameter-table append
-#include "cuda_core/gpu_allocators.cuh"   // `gpu_arena_t`, `gpu_arena_alloc`
+#include "cuda_core/types.hpp"            // `expected`, `expected_t`, `status_t`, the scalar aliases
+#include "cuda_core/array.hpp"            // `array` — the parameter-table append
+#include "cuda_core/gpu_allocators.hpp"   // `gpu_arena_t`, `gpu_arena_alloc`
 #include "cuda_core/schedule.cuh"         // `gpu_stream_t`, `cublaslt_session_t`, `cublaslt_plan_t`, the view aliases
-#include "cuda_core/multimodal_batch.cuh" // `modality_t`, `modality_view_t` — the per-segment routing tag
+#include "cuda_core/multimodal_batch.hpp" // `modality_t`, `modality_view_t` — the per-segment routing tag
 
 namespace unum::uform::core {
 

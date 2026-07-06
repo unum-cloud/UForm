@@ -37,7 +37,7 @@
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
 #include "cuda_train/base.cuh"   // `base_config_t`, `base_replica_t`, `base_trainer_t`
-#include "cuda_test/harness.cuh" // `test_suite_t` — the cumulative pass/fail tally
+#include "cuda_test/harness.hpp" // `test_suite_t` — the cumulative pass/fail tally
 
 using namespace unum::uform::core;
 using namespace unum::uform::train;

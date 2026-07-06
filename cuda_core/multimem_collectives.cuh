@@ -34,9 +34,9 @@
 
 #include <cuda.h> // `cuMulticastCreate`, `cuMulticastBindMem`, `cuMemMap`, `cuMemSetAccess`
 
-#include "cuda_core/types.cuh"          // `expected`, `expected_t`, `status_t`, the scalar aliases
-#include "cuda_core/array.cuh"          // `array` — the runtime-sized per-member tables
-#include "cuda_core/gpu_allocators.cuh" // `gpu_arena_t` conventions, `round_up_to_multiple`
+#include "cuda_core/types.hpp"          // `expected`, `expected_t`, `status_t`, the scalar aliases
+#include "cuda_core/array.hpp"          // `array` — the runtime-sized per-member tables
+#include "cuda_core/gpu_allocators.hpp" // `gpu_arena_t` conventions, `round_up_to_multiple`
 #include "cuda_core/schedule.cuh"       // `gpu_stream_t`, `launch_kernel`, `current_context_t`, the rank-1 aliases
 
 namespace unum::uform::core {

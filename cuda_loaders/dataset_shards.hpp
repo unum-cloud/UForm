@@ -25,8 +25,8 @@
 #include <memory>  // `std::unique_ptr` — the pimpl owning the cuDF table
 #include <span>    // `std::span`
 
-#include "cuda_core/types.cuh"    // `expected`, `status_t`, the scalar aliases, `sz::arrow_packed_view`, `sz::string`
-#include "cuda_core/array.cuh"    // `array` — the glob expansion result
+#include "cuda_core/types.hpp"    // `expected`, `status_t`, the scalar aliases, `sz::arrow_packed_view`, `sz::string`
+#include "cuda_core/array.hpp"    // `array` — the glob expansion result
 #include "cuda_core/schedule.cuh" // `gpu_stream_t`
 #include "cuda_loaders/direct_storage.hpp" // `gpu_direct_storage_session_t` — the reader's GDS precondition
 

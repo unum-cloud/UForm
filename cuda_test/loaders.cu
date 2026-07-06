@@ -26,16 +26,16 @@
 
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
-#include "cuda_core/types.cuh"             // `splitmix64_hash_t`, `epoch_permutation`, `epoch_t`, `to_string`, aliases
-#include "cuda_core/array.cuh"             // `array`, `stack_array` — the host-oracle and staging scratch
-#include "cuda_core/gpu_allocators.cuh"    // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`, the tensor aliases
+#include "cuda_core/types.hpp"             // `splitmix64_hash_t`, `epoch_permutation`, `epoch_t`, `to_string`, aliases
+#include "cuda_core/array.hpp"             // `array`, `stack_array` — the host-oracle and staging scratch
+#include "cuda_core/gpu_allocators.hpp"    // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`, the tensor aliases
 #include "cuda_core/schedule.cuh"          // `gpu_stream_t`, `copy_host_to_device`, `copy_device_to_host`
-#include "cuda_core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, the shape, `fill_coords`, `modality_t`
+#include "cuda_core/multimodal_batch.hpp"  // `multimodal_batch_on_gpu_t`, the shape, `fill_coords`, `modality_t`
 #include "cuda_loaders/dataset_shards.hpp" // `column_view_t`
 #include "cuda_loaders/audio_loader.cuh"   // `decode_audios`, `cpu_decode_pool_t`
 #include "cuda_loaders/image_loader.cuh"   // `nvjpeg_session_t`, `decode_images`
 #include "cuda_loaders/video_loader.cuh"   // `nvdec_session_t`, `decode_videos`
-#include "cuda_test/harness.cuh"           // `test_suite_t`
+#include "cuda_test/harness.hpp"           // `test_suite_t`
 
 using namespace unum::uform::core;
 using namespace unum::uform::loaders;

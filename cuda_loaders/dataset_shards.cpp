@@ -30,7 +30,7 @@
 
 #include "cuda_loaders/dataset_shards.hpp"
 
-#include "cuda_core/array.cuh" // `array` — the owned per-column table
+#include "cuda_core/array.hpp" // `array` — the owned per-column table
 
 namespace uc = unum::uform::core;
 namespace ul = unum::uform::loaders;
@@ -472,5 +472,3 @@ expected<array<sz::string>> ul::expand_glob(sz::string_view path_or_glob) noexce
     std::sort(paths.begin(), paths.end());
     return result_t {std::move(paths)};
 }
-
-} // namespace unum::uform::loaders

@@ -38,15 +38,15 @@
 
 #include <span> // `std::span` — the replay-graph table decays to a view for `step`
 
-#include "cuda_core/array.cuh"          // `array`, `per_gpu_array`
-#include "cuda_core/gpu_allocators.cuh" // `gpu_arena_t`
+#include "cuda_core/array.hpp"          // `array`, `per_gpu_array`
+#include "cuda_core/gpu_allocators.hpp" // `gpu_arena_t`
 #include "cuda_core/schedule.cuh"       // `gpu_stream_t`, `cublaslt_session_t`, `cudnn_session_t`, replay graphs
-#include "cuda_core/mesh.cuh"           // `mesh_topology_t`
+#include "cuda_core/mesh.hpp"           // `mesh_topology_t`
 #include "cuda_core/multimem_collectives.cuh"
-#include "cuda_core/multimodal_batch.cuh" // `multimodal_batch_shape_t`, `multimodal_batch_on_gpu_t`, `modality_t`
-#include "cuda_core/multimodal_masking.cuh"
-#include "cuda_core/encoder_tower.cuh"
-#include "cuda_core/optimizer.cuh"
+#include "cuda_core/multimodal_batch.hpp" // `multimodal_batch_shape_t`, `multimodal_batch_on_gpu_t`, `modality_t`
+#include "cuda_core/multimodal_masking.hpp"
+#include "cuda_core/encoder_tower.hpp"
+#include "cuda_core/optimizer.hpp"
 
 namespace unum::uform::train {
 

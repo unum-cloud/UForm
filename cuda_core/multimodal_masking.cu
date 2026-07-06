@@ -5,7 +5,7 @@
  *  @author Ash Vardanian
  *  @date July 3, 2026
  */
-#include "cuda_core/multimodal_masking.cuh"
+#include "cuda_core/multimodal_masking.hpp"
 
 using namespace unum::uform::core;
 

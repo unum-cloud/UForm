@@ -4,7 +4,7 @@
  *      @c gpu_arena_alloc_t instance is what the towers read, and one @c copy_from between the
  *      two is the whole transfer. Distribution across the multimem_domain and the colocated_domain
  *      is @ref multimodal_batch_mixer_t 's job; batches never know they are distributed.
- *  @file cuda_core/multimodal_batch.cuh
+ *  @file cuda_core/multimodal_batch.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
  *
@@ -85,9 +85,9 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor` — the owning storage
 
-#include "cuda_core/types.cuh"                  // the scalar aliases, `token_id_t`, `pixel_t`
-#include "cuda_core/array.cuh"                  // `per_gpu_array` — the composition root's per-GPU tables
-#include "cuda_core/gpu_allocators.cuh"         // `gpu_arena_alloc_t`, `pinned_alloc_t`
+#include "cuda_core/types.hpp"                  // the scalar aliases, `token_id_t`, `pixel_t`
+#include "cuda_core/array.hpp"                  // `per_gpu_array` — the composition root's per-GPU tables
+#include "cuda_core/gpu_allocators.hpp"         // `gpu_arena_alloc_t`, `pinned_alloc_t`
 #include "cuda_core/schedule.cuh"               // `gpu_stream_t` — the mixer's enqueue surface
 #include "cuda_core/multimem_collectives.cuh"   // `multimem_domain_t` — the barrier the exchange brackets
 #include "cuda_core/infiniband_collectives.cuh" // `colocated_domain_t` — the cross-host_domain lane

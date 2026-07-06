@@ -165,18 +165,16 @@ set(UFORM_WITH_INFINIBAND
 set_property(CACHE UFORM_WITH_INFINIBAND PROPERTY STRINGS ON OFF AUTO)
 uform_probe_infiniband()
 
-# `cuda_core` → `uform`: one static library for the whole core cell. `.cuh` headers declare, sibling `.cu` files hold
-# the kernels and heavy construction bodies — compiled once, never per consumer. Dependencies stay lean: NumKong,
-# StringZilla, yyjson, the CUDA Driver API (no runtime, no NCCL, no NVSHMEM), cuBLASLt, plus the fused-attention tier
-# (nvrtc + cuDNN + cudnn-frontend) that `transformer_block.cuh` / `encoder_tower.cuh` need — folded in here because
-# they are core, not a separate directory. cuDNN is universal now, so no lean/attention split.
+# `cuda_core` → `uform`: one static library for the whole core cell, compiled once, never per consumer.
+# Dependencies stay lean: NumKong, StringZilla, yyjson, the CUDA Driver API (no runtime, no NCCL, no NVSHMEM),
+# cuBLASLt, plus the fused-attention tier (nvrtc + cuDNN + cudnn-frontend) the transformer / tower cells need.
 add_library(
     uform STATIC
     cuda_core/schedule.cu
     cuda_core/multimem_collectives.cu
     cuda_core/infiniband_collectives.cu
     cuda_core/multimodal_masking.cu
-    cuda_core/checkpoint.cu
+    cuda_core/checkpoint.cpp
     cuda_core/multimodal_batch.cu
     cuda_core/contrastive_segments.cu
     cuda_core/optimizer.cu
@@ -203,25 +201,20 @@ if (UFORM_INFINIBAND_ENABLED)
     target_link_libraries(uform PUBLIC "${UFORM_IBVERBS_LIBRARY}" "${UFORM_MLX5_LIBRARY}")
 endif ()
 
-# `cuda_train` → the model-training library plus its thin binary. `base.cu` compiles the training stack once
-# (see `cuda_train/base.cuh`'s header); `uform_base` is a thin `main`, and the conformance test links the same
-# object, so neither copies the composition root.
+# `cuda_train` → `uform_train`: the training stack compiled once, linked by the `uform_base` binary and the
+# conformance test alike.
 add_library(uform_train STATIC cuda_train/base.cu)
 target_link_libraries(uform_train PUBLIC uform)
 add_executable(uform_base cuda_train/base_main.cu)
 target_link_libraries(uform_base PRIVATE uform_train)
 
-# `cuda_test` → conformance binaries: plain `int main` executables against Float64 host oracles, finite differences,
-# and bitwise replay checks — the only place `std::vector`-style conveniences are welcome. The contrastive and
-# transformer suites rejoin this list with the contrastive rework.
+# `cuda_test` → conformance binaries, one per cell; the contrastive and transformer suites rejoin with the
+# contrastive rework.
 enable_testing()
-foreach (_uform_test mesh)
-    add_executable(cuda_test_${_uform_test} cuda_test/${_uform_test}.cu)
-    target_link_libraries(cuda_test_${_uform_test} PRIVATE uform)
-    add_test(NAME ${_uform_test} COMMAND cuda_test_${_uform_test})
-endforeach ()
+add_executable(cuda_test_mesh cuda_test/mesh.cpp)
+target_link_libraries(cuda_test_mesh PRIVATE uform)
+add_test(NAME mesh COMMAND cuda_test_mesh)
 
-# `cuda_test/base.cu` drives the training library through `base.cuh`, so it links `uform_train`, not bare `uform`.
 add_executable(cuda_test_base cuda_test/base.cu)
 target_link_libraries(cuda_test_base PRIVATE uform_train)
 add_test(NAME base COMMAND cuda_test_base)

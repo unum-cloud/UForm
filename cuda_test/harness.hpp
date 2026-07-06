@@ -1,7 +1,7 @@
 /**
  *  @brief The one shared testing primitive every `cuda_test/` binary threads through its cases — the
  *      cumulative pass/fail tally, reusing the library's own diagnostic channel.
- *  @file cuda_test/harness.cuh
+ *  @file cuda_test/harness.hpp
  *  @author Ash Vardanian
  *  @date July 5, 2026
  *
@@ -18,7 +18,7 @@
 
 #include <unistd.h> // `::write`, `STDERR_FILENO`
 
-#include "cuda_core/types.cuh" // `expected`, `format_into`, `format_at_t`, `format_into_t`, `sz`, the scalar aliases
+#include "cuda_core/types.hpp" // `expected`, `format_into`, `format_at_t`, `format_into_t`, `sz`, the scalar aliases
 
 namespace unum::uform::test {
 

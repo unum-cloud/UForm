@@ -10,7 +10,7 @@ It is deliberately separate from the __data-acquisition__ job (`python_data/acqu
 
 ## The mesh, in one paragraph
 
-The world is a shape `{host_domain, multimem_domain, colocated_domain}` with `1 <= host_domain <= multimem_domain <= colocated_domain` (see `cuda_core/mesh.cuh`).
+The world is a shape `{host_domain, multimem_domain, colocated_domain}` with `1 <= host_domain <= multimem_domain <= colocated_domain` (see `cuda_core/mesh.hpp`).
 `host_domain` is the GPUs __one process__ drives; `multimem_domain` is the GPUs reachable by `multimem.*` over one NVLink/NVSwitch island (HGX = 8, NVL72 = 72); `colocated_domain` is the whole job.
 When `host_domain < multimem_domain`, __several processes compose one multicast domain__ — the interesting cross-process case (NVL72 is `{4, 72, 144}`: 18 processes per rack-wide multicast domain).
 
@@ -43,7 +43,7 @@ The mesh's filesystem-rendezvous barrier assumes co-start; independently-schedul
 - __Task layout.__
 `--ntasks-per-node` = host_domains per node, `--gpus-per-task` = host_domain size; GRES cgroup enforcement then pins each task's `CUDA_VISIBLE_DEVICES` to exactly its GPUs.
 - __Host-domain index = `$SLURM_PROCID`, not `$SLURM_NODEID`.__
-With 2 host_domains per node, `SLURM_NODEID` is `0,0,1,1` — wrong; the launcher exports `UFORM_HOST_DOMAIN_INDEX=$SLURM_PROCID` (`0,1,2,3`), which `mesh.cuh` reads first.
+With 2 host_domains per node, `SLURM_NODEID` is `0,0,1,1` — wrong; the launcher exports `UFORM_HOST_DOMAIN_INDEX=$SLURM_PROCID` (`0,1,2,3`), which `mesh.hpp` reads first.
 - __NUMA / NIC affinity__ via `--cpu-bind=cores --distribution=block:block` — task 0 → cores 0-63 (NUMA0, near GPUs 0-3 and NIC4-7), task 1 → cores 64-127.
 - __`--exclusive` + `--no-kill`__ — own the node (tightly-coupled jobs never share GPUs); keep survivors up so the mesh can re-bootstrap a spare host_domain into a dead peer's index.
 - __Env-var contract__ — `UFORM_GPUS_PER_MULTIMEM_DOMAIN`, `UFORM_EXCHANGE_DIR` (a shared-filesystem rendezvous path), `UFORM_JOB_ID=$SLURM_JOB_ID`, exported to every task.

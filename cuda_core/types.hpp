@@ -1,6 +1,6 @@
 /**
  *  @brief Foundational vocabulary of the UForm v4 primitives cell: statuses, error channel, launch constants.
- *  @file cuda/primitives/types.cuh
+ *  @file cuda_core/types.hpp
  *  @author Ash Vardanian
  *  @date July 2, 2026
  *

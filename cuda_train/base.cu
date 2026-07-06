@@ -33,7 +33,7 @@
 
 #include "cuda_train/base.cuh"
 
-#include "cuda_core/checkpoint.cuh" // `checkpoint_to_save_t` — the lead replica's snapshot
+#include "cuda_core/checkpoint.hpp" // `checkpoint_to_save_t` — the lead replica's snapshot
 
 using namespace unum::uform::core;
 using namespace unum::uform::train;

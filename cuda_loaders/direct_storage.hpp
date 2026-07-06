@@ -16,7 +16,7 @@
  */
 #pragma once
 
-#include "cuda_core/types.cuh" // `expected`, `status_t`, the scalar aliases
+#include "cuda_core/types.hpp" // `expected`, `status_t`, the scalar aliases
 
 namespace unum::uform::loaders {
 

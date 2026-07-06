@@ -1,7 +1,7 @@
 /**
  *  @brief The checkpoint cell's implementation: yyjson header building / parsing and plain POSIX
  *      file I/O — see the header for the contract.
- *  @file cuda_core/checkpoint.cu
+ *  @file cuda_core/checkpoint.cpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
  */
@@ -13,7 +13,7 @@
 
 #include <yyjson.h> // the safetensors JSON header — exceptions-free C
 
-#include "cuda_core/checkpoint.cuh"
+#include "cuda_core/checkpoint.hpp"
 
 namespace unum::uform::core {
 

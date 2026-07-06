@@ -1,6 +1,6 @@
 /**
  *  @brief The multi-level GPU mesh: nested domain sizes, this rank's coordinate, and the world bootstrap.
- *  @file cuda/primitives/mesh.cuh
+ *  @file cuda_core/mesh.hpp
  *  @author Ash Vardanian
  *  @date July 2, 2026
  *
@@ -95,8 +95,8 @@
 
 #include <stringzilla/stringzilla.hpp> // `sz::string`, `sz::string_view` — exception-free text handling
 
-#include "cuda_core/types.cuh" // `expected`, `expected_t`, `status_t`, `format_into`
-#include "cuda_core/array.cuh" // `array` for the exception-free host_domain table
+#include "cuda_core/types.hpp" // `expected`, `expected_t`, `status_t`, `format_into`
+#include "cuda_core/array.hpp" // `array` for the exception-free host_domain table
 
 namespace unum::uform::core {
 

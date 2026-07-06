@@ -8,7 +8,7 @@
  *  @author Ash Vardanian
  *  @date July 3, 2026
  */
-#include "cuda_core/multimodal_batch.cuh"
+#include "cuda_core/multimodal_batch.hpp"
 
 namespace uc = unum::uform::core;
 using namespace uc;

@@ -59,11 +59,11 @@
 
 #include <fork_union.hpp> // vendor-boundary: `fu::basic_pool_t` — the borrowed CPU demux / decode-drive pool
 
-#include "cuda_core/types.cuh"             // `expected`, `status_t`, the scalar aliases, `epoch_t`, `epoch_permutation`
-#include "cuda_core/array.cuh"             // `array`
-#include "cuda_core/gpu_allocators.cuh"    // `pinned_alloc`
+#include "cuda_core/types.hpp"             // `expected`, `status_t`, the scalar aliases, `epoch_t`, `epoch_permutation`
+#include "cuda_core/array.hpp"             // `array`
+#include "cuda_core/gpu_allocators.hpp"    // `pinned_alloc`
 #include "cuda_core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
-#include "cuda_core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`
+#include "cuda_core/multimodal_batch.hpp"  // `multimodal_batch_on_gpu_t`
 #include "cuda_loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
 #include "cuda_loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
 

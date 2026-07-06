@@ -10,7 +10,7 @@
 
 #include <cub/device/device_radix_sort.cuh> // the deterministic embedding-gradient scatter
 
-#include "cuda_core/encoder_tower.cuh"
+#include "cuda_core/encoder_tower.hpp"
 
 using namespace unum::uform::core;
 

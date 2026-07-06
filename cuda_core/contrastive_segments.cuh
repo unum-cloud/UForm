@@ -106,7 +106,7 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "cuda_core/types.cuh"    // `expected_t`, `status_t`, `warp_size_k`, `kernel_block_size_default_k`
+#include "cuda_core/types.hpp"    // `expected_t`, `status_t`, `warp_size_k`, `kernel_block_size_default_k`
 #include "cuda_core/schedule.cuh" // `gpu_stream_t`, `launch_kernel`, `cublaslt_session_t`, `cublaslt_plan_t`
 #include "cuda_core/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 force surface
 #include "cuda_core/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_member_t` — the level-2 surface

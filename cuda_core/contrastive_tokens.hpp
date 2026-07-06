@@ -2,7 +2,7 @@
  *  @brief Sharded sigmoid-pairwise contrastive loss over tokens — the late-interaction @b ColBERT-style 
  *      @b Reranker objective. Placeholder: the launcher lands with the candidate-axis banding design.
  *  
- *  @file cuda/primitives/contrastive_tokens.cuh
+ *  @file cuda_core/contrastive_tokens.hpp
  *  @author Ash Vardanian
  *  @date July 2, 2026
  *
@@ -22,6 +22,6 @@
  */
 #pragma once
 
-#include "cuda_core/types.cuh" // the primitives cell's shared floor
+#include "cuda_core/types.hpp" // the primitives cell's shared floor
 
 namespace unum::uform::core {} // namespace unum::uform::core

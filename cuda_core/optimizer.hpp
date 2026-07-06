@@ -3,7 +3,7 @@
  *      (one row and one column vector per matrix instead of a full moment), RMS-clipped updates, no
  *      momentum — plus @ref distributed_adafactor_t , which reduces the gradients over the same
  *      two-level mesh transports the loss uses and keeps every rank's weight replica bitwise identical.
- *  @file cuda_core/optimizer.cuh
+ *  @file cuda_core/optimizer.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
  *
@@ -37,9 +37,9 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "cuda_core/types.cuh"                  // `expected`, `expected_t`, `status_t`, the scalar aliases
+#include "cuda_core/types.hpp"                  // `expected`, `expected_t`, `status_t`, the scalar aliases
 #include "cuda_core/schedule.cuh"               // `gpu_stream_t`, `launch_kernel`, `grid_size_for`
-#include "cuda_core/gpu_allocators.cuh"         // `gpu_arena_t`
+#include "cuda_core/gpu_allocators.hpp"         // `gpu_arena_t`
 #include "cuda_core/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 gradient surface
 #include "cuda_core/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_member_t` — the level-2 surface
 

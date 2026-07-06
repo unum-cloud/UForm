@@ -78,7 +78,7 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "cuda_core/types.cuh"    // `expected`, `expected_t`, `status_t`, the integer aliases
+#include "cuda_core/types.hpp"    // `expected`, `expected_t`, `status_t`, the integer aliases
 #include "cuda_core/schedule.cuh" // `gpu_stream_t`, `launch_kernel`, `cublaslt_*`, `cudnn_session_t`
 
 namespace unum::uform::core {

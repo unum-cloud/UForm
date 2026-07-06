@@ -1,7 +1,7 @@
 /**
- *  @brief Conformance test of the mesh bootstrap — the one job `mesh.cuh` exists for: minting each
+ *  @brief Conformance test of the mesh bootstrap — the one job `mesh.hpp` exists for: minting each
  *      host_domain's facts and reconciling them over a shared filesystem into one agreed world.
- *  @file cuda_test/mesh.cu
+ *  @file cuda_test/mesh.cpp
  *  @author Ash Vardanian
  *  @date July 5, 2026
  *
@@ -31,8 +31,8 @@
 
 #include <cuda.h> // `cuInit`, `cuDeviceGet`, `cuDeviceGetName`
 
-#include "cuda_core/mesh.cuh"
-#include "cuda_test/harness.cuh"
+#include "cuda_core/mesh.hpp"
+#include "cuda_test/harness.hpp"
 
 using namespace unum::uform::core;
 using namespace unum::uform::test;

@@ -57,8 +57,8 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor`, `nk::tensor_view` — owning columns and borrowed views
 
-#include "cuda_core/types.cuh"          // `expected`, `expected_t`, `status_t`
-#include "cuda_core/gpu_allocators.cuh" // `gpu_arena_t`, `gpu_arena_alloc` backing the owning tensors
+#include "cuda_core/types.hpp"          // `expected`, `expected_t`, `status_t`
+#include "cuda_core/gpu_allocators.hpp" // `gpu_arena_t`, `gpu_arena_alloc` backing the owning tensors
 #include "cuda_core/schedule.cuh"       // `gpu_stream_t` ordering the uploads
 
 namespace unum::uform::core {

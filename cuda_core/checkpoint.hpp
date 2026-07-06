@@ -2,7 +2,7 @@
  *  @brief Safetensors checkpoints: one file, a yyjson-built JSON header of names / dtypes / shapes /
  *      offsets, then the raw little-endian tensor bytes — readable by the whole Python ecosystem,
  *      written and read here through NumKong views with no exceptions and no vendor containers.
- *  @file cuda_core/checkpoint.cuh
+ *  @file cuda_core/checkpoint.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
  *
@@ -24,9 +24,9 @@
 
 #include <cstddef> // `std::size_t`
 
-#include "cuda_core/types.cuh"          // `expected`, `expected_t`, `status_t`, `sz::string`
-#include "cuda_core/array.cuh"          // `array` — the entry table and the payload
-#include "cuda_core/gpu_allocators.cuh" // `pinned_alloc` — page-locked staging the DMA engines read directly
+#include "cuda_core/types.hpp"          // `expected`, `expected_t`, `status_t`, `sz::string`
+#include "cuda_core/array.hpp"          // `array` — the entry table and the payload
+#include "cuda_core/gpu_allocators.hpp" // `pinned_alloc` — page-locked staging the DMA engines read directly
 #include "cuda_core/schedule.cuh"       // `gpu_stream_t` — orders the snapshot after the training kernels
 
 namespace unum::uform::core {

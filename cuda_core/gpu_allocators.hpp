@@ -1,7 +1,7 @@
 /**
  *  @brief Single-GPU memory allocators of the UForm v4 primitives cell: a growing bump arena + a
  *      stream-ordered allocator, each owning memory of exactly @b one device.
- *  @file cuda/primitives/gpu_allocators.cuh
+ *  @file cuda_core/gpu_allocators.hpp
  *  @author Ash Vardanian
  *  @date July 2, 2026
  *
@@ -44,8 +44,8 @@
 
 #include <cuda.h> // `CUdeviceptr`, `cuMemAddressReserve`, `cuMemCreate`, `cuMemMap`, `cuMemAllocAsync`
 
-#include "cuda_core/types.cuh" // `expected`, `status_t`
-#include "cuda_core/array.cuh" // `array` for exception-free chunk bookkeeping
+#include "cuda_core/types.hpp" // `expected`, `status_t`
+#include "cuda_core/array.hpp" // `array` for exception-free chunk bookkeeping
 
 namespace unum::uform::core {
 

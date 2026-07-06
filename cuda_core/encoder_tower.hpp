@@ -5,7 +5,7 @@
  *      function objects: @ref encoder_tower_bf16_t (training, forward + backward) and its quantized
  *      forward-only twin @ref encoder_tower_e4m3_t , constructed only through
  *      @ref encoder_tower_bf16_t::quantize_weights .
- *  @file cuda_core/encoder_tower.cuh
+ *  @file cuda_core/encoder_tower.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
  *
@@ -61,8 +61,8 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "cuda_core/types.cuh"             // `expected`, `expected_t`, `status_t`, `differentiable_weights_t`
-#include "cuda_core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`, `modality_t`
+#include "cuda_core/types.hpp"             // `expected`, `expected_t`, `status_t`, `differentiable_weights_t`
+#include "cuda_core/multimodal_batch.hpp"  // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`, `modality_t`
 #include "cuda_core/transformer_block.cuh" // the block stack, `rope_angles_t`, `sdpa_plan_t`, shared `rmsnorm_*`
 
 namespace unum::uform::core {
