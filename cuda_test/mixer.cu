@@ -1,17 +1,18 @@
 /**
- *  @brief Conformance suite for @ref multimodal_batch_mixer_t — the cross-GPU segment shuffle. Builds a
- *      single-box composition root ( @ref mesh_topology_t::bootstrap → per-GPU arenas / streams →
+ *  @brief Conformance suite for @ref multimodal_batch_mixer_t — the cross-GPU segment shuffle. Builds the
+ *      composition root ( @ref mesh_topology_t::bootstrap → per-GPU arenas / streams →
  *      @ref multimem_domain_t → @ref colocated_domain_t → the mixer), fabricates every member's loaded batch
- *      with a token signature distinct per @c (member,segment,column) , runs one mix, and asserts each mixed
- *      segment equals its @ref epoch_permutation source — the routing bijection, the length / modality
- *      descriptor travel, and the token content. One NVLink island (up to 8 GPUs), no InfiniBand; the
- *      cross-node colocated tier lands with @c wire_alltoall .
+ *      with a token signature distinct per @c (global_member,segment,column) , runs one mix, and asserts each
+ *      mixed segment equals its @ref epoch_permutation source — the routing bijection, the length / modality
+ *      descriptor travel, and the token content. One process per host_domain under the same
+ *      @c UFORM_HOST_DOMAIN_COUNT contract as the base suite: one node exercises the NVLink island alone,
+ *      two nodes add the InfiniBand full-batch exchange to same-index landings.
  *  @file cuda_test/mixer.cu
  *  @author Ash Vardanian
  *  @date July 6, 2026
  */
 #include <cstddef> // `std::size_t`
-#include <cstdlib> // `::setenv` — eager module loading before `cuInit`
+#include <cstdlib> // `::setenv`, `std::getenv`, `std::atoi` — eager module loading, the host_domain contract
 
 #include <utility>   // `std::move`
 #include <algorithm> // `std::min`
@@ -23,7 +24,7 @@
 #include "cuda_core/array.hpp"                  // `array`
 #include "cuda_core/gpu_allocators.hpp"         // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`
 #include "cuda_core/schedule.cuh"               // `gpu_stream_t`, `switch_to_gpu_t`, `copy_host_to_device`
-#include "cuda_core/mesh.hpp"                   // `mesh_topology_t`
+#include "cuda_core/mesh.hpp"                   // `mesh_topology_t`, `host_domain_index_from_environment`
 #include "cuda_core/multimem_collectives.cuh"   // `multimem_domain_t`
 #include "cuda_core/infiniband_collectives.cuh" // `colocated_domain_t`
 #include "cuda_core/multimodal_batch.hpp"       // `multimodal_batch_on_gpu_t`, the shape, the mixer
@@ -53,7 +54,7 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
  *      @ref tokens_per_segment_k columns, packed contiguously into row 0, tokens carrying @ref signature_token_ .
  *      Staged host→device through the pinned + @ref copy_host_to_device path, synchronized before returning.
  *  @param[inout] batch The member's loaded batch, its geometry and tokens overwritten.
- *  @param[in] member This member's index, folded into every token signature.
+ *  @param[in] member This member's @b global index across every island, folded into every token signature.
  *  @param[inout] stream The member's stream the staging enqueues on. */
 [[nodiscard]] static expected_t fabricate_loaded_(multimodal_batch_on_gpu_t &batch, u32_t member,
                                                   gpu_stream_t &stream) noexcept {
@@ -98,7 +99,7 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
  *      @c src%S ; the mixed segment must carry that source's length, its @c text_k modality, and its tokens.
  *  @param[inout] suite The conformance suite the checks report into.
  *  @param[inout] mixed The member's mixed batch to read back.
- *  @param[in] member This member's index.
+ *  @param[in] member This member's @b global index across every island — its destination range's base.
  *  @param[in] member_count The world's member count — the permutation's segment span is @c S·member_count .
  *  @param[in] seed The routing seed the mixer was built with.
  *  @param[in] epoch The data epoch the mix ran at.
@@ -167,9 +168,11 @@ static void routing_is_a_bijection(test_suite_t &suite, u32_t member_count, u64_
     suite.check(bijection, "the routing must be a bijection over {} world segments", world);
 }
 
-/** @brief The single-box mixer tier: stand up the domains over every visible GPU, fabricate each member's loaded
- *      batch, run one mix through the eager overload, and verify every mixed segment against its source. Skips
- *      cleanly when the box has no multicast-capable island (the domain make fails loudly). */
+/** @brief The mixer tier: stand up the domains over every visible GPU — one process per host_domain,
+ *      reading the same @c UFORM_HOST_DOMAIN_COUNT contract as the base suite, so a two-node run exercises
+ *      the InfiniBand full-batch exchange — fabricate each member's loaded batch under its @b global member
+ *      signature, run one mix through the eager overload, and verify every mixed segment against its world
+ *      source. Skips cleanly when the box has no multicast-capable island (the domain make fails loudly). */
 static void mixer_routes_segments(test_suite_t &suite) {
     int device_count = 0;
     if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 1) return;
@@ -177,9 +180,15 @@ static void mixer_routes_segments(test_suite_t &suite) {
     u64_t const seed = 0xA5A5C0FFEEULL;
     data_epoch_t const epoch {1u};
 
-    auto bootstrapped = mesh_topology_t::bootstrap(0u, 1u, member_count);
-    if (!bootstrapped) return suite.check(false, "single-box bootstrap: {}", bootstrapped.description_);
+    u32_t const host_domain_index = host_domain_index_from_environment();
+    u32_t const host_domain_count = host_domain_count_from_environment();
+    auto bootstrapped = mesh_topology_t::bootstrap(host_domain_index, host_domain_count, member_count);
+    if (!bootstrapped) return suite.check(false, "mesh bootstrap: {}", bootstrapped.description_);
     mesh_topology_t topology = std::move(bootstrapped.value_);
+    // The routing world spans every island's members; this island's GPUs carry the global indices
+    // [global_member_base, global_member_base + member_count) the signatures and the oracle both use.
+    u32_t const world_member_count = member_count * host_domain_count;
+    u32_t const global_member_base = topology.multimem_domain_index() * member_count;
 
     multimodal_batch_shape_t shape;
     shape.max_rows_per_gpu = 2u;
@@ -215,11 +224,11 @@ static void mixer_routes_segments(test_suite_t &suite) {
         auto mixed_made = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {arenas[member]}, shape);
         if (!mixed_made) return suite.check(false, "mixed batch make on GPU {}: {}", member, mixed_made.description_);
         (void)mixed.try_push_back(std::move(mixed_made.value_));
-        if (expected_t built = fabricate_loaded_(loaded[member], member, streams[member]); !built)
+        if (expected_t built = fabricate_loaded_(loaded[member], global_member_base + member, streams[member]); !built)
             return suite.check(false, "fabricate loaded on GPU {}: {}", member, built.description_);
     }
 
-    routing_is_a_bijection(suite, member_count, seed, epoch);
+    routing_is_a_bijection(suite, world_member_count, seed, epoch);
 
     auto multimem_made = multimem_domain_t::make(topology, devices.view(), 1024u,
                                                  std::span<gpu_stream_t> {streams.data(), streams.size()});
@@ -243,8 +252,8 @@ static void mixer_routes_segments(test_suite_t &suite) {
         return suite.check(false, "the mix should run: {}", mixed_ok.description_);
 
     for (u32_t member = 0; member != member_count; ++member)
-        if (expected_t verified = verify_mixed_(suite, mixed[member], member, member_count, seed, epoch,
-                                                streams[member]);
+        if (expected_t verified = verify_mixed_(suite, mixed[member], global_member_base + member, world_member_count,
+                                                seed, epoch, streams[member]);
             !verified)
             suite.check(false, "verify mixed on GPU {}: {}", member, verified.description_);
 }

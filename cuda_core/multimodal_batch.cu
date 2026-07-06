@@ -306,8 +306,12 @@ static expected_t pack_batch_into_wire_(multimodal_batch_on_gpu_t const &loaded,
                 reinterpret_cast<CUdeviceptr>(destination.data() + layout.offset(copy.tensor)),
                 reinterpret_cast<CUdeviceptr>(copy.source), bytes, stream.get());
             packed != CUDA_SUCCESS)
-            return expected_t::fail(packed, "packing batch tensor {} into the wire block failed",
-                                    static_cast<u32_t>(copy.tensor));
+            return expected_t::fail(packed,
+                                    "packing batch tensor {} into the wire block failed " //
+                                    "(destination=0x{:x} source=0x{:x} bytes={})",
+                                    static_cast<u32_t>(copy.tensor),
+                                    reinterpret_cast<u64_t>(destination.data() + layout.offset(copy.tensor)),
+                                    reinterpret_cast<u64_t>(copy.source), bytes);
     }
     return {};
 }
@@ -351,7 +355,10 @@ expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
     // A single-island world never posts — the all-to-all buffers stay empty and the exchange path is skipped.
     // A multi-island world wires one buffer per member, same-index-paired with the other island's GPU; each
     // buffer's block is the whole serialized batch, so a landing holds the remote same-index GPU's batch.
-    if (mixer.domains_ > 1u)
+    if (mixer.domains_ > 1u) {
+        if (mixer.alltoall_buffers_.try_resize(members) != status_t::success_k)
+            return result_t::fail(status_t::bad_alloc_k, "all-to-all buffer table allocation failed ({} members)",
+                                  members);
         for (std::size_t member = 0; member != members; ++member) {
             switch_to_gpu_t gpu_scope {streams[member]};
             if (!gpu_scope.ok())
@@ -362,6 +369,7 @@ expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
             if (!wired) return result_t::fail(std::move(wired));
             mixer.alltoall_buffers_[member] = std::move(wired.value_);
         }
+    }
     return result_t {std::move(mixer)};
 }
 
