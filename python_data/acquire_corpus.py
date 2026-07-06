@@ -4,25 +4,29 @@
 # ///
 """Drive the balanced multi-modal corpus staging on `$UFORM_DATA_ROOT` from `acquire_manifest.py`.
 
-Reads the declarative `STAGING_ROWS` manifest and, for each selected dataset, runs its
-downloader (and per-shard repack, where one applies) at the manifest's fraction, logging GB
-staged per modality against the ~750 GB target. The objective is a LARGE, BALANCED, REAL
-corpus — ~3 TB across text / image / video / audio — so a trainer can draw every modality.
+Reads the declarative `STAGING_ROWS` manifest and, for each selected dataset THIS worker owns, runs its
+downloader (and per-shard repack, where one applies) at the budget allocator's derived cap, logging the
+target GB per modality. The objective is a large, balanced, real corpus across text / image / video / audio.
 
-Properties.
-  - RESUMABLE: a dataset whose registry glob already matches enough shards on disk is SKIPPED, so
-    re-runs only fetch what is missing (the giant media pulls can take hours and crash midway).
+One driver for both single-host and Slurm — the only difference is `(rank, world)`:
+  - RANK/WORLD: resolved via `sharding.resolve_rank_world` (Slurm array / srun env, else `--rank`/`--world`,
+    else `(0, 1)`). Shardable rows (their downloader strides `[rank::world]` internally) run on every worker,
+    each pulling its disjoint stride; whole rows (single-file repackers, multi-repo, `text_pairs`) cannot
+    sub-shard, so each is assigned to one worker by `row_index % world == rank`.
+  - RESUMABLE: no dataset is coarse-skipped; every owned row is invoked and resume is the downloader's own
+    per-shard atomic rename (`already_done`) or output sentinel — so a giant pull that crashed midway
+    finishes on re-submit. The on-disk shard count is printed for visibility.
   - MODALITY-SCOPED: `--modality text|image|video|audio|all` stages one modality at a time.
-  - DRY-RUN: `--dry-run` prints the exact download/repack commands it WOULD run and the planned
-    per-modality GB, downloading nothing. This is the safe default for a PM to review before launch.
+  - DRY-RUN: `--dry-run` prints the exact commands (with injected caps) and the balance table, downloading
+    nothing — the safe default to review before launch.
 
-Pure stdlib (no cudf / registry import) so it runs under a lightweight `uv run` environment; the
-manifest carries each dataset's registry glob directly, so presence is checked by globbing alone.
+Pure stdlib (no cudf / registry import) so it runs under a lightweight `uv run` environment.
 
 Usage:
     uv run python_data/acquire_corpus.py --dry-run                 # plan only, no download
-    uv run python_data/acquire_corpus.py --modality audio          # stage audio for real
-    uv run python_data/acquire_corpus.py --modality all            # stage everything
+    uv run python_data/acquire_corpus.py --modality audio          # stage audio for real (single host)
+    uv run python_data/acquire_corpus.py --rank 0 --world 2        # this worker's share of a local 2-way split
+    srun ... uv run python_data/acquire_corpus.py --modality all   # cluster-wide (rank/world from Slurm)
 """
 
 from __future__ import annotations
@@ -43,25 +47,15 @@ from acquire_manifest import (
     resolve_budget_gigabytes,
     rows_for_modality,
 )
+from sharding import resolve_rank_world
 
 #: Repository root (parent of `python_data/`); registry globs are anchored here.
 PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
 
-#: A dataset is "present" once at least this many shards match its registry glob — enough that a
-#: resumed run treats it as staged rather than re-pulling. Single-file datasets (one parquet) still
-#: pass at 1.
-MINIMUM_PRESENT_SHARDS: int = 1
-
-
 def staged_shard_count(registry_glob: str) -> int:
-    """Count shards already on disk for a registry glob (recursive, anchored to PROJECT_ROOT)."""
+    """Count shards already on disk for a registry glob (recursive, anchored to PROJECT_ROOT) — for display."""
     absolute = registry_glob if Path(registry_glob).is_absolute() else str(PROJECT_ROOT / registry_glob)
     return len(glob.glob(absolute, recursive=True))
-
-
-def is_present(row: StagingRow) -> bool:
-    """Return whether a dataset is already staged (enough shards match its registry glob)."""
-    return staged_shard_count(row.registry_glob) >= MINIMUM_PRESENT_SHARDS
 
 
 def run_command(command: list[str], dry_run: bool) -> int:
@@ -82,46 +76,48 @@ def run_shell(command: str, dry_run: bool) -> int:
     return completed.returncode
 
 
-def stage_row(row: StagingRow, dry_run: bool, target_gigabytes: float) -> tuple[str, float]:
-    """Plan or stage one dataset row.
+def stage_row(row: StagingRow, dry_run: bool, target_gigabytes: float, rank: int, world: int) -> tuple[str, float]:
+    """Plan or stage one dataset row for this worker.
 
     Args:
         row: The manifest row to stage.
         dry_run: When True, only print the commands that would run.
         target_gigabytes: The budget allocator's target on-disk GB for this row.
+        rank, world: This worker's Slurm split; a shardable row forwards them so its downloader strides.
 
     Returns:
-        `(status, gigabytes_planned)` where status is one of "present" / "planned" / "staged" /
-        "blocked" / "failed", and gigabytes_planned is the row's target GB (0 when already present or
-        blocked with no command).
+        `(status, gigabytes)` where status is one of "planned" / "staged" / "blocked" / "failed", and
+        gigabytes is the row's target GB (0 when blocked with no command). Resume is the downloader's own
+        per-shard `already_done` / output sentinel, so a row is always invoked, never coarse-skipped.
     """
-    present_shards = staged_shard_count(row.registry_glob)
     cap = derive_cap(row, target_gigabytes)
     cap_text = f" cap={cap[0]} {cap[1]}" if cap else ""
+    kind = "shardable" if row.shardable else "whole"
     header = (
-        f"  [{row.dataset}] modality={row.modality} target={target_gigabytes:.0f} GB{cap_text} "
+        f"  [{row.dataset}] modality={row.modality} {kind} target={target_gigabytes:.0f} GB{cap_text} "
         f"(full~{row.estimated_full_gigabytes:.0f} GB, mechanism={row.fraction_mechanism}, "
-        f"on-disk shards={present_shards})"
+        f"on-disk shards={staged_shard_count(row.registry_glob)})"
     )
     print(header, flush=True)
     if row.flag:
         print(f"    FLAG: {row.flag}", flush=True)
 
-    if is_present(row):
-        print("    -> SKIP: already staged (resumable).", flush=True)
-        return "present", 0.0
-
     command = row.resolved_download_command(target_gigabytes)
     if command is None:
         print("    -> BLOCKED: no download command (see FLAG above) — staged 0 GB.", flush=True)
         return "blocked", 0.0
+    if row.shardable and world > 1:
+        command = [*command, "--rank", str(rank), "--world", str(world)]
 
     download_code = run_command(command, dry_run)
     if download_code != 0 and not dry_run:
         print(f"    -> FAILED: downloader exited {download_code}.", flush=True)
         return "failed", 0.0
 
-    if row.repack_command is not None:
+    # The GNU-parallel repack pipelines walk the whole tree and are not rank-partitioned, so only rank 0
+    # runs them; repack_one is idempotent (skips an existing parquet), so a re-submit sweeps up any tars
+    # other workers committed after rank 0's pass.
+    if row.repack_command is not None and rank == 0:
         repack_code = run_shell(row.repack_command, dry_run)
         if repack_code != 0 and not dry_run:
             print(f"    -> FAILED: repack exited {repack_code}.", flush=True)
@@ -170,7 +166,7 @@ def main() -> int:
         Process exit code: `0` when every selected dataset was staged, skipped, or (in dry-run)
         planned; `1` when any real download/repack failed.
     """
-    parser = argparse.ArgumentParser(description="Stage the balanced ~3 TB multi-modal corpus on $UFORM_DATA_ROOT.")
+    parser = argparse.ArgumentParser(description="Stage the balanced multi-modal corpus on $UFORM_DATA_ROOT.")
     parser.add_argument(
         "--modality",
         default="all",
@@ -188,27 +184,33 @@ def main() -> int:
         default=None,
         help="Total on-disk budget in GB; default auto-detects free disk * SAFETY_MARGIN (or $UFORM_DATA_BUDGET_GB).",
     )
+    parser.add_argument("--rank", type=int, default=None, help="this worker's index; usually Slurm-derived, explicit for local N-way runs.")
+    parser.add_argument("--world", type=int, default=None, help="total workers; usually Slurm-derived, explicit for local N-way runs.")
     args = parser.parse_args()
 
+    rank, world = resolve_rank_world(args.rank, args.world)
     budget_gigabytes = resolve_budget_gigabytes(args.budget_gb)
     targets = allocate_targets(budget_gigabytes)
     rows = rows_for_modality(args.modality)
     print(
-        f"[stage] modality={args.modality}  datasets={len(rows)}  dry_run={args.dry_run}  "
+        f"[stage] modality={args.modality}  rank={rank}/{world}  datasets={len(rows)}  dry_run={args.dry_run}  "
         f"budget={budget_gigabytes:.0f} GB  data_root={acquire_manifest.DATA_ROOT}",
         flush=True,
     )
 
     statuses: dict[str, int] = {}
-    staged_gigabytes: dict[str, float] = dict.fromkeys(MODALITIES, 0.0)
-    for row in rows:
-        status, gigabytes = stage_row(row, args.dry_run, targets.get(row.dataset, row.estimated_download_gigabytes))
+    for index, row in enumerate(rows):
+        if not row.shardable and world > 1 and index % world != rank:
+            continue  # a whole-dataset row runs on exactly one worker
+        status, _gigabytes = stage_row(
+            row, args.dry_run, targets.get(row.dataset, row.estimated_download_gigabytes), rank, world
+        )
         statuses[status] = statuses.get(status, 0) + 1
-        staged_gigabytes[row.modality] += gigabytes
 
-    print_balance_table(rows, budget_gigabytes, targets)
-    print_blocker_summary(rows)
-    print(f"\n[stage] status counts: {statuses}", flush=True)
+    if rank == 0:
+        print_balance_table(rows, budget_gigabytes, targets)
+        print_blocker_summary(rows)
+    print(f"\n[stage] rank {rank}/{world} status counts: {statuses}", flush=True)
 
     return 1 if statuses.get("failed", 0) else 0
 

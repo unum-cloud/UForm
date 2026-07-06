@@ -28,7 +28,7 @@ Fraction mechanism.
   - "shards"        — fineweb2 per-language depth `--shards N` (+ `--fraction` over languages).
   - "language-subset" — starcoderdata `--top10` / `--only` language gate.
   - "pre-staged"    — already fully on `$UFORM_DATA_ROOT`; no download script exists (and none needed).
-  - "snapshot-full" — downloader pulls the WHOLE repo: NO fraction knob today. `flag` says so; to
+  - "snapshot-full" — downloader pulls the whole repo: no fraction knob today. `flag` says so; to
                       hit the per-modality budget without over-pulling, a `--max-shards`-style knob
                       must be added (see `requires_new_knob`).
   - "no-downloader" — NO download script exists for this registry dataset yet (gap; `flag` says so).
@@ -43,7 +43,7 @@ the per-dataset caps live in one allocator that reads the disk rather than as co
 
 Downloader CLI.
 `acquire` accepts `--fraction` / `--max-shards` / `--out-dir` / `--data-root` / `--only` (split or language
-subset, matched on path COMPONENTS) / `--shards` (per-language depth) / `--rank` / `--world` / `--force`; the
+subset, matched on path components) / `--shards` (per-language depth) / `--rank` / `--world` / `--force`; the
 `acquire_clips` fetchers take `--fraction` / `--max-clips` / `--index-cap` / `--fanout` and write to
 `data_root()/<out_name>`. Each row's `download_command` holds the base argv; `resolved_download_command`
 injects the allocator's derived cap before the driver runs it.
@@ -71,6 +71,24 @@ SAFETY_MARGIN: float = 0.5
 #: How the disk budget is split across modalities. Cross-modal paired video / image lead; text is kept
 #: substantial (foundational, lots of high-value corpora) and audio is the thinnest slice. Sums to 1.0.
 MODALITY_WEIGHTS: dict[str, float] = {"video": 0.35, "image": 0.30, "text": 0.22, "audio": 0.13}
+
+#: Downloader-source markers that mean a script reads a Slurm (rank, world) split — the same test as
+#: `list_registry._acquire_plan`, so the manifest's `shardable` and that report never diverge.
+_RANK_WORLD_MARKERS: tuple[str, ...] = ("from acquire import acquire", "acquire_clips", "resolve_rank_world")
+
+#: Cache of downloader script path -> shardable, so each script's source is read at most once.
+_SHARDABLE_CACHE: dict[str, bool] = {}
+
+
+def _script_is_shardable(script: str) -> bool:
+    """Whether `python_data/download_<name>.py` rank-partitions its work (see `StagingRow.shardable`)."""
+    if script not in _SHARDABLE_CACHE:
+        try:
+            source = (PROJECT_ROOT / script).read_text(encoding="utf-8")
+            _SHARDABLE_CACHE[script] = any(marker in source for marker in _RANK_WORLD_MARKERS)
+        except OSError:
+            _SHARDABLE_CACHE[script] = False
+    return _SHARDABLE_CACHE[script]
 
 #: Host data root every registry `data/<name>` glob is anchored under.
 DATA_ROOT: str = os.environ.get("UFORM_DATA_ROOT", str(Path(__file__).resolve().parents[1] / "data"))
@@ -149,6 +167,20 @@ class StagingRow:
         else:
             argv += [flag, value]
         return argv
+
+    @property
+    def shardable(self) -> bool:
+        """Whether this row's downloader reads a Slurm (rank, world) split, so every worker runs it.
+
+        A shardable downloader strides `[rank::world]` internally (it imports `acquire`, uses
+        `acquire_clips`, or calls `resolve_rank_world`); a whole one — a single-file repacker, a
+        multi-repo pull, or the generic `text_pairs` — cannot sub-shard and is assigned to one worker.
+        Mirrors `list_registry._acquire_plan` so the two never disagree; a None command is not runnable.
+        """
+        if self.download_command is None:
+            return False
+        script = next((arg for arg in self.download_command if arg.endswith(".py")), None)
+        return _script_is_shardable(script) if script is not None else False
 
 
 def _uv(*args: str) -> list[str]:
@@ -641,7 +673,7 @@ STAGING_ROWS: list[StagingRow] = [
         download_command=_uv(
             "python_data/download_audioset.py", "--out-dir", f"{DATA_ROOT}/audioset", "--fraction", "0.02"
         ),
-        flag="bal_train+eval sort FIRST, so a --fraction slice keeps the curated ~48 GB first and spills into "
+        flag="bal_train+eval sort first, so a --fraction slice keeps the curated ~48 GB first and spills into "
         "unbal_train as the budget grows; `--only bal_train,eval` would pin it to the curated splits only.",
         weight=3.0,
         cap_flag="--fraction",

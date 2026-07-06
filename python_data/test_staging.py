@@ -139,6 +139,17 @@ def test_no_row_uses_unsupported_acquire_flags() -> None:
         assert banned.isdisjoint(row.download_command), (row.dataset, row.download_command)
 
 
+def test_shardable_classification() -> None:
+    """`shardable` marks the rank/world-aware downloaders (acquire / acquire_clips), not the whole ones."""
+    by_name = {row.dataset: row for row in acquire_manifest.STAGING_ROWS}
+    assert by_name["cc12m"].shardable  # acquire (webdataset)
+    assert by_name["audioset"].shardable  # acquire (hf_snapshot)
+    assert by_name["howto100m"].shardable  # acquire_clips
+    assert not by_name["coco_captions"].shardable  # archetype B, own argparse
+    assert not by_name["didemo"].shardable  # archetype B
+    assert not by_name["paq"].shardable  # download_text_pairs (multi-repo, whole)
+
+
 def main() -> int:
     """Run every sizing check, printing one line per test; return non-zero on the first failure."""
     tests = [
@@ -151,6 +162,7 @@ def main() -> int:
         test_derive_cap,
         test_resolved_download_command_injection,
         test_no_row_uses_unsupported_acquire_flags,
+        test_shardable_classification,
     ]
     for test in tests:
         test()

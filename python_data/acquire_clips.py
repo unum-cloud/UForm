@@ -11,7 +11,7 @@ only captions plus a YouTube id and an optional `[start, end]` window — the me
 fetched at repack time.  This module is the single host-side helper those builders call: given an
 iterable of `MediaClip` records it downloads each clip with `yt-dlp` (audio: `bestaudio` extracted to
 mp3; video: an H.264 `bestvideo+bestaudio` mux trimmed to the requested window, written as mp4),
-RETRIES transient failures with exponential backoff, SKIPS permanently dead / private / geo-blocked
+retries transient failures with exponential backoff, skips permanently dead / private / geo-blocked
 ids, and accounts for every attempted id in a `FetchManifest` so a shard's yield is auditable and is
 never silently truncated.
 
@@ -38,6 +38,7 @@ CLI usage:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import math
 import os
@@ -86,6 +87,49 @@ PERMANENT_ERROR_MARKERS: tuple[str, ...] = (
 #: Cap the fetched video rendition to this height (pixels). The encoder trains at a small patch grid, so
 #: there is no benefit to pulling 1080p+; 480p slashes bandwidth, disk, and per-clip memory.
 _MAX_VIDEO_HEIGHT: int = 480
+
+#: Env var naming a Netscape `cookies.txt` (or a DIRECTORY of them) that authenticates yt-dlp against
+#: YouTube's bot-wall. An off-repo secret; when unset the media scrapers will almost certainly bot-wall.
+_COOKIES_ENV: str = "UFORM_YTDLP_COOKIES"
+
+
+@functools.cache
+def _cookies_args() -> tuple[str, ...]:
+    """`("--cookies", <file>)` for yt-dlp from `$UFORM_YTDLP_COOKIES`, or `()` when unset (computed once).
+
+    The value is a Netscape `cookies.txt` path, or a DIRECTORY of them — a worker then picks one by its
+    Slurm rank (`cookies[rank % n]`) to spread the fetch across accounts and soften per-account limits.
+    A set-but-missing path (or empty directory) is an explicit error: a typo must not silently bot-wall.
+    """
+    raw = os.environ.get(_COOKIES_ENV)
+    if not raw:
+        return ()
+    path = Path(raw)
+    if path.is_dir():
+        files = sorted(entry for entry in path.iterdir() if entry.is_file())
+        if not files:
+            raise FileNotFoundError(f"{_COOKIES_ENV}={raw} is an empty directory; expected cookies.txt file(s).")
+        rank, _world = resolve_rank_world()
+        path = files[rank % len(files)]
+    if not path.is_file():
+        raise FileNotFoundError(f"{_COOKIES_ENV}={raw} does not exist; export a Netscape cookies.txt path.")
+    return ("--cookies", str(path))
+
+
+def _hit_bot_wall(output: str) -> bool:
+    """Whether yt-dlp output shows the YouTube bot / sign-in wall (a missing/expired cookie, not a dead id)."""
+    lowered = output.lower()
+    return "not a bot" in lowered or "sign in to confirm" in lowered or "use --cookies" in lowered
+
+
+def _warn_if_no_cookies() -> None:
+    """Warn once (to stderr) when no cookies are configured — the YouTube fetch will likely bot-wall."""
+    if not os.environ.get(_COOKIES_ENV):
+        print(
+            f"acquire_clips: WARNING — {_COOKIES_ENV} is unset; YouTube fetch will likely hit the bot-wall. "
+            "Export a Netscape cookies.txt path (or a directory of them) to authenticate.",
+            file=sys.stderr,
+        )
 
 
 class MediaKind(StrEnum):
@@ -235,6 +279,9 @@ def _build_ytdlp_command(clip: MediaClip, output_template: str) -> list[str]:
         "--no-warnings",
         "--quiet",
         "--ignore-config",
+        *_cookies_args(),
+        "--sleep-requests",
+        "1",
         "--socket-timeout",
         "30",
         "--retries",
@@ -325,7 +372,14 @@ def fetch_one_clip(
                         return ClipFetch(clip=clip, payload=payload, extension=extension, dropped_reason="")
                     last_reason = "transient: yt-dlp succeeded but produced no output file"
                 else:
-                    permanent = _classify_failure(completed.stdout + "\n" + completed.stderr)
+                    output = completed.stdout + "\n" + completed.stderr
+                    if _hit_bot_wall(output):
+                        raise RuntimeError(
+                            f"yt-dlp hit YouTube's bot / sign-in wall — set ${_COOKIES_ENV} to a valid Netscape "
+                            "cookies.txt (a stale/expired cookie looks the same). Aborting rather than silently "
+                            "dropping every clip."
+                        )
+                    permanent = _classify_failure(output)
                     if permanent:
                         return ClipFetch(clip=clip, payload=None, extension=extension, dropped_reason=permanent)
                     tail = (completed.stderr.strip() or completed.stdout.strip() or "unknown error")[-200:]
@@ -346,7 +400,7 @@ def fetch_clips(
     """Fetch clips one at a time, yielding each `ClipFetch` and recording it in `manifest`.
 
     This is a generator so a caller can stream rows into a parquet writer without buffering an entire
-    shard of media bytes in memory.  It NEVER parallelises internally — the caller
+    shard of media bytes in memory.  It never parallelises internally — the caller
     parallelises across shards with GNU `parallel`.
 
     Args:
@@ -563,7 +617,9 @@ def _record_start_key(record: dict[str, object]) -> float:
     return float(start) if start is not None else -1.0  # type: ignore[arg-type]
 
 
-def _cap_records(records: list[dict[str, object]], fraction: float | None, max_clips: int | None) -> list[dict[str, object]]:
+def _cap_records(
+    records: list[dict[str, object]], fraction: float | None, max_clips: int | None
+) -> list[dict[str, object]]:
     """Return the leading slice of `records` under the tighter of `--fraction` and `--max-clips` (or all)."""
     keep = len(records)
     if fraction is not None and records:
@@ -606,8 +662,8 @@ def _repack_clip_shard(
     a `.partial` sibling + atomic replace — the final parquet appearing IS the shard's commit record — plus
     the per-shard `FetchManifest`. Dropped ids are recorded, never silently truncated.
     """
-    import pyarrow as pa  # lazy: the smoke CLI needs only yt-dlp; the dataset builders declare pyarrow
-    import pyarrow.parquet as pq
+    import pyarrow as pa  # noqa: PLC0415 — lazy: the smoke CLI needs only yt-dlp; builders declare pyarrow
+    import pyarrow.parquet as pq  # noqa: PLC0415 — lazy: paired with pyarrow above
 
     media_struct = pa.struct([("bytes", pa.binary()), ("path", pa.string())])
     manifest = FetchManifest()
@@ -634,9 +690,7 @@ def _repack_clip_shard(
     return 0
 
 
-def _print_clip_plan(
-    name: str, rank: int, world: int, total: int, capped: int, mine: list[dict[str, object]]
-) -> None:
+def _print_clip_plan(name: str, rank: int, world: int, total: int, capped: int, mine: list[dict[str, object]]) -> None:
     """Dry-run hook: report this rank's disjoint clip stride (count + `(id, start)` keys) without fetching."""
     keys = [(str(record["source_id"]), _record_start_key(record)) for record in mine]
     print(f"acquire_clips[{name}]: rank {rank}/{world} — {total} indexed, {capped} after cap, {len(mine)} this rank")
@@ -736,6 +790,7 @@ def acquire_clips(
         _print_clip_plan(name, rank, world, len(records), len(capped), mine)
         return 0
 
+    _warn_if_no_cookies()
     output_dir = out_dir / "data"
     staging_dir = out_dir / ".staging" / f"r{rank}w{world}"
     if args.force and staging_dir.exists():
@@ -786,6 +841,7 @@ def _run_cli(args: argparse.Namespace) -> int:
     if not clips:
         print("acquire_clips: no clips requested (pass --ids or --clips-jsonl)", file=sys.stderr)
         return 2
+    _warn_if_no_cookies()
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest = FetchManifest()
