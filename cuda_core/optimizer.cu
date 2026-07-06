@@ -83,8 +83,12 @@ static __global__ void adafactor_scale_kernel_(adafactor_state_t state, f32r1_sp
     std::size_t const scalars = static_cast<std::size_t>(rows) * cols;
     for (std::size_t index = threadIdx.x; index < scalars; index += blockDim.x) {
         u32_t const row = static_cast<u32_t>(index / cols), column = static_cast<u32_t>(index % cols);
-        f32_t const variance = moments[state.row_moment_offset + row] * moments[state.column_moment_offset + column] /
-                               row_mean;
+        // Divide before multiplying: a zero gradient leaves both moments at (1-beta2)*epsilon1 ~ 1e-33, and
+        // the raw r*c product underflows Float32 to zero - rsqrtf(0) is Inf and 0*Inf poisons the whole
+        // matrix with NaN. The paper's own normalization (r/mean(r))*c keeps every factor representable, so
+        // a zero-gradient step is a clean no-op.
+        f32_t const variance = moments[state.row_moment_offset + row] / row_mean *
+                               moments[state.column_moment_offset + column];
         f32_t const gradient = adafactor_gradient_(state, reduced_gradients, row, column);
         f32_t const update = gradient * rsqrtf(variance);
         thread_update_energy += update * update;
@@ -115,8 +119,10 @@ static __global__ void adafactor_apply_kernel_(adafactor_state_t state, f32r1_sp
     for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < scalars;
          index += stride) {
         u32_t const row = static_cast<u32_t>(index / cols), column = static_cast<u32_t>(index % cols);
-        f32_t const variance = moments[state.row_moment_offset + row] * moments[state.column_moment_offset + column] /
-                               row_mean;
+        // The same divide-before-multiply order as the scale pass - the two must agree bitwise, and the raw
+        // r*c product underflows to 0*Inf=NaN on zero-gradient matrices (see the scale kernel's note).
+        f32_t const variance = moments[state.row_moment_offset + row] / row_mean *
+                               moments[state.column_moment_offset + column];
         f32_t const gradient = adafactor_gradient_(state, reduced_gradients, row, column);
         f32_t const step = learning_rate * clip_scale * gradient * rsqrtf(variance);
         if (rows == 1u) {
