@@ -1,0 +1,20 @@
+/**
+ *  @brief The Base training binary — a thin @c main over the training library in @c cuda_train/base.cuh . It
+ *      parses the command line into a @ref base_config_t and hands the whole run to @ref base_trainer_t::run ,
+ *      which owns the composition root, the two-region capture, the steady loop, and the checkpoint. The same
+ *      library backs @c cuda_test/base.cu 's conformance test, so the driver lives in one place and neither
+ *      consumer copies the other.
+ *  @file cuda_train/base_main.cu
+ *  @author Ash Vardanian
+ *  @date July 6, 2026
+ *
+ *  The modality mixture is the batch envelope itself: @c --mixture @c tokens (the default) trains the byte
+ *  token head alone — span-masked byte pretraining, the "Uniform Byte Models" root the Reranker and Embedder
+ *  warm-start from — and @c --mixture @c omni adds the raw-media masked-autoencoder heads (image /
+ *  video patches, 1-D audio frames) over one heterogeneous batch. @c --eager drops the model-region capture.
+ */
+#include "cuda_train/base.cuh"
+
+using namespace unum::uform::train;
+
+int main(int argc, char **argv) { return base_trainer_t::run(base_config_t::parse(argc, argv)); }

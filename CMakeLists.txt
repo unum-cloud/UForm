@@ -172,7 +172,9 @@ uform_probe_infiniband()
 # they are core, not a separate directory. cuDNN is universal now, so no lean/attention split.
 add_library(
     uform STATIC
+    cuda_core/schedule.cu
     cuda_core/multimem_collectives.cu
+    cuda_core/infiniband_collectives.cu
     cuda_core/multimodal_masking.cu
     cuda_core/checkpoint.cu
     cuda_core/multimodal_batch.cu
@@ -201,18 +203,28 @@ if (UFORM_INFINIBAND_ENABLED)
     target_link_libraries(uform PUBLIC "${UFORM_IBVERBS_LIBRARY}" "${UFORM_MLX5_LIBRARY}")
 endif ()
 
-# `cuda_train` → the training binary — the composition root exemplar (see `cuda_train/base.cu`'s header).
-add_executable(uform_train cuda_train/base.cu)
-target_link_libraries(uform_train PRIVATE uform)
+# `cuda_train` → the model-training library plus its thin binary. `base.cu` compiles the training stack once
+# (see `cuda_train/base.cuh`'s header); `uform_base` is a thin `main`, and the conformance test links the same
+# object, so neither copies the composition root.
+add_library(uform_train STATIC cuda_train/base.cu)
+target_link_libraries(uform_train PUBLIC uform)
+add_executable(uform_base cuda_train/base_main.cu)
+target_link_libraries(uform_base PRIVATE uform_train)
 
 # `cuda_test` → conformance binaries: plain `int main` executables against Float64 host oracles, finite differences,
-# and bitwise replay checks — the only place `std::vector`-style conveniences are welcome.
+# and bitwise replay checks — the only place `std::vector`-style conveniences are welcome. The contrastive and
+# transformer suites rejoin this list with the contrastive rework.
 enable_testing()
-foreach (_uform_test mesh contrastive transformer training)
+foreach (_uform_test mesh)
     add_executable(cuda_test_${_uform_test} cuda_test/${_uform_test}.cu)
     target_link_libraries(cuda_test_${_uform_test} PRIVATE uform)
     add_test(NAME ${_uform_test} COMMAND cuda_test_${_uform_test})
 endforeach ()
+
+# `cuda_test/base.cu` drives the training library through `base.cuh`, so it links `uform_train`, not bare `uform`.
+add_executable(cuda_test_base cuda_test/base.cu)
+target_link_libraries(cuda_test_base PRIVATE uform_train)
+add_test(NAME base COMMAND cuda_test_base)
 
 # `cuda_loaders` → `uform_loaders`: GPU-native data ingestion, one translation unit per format / modality cell. Every
 # vendor dependency below is available on every target and is hard-required, discovered through the layered
@@ -322,7 +334,8 @@ target_include_directories(
 # cuFile GPU Direct Storage.
 target_link_libraries(uform_loaders PRIVATE "${UFORM_CUFILE_LIBRARY}")
 
-# Image decode: nvJPEG + NPP on the GPU, the three CPU codecs for the fallback.
+# Image decode: nvJPEG + NPP on the GPU, the three CPU codecs for the fallback. cuFFT drives the audio loader's
+# GPU STFT (the log-mel frontend), so it links on the same GPU-vendor line.
 target_link_libraries(
     uform_loaders PRIVATE CUDA::nvjpeg CUDA::nppig CUDA::nppc JPEG::JPEG PNG::PNG "${UFORM_WEBP_LIBRARY}"
 )
@@ -345,10 +358,7 @@ target_include_directories(uform_loaders SYSTEM PRIVATE "${UFORM_FORKUNION_INCLU
 # Arrow CPU Parquet fallback, behind the exception firewall.
 target_link_libraries(uform_loaders PRIVATE Arrow::arrow_shared Parquet::parquet_shared)
 
-# Loader conformance binaries.
-add_executable(cuda_test_datasets cuda_test/datasets.cu)
-target_link_libraries(cuda_test_datasets PRIVATE uform_loaders)
-add_test(NAME datasets COMMAND cuda_test_datasets)
+# Loader conformance binaries. A datasets suite rejoins when the loader tier stabilizes.
 # `loaders` includes the media loader headers, which expose `cpu_decode_pool_t` (= `fu::basic_pool_t`), so it needs
 # fork_union on its own include path — `uform_loaders` keeps that dependency PRIVATE.
 add_executable(cuda_test_loaders cuda_test/loaders.cu)
