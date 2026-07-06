@@ -226,7 +226,7 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
     return result_t {std::move(optimizer)};
 }
 
-expected_t adafactor_t::step(gpu_stream_t &stream, f32r1_view_t reduced_gradients) noexcept {
+expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_view_t reduced_gradients) noexcept {
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     for (std::size_t index = 0; index != states_.size(); ++index) {
         adafactor_state_t const &state = states_[index];
@@ -244,7 +244,7 @@ expected_t adafactor_t::step(gpu_stream_t &stream, f32r1_view_t reduced_gradient
             staged = launch_kernel(reinterpret_cast<void const *>(&adafactor_apply_kernel_),
                                    dim3 {grid_size_for(rows * cols), 1u, 1u}, block_shape, stream, state,
                                    moments_.span(), reduced_gradients, state_scales_.view(), static_cast<u32_t>(index),
-                                   masters_.span(), config_.learning_rate);
+                                   masters_.span(), learning_rate);
         if (!staged) return staged;
     }
     return {};
@@ -310,7 +310,7 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
     return result_t {std::move(optimizer)};
 }
 
-expected_t distributed_adafactor_t::step(std::size_t rank, gpu_stream_t &stream) noexcept {
+expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, gpu_stream_t &stream) noexcept {
     std::size_t const gpus = ranks_.size();
     if (rank >= gpus) return expected_t::fail(status_t::invalid_input_k, "rank {} of {}", rank, gpus);
     switch_to_gpu_t gpu_scope {stream};
@@ -338,22 +338,23 @@ expected_t distributed_adafactor_t::step(std::size_t rank, gpu_stream_t &stream)
         staged = launch_kernel(reinterpret_cast<void const *>(&adafactor_reduce_gradient_kernel_),
                                dim3 {grid_size_for(scalars), 1u, 1u}, block_shape, stream, domain_->member(rank),
                                ranks_[rank].reduced.span(), window_.offset);
-        if (staged) staged = ranks_[rank].state.step(stream, ranks_[rank].reduced.view());
+        if (staged) staged = ranks_[rank].state.step(learning_rate, stream, ranks_[rank].reduced.view());
         return staged;
     }
-    return world_gradient_step_(rank, stream);
+    return world_gradient_step_(rank, learning_rate, stream);
 }
 
-expected_t distributed_adafactor_t::step(std::span<gpu_stream_t> streams) noexcept {
+expected_t distributed_adafactor_t::step(f32_t learning_rate, std::span<gpu_stream_t> streams) noexcept {
     std::size_t const gpus = ranks_.size();
     if (streams.size() != gpus)
         return expected_t::fail(status_t::invalid_input_k, "every rank needs its stream ({} ranks)", gpus);
     for (std::size_t rank = 0; rank != gpus; ++rank)
-        if (expected_t staged = step(rank, streams[rank]); !staged) return staged;
+        if (expected_t staged = step(rank, learning_rate, streams[rank]); !staged) return staged;
     return {};
 }
 
-expected_t distributed_adafactor_t::world_gradient_step_(std::size_t rank, gpu_stream_t &stream) noexcept {
+expected_t distributed_adafactor_t::world_gradient_step_(std::size_t rank, f32_t learning_rate,
+                                                         gpu_stream_t &stream) noexcept {
     std::size_t const scalars = ranks_[rank].state.gradient_scalars();
     f32_t *const world_gradient = reinterpret_cast<f32_t *>(world_member_.payload().data());
     expected_t staged {};
@@ -369,6 +370,6 @@ expected_t distributed_adafactor_t::world_gradient_step_(std::size_t rank, gpu_s
     }
     else if (CUresult result = cuStreamWaitEvent(stream.get(), world_ready_.get(), 0); result != CUDA_SUCCESS)
         staged = expected_t::fail(result, "world-gradient wait failed (rank={})", rank);
-    if (staged) staged = ranks_[rank].state.step(stream, f32r1_view_t {world_gradient, scalars});
+    if (staged) staged = ranks_[rank].state.step(learning_rate, stream, f32r1_view_t {world_gradient, scalars});
     return staged;
 }

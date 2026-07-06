@@ -45,10 +45,10 @@
 
 namespace unum::uform::core {
 
-/** @brief The update's knobs; the defaults follow the Adafactor paper's stable regime. */
+/** @brief The update's baked knobs; the defaults follow the Adafactor paper's stable regime. The learning rate
+ *      is deliberately absent: it varies per step (the trainer owns the warmup / decay policy), so it travels as
+ *      a @ref adafactor_t::step argument — legal because the optimizer region is eager, never captured. */
 struct adafactor_config_t {
-    /** @brief Step size the clipped, second-moment-scaled update is multiplied by. */
-    f32_t learning_rate = 1.0e-3f;
     /** @brief The second-moment decay — how much of the running row / column moments each step retains. */
     f32_t beta2 = 0.999f;
     /** @brief The moment floor added before the running average, keeping @c 1/√v finite for a zero gradient. */
@@ -90,8 +90,10 @@ struct adafactor_t {
     }
 
     /** @brief One optimizer step: moments, clip scales, apply — per state, pure enqueue. A non-empty
-     *      @p reduced_gradients redirects every gradient read to the Float32 world sum. */
-    [[nodiscard]] expected_t step(gpu_stream_t &stream, f32r1_view_t reduced_gradients = {}) noexcept;
+     *      @p reduced_gradients redirects every gradient read to the Float32 world sum. The scheduled
+     *      @p learning_rate is this step's rate — the caller's warmup / decay policy, host-computed. */
+    [[nodiscard]] expected_t step(f32_t learning_rate, gpu_stream_t &stream,
+                                  f32r1_view_t reduced_gradients = {}) noexcept;
 
   private:
     /** @brief The distributed sibling reads @ref gradient_scalars over the shared states. */
@@ -167,18 +169,19 @@ struct distributed_adafactor_t {
      *      multimem_domains the gateway member's all-reduce runs between the materialise and the
      *      update, and every rank reads the gateway's world sum. Ordering contract: this consumer's
      *      advance/barrier phase must follow the same cross-consumer order on every rank (see
-     *      @ref multimem_domain_t ); ranks are enqueued in order @c 0..gpus-1 within a step. */
-    [[nodiscard]] expected_t step(std::size_t rank, gpu_stream_t &stream) noexcept;
+     *      @ref multimem_domain_t ); ranks are enqueued in order @c 0..gpus-1 within a step. The scheduled
+     *      @p learning_rate must be identical on every rank of the step — replicas step in lockstep. */
+    [[nodiscard]] expected_t step(std::size_t rank, f32_t learning_rate, gpu_stream_t &stream) noexcept;
 
     /** @brief The eager convenience: every rank's slice in order over the per-rank streams. */
-    [[nodiscard]] expected_t step(std::span<gpu_stream_t> streams) noexcept;
+    [[nodiscard]] expected_t step(f32_t learning_rate, std::span<gpu_stream_t> streams) noexcept;
 
   private:
     /** @brief The D>1 tail of one rank's step: the gateway materialises the domain sum into its world
      *      member's heap, all-reduces it across domains, and records the event every rank's update
      *      waits on; every rank then steps against the gateway's world sum. Caller holds the rank's
      *      context. */
-    [[nodiscard]] expected_t world_gradient_step_(std::size_t rank, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t world_gradient_step_(std::size_t rank, f32_t learning_rate, gpu_stream_t &stream) noexcept;
 
     /** @brief How many multimem_domains the world spans, polled from the borrowed topology; 1 makes
      *      @ref world_member_ an identity. */
