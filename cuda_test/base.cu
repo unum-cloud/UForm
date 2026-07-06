@@ -551,9 +551,7 @@ int main() {
     // One process per host_domain; the sbatch launcher raises UFORM_HOST_DOMAIN_COUNT for the two-node tier,
     // and single-host worlds need no exchange directory.
     u32_t const host_domain_index = host_domain_index_from_environment();
-    char const *const domain_count_text = std::getenv("UFORM_HOST_DOMAIN_COUNT");
-    u32_t const host_domain_count = domain_count_text != nullptr ? static_cast<u32_t>(std::atoi(domain_count_text))
-                                                                 : 1u;
+    u32_t const host_domain_count = host_domain_count_from_environment();
     expected<mesh_topology_t> topology = mesh_topology_t::bootstrap(host_domain_index, host_domain_count);
     if (!topology) {
         suite.check(false, "mesh bootstrap: {}", topology.description_);

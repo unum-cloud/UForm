@@ -28,6 +28,7 @@
 #endif
 
 #include "cuda_core/gpu_allocators.hpp" // `gpu_arena_t`, `gpu_registrable_alloc`
+#include "cuda_core/mesh.hpp"           // `host_domain_count_from_environment`
 #include "cuda_test/harness.hpp"        // `test_suite_t`
 
 using namespace unum::uform::core;
@@ -93,9 +94,7 @@ static void probe_gpu_registration_(test_suite_t &suite, int device) noexcept {
  *  @param[inout] suite The probe suite the check reports into. */
 static void probe_exchange_directory_(test_suite_t &suite) noexcept {
     char const *const exchange_directory = std::getenv("UFORM_EXCHANGE_DIR");
-    char const *const host_domains = std::getenv("UFORM_HOST_DOMAIN_COUNT");
-    bool const multi_node = host_domains != nullptr && host_domains[0] != '\0' && host_domains[0] != '1';
-    if (!multi_node) return; // Single-node runs never rendezvous.
+    if (host_domain_count_from_environment() == 1u) return; // Single-node runs never rendezvous.
     suite.check(exchange_directory != nullptr, "UFORM_EXCHANGE_DIR unset in a multi-node world");
     if (exchange_directory == nullptr) return;
     sz::string probe_path;

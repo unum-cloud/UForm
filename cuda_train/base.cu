@@ -730,8 +730,7 @@ int base_trainer_t::run(base_config_t const &config) noexcept {
 
     // 1. The mesh: one process per host_domain; single-host worlds need no exchange directory.
     u32_t const host_domain_index = host_domain_index_from_environment();
-    char const *const domain_count_text = std::getenv("UFORM_HOST_DOMAIN_COUNT");
-    u32_t const host_domain_count = domain_count_text != nullptr ? std::atoi(domain_count_text) : 1u;
+    u32_t const host_domain_count = host_domain_count_from_environment();
     expected<mesh_topology_t> topology = mesh_topology_t::bootstrap(host_domain_index, host_domain_count);
     if (!topology) return fail_out_(topology.description_.view());
     sz::string banner;

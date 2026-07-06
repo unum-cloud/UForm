@@ -861,4 +861,21 @@ struct mesh_topology_t {
     return 0u;
 }
 
+/** @brief The world's host_domain count, read at the @b launcher boundary — @c $UFORM_HOST_DOMAIN_COUNT ,
+ *      then Slurm's @c $SLURM_JOB_NUM_NODES , then Open MPI's @c $OMPI_COMM_WORLD_SIZE ; 1 if none is
+ *      set. For the mains alone, which pass the count on as @ref mesh_topology_t::bootstrap 's explicit
+ *      argument — bootstrap itself never reads it, so a misconfigured launcher cannot change the math
+ *      behind an already-constructed world. The whole contract is tabled in @c ENVIRONMENT.md . */
+[[nodiscard]] inline u32_t host_domain_count_from_environment() noexcept {
+    // `std::getenv` speaks C strings; the names never escape this loop.
+    char const *const variables[] = {"UFORM_HOST_DOMAIN_COUNT", "SLURM_JOB_NUM_NODES", // vendor-boundary
+                                     "OMPI_COMM_WORLD_SIZE"};
+    for (char const *variable : variables)                                 // vendor-boundary
+        if (char const *value = std::getenv(variable); value != nullptr) { // vendor-boundary
+            u32_t const count = static_cast<u32_t>(std::atoi(value));
+            return count != 0u ? count : 1u;
+        }
+    return 1u;
+}
+
 } // namespace unum::uform::core
