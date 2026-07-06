@@ -28,6 +28,9 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Image Processing",
     "Topic :: Scientific/Engineering :: Image Recognition",
 ]
+# Base install = the CPU inference path: pure-Python multimodal encoders over huggingface_hub
+# weights, tokenizers, Pillow decode, and SimSIMD similarity. GPU inference and the GPU training +
+# data-tooling paths layer on through the optional-dependency groups below.
 dependencies = [
     "huggingface_hub>=0.16.4",
     "tokenizers>=0.13.3",
@@ -35,42 +38,105 @@ dependencies = [
     "simsimd",
     "numpy>=1.24.0,<3.0.0",
 ]
-description = "Pocket-Sized Multimodal AI for Content Understanding and Generation"
+description = "Pocket-Sized Multimodal AI: CPU + GPU inference and GPU training for content understanding and generation"
 maintainers = [
     {email = "info@unum.cloud", name = "Unum Cloud"},
 ]
 name = "uform"
 readme = "README.md"
-requires-python = ">=3.10"
-version = "3.1.4"
+# The floor is 3.12: the GPU training + data path (torch 2.12, RAPIDS cu13, the PEP 723 `python_data/`
+# scripts) requires it.
+requires-python = ">=3.12"
+version = "4.0.0"
 
 [project.scripts]
 uform-chat = "uform.chat:main"
 
 [project.optional-dependencies]
+# ── GPU inference backends ────────────────────────────────────────────────────────────────────────
 torch = ["torch>=2.7.0", "torchvision", "transformers>=4.50.0"]
 onnx = ["onnx>=1.16.0", "onnxruntime>=1.20.0"]
 onnx-gpu = ["onnx>=1.16.0", "onnxruntime-gpu>=1.20.0", "tensorrt-cu12>=10.0.0; platform_system=='Linux'"]
-dev = ["pytest", "pandas", "requests", "tabulate", "psutil>=5.9.0", "nvidia-ml-py>=12.535.0"]
+
+# ── GPU training + data tooling ───────────────────────────────────────────────────────────────────
+# Everything a training run and the `python_data/` loaders / repack scripts need. The `cuda-toolkit`
+# extras ship cudart / cublas / cufft / cufile / curand / cusparse / nvrtc / nvjitlink / nvcc / nvvm
+# as wheels so the native extension resolves them from inside `.venv` (via $ORIGIN RPATH) with no
+# system CUDA install; RAPIDS cuDF / RMM come from the [[tool.uv.index]] NVIDIA index below.
+train = [
+    "torch>=2.12.0",
+    "cudf-cu13>=26.4.0",
+    "cupy-cuda13x>=14.1.0",
+    "rmm-cu13>=26.4.0",
+    "pyarrow>=24.0.0",
+    "safetensors>=0.4.5",
+    "cuda-toolkit[cccl,cublas,cudart,cufft,cufile,curand,cusparse,nvcc,nvjitlink,nvrtc,nvtx,nvvm]>=13.0.2",
+    "nvidia-cudnn-cu13>=9.20",
+    "nvidia-nvimgcodec-cu13>=0.8",
+    "zstandard>=0.23.0",
+    "usearch>=2.16.0",
+    # Load-bearing under torch 2.12 + cupy 14.1: cupy's testing hooks import pytest during torch init.
+    "pytest>=8.0",
+]
+
+# Offline dataset download / pre-processing extras — pulled in only when running the `python_data/`
+# mining and repack scripts (video first-frame decode, tar -> parquet sweeps, hard-negative mining).
+mining = [
+    "av>=17.0",
+    "transformers>=5.9.0",
+    "pandas>=2.2.0",
+    "orjson>=3.11.9",
+    "xxhash>=3.7.0",
+    "yt-dlp",
+]
+
+# Evaluation extras — heavy benchmark libraries for the MTEB / BEIR eval suites; not needed to train.
+eval = ["mteb>=1.40.0", "datasets>=4.8.0", "scipy>=1.14.0"]
+
+# Development tooling for both the inference package and the training / data code.
+dev = [
+    "pytest>=8.3.0",
+    "pytest-cov>=7.0.0",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.9.0",
+    "mypy>=1.14.0",
+    "pre-commit>=4.0.0",
+    "pandas",
+    "requests",
+    "tabulate",
+    "psutil>=5.9.0",
+    "nvidia-ml-py>=12.535.0",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/unum-cloud/uform"
 
+# RAPIDS cuDF / RMM and the versioned NVIDIA CUDA wheels live on NVIDIA's index alongside PyPI.
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.nvidia.com"
+
+# The pip wheel ships the `uform` inference package only; `python_data/` is repo-resident tooling run
+# via `uv run` from the root, not published in the wheel.
 [tool.setuptools.packages.find]
 where = ["python"]
 include = ["uform"]
 namespaces = false
 
 [tool.ruff]
+line-length = 120
 ignore = ["C408", "C901", "E501", "E741"]
 ignore-init-module-imports = true
-select = ["C", "E", "F", "I", "UP", "W"]
+select = ["C", "E", "F", "I", "UP", "W", "D", "PLC0415"]
 
 [tool.ruff.isort]
 lines-after-imports = 2
 
 [tool.ruff.lint.isort]
-known-first-party = ["uform"]
+known-first-party = ["python_data", "uform"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
 
 [tool.ruff.per-file-ignores]
 "__init__.py" = ["E401"]
@@ -81,9 +147,3 @@ in_place = true
 spaces_before_inline_comment = 2
 spaces_indent_inline_array = 4
 trailing_comma_inline_array = true
-
-# Configuration options for the Black formatter:
-# https://black.readthedocs.io/en/latest/usage_and_configuration/the_basics.html#where-black-looks-for-the-file
-[tool.black]
-line-length = 120                   # Set line length to the same value as in `.clang-format` for modern wide screens
-target-version = ['py310', 'py312']  # Set target Python versions to 3.10 and 3.12

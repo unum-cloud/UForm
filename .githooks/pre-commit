@@ -99,13 +99,38 @@ while IFS= read -r file; do
         prev ~ /"[[:space:]]*$/ && prev !~ /\/\/[[:space:]]*$/ && $0 ~ /^\+[[:space:]]*"/ { print NR": "prev }
         { prev = $0 }' || true)
     # Banned vocabulary: one word per concept — byte-granting is `allocate`, window-granting is
-    # `reserve`, contiguous regions are `buffer` / `chunk` / `plane`. See uform-style-guide.
-    banned_words=$(printf '%s\n' "$added_lines" | grep -inE 'carve|slab|seam' || true)
+    # `reserve`, contiguous regions are `buffer` / `chunk` / `plane`, and the optimizer's per-weight
+    # state is not a `slot`. See uform-style-guide.
+    banned_words=$(printf '%s\n' "$added_lines" | grep -inE 'carve|slab|seam|slot' || true)
     if [ -n "$banned_words" ]; then
-        echo "pre-commit: $file adds banned vocabulary (carve/slab/seam) — allocate/reserve/buffer/chunk/plane/boundary:"
+        echo "pre-commit: $file adds banned vocabulary (carve/slab/seam/slot) — allocate/reserve/buffer/chunk/plane/boundary:"
         printf '%s\n' "$banned_words" | head -5
         failed=1
     fi
+    # Standalone repo: the internal predecessor "UFormTrain" is never named — describe behaviour directly,
+    # not by lineage. Applies to every file, docs included.
+    uformtrain_refs=$(printf '%s\n' "$added_lines" | grep -in 'UFormTrain' || true)
+    if [ -n "$uformtrain_refs" ]; then
+        echo "pre-commit: $file references UFormTrain — the predecessor stack is not named anywhere in this repo:"
+        printf '%s\n' "$uformtrain_refs" | head -5
+        failed=1
+    fi
+    # Doxygen renders @b / @c, not Markdown: `__bold__` / `**bold**` in a `/** */` or `//` comment print
+    # literally. Use @b for a one/two-token emphasis and plain prose for anything longer. CUDA `__keyword__`
+    # spellings are exempt; Markdown `.md` files are not code and are not checked.
+    case "$file" in
+    *.cu | *.cuh | *.cpp | *.hpp)
+        markdown_doxygen=$(printf '%s\n' "$added_lines" | grep -E '^\+[[:space:]]*(\*|//)' |
+            grep -oE '\*\*[^*]+\*\*|__[^_]+__' |
+            grep -vE '^__(global|device|host|shared|constant|managed|restrict|forceinline|noinline|launch_bounds|CUDACC|CUDA_ARCH|nv_[A-Za-z0-9]+|bfloat[0-9]+|half[0-9]*|fp[0-9]+)__$' || true)
+        if [ -n "$markdown_doxygen" ]; then
+            echo "pre-commit: $file uses Markdown emphasis in a Doxygen comment (it prints literally) — use @b"
+            echo "            for a 1-2 token emphasis, plain prose otherwise:"
+            printf '%s\n' "$markdown_doxygen" | head -5
+            failed=1
+        fi
+        ;;
+    esac
     # cstdio formatting is exception-blind and bypasses the cell's one diagnostics spelling: host text
     # goes through `format_into` + POSIX `::write`. Device-side `printf` (the only device formatter)
     # stays legal — this bans only `fprintf`.
@@ -259,20 +284,61 @@ if command -v git-clang-format > /dev/null 2>&1 && command -v clang-format > /de
     fi
 fi
 
+# Python sources: ruff lint (docstring shape D/google, nested-import PLC0415, import order I) and the
+# ALL-CAPS-emphasis ban, on their CHANGED lines only — the same added-lines discipline as the C++ checks
+# (legacy migrates on its own schedule). Ruff is tool-guarded like the cmake / clang gates: a missing ruff
+# (not synced into the uv env) skips rather than blocks. The emphasis grep is pure shell and always runs.
+# See STYLE.md §6 and §14.
+ruff_cmd=""
+if command -v ruff > /dev/null 2>&1; then
+    ruff_cmd="ruff"
+elif command -v uv > /dev/null 2>&1 && uv run --no-sync ruff --version > /dev/null 2>&1; then
+    ruff_cmd="uv run --no-sync ruff"
+fi
+while IFS= read -r file; do
+    added_lines=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++')
+    added_nums=$(git diff --cached --unified=0 -- "$file" | awk '
+        /^@@/ {
+            plus = $0; sub(/^.*\+/, "", plus); sub(/[ ,].*$/, "", plus); start = plus + 0
+            if ($0 ~ /\+[0-9]+,[0-9]+/) { c = $0; sub(/^.*\+[0-9]+,/, "", c); sub(/ .*$/, "", c); count = c + 0 } else { count = 1 }
+            for (i = 0; i < count; i++) print start + i
+        }')
+    # STYLE.md §6: no ALL-CAPS-for-emphasis in docstrings / comments (protocol / token names excepted).
+    emphasis=$(printf '%s\n' "$added_lines" |
+        grep -nE '\b(ONLY|NEVER|ALWAYS|EVERY|WHOLE|SHARDABLE|DISTINCT|STREAMS|MATERIALISES?)\b' || true)
+    if [ -n "$emphasis" ]; then
+        echo "pre-commit: $file uses ALL-CAPS emphasis on a changed line (STYLE.md §6) — lowercase it:"
+        printf '%s\n' "$emphasis" | head -5
+        failed=1
+    fi
+    # ruff findings intersected with the changed line numbers (docstring D / nested-import PLC0415 / imports I).
+    if [ -n "$ruff_cmd" ] && [ -n "$added_nums" ]; then
+        new_findings=$($ruff_cmd check --quiet --output-format=concise "$file" 2> /dev/null |
+            awk -F: -v nums="$added_nums" 'BEGIN { n = split(nums, a, "\n"); for (i = 1; i <= n; i++) keep[a[i]] = 1 } ($2 in keep)')
+        if [ -n "$new_findings" ]; then
+            echo "pre-commit: $file has ruff findings on its changed lines (STYLE.md §14 — docstring / import):"
+            printf '%s\n' "$new_findings" | head -8
+            failed=1
+        fi
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACM -- '*.py')
+
 # Project-wide, every staged file: no decorative banner rulers and no formatter-disabling directives.
-# A staged line that is only dashes or equals (a `# -----` / `// =====` ruler) is banned everywhere
-# except Markdown, where a run of dashes is legal (horizontal rules, table separators). Turning a
-# formatter off in-band is banned too — the checked-in .clang-format / .cmake-format.py profiles are the
-# law, so a file must format clean as a whole rather than fencing regions the tool is told to skip.
-# Patterns are line-anchored so prose that merely names a directive does not trip the check.
+# A staged line that is only dashes, equals, slashes, or hashes (a `# -----` / `// =====` / `//////` /
+# `#####` ruler) is banned everywhere except Markdown, where a run of dashes is legal (horizontal rules,
+# table separators) and `###` opens a heading. Turning a formatter off in-band is banned too — the
+# checked-in .clang-format / .cmake-format.py profiles are the law, so a file must format clean as a
+# whole rather than fencing regions the tool is told to skip. Patterns are line-anchored so prose that
+# merely names a directive does not trip the check.
 while IFS= read -r file; do
     added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++')
     case "$file" in
     *.md | *.markdown) ;;
     *)
-        rulers=$(printf '%s\n' "$added" | grep -nE '^\+[[:space:]]*([#]+|//)?[[:space:]]*[-=]{3,}[[:space:]]*$' || true)
+        rulers=$(printf '%s\n' "$added" |
+            grep -nE '^\+[[:space:]]*(([#]+|//)?[[:space:]]*[-=]{3,}|/{3,}|#{3,})[[:space:]]*$' || true)
         if [ -n "$rulers" ]; then
-            echo "pre-commit: $file adds a decorative ---/=== banner ruler (banned outside Markdown) — delete it:"
+            echo "pre-commit: $file adds a decorative banner ruler (---/===////+/###; banned outside Markdown):"
             printf '%s\n' "$rulers" | head -5
             failed=1
         fi
