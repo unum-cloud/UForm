@@ -323,6 +323,10 @@ base_config_t base_config_t::parse(int argc, char **argv) noexcept {
             config.capture = eager_k;
             continue;
         }
+        if (flag == "--tune") {
+            config.algo_pick = algo_pick_t::benchmarked_k;
+            continue;
+        }
         if (arg + 1 >= count) break;
         ++arg;
         sz::string_view const value {argv[arg], std::strlen(argv[arg])};
@@ -614,11 +618,11 @@ expected_t base_trainer_t::make(base_trainer_t &trainer, base_config_t const &co
         if (!arena) return expected_t::fail(std::move(arena));
         if (trainer.arenas.try_push_back(std::move(arena.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "arena table full");
-        expected<cublaslt_session_t> blas_session = cublaslt_session_t::make();
+        expected<cublaslt_session_t> blas_session = cublaslt_session_t::make(config.algo_pick, &trainer.algo_picks);
         if (!blas_session) return expected_t::fail(std::move(blas_session));
         if (trainer.blas.try_push_back(std::move(blas_session.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "blas session table full");
-        expected<cudnn_session_t> dnn_session = cudnn_session_t::make();
+        expected<cudnn_session_t> dnn_session = cudnn_session_t::make(config.algo_pick);
         if (!dnn_session) return expected_t::fail(std::move(dnn_session));
         if (trainer.dnn.try_push_back(std::move(dnn_session.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "dnn session table full");
@@ -743,6 +747,12 @@ int base_trainer_t::run(base_config_t const &config) noexcept {
     base_trainer_t trainer;
     if (expected_t built = make(trainer, config, topology.value_); !built) return fail_out_(built.description_.view());
     u32_t const gpus = static_cast<u32_t>(trainer.replicas.size());
+    if (config.algo_pick == algo_pick_t::benchmarked_k) {
+        sz::string tuned;
+        if (format_into(tuned, "uform_base: benchmarked {} matmul shapes, winners sum to {:.1f} ms per pass",
+                        trainer.algo_picks.size(), trainer.algo_picks.total_microseconds() / 1000.0f))
+            report_(tuned.view());
+    }
 
     // 3. The one multimem / colocated surface and the optimizer — locals threaded by reference. The flat
     //    replica-major registration table is a construction-time transient: the optimizer copies the views into
@@ -759,7 +769,8 @@ int base_trainer_t::run(base_config_t const &config) noexcept {
     std::span<differentiable_weights_t const> const lead_list {trainer.replicas[0].weights.view().data(),
                                                                weights_per_replica};
     expected<multimem_domain_t> domain_made = multimem_domain_t::make(
-        trainer.devices.view(), distributed_adafactor_t::payload_scalars_needed(lead_list), trainer.streams);
+        topology.value_, trainer.devices.view(), distributed_adafactor_t::payload_scalars_needed(lead_list),
+        trainer.streams);
     if (!domain_made) return fail_out_(domain_made.description_.view());
     multimem_domain_t domain = std::move(domain_made.value_);
     expected<colocated_domain_t> colocated_made = colocated_domain_t::make(topology.value_);

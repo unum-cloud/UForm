@@ -295,6 +295,16 @@ template <unsigned block_size_>
  *      (the production default), or re-enqueued eagerly each step — the bring-up / debugging path, and the
  *      other half of every capture-vs-eager parity test. A trainer carries it as a run knob; the two modes must
  *      land on bitwise-identical weights over identical seeds. */
+/** @brief How the vendor sessions pin their per-shape algorithms. The default takes the library's own first
+ *      deterministic heuristic pick — zero construction cost, the production behavior. The benchmarked mode
+ *      times every gate-passing candidate at construction and pins the fastest, memoizing per argument
+ *      combination so repeated shapes measure once; picks are measured on this machine at this moment, so
+ *      tuned multi-host runs are for profiling, never for bitwise-parity conformance. */
+enum class algo_pick_t : u8_t {
+    heuristic_k = 0,
+    benchmarked_k = 1,
+};
+
 enum capture_t : u32_t {
     replayed_k = 0,
     eager_k = 1,
@@ -517,6 +527,8 @@ struct gpu_replay_graph_t {
  *      tensor-core matmul entry point for losses, projection heads, and anything else with large matrix
  *      products. Slow primitives are hated here: wide GEMMs go through this, never hand-rolled loops.
  */
+struct cublaslt_algo_picks_t;
+
 struct cublaslt_session_t {
 
   private:
@@ -525,19 +537,28 @@ struct cublaslt_session_t {
   public:
     cublaslt_session_t(cublaslt_session_t const &) = delete;
     cublaslt_session_t &operator=(cublaslt_session_t const &) = delete;
-    cublaslt_session_t(cublaslt_session_t &&other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
+    cublaslt_session_t(cublaslt_session_t &&other) noexcept
+        : handle_(std::exchange(other.handle_, nullptr)), algo_pick_(other.algo_pick_),
+          picks_(std::exchange(other.picks_, nullptr)) {}
     cublaslt_session_t &operator=(cublaslt_session_t &&other) noexcept {
         if (this != &other) {
             destroy_();
             handle_ = std::exchange(other.handle_, nullptr);
+            algo_pick_ = other.algo_pick_;
+            picks_ = std::exchange(other.picks_, nullptr);
         }
         return *this;
     }
     ~cublaslt_session_t() noexcept { destroy_(); }
 
-    /** @brief Create the handle — once per device, outside any capture. */
-    [[nodiscard]] static expected<cublaslt_session_t> make() noexcept {
+    /** @brief Create the handle — once per device, outside any capture. @p algo_pick is the run's algorithm
+     *      policy and @p picks the composition-root-owned memo the benchmarked mode fills; under
+     *      @ref algo_pick_t::heuristic_k the memo is never touched and may be null. */
+    [[nodiscard]] static expected<cublaslt_session_t> make(algo_pick_t algo_pick,
+                                                           cublaslt_algo_picks_t *picks) noexcept {
         cublaslt_session_t session;
+        session.algo_pick_ = algo_pick;
+        session.picks_ = picks;
         if (cublasStatus_t status = cublasLtCreate(&session.handle_); status != CUBLAS_STATUS_SUCCESS)
             return expected<cublaslt_session_t>::fail(
                 status_t::cuda_error_k, "cuBLASLt handle creation failed (status={})", static_cast<int>(status));
@@ -546,6 +567,10 @@ struct cublaslt_session_t {
 
     /** @brief The wrapped handle, borrowed by plans. */
     [[nodiscard]] cublasLtHandle_t get() const noexcept { return handle_; }
+    /** @brief The run's algorithm policy, applied by every plan this session builds. */
+    [[nodiscard]] algo_pick_t algo_pick() const noexcept { return algo_pick_; }
+    /** @brief The shared per-shape pick memo; null under the heuristic policy. */
+    [[nodiscard]] cublaslt_algo_picks_t *picks() const noexcept { return picks_; }
 
   private:
     void destroy_() noexcept {
@@ -553,6 +578,8 @@ struct cublaslt_session_t {
     }
 
     cublasLtHandle_t handle_ = nullptr;
+    algo_pick_t algo_pick_ = algo_pick_t::heuristic_k;
+    cublaslt_algo_picks_t *picks_ = nullptr;
 };
 
 /**
@@ -587,11 +614,95 @@ struct cublaslt_plan_config_t {
     f32_t const *b_descale = nullptr;
 };
 
+/** @brief One matmul argument combination — every @ref cublaslt_plan_config_t field except the runtime
+ *      descale addresses, which travel as presence bits: two plans differing only in where their descale
+ *      scalars live pin the same algorithm. */
+struct cublaslt_algo_key_t {
+    u32_t a_rows = 0, a_cols = 0, a_row_stride = 0;
+    u32_t b_rows = 0, b_cols = 0, b_row_stride = 0;
+    u32_t c_rows = 0, c_cols = 0, c_row_stride = 0;
+    u32_t a_type = 0, b_type = 0, c_type = 0;
+    u8_t transpose_a = 0, transpose_b = 0;
+    u8_t a_descaled = 0, b_descaled = 0;
+
+    friend bool operator==(cublaslt_algo_key_t const &, cublaslt_algo_key_t const &) noexcept = default;
+
+    [[nodiscard]] static cublaslt_algo_key_t from(cublaslt_plan_config_t const &config) noexcept {
+        cublaslt_algo_key_t key;
+        key.a_rows = config.a_rows, key.a_cols = config.a_cols, key.a_row_stride = config.a_row_stride;
+        key.b_rows = config.b_rows, key.b_cols = config.b_cols, key.b_row_stride = config.b_row_stride;
+        key.c_rows = config.c_rows, key.c_cols = config.c_cols, key.c_row_stride = config.c_row_stride;
+        key.a_type = static_cast<u32_t>(config.a_type), key.b_type = static_cast<u32_t>(config.b_type);
+        key.c_type = static_cast<u32_t>(config.c_type);
+        key.transpose_a = config.transpose_a ? 1u : 0u, key.transpose_b = config.transpose_b ? 1u : 0u;
+        key.a_descaled = config.a_descale != nullptr ? 1u : 0u;
+        key.b_descaled = config.b_descale != nullptr ? 1u : 0u;
+        return key;
+    }
+};
+
+/** @brief One benchmarked pick: the argument combination it answers and the fastest deterministic algorithm
+ *      measured for it, with the measurement for the construction report. */
+struct cublaslt_algo_pick_t {
+    cublaslt_algo_key_t key {};
+    cublasLtMatmulAlgo_t algorithm {};
+    std::size_t workspace_bytes = 0;
+    f32_t microseconds = 0.0f;
+};
+
+/** @brief The run's per-shape pick memo — owned at the composition root beside the session tables and shared
+ *      by every replica's session, so identical blocks across replicas measure once. A future cluster-wide
+ *      pre-profiling pass (uniform GPUs timing disjoint shape subsets simultaneously) merges into this same
+ *      container. */
+struct cublaslt_algo_picks_t {
+
+    /** @brief The recorded pick for @p key , or null when the shape is unmeasured. */
+    [[nodiscard]] cublaslt_algo_pick_t const *find(cublaslt_algo_key_t const &key) const noexcept {
+        for (cublaslt_algo_pick_t const &pick : std::span<cublaslt_algo_pick_t const> {picks_.view()})
+            if (pick.key == key) return &pick;
+        return nullptr;
+    }
+
+    /** @brief Record one measured pick. */
+    [[nodiscard]] status_t try_record(cublaslt_algo_pick_t pick) noexcept { return picks_.try_push_back(pick); }
+
+    /** @brief How many distinct argument combinations were measured. */
+    [[nodiscard]] std::size_t size() const noexcept { return picks_.size(); }
+
+    /** @brief The summed per-call winners — the construction report's one number. */
+    [[nodiscard]] f32_t total_microseconds() const noexcept {
+        f32_t total = 0.0f;
+        for (cublaslt_algo_pick_t const &pick : std::span<cublaslt_algo_pick_t const> {picks_.view()})
+            total += pick.microseconds;
+        return total;
+    }
+
+  private:
+    array<cublaslt_algo_pick_t> picks_ {};
+};
+
+/** @brief One measured winner among a plan's gate-passing candidates — @ref cublaslt_benchmark_candidates
+ *      hands it back for @ref cublaslt_plan_t::make to pin and memoize. */
+struct cublaslt_measured_t {
+    std::size_t candidate_index = 0;
+    std::size_t workspace_bytes = 0;
+    f32_t microseconds = 0.0f;
+};
+
+/** @brief Time every gate-passing candidate of one product on transient device operands and return the
+ *      fastest — the benchmarked pick's stopwatch, compiled in @c schedule.cu . Allocates the operands and
+ *      a workspace for the run's duration only, so benchmarked construction needs transient headroom for
+ *      the largest product it measures. */
+[[nodiscard]] expected<cublaslt_measured_t> cublaslt_benchmark_candidates(
+    cublaslt_session_t &session, cublasLtMatmulDesc_t description, cublasLtMatrixLayout_t a_layout,
+    cublasLtMatrixLayout_t b_layout, cublasLtMatrixLayout_t c_layout, cublaslt_plan_config_t const &config,
+    std::span<cublasLtMatmulHeuristicResult_t const> candidates) noexcept;
+
 /**
- *  @brief One pre-planned tensor-core matmul: descriptors, layouts, and the heuristic-chosen algorithm
- *      are pinned at @ref make , so a @ref matmul call is a pure enqueue with a fixed kernel — hidden
- *      allocation cannot happen (the workspace is caller-owned) and results replay bit-identically (a
- *      pinned algorithm never re-tunes).
+ *  @brief One pre-planned tensor-core matmul: descriptors, layouts, and the pinned algorithm — the
+ *      session's policy picks it (see @ref algo_pick_t ) at @ref make , so a @ref matmul call is a pure
+ *      enqueue with a fixed kernel — hidden allocation cannot happen (the workspace is caller-owned) and
+ *      results replay bit-identically (a pinned algorithm never re-tunes).
  */
 struct cublaslt_plan_t {
 
@@ -698,6 +809,8 @@ struct cublaslt_plan_t {
                 config.a_cols, config.b_rows, config.b_cols, config.c_rows, config.c_cols, static_cast<int>(searched));
         // The determinism gate: single split, no cross-CTA reduction scheme — the properties a size
         // cap only ever enforced by accident.
+        std::array<cublasLtMatmulHeuristicResult_t, 64> passing {};
+        std::size_t passing_count = 0;
         for (int candidate = 0; candidate != heuristic_count; ++candidate) {
             cublasLtMatmulHeuristicResult_t const &heuristic = heuristics[static_cast<std::size_t>(candidate)];
             std::int32_t splits = 0;
@@ -710,17 +823,46 @@ struct cublaslt_plan_t {
                                                      sizeof(reduction), &written) != CUBLAS_STATUS_SUCCESS)
                 continue;
             if (splits > 1 || reduction != CUBLASLT_REDUCTION_SCHEME_NONE) continue;
-            plan.algorithm_ = heuristic.algo;
-            plan.workspace_bytes_ = heuristic.workspaceSize;
-            plan.a_cols_ = config.a_cols;
-            plan.b_cols_ = config.b_cols;
-            plan.c_cols_ = config.c_cols;
+            passing[passing_count++] = heuristic;
+        }
+        if (passing_count == 0)
+            return expected<cublaslt_plan_t>::fail(
+                status_t::shape_unsupported_k,
+                "no deterministic tensor-core algorithm among {} candidates (a=[{}x{}] b=[{}x{}] c=[{}x{}])",
+                heuristic_count, config.a_rows, config.a_cols, config.b_rows, config.b_cols, config.c_rows,
+                config.c_cols);
+        plan.a_cols_ = config.a_cols;
+        plan.b_cols_ = config.b_cols;
+        plan.c_cols_ = config.c_cols;
+
+        // The session's policy picks among the gate-passers: the heuristic's own first choice by default,
+        // or the memoized measured winner under the benchmarked mode.
+        if (session.algo_pick() == algo_pick_t::benchmarked_k && session.picks() != nullptr) {
+            cublaslt_algo_key_t const key = cublaslt_algo_key_t::from(config);
+            if (cublaslt_algo_pick_t const *memoized = session.picks()->find(key); memoized != nullptr) {
+                plan.algorithm_ = memoized->algorithm;
+                plan.workspace_bytes_ = memoized->workspace_bytes;
+                return expected<cublaslt_plan_t> {std::move(plan)};
+            }
+            expected<cublaslt_measured_t> measured = cublaslt_benchmark_candidates(
+                session, plan.description_, plan.a_layout_, plan.b_layout_, plan.c_layout_, config,
+                {passing.data(), passing_count});
+            if (!measured) return expected<cublaslt_plan_t>::fail(std::move(measured));
+            cublasLtMatmulHeuristicResult_t const &winner = passing[measured.value_.candidate_index];
+            cublaslt_algo_pick_t pick;
+            pick.key = key;
+            pick.algorithm = winner.algo;
+            pick.workspace_bytes = winner.workspaceSize;
+            pick.microseconds = measured.value_.microseconds;
+            if (session.picks()->try_record(pick) != status_t::success_k)
+                return expected<cublaslt_plan_t>::fail(status_t::bad_alloc_k, "algorithm pick memo append failed");
+            plan.algorithm_ = winner.algo;
+            plan.workspace_bytes_ = winner.workspaceSize;
             return expected<cublaslt_plan_t> {std::move(plan)};
         }
-        return expected<cublaslt_plan_t>::fail(
-            status_t::shape_unsupported_k,
-            "no deterministic tensor-core algorithm among {} candidates (a=[{}x{}] b=[{}x{}] c=[{}x{}])",
-            heuristic_count, config.a_rows, config.a_cols, config.b_rows, config.b_cols, config.c_rows, config.c_cols);
+        plan.algorithm_ = passing[0].algo;
+        plan.workspace_bytes_ = passing[0].workspaceSize;
+        return expected<cublaslt_plan_t> {std::move(plan)};
     }
 
     /** @brief The workspace bytes the pinned algorithm needs; the caller sizes one shared buffer to the
@@ -845,6 +987,15 @@ struct gpu_event_t {
         return expected<gpu_event_t> {std::move(event)};
     }
 
+    /** @brief Create a timing-capable event — the benchmarked algorithm pick's stopwatch; ordering-only
+     *      consumers keep @ref make 's cheaper @c CU_EVENT_DISABLE_TIMING events. */
+    [[nodiscard]] static expected<gpu_event_t> make_timed() noexcept {
+        gpu_event_t event;
+        if (CUresult result = cuEventCreate(&event.event_, CU_EVENT_DEFAULT); result != CUDA_SUCCESS)
+            return expected<gpu_event_t>::fail(result, "timed event creation failed");
+        return expected<gpu_event_t> {std::move(event)};
+    }
+
     /** @brief The wrapped handle for record / wait calls. */
     [[nodiscard]] CUevent get() const noexcept { return event_; }
 
@@ -933,19 +1084,24 @@ struct cudnn_session_t {
   public:
     cudnn_session_t(cudnn_session_t const &) = delete;
     cudnn_session_t &operator=(cudnn_session_t const &) = delete;
-    cudnn_session_t(cudnn_session_t &&other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
+    cudnn_session_t(cudnn_session_t &&other) noexcept
+        : handle_(std::exchange(other.handle_, nullptr)), algo_pick_(other.algo_pick_) {}
     cudnn_session_t &operator=(cudnn_session_t &&other) noexcept {
         if (this != &other) {
             destroy_();
             handle_ = std::exchange(other.handle_, nullptr);
+            algo_pick_ = other.algo_pick_;
         }
         return *this;
     }
     ~cudnn_session_t() noexcept { destroy_(); }
 
-    /** @brief Create the handle — once per device, outside any capture. */
-    [[nodiscard]] static expected<cudnn_session_t> make() noexcept {
+    /** @brief Create the handle — once per device, outside any capture. @p algo_pick carries the run's
+     *      algorithm policy; the SDPA plans keep their heuristic engine under both values today, and
+     *      @ref algo_pick_t::benchmarked_k will iterate the frontend's engine configs in a later wave. */
+    [[nodiscard]] static expected<cudnn_session_t> make(algo_pick_t algo_pick) noexcept {
         cudnn_session_t session;
+        session.algo_pick_ = algo_pick;
         if (cudnnStatus_t status = cudnnCreate(&session.handle_); status != CUDNN_STATUS_SUCCESS)
             return expected<cudnn_session_t>::fail(status_t::cuda_error_k, "cuDNN handle creation failed ({})",
                                                    cudnnGetErrorString(status));
@@ -964,6 +1120,8 @@ struct cudnn_session_t {
 
     /** @brief The wrapped handle, borrowed by graph builders and executes. */
     [[nodiscard]] cudnnHandle_t get() const noexcept { return handle_; }
+    /** @brief The run's algorithm policy — carried for the later engine-config benchmarking wave. */
+    [[nodiscard]] algo_pick_t algo_pick() const noexcept { return algo_pick_; }
 
   private:
     void destroy_() noexcept {
@@ -971,6 +1129,7 @@ struct cudnn_session_t {
     }
 
     cudnnHandle_t handle_ = nullptr;
+    algo_pick_t algo_pick_ = algo_pick_t::heuristic_k;
 };
 
 } // namespace unum::uform::core

@@ -86,6 +86,10 @@ struct base_config_t {
     /** @brief The run's model-region mode — @ref replayed_k in production, @ref eager_k under @c --eager ; the
      *      parity test drives both over identical seeds. */
     capture_t capture = replayed_k;
+    /** @brief The vendor sessions' algorithm policy — the library's own heuristic pick by default,
+     *      @ref algo_pick_t::benchmarked_k under @c --tune (each shape's candidates measured once at
+     *      construction and the fastest pinned). */
+    algo_pick_t algo_pick = algo_pick_t::heuristic_k;
     /** @brief Checkpoint path; empty writes none. Borrows the argv storage it was parsed from. */
     sz::string_view checkpoint {};
 
@@ -177,6 +181,10 @@ struct base_trainer_t {
     per_gpu_array<gpu_stream_t> streams {};
     /** @brief One owning arena per GPU — the allocation budget its replica draws from. */
     per_gpu_array<gpu_arena_t> arenas {};
+    /** @brief The run's shared per-shape algorithm picks, filled under @ref algo_pick_t::benchmarked_k —
+     *      declared before the sessions that borrow its address, so identical shapes across replicas
+     *      measure once. */
+    cublaslt_algo_picks_t algo_picks {};
     /** @brief One tensor-core session per GPU, placed address-stable so the towers may point into it. */
     per_gpu_array<cublaslt_session_t> blas {};
     /** @brief One fused-attention session per GPU, placed address-stable beside @ref blas . */
