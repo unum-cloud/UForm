@@ -216,6 +216,46 @@ static void learning_rate_schedule(test_suite_t &suite) {
                 config.min_learning_rate * 1.1f);
 }
 
+/** @brief The checkpoint naming contract over one built replica: the registration list carries the semantic
+ *      per-weight names every SafeTensors parser keys by (under the driver's @c model. prefix), derived from
+ *      @p config and asserted in full order — a @c fill reorder or rename fails loudly here before it silently
+ *      re-keys a checkpoint. Piggybacks on an already-built trainer, so it costs no bring-up of its own. */
+static void check_weight_naming_(test_suite_t &suite, char const *label, base_config_t const &config,
+                                 std::span<differentiable_weights_t const> weights) {
+    std::size_t index = 0;
+    auto expect = [&](sz::string_view want) {
+        if (index >= weights.size()) {
+            suite.check(false, "[{}] weight {} missing: want {}", label, index, want);
+            return;
+        }
+        suite.check(weights[index].name.view() == want, "[{}] weight {}: got {} want {}", label, index,
+                    weights[index].name.view(), want);
+        ++index;
+    };
+    expect("embedding");
+    if (config.batch.contains(modality_t::image_k)) expect("image_projection");
+    if (config.batch.contains(modality_t::video_k)) expect("video_projection");
+    if (config.batch.contains(modality_t::audio_k)) expect("audio_projection");
+    sz::string name;
+    for (u32_t layer_index = 0; layer_index != config.depth; ++layer_index)
+        for (sz::string_view part : {"qkv", "out", "gate_up", "down", "pre_norm", "post_norm"}) {
+            name.clear();
+            if (!format_into(name, "blocks.{}.{}", layer_index, part))
+                return suite.check(false, "[{}] weight name format failed", label);
+            expect(name.view());
+        }
+    expect("final_norm");
+    expect("pool_query");
+    expect("head.norm");
+    expect("head.fc1");
+    expect("head.fc2");
+    expect("masked_tokens");
+    if (config.batch.contains(modality_t::image_k)) expect("masked_image");
+    if (config.batch.contains(modality_t::video_k)) expect("masked_video");
+    if (config.batch.contains(modality_t::audio_k)) expect("masked_audio");
+    suite.check(index == weights.size(), "[{}] registration count: got {} want {}", label, weights.size(), index);
+}
+
 /** @brief Bring up the trainer for one mixture, run the captured two-region loop reading telemetry every step,
  *      and fold the five invariants (A replica identity, B round progression, C capture == eager, D loss
  *      descent, E every live head trained) into @p suite . */
@@ -227,6 +267,7 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
     u32_t const gpus = static_cast<u32_t>(trainer.replicas.size());
     suite.check(gpus != 0u, "[{}] at least one visible GPU: got {}", label, gpus);
     if (gpus == 0u) return;
+    check_weight_naming_(suite, label, config, trainer.replicas[0].weights.view());
 
     // Two disjoint windows so the captured optimizer and the assertion-C eager optimizer get fresh moments.
     expected<multimem_domain_t> domain = make_domain_(trainer, 2u);

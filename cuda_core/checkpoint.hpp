@@ -16,9 +16,10 @@
  *  whole warm-start policy: a masked-pretraining checkpoint fills the shared encoder, the objective
  *  heads come back empty, and the caller re-seeds them.
  *
- *  The caller (main — the composition root) spells the naming contract @c model.<section>.<part> at
- *  both ends. Shapes are the true @b [rows,cols] extents of the rank-2 views; BFloat16 is the only
- *  training dtype; weights only — optimizer moments restart fresh on resume.
+ *  Each cell's @c fill spells its own weights' names — the tower its structure ( @c embedding ,
+ *  @c blocks.{i}.qkv , … ), each objective head its instance name — and the composition root adds only
+ *  its @c model. prefix at both ends. Shapes are the true @b [rows,cols] extents of the rank-2 views;
+ *  BFloat16 is the only training dtype; weights only — optimizer moments restart fresh on resume.
  */
 #pragma once
 

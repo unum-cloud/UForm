@@ -873,49 +873,62 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
 expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) noexcept {
     u32_t const hidden = config_.block.hidden;
     u32_t const ffn = config_.block.ffn_expansion * hidden;
-    // A block weight arrives as a rank-1 accessor; it joins as its logical [rows,cols] rectangle (a tower
-    // matrix is already rank-2 and joins through its own span / view).
+    // Every weight joins under the checkpoint name the tower spells for it — the composition root adds only
+    // its `model.` prefix. A block weight arrives as a rank-1 accessor; it joins as its logical [rows,cols]
+    // rectangle (a tower matrix is already rank-2 and joins through its own span / view).
 
-    auto make_weight = [](bf16r1_span_t weight, bf16r1_view_t grad, std::size_t rows, std::size_t cols) noexcept {
-        return differentiable_weights_t {bf16r2_span_t {weight.data(), rows, cols},
-                                         bf16r2_view_t {grad.data(), rows, cols}};
+    auto push = [&weights](sz::string_view name, bf16r2_span_t weight, bf16r2_view_t grad) noexcept {
+        differentiable_weights_t entry {{}, weight, grad};
+        if (!entry.name.try_assign(name)) return status_t::bad_alloc_k;
+        return weights.try_push_back(std::move(entry));
     };
-    status_t pushed = weights.try_push_back({entry_weight_.span(), entry_weight_grad_.view()});
+    auto push_flat = [&push](sz::string_view name, bf16r1_span_t weight, bf16r1_view_t grad, std::size_t rows,
+                             std::size_t cols) noexcept {
+        return push(name, bf16r2_span_t {weight.data(), rows, cols}, bf16r2_view_t {grad.data(), rows, cols});
+    };
+    status_t pushed = push("embedding", entry_weight_.span(), entry_weight_grad_.view());
     // Media projections next, in modality order — each present iff its plan base was pinned. These rank-2
     // [hidden, fan_in] matrices join directly (like the head products), replica-identical with the grads
     // backward() produces, so the optimizer trains what was frozen before.
     if (pushed == status_t::success_k && image_plan_base_ != plan_absent_k)
-        pushed = weights.try_push_back({image_projection_.span(), image_projection_grad_.view()});
+        pushed = push("image_projection", image_projection_.span(), image_projection_grad_.view());
     if (pushed == status_t::success_k && video_plan_base_ != plan_absent_k)
-        pushed = weights.try_push_back({video_projection_.span(), video_projection_grad_.view()});
+        pushed = push("video_projection", video_projection_.span(), video_projection_grad_.view());
     if (pushed == status_t::success_k && audio_plan_base_ != plan_absent_k)
-        pushed = weights.try_push_back({audio_projection_.span(), audio_projection_grad_.view()});
+        pushed = push("audio_projection", audio_projection_.span(), audio_projection_grad_.view());
+    sz::string name_text;
     for (u32_t layer_index = 0; pushed == status_t::success_k && layer_index != config_.depth; ++layer_index) {
         transformer_block_bf16_t &layer = blocks_[layer_index];
-        pushed = weights.try_push_back(make_weight(layer.qkv_weight(), layer.qkv_weight_grad(), 3u * hidden, hidden));
-        if (pushed == status_t::success_k)
-            pushed = weights.try_push_back(make_weight(layer.out_weight(), layer.out_weight_grad(), hidden, hidden));
-        if (pushed == status_t::success_k)
-            pushed = weights.try_push_back(
-                make_weight(layer.gate_up_weight(), layer.gate_up_weight_grad(), 2u * ffn, hidden));
-        if (pushed == status_t::success_k)
-            pushed = weights.try_push_back(make_weight(layer.down_weight(), layer.down_weight_grad(), hidden, ffn));
-        if (pushed == status_t::success_k)
-            pushed = weights.try_push_back(
-                make_weight(layer.pre_norm_scale(), layer.pre_norm_scale_grad(), 1u, hidden));
-        if (pushed == status_t::success_k)
-            pushed = weights.try_push_back(
-                make_weight(layer.post_norm_scale(), layer.post_norm_scale_grad(), 1u, hidden));
+        struct block_part_t {
+            sz::string_view suffix;
+            bf16r1_span_t weight;
+            bf16r1_view_t grad;
+            std::size_t rows, cols;
+        };
+        block_part_t const parts[] = {
+            {"qkv", layer.qkv_weight(), layer.qkv_weight_grad(), 3u * hidden, hidden},
+            {"out", layer.out_weight(), layer.out_weight_grad(), hidden, hidden},
+            {"gate_up", layer.gate_up_weight(), layer.gate_up_weight_grad(), 2u * ffn, hidden},
+            {"down", layer.down_weight(), layer.down_weight_grad(), hidden, ffn},
+            {"pre_norm", layer.pre_norm_scale(), layer.pre_norm_scale_grad(), 1u, hidden},
+            {"post_norm", layer.post_norm_scale(), layer.post_norm_scale_grad(), 1u, hidden},
+        };
+        for (block_part_t const &part : parts) {
+            name_text.clear();
+            if (!format_into(name_text, "blocks.{}.{}", layer_index, part.suffix))
+                return expected_t::fail(status_t::bad_alloc_k, "weight name format failed");
+            pushed = push_flat(name_text.view(), part.weight, part.grad, part.rows, part.cols);
+            if (pushed != status_t::success_k) break;
+        }
     }
     if (pushed == status_t::success_k)
-        pushed = weights.try_push_back(
-            make_weight(final_norm_scale_.span(), final_norm_scale_grad_.view(), 1u, hidden));
+        pushed = push_flat("final_norm", final_norm_scale_.span(), final_norm_scale_grad_.view(), 1u, hidden);
     if (pushed == status_t::success_k)
-        pushed = weights.try_push_back(make_weight(pool_query_.span(), pool_query_grad_.view(), 1u, hidden));
+        pushed = push_flat("pool_query", pool_query_.span(), pool_query_grad_.view(), 1u, hidden);
     if (pushed == status_t::success_k)
-        pushed = weights.try_push_back(make_weight(head_norm_scale_.span(), head_norm_scale_grad_.view(), 1u, hidden));
-    if (pushed == status_t::success_k) pushed = weights.try_push_back({head_fc1_.span(), head_fc1_grad_.view()});
-    if (pushed == status_t::success_k) pushed = weights.try_push_back({head_fc2_.span(), head_fc2_grad_.view()});
+        pushed = push_flat("head.norm", head_norm_scale_.span(), head_norm_scale_grad_.view(), 1u, hidden);
+    if (pushed == status_t::success_k) pushed = push("head.fc1", head_fc1_.span(), head_fc1_grad_.view());
+    if (pushed == status_t::success_k) pushed = push("head.fc2", head_fc2_.span(), head_fc2_grad_.view());
     if (pushed != status_t::success_k) return expected_t::fail(status_t::bad_alloc_k, "weight table overflowed");
     return {};
 }

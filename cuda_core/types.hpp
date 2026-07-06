@@ -453,10 +453,14 @@ struct expected<void> {
 /** @brief The everyday spelling of the value-less @ref expected . */
 using expected_t = expected<void>;
 
-/** @brief One weight matrix with its gradient — what models publish and optimizers consume. Vector
- *      parameters (norm scales, biases) are @b [1,cols] . The optimizer reads the gradient and writes
- *      the weights, hence the mutability split. */
+/** @brief One named weight matrix with its gradient — what models publish and optimizers consume.
+ *      Vector parameters (norm scales, biases) are @b [1,cols] . The optimizer reads the gradient and
+ *      writes the weights, hence the mutability split. The publishing cell's @c fill spells @ref name —
+ *      the checkpoint key every SafeTensors parser matches on — since it owns the structure the name
+ *      describes; the composition root adds only its @c model. prefix. */
 struct differentiable_weights_t {
+    /** @brief The owned checkpoint name — short names ride StringZilla's inline buffer. */
+    sz::string name {};
     nk::tensor_span<bf16_t, 2> weights {};
     nk::tensor_view<bf16_t, 2> weights_grad {};
 };

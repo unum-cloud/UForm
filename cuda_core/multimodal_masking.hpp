@@ -201,8 +201,9 @@ struct masked_tokens_t {
                                         u32r1_view_t loss_weights, f32r1_span_t loss_summands,
                                         bf16r2_span_t normalized_grad, gpu_stream_t &stream) noexcept;
 
-    /** @brief Append the decoder weight to @p weights . */
-    [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;
+    /** @brief Append the decoder weight to @p weights under the checkpoint name @p name — the owning
+     *      replica spells the instance name, since one head class may serve several modalities. */
+    [[nodiscard]] expected_t fill(sz::string_view name, array<differentiable_weights_t> &weights) noexcept;
     /** @brief The decoder weights @b [vocabulary·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> decoder_weights() noexcept { return decoder_weight_.span().flatten<1>(); }
 
@@ -288,8 +289,9 @@ struct masked_patches_t {
                                         f32r1_span_t loss_summands, bf16r2_span_t normalized_grad,
                                         gpu_stream_t &stream) noexcept;
 
-    /** @brief Append the recon weight to @p weights . */
-    [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;
+    /** @brief Append the recon weight to @p weights under the checkpoint name @p name — the owning
+     *      replica spells the instance name, since one head class may serve several modalities. */
+    [[nodiscard]] expected_t fill(sz::string_view name, array<differentiable_weights_t> &weights) noexcept;
     /** @brief The recon weights @b [patch_pixels·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> recon_weights() noexcept { return recon_weight_.span().flatten<1>(); }
 
@@ -374,8 +376,9 @@ struct masked_frames_t {
     [[nodiscard]] expected_t operator()(bf16r2_view_t normalized, f32r2_view_t clean_frames, f32r1_span_t loss_summands,
                                         bf16r2_span_t normalized_grad, gpu_stream_t &stream) noexcept;
 
-    /** @brief Append the recon weight to @p weights . */
-    [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;
+    /** @brief Append the recon weight to @p weights under the checkpoint name @p name — the owning
+     *      replica spells the instance name, since one head class may serve several modalities. */
+    [[nodiscard]] expected_t fill(sz::string_view name, array<differentiable_weights_t> &weights) noexcept;
     /** @brief The recon weights @b [chunk_samples·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> recon_weights() noexcept { return recon_weight_.span().flatten<1>(); }
 

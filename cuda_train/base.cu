@@ -290,8 +290,8 @@ struct row_partition_t {
     return tower;
 }
 
-/** @brief Snapshot one replica's registration list to @p path with the run's step count, matrices named by
- *      their registration index. */
+/** @brief Snapshot one replica's registration list to @p path with the run's step count, each matrix keyed
+ *      by the name its cell's @c fill spelled, under this composition root's @c model. prefix. */
 [[nodiscard]] static expected_t save_checkpoint_(sz::string_view path, array<differentiable_weights_t> const &weights,
                                                  u32_t steps, gpu_stream_t &stream) noexcept {
     switch_to_gpu_t gpu_scope {stream};
@@ -304,11 +304,11 @@ struct row_partition_t {
     checkpoint_to_save_t checkpoint = std::move(made.value_);
     if (expected_t reserved = checkpoint.try_reserve(total_scalars, list.size()); !reserved) return reserved;
     sz::string name_text;
-    for (std::size_t index = 0; index != list.size(); ++index) {
+    for (differentiable_weights_t const &matrix : list) {
         name_text.clear();
-        if (!format_into(name_text, "model.matrix.{}", index))
-            return expected_t::fail(status_t::bad_alloc_k, "matrix name format failed ({})", index);
-        if (expected_t inserted = checkpoint.try_insert(name_text.view(), list[index].weights, stream); !inserted)
+        if (!format_into(name_text, "model.{}", matrix.name))
+            return expected_t::fail(status_t::bad_alloc_k, "matrix name format failed ({})", matrix.name);
+        if (expected_t inserted = checkpoint.try_insert(name_text.view(), matrix.weights, stream); !inserted)
             return inserted;
     }
     return checkpoint.save(path, steps);
@@ -425,15 +425,20 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cublaslt_sessi
             return result_t::fail(status_t::bad_alloc_k, "audio scratch allocation failed");
     }
 
-    // The registration list — tower first, then each live head, identical order on every replica.
+    // The registration list — tower first, then each live head, identical order on every replica. The tower
+    // spells its own weight names; the heads take their instance names here, where the modalities are told apart.
     if (expected_t listed = replica.tower.fill(replica.weights); !listed) return result_t::fail(std::move(listed));
-    if (expected_t listed = replica.tokens.fill(replica.weights); !listed) return result_t::fail(std::move(listed));
+    if (expected_t listed = replica.tokens.fill("masked_tokens", replica.weights); !listed)
+        return result_t::fail(std::move(listed));
     if (shape.contains(modality_t::image_k))
-        if (expected_t listed = replica.image.fill(replica.weights); !listed) return result_t::fail(std::move(listed));
+        if (expected_t listed = replica.image.fill("masked_image", replica.weights); !listed)
+            return result_t::fail(std::move(listed));
     if (shape.contains(modality_t::video_k))
-        if (expected_t listed = replica.video.fill(replica.weights); !listed) return result_t::fail(std::move(listed));
+        if (expected_t listed = replica.video.fill("masked_video", replica.weights); !listed)
+            return result_t::fail(std::move(listed));
     if (shape.contains(modality_t::audio_k))
-        if (expected_t listed = replica.audio.fill(replica.weights); !listed) return result_t::fail(std::move(listed));
+        if (expected_t listed = replica.audio.fill("masked_audio", replica.weights); !listed)
+            return result_t::fail(std::move(listed));
     return result_t {std::move(replica)};
 }
 

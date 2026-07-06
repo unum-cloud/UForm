@@ -136,10 +136,11 @@ struct base_replica_t {
      *      token head overwrites first, media heads add) and the tower's backward consumes. */
     bf16r2_tensor_arena_t normalized_grad {};
 
-    /** @brief This replica's parameter registrations: one @ref differentiable_weights_t non-owning
-     *      @c {weights, weights_grad} view pair per matrix, in one canonical order (tower first, then each live
-     *      head). The scalars live once inside this GPU's tensors; the optimizer's @c make copies these views
-     *      into its own per-replica state, so the concatenated table is a construction-time transient. */
+    /** @brief This replica's parameter registrations: one named @ref differentiable_weights_t
+     *      @c {name, weights, weights_grad} entry per matrix — the views non-owning, the checkpoint name
+     *      owned — in one canonical order (tower first, then each live head). The scalars live once inside
+     *      this GPU's tensors; the optimizer's @c make copies these views into its own per-replica state,
+     *      so the concatenated table is a construction-time transient. */
     array<differentiable_weights_t> weights {};
 
     /** @brief Build the replica over the world-owned @p arena and the placed @p blas / @p dnn sessions (borrowed

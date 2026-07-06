@@ -152,7 +152,13 @@ struct encoder_tower_bf16_t {
                                                     bf16r2_span_t video_patches, gpu_stream_t &stream) noexcept;
 
     /** @brief Fill @p weights with every optimizer-facing weight in the canonical reduction order:
-     *      entry → media projections → per-layer block weights → final norm → pool query → head. */
+     *      entry → media projections → per-layer block weights → final norm → pool query → head.
+     *      Each entry carries the checkpoint name every SafeTensors parser keys by — @c embedding , the
+     *      per-modality @c image_projection / @c video_projection / @c audio_projection (present iff
+     *      configured), the per-layer @c blocks.{i}.qkv / @c blocks.{i}.out / @c blocks.{i}.gate_up /
+     *      @c blocks.{i}.down / @c blocks.{i}.pre_norm / @c blocks.{i}.post_norm , then @c final_norm ,
+     *      @c pool_query , @c head.norm , @c head.fc1 , and @c head.fc2 — the composition root adds only
+     *      its @c model. prefix. */
     [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;
 
     /** @brief Quantize this tower's block stack into the E4M3 inference twin (entries / pool / head stay
