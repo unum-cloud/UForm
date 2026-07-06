@@ -147,6 +147,9 @@ struct nvjpeg_session_t {
  *  @param[in] tape The pooled blob column with its offsets landed on host — device bytes, host-indexable, so
  *      @c tape[row] is a device slice computed on the host.
  *  @param[in] drawn_rows The tape rows to decode; each becomes one live image segment, in draw order.
+ *  @param[in] representations The flat @ref image_batch_shape_t representations ( @c patch_side , @c channels ); the
+ *      shape is the single source of geometry, validated against the grid. Image carries no per-representation
+ *      variation yet, so it consumes one (must be non-empty).
  *  @param[out] pixels The patch-arranged @b [rows,columns,P,P,C] grid to fill; its extents give the row width
  *      (columns), the square patch side (extent 2), and the RGBA channel count (extent 4).
  *  @param[out] shapes Each segment's @c (patch_rows,patch_cols) factorization of its column budget, shaped
@@ -157,10 +160,11 @@ struct nvjpeg_session_t {
  *  @param[inout] stream The stream the staging, decode, resize, and copies run on.
  */
 [[nodiscard]] expected_t decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, column_view_t tape,
-                                       std::span<u64_t const> drawn_rows, pixel_patches_span_t pixels,
-                                       image_shape_span_t shapes, u32r1_span_t segment_offsets,
-                                       u32r1_span_t segment_lengths, modality_span_t segment_modality,
-                                       gpu_stream_t &stream) noexcept;
+                                       std::span<u64_t const> drawn_rows,
+                                       std::span<image_batch_shape_t const> representations,
+                                       pixel_patches_span_t pixels, image_shape_span_t shapes,
+                                       u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
+                                       modality_span_t segment_modality, gpu_stream_t &stream) noexcept;
 
 /** @brief The Parquet image loader's baked knobs — a different config is a different loader. */
 struct image_loader_parquet_config_t {
@@ -182,10 +186,13 @@ struct image_loader_parquet_t {
      *  @param[in] path_or_glob Dataset's Parquet paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
      *  @param[inout] pool The run's CPU-decode worker pool, owned at the composition root and borrowed here
-     *      for the PNG / WebP / progressive-JPEG fallback; the loader never spawns threads of its own. */
+     *      for the PNG / WebP / progressive-JPEG fallback; the loader never spawns threads of its own.
+     *  @param[in] image The image modality's own geometry slice ( @c patch_side , @c channels ) — the single source
+     *      of a step's image geometry; it never sees the sibling modalities' shapes. */
     [[nodiscard]] static expected<image_loader_parquet_t> make(gpu_direct_storage_session_t &session,
                                                                sz::string_view path_or_glob, u64_t seed,
-                                                               cpu_decode_pool_t &pool) noexcept;
+                                                               cpu_decode_pool_t &pool,
+                                                               image_batch_shape_t image) noexcept;
 
     /**
      *  @brief Fill the next few @p batches ' @c images grid on one GPU rank, each image one sub-row segment.
@@ -223,6 +230,9 @@ struct image_loader_parquet_t {
      *      @c upper_bound maps a keyed row position to its owning file) and, at its back, the dataset's
      *      total rows. Read once per dataset; shared across every GPU the loader serves. */
     array<std::size_t> row_prefix_ {};
+    /** @brief The image modality's geometry ( @c patch_side , @c channels ) every @ref fill hands the decode as its
+     *      one representation — fixed at @ref make . */
+    image_batch_shape_t image_ {};
 };
 
 } // namespace unum::uform::loaders

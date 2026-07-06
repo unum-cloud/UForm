@@ -59,18 +59,15 @@
  *      video       a tube vector         @c (frame,row,col) — 3-D
  *      audio       a raw waveform chunk  @c (frame,0,0) — 1-D, identical to text: a run of frames
  *
- *  @section multimodal_batch_grid Geometry is a factorization of the row budget, not a baked shape
+ *  @section multimodal_batch_grid Geometry is derived from content, not a baked shape
  *
- *  The token count per media item is fixed — it equals @c max_columns_per_row (one encoder token per
- *  patch), so a media item fills a whole row. But the @b grid that count factors into is free: 4096
- *  patches can tile a 64×64 image, a 32×128 one, or a 128×32 one, and the encoder cannot tell — it is
- *  still 4096 tokens at one width. The only thing that changes is the coordinate the descriptor drives.
- *  So @b aspect ratio is a positional-encoding-shape choice (the item's @ref image_shapes picks the
- *  factorization), and @b video spatial-vs-temporal resolution is likewise a runtime grid choice: the
- *  same clip fed at @c (T=16,16×16) and @c (T=4,32×32) both fill the row, differing only in coordinates.
- *  Absolute time on the temporal axis (a tube at real frame @c T carries coord @c T regardless of
- *  sampling density) is what makes those multi-resolution views commensurable — one video file can drive
- *  several inputs at different tradeoffs, sharing one coordinate frame.
+ *  A media segment's column footprint is @b derived from its decoded content — an image's native aspect factors
+ *  into @ref image_shapes , a clip's into @ref video_shapes — clamped to a row, so segments are variable-width and
+ *  several share a row. The encoder sees only tokens at one width; the factorization changes only the coordinate
+ *  the descriptor drives, so @b aspect ratio and @b video spatial-vs-temporal resolution are positional-encoding
+ *  choices, not storage ones. One clip sampled two ways (a dense and a sparse @c frame_stride ) is two segments
+ *  sharing one coordinate frame: absolute time on the temporal axis (a tube at real frame @c T carries coord @c T
+ *  regardless of sampling density) is what makes those representations commensurable.
  *
  *  A corollary the masking cell reuses: tube masking is just a @b key the mask draws on @c (h,w) and
  *  broadcasts over @c t — derived from the coordinates, never a separate temporal-group parameter.
@@ -125,23 +122,6 @@ using modality_span_t = nk::tensor_span<modality_t, 1>;
     return tube_frames * patch_scalars(side, channels);
 }
 
-/** @brief One video sampling view — a temporal-versus-spatial pathway a clip is decoded into. Each view
- *      becomes @b one segment per clip, so a two-view config (a high-resolution / low-frame-rate @b slow
- *      pathway and a low-resolution / high-frame-rate @b fast pathway, SlowFast-style) yields two segments.
- *      It lives in the batch shape, not the loader: the shape is the single source of a step's geometry. */
-struct video_view_t {
-    /** @brief The view's column budget — factored per clip into @c (temporal_groups,patch_rows,patch_cols) . */
-    u32_t column_share = 0;
-    /** @brief Sample every Nth source frame — the view's temporal density (the @c slow pathway strides more). */
-    u32_t frame_stride = 1;
-    /** @brief Weights temporal against spatial in the 3-D factor: larger favors more temporal groups. */
-    f32_t temporal_bias = 1.0f;
-};
-
-/** @brief The most views one clip may be sampled into — the fixed cap the shape carries inline so it stays a
- *      trivial value type (no owning storage). One or two views is the norm; four is generous headroom. */
-constexpr u32_t max_video_views_k = 4;
-
 /** @brief The image modality's slice of a batch shape — everything the image path needs and nothing of any
  *      other modality. A zero @ref patch_side leaves the image content tensor unallocated and the modality out
  *      of the composition; the image loader is handed this alone, never the sibling modalities. */
@@ -153,9 +133,12 @@ struct image_batch_shape_t {
     u32_t channels = 4;
 };
 
-/** @brief The video modality's slice of a batch shape — the tube geometry plus the sampling views a clip is
- *      decoded into. Independent of the image modality (its own patch side and channels). A zero @ref patch_side
- *      disables the modality; an empty @ref view_count means one implicit uniform full-budget view. */
+/** @brief The video modality's slice of a batch shape — the tube geometry a clip is decoded and patchified into.
+ *      A clip is decoded @b once at its native resolution and tiled exactly like an image with a temporal axis
+ *      folded ahead of the spatial patch; @ref frame_stride selects which source frames a representation samples,
+ *      and the footprint is derived from the decoded resolution and clamped to a row (an oversized clip downscales
+ *      to fit), never a fixed budget. Independent of the image modality (its own patch side and channels). A zero
+ *      @ref patch_side disables the modality. */
 struct video_batch_shape_t {
     /** @brief The square patch side one video tube tiles into, in pixels; nonzero sizes @ref multimodal_batch::videos
      *      to @c [rows,columns,tube_frames,patch_side,patch_side,channels] . Zero disables the modality. */
@@ -164,10 +147,8 @@ struct video_batch_shape_t {
     u32_t channels = 3;
     /** @brief The temporal depth of one video tube in frames — the content axis folded ahead of the spatial patch. */
     u32_t tube_frames = 0;
-    /** @brief The sampling views a clip is decoded into — each becomes one segment (see @ref video_view_t ). */
-    video_view_t views[max_video_views_k] {};
-    /** @brief How many of @ref views are live (the rest are ignored). Zero means one implicit uniform view. */
-    u32_t view_count = 0;
+    /** @brief Sample every Nth source frame — the temporal density; a sparser stride spans more real time per tube. */
+    u32_t frame_stride = 1;
 };
 
 /** @brief The audio modality's slice of a batch shape — and nothing of any other modality. A waveform is
@@ -207,10 +188,22 @@ struct multimodal_batch_shape_t {
 
     /** @brief The image modality's geometry (patch side, channels) — handed to the image loader alone. */
     image_batch_shape_t image {};
-    /** @brief The video modality's geometry (tube frames, patch side, channels, views) — to the video loader alone. */
+    /** @brief The video modality's geometry (tube frames, patch side, channels, frame stride) — to the video loader. */
     video_batch_shape_t video {};
     /** @brief The audio modality's geometry (chunk samples, sample rate) — handed to the audio loader alone. */
     audio_batch_shape_t audio {};
+
+    /** @brief Whether @p modality participates in this composition — text always, a media modality iff its
+     *      nested slice is live (the "zero disables" rule above, spelled once). */
+    [[nodiscard]] constexpr bool contains(modality_t modality) const noexcept {
+        switch (modality) {
+        case modality_t::text_k: return true;
+        case modality_t::image_k: return image.patch_side != 0u;
+        case modality_t::video_k: return video.patch_side != 0u && video.tube_frames != 0u;
+        case modality_t::audio_k: return audio.chunk_samples != 0u;
+        }
+        return false;
+    }
 };
 
 /**
@@ -255,21 +248,21 @@ struct multimodal_batch {
      *      M-RoPE stays the tower's business. @c channels is the innermost rank, so the entry peels
      *      @c (patch_side,patch_side,channels) into one projection fan-in with a @c reshape<2> . */
     nk::tensor<pixel_t, rebound<pixel_t>, 5> images {};
-    /** @brief @b [max_segments_per_gpu,2] each image segment's @c (patch_rows,patch_cols) factorization of
-     *      its column sub-budget — the @b only place an image's aspect ratio survives, segment-indexed since
-     *      several images may share a row. An entry is meaningful iff @ref segment_modality is @c image_k . The
-     *      coordinate adapter turns it into M-RoPE @c (t,h,w) ; aspect is a positional-encoding fact, not a
-     *      storage one. */
+    /** @brief @b [max_segments_per_gpu,2] each image segment's @c (patch_rows,patch_cols) — the native aspect
+     *      factored into a row-clamped footprint, the @b only place an image's aspect ratio survives, segment-indexed
+     *      since several images may share a row. An entry is meaningful iff @ref segment_modality is @c image_k . The
+     *      coordinate adapter turns it into M-RoPE @c (t,h,w) ; aspect is a positional-encoding fact, not a storage
+     *      one. */
     nk::tensor<u16_t, rebound<u16_t>, 2> image_shapes {};
     /** @brief @b [rows,columns,video_tube_frames,video_patch_side,video_patch_side,video_channels]
      *      patch-arranged video tubes — images with a temporal depth folded ahead of the spatial patch, each
-     *      view-segment scattered into its column sub-range and carrying the same @c (content,shapes) contract
-     *      as @ref images . */
+     *      segment scattered into its column sub-range and carrying the same @c (content,shapes) contract as
+     *      @ref images . */
     nk::tensor<pixel_t, rebound<pixel_t>, 6> videos {};
-    /** @brief @b [max_segments_per_gpu,3] each video segment's @c (temporal_groups,patch_rows,patch_cols)
-     *      factorization of its column sub-budget, segment-indexed. An entry is meaningful iff
-     *      @ref segment_modality is @c video_k . One clip fed at different spatial-versus-temporal resolutions
-     *      is several segments differing only in this descriptor and the absolute-frame temporal coordinate. */
+    /** @brief @b [max_segments_per_gpu,3] each video segment's @c (temporal_groups,patch_rows,patch_cols) — its
+     *      native resolution factored into a row-clamped footprint, segment-indexed. An entry is meaningful iff
+     *      @ref segment_modality is @c video_k . One clip sampled at different frame strides is several segments
+     *      differing only in this descriptor and the absolute-frame temporal coordinate. */
     nk::tensor<u16_t, rebound<u16_t>, 2> video_shapes {};
     /** @brief @b [rows,columns,chunk_samples] the raw mono waveform, one chunk of @c chunk_samples samples per
      *      column-frame. Audio is 1-D and unpatched — a segment is a run of frames like a text run — so the

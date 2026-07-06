@@ -52,27 +52,30 @@ using cpu_decode_pool_t = ashvardanian::fork_union::basic_pool_t;
 /**
  *  @brief Decode a batch's drawn clip rows into its @c audio_samples frame grid — the audio decode every audio
  *      loader shares (Parquet today, tarball next). Hops each drawn clip's encoded bytes off the device @p tape
- *      to a pinned tape, fans them across @p pool to libav-decode + resample to mono Float32 at @p sample_rate ,
- *      then climbs onto the GPU and chunks each clip's waveform into frames of @c chunk_samples raw samples
- *      ( @c chunk_samples = @c audio_samples.extent(2) ), scattering each clip into its own sub-row segment (a
- *      clip fills a whole row). Writes the segment geometry ( @p segment_offsets / @p segment_lengths ) and
- *      @p segment_modality — @c audio_k , 1-D, so no shape descriptor.
+ *      to a pinned tape, then for every @c (clip,representation) pair fans a libav decode + resample to mono
+ *      Float32 at that representation's @c sample_rate across @p pool , climbs onto the GPU, and chunks the
+ *      waveform into frames of @c chunk_samples raw samples (the grid's @c extent(2) , which every representation
+ *      must match), scattering each into its own whole-row sub-row segment. Writes the segment geometry
+ *      ( @p segment_offsets / @p segment_lengths ) and @p segment_modality — @c audio_k , 1-D, so no shape
+ *      descriptor.
  *
  *  @param[inout] pool The run's CPU-decode worker pool, borrowed for the per-clip libav decode.
  *  @param[in] tape The pooled clip column with its offsets on host — device bytes, host-indexable via
  *      @c tape[row] .
- *  @param[in] drawn_rows The tape rows to decode, one per output segment (segment @c s decodes @c drawn_rows[s] ).
+ *  @param[in] drawn_rows The tape rows to decode, one clip each; each clip emits one segment per representation.
+ *  @param[in] representations The flat @ref audio_batch_shape_t representations ( @c chunk_samples , @c sample_rate );
+ *      the shape is the single source of geometry. Must be non-empty (the loader defaults it to one).
  *  @param[out] audio_samples The @b [rows,columns,chunk_samples] frame grid to chunk each clip's waveform into.
  *  @param[out] segment_offsets The @b [max_segments+1] segment START positions (serial cursor, terminal entry).
  *  @param[out] segment_lengths The @b [max_segments] live frame counts (one clip fills @c columns ; PAD 0).
  *  @param[out] segment_modality The @b [max_segments] per-segment tag — @c audio_k live, @c text_k on PAD.
- *  @param[in] sample_rate The mono rate each clip is resampled to before chunking.
  *  @param[inout] stream The stream the staging, the copy, and every kernel enqueue on.
  */
 [[nodiscard]] expected_t decode_audios(cpu_decode_pool_t &pool, column_view_t tape, std::span<u64_t const> drawn_rows,
+                                       std::span<audio_batch_shape_t const> representations,
                                        audio_samples_span_t audio_samples, u32r1_span_t segment_offsets,
                                        u32r1_span_t segment_lengths, modality_span_t segment_modality,
-                                       u32_t sample_rate, gpu_stream_t &stream) noexcept;
+                                       gpu_stream_t &stream) noexcept;
 
 /** @brief The Parquet audio loader's baked knob — just which column; the audio geometry travels on the loader's
  *      @c audio_batch_shape_t (fixed at @ref audio_loader_parquet_t::make ), not here. */

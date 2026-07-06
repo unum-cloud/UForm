@@ -895,15 +895,17 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
 }
 
 expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, column_view_t tape,
-                             std::span<u64_t const> drawn_rows, pixel_patches_span_t pixels, image_shape_span_t shapes,
-                             u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
-                             modality_span_t segment_modality, gpu_stream_t &stream) noexcept {
+                             std::span<u64_t const> drawn_rows, std::span<image_batch_shape_t const> representations,
+                             pixel_patches_span_t pixels, image_shape_span_t shapes, u32r1_span_t segment_offsets,
+                             u32r1_span_t segment_lengths, modality_span_t segment_modality,
+                             gpu_stream_t &stream) noexcept {
     std::size_t const images = drawn_rows.size();
     if (images == 0) return {};
     // The batch grid names the geometry: columns is the row width, extent(2) the square patch side, extent(4)
     // the RGBA channel count; the segment axis is the descriptors' leading extent.
     u32_t const columns_per_row = static_cast<u32_t>(pixels.extent(1));
     u32_t const patch_size = static_cast<u32_t>(pixels.extent(2));
+    u32_t const channels = static_cast<u32_t>(pixels.extent(4));
     u32_t const max_segments = static_cast<u32_t>(segment_lengths.extent(0));
     std::size_t const capacity = static_cast<std::size_t>(pixels.extent(0)) * columns_per_row;
     if (images > max_segments || shapes.extent(0) < max_segments || segment_offsets.extent(0) < max_segments + 1u ||
@@ -911,6 +913,15 @@ expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, co
         return expected_t::fail(status_t::shape_unsupported_k, "batch segments cannot hold {} images", images);
     if (patch_size == 0 || columns_per_row == 0)
         return expected_t::fail(status_t::shape_unsupported_k, "patch_size and columns must be nonzero");
+    // The shape is the single source of geometry; the grid is the validated destination. Image carries no per-
+    // representation variation yet (footprint is native-derived, patch side and channels are shared), so it consumes
+    // one representation, matching the uniform decode contract while multi-representation awaits a varying field.
+    if (representations.empty())
+        return expected_t::fail(status_t::invalid_input_k, "decode_images requires a non-empty representations span");
+    if (representations[0].patch_side != patch_size || representations[0].channels != channels)
+        return expected_t::fail(status_t::shape_unsupported_k,
+                                "representation (patch_side={} channels={}) must match the image grid ({},{})",
+                                representations[0].patch_side, representations[0].channels, patch_size, channels);
 
     array<image_plan_t> plans;
     if (plans.try_resize(images) != status_t::success_k)
@@ -957,7 +968,8 @@ expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, co
 
 expected<image_loader_parquet_t> image_loader_parquet_t::make(gpu_direct_storage_session_t &session,
                                                               sz::string_view path_or_glob, u64_t seed,
-                                                              cpu_decode_pool_t &pool) noexcept {
+                                                              cpu_decode_pool_t &pool,
+                                                              image_batch_shape_t image) noexcept {
     using result_t = expected<image_loader_parquet_t>;
 
     // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths — POSIX glob(3).
@@ -969,6 +981,7 @@ expected<image_loader_parquet_t> image_loader_parquet_t::make(gpu_direct_storage
     loader.pool_ = &pool;
     loader.absolute_paths_ = std::move(paths.value_);
     loader.seed_ = seed;
+    loader.image_ = image;
 
     // Footer only — host-side, no GPU: a running prefix of each file's row count, the weighted file draw's
     // search table; its back holds the dataset's total rows.
@@ -1078,8 +1091,9 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
         u32r1_span_t const segment_offsets {loaded.segment_offsets.data(), loaded.segment_offsets.extent(0)};
         u32r1_span_t const segment_lengths {loaded.segment_lengths.data(), loaded.segment_lengths.extent(0)};
         modality_span_t const segment_modality {loaded.segment_modality.data(), loaded.segment_modality.extent(0)};
-        if (expected_t decoded = decode_images(decoder, *pool_, tape, drawn, pixels, shapes, segment_offsets,
-                                               segment_lengths, segment_modality, gpu_stream);
+        std::span<image_batch_shape_t const> const representations {&image_, 1}; // one representation today
+        if (expected_t decoded = decode_images(decoder, *pool_, tape, drawn, representations, pixels, shapes,
+                                               segment_offsets, segment_lengths, segment_modality, gpu_stream);
             !decoded)
             return decoded;
     }
