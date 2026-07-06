@@ -19,20 +19,20 @@ Concurrency: this module never spawns an in-process `Pool` / `ThreadPool`; it fe
 one clip at a time.  Shard-level parallelism is the caller's job — each dataset builder runs one
 process per shard under GNU `parallel`, and every such process drives this helper serially.
 
-`yt-dlp` is declared in the PEP 723 header above so `uv run python_data/fetch_media_clips.py ...`
+`yt-dlp` is declared in the PEP 723 header above so `uv run python_data/acquire_clips.py ...`
 provisions it (and the binary is invoked as `python -m yt_dlp`, so the module is never imported into
 the caller's interpreter).  `ffmpeg` must be on `PATH` for the mp3 extraction and the keyframe-accurate
 mp4 trim.
 
 CLI usage:
     # Smoke-test a handful of public ids (some failures are expected and reported, not fatal):
-    uv run python_data/fetch_media_clips.py --kind video --ids dQw4w9WgXcQ aqz-KE-bpKQ \\
+    uv run python_data/acquire_clips.py --kind video --ids dQw4w9WgXcQ aqz-KE-bpKQ \\
         --out-dir /tmp/clips --manifest /tmp/clips/manifest.json
     # Fetch a 10-second audio window from one id:
-    uv run python_data/fetch_media_clips.py --kind audio --ids YS6CoSybkYU --start 30 --end 40 \\
+    uv run python_data/acquire_clips.py --kind audio --ids YS6CoSybkYU --start 30 --end 40 \\
         --out-dir /tmp/audio
     # Shard mode used by the dataset builders under GNU parallel (one JSON clip spec per line):
-    uv run python_data/fetch_media_clips.py --clips-jsonl shard_007.jsonl --out-dir staging/shard_007
+    uv run python_data/acquire_clips.py --clips-jsonl shard_007.jsonl --out-dir staging/shard_007
 """
 
 from __future__ import annotations
@@ -784,7 +784,7 @@ def _run_cli(args: argparse.Namespace) -> int:
     """Fetch every requested clip, write the payloads and the yield manifest, and report the yield."""
     clips = _clips_from_args(args)
     if not clips:
-        print("fetch_media_clips: no clips requested (pass --ids or --clips-jsonl)", file=sys.stderr)
+        print("acquire_clips: no clips requested (pass --ids or --clips-jsonl)", file=sys.stderr)
         return 2
     out_dir = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -799,13 +799,13 @@ def _run_cli(args: argparse.Namespace) -> int:
         if result.succeeded and result.payload is not None:
             destination = out_dir / f"{_safe_stem(result.clip.source_id)}.{result.extension}"
             destination.write_bytes(result.payload)
-            print(f"fetch_media_clips: ok   {result.clip.source_id} -> {destination.name}")
+            print(f"acquire_clips: ok   {result.clip.source_id} -> {destination.name}")
         else:
-            print(f"fetch_media_clips: drop {result.clip.source_id} ({result.dropped_reason})")
+            print(f"acquire_clips: drop {result.clip.source_id} ({result.dropped_reason})")
     manifest_path = args.manifest if args.manifest is not None else out_dir / "fetch_manifest.json"
     manifest.write(manifest_path)
     print(
-        f"fetch_media_clips: yield {len(manifest.succeeded)}/{len(manifest.attempted)} "
+        f"acquire_clips: yield {len(manifest.succeeded)}/{len(manifest.attempted)} "
         f"({manifest.yield_fraction * 100:.1f}%); manifest at {manifest_path}"
     )
     return 0

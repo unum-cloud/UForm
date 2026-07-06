@@ -2,7 +2,7 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""Drive the balanced multi-modal corpus staging on `$UFORM_DATA_ROOT` from `staging_manifest.py`.
+"""Drive the balanced multi-modal corpus staging on `$UFORM_DATA_ROOT` from `acquire_manifest.py`.
 
 Reads the declarative `STAGING_ROWS` manifest and, for each selected dataset, runs its
 downloader (and per-shard repack, where one applies) at the manifest's fraction, logging GB
@@ -20,9 +20,9 @@ Pure stdlib (no cudf / registry import) so it runs under a lightweight `uv run` 
 manifest carries each dataset's registry glob directly, so presence is checked by globbing alone.
 
 Usage:
-    uv run python_data/stage_balanced_corpus.py --dry-run                 # plan only, no download
-    uv run python_data/stage_balanced_corpus.py --modality audio          # stage audio for real
-    uv run python_data/stage_balanced_corpus.py --modality all            # stage everything
+    uv run python_data/acquire_corpus.py --dry-run                 # plan only, no download
+    uv run python_data/acquire_corpus.py --modality audio          # stage audio for real
+    uv run python_data/acquire_corpus.py --modality all            # stage everything
 """
 
 from __future__ import annotations
@@ -33,8 +33,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-import staging_manifest
-from staging_manifest import (
+import acquire_manifest
+from acquire_manifest import (
     MODALITIES,
     MODALITY_WEIGHTS,
     StagingRow,
@@ -195,7 +195,7 @@ def main() -> int:
     rows = rows_for_modality(args.modality)
     print(
         f"[stage] modality={args.modality}  datasets={len(rows)}  dry_run={args.dry_run}  "
-        f"budget={budget_gigabytes:.0f} GB  data_root={staging_manifest.DATA_ROOT}",
+        f"budget={budget_gigabytes:.0f} GB  data_root={acquire_manifest.DATA_ROOT}",
         flush=True,
     )
 

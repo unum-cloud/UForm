@@ -26,7 +26,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from engine_base import data_root
+from acquire_shared import data_root
 from huggingface_hub import snapshot_download
 
 _REPOS = ("nielsr/funsd", "nielsr/funsd-layoutlmv3")

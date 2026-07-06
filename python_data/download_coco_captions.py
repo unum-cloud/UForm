@@ -44,7 +44,7 @@ import sys
 from pathlib import Path
 
 import pyarrow.parquet as pq
-from engine_base import cap_shards, data_root
+from acquire_shared import cap_shards, data_root
 from huggingface_hub import list_repo_files, snapshot_download
 
 _PRIMARY_REPO_ID = "HuggingFaceM4/COCO"

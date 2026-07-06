@@ -51,7 +51,7 @@ import mixtures
 import pyarrow as pa
 import pyarrow.compute as compute
 import pyarrow.parquet as parquet
-from engine_base import cap_shards, data_root
+from acquire_shared import cap_shards, data_root
 from huggingface_hub import hf_hub_download, list_repo_files
 from sharding import already_done, atomic_write, partition, resolve_rank_world
 

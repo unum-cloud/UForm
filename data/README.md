@@ -11,20 +11,20 @@ The `Format` column reads `downloaded → stored`; every corpus is converted on 
 
 The tables above list what _exists_; this section is how a balanced slice of it lands on disk.
 The host data root comes from the `UFORM_DATA_ROOT` env var, falling back to the repository's own `data/` tree.
-The declarative plan lives in `python_data/staging_manifest.py` — one `StagingRow` per dataset, grouped into four modalities (text / image / video / audio).
+The declarative plan lives in `python_data/acquire_manifest.py` — one `StagingRow` per dataset, grouped into four modalities (text / image / video / audio).
 Sizing is disk-aware: `resolve_budget_gigabytes` derives one total budget (`--budget-gb` > `$UFORM_DATA_BUDGET_GB` > free disk × `SAFETY_MARGIN`), `MODALITY_WEIGHTS` splits it across modalities (cross-modal video / image lead, text stays substantial, audio is thinnest), and `allocate_targets` water-fills each modality's share across its growable rows.
-`python_data/stage_balanced_corpus.py` reads that manifest and, per row, runs that row's `download_command` — a `uv run python_data/download_<name>.py` invocation that pulls and repacks each assigned shard to parquet in one pass.
+`python_data/acquire_corpus.py` reads that manifest and, per row, runs that row's `download_command` — a `uv run python_data/download_<name>.py` invocation that pulls and repacks each assigned shard to parquet in one pass.
 `--dry-run` prints the exact commands and a per-modality balance table without downloading anything.
 
 ```sh
-uv run python_data/stage_balanced_corpus.py --dry-run                  # plan + balance table (auto-detect budget)
-uv run python_data/stage_balanced_corpus.py --dry-run --budget-gb 6000 # pin a 6 TB budget, reproducible plan
-uv run python_data/stage_balanced_corpus.py --modality all             # stage everything for real (resumable)
+uv run python_data/acquire_corpus.py --dry-run                  # plan + balance table (auto-detect budget)
+uv run python_data/acquire_corpus.py --dry-run --budget-gb 6000 # pin a 6 TB budget, reproducible plan
+uv run python_data/acquire_corpus.py --modality all             # stage everything for real (resumable)
 ```
 
 __Budgets and the cap vocabulary.__
 No source is pulled whole; the allocator's per-dataset GB target converts to one uniform cap flag.
-`--fraction F` (a leading `units × f` slice) and `--max-shards N` compose with the tighter one winning (`engine_base.cap_shards`); `--max-clips N` is the clip-native spelling for the YouTube-fetch datasets; and `--index-cap N` (`$UFORM_INDEX_CAP`) bounds how many windows an unbounded clip index even enumerates — distinct from the fetch cap, so `--fraction` / `--max-clips` lower the fetch below it, never above.
+`--fraction F` (a leading `units × f` slice) and `--max-shards N` compose with the tighter one winning (`acquire_shared.cap_shards`); `--max-clips N` is the clip-native spelling for the YouTube-fetch datasets; and `--index-cap N` (`$UFORM_INDEX_CAP`) bounds how many windows an unbounded clip index even enumerates — distinct from the fetch cap, so `--fraction` / `--max-clips` lower the fetch below it, never above.
 `--fanout N` on the clip fetchers is a parallelism knob, not a cap; the record repackers (C4-200M, Enron, Google Text-Norm) cap by `--max-records N`.
 A downloader caps _before_ transfer: it enumerates the sorted upstream shard list and keeps only the leading slice, so a fraction never downloads-then-deletes.
 

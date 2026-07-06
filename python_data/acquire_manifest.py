@@ -5,7 +5,7 @@
 """Balanced multi-modal staging manifest for the ~3 TB real corpus on `$UFORM_DATA_ROOT`.
 
 This module is the single declarative source the staging driver
-(`python_data.stage_balanced_corpus`) reads. It carries one `StagingRow` per dataset the owner
+(`python_data.acquire_corpus`) reads. It carries one `StagingRow` per dataset the owner
 wants staged, grouped into four modalities — text / image / video / audio — each sized by the disk-aware
 budget allocator (see "Budget model" below), not a flat per-modality target. Each row's shard glob is
 sourced from the stdlib-only JSON `python_data.mixtures` reader (no cudf / cupy), so the driver still
@@ -597,7 +597,7 @@ STAGING_ROWS: list[StagingRow] = [
         fraction_mechanism="fraction",
         download_command=_uv("python_data/download_vatex.py", "--fraction", "1.0"),
         flag="research-only (YouTube ToS): download_vatex.py pulls bilingual caption JSON (10 EN + 10 ZH/clip), "
-        "then fetches an H.264 mp4 per 10s window via fetch_media_clips.py under GNU parallel; ~60-80% yield.",
+        "then fetches an H.264 mp4 per 10s window via acquire_clips.py under GNU parallel; ~60-80% yield.",
     ),
     StagingRow(
         dataset="activitynet_captions",
@@ -609,7 +609,7 @@ STAGING_ROWS: list[StagingRow] = [
         fraction_mechanism="fraction",
         download_command=_uv("python_data/download_activitynet_captions.py", "--fraction", "0.20"),
         flag="research-only (YouTube ToS): download_activitynet_captions.py pulls densevid caption metadata, "
-        "then fetches the full H.264 mp4 per video via fetch_media_clips.py under GNU parallel; ~60-80% yield.",
+        "then fetches the full H.264 mp4 per video via acquire_clips.py under GNU parallel; ~60-80% yield.",
         weight=2.0,
         cap_flag="--fraction",
     ),
@@ -676,7 +676,7 @@ STAGING_ROWS: list[StagingRow] = [
         fraction_mechanism="fraction",
         download_command=_uv("python_data/download_auto_acd.py", "--fraction", "0.05"),
         flag="research-only (YouTube ToS): download_auto_acd.py fetches bestaudio->mp3 per clip via "
-        "fetch_media_clips.py under GNU parallel; ~60-80% audio yield audited in fetch_manifest.json.",
+        "acquire_clips.py under GNU parallel; ~60-80% audio yield audited in fetch_manifest.json.",
         weight=1.5,
         cap_flag="--fraction",
     ),

@@ -33,7 +33,7 @@ leading row groups of the remote files.  Records that share a window are folded 
 captions are joined, so no window is fetched twice.  The tiny built index (a few hundred-k small dicts) is
 cached under `<out-dir>/.captions/` keyed by the cap so re-runs and `--print-plan` are instant.
 
-The rest is the shared `fetch_media_clips.acquire_clips` orchestrator: a Slurm `(rank, world)` split so each
+The rest is the shared `acquire_clips.acquire_clips` orchestrator: a Slurm `(rank, world)` split so each
 worker fetches a disjoint `clips[rank::world]` stride, intra-host GNU-`parallel` fan-out, per-shard yt-dlp
 fetch (an H.264 `bestvideo+bestaudio` mux trimmed to the clip's window), and the uniform registry parquet:
 
@@ -64,7 +64,7 @@ import urllib.request
 from pathlib import Path
 
 import pyarrow.parquet as pq
-from fetch_media_clips import MediaClip, MediaKind, acquire_clips
+from acquire_clips import MediaClip, MediaKind, acquire_clips
 
 #: HuggingFace `resolve` URLs of the per-clip caption parquet shards (read by row group, never fully fetched).
 _CAPTION_PARQUET_URLS: tuple[str, ...] = tuple(

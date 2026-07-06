@@ -48,7 +48,7 @@ from pathlib import Path
 
 import pyarrow
 import pyarrow.parquet
-from engine_base import data_root
+from acquire_shared import data_root
 from huggingface_hub import snapshot_download
 
 #: Default host data root — overridable via `UFORM_DATA_ROOT`; the symlink target `data/c4_200m`

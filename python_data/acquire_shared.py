@@ -24,7 +24,7 @@ def data_root() -> Path:
     The single definition of the output root every standalone downloader shares, so the two idioms
     that used to coexist — `Path(__file__).resolve().parents[1] / "data"` and the older
     `os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")` — collapse to one. `acquire`
-    and `fetch_media_clips` resolve the same path; a dataset appends its own `<name>` subdirectory.
+    and `acquire_clips` resolve the same path; a dataset appends its own `<name>` subdirectory.
     """
     return Path(os.environ.get("UFORM_DATA_ROOT", Path(__file__).resolve().parents[1] / "data"))
 

@@ -59,7 +59,7 @@ import tempfile
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from engine_base import cap_shards, data_root
+from acquire_shared import cap_shards, data_root
 from huggingface_hub import snapshot_download
 
 #: Default host data root — overridable via `UFORM_DATA_ROOT`; the symlink target `data/mevis`.

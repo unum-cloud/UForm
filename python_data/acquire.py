@@ -52,7 +52,7 @@ import mixtures
 import pyarrow as pa
 import pyarrow.compute as compute
 import pyarrow.parquet as parquet
-from engine_base import artifact_path, cap_shards
+from acquire_shared import artifact_path, cap_shards
 from huggingface_hub import list_repo_files, snapshot_download
 from sharding import already_done, atomic_write, partition, resolve_rank_world
 
@@ -90,7 +90,7 @@ def _enumerate_shards(source_kind: str, repo_id: str | None, revision: str, shar
     """
     if source_kind == "youtube_fetch":
         raise NotImplementedError(
-            "youtube_fetch reuses fetch_media_clips over each index shard's (id, window, caption) rows; it "
+            "youtube_fetch reuses acquire_clips over each index shard's (id, window, caption) rows; it "
             "needs the per-dataset index-column names and is wired in a follow-up — until then the youtube "
             "download_*.py scripts remain the acquisition path."
         )

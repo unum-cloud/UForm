@@ -16,7 +16,7 @@ loaders read: `resolve_mixture` yields the exact `(resolved_glob, weight, text_f
 `TextMaskLoader` and the C++ loader consume — that shape is a hard contract, do not widen it. The dataset
 view (`dataset_spec`, `dataset_glob`, `dataset_columns`, `dataset_media_column`) aggregates a dataset
 across every mixture it appears in, asserting the declared column fields agree, and supplies the column
-contract the `acquire` assert and `staging_manifest` / `mine_hard_negatives` read. Stdlib `json` + `glob`
+contract the `acquire` assert and `acquire_manifest` / `mine_hard_negatives` read. Stdlib `json` + `glob`
 only, so importing it stays cheap enough that those tools read it instead of re-inlining glob strings.
 """
 

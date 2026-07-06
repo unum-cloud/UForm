@@ -28,7 +28,7 @@ import argparse
 import os
 import sys
 
-from engine_base import cap_shards, data_root
+from acquire_shared import cap_shards, data_root
 from huggingface_hub import list_repo_files, snapshot_download
 
 #: Default host data root — overridable via `UFORM_DATA_ROOT`; the symlink target every existing
