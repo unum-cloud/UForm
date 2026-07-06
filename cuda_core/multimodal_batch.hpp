@@ -408,31 +408,31 @@ struct multimodal_batch_mixer_t {
     /**
      *  @brief Member @p member_index 's slice of one mix — pure enqueue onto @p stream : gather its
      *      incoming segments from all members' @p loaded batches into its own @p mixed batch. Member
-     *      0's slice carries the multimem_domain's generation advance; every member barriers before its
+     *      0's slice carries the multimem_domain's round advance; every member barriers before its
      *      peer reads, and members are enqueued in order @c 0..members-1 within a step.
      *
      *  @param[in] member_index This GPU's index inside the borrowed @b multimem_domain —
      *      @c [0,multimem_domain_t::member_count()) , the same axis @c member() and @c barrier()
      *      take. Not a host_domain index and not a colocated_domain coordinate: the mixer's world is
      *      one multimem_domain until the InfiniBand lane is wired.
-     *  @param[in] epoch The keyed-draw counter the routing bijection folds with the run's seed.
+     *  @param[in] data_epoch The keyed-draw counter the routing bijection folds with the run's seed.
      *  @param[in] loaded Every member's freshly loaded batch, in member order.
      *  @param[out] mixed This member's destination batch — distinct storage from every @p loaded .
      *  @param[in] stream This member's stream; the caller holds no context around the call.
      */
-    [[nodiscard]] expected_t operator()(std::size_t member_index, epoch_t epoch,
+    [[nodiscard]] expected_t operator()(std::size_t member_index, data_epoch_t data_epoch,
                                         std::span<multimodal_batch_on_gpu_t const> loaded,
                                         multimodal_batch_on_gpu_t &mixed, gpu_stream_t &stream) noexcept;
 
     /** @brief The eager convenience: every member's slice in order over the per-GPU streams. */
-    [[nodiscard]] expected_t operator()(epoch_t epoch, std::span<multimodal_batch_on_gpu_t const> loaded,
+    [[nodiscard]] expected_t operator()(data_epoch_t data_epoch, std::span<multimodal_batch_on_gpu_t const> loaded,
                                         std::span<multimodal_batch_on_gpu_t> mixed,
                                         std::span<gpu_stream_t> streams) noexcept;
 
   private:
     /** @brief The main-owned multimem_domain — borrowed; its barrier brackets every mix. */
     multimem_domain_t *multimem_ = nullptr;
-    /** @brief The run's routing seed; combined with the per-call epoch inside the routing bijection. */
+    /** @brief The run's routing seed; combined with the per-call data epoch inside the routing bijection. */
     u64_t seed_ = 0;
     /** @brief The baked batch capacities every route and repack cursor is bounded by. */
     multimodal_batch_shape_t shape_ {};

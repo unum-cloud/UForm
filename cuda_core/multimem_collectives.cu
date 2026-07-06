@@ -11,18 +11,18 @@ namespace unum::uform::core {
 
 /**
  *  @brief Domain barrier: lane 0 release-adds 1 into every replica's counter, then acquire-spins on its
- *      @b own counter until all @c member_count arrivals of this generation landed. Monotonic — the
- *      counter never resets, so a captured step replays cleanly; the generation itself is device
- *      self-advanced by @ref barrier_generation_t::advance , not host-bumped.
+ *      @b own counter until all @c member_count arrivals of this round landed. Monotonic — the
+ *      counter never resets, so a captured step replays cleanly; the round itself is device
+ *      self-advanced by @ref barrier_round_t::advance , not host-bumped.
  *
  *  __grid_size__ @c [1,1,1] , one warp; no dynamic shared memory.
  */
 static __global__ void multimem_barrier_kernel_(multimem_member_t member) {
     if (threadIdx.x != 0u) return;
-    u32_t const target = *member.generation + member.member_count;
+    u32_t const target = *member.round + member.member_count;
     multimem_red_add_release_(member.multimem_flag, 1u);
     while (multimem_load_acquire_(member.own_flag()) < target) {
-        // Spin until every member's arrival of this generation reached our replica.
+        // Spin until every member's arrival of this round reached our replica.
     }
     __threadfence_system();
 }
@@ -35,13 +35,13 @@ static __global__ void multimem_barrier_kernel_(multimem_member_t member) {
  */
 static __global__ void multimem_barrier_peer_kernel_(multimem_member_t member) {
     if (threadIdx.x != 0u) return;
-    u32_t const target = *member.generation + member.member_count;
+    u32_t const target = *member.round + member.member_count;
     for (u32_t peer = 0; peer != member.member_count; ++peer) {
         u32_t *flag = member.peer_flag(peer);
         asm volatile("red.release.sys.global.add.u32 [%0], %1;" : : "l"(flag), "r"(1u) : "memory");
     }
     while (multimem_load_acquire_(member.own_flag()) < target) {
-        // Spin until every member's arrival of this generation reached our replica.
+        // Spin until every member's arrival of this round reached our replica.
     }
     __threadfence_system();
 }
@@ -147,14 +147,14 @@ expected<multimem_domain_t> multimem_domain_t::make(std::span<i32_t const> devic
     if (streams.size() != member_count)
         return result_t::fail(status_t::invalid_input_k, "every member needs its stream ({} vs {})", member_count,
                               streams.size());
-    // Host-side staging (memsets, the generation reset) needs a current context; the lead stream owns one.
+    // Host-side staging (memsets, the round reset) needs a current context; the lead stream owns one.
     switch_to_gpu_t gpu_scope {streams[0]};
     if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (device={})", devices[0]);
 
     multimem_domain_t domain;
     domain.payload_scalars_ = payload_scalars;
-    // Replica layout: [payload f32×N | flag u32 | generation u32], regions cache-line aligned. The
-    // generation scalar is live only in the lead replica, peer-read by every barrier.
+    // Replica layout: [payload f32×N | flag u32 | round u32], regions cache-line aligned. The
+    // round scalar is live only in the lead replica, peer-read by every barrier.
     std::size_t const replica_bytes = domain.flag_offset_() + 2 * sizeof(u32_t);
 
     bool multimem_everywhere = true;
@@ -220,19 +220,19 @@ expected<multimem_domain_t> multimem_domain_t::make(std::span<i32_t const> devic
         }
     }
 
-    // Zero every member's flag and the lead replica's generation.
+    // Zero every member's flag and the lead replica's round.
     for (std::size_t member = 0; member != member_count; ++member) {
         std::span<std::byte> member_slice = domain.replicas_.member_slice(member);
         CUdeviceptr const counters = reinterpret_cast<CUdeviceptr>(member_slice.data()) + domain.flag_offset_();
         if (CUresult result = cuMemsetD8(counters, 0, 2 * sizeof(u32_t)); result != CUDA_SUCCESS)
             return result_t::fail(result, "arrival counter reset failed (member={})", member);
     }
-    // The domain's monotonic step counter, seeding the lead replica's generation scalar on the lead
+    // The domain's monotonic step counter, seeding the lead replica's round scalar on the lead
     // stream (ordered after the cuMemsetD8 zero above); every advance self-bumps it on the device.
-    expected<barrier_generation_t> generation = barrier_generation_t::make(
-        u32r1_span_t {domain.generation_pointer_(), 1}, static_cast<u32_t>(member_count), streams[0]);
-    if (!generation) return result_t::fail(std::move(generation));
-    domain.generation_ = std::move(generation.value_);
+    expected<barrier_round_t> round = barrier_round_t::make(u32r1_span_t {domain.round_pointer_(), 1},
+                                                            static_cast<u32_t>(member_count), streams[0]);
+    if (!round) return result_t::fail(std::move(round));
+    domain.round_ = std::move(round.value_);
     return result_t {std::move(domain)};
 }
 

@@ -70,10 +70,10 @@ __global__ void rmsnorm_scale_grad_kernel(bf16r2_view_t input, f32r1_view_t inve
 }
 
 /** @brief Inverted keyed dropout, in place — external linkage; see the header. The @p salt selects the
- *      site (per layer, per residual join) and @p epoch , read from device memory, advances the mask per
+ *      site (per layer, per residual join) and @p data_epoch , read from device memory, advances the mask per
  *      step; @ref splitmix64_hash_t re-derives the identical keep decision wherever this runs. */
-__global__ void dropout_kernel(bf16r1_span_t values, u32r1_view_t epoch, u32_t salt, f32_t drop_probability) {
-    u32_t const key = salt ^ (epoch[0] * 2654435761u);
+__global__ void dropout_kernel(bf16r1_span_t values, u32r1_view_t data_epoch, u32_t salt, f32_t drop_probability) {
+    u32_t const key = salt ^ (data_epoch[0] * 2654435761u);
     f32_t const keep_scale = 1.0f / (1.0f - drop_probability);
     std::size_t const total = values.extent(0);
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;

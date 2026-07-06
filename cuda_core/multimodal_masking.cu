@@ -45,8 +45,9 @@ template <unsigned block_size_>
 static __global__ void masked_token_corrupt_kernel_(tokens_view_t clean, tokens_span_t distorted,
                                                     u32r1_span_t loss_weights, u32r1_view_t segment_offsets,
                                                     u32r1_view_t segment_lengths, modality_view_t segment_modality,
-                                                    u64_t seed, u32_t epoch, f32_t open_rate, f32_t continue_rate,
-                                                    f32_t replace_fraction, f32_t random_fraction) {
+                                                    u64_t seed, data_epoch_t data_epoch, f32_t open_rate,
+                                                    f32_t continue_rate, f32_t replace_fraction,
+                                                    f32_t random_fraction) {
     u32_t const segment = blockIdx.x * blockDim.x + threadIdx.x;
     if (segment >= segment_lengths.extent(0)) return;
     if (segment_modality[segment] != modality_t::text_k) return; // media segments stay clean, weight zero
@@ -60,18 +61,19 @@ static __global__ void masked_token_corrupt_kernel_(tokens_view_t clean, tokens_
             continue;
         }
         if (in_span)
-            in_span = masking_draw(seed, epoch, segment, column,
+            in_span = masking_draw(seed, data_epoch, segment, column,
                                    static_cast<u32_t>(masking_draw_purpose_t::span_continue_k)) < continue_rate;
         if (!in_span)
-            in_span = masking_draw(seed, epoch, segment, column,
+            in_span = masking_draw(seed, data_epoch, segment, column,
                                    static_cast<u32_t>(masking_draw_purpose_t::span_open_k)) < open_rate;
         if (!in_span) continue;
-        f32_t const action = masking_draw(seed, epoch, segment, column,
+        f32_t const action = masking_draw(seed, data_epoch, segment, column,
                                           static_cast<u32_t>(masking_draw_purpose_t::token_action_k));
         if (action < replace_fraction) { distorted[position] = byte_mask_k; }
         else if (action < replace_fraction + random_fraction)
             distorted[position] = static_cast<token_id_t>(
-                masking_draw(seed, epoch, segment, column, static_cast<u32_t>(masking_draw_purpose_t::random_byte_k)) *
+                masking_draw(seed, data_epoch, segment, column,
+                             static_cast<u32_t>(masking_draw_purpose_t::random_byte_k)) *
                 256.0f);
         loss_weights[position] = 1u; // the remaining fraction keeps the clean byte, still scored
     }
@@ -209,7 +211,7 @@ expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, cublaslt_ses
 
 expected_t masked_tokens_t::corrupt(tokens_view_t clean, tokens_span_t distorted, u32r1_span_t loss_weights,
                                     u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                    modality_view_t segment_modality, masking_recipe_t recipe, epoch_t epoch,
+                                    modality_view_t segment_modality, masking_recipe_t recipe, data_epoch_t data_epoch,
                                     gpu_stream_t &stream) noexcept {
     std::size_t const tokens = clean.extent(0);
     if (distorted.extent(0) != tokens || loss_weights.extent(0) != tokens)
@@ -234,7 +236,7 @@ expected_t masked_tokens_t::corrupt(tokens_view_t clean, tokens_span_t distorted
     dim3 const segment_grid {grid_size_for(segments), 1u, 1u};
     return launch_kernel(reinterpret_cast<void const *>(&masked_token_corrupt_kernel_), segment_grid, block_shape,
                          stream, clean, distorted, loss_weights, segment_offsets, segment_lengths, segment_modality,
-                         recipe.seed, epoch.index, open_rate, continue_rate, recipe.replace_fraction,
+                         recipe.seed, data_epoch, open_rate, continue_rate, recipe.replace_fraction,
                          recipe.random_fraction);
 }
 
@@ -294,12 +296,13 @@ inline constexpr f32_t patch_variance_epsilon_k = 1.0e-6f;
  *      (@p temporal_groups > 1 ) keys only the spatial index, so a masked cell stays masked across time.
  *
  *  __grid_size__ @c [grid_size_for(patches),1,1] , one thread per patch; no dynamic shared memory. */
-static __global__ void patch_mask_sample_kernel_(u32r1_span_t mask, u64_t seed, u32_t epoch, f32_t mask_ratio,
-                                                 u32_t spatial_patches) {
+static __global__ void patch_mask_sample_kernel_(u32r1_span_t mask, u64_t seed, data_epoch_t data_epoch,
+                                                 f32_t mask_ratio, u32_t spatial_patches) {
     u32_t const patch = blockIdx.x * blockDim.x + threadIdx.x;
     if (patch >= mask.extent(0)) return;
     u32_t const key = patch % spatial_patches; // == patch when spatial_patches == max_patches (random)
-    f32_t const draw = masking_draw(seed, epoch, key, 0u, static_cast<u32_t>(masking_draw_purpose_t::patch_mask_k));
+    f32_t const draw = masking_draw(seed, data_epoch, key, 0u,
+                                    static_cast<u32_t>(masking_draw_purpose_t::patch_mask_k));
     mask[patch] = draw < mask_ratio ? 1u : 0u;
 }
 
@@ -444,13 +447,14 @@ expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, cublaslt_s
     return result_t {std::move(head)};
 }
 
-expected_t masked_patches_t::sample_mask(masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept {
+expected_t masked_patches_t::sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch,
+                                         gpu_stream_t &stream) noexcept {
     u32_t const patches = config_.max_patches;
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const patch_grid {grid_size_for(patches), 1u, 1u};
     u32_t const spatial_patches = patches / config_.temporal_groups;
     return launch_kernel(reinterpret_cast<void const *>(&patch_mask_sample_kernel_), patch_grid, block_shape, stream,
-                         mask_.span(), recipe.seed, epoch.index, config_.mask_ratio, spatial_patches);
+                         mask_.span(), recipe.seed, data_epoch, config_.mask_ratio, spatial_patches);
 }
 
 expected_t masked_patches_t::corrupt_raw(nk::tensor_span<pixel_t, 2> raw_patches, gpu_stream_t &stream) noexcept {
@@ -518,10 +522,12 @@ expected_t masked_patches_t::fill(array<differentiable_weights_t> &weights) noex
  *      whole waveform frames are masked i.i.d.
  *
  *  __grid_size__ @c [grid_size_for(frames),1,1] , one thread per frame; no dynamic shared memory. */
-static __global__ void frame_mask_sample_kernel_(u32r1_span_t mask, u64_t seed, u32_t epoch, f32_t mask_ratio) {
+static __global__ void frame_mask_sample_kernel_(u32r1_span_t mask, u64_t seed, data_epoch_t data_epoch,
+                                                 f32_t mask_ratio) {
     u32_t const frame = blockIdx.x * blockDim.x + threadIdx.x;
     if (frame >= mask.extent(0)) return;
-    f32_t const draw = masking_draw(seed, epoch, frame, 0u, static_cast<u32_t>(masking_draw_purpose_t::frame_mask_k));
+    f32_t const draw = masking_draw(seed, data_epoch, frame, 0u,
+                                    static_cast<u32_t>(masking_draw_purpose_t::frame_mask_k));
     mask[frame] = draw < mask_ratio ? 1u : 0u;
 }
 
@@ -666,12 +672,13 @@ expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, cublaslt_ses
     return result_t {std::move(head)};
 }
 
-expected_t masked_frames_t::sample_mask(masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept {
+expected_t masked_frames_t::sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch,
+                                        gpu_stream_t &stream) noexcept {
     u32_t const frames = config_.max_frames;
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const frame_grid {grid_size_for(frames), 1u, 1u};
     return launch_kernel(reinterpret_cast<void const *>(&frame_mask_sample_kernel_), frame_grid, block_shape, stream,
-                         mask_.span(), recipe.seed, epoch.index, config_.mask_ratio);
+                         mask_.span(), recipe.seed, data_epoch, config_.mask_ratio);
 }
 
 expected_t masked_frames_t::corrupt_raw(f32r2_span_t raw_frames, gpu_stream_t &stream) noexcept {

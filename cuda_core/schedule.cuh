@@ -31,9 +31,9 @@
  *
  *  A captured graph holds @b model math only — entry / embedding, the block stack, the final RMSNorm, the
  *  @b local loss, and backward. The distributed work — cross-GPU loss exchange, the gradient reduce, the
- *  @ref barrier_generation_t barriers, and the optimizer's world step — is @b never fused into it; it is
+ *  @ref barrier_round_t barriers, and the optimizer's world step — is @b never fused into it; it is
  *  its own region the parent scope sequences after the model region. UForm is a distributed-loss training
- *  stack, so a monolithic all-in-one graph welds the pure math to world state, and the generation, the
+ *  stack, so a monolithic all-in-one graph welds the pure math to world state, and the round, the
  *  reduce, and the loss exchange can no longer be reasoned about — or replayed — independently. Forward and
  *  backward stay together (one contiguous, shape-stable computation); the only boundary is model-vs-collective.
  *
@@ -853,38 +853,38 @@ struct gpu_event_t {
 };
 
 /**
- *  @brief The monotonic step counter of one collective surface — the device generation scalar @b is
+ *  @brief The monotonic step counter of one collective surface — the device round scalar @b is
  *      the count, and it is the sole source of truth (no host shadow, no pinned cell). One behavior:
- *      @ref advance enqueues a one-thread device increment (@c generation += increment , then a
+ *      @ref advance enqueues a one-thread device increment (@c round += increment , then a
  *      @c __threadfence_system() ), once per step on the surface's lead stream before any barrier.
- *      Because the bump lives on the device, a captured collective region self-advances the generation
+ *      Because the bump lives on the device, a captured collective region self-advances the round
  *      on every @c cuGraphLaunch replay with no host intervention. The scalar is seeded @c 0u-increment
- *      at @ref make so the first advance yields generation 0. Counts never reset; a replayed barrier's
+ *      at @ref make so the first advance yields round 0. Counts never reset; a replayed barrier's
  *      target only grows.
  */
-struct barrier_generation_t {
+struct barrier_round_t {
 
-    barrier_generation_t() noexcept = default;
-    barrier_generation_t(barrier_generation_t const &) = delete;
-    barrier_generation_t &operator=(barrier_generation_t const &) = delete;
-    barrier_generation_t(barrier_generation_t &&) noexcept = default;
-    barrier_generation_t &operator=(barrier_generation_t &&) noexcept = default;
+    barrier_round_t() noexcept = default;
+    barrier_round_t(barrier_round_t const &) = delete;
+    barrier_round_t &operator=(barrier_round_t const &) = delete;
+    barrier_round_t(barrier_round_t &&) noexcept = default;
+    barrier_round_t &operator=(barrier_round_t &&) noexcept = default;
 
-    /** @brief Seed the device generation scalar — once, at setup, with a current context.
-     *  @param[in] device_generation The one-scalar device destination, borrowed for this object's lifetime.
+    /** @brief Seed the device round scalar — once, at setup, with a current context.
+     *  @param[in] device_round The one-scalar device destination, borrowed for this object's lifetime.
      *  @param[in] increment How far one step advances the count (a member count, a round count).
      *  @param[in] stream The lead stream the seed is enqueued on, ordered before the first @ref advance. */
-    [[nodiscard]] static expected<barrier_generation_t> make(u32r1_span_t device_generation, u32_t increment,
-                                                             gpu_stream_t &stream) noexcept {
-        barrier_generation_t counter;
-        counter.device_generation_ = device_generation;
+    [[nodiscard]] static expected<barrier_round_t> make(u32r1_span_t device_round, u32_t increment,
+                                                        gpu_stream_t &stream) noexcept {
+        barrier_round_t counter;
+        counter.device_round_ = device_round;
         counter.increment_ = increment;
-        // Seed one increment below zero so the first advance yields generation 0 (device is the sole source of truth).
-        if (CUresult result = cuMemsetD32Async(reinterpret_cast<CUdeviceptr>(device_generation.data()), 0u - increment,
-                                               1, stream.get());
+        // Seed one increment below zero so the first advance yields round 0 (device is the sole source of truth).
+        if (CUresult result = cuMemsetD32Async(reinterpret_cast<CUdeviceptr>(device_round.data()), 0u - increment, 1,
+                                               stream.get());
             result != CUDA_SUCCESS)
-            return expected<barrier_generation_t>::fail(result, "generation seed failed");
-        return expected<barrier_generation_t> {std::move(counter)};
+            return expected<barrier_round_t>::fail(result, "round seed failed");
+        return expected<barrier_round_t> {std::move(counter)};
     }
 
     /** @brief Enqueue the one-thread device increment — once per step, on the surface's lead stream,
@@ -893,7 +893,7 @@ struct barrier_generation_t {
 
   private:
     /** @brief The borrowed one-scalar device destination the barriers spin against and @ref advance bumps. */
-    u32r1_span_t device_generation_ {};
+    u32r1_span_t device_round_ {};
     /** @brief One step's advance — the arrivals a barrier waits for. */
     u32_t increment_ = 0;
 };

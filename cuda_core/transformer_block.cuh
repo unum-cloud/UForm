@@ -210,14 +210,14 @@ __global__ void rmsnorm_scale_grad_kernel(bf16r2_view_t input, f32r1_view_t inve
  *  @brief Inverted dropout, in place and keyed — declared here with @b external linkage (like the
  *      @c rmsnorm_* family) so the block, the tower, and any future consumer launch the one shared symbol.
  *      A single op serves both directions: forward runs it on the activations, backward on the same site's
- *      branch gradient, and because the keep decision is re-derived from @p salt and the device @p epoch it
+ *      branch gradient, and because the keep decision is re-derived from @p salt and the device @p data_epoch it
  *      needs no stored mask — the two launches agree by construction. Keep with prob @c 1−p (a keyed draw
- *      @c ≥ p ), scale kept values by @c 1/(1−p) , zero the rest; @p epoch is read from device memory so a
+ *      @c ≥ p ), scale kept values by @c 1/(1−p) , zero the rest; @p data_epoch is read from device memory so a
  *      captured step re-keys per replay. Launch only when @c drop_probability > 0 .
  *
  *  __grid_size__ grid-stride over the flattened extent; no dynamic shared memory.
  */
-__global__ void dropout_kernel(bf16r1_span_t values, u32r1_view_t epoch, u32_t salt, f32_t drop_probability);
+__global__ void dropout_kernel(bf16r1_span_t values, u32r1_view_t data_epoch, u32_t salt, f32_t drop_probability);
 
 namespace fe = cudnn_frontend;
 

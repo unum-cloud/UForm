@@ -117,10 +117,25 @@ inline constexpr unsigned kernel_block_size_default_k = 256u;
  *  @sa Defines the upper bound for @ref mesh_shape_t::gpus_per_host_domain. */
 inline constexpr unsigned max_gpus_per_host_k = 32u;
 
-/** @brief One pass over the dataset — a strong type, so the keyed draws (shuffling, mixing, masking)
- *      can never confuse it with any other counter in an argument list. */
-struct epoch_t {
-    u32_t index = 0;
+/** @brief One pass over the data — the sole key of every deterministic draw (shuffling, mixing, masking,
+ *      synthetic contents). Distinct from @ref optimizer_step_t : a resumed run at the same data epoch
+ *      reproduces the same draws regardless of how many optimizer steps preceded it. */
+struct data_epoch_t {
+    u32_t ordinal = 0;
+};
+
+/** @brief One optimizer iteration — the learning-rate schedule's clock and the report / checkpoint
+ *      cadence. Never a draw key. Synthetic corpora key the pass on the iteration; that crossing is
+ *      spelled @c data_epoch_t {optimizer_step.ordinal} exactly where it happens. */
+struct optimizer_step_t {
+    u32_t ordinal = 0;
+};
+
+/** @brief One observed round of a device-side collective barrier — @ref barrier_round_t 's self-advanced
+ *      scalar, read back for telemetry and conformance. Never a caller input: the device bumps it, the
+ *      host only observes. */
+struct concurrency_round_t {
+    u32_t ordinal = 0;
 };
 
 /** @brief @c ceil(numerator/denominator) over non-negative integers — grid sizing, chunk counts. */
@@ -140,15 +155,16 @@ struct epoch_t {
  *  @brief The project's one keyed hasher — a splitmix64 core, used three ways and nothing else, so no
  *      free-standing @c mix / @c combine / @c derive helpers proliferate. Pure and device-callable;
  *      stateless by design (no engine object to step, unlike @c std::minstd or a @c curandState ), so a
- *      thread hashes @c (key, its own index) independently and any result is recomputable from its inputs
+ *      thread hashes its own @c (key,index) pair independently and any result is recomputable from its inputs
  *      on any host or GPU and across restarts. Every keyed draw — dataset shuffling, batch mixing, span
  *      masking, dropout — builds on this; @ref epoch_permutation is the one primitive it cannot be (a
  *      hash collides, a permutation does not).
  *
  *  - @c hash(word) avalanches one word (the finalizer).
- *  - @c hash(key, value) folds @p value into @p key (one mixing step).
- *  - @c hash(a, b, c, ...) folds every argument left to right — the seeder over @c (seed, epoch, rank,
- *    index, salt, ...) , and the indexed draw @c hash(key, index) is just the two-argument case.
+ *  - @c hash(key,value) folds @p value into @p key (one mixing step).
+ *  - @c hash(a,b,c,...) folds every argument left to right — the seeder over
+ *    @c (seed,data_epoch,member,index,salt,...) , and the indexed draw @c hash(key,index) is just the
+ *    two-argument case.
  */
 struct splitmix64_hash_t {
     /** @brief Avalanche one 64-bit word — the splitmix64 finalizer. */
@@ -171,13 +187,13 @@ struct splitmix64_hash_t {
 
 /** @brief The keyed bijection over @c [0,count) : a 4-round Feistel — its round the one
  *      @ref splitmix64_hash_t — over the smallest even-bit domain covering @p count , cycle-walked back
- *      into range. Identical on every host and GPU for the same @c (seed,epoch) , so no shuffle ever
+ *      into range. Identical on every host and GPU for the same @c (seed,data_epoch) , so no shuffle ever
  *      needs an exchange, and @b without replacement (a bijection) — the guarantee the hasher's draws,
  *      which collide, cannot give. */
-[[nodiscard]] constexpr std::size_t epoch_permutation(u64_t seed, epoch_t epoch, std::size_t index,
+[[nodiscard]] constexpr std::size_t epoch_permutation(u64_t seed, data_epoch_t data_epoch, std::size_t index,
                                                       std::size_t count) noexcept {
     splitmix64_hash_t const hash {};
-    u64_t const key = hash(seed, epoch.index);
+    u64_t const key = hash(seed, data_epoch.ordinal);
     u32_t const half_bits = (ceil_log2(static_cast<u32_t>(count)) + 1u) / 2u;
     u32_t const half_mask = (1u << half_bits) - 1u;
     std::size_t value = index;

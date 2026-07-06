@@ -35,10 +35,10 @@ inline constexpr unsigned infiniband_doorbell_block_threads_k = 32u;
  */
 static __global__ void infiniband_allreduce_post_kernel_(infiniband_links_view_t links, u32_t round, f32_t const *shard,
                                                          std::size_t shard_scalars,
-                                                         infiniband_generation_view_t flag_generation) {
+                                                         infiniband_round_view_t flag_round) {
     if (threadIdx.x != 0) return;
     infiniband_link_t const link = links[round];
-    u32_t const flag_value = flag_generation[0] + round + 1u;
+    u32_t const flag_value = flag_round[0] + round + 1u;
     infiniband_post_write(link.queue, reinterpret_cast<u64_t>(shard), link.local_access_key,
                           link.remote_heap_base + link.landing_offset, link.remote_access_key,
                           static_cast<u32_t>(shard_scalars * sizeof(f32_t)), false, nullptr);
@@ -51,10 +51,10 @@ static __global__ void infiniband_allreduce_post_kernel_(infiniband_links_view_t
  *      target (monotonic @c >= — the flag never resets), then a system fence orders the partner's landed
  *      payload before the next kernel, propagated to the block by the closing @c __syncthreads . */
 static __global__ void infiniband_flag_wait_kernel_(infiniband_links_view_t links, u32_t round,
-                                                    infiniband_generation_view_t flag_generation) {
+                                                    infiniband_round_view_t flag_round) {
     if (threadIdx.x == 0) {
         infiniband_link_t const link = links[round];
-        u32_t const target = flag_generation[0] + round + 1u;
+        u32_t const target = flag_round[0] + round + 1u;
         while (infiniband_load_acquire_u32(link.arrival_flag) < target) {
             // Spin until the partner's flag write for this round lands; its payload already did.
         }
@@ -87,7 +87,7 @@ static __global__ void infiniband_accumulate_f32_kernel_(infiniband_links_view_t
  */
 static __global__ void infiniband_allgather_post_kernel_(infiniband_links_view_t links, u32_t round,
                                                          infiniband_allgather_plan_t plan, char const *gathered_bytes,
-                                                         infiniband_generation_view_t flag_generation) {
+                                                         infiniband_round_view_t flag_round) {
     if (threadIdx.x != 0) return;
     infiniband_link_t const link = links[round];
     // The recursive-doubling bit math keys on the link's true round; the loop index drives only the
@@ -97,7 +97,7 @@ static __global__ void infiniband_allgather_post_kernel_(infiniband_links_view_t
     u32_t const group_base = plan.this_multimem_domain & ~((1u << bit_round) - 1u);
     std::size_t const send_byte_offset = static_cast<std::size_t>(group_base) * plan.block_bytes;
     std::size_t const send_bytes = (static_cast<std::size_t>(1u) << bit_round) * plan.block_bytes;
-    u32_t const flag_value = flag_generation[0] + round + 1u;
+    u32_t const flag_value = flag_round[0] + round + 1u;
 
     infiniband_post_write(link.queue, reinterpret_cast<u64_t>(gathered_bytes + send_byte_offset), link.local_access_key,
                           link.remote_heap_base + send_byte_offset, link.remote_access_key,
@@ -395,17 +395,17 @@ expected<infiniband_member_t> infiniband_member_t::make_(mesh_topology_t const &
     gpu_arena_alloc<u32_t> u32_alloc {arena};
     member.heap_ = b8r1_tensor_arena_t::try_empty({heap_bytes}, byte_alloc);
     member.links_ = infiniband_links_tensor_t::try_empty({layout.rounds}, link_alloc);
-    member.generation_scalar_ = u32r1_tensor_arena_t::try_empty({1}, u32_alloc);
-    if (!member.heap_ || !member.links_ || !member.generation_scalar_)
+    member.round_scalar_ = u32r1_tensor_arena_t::try_empty({1}, u32_alloc);
+    if (!member.heap_ || !member.links_ || !member.round_scalar_)
         return result_t::fail(status_t::bad_alloc_k, "member heap / table allocation failed ({} bytes, arena_used={})",
                               heap_bytes, arena.used());
     if (cuMemsetD8(reinterpret_cast<CUdeviceptr>(member.heap_.data()), 0, heap_bytes) != CUDA_SUCCESS ||
-        cuMemsetD8(reinterpret_cast<CUdeviceptr>(member.generation_scalar_.data()), 0, sizeof(u32_t)) != CUDA_SUCCESS)
+        cuMemsetD8(reinterpret_cast<CUdeviceptr>(member.round_scalar_.data()), 0, sizeof(u32_t)) != CUDA_SUCCESS)
         return result_t::fail(status_t::cuda_error_k, "member heap reset failed");
-    expected<barrier_generation_t> counter = barrier_generation_t::make(
-        u32r1_span_t {member.generation_scalar_.data(), 1}, layout.rounds, stream);
+    expected<barrier_round_t> counter = barrier_round_t::make(u32r1_span_t {member.round_scalar_.data(), 1},
+                                                              layout.rounds, stream);
     if (!counter) return result_t::fail(std::move(counter));
-    member.generation_ = std::move(counter.value_);
+    member.round_ = std::move(counter.value_);
     if (member.endpoints_.try_resize(layout.rounds) != status_t::success_k ||
         member.queues_.try_resize(layout.rounds) != status_t::success_k ||
         member.completions_.try_resize(layout.rounds) != status_t::success_k)
@@ -465,7 +465,7 @@ expected<infiniband_member_t> infiniband_member_t::make_(mesh_topology_t const &
             link.landing_offset = 0;
         }
         link.remote_flag_offset = layout.flags_offset() + round * sizeof(u32_t);
-        link.arrival_flag = reinterpret_cast<infiniband_generation_t *>(member.heap_.data() + link.remote_flag_offset);
+        link.arrival_flag = reinterpret_cast<infiniband_round_t *>(member.heap_.data() + link.remote_flag_offset);
         host_links[round] = link;
     }
     if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(member.links_.data()), host_links.view().data(),
@@ -486,14 +486,14 @@ expected_t infiniband_member_t::allreduce_sum(gpu_stream_t &stream) noexcept {
     dim3 const doorbell_grid {1u, 1u, 1u};
     dim3 const doorbell_block {infiniband_doorbell_block_threads_k, 1u, 1u};
     infiniband_links_view_t const links {links_.data(), layout_.rounds};
-    infiniband_generation_view_t const generation {generation_scalar_.data(), 1};
+    infiniband_round_view_t const round_view {round_scalar_.data(), 1};
     for (u32_t round = 0; round != layout_.rounds; ++round) {
         expected_t launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_allreduce_post_kernel_),
                                             doorbell_grid, doorbell_block, stream, links, round,
-                                            static_cast<f32_t const *>(shard), shard_scalars, generation);
+                                            static_cast<f32_t const *>(shard), shard_scalars, round_view);
         if (launched)
             launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_flag_wait_kernel_), doorbell_grid,
-                                     doorbell_block, stream, links, round, generation);
+                                     doorbell_block, stream, links, round, round_view);
         if (launched)
             launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_accumulate_f32_kernel_),
                                      dim3 {accumulate_grid, 1u, 1u}, dim3 {kernel_block_size_default_k, 1u, 1u}, stream,
@@ -515,14 +515,14 @@ expected_t infiniband_member_t::allgather(gpu_stream_t &stream) noexcept {
     dim3 const doorbell_grid {1u, 1u, 1u};
     dim3 const doorbell_block {infiniband_doorbell_block_threads_k, 1u, 1u};
     infiniband_links_view_t const links {links_.data(), layout_.rounds};
-    infiniband_generation_view_t const generation {generation_scalar_.data(), 1};
+    infiniband_round_view_t const round_view {round_scalar_.data(), 1};
     for (u32_t round = 0; round != layout_.rounds; ++round) {
         expected_t launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_allgather_post_kernel_),
                                             doorbell_grid, doorbell_block, stream, links, round, plan, payload_bytes,
-                                            generation);
+                                            round_view);
         if (launched)
             launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_flag_wait_kernel_), doorbell_grid,
-                                     doorbell_block, stream, links, round, generation);
+                                     doorbell_block, stream, links, round, round_view);
         if (!launched) return launched;
     }
     return {};

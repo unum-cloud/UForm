@@ -133,15 +133,16 @@ struct batch_sources_t_ {
  *  __grid_size__ @c [1,1,1] , one thread live; no dynamic shared memory.
  */
 static __global__ void batch_geometry_kernel_(batch_sources_t_ sources, u32r1_span_t mixed_offsets,
-                                              u32r1_span_t mixed_lengths, u32_t member_index, u32_t epoch, u64_t seed,
-                                              u32_t segments_per_gpu, u32_t rows_per_gpu, u32_t columns_per_row) {
+                                              u32r1_span_t mixed_lengths, u32_t member_index, data_epoch_t data_epoch,
+                                              u64_t seed, u32_t segments_per_gpu, u32_t rows_per_gpu,
+                                              u32_t columns_per_row) {
     if (threadIdx.x != 0u || blockIdx.x != 0u) return;
     std::size_t const world_segments = static_cast<std::size_t>(segments_per_gpu) * sources.count;
     u32_t const capacity = rows_per_gpu * columns_per_row;
     u32_t cursor = 0;
     for (u32_t segment = 0; segment != segments_per_gpu; ++segment) {
         std::size_t const destination = static_cast<std::size_t>(member_index) * segments_per_gpu + segment;
-        std::size_t const source = epoch_permutation(seed, epoch_t {epoch}, destination, world_segments);
+        std::size_t const source = epoch_permutation(seed, data_epoch, destination, world_segments);
         batch_source_t_ const &peer = sources.entries[source / segments_per_gpu];
         u32_t columns = peer.segment_lengths[source % segments_per_gpu];
         // A segment never crosses its row: jump the cursor to the next row when it would.
@@ -169,13 +170,13 @@ static __global__ void batch_geometry_kernel_(batch_sources_t_ sources, u32r1_sp
  *  __grid_size__ @c [segments_per_gpu,1,1] , threads stripe the content run; no dynamic shared memory.
  */
 static __global__ void batch_gather_kernel_(batch_sources_t_ sources, batch_dest_t_ dest, u32r1_view_t mixed_offsets,
-                                            u32r1_view_t mixed_lengths, u32_t member_index, u32_t epoch, u64_t seed,
-                                            u32_t segments_per_gpu, u32_t image_patch_scalars, u32_t video_tube_scalars,
-                                            u32_t audio_frame_scalars) {
+                                            u32r1_view_t mixed_lengths, u32_t member_index, data_epoch_t data_epoch,
+                                            u64_t seed, u32_t segments_per_gpu, u32_t image_patch_scalars,
+                                            u32_t video_tube_scalars, u32_t audio_frame_scalars) {
     u32_t const segment = blockIdx.x;
     std::size_t const world_segments = static_cast<std::size_t>(segments_per_gpu) * sources.count;
     std::size_t const destination = static_cast<std::size_t>(member_index) * segments_per_gpu + segment;
-    std::size_t const source = epoch_permutation(seed, epoch_t {epoch}, destination, world_segments);
+    std::size_t const source = epoch_permutation(seed, data_epoch, destination, world_segments);
     batch_source_t_ const &peer = sources.entries[source / segments_per_gpu];
     u32_t const source_segment = static_cast<u32_t>(source % segments_per_gpu);
 
@@ -262,7 +263,7 @@ expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(multimem_domai
     return result_t {std::move(mixer)};
 }
 
-expected_t multimodal_batch_mixer_t::operator()(std::size_t member_index, epoch_t epoch,
+expected_t multimodal_batch_mixer_t::operator()(std::size_t member_index, data_epoch_t data_epoch,
                                                 std::span<multimodal_batch_on_gpu_t const> loaded,
                                                 multimodal_batch_on_gpu_t &mixed, gpu_stream_t &stream) noexcept {
     std::size_t const members = multimem_->member_count();
@@ -327,18 +328,19 @@ expected_t multimodal_batch_mixer_t::operator()(std::size_t member_index, epoch_
     dim3 const segment_grid {shape_.max_segments_per_gpu, 1u, 1u};
     expected_t staged = launch_kernel(reinterpret_cast<void const *>(&batch_geometry_kernel_), one_block, block_shape,
                                       stream, sources, mixed_offsets, mixed_lengths, static_cast<u32_t>(member_index),
-                                      epoch.index, seed_, shape_.max_segments_per_gpu, shape_.max_rows_per_gpu,
+                                      data_epoch, seed_, shape_.max_segments_per_gpu, shape_.max_rows_per_gpu,
                                       shape_.max_columns_per_row);
     if (staged)
         staged = launch_kernel(reinterpret_cast<void const *>(&batch_gather_kernel_), segment_grid, block_shape, stream,
                                sources, dest, u32r1_view_t {mixed_offsets.data(), mixed_offsets.extent(0)},
                                u32r1_view_t {mixed_lengths.data(), mixed_lengths.extent(0)},
-                               static_cast<u32_t>(member_index), epoch.index, seed_, shape_.max_segments_per_gpu,
+                               static_cast<u32_t>(member_index), data_epoch, seed_, shape_.max_segments_per_gpu,
                                image_patch_scalars, video_tube_scalars, audio_frame_scalars);
     return staged;
 }
 
-expected_t multimodal_batch_mixer_t::operator()(epoch_t epoch, std::span<multimodal_batch_on_gpu_t const> loaded,
+expected_t multimodal_batch_mixer_t::operator()(data_epoch_t data_epoch,
+                                                std::span<multimodal_batch_on_gpu_t const> loaded,
                                                 std::span<multimodal_batch_on_gpu_t> mixed,
                                                 std::span<gpu_stream_t> streams) noexcept {
     std::size_t const members = multimem_->member_count();
@@ -346,7 +348,7 @@ expected_t multimodal_batch_mixer_t::operator()(epoch_t epoch, std::span<multimo
         return expected_t::fail(status_t::invalid_input_k, "every member needs its stream and mixed batch ({} members)",
                                 members);
     for (std::size_t member_index = 0; member_index != members; ++member_index)
-        if (expected_t staged = (*this)(member_index, epoch, loaded, mixed[member_index], streams[member_index]);
+        if (expected_t staged = (*this)(member_index, data_epoch, loaded, mixed[member_index], streams[member_index]);
             !staged)
             return staged;
     return {};

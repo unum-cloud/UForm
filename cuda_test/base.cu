@@ -17,7 +17,7 @@
  *
  *      - @ref learning_rate_schedule — the warmup / cosine policy's properties, pure host math, no GPU.
  *      - @ref run_base_conformance for the tokens and omni mixtures — @b A every replica bitwise-matches the
- *        lead, @b B the barrier generation advanced and reads identically, @b C a reseeded eager rerun lands
+ *        lead, @b B the barrier round advanced and reads identically, @b C a reseeded eager rerun lands
  *        bitwise on the captured run, @b D the composite loss fell, @b E every live head's loss read nonzero at
  *        least once (the keyed partition fed every modality).
  *      - @ref mixture_sweep — the cross-product of every media subset (2³) with one-row and two-row budgets;
@@ -97,7 +97,7 @@ using namespace unum::uform::test;
 [[nodiscard]] static expected_t run_steps_(base_trainer_t &trainer, distributed_adafactor_t &optimizer,
                                            std::span<gpu_replay_graph_t> graphs, u32_t begin, u32_t end) noexcept {
     for (u32_t ordinal = begin; ordinal != end; ++ordinal)
-        if (expected_t stepped = trainer.step(ordinal, optimizer, graphs); !stepped) return stepped;
+        if (expected_t stepped = trainer.step(optimizer_step_t {ordinal}, optimizer, graphs); !stepped) return stepped;
     return {};
 }
 
@@ -169,17 +169,17 @@ static void synchronize_(base_trainer_t &trainer) noexcept {
     return left.size() == right.size() && std::memcmp(left.data(), right.data(), left.size() * sizeof(bf16_t)) == 0;
 }
 
-/** @brief DtoH the domain's barrier generation through member @p member_index 's accessor — zero when absent
+/** @brief DtoH the domain's barrier round through member @p member_index 's accessor — zero when absent
  *      or when the readback slips (assertion B treats zero as "never advanced"). */
-[[nodiscard]] static u32_t read_generation_(multimem_domain_t &domain, u32_t member_index,
-                                            gpu_stream_t &stream) noexcept {
-    u32_t const *const generation = domain.member(member_index).generation;
-    if (generation == nullptr) return 0u;
+[[nodiscard]] static concurrency_round_t read_round_(multimem_domain_t &domain, u32_t member_index,
+                                                     gpu_stream_t &stream) noexcept {
+    u32_t const *const round = domain.member(member_index).round;
+    if (round == nullptr) return concurrency_round_t {0u};
     u32r1_tensor_pinned_t staging = u32r1_tensor_pinned_t::try_empty({1}, pinned_alloc<u32_t> {});
-    nk::tensor_view<u32_t, 1> const source {generation, 1};
-    if (!staging || !copy_device_to_host(source, staging.span(), stream)) return 0u;
+    nk::tensor_view<u32_t, 1> const source {round, 1};
+    if (!staging || !copy_device_to_host(source, staging.span(), stream)) return concurrency_round_t {0u};
     cuStreamSynchronize(stream.get());
-    return staging[0];
+    return concurrency_round_t {staging[0]};
 }
 
 /** @brief The warmup / cosine policy's own properties, pure host math: a strictly monotone ramp topping out
@@ -194,29 +194,30 @@ static void learning_rate_schedule(test_suite_t &suite) {
 
     bool ramp_monotone = true;
     for (u32_t ordinal = 1; ordinal < config.warmup_steps; ++ordinal)
-        ramp_monotone = ramp_monotone && config.learning_rate_for(ordinal) > config.learning_rate_for(ordinal - 1u);
+        ramp_monotone = ramp_monotone && config.learning_rate_for(optimizer_step_t {ordinal}) >
+                                             config.learning_rate_for(optimizer_step_t {ordinal - 1u});
     suite.check(ramp_monotone, "the warmup ramp is strictly monotone");
-    f32_t const peak = config.learning_rate_for(config.warmup_steps - 1u);
+    f32_t const peak = config.learning_rate_for(optimizer_step_t {config.warmup_steps - 1u});
     suite.check(peak == config.learning_rate, "the ramp tops out exactly at the peak: got {} want {}", peak,
                 config.learning_rate);
 
     bool decay_monotone = true, bounded = true;
     f32_t previous = peak;
     for (u32_t ordinal = config.warmup_steps; ordinal < config.steps; ++ordinal) {
-        f32_t const rate = config.learning_rate_for(ordinal);
+        f32_t const rate = config.learning_rate_for(optimizer_step_t {ordinal});
         decay_monotone = decay_monotone && rate <= previous;
         bounded = bounded && rate >= config.min_learning_rate && rate <= config.learning_rate;
         previous = rate;
     }
     suite.check(decay_monotone, "the cosine decay never rises");
     suite.check(bounded, "every decay rate stays within the floor-to-peak band");
-    f32_t const tail = config.learning_rate_for(config.steps - 1u);
+    f32_t const tail = config.learning_rate_for(optimizer_step_t {config.steps - 1u});
     suite.check(tail <= config.min_learning_rate * 1.1f, "the tail settles onto the floor: got {} want <= {}", tail,
                 config.min_learning_rate * 1.1f);
 }
 
 /** @brief Bring up the trainer for one mixture, run the captured two-region loop reading telemetry every step,
- *      and fold the five invariants (A replica identity, B generation progression, C capture == eager, D loss
+ *      and fold the five invariants (A replica identity, B round progression, C capture == eager, D loss
  *      descent, E every live head trained) into @p suite . */
 static void run_base_conformance(test_suite_t &suite, char const *label, base_config_t const &config,
                                  mesh_topology_t const &topology) {
@@ -243,9 +244,9 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
     f32_t baseline_loss = 0.0f, final_loss = 0.0f;
     bool token_trained = false, image_trained = false, video_trained = false, audio_trained = false;
     for (u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
-        if (expected_t ran = trainer.step(ordinal, optimizer.value_, graphs); !ran)
+        if (expected_t ran = trainer.step(optimizer_step_t {ordinal}, optimizer.value_, graphs); !ran)
             return suite.check(false, "[{}] captured step {}: {}", label, ordinal, ran.description_);
-        base_trainer_t::telemetry_t const telemetry = trainer.telemetry(domain.value_, ordinal);
+        base_trainer_t::telemetry_t const telemetry = trainer.telemetry(domain.value_, optimizer_step_t {ordinal});
         if (ordinal == 0u) baseline_loss = telemetry.composite();
         final_loss = telemetry.composite();
         token_trained = token_trained || telemetry.token_ce != 0.0f;
@@ -266,14 +267,14 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
     }
     suite.check(replicas_identical, "[{}] every replica matches the lead bitwise (A)", label);
 
-    // B — the barrier generation advanced off zero and reads identically through every member's accessor.
-    u32_t const lead_generation = read_generation_(domain.value_, 0u, trainer.streams[0]);
-    bool generation_uniform = true;
+    // B — the barrier round advanced off zero and reads identically through every member's accessor.
+    concurrency_round_t const lead_round = read_round_(domain.value_, 0u, trainer.streams[0]);
+    bool round_uniform = true;
     for (u32_t member_index = 0; member_index < gpus; ++member_index)
-        generation_uniform = generation_uniform &&
-                             read_generation_(domain.value_, member_index, trainer.streams[0]) == lead_generation;
-    suite.check(lead_generation > 0u, "[{}] barrier generation advanced off zero: got {} (B)", label, lead_generation);
-    suite.check(generation_uniform, "[{}] barrier generation reads identically through every member (B)", label);
+        round_uniform = round_uniform &&
+                        read_round_(domain.value_, member_index, trainer.streams[0]).ordinal == lead_round.ordinal;
+    suite.check(lead_round.ordinal > 0u, "[{}] barrier round advanced off zero: got {} (B)", label, lead_round.ordinal);
+    suite.check(round_uniform, "[{}] barrier round reads identically through every member (B)", label);
 
     // D — the composite masked loss fell. Loose by design — one deterministic descent, not convergence.
     suite.check(std::isfinite(final_loss) && final_loss < baseline_loss,
@@ -325,13 +326,13 @@ static void run_sweep_cell_(test_suite_t &suite, mesh_topology_t const &topology
     // optimizer has stepped (the capture-stable addresses survive weight updates).
     if (expected_t ran = run_steps_(trainer, optimizer.value_, {}, 0u, 2u); !ran)
         return suite.check(false, "[{}] eager steps: {}", label, ran.description_);
-    f32_t const eager_loss = trainer.telemetry(domain.value_, 1u).composite();
+    f32_t const eager_loss = trainer.telemetry(domain.value_, optimizer_step_t {1u}).composite();
     per_gpu_array<gpu_replay_graph_t> graphs;
     if (expected_t captured = trainer.capture(graphs); !captured)
         return suite.check(false, "[{}] capture: {}", label, captured.description_);
     if (expected_t ran = run_steps_(trainer, optimizer.value_, graphs, 2u, 4u); !ran)
         return suite.check(false, "[{}] replayed steps: {}", label, ran.description_);
-    f32_t const replayed_loss = trainer.telemetry(domain.value_, 3u).composite();
+    f32_t const replayed_loss = trainer.telemetry(domain.value_, optimizer_step_t {3u}).composite();
 
     suite.check(std::isfinite(eager_loss) && std::isfinite(replayed_loss),
                 "[{}] losses finite through both modes: eager {} replayed {}", label, eager_loss, replayed_loss);
@@ -382,7 +383,7 @@ static void graph_capture(test_suite_t &suite, mesh_topology_t const &topology) 
 
     switch_to_gpu_t gpu_scope {trainer.streams[0]};
     if (!gpu_scope.ok()) return suite.check(false, "capture context entry");
-    if (expected_t prepared = trainer.replicas[0].prepare(config, 0u, epoch_t {0u}, trainer.streams[0]); !prepared)
+    if (expected_t prepared = trainer.replicas[0].prepare(config, 0u, data_epoch_t {0u}, trainer.streams[0]); !prepared)
         return suite.check(false, "capture preamble: {}", prepared.description_);
     if (expected_t first = graphs[0].launch(trainer.streams[0].get()); !first)
         return suite.check(false, "first replay: {}", first.description_);
@@ -418,7 +419,7 @@ static void gradient_propagation(test_suite_t &suite, mesh_topology_t const &top
     expected<array<bf16_t>> stepped_snapshot = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
     suite.check(stepped_snapshot && !snapshots_match_(seed_snapshot.value_, stepped_snapshot.value_),
                 "one step moved the weights off their seed (gradients propagated)");
-    f32_t const loss = trainer.telemetry(domain.value_, 0u).composite();
+    f32_t const loss = trainer.telemetry(domain.value_, optimizer_step_t {0u}).composite();
     suite.check(std::isfinite(loss), "composite loss is finite after one step: got {}", loss);
 }
 

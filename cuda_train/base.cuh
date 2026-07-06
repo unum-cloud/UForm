@@ -24,7 +24,7 @@
  *  capture-stable addresses the model graph re-reads at replay — then the @b captured model region runs the
  *  tower forward, scores every live head into the one shared @c d(normalized) buffer, and folds it back through
  *  the tower's backward; the collective @c optimizer.step stays eager. The synthetic pass key coincides with the
- *  step ordinal ( @c epoch = {ordinal} ) inside @ref base_trainer_t::step.
+ *  optimizer step ( @c data_epoch_t {optimizer_step.ordinal} ) inside @ref base_trainer_t::step.
  *
  *  @section base_ownership Sessions placed, trainer built in place, domains threaded by reference
  *
@@ -94,10 +94,10 @@ struct base_config_t {
      *      patches, 2-frame video tubes, 256-sample audio frames); every other flag adjusts one knob. */
     [[nodiscard]] static base_config_t parse(int argc, char **argv) noexcept;
 
-    /** @brief Step @p ordinal 's scheduled learning rate: the linear warmup to @ref learning_rate over
+    /** @brief Step @p optimizer_step 's scheduled learning rate: the linear warmup to @ref learning_rate over
      *      @ref warmup_steps , then the cosine decay to @ref min_learning_rate over the run's remainder. Host
      *      math, bitwise-stable across runs — replicas step in lockstep on it. */
-    [[nodiscard]] f32_t learning_rate_for(u32_t ordinal) const noexcept;
+    [[nodiscard]] f32_t learning_rate_for(optimizer_step_t optimizer_step) const noexcept;
 };
 
 #if defined(__CUDACC__)
@@ -150,10 +150,10 @@ struct base_replica_t {
                                                        cudnn_session_t &dnn, base_config_t const &config) noexcept;
 
     /** @brief The eager per-step preamble: draw the keyed synthetic mixture (row partition, contents, and
-     *      corruption all pure functions of @c config.seed , @p epoch , and @p member_index ), snapshot every
+     *      corruption all pure functions of @c config.seed , @p data_epoch , and @p member_index ), snapshot every
      *      live head's clean target, and corrupt each modality in place into the tower's distorted input. Pure
      *      enqueue onto @p stream ; never captured. */
-    [[nodiscard]] expected_t prepare(base_config_t const &config, u32_t member_index, epoch_t epoch,
+    [[nodiscard]] expected_t prepare(base_config_t const &config, u32_t member_index, data_epoch_t data_epoch,
                                      gpu_stream_t &stream) noexcept;
 
     /** @brief The captured model region: tower forward → every live head scores its clean target,
@@ -186,14 +186,14 @@ struct base_trainer_t {
     /** @brief One step's readouts off the lead replica — best-effort: a readback slip degrades a field, never
      *      the run. The test's descent check and the binary's progress line read the same record. */
     struct telemetry_t {
-        /** @brief The step ordinal this record belongs to. */
-        u32_t ordinal = 0;
+        /** @brief The optimizer step this record belongs to. */
+        optimizer_step_t optimizer_step {};
         /** @brief The token head's mean masked cross-entropy. */
         f32_t token_ce = 0.0f;
         /** @brief Each live media head's mean normalized reconstruction error (zero when absent). */
         f32_t image_mse = 0.0f, video_mse = 0.0f, audio_mse = 0.0f;
-        /** @brief The domain's barrier generation after this step — advanced off zero once bring-up succeeds. */
-        u32_t generation = 0;
+        /** @brief The domain's barrier round after this optimizer step — advanced off zero once bring-up succeeds. */
+        concurrency_round_t concurrency_round {};
 
         /** @brief The composite masked loss — the token cross-entropy plus every live head's error. */
         [[nodiscard]] f32_t composite() const noexcept { return token_ce + image_mse + video_mse + audio_mse; }
@@ -213,10 +213,10 @@ struct base_trainer_t {
      *      span for eager ones. */
     [[nodiscard]] expected_t capture(per_gpu_array<gpu_replay_graph_t> &graphs) noexcept;
 
-    /** @brief Enqueue step @p ordinal on every replica: the eager @ref base_replica_t::prepare (whose synthetic
-     *      pass key is @c epoch = {ordinal} ), the model region ( @p graphs replayed when non-empty, else
-     *      inline), then the eager collective @c optimizer.step . */
-    [[nodiscard]] expected_t step(u32_t ordinal, distributed_adafactor_t &optimizer,
+    /** @brief Enqueue step @p optimizer_step on every replica: the eager @ref base_replica_t::prepare (whose
+     *      synthetic pass key is @c data_epoch_t {optimizer_step.ordinal} ), the model region ( @p graphs replayed
+     *      when non-empty, else inline), then the eager collective @c optimizer.step . */
+    [[nodiscard]] expected_t step(optimizer_step_t optimizer_step, distributed_adafactor_t &optimizer,
                                   std::span<gpu_replay_graph_t> graphs) noexcept;
 
     /** @brief Re-seed every replica's weights to the identical deterministic init — @ref make runs it once, and
@@ -224,8 +224,8 @@ struct base_trainer_t {
     [[nodiscard]] expected_t reseed() noexcept;
 
     /** @brief Sync the lead replica and read one @ref telemetry_t — each live head's @c {λ·Σ, count} summands
-     *      folded to means, plus @p domain 's barrier generation. */
-    [[nodiscard]] telemetry_t telemetry(multimem_domain_t &domain, u32_t ordinal) noexcept;
+     *      folded to means, plus @p domain 's barrier round. */
+    [[nodiscard]] telemetry_t telemetry(multimem_domain_t &domain, optimizer_step_t optimizer_step) noexcept;
 
     /** @brief The whole training binary: bootstrap the mesh, @ref make the trainer, make the one domain /
      *      colocated surface / optimizer as locals, @ref capture unless @c --eager , run @c config.steps of

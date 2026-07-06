@@ -24,13 +24,13 @@
  *        order, so every domain associates identically, bit-for-bit. This is the cross-domain gradient
  *        reduce.
  *
- *  @section collectives_generations Arrival flags are generations, never events
+ *  @section collectives_rounds Arrival flags are rounds, never events
  *
  *  Every round's arrival proof is a 4-byte @b inline flag write on the @b same queue pair as the payload:
  *  Reliable-Connection delivery is in-order, so the flag's arrival proves the payload landed. Flags are
  *  @b monotonic never-reset counters — a waiter spins with @c >= against the absolute target
- *  @c *generation+round+1 , so replays of a captured step need no flag reset (a reset would be a host
- *  write inside the replay loop). Each @ref infiniband_member_t owns its generation scalar and
+ *  @c *round+round+1 , so replays of a captured step need no flag reset (a reset would be a host
+ *  write inside the replay loop). Each @ref infiniband_member_t owns its round scalar and
  *  @c advance() s it once per step by its round count — distinct members' flags can never alias, because
  *  they live in distinct heaps.
  *
@@ -90,7 +90,7 @@
 namespace unum::uform::core {
 
 /** @brief Monotonic never-reset arrival counter the GDAKI collectives spin on; lives in device memory. */
-using infiniband_generation_t = u32_t;
+using infiniband_round_t = u32_t;
 
 /** @brief The send-doorbell entry in the mlx5 two-entry doorbell-record array (entry 0 is the receive side). */
 inline constexpr std::size_t mlx5_send_doorbell_index_k = 1;
@@ -265,7 +265,7 @@ struct infiniband_link_t {
     /** @brief Symmetric-heap byte offset of the partner's arrival flag. */
     std::size_t remote_flag_offset = 0;
     /** @brief This rank's monotonic arrival flag (device VRAM) the waiting kernel acquire-spins on. */
-    infiniband_generation_t *arrival_flag = nullptr;
+    infiniband_round_t *arrival_flag = nullptr;
 };
 
 #if defined(UFORM_WITH_INFINIBAND)
@@ -785,13 +785,13 @@ __device__ inline void infiniband_drain_one(infiniband_completion_handles_t comp
 /** @brief Rank-1 device view of the per-round link table, shaped @b [ceil(log2(D))] — one
  *      @ref infiniband_link_t per recursive-doubling round, indexed by round. */
 using infiniband_links_view_t = nk::tensor_view<infiniband_link_t, 1>;
-/** @brief Rank-1 device view of the flag-generation scalar, shaped @b [1] — the monotonic base every
+/** @brief Rank-1 device view of the flag-round scalar, shaped @b [1] — the monotonic base every
  *      flag target keys on; the owning member advances it once per step. */
-using infiniband_generation_view_t = nk::tensor_view<infiniband_generation_t, 1>;
+using infiniband_round_view_t = nk::tensor_view<infiniband_round_t, 1>;
 
 /**
  *  @brief The static description of one all-gather invocation — the two scalars its kernels need
- *      beyond the links and the generation. Internal to @ref infiniband_member_t 's dispatch: the member
+ *      beyond the links and the round. Internal to @ref infiniband_member_t 's dispatch: the member
  *      bakes both at wiring time and builds this by value at enqueue; consumers never construct one.
  */
 struct infiniband_allgather_plan_t {
@@ -810,7 +810,7 @@ using infiniband_links_tensor_t = nk::tensor<infiniband_link_t, gpu_arena_alloc<
  *  @brief One member's wired reach into the other multimem_domains: the registered symmetric heap,
  *      one RC
  *      endpoint with its device-initiated queue / completion mappings per recursive-doubling round,
- *      the exchanged coordinates, the device-resident link table, and the collective's generation
+ *      the exchanged coordinates, the device-resident link table, and the collective's round
  *      scalar — the level-2 counterpart of @ref multimem_domain_t 's per-member surface.
  *
  *  Constructed only through @ref colocated_domain_t 's role factories — @c wire_allreduce (a Float32
@@ -818,7 +818,7 @@ using infiniband_links_tensor_t = nk::tensor<infiniband_link_t, gpu_arena_alloc<
  *  in place, the payload doubling as the landing) — so a member's heap layout can never contradict the
  *  collective it runs, and the adapters underneath are always the shared ones. The collectives
  *  themselves are the argument-free methods @ref allreduce_sum and @ref allgather : payload, links,
- *  generation, and the domain coordinate are all baked at wiring time.
+ *  round, and the domain coordinate are all baked at wiring time.
  */
 struct infiniband_member_t {
 
@@ -852,7 +852,7 @@ struct infiniband_member_t {
 
     /** @brief The shared wiring body behind @ref colocated_domain_t 's role factories: allocate the heap,
      *      wire one endpoint per round on the shared @p nic , exchange coordinates, stage the links. The
-     *      @p stream seeds the member's generation scalar (ordered after its zero). */
+     *      @p stream seeds the member's round scalar (ordered after its zero). */
     [[nodiscard]] static expected<infiniband_member_t> make_(mesh_topology_t const &topology, u32_t member_index,
                                                              infiniband_nic_t &nic, gpu_arena_t &arena,
                                                              gpu_stream_t &stream, heap_layout_t layout,
@@ -870,12 +870,12 @@ struct infiniband_member_t {
         std::size_t const block_bytes = layout_.payload_bytes >> layout_.rounds;
         return {heap_.data() + static_cast<std::size_t>(multimem_domain_index_) * block_bytes, block_bytes};
     }
-    /** @brief The one enqueued host write of a step: stage the generation into the pinned cell and
+    /** @brief The one enqueued host write of a step: stage the round into the pinned cell and
      *      enqueue its upload — on @p stream , before this step's collective. A no-op on the zero-round
      *      single-domain identity. */
     [[nodiscard]] expected_t advance(gpu_stream_t &stream) noexcept {
         if (layout_.rounds == 0) return {};
-        return generation_.advance(stream);
+        return round_.advance(stream);
     }
 
     /**
@@ -902,8 +902,8 @@ struct infiniband_member_t {
     /** @brief This rank's multimem_domain index — the recursive-doubling coordinate, baked at wiring. */
     u32_t multimem_domain_index_ = 0;
     /** @brief The member's monotonic step counter — host count, pinned staging, and the device
-     *      generation scalar it uploads into; see @ref barrier_generation_t . */
-    barrier_generation_t generation_ {};
+     *      round scalar it uploads into; see @ref barrier_round_t . */
+    barrier_round_t round_ {};
     /** @brief The registered symmetric heap: payload, per-round landings, per-round flags. */
     b8r1_tensor_arena_t heap_ {};
     /** @brief One connected RC endpoint per round; the two mapping tables below layer onto them. */
@@ -915,8 +915,8 @@ struct infiniband_member_t {
     array<infiniband_completion_mapping_t> completions_ {};
     /** @brief The device link table the doorbell kernels index by round. */
     infiniband_links_tensor_t links_ {};
-    /** @brief The device generation scalar; see @ref advance . */
-    u32r1_tensor_arena_t generation_scalar_ {};
+    /** @brief The device round scalar; see @ref advance . */
+    u32r1_tensor_arena_t round_scalar_ {};
 };
 
 /**
@@ -926,7 +926,7 @@ struct infiniband_member_t {
  *      the one @ref multimem_domain_t .
  *
  *  Wiring a member is a consumer's own lane — its queue pairs (the single-poster concurrency
- *  granularity, so consumers' collectives can overlap), its heap, its generation; this domain only lends
+ *  granularity, so consumers' collectives can overlap), its heap, its round; this domain only lends
  *  the shared adapters and the exchange. Batch-shuffle payload movement is added later as a third role
  *  ( @c wire_alltoall with per-pair sizes) without touching the NIC or member layers.
  */
@@ -941,14 +941,14 @@ struct colocated_domain_t {
     /**
      *  @brief Wire one member for the cross-domain Float32 all-reduce-sum of a @p shard_bytes payload:
      *      heap @b [shard | rounds landings | rounds flags] . One member per (consumer, role) — own
-     *      queue pairs, own generation. Runs once, at setup, outside any capture; the calling thread must
+     *      queue pairs, own round. Runs once, at setup, outside any capture; the calling thread must
      *      hold the member's context.
      *
      *  @param[in] member_index This GPU's index inside its multimem_domain; the partner's same-index
      *      GPU pairs with it.
      *  @param[in] arena The member's arena; the heap, the link table, and the mapping counters allocate
      *      from it (its chunks are GPUDirect-RDMA-capable by construction).
-     *  @param[in] stream The member's lead stream; the generation scalar is seeded on it at setup.
+     *  @param[in] stream The member's lead stream; the round scalar is seeded on it at setup.
      *  @param[in] key_prefix Exchange-key namespace; keys are @c "<prefix>.<round>" , so distinct
      *      consumers never collide.
      */

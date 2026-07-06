@@ -15,10 +15,10 @@
  *  multicast range, and the NVSwitch returns the @b sum across every member's replica in one load,
  *  deterministic by construction (one fused reduction, no ordering to fix).
  *
- *  Synchronization is the same monotonic-generation discipline the InfiniBand collectives use: an arrival
+ *  Synchronization is the same monotonic-round discipline the InfiniBand collectives use: an arrival
  *  flag lives inside every replica, a member @b adds 1 through the multicast address (so every replica's
- *  counter grows), and waiters acquire-spin on their @b own replica until the generation target — no resets,
- *  so captured steps replay without host writes. The generation scalar is the domain's own, inside the lead
+ *  counter grows), and waiters acquire-spin on their @b own replica until the round target — no resets,
+ *  so captured steps replay without host writes. The round scalar is the domain's own, inside the lead
  *  replica, advanced once per step through @ref multimem_domain_t::advance .
  *
  *  When the platform lacks multicast ( @c CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED off — pre-Hopper or
@@ -167,8 +167,8 @@ struct multimem_member_t {
     u32_t *multimem_flag = nullptr;
     /** @brief Base of the contiguous symmetric range covering every member's replica. */
     std::byte *replicas = nullptr;
-    /** @brief The domain's generation scalar (inside the lead replica) every barrier keys on. */
-    u32_t const *generation = nullptr;
+    /** @brief The domain's round scalar (inside the lead replica) every barrier keys on. */
+    u32_t const *round = nullptr;
     /** @brief Byte distance between adjacent members' replicas. */
     std::size_t replica_stride = 0;
     /** @brief Byte offset of the arrival counter inside every replica. */
@@ -237,7 +237,7 @@ struct multimem_window_t {
  *
  *  @section multimem_ordering The barrier ordering contract
  *
- *  The arrival flag and the generation are shared by every consumer, so all ranks must issue their
+ *  The arrival flag and the round are shared by every consumer, so all ranks must issue their
  *  @ref advance / @ref barrier sequences in the @b same order across consumers within a step — the
  *  natural property of an SPMD step program. Violating it is a hang (arrivals are monotonic, a
  *  mis-paired barrier waits forever), never a silent corruption.
@@ -267,8 +267,8 @@ struct multimem_domain_t {
      *  @brief Build the domain over @p devices with @p payload_scalars Float32 per replica: the
      *      symmetric replica range, the multicast object binding every slice, one multicast mapping,
      *      and the zeroed arrival counters. Runs once, at setup, outside any capture. The barrier
-     *      generation is the domain's own: a scalar inside the lead replica, advanced once per step
-     *      through @ref advance — consumers never allocate or upload generations themselves.
+     *      round is the domain's own: a scalar inside the lead replica, advanced once per step
+     *      through @ref advance — consumers never allocate or upload rounds themselves.
      */
     [[nodiscard]] static expected<multimem_domain_t> make(std::span<i32_t const> devices, std::size_t payload_scalars,
                                                           std::span<gpu_stream_t> streams) noexcept;
@@ -299,9 +299,9 @@ struct multimem_domain_t {
         return expected<multimem_window_t> {window};
     }
 
-    /** @brief The one enqueued host write of a step — see @ref barrier_generation_t::advance . Lead
+    /** @brief The one enqueued host write of a step — see @ref barrier_round_t::advance . Lead
      *      stream, before any member's barrier. */
-    [[nodiscard]] expected_t advance(gpu_stream_t &stream) noexcept { return generation_.advance(stream); }
+    [[nodiscard]] expected_t advance(gpu_stream_t &stream) noexcept { return round_.advance(stream); }
 
     /** @brief Member @p member_index 's kernel-facing addresses. */
     [[nodiscard]] multimem_member_t member(std::size_t member_index) noexcept {
@@ -312,7 +312,7 @@ struct multimem_domain_t {
             addresses.multimem_flag = reinterpret_cast<u32_t *>(multimem_pointer_ + flag_offset);
         }
         addresses.replicas = replicas_.base();
-        addresses.generation = generation_pointer_();
+        addresses.round = round_pointer_();
         addresses.replica_stride = replicas_.member_stride();
         addresses.flag_offset = flag_offset;
         addresses.member_index = static_cast<u32_t>(member_index);
@@ -321,7 +321,7 @@ struct multimem_domain_t {
     }
 
     /** @brief Enqueue the domain barrier for @p member_index — one arrival, one acquire-spin against
-     *      the domain's own generation (see @ref advance ). On the peer tier the arrival walks the members
+     *      the domain's own round (see @ref advance ). On the peer tier the arrival walks the members
      *      through the symmetric range instead. */
     [[nodiscard]] expected_t barrier(std::size_t member_index, gpu_stream_t &stream) noexcept;
 
@@ -333,14 +333,14 @@ struct multimem_domain_t {
 
   private:
     /** @brief Byte offset of the arrival counter inside every replica — pure layout arithmetic over
-     *      @ref payload_scalars_ , never stored; the generation sits one word above. */
+     *      @ref payload_scalars_ , never stored; the round sits one word above. */
     [[nodiscard]] std::size_t flag_offset_() const noexcept {
         return round_up_to_multiple(payload_scalars_ * sizeof(f32_t), cache_line_bytes_k);
     }
 
-    /** @brief The barrier generation scalar — GPU memory inside the lead replica, one word above the
+    /** @brief The barrier round scalar — GPU memory inside the lead replica, one word above the
      *      flag; derived, never stored, so no second copy of the layout exists. */
-    [[nodiscard]] u32_t *generation_pointer_() noexcept {
+    [[nodiscard]] u32_t *round_pointer_() noexcept {
         std::span<std::byte> lead_slice = replicas_.member_slice(0);
         return reinterpret_cast<u32_t *>(lead_slice.data() + flag_offset_() + sizeof(u32_t));
     }
@@ -349,7 +349,7 @@ struct multimem_domain_t {
         std::swap(replicas_, other.replicas_);
         std::swap(multimem_handle_, other.multimem_handle_);
         std::swap(multimem_pointer_, other.multimem_pointer_);
-        std::swap(generation_, other.generation_);
+        std::swap(round_, other.round_);
         std::swap(payload_scalars_, other.payload_scalars_);
         std::swap(reserved_scalars_, other.reserved_scalars_);
     }
@@ -380,8 +380,8 @@ struct multimem_domain_t {
     /** @brief The one multicast VA shared by all members; 0 on the peer-read tier. */
     CUdeviceptr multimem_pointer_ = 0;
     /** @brief The domain's monotonic step counter — host count, pinned staging, and the device
-     *      generation scalar it uploads into; see @ref barrier_generation_t . */
-    barrier_generation_t generation_ {};
+     *      round scalar it uploads into; see @ref barrier_round_t . */
+    barrier_round_t round_ {};
     /** @brief Float32 payload scalars per replica. */
     std::size_t payload_scalars_ = 0;
     /** @brief The window-reservation cursor; see @ref reserve . */

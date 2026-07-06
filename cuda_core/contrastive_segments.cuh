@@ -339,7 +339,7 @@ struct contrastive_segments_t {
  *  the subgraph columns of one global vertex axis, so the row-side and column-side forces of every
  *  vertex always fold — a bipartite mesh is a different signature, not a flag. One call runs: the
  *  world-tower gather (multi-domain worlds), then per rank the loss (row force straight into the
- *  caller's gradient, column forces into the domain window), the generation barrier, the switch
+ *  caller's gradient, column forces into the domain window), the round barrier, the switch
  *  reduce-scatter, the cross-domain force all-reduce, and the column fold — enqueue-only,
  *  deterministic, capture-friendly.
  */
@@ -389,7 +389,7 @@ struct distributed_contrastive_segments_t {
     /**
      *  @brief Rank @p rank 's slice of one distributed evaluation — pure enqueue onto @p stream , the
      *      shape a fork/join capture body composes directly. Rank 0's slice carries the shared phase:
-     *      the domain's generation advance and (across domains) the world-tower gather every other rank's
+     *      the domain's round advance and (across domains) the world-tower gather every other rank's
      *      stream waits on. All views were baked at @ref make ; the only per-call argument is the
      *      recipe. Ranks must be enqueued in order @c 0..gpus-1 within a step.
      */

@@ -10,8 +10,8 @@
  *  @section masking_two_instances Two instances of one batch
  *
  *  The objective runs on two instances of the same representation: the clean one is the reconstruction
- *  target, the distorted one is what the tower sees. Corruption is a pure function of @c (seed,epoch,
- *  position) through the epoch shuffle's mixer — identical on every host_domain, bit-reproducible, no
+ *  target, the distorted one is what the tower sees. Corruption is a pure function of @c (seed,data_epoch,
+ *  position) through the data epoch shuffle's mixer — identical on every host_domain, bit-reproducible, no
  *  cuRAND and no state. Tokens are corrupted in vocabulary space (MASK / random byte / kept); for image /
  *  video patches and 1-D audio frames the driver zeros the masked raw media rows in place before the tower
  *  re-patchifies.
@@ -75,9 +75,9 @@ enum class masking_draw_purpose_t : u32_t {
 /** @brief One counter-based draw in @b [0,1) , keyed through the one @ref splitmix64_hash_t — pure,
  *      stateless, device-callable, bit-reproducible on every rank. @p purpose is a
  *      @ref masking_draw_purpose_t salt cast to @c u32_t . */
-[[nodiscard]] constexpr f32_t masking_draw(u64_t seed, u32_t epoch, u32_t sample_index, u32_t position,
+[[nodiscard]] constexpr f32_t masking_draw(u64_t seed, data_epoch_t data_epoch, u32_t sample_index, u32_t position,
                                            u32_t purpose) noexcept {
-    u64_t const mixed = splitmix64_hash_t {}(seed, epoch, purpose, sample_index, position);
+    u64_t const mixed = splitmix64_hash_t {}(seed, data_epoch.ordinal, purpose, sample_index, position);
     return static_cast<f32_t>(mixed >> 40) * 0x1.0p-24f; // The top 24 bits as a uniform [0,1).
 }
 
@@ -184,7 +184,7 @@ struct masked_tokens_t {
      */
     [[nodiscard]] expected_t corrupt(tokens_view_t clean, tokens_span_t distorted, u32r1_span_t loss_weights,
                                      u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                     modality_view_t segment_modality, masking_recipe_t recipe, epoch_t epoch,
+                                     modality_view_t segment_modality, masking_recipe_t recipe, data_epoch_t data_epoch,
                                      gpu_stream_t &stream) noexcept;
 
     /**
@@ -263,7 +263,8 @@ struct masked_patches_t {
      *      probability @c mask_ratio , tubed across time groups when @c temporal_groups > 1 so a masked
      *      spatial cell stays masked across all its time groups.
      */
-    [[nodiscard]] expected_t sample_mask(masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch,
+                                         gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief Corrupt the raw batch media in place — pure enqueue. Zeros every raw patch row whose @c mask_
@@ -349,7 +350,8 @@ struct masked_frames_t {
      *  @brief Sample the frame mask into @c mask_ — pure enqueue, nothing else. A frame is masked with
      *      probability @c mask_ratio , drawn independently per frame.
      */
-    [[nodiscard]] expected_t sample_mask(masking_recipe_t recipe, epoch_t epoch, gpu_stream_t &stream) noexcept;
+    [[nodiscard]] expected_t sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch,
+                                         gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief Corrupt the raw batch media in place — pure enqueue. Zeros every raw waveform frame whose
