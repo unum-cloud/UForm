@@ -215,9 +215,42 @@ add_executable(cuda_test_mesh cuda_test/mesh.cpp)
 target_link_libraries(cuda_test_mesh PRIVATE uform)
 add_test(NAME mesh COMMAND cuda_test_mesh)
 
+# The preflight probe every multi-node sbatch runs first: links the full training stack so merely starting
+# on a node proves the runtime closure resolves there, then checks GPUDirect registration per GPU-NIC pair
+# and the rendezvous directory — one named line per environment gap, before the real job spends a minute
+# discovering it mid-suite.
+add_executable(cuda_test_env cuda_test/env.cpp)
+target_link_libraries(cuda_test_env PRIVATE uform_train)
+add_test(NAME env COMMAND cuda_test_env)
+
 add_executable(cuda_test_base cuda_test/base.cu)
 target_link_libraries(cuda_test_base PRIVATE uform_train)
 add_test(NAME base COMMAND cuda_test_base)
+
+add_executable(cuda_test_mixer cuda_test/mixer.cu)
+target_link_libraries(cuda_test_mixer PRIVATE uform)
+add_test(NAME mixer COMMAND cuda_test_mixer)
+
+# Every runnable resolves shared libraries beside itself first (`$ORIGIN`), so a `uform_bundle` tree on a
+# shared filesystem runs on nodes whose native installs diverge from the build node's.
+set_target_properties(
+    uform_base cuda_test_env cuda_test_mesh cuda_test_base cuda_test_mixer PROPERTIES BUILD_RPATH "$ORIGIN"
+)
+
+# `uform_bundle` → a self-contained runtime tree (executables + their shared-library closure, glibc
+# excepted) under `runtime-bundle/`, for Slurm or K8s clusters where nodes are not package-identical:
+# deploy the tree to the shared filesystem and every node runs it, whatever it has installed natively.
+# The executable list travels |-separated — a raw `;` cannot survive the custom-command argument path.
+add_custom_target(
+    uform_bundle
+    COMMAND
+        ${CMAKE_COMMAND}
+        "-DBUNDLE_EXECUTABLES=$<TARGET_FILE:uform_base>|$<TARGET_FILE:cuda_test_env>|$<TARGET_FILE:cuda_test_mesh>|$<TARGET_FILE:cuda_test_base>|$<TARGET_FILE:cuda_test_mixer>"
+        "-DBUNDLE_DIR=${CMAKE_BINARY_DIR}/runtime-bundle" -P "${CMAKE_SOURCE_DIR}/cmake/bundle_runtime.cmake"
+    DEPENDS uform_base cuda_test_env cuda_test_mesh cuda_test_base cuda_test_mixer
+    COMMENT "Bundling executables with their runtime closure into runtime-bundle/"
+    VERBATIM
+)
 
 # `cuda_loaders` → `uform_loaders`: GPU-native data ingestion, one translation unit per format / modality cell. Every
 # vendor dependency below is available on every target and is hard-required, discovered through the layered

@@ -48,5 +48,14 @@ echo "uform-test-base: ${total_gpus} GPU(s) = ${host_domain_count} node(s) x ${g
 
 # One task per node; that process owns all of its node's GPUs, so it must see them all (no per-task GPU
 # mask). Slurm sets SLURM_NODEID per task, which the test reads as its host_domain_index.
+#
+# The preflight probe runs first: cuda_test_env names each environment gap (library resolution, GPUDirect
+# registration, the rendezvous directory) in one line per node; under `set -e` a failing probe aborts the
+# job before the suite spends a minute discovering the gap mid-run.
+env_binary="${UFORM_ENV_BINARY:-$(dirname "${UFORM_TEST_BINARY:-./build/cuda_test_base}")/cuda_test_env}"
+if [[ -x "${env_binary}" ]]; then
+    srun --ntasks="${host_domain_count}" --ntasks-per-node=1 --gpu-bind=none "${env_binary}"
+fi
+
 srun --ntasks="${host_domain_count}" --ntasks-per-node=1 --gpu-bind=none \
     "${UFORM_TEST_BINARY:-./build/cuda_test_base}"
