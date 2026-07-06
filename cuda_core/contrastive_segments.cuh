@@ -109,7 +109,7 @@
 #include "cuda_core/types.hpp"    // `expected_t`, `status_t`, `warp_size_k`, `kernel_block_size_default_k`
 #include "cuda_core/schedule.cuh" // `gpu_stream_t`, `launch_kernel`, `cublaslt_session_t`, `cublaslt_plan_t`
 #include "cuda_core/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 force surface
-#include "cuda_core/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_member_t` — the level-2 surface
+#include "cuda_core/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_all_reduce/all_gather` — level-2
 #include "cuda_core/contrastive_relations.cuh"  // `contrastive_relations_view_t`, `contrastive_recipe_t`
 
 namespace unum::uform::core {
@@ -435,11 +435,11 @@ struct distributed_contrastive_segments_t {
     u32_t home_domain_index_ = 0;
     /** @brief The gateway's gather-complete ordering token every rank's stream waits on. */
     gpu_event_t gather_ready_ {};
-    /** @brief One cross-domain reduce member per local GPU — its payload is the rank's world-column
+    /** @brief One cross-domain all-reduce buffer per local GPU — its typed payload is the rank's world-column
      *      shard. */
-    per_gpu_array<infiniband_member_t> reduce_members_ {};
-    /** @brief The gateway's cross-domain gather member — its payload is the world tower. */
-    infiniband_member_t gather_member_ {};
+    per_gpu_array<infiniband_all_reduce<f32_t>> reduce_buffers_ {};
+    /** @brief The gateway's cross-domain all-gather buffer — its typed payload is the world tower. */
+    infiniband_all_gather<bf16_t> gather_buffer_ {};
     /** @brief All ranks' subgraph tables in one rank-major table, baked at @ref make . */
     array<gpu_subgraph_t> subgraph_tables_ {};
     /** @brief @b [gpus] tower views the gateway stages into the gather member's own block — populated

@@ -41,7 +41,7 @@
 #include "cuda_core/schedule.cuh"               // `gpu_stream_t`, `launch_kernel`, `grid_size_for`
 #include "cuda_core/gpu_allocators.hpp"         // `gpu_arena_t`
 #include "cuda_core/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 gradient surface
-#include "cuda_core/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_member_t` — the level-2 surface
+#include "cuda_core/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_all_reduce` — the level-2 surface
 
 namespace unum::uform::core {
 
@@ -184,7 +184,7 @@ struct distributed_adafactor_t {
     [[nodiscard]] expected_t world_gradient_step_(std::size_t rank, f32_t learning_rate, gpu_stream_t &stream) noexcept;
 
     /** @brief How many multimem_domains the world spans, polled from the borrowed topology; 1 makes
-     *      @ref world_member_ an identity. */
+     *      @ref world_reduce_ an identity. */
     [[nodiscard]] u32_t world_domains() const noexcept { return colocated_->multimem_domain_count(); }
 
     /** @brief One Adafactor state (and, in single-domain worlds, one reduced buffer) per local GPU. */
@@ -195,8 +195,8 @@ struct distributed_adafactor_t {
     colocated_domain_t *colocated_ = nullptr;
     /** @brief This consumer's disjoint gradient window of the domain payload, reserved at @ref make . */
     multimem_window_t window_ {};
-    /** @brief The gateway's cross-domain reduce member — its payload is the world gradient. */
-    infiniband_member_t world_member_ {};
+    /** @brief The gateway's cross-domain all-reduce buffer — its typed payload is the world gradient. */
+    infiniband_all_reduce<f32_t> world_reduce_ {};
     /** @brief The gateway's world-sum-ready ordering token every rank's update waits on. */
     gpu_event_t world_ready_ {};
 };

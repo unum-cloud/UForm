@@ -792,7 +792,7 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     std::size_t const subgraphs = config.gpu_subgraphs_per_step;
     std::size_t const tower_scalars = static_cast<std::size_t>(config.from_vertices_per_gpu) * config.hidden;
     if (distributed.losses_.try_resize(gpus) != status_t::success_k ||
-        distributed.reduce_members_.try_resize(gpus) != status_t::success_k ||
+        distributed.reduce_buffers_.try_resize(gpus) != status_t::success_k ||
         distributed.subgraph_tables_.try_resize(gpus * subgraphs) != status_t::success_k ||
         distributed.relations_.try_resize(gpus) != status_t::success_k ||
         distributed.from_vertices_grads_.try_resize(gpus) != status_t::success_k)
@@ -831,14 +831,10 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
                                                                              prefix_dims);
         if (!loss) return result_t::fail(std::move(loss));
         distributed.losses_[rank] = std::move(loss.value_);
-        sz::string key;
-        if (!format_into(key, "csegments.reduce.{}", rank))
-            return result_t::fail(status_t::bad_alloc_k, "exchange key formatting failed");
-        expected<infiniband_member_t> reduce_member = colocated.wire_allreduce(
-            static_cast<u32_t>(rank), arenas[rank], streams[rank], domains * tower_scalars * sizeof(f32_t), key.view(),
-            timeout_seconds);
-        if (!reduce_member) return result_t::fail(std::move(reduce_member));
-        distributed.reduce_members_[rank] = std::move(reduce_member.value_);
+        expected<infiniband_all_reduce<f32_t>> reduce_buffer = infiniband_all_reduce<f32_t>::make(
+            colocated, static_cast<u32_t>(rank), arenas[rank], domains * tower_scalars, streams[rank], timeout_seconds);
+        if (!reduce_buffer) return result_t::fail(std::move(reduce_buffer));
+        distributed.reduce_buffers_[rank] = std::move(reduce_buffer.value_);
     }
 
     // The gateway's gather member, the per-rank loss summands, and the gather-ready ordering token
@@ -846,10 +842,10 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     {
         switch_to_gpu_t gpu_scope {streams[0]};
         if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (rank=0)");
-        expected<infiniband_member_t> gather_member = colocated.wire_allgather(
-            0, arenas[0], streams[0], gpus * tower_scalars * sizeof(bf16_t), "csegments.gather", timeout_seconds);
-        if (!gather_member) return result_t::fail(std::move(gather_member));
-        distributed.gather_member_ = std::move(gather_member.value_);
+        expected<infiniband_all_gather<bf16_t>> gather_buffer = infiniband_all_gather<bf16_t>::make(
+            colocated, 0, arenas[0], gpus * tower_scalars, streams[0], timeout_seconds);
+        if (!gather_buffer) return result_t::fail(std::move(gather_buffer));
+        distributed.gather_buffer_ = std::move(gather_buffer.value_);
         gpu_arena_alloc<f32_t> f32_alloc {arenas[0]};
         distributed.loss_outs_ = f32r1_tensor_arena_t::try_empty({gpus}, f32_alloc);
         if (!distributed.loss_outs_)
@@ -861,9 +857,7 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
 
     // Bake every rank's subgraph table once — all the addresses are capture-stable by contract:
     // caller towers/grads, the domain window, and the gather payload never move after construction.
-    bf16_t const *world_tower = domains > 1u
-                                    ? reinterpret_cast<bf16_t const *>(distributed.gather_member_.payload().data())
-                                    : nullptr;
+    bf16_t const *world_tower = domains > 1u ? distributed.gather_buffer_.payload().data() : nullptr;
     for (std::size_t rank = 0; rank != gpus; ++rank) {
         f32_t *const window_base = domain.payload(rank).data() + distributed.window_.offset;
         for (std::size_t subgraph = 0; subgraph != subgraphs; ++subgraph) {
@@ -943,15 +937,14 @@ expected_t distributed_contrastive_segments_t::gather_world_tower_(gpu_stream_t 
     std::size_t const gpus = losses_.size();
     std::size_t const tower_scalars = static_cast<std::size_t>(config_.from_vertices_per_gpu) * config_.hidden;
     expected_t staged {};
-    CUdeviceptr const own_block = reinterpret_cast<CUdeviceptr>(gather_member_.own_block().data());
+    CUdeviceptr const own_block = reinterpret_cast<CUdeviceptr>(gather_buffer_.own_block().data());
     for (std::size_t rank = 0; rank != gpus && staged; ++rank)
         if (CUresult result = cuMemcpyDtoDAsync(own_block + rank * tower_scalars * sizeof(bf16_t),
                                                 reinterpret_cast<CUdeviceptr>(gather_sources_[rank].data()),
                                                 tower_scalars * sizeof(bf16_t), stream.get());
             result != CUDA_SUCCESS)
             staged = expected_t::fail(result, "tower staging copy failed (rank={})", rank);
-    if (staged) staged = gather_member_.advance(stream);
-    if (staged) staged = gather_member_.allgather(stream);
+    if (staged) staged = gather_buffer_(stream);
     if (staged)
         if (CUresult result = cuEventRecord(gather_ready_.get(), stream.get()); result != CUDA_SUCCESS)
             staged = expected_t::fail(result, "gather event record failed");
@@ -962,7 +955,7 @@ expected_t distributed_contrastive_segments_t::reduce_world_columns_(std::size_t
                                                                      f32r1_view_t &column_force) noexcept {
     std::size_t const gpus = losses_.size();
     std::size_t const tower_scalars = static_cast<std::size_t>(config_.from_vertices_per_gpu) * config_.hidden;
-    f32_t *const shard = reinterpret_cast<f32_t *>(reduce_members_[rank].payload().data());
+    f32_t *const shard = reduce_buffers_[rank].payload().data();
     for (u32_t domain = 0; domain != world_domains(); ++domain) {
         f32r1_span_t const domain_shard {shard + domain * tower_scalars, tower_scalars};
         std::size_t const grid_offset = window_.offset +
@@ -970,8 +963,7 @@ expected_t distributed_contrastive_segments_t::reduce_world_columns_(std::size_t
         if (expected_t reduced = domain_->reduce_scatter(rank, domain_shard, grid_offset, stream); !reduced)
             return reduced;
     }
-    if (expected_t advanced = reduce_members_[rank].advance(stream); !advanced) return advanced;
-    if (expected_t summed = reduce_members_[rank].allreduce_sum(stream); !summed) return summed;
+    if (expected_t summed = reduce_buffers_[rank](stream); !summed) return summed;
     column_force = f32r1_view_t {shard + static_cast<std::size_t>(home_domain_index_) * tower_scalars, tower_scalars};
     return {};
 }

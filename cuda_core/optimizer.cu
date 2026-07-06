@@ -305,10 +305,10 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
         switch_to_gpu_t gpu_scope {streams[0]};
         if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (rank=0)");
         std::size_t const scalars = optimizer.ranks_[0].state.gradient_scalars();
-        expected<infiniband_member_t> world_member = colocated.wire_allreduce(
-            0, arenas[0], streams[0], scalars * sizeof(f32_t), "adafactor.reduce", timeout_seconds);
-        if (!world_member) return result_t::fail(std::move(world_member));
-        optimizer.world_member_ = std::move(world_member.value_);
+        expected<infiniband_all_reduce<f32_t>> world_reduce = infiniband_all_reduce<f32_t>::make(
+            colocated, 0, arenas[0], scalars, streams[0], timeout_seconds);
+        if (!world_reduce) return result_t::fail(std::move(world_reduce));
+        optimizer.world_reduce_ = std::move(world_reduce.value_);
         expected<gpu_event_t> event = gpu_event_t::make();
         if (!event) return result_t::fail(std::move(event));
         optimizer.world_ready_ = std::move(event.value_);
@@ -359,14 +359,13 @@ expected_t distributed_adafactor_t::step(f32_t learning_rate, std::span<gpu_stre
 expected_t distributed_adafactor_t::world_gradient_step_(std::size_t rank, f32_t learning_rate,
                                                          gpu_stream_t &stream) noexcept {
     std::size_t const scalars = ranks_[rank].state.gradient_scalars();
-    f32_t *const world_gradient = reinterpret_cast<f32_t *>(world_member_.payload().data());
+    f32_t *const world_gradient = world_reduce_.payload().data();
     expected_t staged {};
     if (rank == 0) {
         staged = launch_kernel(reinterpret_cast<void const *>(&adafactor_reduce_gradient_kernel_),
                                dim3 {grid_size_for(scalars), 1u, 1u}, dim3 {kernel_block_size_default_k, 1u, 1u},
                                stream, domain_->member(rank), f32r1_span_t {world_gradient, scalars}, window_.offset);
-        if (staged) staged = world_member_.advance(stream);
-        if (staged) staged = world_member_.allreduce_sum(stream);
+        if (staged) staged = world_reduce_(stream);
         if (staged)
             if (CUresult result = cuEventRecord(world_ready_.get(), stream.get()); result != CUDA_SUCCESS)
                 staged = expected_t::fail(result, "world-gradient event record failed");
