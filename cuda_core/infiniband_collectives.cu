@@ -271,13 +271,15 @@ expected_t infiniband_endpoint_t::register_gpu_memory_(ibv_pd *protection_domain
         }
         ::close(dmabuf_descriptor);
     }
+    errno = 0;
     memory_region_ = ibv_reg_mr(protection_domain, gpu_buffer_.data(), gpu_buffer_.extent(0),
                                 infiniband_access_flags_k);
     if (memory_region_ == nullptr)
         return expected_t::fail(status_t::io_error_k,
-                                "GPU memory-region registration failed on both the dmabuf and the " //
-                                "nvidia_peermem paths ({} bytes)",
-                                gpu_buffer_.extent(0));
+                                "GPU memory-region registration failed: dmabuf export {} (fd={}), " //
+                                "ibv_reg_mr errno={} ({} bytes at 0x{:x})",
+                                exported == CUDA_SUCCESS ? "ok" : "unsupported", dmabuf_descriptor, errno,
+                                gpu_buffer_.extent(0), reinterpret_cast<u64_t>(gpu_buffer_.data()));
     return {};
 }
 
@@ -412,10 +414,10 @@ expected<infiniband_member_t> infiniband_member_t::make_(mesh_topology_t const &
     member.layout_ = layout;
     member.multimem_domain_index_ = domain_index;
     std::size_t const heap_bytes = layout.total_bytes();
-    gpu_arena_alloc<b8_t> byte_alloc {arena};
+    gpu_registrable_alloc<b8_t> heap_alloc {arena};
     gpu_arena_alloc<infiniband_link_t> link_alloc {arena};
     gpu_arena_alloc<u32_t> u32_alloc {arena};
-    member.heap_ = b8r1_tensor_arena_t::try_empty({heap_bytes}, byte_alloc);
+    member.heap_ = b8r1_tensor_registrable_t::try_empty({heap_bytes}, heap_alloc);
     member.links_ = infiniband_links_tensor_t::try_empty({layout.rounds}, link_alloc);
     member.round_scalar_ = u32r1_tensor_arena_t::try_empty({1}, u32_alloc);
     if (!member.heap_ || !member.links_ || !member.round_scalar_)

@@ -944,8 +944,9 @@ struct infiniband_member_t {
     /** @brief The member's monotonic step counter — host count, pinned staging, and the device
      *      round scalar it uploads into; see @ref barrier_round_t . */
     barrier_round_t round_ {};
-    /** @brief The registered symmetric heap: payload, per-round landings, per-round flags. */
-    b8r1_tensor_arena_t heap_ {};
+    /** @brief The registered symmetric heap: payload, per-round landings, per-round flags. Registrable
+     *      allocation — one physical chunk — since @c nvidia_peermem rejects handle-spanning ranges. */
+    b8r1_tensor_registrable_t heap_ {};
     /** @brief One connected RC endpoint per round; the two mapping tables below layer onto them. */
     array<infiniband_endpoint_t> endpoints_ {};
     /** @brief Per-round device-initiated send paths, owning the GPU registrations of each queue pair's

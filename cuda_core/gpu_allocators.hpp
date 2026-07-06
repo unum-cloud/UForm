@@ -250,6 +250,24 @@ struct gpu_arena_t {
         return reinterpret_cast<value_type_ *>(allocate_bytes(count * sizeof(value_type_)));
     }
 
+    /**
+     *  @brief Allocate @p bytes guaranteed to lie within @b one physical chunk, so the range can be
+     *      MR-registered: @c nvidia_peermem rejects ( @c EFAULT ) any @c ibv_reg_mr range spanning two
+     *      @c cuMemCreate handles, and a bump allocation crossing the growth boundary does exactly that.
+     *
+     *  Places the range at the virgin mapping frontier — a fresh chunk start — and grows the whole
+     *  extent as a single @c cuMemCreate , skipping the mapped-but-unused tail (under one granularity in
+     *  the wire-at-startup pattern, since growth maps exactly the shortfall). The returned pointer is
+     *  granularity-aligned. @c nullptr on ceiling or growth failure, like @ref allocate_bytes .
+     */
+    [[nodiscard]] std::byte *allocate_registrable_bytes(std::size_t bytes) noexcept {
+        std::size_t const chunk_start = mapped_bytes_;
+        if (chunk_start + bytes > reserved_bytes_) return nullptr;
+        if (grow_to_(chunk_start + bytes) != CUDA_SUCCESS) return nullptr;
+        used_bytes_ = chunk_start + bytes;
+        return reinterpret_cast<std::byte *>(base_ + chunk_start);
+    }
+
     /** @brief Rewind the cursor to a @ref snapshot ; the physical backing stays mapped. The caller owns the
      *      hazard of rewinding under allocations still referenced by enqueued work. */
     void rewind(snapshot_t snapshot) noexcept { used_bytes_ = snapshot.bytes; }
@@ -375,6 +393,54 @@ struct gpu_arena_alloc {
 using gpu_arena_alloc_t = gpu_arena_alloc<b8_t>;
 
 /**
+ *  @brief The RDMA-registrable sibling of @ref gpu_arena_alloc : every allocation lies within one
+ *      physical chunk of the arena — the precondition @c nvidia_peermem places on @c ibv_reg_mr — via
+ *      @ref gpu_arena_t::allocate_registrable_bytes . For the symmetric heaps the InfiniBand collectives
+ *      register with their NICs; everything else stays on the ordinary arena allocator.
+ *
+ *  Same contract as @ref gpu_arena_alloc otherwise: borrowed arena, no-op deallocate, free rebind.
+ */
+template <typename value_type_ = std::byte>
+struct gpu_registrable_alloc {
+    using value_type = value_type_;
+    using size_type = std::size_t;
+    using difference_type = std::ptrdiff_t;
+    /** @brief The handle is just an arena pointer — move it with the container so moves stay @c noexcept . */
+    using propagate_on_container_move_assignment = std::true_type;
+
+    template <typename other_type_>
+    struct rebind {
+        using other = gpu_registrable_alloc<other_type_>;
+    };
+
+    /** @brief The borrowed arena every allocation comes from. */
+    gpu_arena_t *arena_ = nullptr;
+
+    constexpr gpu_registrable_alloc() noexcept = default;
+    explicit constexpr gpu_registrable_alloc(gpu_arena_t &arena) noexcept : arena_(&arena) {}
+    template <typename other_type_>
+    constexpr gpu_registrable_alloc(gpu_registrable_alloc<other_type_> const &other) noexcept : arena_(other.arena_) {}
+
+    /** @brief Allocate @p count elements inside one fresh physical chunk; @c nullptr on exhaustion or
+     *      when unbound. */
+    [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
+        return arena_ != nullptr
+                   ? reinterpret_cast<value_type *>(arena_->allocate_registrable_bytes(count * sizeof(value_type)))
+                   : nullptr;
+    }
+
+    /** @brief A no-op: bump-arena memory is reclaimed by @ref gpu_arena_t::rewind , never per buffer. */
+    void deallocate(value_type *, std::size_t) noexcept {}
+
+    [[nodiscard]] constexpr bool operator==(gpu_registrable_alloc const &other) const noexcept {
+        return arena_ == other.arena_;
+    }
+};
+
+/** @brief The canonical byte-typed registrable-allocator handle — what the collective heaps receive. */
+using gpu_registrable_alloc_t = gpu_registrable_alloc<b8_t>;
+
+/**
  *  @brief Pinned host-memory allocator — page-locked pages the DMA engines read directly, for the two
  *      host-side surfaces of a replayed step: generation staging cells that captured copy nodes re-read
  *      at every launch, and loss landings polled without a stream synchronize. Stateless; needs a current
@@ -477,6 +543,7 @@ using gpu_alloc_t = gpu_alloc<b8_t>;
  *  @c *_span_t counterparts live in @c types.cuh .
  */
 using b8r1_tensor_arena_t = nk::tensor<b8_t, gpu_arena_alloc<b8_t>, 1>;
+using b8r1_tensor_registrable_t = nk::tensor<b8_t, gpu_registrable_alloc<b8_t>, 1>;
 using i16r2_tensor_arena_t = nk::tensor<i16_t, gpu_arena_alloc<i16_t>, 2>;
 using i32r1_tensor_arena_t = nk::tensor<i32_t, gpu_arena_alloc<i32_t>, 1>;
 using u32r1_tensor_arena_t = nk::tensor<u32_t, gpu_arena_alloc<u32_t>, 1>;
