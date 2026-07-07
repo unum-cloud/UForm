@@ -50,7 +50,7 @@ static __global__ void sample_rows_kernel_(u64r1_span_t record_indices, u64_t se
  */
 static __global__ void tokens_geometry_kernel_(u64r1_view_t reservoir_offsets, u64r1_view_t record_indices,
                                                u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
-                                               tokens_matrix_span_t tokens) {
+                                               modality_span_t segment_modality, tokens_matrix_span_t tokens) {
     if (threadIdx.x != 0u || blockIdx.x != 0u) return;
     u32_t const columns_per_row = static_cast<u32_t>(tokens.extent(1));
     u32_t const capacity = static_cast<u32_t>(tokens.extent(0) * tokens.extent(1));
@@ -73,6 +73,9 @@ static __global__ void tokens_geometry_kernel_(u64r1_view_t reservoir_offsets, u
         }
         segment_offsets[segment_index] = cursor;
         segment_lengths[segment_index] = columns;
+        // Every fill owns the whole segment table — a reused batch may hold another modality's tags, and
+        // a stale tag routes token bytes into a media head downstream (text_k doubles as PAD at length 0).
+        segment_modality[segment_index] = modality_t::text_k;
         cursor += columns;
     }
     segment_offsets[total_segments] = cursor;
@@ -142,12 +145,13 @@ static __global__ void tokens_gather_kernel_(b8r1_view_t reservoir_payload, u64r
             return expected_t::fail(status_t::shape_unsupported_k, "{} documents exceed batch {}'s segment capacity",
                                     documents, batch);
         u64r1_view_t const batch_records {record_indices.data() + batch * documents, documents};
-        u32r1_span_t const segment_offsets {loaded.segment_offsets.data(), loaded.segment_offsets.extent(0)};
-        u32r1_span_t const segment_lengths {loaded.segment_lengths.data(), loaded.segment_lengths.extent(0)};
-        tokens_matrix_span_t const tokens {loaded.tokens.data(), loaded.tokens.extent(0), loaded.tokens.extent(1)};
+        u32r1_span_t const segment_offsets = loaded.segment_offsets.span();
+        u32r1_span_t const segment_lengths = loaded.segment_lengths.span();
+        modality_span_t const segment_modality = loaded.segment_modality.span();
+        tokens_matrix_span_t const tokens = loaded.tokens.span();
         expected_t staged = launch_kernel(reinterpret_cast<void const *>(&tokens_geometry_kernel_), one_block,
                                           one_block, gpu_stream, reservoir_offsets, batch_records, segment_offsets,
-                                          segment_lengths, tokens);
+                                          segment_lengths, segment_modality, tokens);
         if (staged)
             staged = launch_kernel(reinterpret_cast<void const *>(&tokens_gather_kernel_), document_grid, block_shape,
                                    gpu_stream, reservoir_payload, reservoir_offsets, batch_records,
