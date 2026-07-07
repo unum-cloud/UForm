@@ -171,6 +171,7 @@ uform_probe_infiniband()
 add_library(
     uform STATIC
     cuda_core/schedule.cu
+    cuda_core/introspect.cu
     cuda_core/multimem_collectives.cu
     cuda_core/infiniband_collectives.cu
     cuda_core/multimodal_masking.cu
