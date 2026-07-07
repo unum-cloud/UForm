@@ -124,6 +124,10 @@ struct flat_column_t {
                                             list.offsets()}};
         }
     }
+    // A dotted nested selection ("audio.bytes") arrives as its parent struct pruned to the one
+    // requested child — unwrap and flatten the child itself.
+    if (decoded.type().id() == cudf::type_id::STRUCT && decoded.num_children() == 1)
+        return flatten_column_(decoded.child(0), name, stream);
     return result_t::fail(status_t::shape_unsupported_k, "column {} is not string, list<uint8>, or list<string>", name);
 }
 
