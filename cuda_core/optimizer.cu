@@ -256,20 +256,22 @@ expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_vi
     return {};
 }
 
-expected<distributed_adafactor_t> distributed_adafactor_t::make(
-    multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
-    std::span<differentiable_weights_t const> weights, std::size_t weights_per_rank, adafactor_config_t config,
-    std::span<gpu_stream_t> streams, f64_t timeout_seconds) noexcept {
+expected<distributed_adafactor_t> distributed_adafactor_t::make(multimem_domain_t &domain,
+                                                                infiniband_all_reduce<f32_t> &world_reduce,
+                                                                std::span<gpu_arena_t> arenas,
+                                                                std::span<differentiable_weights_t const> weights,
+                                                                std::size_t weights_per_rank, adafactor_config_t config,
+                                                                std::span<gpu_stream_t> streams) noexcept {
     using result_t = expected<distributed_adafactor_t>;
     std::size_t const gpus = arenas.size();
-    u32_t const domains = colocated.multimem_domain_count();
+    bool const single_domain = world_reduce.identity();
     if (gpus == 0 || streams.size() != gpus || domain.member_count() != gpus ||
         weights.size() != gpus * weights_per_rank)
         return result_t::fail(status_t::invalid_input_k,
                               "every rank needs an arena, stream, domain member, and weights table ({} ranks)", gpus);
     distributed_adafactor_t optimizer;
     optimizer.domain_ = &domain;
-    optimizer.colocated_ = &colocated;
+    optimizer.world_reduce_ = &world_reduce;
     if (optimizer.ranks_.try_resize(gpus) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "rank table allocation failed");
     expected<multimem_window_t> window = domain.reserve(payload_scalars_needed(weights.subspan(0, weights_per_rank)));
@@ -283,7 +285,7 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
             arenas[rank], weights.subspan(rank * weights_per_rank, weights_per_rank), config, streams[rank]);
         if (!state) return result_t::fail(std::move(state));
         optimizer.ranks_[rank].state = std::move(state.value_);
-        if (domains == 1u) {
+        if (single_domain) {
             gpu_arena_alloc<f32_t> f32_alloc {arenas[rank]};
             std::size_t const scalars = optimizer.ranks_[rank].state.gradient_scalars();
             optimizer.ranks_[rank].reduced = f32r1_tensor_arena_t::try_empty({scalars}, f32_alloc);
@@ -292,23 +294,25 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
         }
     }
 
-    // The gateway's cross-domain member and the world-ready ordering token; every member must be
-    // able to peer-read the gateway's world sum.
-    if (domains > 1u)
+    // The borrowed world buffer must fit this optimizer's gradient (the unread tail beyond it is
+    // harmless — the reduce is elementwise), and every member must be able to peer-read the gateway's
+    // world sum.
+    if (!single_domain) {
+        std::size_t const gradient_scalars = optimizer.ranks_[0].state.gradient_scalars();
+        if (world_reduce.payload().extent(0) < gradient_scalars)
+            return result_t::fail(status_t::invalid_input_k,
+                                  "the borrowed world all-reduce is too small: payload {} < gradient {} scalars",
+                                  world_reduce.payload().extent(0), gradient_scalars);
         for (std::size_t rank = 0; rank != gpus; ++rank)
             if (!arenas[0].is_visible_to(static_cast<int>(rank)))
                 return result_t::fail(status_t::invalid_input_k,
                                       "rank 0's arena is not visible to device {} — " //
                                       "construct it with `visible_to`",
                                       rank);
+    }
     {
         switch_to_gpu_t gpu_scope {streams[0]};
         if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (rank=0)");
-        std::size_t const scalars = optimizer.ranks_[0].state.gradient_scalars();
-        expected<infiniband_all_reduce<f32_t>> world_reduce = infiniband_all_reduce<f32_t>::make(
-            colocated, 0, arenas[0], scalars, streams[0], timeout_seconds);
-        if (!world_reduce) return result_t::fail(std::move(world_reduce));
-        optimizer.world_reduce_ = std::move(world_reduce.value_);
         expected<gpu_event_t> event = gpu_event_t::make();
         if (!event) return result_t::fail(std::move(event));
         optimizer.world_ready_ = std::move(event.value_);
@@ -336,7 +340,7 @@ expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, 
     if (staged) staged = domain_->barrier(rank, stream);
     if (!staged) return staged;
     std::size_t const scalars = ranks_[rank].state.gradient_scalars();
-    if (world_domains() == 1u) {
+    if (world_reduce_->identity()) {
         // Materialise the domain sum locally; the world IS the domain.
         staged = launch_kernel(reinterpret_cast<void const *>(&adafactor_reduce_gradient_kernel_),
                                dim3 {grid_size_for(scalars), 1u, 1u}, block_shape, stream, domain_->member(rank),
@@ -359,13 +363,13 @@ expected_t distributed_adafactor_t::step(f32_t learning_rate, std::span<gpu_stre
 expected_t distributed_adafactor_t::world_gradient_step_(std::size_t rank, f32_t learning_rate,
                                                          gpu_stream_t &stream) noexcept {
     std::size_t const scalars = ranks_[rank].state.gradient_scalars();
-    f32_t *const world_gradient = world_reduce_.payload().data();
+    f32_t *const world_gradient = world_reduce_->payload().data();
     expected_t staged {};
     if (rank == 0) {
         staged = launch_kernel(reinterpret_cast<void const *>(&adafactor_reduce_gradient_kernel_),
                                dim3 {grid_size_for(scalars), 1u, 1u}, dim3 {kernel_block_size_default_k, 1u, 1u},
                                stream, domain_->member(rank), f32r1_span_t {world_gradient, scalars}, window_.offset);
-        if (staged) staged = world_reduce_(stream);
+        if (staged) staged = (*world_reduce_)(stream);
         if (staged)
             if (CUresult result = cuEventRecord(world_ready_.get(), stream.get()); result != CUDA_SUCCESS)
                 staged = expected_t::fail(result, "world-gradient event record failed");

@@ -786,9 +786,21 @@ int base_trainer_t::run(base_config_t const &config) noexcept {
     expected<colocated_domain_t> colocated_made = colocated_domain_t::make(topology.value_);
     if (!colocated_made) return fail_out_(colocated_made.description_.view());
     colocated_domain_t colocated = std::move(colocated_made.value_);
+    // The one cross-domain all-reduce buffer of the run — wired here, at the composition root, and
+    // borrowed by the optimizer (which constructs no transport of its own).
+    infiniband_all_reduce<f32_t> world_reduce;
+    {
+        switch_to_gpu_t gpu_scope {trainer.streams[0]};
+        if (!gpu_scope.ok()) return fail_out_("context entry failed wiring the world all-reduce");
+        expected<infiniband_all_reduce<f32_t>> world_reduce_made = infiniband_all_reduce<f32_t>::make(
+            colocated, 0, trainer.arenas[0], distributed_adafactor_t::payload_scalars_needed(lead_list),
+            trainer.streams[0]);
+        if (!world_reduce_made) return fail_out_(world_reduce_made.description_.view());
+        world_reduce = std::move(world_reduce_made.value_);
+    }
     adafactor_config_t optimizer_config; // the per-step learning rate travels through `step`, not the config
     expected<distributed_adafactor_t> optimizer_made = distributed_adafactor_t::make(
-        domain, colocated, trainer.arenas, {registrations.view().data(), registrations.size()}, weights_per_replica,
+        domain, world_reduce, trainer.arenas, {registrations.view().data(), registrations.size()}, weights_per_replica,
         optimizer_config, trainer.streams);
     if (!optimizer_made) return fail_out_(optimizer_made.description_.view());
     distributed_adafactor_t optimizer = std::move(optimizer_made.value_);

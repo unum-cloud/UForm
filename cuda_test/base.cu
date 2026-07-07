@@ -8,7 +8,7 @@
  *
  *  This is a test: a plain @c int @c main builds one @ref test_suite_t and threads it by reference into every
  *  case, consuming @c cuda_train/base.cuh 's typed surface instead of copying the driver. The collective
- *  surfaces — one multimem domain and one colocated surface per width tier — are created once in @c main and
+ *  surfaces — one multimem domain and one cross-domain all-reduce per width tier — are created once in @c main and
  *  threaded by reference into every case, exactly as @ref base_trainer_t::run composes production; each case
  *  keeps only its own trainer and optimizer. Launched under Slurm via @c cuda_test/base-4-8-16.sbatch , the
  *  same binary runs the distributed tiers: @c main honors @c UFORM_HOST_DOMAIN_COUNT , so a two-node world
@@ -96,9 +96,12 @@ inline constexpr f64_t test_rendezvous_timeout_seconds_k = 20.0;
 /** @brief One width tier's shared surfaces: the topology plus the collective state every cell of the tier
  *      reuses instead of re-creating — threaded by reference from @c main , like production. */
 struct tier_t {
+    /** @brief The tier's world description. */
     mesh_topology_t const &topology;
+    /** @brief The tier's one multicast domain — every case reserves its own window from it. */
     multimem_domain_t &domain;
-    colocated_domain_t &colocated;
+    /** @brief The tier's one cross-domain all-reduce — every case's optimizer borrows it. */
+    infiniband_all_reduce<f32_t> &world_reduce;
 };
 
 /** @brief One collective surface shared by every consumer of a tier — multicast objects are a scarce
@@ -124,12 +127,45 @@ struct tier_t {
                                    streams);
 }
 
+/** @brief The suite-lifetime arena hosting the tiers' world-reduce heaps — on device 0, visible to every
+ *      local device, because the ranks peer-read the gateway's world sum over NVLink. */
+[[nodiscard]] static expected<gpu_arena_t> make_reduce_arena_(u32_t gpus) noexcept {
+    using result_t = expected<gpu_arena_t>;
+    array<i32_t> devices;
+    for (u32_t device = 0; device != gpus; ++device)
+        if (devices.try_push_back(static_cast<i32_t>(device)) != status_t::success_k)
+            return result_t::fail(status_t::bad_alloc_k, "reduce-arena device table allocation failed");
+    expected<gpu_stream_t> lead_stream = gpu_stream_t::make(0);
+    if (!lead_stream) return result_t::fail(std::move(lead_stream));
+    switch_to_gpu_t gpu_scope {lead_stream.value_};
+    if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed");
+    return gpu_arena_t::make(0, 256ull << 20, devices.view());
+}
+
+/** @brief One tier's world all-reduce buffer, wired once and borrowed by every case — sized like a domain
+ *      window ( @ref tier_window_scalars_k , the elementwise reduce leaves a smaller case's tail unread).
+ *      A single-domain tier gets the zero-round identity, wired without touching InfiniBand. */
+[[nodiscard]] static expected<infiniband_all_reduce<f32_t>> make_tier_reduce_(colocated_domain_t &colocated,
+                                                                              gpu_arena_t &arena) noexcept {
+    using result_t = expected<infiniband_all_reduce<f32_t>>;
+    expected<gpu_stream_t> wiring_stream = gpu_stream_t::make(0);
+    if (!wiring_stream) return result_t::fail(std::move(wiring_stream));
+    switch_to_gpu_t gpu_scope {wiring_stream.value_};
+    if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed");
+    result_t wired = infiniband_all_reduce<f32_t>::make(colocated, 0, arena, tier_window_scalars_k,
+                                                        wiring_stream.value_, test_rendezvous_timeout_seconds_k);
+    // The round-scalar seed is enqueued on the transient wiring stream — drain it before the stream dies.
+    if (wired)
+        if (CUresult synced = cuStreamSynchronize(wiring_stream.value_.get()); synced != CUDA_SUCCESS)
+            return result_t::fail(synced, "tier reduce wiring drain failed");
+    return wired;
+}
+
 /** @brief The distributed Adafactor over the transient flat replica-major registration table — the same
  *      construction @ref base_trainer_t::run performs. A second call on the same domain reserves the next
- *      disjoint window (fresh moments). */
-[[nodiscard]] static expected<distributed_adafactor_t> make_optimizer_(base_trainer_t &trainer,
-                                                                       multimem_domain_t &domain,
-                                                                       colocated_domain_t &colocated) noexcept {
+ *      disjoint window (fresh moments), borrowing the tier's one world all-reduce. */
+[[nodiscard]] static expected<distributed_adafactor_t> make_optimizer_(
+    base_trainer_t &trainer, multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce) noexcept {
     using result_t = expected<distributed_adafactor_t>;
     array<differentiable_weights_t> registrations;
     for (std::size_t member_index = 0; member_index != trainer.replicas.size(); ++member_index) {
@@ -140,9 +176,9 @@ struct tier_t {
                 return result_t::fail(status_t::bad_alloc_k, "registration table allocation failed");
     }
     adafactor_config_t optimizer_config; // the per-step learning rate travels through `step`, not the config
-    return distributed_adafactor_t::make(
-        domain, colocated, trainer.arenas, {registrations.view().data(), registrations.size()},
-        trainer.replicas[0].weights.size(), optimizer_config, trainer.streams, test_rendezvous_timeout_seconds_k);
+    return distributed_adafactor_t::make(domain, world_reduce, trainer.arenas,
+                                         {registrations.view().data(), registrations.size()},
+                                         trainer.replicas[0].weights.size(), optimizer_config, trainer.streams);
 }
 
 /** @brief The world's health, owned by @c main beside the suite and threaded by reference into every case:
@@ -343,12 +379,27 @@ static void check_weight_naming_(test_suite_t &suite, char const *label, base_co
     suite.check(index == weights.size(), "[{}] registration count: got {} want {}", label, weights.size(), index);
 }
 
+/** @brief Drain every member's stream before a case's trainer — and the wired collectives borrowing its
+ *      arenas — leaves scope: a doorbell or completion-drain kernel still in flight would otherwise poke
+ *      NIC structures the teardown frees, and mlx5's pools recycle those pages into the next case's
+ *      queues (a roaming device fault the page registry alone cannot prevent). */
+[[nodiscard]] static expected_t drain_all_streams_(base_trainer_t &trainer) noexcept {
+    for (std::size_t member_index = 0; member_index != trainer.streams.size(); ++member_index) {
+        switch_to_gpu_t gpu_scope {trainer.streams[member_index]};
+        if (!gpu_scope.ok())
+            return expected_t::fail(status_t::cuda_error_k, "context entry failed (member={})", member_index);
+        if (CUresult synced = cuStreamSynchronize(trainer.streams[member_index].get()); synced != CUDA_SUCCESS)
+            return expected_t::fail(synced, "end-of-case stream drain failed (member={})", member_index);
+    }
+    return {};
+}
+
 /** @brief Bring up the trainer for one mixture, run the captured two-region loop reading telemetry every step,
  *      and fold the five invariants (A replica identity, B round progression, C capture == eager, D loss
  *      descent, E every live head trained) into @p suite . */
 static void run_base_conformance(test_suite_t &suite, world_health_t &health, char const *label,
                                  base_config_t const &config, mesh_topology_t const &topology,
-                                 multimem_domain_t &domain, colocated_domain_t &colocated) {
+                                 multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce) {
     if (!world_still_healthy_(suite, health)) return;
     base_trainer_t trainer;
     if (expected_t built = base_trainer_t::make(trainer, config, topology); !built)
@@ -359,8 +410,8 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
     check_weight_naming_(suite, label, config, trainer.replicas[0].weights.view());
 
     // The captured optimizer and the assertion-C eager optimizer each reserve a fresh disjoint window
-    // from the tier's shared domain.
-    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain, colocated);
+    // from the tier's shared domain and borrow the tier's one world all-reduce.
+    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain, world_reduce);
     if (!optimizer) {
         ++health.consecutive_setup_failures;
         return suite.check(false, "[{}] optimizer setup: {}", label, optimizer.description_);
@@ -453,7 +504,7 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
     //     same steps eagerly, and land bitwise on the captured run's weights. The strongest single check.
     if (expected_t reseeded = trainer.reseed(); !reseeded)
         return suite.check(false, "[{}] reseed: {}", label, reseeded.description_);
-    expected<distributed_adafactor_t> eager_optimizer = make_optimizer_(trainer, domain, colocated);
+    expected<distributed_adafactor_t> eager_optimizer = make_optimizer_(trainer, domain, world_reduce);
     if (!eager_optimizer)
         return suite.check(false, "[{}] eager optimizer setup: {}", label, eager_optimizer.description_);
     if (expected_t ran = run_steps_(trainer, eager_optimizer.value_, {}, 0u, config.steps); !ran)
@@ -462,20 +513,23 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
     expected<array<bf16_t>> eager_lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
     suite.check(eager_lead && snapshots_match_(eager_lead.value_, captured_lead.value_),
                 "[{}] captured replay lands bitwise on the eager run (C)", label);
+
+    if (expected_t drained = drain_all_streams_(trainer); !drained)
+        suite.check(false, "[{}] end-of-case drain: {}", label, drained.description_);
 }
 
 /** @brief One sweep cell: bring up the trainer, run two eager steps, then capture and replay two more over the
  *      same trainer — both model-region modes under one mixture — asserting finite losses and the final-norm
  *      extents every head reconstructs against. */
 static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, mesh_topology_t const &topology,
-                            multimem_domain_t &domain, colocated_domain_t &colocated, sz::string_view label,
-                            base_config_t const &config) {
+                            multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce,
+                            sz::string_view label, base_config_t const &config) {
     if (!world_still_healthy_(suite, health)) return;
     base_trainer_t trainer;
     if (expected_t built = base_trainer_t::make(trainer, config, topology); !built)
         return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
     if (trainer.replicas.size() == 0) return suite.check(false, "[{}] no visible GPU", label);
-    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain, colocated);
+    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain, world_reduce);
     if (!optimizer) {
         ++health.consecutive_setup_failures;
         return suite.check(false, "[{}] optimizer setup: {}", label, optimizer.description_);
@@ -502,6 +556,9 @@ static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, mesh_to
     suite.check(normalized.extent(0) == max_tokens && normalized.extent(1) == config.hidden,
                 "[{}] normalized carries [max_tokens, hidden]: got [{}, {}] want [{}, {}]", label, normalized.extent(0),
                 normalized.extent(1), max_tokens, config.hidden);
+
+    if (expected_t drained = drain_all_streams_(trainer); !drained)
+        suite.check(false, "[{}] end-of-case drain: {}", label, drained.description_);
 }
 
 /** @brief One sweep cell's config: @p subset 's media bits over @p rows full-width rows of @p columns cells. */
@@ -529,22 +586,22 @@ static void mixture_sweep(test_suite_t &suite, world_health_t &health, tier_t wi
             if (!format_into(label, "1gpu:tokens{}{}{} rows={}", (subset & 1u) ? "+image" : "",
                              (subset & 2u) ? "+video" : "", (subset & 4u) ? "+audio" : "", rows))
                 return suite.check(false, "sweep label format failed");
-            run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.colocated, label.view(),
+            run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.world_reduce, label.view(),
                             sweep_config_(subset, rows, 64u));
         }
-    run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.colocated, "1gpu:omni rows=5",
+    run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.world_reduce, "1gpu:omni rows=5",
                     sweep_config_(7u, 5u, 64u));
-    run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.colocated, "1gpu:omni rows=2 columns=96",
+    run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.world_reduce, "1gpu:omni rows=2 columns=96",
                     sweep_config_(7u, 2u, 96u));
     base_config_t tuned = sweep_config_(7u, 2u, 64u);
     tuned.algo_pick = algo_pick_t::benchmarked_k;
-    run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.colocated, "1gpu:omni rows=2 tuned", tuned);
+    run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.world_reduce, "1gpu:omni rows=2 tuned", tuned);
     for (u32_t subset = 0; subset != 8u; ++subset) {
         sz::string label;
         if (!format_into(label, "wide:tokens{}{}{} rows=2", (subset & 1u) ? "+image" : "",
                          (subset & 2u) ? "+video" : "", (subset & 4u) ? "+audio" : ""))
             return suite.check(false, "sweep label format failed");
-        run_sweep_cell_(suite, health, wide.topology, wide.domain, wide.colocated, label.view(),
+        run_sweep_cell_(suite, health, wide.topology, wide.domain, wide.world_reduce, label.view(),
                         sweep_config_(subset, 2u, 64u));
     }
 }
@@ -634,12 +691,34 @@ int main() {
         suite.check(false, "cheap-tier colocated surface: {}", cheap_colocated.description_);
         return suite.finish();
     }
-    tier_t const wide {topology.value_, wide_domain.value_, wide_colocated.value_};
-    tier_t const cheap {narrow.value_, cheap_domain.value_, cheap_colocated.value_};
+
+    // Each tier's one cross-domain all-reduce buffer, wired here — at the composition root — and borrowed
+    // by every case's optimizer, exactly as each case reserves its window from the tier's shared domain.
+    // Its heap lives in a suite-lifetime arena visible to every device (the ranks peer-read the world sum),
+    // sized like the domain payload; the cheap tier's single-domain buffer is the zero-round identity.
+    expected<gpu_arena_t> reduce_arena = make_reduce_arena_(topology.value_.shape.gpus_per_host_domain);
+    if (!reduce_arena) {
+        suite.check(false, "tier reduce arena: {}", reduce_arena.description_);
+        return suite.finish();
+    }
+    expected<infiniband_all_reduce<f32_t>> wide_reduce = make_tier_reduce_(wide_colocated.value_, reduce_arena.value_);
+    if (!wide_reduce) {
+        suite.check(false, "wide-tier world all-reduce: {}", wide_reduce.description_);
+        return suite.finish();
+    }
+    expected<infiniband_all_reduce<f32_t>> cheap_reduce = make_tier_reduce_(cheap_colocated.value_,
+                                                                            reduce_arena.value_);
+    if (!cheap_reduce) {
+        suite.check(false, "cheap-tier world all-reduce: {}", cheap_reduce.description_);
+        return suite.finish();
+    }
+
+    tier_t const wide {topology.value_, wide_domain.value_, wide_reduce.value_};
+    tier_t const cheap {narrow.value_, cheap_domain.value_, cheap_reduce.value_};
     world_health_t health;
 
-    run_base_conformance(suite, health, "tokens", test_geometry_(false), wide.topology, wide.domain, wide.colocated);
-    run_base_conformance(suite, health, "omni", test_geometry_(true), wide.topology, wide.domain, wide.colocated);
+    run_base_conformance(suite, health, "tokens", test_geometry_(false), wide.topology, wide.domain, wide.world_reduce);
+    run_base_conformance(suite, health, "omni", test_geometry_(true), wide.topology, wide.domain, wide.world_reduce);
     mixture_sweep(suite, health, wide, cheap);
     graph_capture(suite, health, narrow.value_);
     return suite.finish();

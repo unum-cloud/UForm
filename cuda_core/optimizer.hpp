@@ -41,7 +41,7 @@
 #include "cuda_core/schedule.cuh"               // `gpu_stream_t`, `launch_kernel`, `grid_size_for`
 #include "cuda_core/gpu_allocators.hpp"         // `gpu_arena_t`
 #include "cuda_core/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 gradient surface
-#include "cuda_core/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_all_reduce` — the level-2 surface
+#include "cuda_core/infiniband_collectives.cuh" // `infiniband_all_reduce` — the borrowed level-2 buffer
 
 namespace unum::uform::core {
 
@@ -148,19 +148,24 @@ struct distributed_adafactor_t {
     /**
      *  @brief One construction absorbs the whole world: one Adafactor per rank over its own tower's
      *      weights (all ranks must expose identically-shaped tables), one reserved gradient window of the
-     *      shared @p domain , and one cross-domain reduce member wired through @p colocated on the
-     *      gateway — only member 0 touches InfiniBand, because the domain sums are already identical on
-     *      every member and the world sum is peer-read back over NVLink.
+     *      shared @p domain , and the borrowed @p world_reduce buffer on the gateway — only member 0
+     *      touches InfiniBand, because the domain sums are already identical on every member and the
+     *      world sum is peer-read back over NVLink. The optimizer constructs no transport of its own:
+     *      the buffer is wired once at the composition root and borrowed here, exactly like the domain —
+     *      so many optimizers (the conformance suite's case matrix) share one set of queue pairs.
      *
      *  @param[inout] domain The main-owned level-1 surface; one gradient window is reserved from it.
-     *  @param[inout] colocated The main-owned level-2 surface — a zero-round identity member in
-     *      single-domain worlds.
+     *  @param[inout] world_reduce The main-owned cross-domain all-reduce buffer — a zero-round identity
+     *      in single-domain worlds. Its payload must span at least this optimizer's gradient scalars;
+     *      the unread tail beyond them is harmless (the reduce is elementwise).
      *  @param[in] weights Rank-major @b [ranks·weights_per_rank] weights table.
      */
-    [[nodiscard]] static expected<distributed_adafactor_t> make(
-        multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
-        std::span<differentiable_weights_t const> weights, std::size_t weights_per_rank, adafactor_config_t config,
-        std::span<gpu_stream_t> streams, f64_t timeout_seconds = 120.0) noexcept;
+    [[nodiscard]] static expected<distributed_adafactor_t> make(multimem_domain_t &domain,
+                                                                infiniband_all_reduce<f32_t> &world_reduce,
+                                                                std::span<gpu_arena_t> arenas,
+                                                                std::span<differentiable_weights_t const> weights,
+                                                                std::size_t weights_per_rank, adafactor_config_t config,
+                                                                std::span<gpu_stream_t> streams) noexcept;
 
     /** @brief Rank @p rank 's slice of one world step — pure enqueue onto @p stream , the shape a
      *      fork/join capture body composes directly. Rank 0's slice carries the domain's generation
@@ -183,20 +188,15 @@ struct distributed_adafactor_t {
      *      context. */
     [[nodiscard]] expected_t world_gradient_step_(std::size_t rank, f32_t learning_rate, gpu_stream_t &stream) noexcept;
 
-    /** @brief How many multimem_domains the world spans, polled from the borrowed topology; 1 makes
-     *      @ref world_reduce_ an identity. */
-    [[nodiscard]] u32_t world_domains() const noexcept { return colocated_->multimem_domain_count(); }
-
     /** @brief One Adafactor state (and, in single-domain worlds, one reduced buffer) per local GPU. */
     per_gpu_array<optimizer_rank_t> ranks_ {};
     /** @brief The main-owned level-1 surface — borrowed; its replicas carry the staged gradients. */
     multimem_domain_t *domain_ = nullptr;
-    /** @brief The main-owned level-2 topology — borrowed; polled for the world's domain span. */
-    colocated_domain_t *colocated_ = nullptr;
     /** @brief This consumer's disjoint gradient window of the domain payload, reserved at @ref make . */
     multimem_window_t window_ {};
-    /** @brief The gateway's cross-domain all-reduce buffer — its typed payload is the world gradient. */
-    infiniband_all_reduce<f32_t> world_reduce_ {};
+    /** @brief The main-owned cross-domain all-reduce buffer — borrowed, like @ref domain_ ; its typed
+     *      payload is the world gradient, and its @c identity() marks single-domain worlds. */
+    infiniband_all_reduce<f32_t> *world_reduce_ = nullptr;
     /** @brief The gateway's world-sum-ready ordering token every rank's update waits on. */
     gpu_event_t world_ready_ {};
 };
