@@ -42,6 +42,7 @@
 #include "cuda_core/gpu_allocators.hpp" // `gpu_arena_t`
 #include "cuda_core/schedule.cuh"       // `gpu_stream_t`, `cublaslt_session_t`, `cudnn_session_t`, replay graphs
 #include "cuda_core/mesh.hpp"           // `mesh_topology_t`
+#include "cuda_core/introspect.cuh"     // `telemetry_ledger_t`, `telemetry_probe_t` — the run's one ledger
 #include "cuda_core/multimem_collectives.cuh"
 #include "cuda_core/multimodal_batch.hpp" // `multimodal_batch_shape_t`, `multimodal_batch_on_gpu_t`, `modality_t`
 #include "cuda_core/multimodal_masking.hpp"
@@ -97,6 +98,10 @@ struct base_config_t {
      *      step — the learning-rate schedule and the keyed data draws pick up where the save left off.
      *      Borrows the argv storage it was parsed from. */
     sz::string_view resume {};
+    /** @brief The ledger channels this run arms — losses and rounds by default; @c --telemetry adds
+     *      more (e.g. @c signals for the optimizer's gradient-boundary probes). The entry point may
+     *      also arm channels from its launcher contract; the library itself never reads environment. */
+    u32_t telemetry_channels = telemetry_losses_k | telemetry_rounds_k;
 
     /** @brief Fold the @c --flag value pairs into a config; unknown flags keep their default. The
      *      @c --mixture @c tokens|omni preset fills the media slices of @ref batch (omni: 8-pixel RGB image
@@ -201,6 +206,16 @@ struct base_trainer_t {
     per_gpu_array<cudnn_session_t> dnn {};
     /** @brief One model replica per GPU, each holding its own @c weights registration list. */
     per_gpu_array<base_replica_t> replicas {};
+    /** @brief The run's one telemetry ledger — borrowed, like the domains; @ref make stores it and
+     *      registers the probes below, so every consumer feeds the same root-owned instance. */
+    telemetry_ledger_t *ledger = nullptr;
+    /** @brief The trainer's registered probes: one loss row per head, one round row per member — inert
+     *      zero handles whenever their channels are dark, so feeding them never branches. */
+    struct probes_t {
+        telemetry_probe_t token {}, image {}, video {}, audio {};
+        per_gpu_array<telemetry_probe_t> rounds {};
+    };
+    probes_t probes {};
 
     /** @brief One step's readouts off the lead replica — best-effort: a readback slip degrades a field, never
      *      the run. The test's descent check and the binary's progress line read the same record. */
@@ -222,10 +237,11 @@ struct base_trainer_t {
 
     /** @brief The whole bring-up, filling the caller-placed @p trainer in place (a move would dangle the towers'
      *      session borrows): per GPU a stream, an arena, the two sessions, and the replica — each publishing its
-     *      own registration list — then every replica seeded identically. Builds no domain, colocated surface,
-     *      or optimizer. */
+     *      own registration list — then every replica seeded identically. Registers the trainer's loss and
+     *      round probes on the borrowed @p ledger (inert rows when the channels are dark). Builds no domain,
+     *      colocated surface, or optimizer. */
     [[nodiscard]] static expected_t make(base_trainer_t &trainer, base_config_t const &config,
-                                         mesh_topology_t const &topology) noexcept;
+                                         mesh_topology_t const &topology, telemetry_ledger_t &ledger) noexcept;
 
     /** @brief Capture each replica's @ref base_replica_t::model_region into one replay graph per GPU, appended
      *      to the caller-owned @p graphs — pass the filled table to @ref step for replayed runs, or an empty
@@ -242,8 +258,10 @@ struct base_trainer_t {
      *      the capture-vs-eager parity test reruns it between runs so both start from equals. */
     [[nodiscard]] expected_t reseed() noexcept;
 
-    /** @brief Sync the lead replica and read one @ref telemetry_t — each live head's @c {λ·Σ, count} summands
-     *      folded to means, plus @p domain 's barrier round. */
+    /** @brief Sync @b every local replica and read one @ref telemetry_t — each live head's @c {λ·Σ, count}
+     *      summands accumulated across all members before the fold to means (8–16× the sample mass of a
+     *      lead-only reading, the difference between a statistic and a coin flip at wide worlds), plus
+     *      @p domain 's barrier round. Feeds the ledger's loss rows and enqueues one round probe per member. */
     [[nodiscard]] telemetry_t telemetry(multimem_domain_t &domain, optimizer_step_t optimizer_step) noexcept;
 
     /** @brief The whole training binary: bootstrap the mesh, @ref make the trainer, make the one domain /

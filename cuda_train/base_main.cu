@@ -13,7 +13,7 @@
  *  warm-start from — and @c --mixture @c omni adds the raw-media masked-autoencoder heads (image /
  *  video patches, 1-D audio frames) over one heterogeneous batch. @c --eager drops the model-region capture.
  */
-#include <cstdlib> // `::setenv` — eager module loading before `cuInit`
+#include <cstdlib> // `::setenv`, `std::getenv` — the launcher-contract boundary
 
 #include "cuda_train/base.cuh"
 
@@ -23,5 +23,9 @@ int main(int argc, char **argv) {
     // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins (see the mixer
     // and base conformance suites); eager loading before `cuInit` front-loads every module.
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
-    return base_trainer_t::run(base_config_t::parse(argc, argv));
+    base_config_t config = base_config_t::parse(argc, argv);
+    // The ledger's one environment boundary: the library never reads env, so the launcher contract maps
+    // onto the config here — UFORM_DEBUG_ASSERTS arms the gradient-boundary signal probes.
+    if (std::getenv("UFORM_DEBUG_ASSERTS") != nullptr) config.telemetry_channels |= telemetry_signals_k;
+    return base_trainer_t::run(config);
 }

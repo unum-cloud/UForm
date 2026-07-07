@@ -45,10 +45,13 @@ using namespace unum::uform::core;
 using namespace unum::uform::train;
 using namespace unum::uform::test;
 
-/** @brief The tiny shared geometry — @c depth=2 , @c hidden=256 , @c 8 steps, and a two-step warmup so even
+/** @brief The tiny shared geometry — @c depth=2 , @c hidden=256 , @c 16 steps, and a two-step warmup so even
  *      the tiny run crosses both schedule phases. Tokens ride a @c 2×64 rectangle; the omni variant fills
  *      every media slice over a @c 4×64 one, so the keyed partition holds all four modalities live at every
- *      step and the composite loss measures the same mixture throughout — descent stays comparable. */
+ *      step and the composite loss measures the same mixture throughout — descent stays comparable. Sixteen
+ *      steps, because descent is asserted on the @b world mean: at a 16-GPU world the data spreads twice as
+ *      wide as one box's, and the eight-step horizon left the token head's early-vs-late comparison genuinely
+ *      marginal (a ~0.7% rise on the world mean) while every machinery invariant held. */
 [[nodiscard]] static base_config_t test_geometry_(bool omni) noexcept {
     base_config_t config;
     config.batch = multimodal_batch_shape_t {2u, 2u, 64u};
@@ -60,7 +63,7 @@ using namespace unum::uform::test;
     }
     config.depth = 2;
     config.hidden = 256;
-    config.steps = 8;
+    config.steps = 16;
     config.warmup_steps = 2;
     return config;
 }
@@ -104,6 +107,8 @@ struct tier_t {
     multimem_domain_t &domain;
     /** @brief The tier's one cross-domain all-reduce — every case's optimizer borrows it. */
     infiniband_all_reduce<f32_t> &world_reduce;
+    /** @brief The suite's one telemetry ledger — every case's trainer and optimizer feed it. */
+    telemetry_ledger_t &ledger;
 };
 
 /** @brief One collective surface shared by every consumer of a tier — multicast objects are a scarce
@@ -166,8 +171,10 @@ struct tier_t {
 /** @brief The distributed Adafactor over the transient flat replica-major registration table — the same
  *      construction @ref base_trainer_t::run performs. A second call on the same domain reserves the next
  *      disjoint window (fresh moments), borrowing the tier's one world all-reduce. */
-[[nodiscard]] static expected<distributed_adafactor_t> make_optimizer_(
-    base_trainer_t &trainer, multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce) noexcept {
+[[nodiscard]] static expected<distributed_adafactor_t> make_optimizer_(base_trainer_t &trainer,
+                                                                       multimem_domain_t &domain,
+                                                                       infiniband_all_reduce<f32_t> &world_reduce,
+                                                                       telemetry_ledger_t &ledger) noexcept {
     using result_t = expected<distributed_adafactor_t>;
     array<differentiable_weights_t> registrations;
     for (std::size_t member_index = 0; member_index != trainer.replicas.size(); ++member_index) {
@@ -180,7 +187,7 @@ struct tier_t {
     adafactor_config_t optimizer_config; // the per-step learning rate travels through `step`, not the config
     return distributed_adafactor_t::make(domain, world_reduce, trainer.arenas,
                                          {registrations.view().data(), registrations.size()},
-                                         trainer.replicas[0].weights.size(), optimizer_config, trainer.streams);
+                                         trainer.replicas[0].weights.size(), optimizer_config, trainer.streams, ledger);
 }
 
 /** @brief The world's health, owned by @c main beside the suite and threaded by reference into every case:
@@ -291,22 +298,6 @@ static void synchronize_(base_trainer_t &trainer) noexcept {
     return left.size() == right.size() && std::memcmp(left.data(), right.data(), left.size() * sizeof(bf16_t)) == 0;
 }
 
-/** @brief DtoH member @p member_index 's own barrier round through its accessor, on its own stream and
- *      context — zero when absent or when the readback slips (assertion B treats zero as "never
- *      advanced"). */
-[[nodiscard]] static concurrency_round_t read_round_(multimem_domain_t &domain, u32_t member_index,
-                                                     gpu_stream_t &stream) noexcept {
-    u32_t const *const round = domain.member(member_index).round;
-    if (round == nullptr) return concurrency_round_t {0u};
-    switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return concurrency_round_t {0u};
-    u32r1_tensor_pinned_t staging = u32r1_tensor_pinned_t::try_empty({1}, pinned_alloc<u32_t> {});
-    nk::tensor_view<u32_t, 1> const source {round, 1};
-    if (!staging || !copy_device_to_host(source, staging.span(), stream)) return concurrency_round_t {0u};
-    cuStreamSynchronize(stream.get());
-    return concurrency_round_t {staging[0]};
-}
-
 /** @brief The warmup / cosine policy's own properties, pure host math: a strictly monotone ramp topping out
  *      exactly at the peak, a never-rising decay bounded by @b [floor, peak] , and a tail settling onto the
  *      floor. */
@@ -398,13 +389,15 @@ static void check_weight_naming_(test_suite_t &suite, char const *label, base_co
 
 /** @brief Bring up the trainer for one mixture, run the captured two-region loop reading telemetry every step,
  *      and fold the five invariants (A replica identity, B round progression, C capture == eager, D loss
- *      descent, E every live head trained) into @p suite . */
+ *      descent, E every live head trained) into @p suite . D and E read the ledger's running loss
+ *      statistics — every local member's sample mass, not a lead-only coin flip. */
 static void run_base_conformance(test_suite_t &suite, world_health_t &health, char const *label,
                                  base_config_t const &config, mesh_topology_t const &topology,
-                                 multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce) {
+                                 multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce,
+                                 telemetry_ledger_t &ledger) {
     if (!world_still_healthy_(suite, health)) return;
     base_trainer_t trainer;
-    if (expected_t built = base_trainer_t::make(trainer, config, topology); !built)
+    if (expected_t built = base_trainer_t::make(trainer, config, topology, ledger); !built)
         return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
     u32_t const gpus = static_cast<u32_t>(trainer.replicas.size());
     suite.check(gpus != 0u, "[{}] at least one visible GPU: got {}", label, gpus);
@@ -413,7 +406,7 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
 
     // The captured optimizer and the assertion-C eager optimizer each reserve a fresh disjoint window
     // from the tier's shared domain and borrow the tier's one world all-reduce.
-    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain, world_reduce);
+    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain, world_reduce, ledger);
     if (!optimizer) {
         ++health.consecutive_setup_failures;
         return suite.check(false, "[{}] optimizer setup: {}", label, optimizer.description_);
@@ -426,38 +419,67 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
     expected<array<bf16_t>> seed_lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
     if (!seed_lead) return suite.check(false, "[{}] seed snapshot: {}", label, seed_lead.description_);
 
-    // The captured run, telemetry every step. Assertion D compares each head against itself — its first
-    // and last scored (nonzero) readouts — so a step whose keyed draw masked nothing for one head (a
-    // routine event on short token rows) never skews the comparison with a missing term. Assertion E's
-    // per-modality coverage accumulates from the same readouts.
-    f32_t first_scored_sum = 0.0f, last_scored_sum = 0.0f;
-    f32_t token_first = 0.0f, token_last = 0.0f, image_first = 0.0f, image_last = 0.0f;
-    f32_t video_first = 0.0f, video_last = 0.0f, audio_first = 0.0f, audio_last = 0.0f;
+    // The captured run, telemetry every step — each reading aggregates every local member's summands
+    // into the ledger's running statistics. A midpoint snapshot splits the run into two halves;
+    // assertion D compares their sample-weighted means, so a head scored on only some steps (a routine
+    // event on short token rows at wide worlds) contributes its whole sample mass, not one noisy endpoint.
+    telemetry_probe_t const head_probes[4] = {trainer.probes.token, trainer.probes.image, trainer.probes.video,
+                                              trainer.probes.audio};
+    telemetry_loss_stats_t mid_stats[4] {};
     for (u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
         if (expected_t ran = trainer.step(optimizer_step_t {ordinal}, optimizer.value_, graphs); !ran)
             return suite.check(false, "[{}] captured step {}: {}", label, ordinal, ran.description_);
-        base_trainer_t::telemetry_t const telemetry = trainer.telemetry(domain, optimizer_step_t {ordinal});
-        if (telemetry.token_ce != 0.0f) {
-            if (token_first == 0.0f) token_first = telemetry.token_ce;
-            token_last = telemetry.token_ce;
+        (void)trainer.telemetry(domain, optimizer_step_t {ordinal});
+        if (ordinal + 1u == config.steps / 2u)
+            for (u32_t head = 0; head != 4u; ++head) mid_stats[head] = ledger.losses(head_probes[head]);
+    }
+    telemetry_loss_stats_t end_stats[4] {};
+    for (u32_t head = 0; head != 4u; ++head) end_stats[head] = ledger.losses(head_probes[head]);
+
+    // At multi-domain worlds a node's telemetry sees only its slice of the objective the optimizer
+    // minimizes — a local half can rise while the world mean falls, and that is descent, not a defect.
+    // Fold every host_domain's summands through the mesh exchange, so D judges the world mean and every
+    // node reaches the same verdict.
+    u32_t const host_domains = static_cast<u32_t>(topology.host_domains.size());
+    if (host_domains > 1u) {
+        sz::string mine;
+        bool formatted = true;
+        for (u32_t head = 0; head != 4u; ++head)
+            formatted = formatted &&
+                        format_into(mine, "{:.17e} {:.17e} {:.17e} {:.17e} {}\n", mid_stats[head].weighted_sum,
+                                    mid_stats[head].weight, end_stats[head].weighted_sum, end_stats[head].weight,
+                                    end_stats[head].scored_steps);
+        sz::string key;
+        formatted = formatted && static_cast<bool>(format_into(key, "conformance.{}.loss_summands", label));
+        if (!formatted) return suite.check(false, "[{}] loss-summand exchange formatting failed", label);
+        if (expected_t published = topology.publish_text(key.view(), mine.view()); !published)
+            return suite.check(false, "[{}] loss-summand publish: {}", label, published.description_);
+        telemetry_loss_stats_t world_mid[4] {}, world_end[4] {};
+        for (u32_t domain_index = 0; domain_index != host_domains; ++domain_index) {
+            sz::string text;
+            if (domain_index == topology.host_domain_index) {
+                if (!text.try_assign(mine.view())) return suite.check(false, "[{}] loss-summand staging failed", label);
+            }
+            else if (expected_t arrived = topology.await_text(domain_index, key.view(), text,
+                                                              test_rendezvous_timeout_seconds_k);
+                     !arrived)
+                return suite.check(false, "[{}] loss-summand exchange: {}", label, arrived.description_);
+            char const *cursor = text.c_str();
+            for (u32_t head = 0; head != 4u; ++head) {
+                char *next = nullptr;
+                world_mid[head].weighted_sum += std::strtod(cursor, &next); // vendor-boundary: libc parse
+                world_mid[head].weight += std::strtod(next, &next);         // vendor-boundary
+                world_end[head].weighted_sum += std::strtod(next, &next);   // vendor-boundary
+                world_end[head].weight += std::strtod(next, &next);         // vendor-boundary
+                world_end[head].scored_steps += static_cast<u64_t>(std::strtod(next, &next)); // vendor-boundary
+                cursor = next;
+            }
         }
-        if (telemetry.image_mse != 0.0f) {
-            if (image_first == 0.0f) image_first = telemetry.image_mse;
-            image_last = telemetry.image_mse;
-        }
-        if (telemetry.video_mse != 0.0f) {
-            if (video_first == 0.0f) video_first = telemetry.video_mse;
-            video_last = telemetry.video_mse;
-        }
-        if (telemetry.audio_mse != 0.0f) {
-            if (audio_first == 0.0f) audio_first = telemetry.audio_mse;
-            audio_last = telemetry.audio_mse;
+        for (u32_t head = 0; head != 4u; ++head) {
+            mid_stats[head] = world_mid[head];
+            end_stats[head] = world_end[head];
         }
     }
-    bool const token_trained = token_first != 0.0f, image_trained = image_first != 0.0f;
-    bool const video_trained = video_first != 0.0f, audio_trained = audio_first != 0.0f;
-    first_scored_sum = token_first + image_first + video_first + audio_first;
-    last_scored_sum = token_last + image_last + video_last + audio_last;
     synchronize_(trainer);
     expected<array<bf16_t>> captured_lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
     if (!captured_lead) return suite.check(false, "[{}] lead snapshot: {}", label, captured_lead.description_);
@@ -471,31 +493,49 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
     }
     suite.check(replicas_identical, "[{}] every replica matches the lead bitwise (A)", label);
 
-    // B — every member's own barrier round advanced off zero and they all agree: with self-advancing
-    //     rounds the uniformity is a real invariant (each member's scalar counts its own passed barriers).
-    concurrency_round_t const lead_round = read_round_(domain, 0u, trainer.streams[0]);
-    bool round_uniform = true;
-    for (u32_t member_index = 0; member_index < gpus; ++member_index)
-        round_uniform = round_uniform &&
-                        read_round_(domain, member_index, trainer.streams[member_index]).ordinal == lead_round.ordinal;
-    suite.check(lead_round.ordinal > 0u, "[{}] barrier round advanced off zero: got {} (B)", label, lead_round.ordinal);
+    // B — every member's own barrier round advanced off zero, never moved backwards, and they all agree:
+    //     the ledger's monotone round rows carry all three (each member's scalar counts its own barriers).
+    expected<telemetry_row_t> lead_round = ledger.row(trainer.probes.rounds[0], trainer.streams[0]);
+    bool rounds_read = static_cast<bool>(lead_round), round_uniform = true, round_monotone = true;
+    for (u32_t member_index = 0; member_index < gpus; ++member_index) {
+        expected<telemetry_row_t> member_round = ledger.row(trainer.probes.rounds[member_index],
+                                                            trainer.streams[member_index]);
+        rounds_read = rounds_read && member_round;
+        round_uniform = round_uniform && member_round && lead_round &&
+                        member_round.value_.last_scalar == lead_round.value_.last_scalar;
+        round_monotone = round_monotone && member_round && member_round.value_.violations == 0u;
+    }
+    suite.check(rounds_read && lead_round.value_.last_scalar > 0.0f, "[{}] barrier round advanced off zero: got {} (B)",
+                label, rounds_read ? lead_round.value_.last_scalar : 0.0f);
     suite.check(round_uniform, "[{}] barrier round reads identically through every member (B)", label);
+    suite.check(round_monotone, "[{}] no member's barrier round ever moved backwards (B)", label);
 
-    // D — the summed per-head loss fell between each head's first and last scored steps. Loose by
-    //     design — one deterministic descent, not convergence; each head is measured against itself.
-    suite.check(std::isfinite(last_scored_sum) && last_scored_sum < first_scored_sum,
-                "[{}] mean loss fell over {} steps: got {} want < {} (D)", label, config.steps, last_scored_sum,
-                first_scored_sum);
+    // D — per live head, the sample-weighted mean of the run's late half fell below the early half's;
+    //     the late half is a subtraction of two monotone snapshots. A head both halves scored votes;
+    //     the sums of voting heads decide. Loose by design — one deterministic descent, not convergence.
+    f64_t early_mean_sum = 0.0, late_mean_sum = 0.0;
+    u32_t voting_heads = 0;
+    for (u32_t head = 0; head != 4u; ++head) {
+        f64_t const early_weight = mid_stats[head].weight;
+        f64_t const late_weight = end_stats[head].weight - mid_stats[head].weight;
+        if (early_weight == 0.0 || late_weight == 0.0) continue; // unscored half — E guards coverage
+        early_mean_sum += mid_stats[head].weighted_sum / early_weight;
+        late_mean_sum += (end_stats[head].weighted_sum - mid_stats[head].weighted_sum) / late_weight;
+        ++voting_heads;
+    }
+    suite.check(voting_heads != 0u && std::isfinite(late_mean_sum) && late_mean_sum < early_mean_sum,
+                "[{}] mean loss fell over {} steps: late-half {} want < early-half {} ({} heads voting) (D)", label,
+                config.steps, late_mean_sum, early_mean_sum, voting_heads);
 
-    // E — every live head's loss read nonzero at least once: the keyed partition fed every modality rows, and
-    //     every head actually trained.
-    suite.check(token_trained, "[{}] the token head trained (E)", label);
+    // E — every live head scored at least once: the keyed partition fed every modality rows, and every
+    //     head actually trained.
+    suite.check(end_stats[0].scored_steps > 0u, "[{}] the token head trained (E)", label);
     if (config.batch.contains(modality_t::image_k))
-        suite.check(image_trained, "[{}] the image head trained (E)", label);
+        suite.check(end_stats[1].scored_steps > 0u, "[{}] the image head trained (E)", label);
     if (config.batch.contains(modality_t::video_k))
-        suite.check(video_trained, "[{}] the video head trained (E)", label);
+        suite.check(end_stats[2].scored_steps > 0u, "[{}] the video head trained (E)", label);
     if (config.batch.contains(modality_t::audio_k))
-        suite.check(audio_trained, "[{}] the audio head trained (E)", label);
+        suite.check(end_stats[3].scored_steps > 0u, "[{}] the audio head trained (E)", label);
 
     // F — the captured window moved the weights off their seed: gradients propagated through the whole
     //     backbone and the optimizer applied them.
@@ -506,7 +546,7 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
     //     same steps eagerly, and land bitwise on the captured run's weights. The strongest single check.
     if (expected_t reseeded = trainer.reseed(); !reseeded)
         return suite.check(false, "[{}] reseed: {}", label, reseeded.description_);
-    expected<distributed_adafactor_t> eager_optimizer = make_optimizer_(trainer, domain, world_reduce);
+    expected<distributed_adafactor_t> eager_optimizer = make_optimizer_(trainer, domain, world_reduce, ledger);
     if (!eager_optimizer)
         return suite.check(false, "[{}] eager optimizer setup: {}", label, eager_optimizer.description_);
     if (expected_t ran = run_steps_(trainer, eager_optimizer.value_, {}, 0u, config.steps); !ran)
@@ -523,16 +563,15 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
 /** @brief One sweep cell: bring up the trainer, run two eager steps, then capture and replay two more over the
  *      same trainer — both model-region modes under one mixture — asserting finite losses and the final-norm
  *      extents every head reconstructs against. */
-static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, mesh_topology_t const &topology,
-                            multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce,
-                            sz::string_view label, base_config_t const &config) {
+static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t tier, sz::string_view label,
+                            base_config_t const &config) {
     if (!test_filter_accepts(label)) return;
     if (!world_still_healthy_(suite, health)) return;
     base_trainer_t trainer;
-    if (expected_t built = base_trainer_t::make(trainer, config, topology); !built)
+    if (expected_t built = base_trainer_t::make(trainer, config, tier.topology, tier.ledger); !built)
         return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
     if (trainer.replicas.size() == 0) return suite.check(false, "[{}] no visible GPU", label);
-    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain, world_reduce);
+    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, tier.domain, tier.world_reduce, tier.ledger);
     if (!optimizer) {
         ++health.consecutive_setup_failures;
         return suite.check(false, "[{}] optimizer setup: {}", label, optimizer.description_);
@@ -543,13 +582,13 @@ static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, mesh_to
     // optimizer has stepped (the capture-stable addresses survive weight updates).
     if (expected_t ran = run_steps_(trainer, optimizer.value_, {}, 0u, 2u); !ran)
         return suite.check(false, "[{}] eager steps: {}", label, ran.description_);
-    f32_t const eager_loss = trainer.telemetry(domain, optimizer_step_t {1u}).composite();
+    f32_t const eager_loss = trainer.telemetry(tier.domain, optimizer_step_t {1u}).composite();
     per_gpu_array<gpu_replay_graph_t> graphs;
     if (expected_t captured = trainer.capture(graphs); !captured)
         return suite.check(false, "[{}] capture: {}", label, captured.description_);
     if (expected_t ran = run_steps_(trainer, optimizer.value_, graphs, 2u, 4u); !ran)
         return suite.check(false, "[{}] replayed steps: {}", label, ran.description_);
-    f32_t const replayed_loss = trainer.telemetry(domain, optimizer_step_t {3u}).composite();
+    f32_t const replayed_loss = trainer.telemetry(tier.domain, optimizer_step_t {3u}).composite();
 
     suite.check(std::isfinite(eager_loss) && std::isfinite(replayed_loss),
                 "[{}] losses finite through both modes: eager {} replayed {}", label, eager_loss, replayed_loss);
@@ -589,34 +628,31 @@ static void mixture_sweep(test_suite_t &suite, world_health_t &health, tier_t wi
             if (!format_into(label, "1gpu:tokens{}{}{} rows={}", (subset & 1u) ? "+image" : "",
                              (subset & 2u) ? "+video" : "", (subset & 4u) ? "+audio" : "", rows))
                 return suite.check(false, "sweep label format failed");
-            run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.world_reduce, label.view(),
-                            sweep_config_(subset, rows, 64u));
+            run_sweep_cell_(suite, health, cheap, label.view(), sweep_config_(subset, rows, 64u));
         }
-    run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.world_reduce, "1gpu:omni rows=5",
-                    sweep_config_(7u, 5u, 64u));
-    run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.world_reduce, "1gpu:omni rows=2 columns=96",
-                    sweep_config_(7u, 2u, 96u));
+    run_sweep_cell_(suite, health, cheap, "1gpu:omni rows=5", sweep_config_(7u, 5u, 64u));
+    run_sweep_cell_(suite, health, cheap, "1gpu:omni rows=2 columns=96", sweep_config_(7u, 2u, 96u));
     base_config_t tuned = sweep_config_(7u, 2u, 64u);
     tuned.algo_pick = algo_pick_t::benchmarked_k;
-    run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.world_reduce, "1gpu:omni rows=2 tuned", tuned);
+    run_sweep_cell_(suite, health, cheap, "1gpu:omni rows=2 tuned", tuned);
     for (u32_t subset = 0; subset != 8u; ++subset) {
         sz::string label;
         if (!format_into(label, "wide:tokens{}{}{} rows=2", (subset & 1u) ? "+image" : "",
                          (subset & 2u) ? "+video" : "", (subset & 4u) ? "+audio" : ""))
             return suite.check(false, "sweep label format failed");
-        run_sweep_cell_(suite, health, wide.topology, wide.domain, wide.world_reduce, label.view(),
-                        sweep_config_(subset, 2u, 64u));
+        run_sweep_cell_(suite, health, wide, label.view(), sweep_config_(subset, 2u, 64u));
     }
 }
 
 /** @brief The capture contract holds — one replay graph per replica builds — and two replays over one fixed
  *      eager preamble produce a bitwise-identical shared @c d(normalized) . Needs no domain or optimizer: the
  *      model region is pure local math, so this stays green even where multicast is not provisioned. */
-static void graph_capture(test_suite_t &suite, world_health_t &health, mesh_topology_t const &topology) {
+static void graph_capture(test_suite_t &suite, world_health_t &health, mesh_topology_t const &topology,
+                          telemetry_ledger_t &ledger) {
     if (!world_still_healthy_(suite, health)) return;
     base_config_t const config = test_geometry_(false);
     base_trainer_t trainer;
-    if (expected_t built = base_trainer_t::make(trainer, config, topology); !built)
+    if (expected_t built = base_trainer_t::make(trainer, config, topology, ledger); !built)
         return suite.check(false, "capture trainer bring-up: {}", built.description_);
     u32_t const gpus = static_cast<u32_t>(trainer.replicas.size());
     if (gpus == 0u) return suite.check(false, "capture: no visible GPU");
@@ -716,8 +752,24 @@ int main() {
         return suite.finish();
     }
 
-    tier_t const wide {topology.value_, wide_domain.value_, wide_reduce.value_};
-    tier_t const cheap {narrow.value_, cheap_domain.value_, cheap_reduce.value_};
+    // The suite's one telemetry ledger — armed on every channel, its device table in the same
+    // all-visible arena as the tier reduce heaps; every case's trainer and optimizer feed it, and the
+    // conformance assertions read its running statistics instead of keeping test-local bookkeeping.
+    expected<gpu_stream_t> ledger_bring_up = gpu_stream_t::make(0); // transient — orders the table's zeroing
+    if (!ledger_bring_up) {
+        suite.check(false, "ledger bring-up stream: {}", ledger_bring_up.description_);
+        return suite.finish();
+    }
+    expected<telemetry_ledger_t> ledger = telemetry_ledger_t::make(
+        reduce_arena.value_, telemetry_losses_k | telemetry_signals_k | telemetry_rounds_k, 4096u,
+        ledger_bring_up.value_);
+    if (!ledger) {
+        suite.check(false, "suite telemetry ledger: {}", ledger.description_);
+        return suite.finish();
+    }
+
+    tier_t const wide {topology.value_, wide_domain.value_, wide_reduce.value_, ledger.value_};
+    tier_t const cheap {narrow.value_, cheap_domain.value_, cheap_reduce.value_, ledger.value_};
     world_health_t health;
 
     // Targeted runs: UFORM_TEST_FILTER is a regular expression against each case's name (the
@@ -725,11 +777,11 @@ int main() {
     // minutes instead of re-running the whole matrix.
     if (test_filter_accepts("conformance/tokens"))
         run_base_conformance(suite, health, "tokens", test_geometry_(false), wide.topology, wide.domain,
-                             wide.world_reduce);
+                             wide.world_reduce, wide.ledger);
     if (test_filter_accepts("conformance/omni"))
-        run_base_conformance(suite, health, "omni", test_geometry_(true), wide.topology, wide.domain,
-                             wide.world_reduce);
+        run_base_conformance(suite, health, "omni", test_geometry_(true), wide.topology, wide.domain, wide.world_reduce,
+                             wide.ledger);
     mixture_sweep(suite, health, wide, cheap);
-    if (test_filter_accepts("capture/replay")) graph_capture(suite, health, narrow.value_);
+    if (test_filter_accepts("capture/replay")) graph_capture(suite, health, narrow.value_, ledger.value_);
     return suite.finish();
 }

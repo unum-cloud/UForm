@@ -259,12 +259,10 @@ expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_vi
     return {};
 }
 
-expected<distributed_adafactor_t> distributed_adafactor_t::make(multimem_domain_t &domain,
-                                                                infiniband_all_reduce<f32_t> &world_reduce,
-                                                                std::span<gpu_arena_t> arenas,
-                                                                std::span<differentiable_weights_t const> weights,
-                                                                std::size_t weights_per_rank, adafactor_config_t config,
-                                                                std::span<gpu_stream_t> streams) noexcept {
+expected<distributed_adafactor_t> distributed_adafactor_t::make(
+    multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce, std::span<gpu_arena_t> arenas,
+    std::span<differentiable_weights_t const> weights, std::size_t weights_per_rank, adafactor_config_t config,
+    std::span<gpu_stream_t> streams, telemetry_ledger_t &ledger) noexcept {
     using result_t = expected<distributed_adafactor_t>;
     std::size_t const gpus = arenas.size();
     bool const single_domain = world_reduce.identity();
@@ -274,6 +272,7 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(multimem_domain_
                               "every rank needs an arena, stream, domain member, and weights table ({} ranks)", gpus);
     distributed_adafactor_t optimizer;
     optimizer.domain_ = &domain;
+    optimizer.ledger_ = &ledger;
     optimizer.world_reduce_ = &world_reduce;
     if (optimizer.ranks_.try_resize(gpus) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "rank table allocation failed");
@@ -295,6 +294,24 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(multimem_domain_
             if (!optimizer.ranks_[rank].reduced)
                 return result_t::fail(status_t::bad_alloc_k, "reduced-gradient allocation failed (rank={})", rank);
         }
+        // The rank's gradient-boundary probes — inert zero handles when the signals channel is dark. A
+        // zero gradient is a legal clean no-op, so every boundary registers as finite-only.
+        auto signal_probe = [&](sz::string_view stage, telemetry_probe_t &into) -> expected_t {
+            sz::string name;
+            if (!format_into(name, "adafactor/{}/{}", stage, rank))
+                return expected_t::fail(status_t::bad_alloc_k, "probe name formatting failed");
+            expected<telemetry_probe_t> registered = ledger.register_probe(name.view(), telemetry_signals_k,
+                                                                           finite_signal_k);
+            if (!registered) return expected_t::fail(std::move(registered));
+            into = registered.value_;
+            return {};
+        };
+        if (expected_t probed = signal_probe("staged_window", optimizer.ranks_[rank].staged_window); !probed)
+            return result_t::fail(std::move(probed));
+        if (expected_t probed = signal_probe("world_payload", optimizer.ranks_[rank].world_payload); !probed)
+            return result_t::fail(std::move(probed));
+        if (expected_t probed = signal_probe("world_readback", optimizer.ranks_[rank].world_readback); !probed)
+            return result_t::fail(std::move(probed));
     }
 
     // The borrowed world buffer must fit this optimizer's gradient (the unread tail beyond it is
@@ -343,6 +360,8 @@ expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, 
     if (staged) staged = domain_->barrier(rank, stream);
     if (!staged) return staged;
     std::size_t const scalars = ranks_[rank].state.gradient_scalars();
+    if (staged) staged = ledger_->probe_signal(ranks_[rank].staged_window, f32r1_view_t {window_base, scalars}, stream);
+    if (!staged) return staged;
     // The mean over gpus_per_colocated_domain, so the update's learning-rate semantics are
     // world-size-invariant — the same scalar on every rank, keeping the replicas bitwise identical.
     f32_t const world_scale = 1.0f / static_cast<f32_t>(gpus * world_reduce_->multimem_domain_count());
@@ -351,6 +370,7 @@ expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, 
         staged = launch_kernel(reinterpret_cast<void const *>(&adafactor_reduce_gradient_kernel_),
                                dim3 {grid_size_for(scalars), 1u, 1u}, block_shape, stream, domain_->member(rank),
                                ranks_[rank].reduced.span(), window_.offset, world_scale);
+        if (staged) staged = ledger_->probe_signal(ranks_[rank].world_payload, ranks_[rank].reduced.view(), stream);
         if (staged) staged = ranks_[rank].state.step(learning_rate, stream, ranks_[rank].reduced.view());
         return staged;
     }
@@ -381,11 +401,17 @@ expected_t distributed_adafactor_t::world_gradient_step_(std::size_t rank, f32_t
                                world_scale);
         if (staged) staged = (*world_reduce_)(stream);
         if (staged)
+            staged = ledger_->probe_signal(ranks_[rank].world_payload, f32r1_view_t {world_gradient, scalars}, stream);
+        if (staged)
             if (CUresult result = cuEventRecord(world_ready_.get(), stream.get()); result != CUDA_SUCCESS)
                 staged = expected_t::fail(result, "world-gradient event record failed");
     }
-    else if (CUresult result = cuStreamWaitEvent(stream.get(), world_ready_.get(), 0); result != CUDA_SUCCESS)
-        staged = expected_t::fail(result, "world-gradient wait failed (rank={})", rank);
+    else {
+        if (CUresult result = cuStreamWaitEvent(stream.get(), world_ready_.get(), 0); result != CUDA_SUCCESS)
+            staged = expected_t::fail(result, "world-gradient wait failed (rank={})", rank);
+        if (staged)
+            staged = ledger_->probe_signal(ranks_[rank].world_readback, f32r1_view_t {world_gradient, scalars}, stream);
+    }
     if (staged) staged = ranks_[rank].state.step(learning_rate, stream, f32r1_view_t {world_gradient, scalars});
     return staged;
 }

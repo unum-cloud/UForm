@@ -198,14 +198,20 @@ struct grid_factor_t {
     return {};
 }
 
-/** @brief Read one head's @b [2] @c {λ·Σ, count} summands back to host and return @c Σ/count .
- *      Best-effort: a slipped readback reports zero, never fails the run. Caller holds the stream's context. */
-[[nodiscard]] static f32_t mean_from_summands_(f32r1_tensor_arena_t &summands, gpu_stream_t &stream) noexcept {
+/** @brief One head's @c {λ·Σ, count} summand pair — the currency the ledger's loss rows accumulate. */
+struct summand_pair_t {
+    f64_t sum = 0.0;
+    f64_t count = 0.0;
+};
+
+/** @brief Read one head's @b [2] @c {λ·Σ, count} summands back to host. Best-effort: a slipped readback
+ *      reports zeros, never fails the run. Caller holds the stream's context. */
+[[nodiscard]] static summand_pair_t read_summands_(f32r1_tensor_arena_t &summands, gpu_stream_t &stream) noexcept {
     f32r1_tensor_pinned_t staging = f32r1_tensor_pinned_t::try_empty({2}, pinned_alloc<f32_t> {});
-    if (!staging) return 0.0f;
-    if (!copy_device_to_host(summands.view(), staging.span(), stream)) return 0.0f;
+    if (!staging) return {};
+    if (!copy_device_to_host(summands.view(), staging.span(), stream)) return {};
     cuStreamSynchronize(stream.get());
-    return staging[1] != 0.0f ? staging[0] / staging[1] : 0.0f;
+    return summand_pair_t {static_cast<f64_t>(staging[0]), static_cast<f64_t>(staging[1])};
 }
 
 f32_t base_config_t::learning_rate_for(optimizer_step_t optimizer_step) const noexcept {
@@ -378,6 +384,10 @@ base_config_t base_config_t::parse(int argc, char **argv) noexcept {
         }
         else if (flag == "--checkpoint") config.checkpoint = value;
         else if (flag == "--resume") config.resume = value;
+        else if (flag == "--telemetry") {
+            if (value == "signals") config.telemetry_channels |= telemetry_signals_k;
+            else if (value == "timings") config.telemetry_channels |= telemetry_timings_k;
+        }
     }
     return config;
 }
@@ -638,9 +648,10 @@ expected_t base_replica_t::model_region(gpu_stream_t &stream) noexcept {
     return tower.backward(bf16r2_view_t {}, normalized_grad.view(), batch, stream);
 }
 
-expected_t base_trainer_t::make(base_trainer_t &trainer, base_config_t const &config,
-                                mesh_topology_t const &topology) noexcept {
+expected_t base_trainer_t::make(base_trainer_t &trainer, base_config_t const &config, mesh_topology_t const &topology,
+                                telemetry_ledger_t &ledger) noexcept {
     trainer.config = config;
+    trainer.ledger = &ledger;
     u32_t const gpus = topology.shape.gpus_per_host_domain;
     trainer.first_gpu_index_in_colocated_domain = topology.shape.gpu_index_of_host_member(topology.host_domain_index,
                                                                                           0u);
@@ -676,6 +687,39 @@ expected_t base_trainer_t::make(base_trainer_t &trainer, base_config_t const &co
         if (!replica) return expected_t::fail(std::move(replica));
         if (trainer.replicas.try_push_back(std::move(replica.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "replica table full");
+    }
+
+    // The trainer's ledger rows: one loss probe per live head, one round probe per member — inert zero
+    // handles whenever the corresponding channel is dark, so the feeding sites never branch.
+    auto loss_probe = [&](char const *name, bool live, telemetry_probe_t &into) -> expected_t {
+        if (!live) return {};
+        expected<telemetry_probe_t> registered = ledger.register_probe(name, telemetry_losses_k, finite_signal_k);
+        if (!registered) return expected_t::fail(std::move(registered));
+        into = registered.value_;
+        return {};
+    };
+    if (expected_t probed = loss_probe("base/token_ce", true, trainer.probes.token); !probed) return probed;
+    if (expected_t probed = loss_probe("base/image_mse", config.batch.contains(modality_t::image_k),
+                                       trainer.probes.image);
+        !probed)
+        return probed;
+    if (expected_t probed = loss_probe("base/video_mse", config.batch.contains(modality_t::video_k),
+                                       trainer.probes.video);
+        !probed)
+        return probed;
+    if (expected_t probed = loss_probe("base/audio_mse", config.batch.contains(modality_t::audio_k),
+                                       trainer.probes.audio);
+        !probed)
+        return probed;
+    for (u32_t member_index = 0; member_index != gpus; ++member_index) {
+        sz::string name;
+        if (!format_into(name, "base/round/{}", member_index))
+            return expected_t::fail(status_t::bad_alloc_k, "round probe name formatting failed");
+        expected<telemetry_probe_t> registered = ledger.register_probe(name.view(), telemetry_rounds_k,
+                                                                       monotone_signal_k);
+        if (!registered) return expected_t::fail(std::move(registered));
+        if (trainer.probes.rounds.try_push_back(registered.value_) != status_t::success_k)
+            return expected_t::fail(status_t::bad_alloc_k, "round probe table full");
     }
     return trainer.reseed();
 }
@@ -730,18 +774,43 @@ base_trainer_t::telemetry_t base_trainer_t::telemetry(multimem_domain_t &domain,
                                                       optimizer_step_t optimizer_step) noexcept {
     telemetry_t telemetry;
     telemetry.optimizer_step = optimizer_step;
-    if (replicas.size() == 0) return telemetry;
+    u32_t const gpus = static_cast<u32_t>(replicas.size());
+    if (gpus == 0) return telemetry;
+    // Accumulate every member's summands before the fold — at wide worlds the data spreads across the
+    // whole colocated_domain, and a lead-only reading is ~2 rows of one head on ~half the steps: a coin
+    // flip, not a statistic. The all-member pairs are also what the ledger's loss rows accumulate.
+    summand_pair_t token {}, image {}, video {}, audio {};
+    bool const image_live = config.batch.contains(modality_t::image_k);
+    bool const video_live = config.batch.contains(modality_t::video_k);
+    bool const audio_live = config.batch.contains(modality_t::audio_k);
+    auto accumulate = [](summand_pair_t &into, summand_pair_t read) {
+        into.sum += read.sum;
+        into.count += read.count;
+    };
+    for (u32_t member_index = 0; member_index != gpus; ++member_index) {
+        switch_to_gpu_t gpu_scope {streams[member_index]};
+        if (!gpu_scope.ok()) continue;
+        cuStreamSynchronize(streams[member_index].get());
+        base_replica_t &replica = replicas[member_index];
+        accumulate(token, read_summands_(replica.tokens_summands, streams[member_index]));
+        if (image_live) accumulate(image, read_summands_(replica.image_summands, streams[member_index]));
+        if (video_live) accumulate(video, read_summands_(replica.video_summands, streams[member_index]));
+        if (audio_live) accumulate(audio, read_summands_(replica.audio_summands, streams[member_index]));
+        if (ledger != nullptr)
+            (void)ledger->probe_round(probes.rounds[member_index], domain.member(member_index), streams[member_index]);
+    }
+    telemetry.token_ce = token.count != 0.0 ? static_cast<f32_t>(token.sum / token.count) : 0.0f;
+    telemetry.image_mse = image.count != 0.0 ? static_cast<f32_t>(image.sum / image.count) : 0.0f;
+    telemetry.video_mse = video.count != 0.0 ? static_cast<f32_t>(video.sum / video.count) : 0.0f;
+    telemetry.audio_mse = audio.count != 0.0 ? static_cast<f32_t>(audio.sum / audio.count) : 0.0f;
+    if (ledger != nullptr) {
+        ledger->scalar(probes.token, token.sum, token.count);
+        ledger->scalar(probes.image, image.sum, image.count);
+        ledger->scalar(probes.video, video.sum, video.count);
+        ledger->scalar(probes.audio, audio.sum, audio.count);
+    }
     switch_to_gpu_t gpu_scope {streams[0]};
-    cuStreamSynchronize(streams[0].get());
-    base_replica_t &lead = replicas[0];
-    telemetry.token_ce = mean_from_summands_(lead.tokens_summands, streams[0]);
-    if (config.batch.contains(modality_t::image_k))
-        telemetry.image_mse = mean_from_summands_(lead.image_summands, streams[0]);
-    if (config.batch.contains(modality_t::video_k))
-        telemetry.video_mse = mean_from_summands_(lead.video_summands, streams[0]);
-    if (config.batch.contains(modality_t::audio_k))
-        telemetry.audio_mse = mean_from_summands_(lead.audio_summands, streams[0]);
-    if (u32_t const *const round = domain.member(0).round; round != nullptr) {
+    if (u32_t const *const round = domain.member(0).round; gpu_scope.ok() && round != nullptr) {
         u32r1_tensor_pinned_t staging = u32r1_tensor_pinned_t::try_empty({1}, pinned_alloc<u32_t> {});
         nk::tensor_view<u32_t, 1> const source {round, 1};
         if (staging && copy_device_to_host(source, staging.span(), streams[0])) {
@@ -787,10 +856,27 @@ int base_trainer_t::run(base_config_t const &config) noexcept {
                     topology.value_.shape.gpus_per_host_domain, host_domain_index, host_domain_count))
         report_(banner.view());
 
-    // 2. The trainer — built in place in this frame and threaded by reference (its towers borrow the placed
-    //    session tables, so it never moves).
+    // 2. The run's one telemetry ledger — constructed here, at the composition root, over a small
+    //    all-visible arena (probes write their rows from any member's stream), and threaded by reference
+    //    like the domains; a zero channel mask yields the inert disarmed instance. Then the trainer —
+    //    built in place in this frame (its towers borrow the placed session tables, so it never moves).
+    array<i32_t> local_devices;
+    for (u32_t device = 0; device != topology.value_.shape.gpus_per_host_domain; ++device)
+        if (local_devices.try_push_back(static_cast<i32_t>(device)) != status_t::success_k)
+            return fail_out_("ledger device table allocation failed");
+    expected<gpu_arena_t> ledger_arena = gpu_arena_t::make(0, 4u << 20, local_devices.view());
+    if (!ledger_arena) return fail_out_(ledger_arena.description_.view());
+    expected<telemetry_ledger_t> ledger_made = [&]() -> expected<telemetry_ledger_t> {
+        // A transient bring-up stream orders the row table's zeroing; nothing of it is retained.
+        expected<gpu_stream_t> bring_up = gpu_stream_t::make(0);
+        if (!bring_up) return expected<telemetry_ledger_t>::fail(std::move(bring_up));
+        return telemetry_ledger_t::make(ledger_arena.value_, config.telemetry_channels, 256u, bring_up.value_);
+    }();
+    if (!ledger_made) return fail_out_(ledger_made.description_.view());
+    telemetry_ledger_t &ledger = ledger_made.value_;
     base_trainer_t trainer;
-    if (expected_t built = make(trainer, config, topology.value_); !built) return fail_out_(built.description_.view());
+    if (expected_t built = make(trainer, config, topology.value_, ledger); !built)
+        return fail_out_(built.description_.view());
     u32_t const gpus = static_cast<u32_t>(trainer.replicas.size());
     if (config.algo_pick == algo_pick_t::benchmarked_k) {
         sz::string tuned;
@@ -836,7 +922,7 @@ int base_trainer_t::run(base_config_t const &config) noexcept {
     adafactor_config_t optimizer_config; // the per-step learning rate travels through `step`, not the config
     expected<distributed_adafactor_t> optimizer_made = distributed_adafactor_t::make(
         domain, world_reduce, trainer.arenas, {registrations.view().data(), registrations.size()}, weights_per_replica,
-        optimizer_config, trainer.streams);
+        optimizer_config, trainer.streams, ledger);
     if (!optimizer_made) return fail_out_(optimizer_made.description_.view());
     distributed_adafactor_t optimizer = std::move(optimizer_made.value_);
 
@@ -899,6 +985,10 @@ int base_trainer_t::run(base_config_t const &config) noexcept {
     for (u32_t member_index = 0; member_index != gpus; ++member_index) {
         switch_to_gpu_t gpu_scope {trainer.streams[member_index]};
         cuStreamSynchronize(trainer.streams[member_index].get());
+    }
+    {
+        switch_to_gpu_t gpu_scope {trainer.streams[0]};
+        if (expected_t reported = ledger.report(trainer.streams[0]); !reported) report_(reported.description_.view());
     }
     report_("uform_base: done");
     return 0;

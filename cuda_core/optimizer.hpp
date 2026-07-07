@@ -41,6 +41,7 @@
 #include "cuda_core/types.hpp"                  // `expected`, `expected_t`, `status_t`, the scalar aliases
 #include "cuda_core/schedule.cuh"               // `gpu_stream_t`, `launch_kernel`, `grid_size_for`
 #include "cuda_core/gpu_allocators.hpp"         // `gpu_arena_t`
+#include "cuda_core/introspect.cuh"             // `telemetry_ledger_t` — the borrowed signal-probe ledger
 #include "cuda_core/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 gradient surface
 #include "cuda_core/infiniband_collectives.cuh" // `infiniband_all_reduce` — the borrowed level-2 buffer
 
@@ -130,10 +131,12 @@ struct adafactor_t {
 struct distributed_adafactor_t {
 
     /** @brief One rank's state and its materialised world-gradient buffer (single-domain worlds only —
-     *      multi-domain worlds read the gateway member's heap instead). */
+     *      multi-domain worlds read the gateway member's heap instead), plus the rank's registered
+     *      gradient-boundary probes — inert zero handles when the signals channel is dark. */
     struct optimizer_rank_t {
         adafactor_t state {};
         f32r1_tensor_arena_t reduced {};
+        telemetry_probe_t staged_window {}, world_payload {}, world_readback {};
     };
 
     /** @brief How many Float32 payload scalars this consumer will @c reserve from the shared
@@ -161,12 +164,10 @@ struct distributed_adafactor_t {
      *      the unread tail beyond them is harmless (the reduce is elementwise).
      *  @param[in] weights Rank-major @b [ranks·weights_per_rank] weights table.
      */
-    [[nodiscard]] static expected<distributed_adafactor_t> make(multimem_domain_t &domain,
-                                                                infiniband_all_reduce<f32_t> &world_reduce,
-                                                                std::span<gpu_arena_t> arenas,
-                                                                std::span<differentiable_weights_t const> weights,
-                                                                std::size_t weights_per_rank, adafactor_config_t config,
-                                                                std::span<gpu_stream_t> streams) noexcept;
+    [[nodiscard]] static expected<distributed_adafactor_t> make(
+        multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce, std::span<gpu_arena_t> arenas,
+        std::span<differentiable_weights_t const> weights, std::size_t weights_per_rank, adafactor_config_t config,
+        std::span<gpu_stream_t> streams, telemetry_ledger_t &ledger) noexcept;
 
     /** @brief Rank @p rank 's slice of one world step — pure enqueue onto @p stream , the shape a
      *      fork/join capture body composes directly. Rank 0's slice carries the domain's generation
@@ -198,6 +199,9 @@ struct distributed_adafactor_t {
     /** @brief The main-owned cross-domain all-reduce buffer — borrowed, like @ref domain_ ; its typed
      *      payload is the world gradient, and its @c identity() marks single-domain worlds. */
     infiniband_all_reduce<f32_t> *world_reduce_ = nullptr;
+    /** @brief The run's telemetry ledger — borrowed, like @ref domain_ ; the per-rank probes above feed
+     *      it at the gradient boundaries, inert whenever the signals channel is dark. */
+    telemetry_ledger_t *ledger_ = nullptr;
     /** @brief The gateway's world-sum-ready ordering token every rank's update waits on. */
     gpu_event_t world_ready_ {};
 };
