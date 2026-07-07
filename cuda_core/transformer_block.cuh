@@ -71,6 +71,7 @@
 #include <array>         // `std::array` — the fixed-size pinned-plan tables
 #include <span>          // `std::span` — host staging views
 #include <unordered_map> // the frontend-dispatch fallback map (SDPA backward only), required by cuDNN
+#include <vector>        // vendor-boundary: the frontend's dim / stride lists
 
 #include <cuda.h>           // `cuMemsetD8Async`, `cuMemcpyDtoDAsync`
 #include <cuda_bf16.h>      // `__nv_bfloat16`
@@ -234,6 +235,45 @@ inline constexpr i64_t sdpa_uid_amax_s_k = 17, sdpa_uid_amax_o_k = 18;
 
 /** @brief Most tensors any of the SDPA variant packs binds — the fixed capacity of the binding table. */
 inline constexpr u32_t sdpa_binding_capacity_k = 20u;
+
+/** @brief The strided THD tensor description shared by every SDPA operand: logical @b {B,H,S,D} over the
+ *      packed token buffer, batch stride 0 (ragged offsets supply segment bases), token stride
+ *      @p token_stride so Q / K / V can live inside the fused QKV block. */
+[[nodiscard]] inline std::vector<i64_t> sdpa_thd_strides(i64_t heads, i64_t token_stride) { // vendor-boundary
+    return {0, transformer_head_dim_k, token_stride, 1};                                    // vendor-boundary
+}
+
+/** @brief Attach a @b [segments+1] Int32 ragged prefix-sum input to @p graph under @p uid . */
+[[nodiscard]] inline auto sdpa_ragged_offset(fe::graph::Graph &graph, i64_t uid, i64_t segments) {
+    return graph.tensor(fe::graph::Tensor_attributes()
+                            .set_name("ragged")
+                            .set_uid(uid)
+                            .set_dim({segments + 1, 1, 1, 1})
+                            .set_stride({1, 1, 1, 1})
+                            .set_data_type(fe::DataType_t::INT32));
+}
+
+/** @brief Attach a @b [segments] Int32 per-segment length input to @p graph under @p uid . */
+[[nodiscard]] inline auto sdpa_seq_lengths(fe::graph::Graph &graph, i64_t uid, char const *name, // vendor-boundary
+                                           i64_t segments) {
+    return graph.tensor(fe::graph::Tensor_attributes()
+                            .set_name(name)
+                            .set_uid(uid)
+                            .set_dim({segments, 1, 1, 1})
+                            .set_stride({1, 1, 1, 1})
+                            .set_data_type(fe::DataType_t::INT32));
+}
+
+/** @brief Attach a @b [1,1,1,1] Float32 scalar input to @p graph under @p uid — the attention scale
+ *      and the FP8 descale / rescale scalars all share this shape. */
+[[nodiscard]] inline auto sdpa_scalar(fe::graph::Graph &graph, i64_t uid, char const *name) { // vendor-boundary
+    return graph.tensor(fe::graph::Tensor_attributes()
+                            .set_name(name)
+                            .set_uid(uid)
+                            .set_dim({1, 1, 1, 1})
+                            .set_stride({1, 1, 1, 1})
+                            .set_data_type(fe::DataType_t::FLOAT));
+}
 
 /**
  *  @brief The cudnn-frontend graph with the two protected boundaries exposed that raw execution needs:

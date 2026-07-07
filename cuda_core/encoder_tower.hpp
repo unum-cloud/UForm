@@ -204,6 +204,10 @@ struct encoder_tower_bf16_t {
      *      case) purely to size the heuristic + workspace, the live tile count coming from the operands. */
     [[nodiscard]] expected_t pin_media_plans(std::size_t &plan_base, u32_t fan_in, u32_t max_tokens, u32_t hidden,
                                              std::size_t &role, std::size_t &workspace_bytes) noexcept;
+    /** @brief Build the attention pool's forward SDPA graph — once, at @ref make , after the pool buffers
+     *      exist: the stride-0 broadcast query over ragged K=V=@ref normalized_ with the padding mask
+     *      driven by the per-segment lengths. Sizes @ref pool_workspace_ . */
+    [[nodiscard]] expected_t build_pool_sdpa(gpu_arena_t &arena) noexcept;
 
     /** @brief The baked geometry and the two borrowed vendor sessions — never owned here. */
     encoder_tower_config_t config_ {};
@@ -235,12 +239,20 @@ struct encoder_tower_bf16_t {
 
     /** @brief The learned attention-pool query @b [heads,head_dim]=[hidden] and its gradient. */
     bf16r1_tensor_arena_t pool_query_ {}, pool_query_grad_ {};
-    /** @brief The attention pool's forward + backward cross-SDPA plans — a single broadcast query attends
-     *      each segment's live tokens. */
-    sdpa_plan_t pool_forward_sdpa_ {}, pool_backward_sdpa_ {};
+    /** @brief The attention pool's forward cross-SDPA plan — the single query rides a stride-0 batch axis
+     *      so cuDNN broadcasts it over every segment, and each segment's live tokens arrive through the
+     *      ragged K/V offsets. The backward is a house kernel pair, not a cuDNN graph: the vendor's
+     *      @c sdpa_backward emits non-finite gradients at single-query shapes, so the backward recomputes
+     *      the softmax and folds the exact Jacobian itself. */
+    sdpa_plan_t pool_forward_sdpa_ {};
     /** @brief The pool's @b [segments+1]/[segments] Int32 ragged staging, filled behind the one vendor
      *      boundary. */
     i32r1_tensor_arena_t pool_ragged_offsets_ {}, pool_ragged_seq_lens_ {};
+    /** @brief The pool's constant all-ones @b [segments] Int32 query lengths — every segment carries
+     *      exactly the one broadcast query; filled once at @ref make . */
+    i32r1_tensor_arena_t pool_seq_ones_ {};
+    /** @brief The pool's device-resident attention scale @c 1/√head_dim , uploaded once at @ref make . */
+    f32r1_tensor_arena_t pool_attn_scale_ {};
     /** @brief The attention pool's SDPA workspace. */
     b8r1_tensor_arena_t pool_workspace_ {};
 

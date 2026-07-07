@@ -698,9 +698,9 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
             u32_t const segment_begin = prefixes_.segment_begin(segment);
             u32_t const segment_width = prefixes_.segment_width(segment);
             auto const band = nk::range(segment_begin, segment_begin + segment_width);
-            auto const gradient_plane = raw_dot_grad_bf16_.view().row(segment); // [1,rows,neighbors] at plane `segment`
-            bf16r2_view_t const gradient_view = gradient_plane.reshape<2>(
-                {gradient_plane.extent(1), gradient_plane.extent(2)});
+            auto const gradient_plane = raw_dot_grad_bf16_.view().row(segment); // [rows,neighbors] at plane `segment`
+            bf16r2_view_t const gradient_view {gradient_plane.data(), gradient_plane.extent(0),
+                                               gradient_plane.extent(1)};
             bf16r2_view_t const neighbor_view = subgraph.to_vertices(nk::all, band, nk::slice);
             bf16r2_view_t const vertex_view = vertices(nk::all, band, nk::slice);
             f32r2_span_t const from_vertices_grad_segment = from_vertices_grad_f32_.span()(nk::all, band, nk::slice);

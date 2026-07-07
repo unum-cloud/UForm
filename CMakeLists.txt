@@ -231,10 +231,15 @@ add_executable(cuda_test_mixer cuda_test/mixer.cu)
 target_link_libraries(cuda_test_mixer PRIVATE uform)
 add_test(NAME mixer COMMAND cuda_test_mixer)
 
+add_executable(cuda_test_contrastive cuda_test/contrastive.cu)
+target_link_libraries(cuda_test_contrastive PRIVATE uform)
+add_test(NAME contrastive COMMAND cuda_test_contrastive)
+
 # Every runnable resolves shared libraries beside itself first (`$ORIGIN`), so a `uform_bundle` tree on a
 # shared filesystem runs on nodes whose native installs diverge from the build node's.
 set_target_properties(
-    uform_base cuda_test_env cuda_test_mesh cuda_test_base cuda_test_mixer PROPERTIES BUILD_RPATH "$ORIGIN"
+    uform_base cuda_test_env cuda_test_mesh cuda_test_base cuda_test_mixer cuda_test_contrastive PROPERTIES BUILD_RPATH
+                                                                                                            "$ORIGIN"
 )
 
 # `uform_bundle` → a self-contained runtime tree (executables + their shared-library closure, glibc
@@ -245,9 +250,9 @@ add_custom_target(
     uform_bundle
     COMMAND
         ${CMAKE_COMMAND}
-        "-DBUNDLE_EXECUTABLES=$<TARGET_FILE:uform_base>|$<TARGET_FILE:cuda_test_env>|$<TARGET_FILE:cuda_test_mesh>|$<TARGET_FILE:cuda_test_base>|$<TARGET_FILE:cuda_test_mixer>"
+        "-DBUNDLE_EXECUTABLES=$<TARGET_FILE:uform_base>|$<TARGET_FILE:cuda_test_env>|$<TARGET_FILE:cuda_test_mesh>|$<TARGET_FILE:cuda_test_base>|$<TARGET_FILE:cuda_test_mixer>|$<TARGET_FILE:cuda_test_contrastive>"
         "-DBUNDLE_DIR=${CMAKE_BINARY_DIR}/runtime-bundle" -P "${CMAKE_SOURCE_DIR}/cmake/bundle_runtime.cmake"
-    DEPENDS uform_base cuda_test_env cuda_test_mesh cuda_test_base cuda_test_mixer
+    DEPENDS uform_base cuda_test_env cuda_test_mesh cuda_test_base cuda_test_mixer cuda_test_contrastive
     COMMENT "Bundling executables with their runtime closure into runtime-bundle/"
     VERBATIM
 )

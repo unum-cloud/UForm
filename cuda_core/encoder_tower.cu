@@ -125,6 +125,124 @@ static __global__ void tower_silu_backward_kernel_(bf16r1_span_t input, bf16r1_s
 }
 
 /**
+ *  @brief The pool's slice of the one cuDNN Int32 boundary: scale the batch's flat @c u32_t segment starts
+ *      into K/V @b element offsets and cast the stored lengths for the padding mask. A PAD segment
+ *      (length zero) is retargeted at the grid's first token with length one — cuDNN's softmax over zero
+ *      keys is undefined, a PAD's repeated offset may sit one past the grid's end, and token zero always
+ *      exists; the pooled PAD vertex stays finite while the loss PADs it out. vendor-boundary.
+ *
+ *  __grid_size__ @c [1,1,1] , threads stripe @c segments+1 entries; no dynamic shared memory.
+ */
+static __global__ void tower_pool_ragged_kernel_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
+                                                 i32r1_span_t ragged_offsets, i32r1_span_t seq_lens, u32_t hidden) {
+    std::size_t const entries = segment_offsets.extent(0);
+    for (std::size_t entry = threadIdx.x; entry < entries; entry += blockDim.x) {
+        bool const pad = entry + 1u < entries && segment_lengths[entry] == 0u;
+        u32_t const base = pad ? 0u : segment_offsets[entry];
+        ragged_offsets[entry] = static_cast<i32_t>(base) * static_cast<i32_t>(hidden);
+        if (entry + 1u < entries) seq_lens[entry] = pad ? 1 : static_cast<i32_t>(segment_lengths[entry]);
+    }
+}
+
+/**
+ *  @brief The attention pool's backward — the house replacement for cuDNN's @c sdpa_backward , which
+ *      emits non-finite gradients at single-query shapes. CTA @c (s,h) owns segment @c s 's head @c h ,
+ *      thread @c c its channel: four streaming passes recompute the softmax the forward ran (max, then
+ *      the denominator, then the @c Σp·dp projection, then the fold), so no attention weights are ever
+ *      stashed. K=V, so one write per token row carries @c dV+dK ; the per-segment query-gradient
+ *      partials land in @p query_partials for @ref tower_pool_query_grad_kernel_ 's fixed-order fold. A
+ *      zero-length (PAD) segment writes only its zero partial.
+ *
+ *  __grid_size__ @c [segments,heads,1] , one @ref transformer_head_dim_k -wide block; no dynamic shared
+ *      memory.
+ */
+static __global__ void tower_pool_backward_kernel_(bf16r2_view_t states, bf16r1_view_t query, bf16r2_view_t pooled_grad,
+                                                   u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
+                                                   bf16r2_span_t states_grad, bf16r2_span_t query_partials,
+                                                   f32_t scale) {
+    u32_t const segment = blockIdx.x, head = blockIdx.y, channel = threadIdx.x;
+    u32_t const base_channel = head * transformer_head_dim_k + channel;
+    u32_t const length = segment_lengths[segment];
+    if (length == 0u) {
+        // Sound because the loss zeroes PAD-vertex forces by relation precedence (PAD outranks every
+        // edge in contrastive_pair_relation), so nothing real ever flows back through a PAD vertex.
+        query_partials[segment, base_channel] = __float2bfloat16(0.0f);
+        return;
+    }
+    u32_t const offset = segment_offsets[segment];
+    f32_t const query_value = __bfloat162float(query[base_channel]);
+    f32_t const output_grad = __bfloat162float(pooled_grad[segment, base_channel]);
+
+    f32_t score_max = -INFINITY;
+    for (u32_t token = 0; token != length; ++token) {
+        f32_t const score = block_reduce_broadcast<transformer_head_dim_k>(
+                                query_value * __bfloat162float(states[offset + token, base_channel])) *
+                            scale;
+        score_max = fmaxf(score_max, score);
+    }
+    f32_t denominator = 0.0f;
+    for (u32_t token = 0; token != length; ++token) {
+        f32_t const score = block_reduce_broadcast<transformer_head_dim_k>(
+                                query_value * __bfloat162float(states[offset + token, base_channel])) *
+                            scale;
+        denominator += expf(score - score_max);
+    }
+    f32_t projection = 0.0f; // Σ_t p_t·dp_t — the softmax Jacobian's rank-1 term.
+    for (u32_t token = 0; token != length; ++token) {
+        f32_t const value = __bfloat162float(states[offset + token, base_channel]);
+        f32_t const score = block_reduce_broadcast<transformer_head_dim_k>(query_value * value) * scale;
+        f32_t const probability = expf(score - score_max) / denominator;
+        f32_t const value_projection = block_reduce_broadcast<transformer_head_dim_k>(output_grad * value);
+        projection += probability * value_projection;
+    }
+    f32_t query_grad = 0.0f;
+    for (u32_t token = 0; token != length; ++token) {
+        f32_t const value = __bfloat162float(states[offset + token, base_channel]);
+        f32_t const score = block_reduce_broadcast<transformer_head_dim_k>(query_value * value) * scale;
+        f32_t const probability = expf(score - score_max) / denominator;
+        f32_t const value_projection = block_reduce_broadcast<transformer_head_dim_k>(output_grad * value);
+        f32_t const score_grad = probability * (value_projection - projection);
+        states_grad[offset + token, base_channel] = __float2bfloat16_rn(probability * output_grad +
+                                                                        score_grad * scale * query_value);
+        query_grad += score_grad * scale * value;
+    }
+    query_partials[segment, base_channel] = __float2bfloat16_rn(query_grad);
+}
+
+/**
+ *  @brief Fold the pool's per-segment query-gradient partials into the one @b [hidden] gradient — a
+ *      fixed-order serial sum per channel, deterministic by construction.
+ *
+ *  __grid_size__ grid-stride over @c hidden channels; no dynamic shared memory.
+ */
+static __global__ void tower_pool_query_grad_kernel_(bf16r2_view_t query_partials, bf16r1_span_t query_grad) {
+    std::size_t const segments = query_partials.extent(0), hidden = query_partials.extent(1);
+    std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+    for (std::size_t channel = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; channel < hidden;
+         channel += stride) {
+        f32_t total = 0.0f;
+        for (std::size_t segment = 0; segment != segments; ++segment)
+            total += __bfloat162float(query_partials[segment, channel]);
+        query_grad[channel] = __float2bfloat16_rn(total);
+    }
+}
+
+/**
+ *  @brief Elementwise add of the masked force onto the pooled force at the final-norm states — the
+ *      co-trained join @c dL_pooled + dL_masked .
+ *
+ *  __grid_size__ grid-stride; no dynamic shared memory.
+ */
+static __global__ void tower_grad_add_kernel_(bf16r1_span_t accumulator, bf16r1_view_t addend) {
+    std::size_t const total = accumulator.extent(0);
+    std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+    for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < total;
+         index += stride)
+        accumulator[index] = __float2bfloat16_rn(__bfloat162float(accumulator[index]) +
+                                                 __bfloat162float(addend[index]));
+}
+
+/**
  *  @brief Normalize one @b pixel segment's cells in place into the projection's BFloat16 fan-in. CTA @c s
  *      owns segment @c s , exits unless @p target matches its @ref modality_t , and otherwise walks its
  *      @c length cells at flat grid rows @c [offset,offset+length) — a cell's raw pixels live at the same
@@ -183,6 +301,12 @@ static __global__ void tower_audio_segment_kernel_(nk::tensor_view<f32_t, 2> con
         std::size_t const row = static_cast<std::size_t>(offset) + cell / scalars;
         patches[row, scalar] = __float2bfloat16(content[row, scalar]);
     }
+}
+
+/** @brief The attention pool's softmax scale @c 1/√head_dim — one derivation for the device upload and
+ *      the backward kernel argument. */
+[[nodiscard]] static f32_t tower_pool_scale_() noexcept {
+    return 1.0f / sqrtf(static_cast<f32_t>(transformer_head_dim_k));
 }
 
 /** @brief File-scope mirror of the towers' @c plan_absent_k sentinel, so the shared media helpers below can
@@ -536,6 +660,30 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
             plan_role, workspace_bytes);
     if (!pinned) return result_t::fail(std::move(pinned));
 
+    // The attention pool's staging — the ragged K/V element offsets, the per-segment padding lengths,
+    // the constant all-ones query lengths, and the device attention scale — then the forward SDPA graph
+    // over them. The two constant fills are setup-path host writes, outside any capture.
+    {
+        gpu_arena_alloc<i32_t> i32_pool_alloc {arena};
+        tower.pool_ragged_offsets_ = i32r1_tensor_arena_t::try_empty({segments + 1}, i32_pool_alloc);
+        tower.pool_ragged_seq_lens_ = i32r1_tensor_arena_t::try_empty({segments}, i32_pool_alloc);
+        tower.pool_seq_ones_ = i32r1_tensor_arena_t::try_empty({segments}, i32_pool_alloc);
+        tower.pool_attn_scale_ = f32r1_tensor_arena_t::try_empty({1}, f32_alloc);
+        if (!tower.pool_ragged_offsets_ || !tower.pool_ragged_seq_lens_ || !tower.pool_seq_ones_ ||
+            !tower.pool_attn_scale_)
+            return result_t::fail(status_t::bad_alloc_k, "pool staging allocation failed (arena_used={})",
+                                  arena.used());
+        if (CUresult result = cuMemsetD32(reinterpret_cast<CUdeviceptr>(tower.pool_seq_ones_.data()), 1u, segments);
+            result != CUDA_SUCCESS)
+            return result_t::fail(result, "pool query-length fill failed");
+        f32_t const attention_scale = tower_pool_scale_();
+        if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(tower.pool_attn_scale_.data()),
+                                           &attention_scale, sizeof(attention_scale));
+            result != CUDA_SUCCESS)
+            return result_t::fail(result, "pool attention-scale upload failed");
+        if (expected_t built = tower.build_pool_sdpa(arena); !built) return result_t::fail(std::move(built));
+    }
+
     // Media entries: each present modality patch-cuts its raw signal and projects it through pinned cuBLASLt
     // plans. A modality is present iff its geometry is fully specified — zero extents leave its projection,
     // plan, and scratch untouched. Fan-ins are per-modality: image is ph·pw·image_channels, video folds
@@ -630,6 +778,78 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
     return result_t {std::move(tower)};
 }
 
+expected_t encoder_tower_bf16_t::build_pool_sdpa(gpu_arena_t &arena) noexcept {
+    i64_t const segments = config_.block.max_segments;
+    i64_t const seq = config_.block.max_segment_tokens;
+    i64_t const heads = config_.block.hidden / transformer_head_dim_k;
+    i64_t const dim = transformer_head_dim_k;
+    i64_t const hidden_stride = static_cast<i64_t>(config_.block.hidden);
+
+    fe::graph::Graph &graph = pool_forward_sdpa_.graph;
+    graph.set_io_data_type(fe::DataType_t::BFLOAT16)
+        .set_intermediate_data_type(fe::DataType_t::FLOAT)
+        .set_compute_data_type(fe::DataType_t::FLOAT);
+    // The one learned query broadcasts over every segment through a stride-0 batch axis; its length-1
+    // query axis needs no ragged offset. K and V both read the final-norm states through the same
+    // per-segment element bases, and the padding mask over the per-segment lengths hides everything
+    // past each segment's live tokens.
+    auto queries = graph.tensor(fe::graph::Tensor_attributes()
+                                    .set_name("Q")
+                                    .set_uid(sdpa_uid_query_k)
+                                    .set_dim({segments, heads, 1, dim})
+                                    .set_stride({0, dim, hidden_stride, 1}));
+    auto make_states_operand = [&](i64_t uid, char const *name, i64_t ragged_uid) {
+        auto node = graph.tensor(fe::graph::Tensor_attributes()
+                                     .set_name(name)
+                                     .set_uid(uid)
+                                     .set_dim({segments, heads, seq, dim})
+                                     .set_stride(sdpa_thd_strides(heads, hidden_stride)));
+        node->set_ragged_offset(sdpa_ragged_offset(graph, ragged_uid, segments));
+        return node;
+    };
+    auto keys = make_states_operand(sdpa_uid_key_k, "K", sdpa_uid_ragged_base_k + 1);
+    auto values = make_states_operand(sdpa_uid_value_k, "V", sdpa_uid_ragged_base_k + 2);
+    auto seq_q = sdpa_seq_lengths(graph, sdpa_uid_seq_len_q_k, "seq_len_q", segments);
+    auto seq_kv = sdpa_seq_lengths(graph, sdpa_uid_seq_len_kv_k, "seq_len_kv", segments);
+    auto options = fe::graph::SDPA_attributes()
+                       .set_name("uform_pool_sdpa_fwd")
+                       .set_generate_stats(false)
+                       .set_attn_scale(sdpa_scalar(graph, sdpa_uid_attn_scale_k, "attn_scale"))
+                       .set_padding_mask(true)
+                       .set_seq_len_q(seq_q)
+                       .set_seq_len_kv(seq_kv);
+    auto [output, stats] = graph.sdpa(queries, keys, values, options);
+    (void)stats; // forward-only — the backward is the house kernel pair, never cuDNN's.
+    output->set_output(true)
+        .set_uid(sdpa_uid_output_k)
+        .set_dim({segments, heads, 1, dim})
+        .set_stride({hidden_stride, dim, hidden_stride, 1});
+    if (auto status = graph.build(cudnn_->get(), {fe::HeurMode_t::A}); status.is_bad())
+        return expected_t::fail(status_t::cuda_error_k, "pool SDPA forward graph build failed: {}",
+                                status.get_message().c_str()); // vendor-boundary
+
+    // Every binding is a construction-time-stable arena address — no per-call pointer stores at all.
+    pool_forward_sdpa_.bind(sdpa_uid_query_k, pool_query_.data());
+    pool_forward_sdpa_.bind(sdpa_uid_key_k, normalized_.data());
+    pool_forward_sdpa_.bind(sdpa_uid_value_k, normalized_.data());
+    pool_forward_sdpa_.bind(sdpa_uid_output_k, pooled_.data());
+    pool_forward_sdpa_.bind(sdpa_uid_attn_scale_k, pool_attn_scale_.data());
+    pool_forward_sdpa_.bind(sdpa_uid_seq_len_q_k, pool_seq_ones_.data());
+    pool_forward_sdpa_.bind(sdpa_uid_seq_len_kv_k, pool_ragged_seq_lens_.data());
+    pool_forward_sdpa_.bind(sdpa_uid_ragged_base_k + 1, pool_ragged_offsets_.data());
+    pool_forward_sdpa_.bind(sdpa_uid_ragged_base_k + 2, pool_ragged_offsets_.data());
+    if (expected_t finalized = pool_forward_sdpa_.finalize_dispatch(); !finalized) return finalized;
+    if (pool_forward_sdpa_.workspace_bytes != 0) {
+        gpu_arena_alloc<b8_t> b8_pool_alloc {arena};
+        pool_workspace_ = b8r1_tensor_arena_t::try_empty({static_cast<std::size_t>(pool_forward_sdpa_.workspace_bytes)},
+                                                         b8_pool_alloc);
+        if (!pool_workspace_)
+            return expected_t::fail(status_t::bad_alloc_k, "pool SDPA workspace allocation failed ({} bytes)",
+                                    pool_forward_sdpa_.workspace_bytes);
+    }
+    return {};
+}
+
 expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t vertices,
                                          gpu_stream_t &stream) noexcept {
     u32_t const hidden = config_.block.hidden;
@@ -721,8 +941,35 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
 
     // Masked path stops here — the masked head reads normalized(); the contrastive path pools + heads.
     if (vertices.data() == nullptr) return {};
-    return expected_t::fail(status_t::shape_unsupported_k,
-                            "the contrastive attention pool + head are not yet built (masked path only)");
+    if (vertices.extent(0) != segments || vertices.extent(1) != hidden)
+        return expected_t::fail(status_t::shape_unsupported_k, "vertices must be [{},{}] (got [{},{}])", segments,
+                                hidden, vertices.extent(0), vertices.extent(1));
+
+    // The attention pool: stage the ragged bases + padding lengths, then the prebuilt cuDNN graph pools
+    // every segment's live tokens under the one broadcast query into pooled_.
+    staged = launch_kernel(reinterpret_cast<void const *>(&tower_pool_ragged_kernel_), dim3 {1u, 1u, 1u}, block_shape,
+                           stream, segment_offsets, segment_lengths, pool_ragged_offsets_.span(),
+                           pool_ragged_seq_lens_.span(), hidden);
+    if (!staged) return staged;
+    if (expected_t bound = cudnn_->bind(stream); !bound) return bound;
+    if (expected_t pooled = pool_forward_sdpa_.execute(cudnn_->get(), pool_workspace_.data()); !pooled) return pooled;
+
+    // The head: learnable-γ RMSNorm, then the biasless fc1 → SiLU → fc2 into the caller's vertices —
+    // raw, never L2-normalized here (the loss owns the cosine geometry).
+    staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_forward_kernel), segment_grid, block_shape, stream,
+                           pooled_.view(), head_norm_scale_.view(), head_normalized_.span(), head_inverse_rms_.span(),
+                           config_.block.rms_eps);
+    if (!staged) return staged;
+    staged = plans_[plan_head_forward_k].matmul(*blas_, head_normalized_.view(), head_fc1_.view(), head_hidden_.span(),
+                                                0.0f, workspace_.span(), stream);
+    if (!staged) return staged;
+    dim3 const head_cell_grid {static_cast<u32_t>(divide_round_up(segments * hidden, kernel_block_size_default_k)), 1u,
+                               1u};
+    staged = launch_kernel(reinterpret_cast<void const *>(&tower_silu_kernel_), head_cell_grid, block_shape, stream,
+                           head_hidden_.span().flatten<1>(), head_activated_.span().flatten<1>());
+    if (!staged) return staged;
+    return plans_[plan_head_forward_k].matmul(*blas_, head_activated_.view(), head_fc2_.view(), vertices, 0.0f,
+                                              workspace_.span(), stream);
 }
 
 expected_t encoder_tower_bf16_t::patchify_media_targets(multimodal_batch_on_gpu_t const &batch,
@@ -767,11 +1014,14 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     u32_t const hidden = config_.block.hidden;
     std::size_t const columns = batch.tokens.extent(1);
     std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
-    if (vertices_grad.data() != nullptr)
-        return expected_t::fail(status_t::shape_unsupported_k,
-                                "the contrastive pool + head backward are not yet built (masked path only)");
-    if (hidden_grad.data() == nullptr)
+    bool const pooled_present = vertices_grad.data() != nullptr;
+    bool const masked_present = hidden_grad.data() != nullptr;
+    if (!pooled_present && !masked_present)
         return expected_t::fail(status_t::invalid_input_k, "backward needs one of vertices_grad / hidden_grad");
+    std::size_t const segments = batch.live_segments();
+    if (pooled_present && (vertices_grad.extent(0) != segments || vertices_grad.extent(1) != hidden))
+        return expected_t::fail(status_t::shape_unsupported_k, "vertices_grad must be [{},{}] (got [{},{}])", segments,
+                                hidden, vertices_grad.extent(0), vertices_grad.extent(1));
 
     // The step's live extent, resized within each arena's reserved capacity — no address moves.
 
@@ -790,17 +1040,77 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     u32r1_view_t const segment_lengths = batch.segment_lengths.view();
     modality_view_t const segment_modality = batch.segment_modality.view();
 
-    // Final-norm backward: d(normalized) → d(stack output) into token_grad_b_, plus the scale grad. The
-    // caller's hidden_grad may carry a wider capacity than the live extent, so it is narrowed to match.
+    expected_t staged {};
+    if (pooled_present) {
+        // The head backward, mirroring the forward in reverse through the segment ping-pong: fc2's two
+        // grads, the SiLU derivative on the stashed pre-activation, fc1's two grads, then the head norm.
+        dim3 const head_cell_grid {static_cast<u32_t>(divide_round_up(segments * hidden, kernel_block_size_default_k)),
+                                   1u, 1u};
+        staged = plans_[plan_head_weight_grad_k].matmul(*blas_, vertices_grad, head_activated_.view(),
+                                                        head_fc2_grad_.span(), 0.0f, workspace_.span(), stream);
+        if (staged)
+            staged = plans_[plan_head_data_grad_k].matmul(*blas_, vertices_grad, head_fc2_.view(),
+                                                          segment_grad_a_.span(), 0.0f, workspace_.span(), stream);
+        if (staged)
+            staged = launch_kernel(reinterpret_cast<void const *>(&tower_silu_backward_kernel_), head_cell_grid,
+                                   block_shape, stream, head_hidden_.span().flatten<1>(),
+                                   segment_grad_a_.span().flatten<1>(), segment_grad_b_.span().flatten<1>());
+        if (staged)
+            staged = plans_[plan_head_weight_grad_k].matmul(*blas_, segment_grad_b_.view(), head_normalized_.view(),
+                                                            head_fc1_grad_.span(), 0.0f, workspace_.span(), stream);
+        if (staged)
+            staged = plans_[plan_head_data_grad_k].matmul(*blas_, segment_grad_b_.view(), head_fc1_.view(),
+                                                          segment_grad_a_.span(), 0.0f, workspace_.span(), stream);
+        if (staged)
+            staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_backward_kernel), segment_grid, block_shape,
+                                   stream, pooled_.view(), head_norm_scale_.view(), head_inverse_rms_.view(),
+                                   segment_grad_a_.view(), segment_grad_b_.span(), /*accumulate=*/false);
+        if (staged)
+            staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_scale_grad_kernel), channel_grid,
+                                   block_shape, stream, pooled_.view(), head_inverse_rms_.view(),
+                                   segment_grad_a_.view(), head_norm_scale_grad_.span());
+        if (!staged) return staged;
 
-    bool const overwrite = false;
-    bf16r2_view_t const hidden_grad_live = hidden_grad(nk::range(0, live_tokens), nk::slice);
-    expected_t staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_backward_kernel), row_grid, block_shape,
-                                      stream, stack_output_, final_norm_scale_.view(), final_inverse_rms_.view(),
-                                      hidden_grad_live, token_grad_b_.span(), overwrite);
+        // The pool backward scatters d(normalized) onto each segment's live token rows (uncovered rows
+        // stay the zeros this reset writes) and folds the query gradient; head_activated_ is free after
+        // fc2's weight grad, so it carries the per-segment query partials.
+        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(token_grad_a_.data()), 0,
+                                              live_tokens * hidden * sizeof(bf16_t), stream.get());
+            result != CUDA_SUCCESS)
+            return expected_t::fail(result, "pool gradient reset failed");
+        f32_t const attention_scale = tower_pool_scale_();
+        dim3 const pool_grid {static_cast<u32_t>(segments), hidden / transformer_head_dim_k, 1u};
+        dim3 const pool_block {transformer_head_dim_k, 1u, 1u};
+        staged = launch_kernel(reinterpret_cast<void const *>(&tower_pool_backward_kernel_), pool_grid, pool_block,
+                               stream, normalized_.view(), pool_query_.view(), segment_grad_b_.view(), segment_offsets,
+                               segment_lengths, token_grad_a_.span(), head_activated_.span(), attention_scale);
+        if (staged)
+            staged = launch_kernel(reinterpret_cast<void const *>(&tower_pool_query_grad_kernel_), channel_grid,
+                                   block_shape, stream, head_activated_.view(), pool_query_grad_.span());
+        if (!staged) return staged;
+
+        // The co-trained join: the masked force adds onto the pooled force at the final-norm states.
+        if (masked_present) {
+            dim3 const cell_grid {
+                static_cast<u32_t>(divide_round_up(live_tokens * hidden, kernel_block_size_default_k)), 1u, 1u};
+            staged = launch_kernel(reinterpret_cast<void const *>(&tower_grad_add_kernel_), cell_grid, block_shape,
+                                   stream, token_grad_a_.span().flatten<1>(),
+                                   hidden_grad(nk::range(0, live_tokens), nk::slice).flatten<1>());
+            if (!staged) return staged;
+        }
+    }
+
+    // Final-norm backward: the total d(normalized) — the pool's scatter (plus the co-trained add) or the
+    // caller's masked force alone — → d(stack output) into token_grad_b_, plus the scale grad. The
+    // caller's hidden_grad may carry a wider capacity than the live extent, so it is narrowed to match.
+    bf16r2_view_t const normalized_grad_total = pooled_present ? token_grad_a_.view()
+                                                               : hidden_grad(nk::range(0, live_tokens), nk::slice);
+    staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_backward_kernel), row_grid, block_shape, stream,
+                           stack_output_, final_norm_scale_.view(), final_inverse_rms_.view(), normalized_grad_total,
+                           token_grad_b_.span(), /*accumulate=*/false);
     if (staged)
         staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_scale_grad_kernel), channel_grid, block_shape,
-                               stream, stack_output_, final_inverse_rms_.view(), hidden_grad_live,
+                               stream, stack_output_, final_inverse_rms_.view(), normalized_grad_total,
                                final_norm_scale_grad_.span());
     if (!staged) return staged;
 

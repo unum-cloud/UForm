@@ -485,44 +485,6 @@ static __global__ void transformer_seq_lens_cast_kernel_(u32r1_view_t segment_le
         seq_lens[entry] = static_cast<i32_t>(segment_lengths[entry]);
 }
 
-/** @brief The strided THD tensor description shared by every SDPA operand: logical @b {B,H,S,D} over the
- *      packed token buffer, batch stride 0 (ragged offsets supply segment bases), token stride
- *      @p token_stride so Q / K / V can live inside the fused QKV block. */
-[[nodiscard]] inline std::vector<i64_t> sdpa_thd_strides(i64_t heads, i64_t token_stride) { // vendor-boundary
-    return {0, transformer_head_dim_k, token_stride, 1};                                    // vendor-boundary
-}
-
-/** @brief Attach a @b [segments+1] Int32 ragged prefix-sum input to @p graph under @p uid . */
-[[nodiscard]] inline auto sdpa_ragged_offset(fe::graph::Graph &graph, i64_t uid, i64_t segments) {
-    return graph.tensor(fe::graph::Tensor_attributes()
-                            .set_name("ragged")
-                            .set_uid(uid)
-                            .set_dim({segments + 1, 1, 1, 1})
-                            .set_stride({1, 1, 1, 1})
-                            .set_data_type(fe::DataType_t::INT32));
-}
-
-/** @brief Attach a @b [segments] Int32 per-segment length input to @p graph under @p uid . */
-[[nodiscard]] inline auto sdpa_seq_lengths(fe::graph::Graph &graph, i64_t uid, char const *name, i64_t segments) {
-    return graph.tensor(fe::graph::Tensor_attributes()
-                            .set_name(name)
-                            .set_uid(uid)
-                            .set_dim({segments, 1, 1, 1})
-                            .set_stride({1, 1, 1, 1})
-                            .set_data_type(fe::DataType_t::INT32));
-}
-
-/** @brief Attach a @b [1,1,1,1] Float32 scalar input to @p graph under @p uid — the attention scale
- *      and the FP8 descale / rescale scalars all share this shape. */
-[[nodiscard]] inline auto sdpa_scalar(fe::graph::Graph &graph, i64_t uid, char const *name) {
-    return graph.tensor(fe::graph::Tensor_attributes()
-                            .set_name(name)
-                            .set_uid(uid)
-                            .set_dim({1, 1, 1, 1})
-                            .set_stride({1, 1, 1, 1})
-                            .set_data_type(fe::DataType_t::FLOAT));
-}
-
 /** @brief Mark one SDPA-backward gradient output ( @c dQ / @c dK / @c dV ): the packed-QKV THD @p dims
  *      and @p strides of its operand, plus the ragged offset under @p ragged_uid . */
 inline void configure_sdpa_grad_output(std::shared_ptr<fe::graph::Tensor_attributes> const &node, // vendor-boundary
