@@ -89,6 +89,10 @@ using namespace unum::uform::test;
  *      window count; @c reserve fails loudly if a geometry change ever outgrows it. */
 inline constexpr std::size_t tier_window_scalars_k = 4u << 20;
 
+/** @brief The test tier's rendezvous deadline — a healthy rendezvous completes in well under a second, and
+ *      the short deadline keeps a dead peer from costing the surviving domain two minutes per case. */
+inline constexpr f64_t test_rendezvous_timeout_seconds_k = 20.0;
+
 /** @brief One width tier's shared surfaces: the topology plus the collective state every cell of the tier
  *      reuses instead of re-creating — threaded by reference from @c main , like production. */
 struct tier_t {
@@ -136,9 +140,40 @@ struct tier_t {
                 return result_t::fail(status_t::bad_alloc_k, "registration table allocation failed");
     }
     adafactor_config_t optimizer_config; // the per-step learning rate travels through `step`, not the config
-    return distributed_adafactor_t::make(domain, colocated, trainer.arenas,
-                                         {registrations.view().data(), registrations.size()},
-                                         trainer.replicas[0].weights.size(), optimizer_config, trainer.streams);
+    return distributed_adafactor_t::make(
+        domain, colocated, trainer.arenas, {registrations.view().data(), registrations.size()},
+        trainer.replicas[0].weights.size(), optimizer_config, trainer.streams, test_rendezvous_timeout_seconds_k);
+}
+
+/** @brief The world's health, owned by @c main beside the suite and threaded by reference into every case:
+ *      a device-side fault poisons the local context (every later case fails with the same unrelated
+ *      "unspecified launch failure"), and a dead peer domain makes every later rendezvous wait its full
+ *      deadline — either way the first detection reports once and the remaining cases return immediately,
+ *      so a faulted run finishes in seconds instead of minutes. */
+struct world_health_t {
+    /** @brief Cleared at the first poisoned-context or unresponsive-peer detection; later cases skip. */
+    bool alive = true;
+    /** @brief Consecutive optimizer-setup failures — a healthy world never fails setup, so two in a row
+     *      mean the peer domain is gone. */
+    u32_t consecutive_setup_failures = 0;
+};
+
+/** @brief Probe @p health before a case: report the first poisoned-context or unresponsive-peer detection
+ *      once, and tell every later case to return immediately.
+ *  @param[inout] suite The suite the one abort line reports into.
+ *  @param[inout] health The world's health record, cleared at the first detection. */
+[[nodiscard]] static bool world_still_healthy_(test_suite_t &suite, world_health_t &health) noexcept {
+    if (!health.alive) return false;
+    if (health.consecutive_setup_failures >= 2u) {
+        health.alive = false;
+        suite.check(false, "peer domain unresponsive — aborting the remaining cases");
+        return false;
+    }
+    expected<gpu_stream_t> probe = gpu_stream_t::make(0);
+    if (probe) return true;
+    health.alive = false;
+    suite.check(false, "device context poisoned — aborting the remaining cases: {}", probe.description_);
+    return false;
 }
 
 /** @brief Enqueue steps @b [begin,end) of the two-region loop — an empty @p graphs span runs the model region
@@ -311,9 +346,10 @@ static void check_weight_naming_(test_suite_t &suite, char const *label, base_co
 /** @brief Bring up the trainer for one mixture, run the captured two-region loop reading telemetry every step,
  *      and fold the five invariants (A replica identity, B round progression, C capture == eager, D loss
  *      descent, E every live head trained) into @p suite . */
-static void run_base_conformance(test_suite_t &suite, char const *label, base_config_t const &config,
-                                 mesh_topology_t const &topology, multimem_domain_t &domain,
-                                 colocated_domain_t &colocated) {
+static void run_base_conformance(test_suite_t &suite, world_health_t &health, char const *label,
+                                 base_config_t const &config, mesh_topology_t const &topology,
+                                 multimem_domain_t &domain, colocated_domain_t &colocated) {
+    if (!world_still_healthy_(suite, health)) return;
     base_trainer_t trainer;
     if (expected_t built = base_trainer_t::make(trainer, config, topology); !built)
         return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
@@ -325,7 +361,11 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
     // The captured optimizer and the assertion-C eager optimizer each reserve a fresh disjoint window
     // from the tier's shared domain.
     expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain, colocated);
-    if (!optimizer) return suite.check(false, "[{}] optimizer setup: {}", label, optimizer.description_);
+    if (!optimizer) {
+        ++health.consecutive_setup_failures;
+        return suite.check(false, "[{}] optimizer setup: {}", label, optimizer.description_);
+    }
+    health.consecutive_setup_failures = 0;
     per_gpu_array<gpu_replay_graph_t> graphs;
     if (expected_t captured = trainer.capture(graphs); !captured)
         return suite.check(false, "[{}] model-region capture: {}", label, captured.description_);
@@ -427,14 +467,20 @@ static void run_base_conformance(test_suite_t &suite, char const *label, base_co
 /** @brief One sweep cell: bring up the trainer, run two eager steps, then capture and replay two more over the
  *      same trainer — both model-region modes under one mixture — asserting finite losses and the final-norm
  *      extents every head reconstructs against. */
-static void run_sweep_cell_(test_suite_t &suite, mesh_topology_t const &topology, multimem_domain_t &domain,
-                            colocated_domain_t &colocated, sz::string_view label, base_config_t const &config) {
+static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, mesh_topology_t const &topology,
+                            multimem_domain_t &domain, colocated_domain_t &colocated, sz::string_view label,
+                            base_config_t const &config) {
+    if (!world_still_healthy_(suite, health)) return;
     base_trainer_t trainer;
     if (expected_t built = base_trainer_t::make(trainer, config, topology); !built)
         return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
     if (trainer.replicas.size() == 0) return suite.check(false, "[{}] no visible GPU", label);
     expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain, colocated);
-    if (!optimizer) return suite.check(false, "[{}] optimizer setup: {}", label, optimizer.description_);
+    if (!optimizer) {
+        ++health.consecutive_setup_failures;
+        return suite.check(false, "[{}] optimizer setup: {}", label, optimizer.description_);
+    }
+    health.consecutive_setup_failures = 0;
 
     // The eager state first, then the captured one over the same trainer — capture must also hold after the
     // optimizer has stepped (the capture-stable addresses survive weight updates).
@@ -476,29 +522,29 @@ static void run_sweep_cell_(test_suite_t &suite, mesh_topology_t const &topology
  *      omni cell at 96 columns (the non-square patch factorization). The wide tier reruns every subset at the
  *      bootstrapped world's full width, so shape handling composes with the real collectives — and widens to
  *      the multi-node world automatically under the sbatch launcher. */
-static void mixture_sweep(test_suite_t &suite, tier_t wide, tier_t cheap) {
+static void mixture_sweep(test_suite_t &suite, world_health_t &health, tier_t wide, tier_t cheap) {
     for (u32_t subset = 0; subset != 8u; ++subset)
         for (u32_t rows = 1; rows != 3u; ++rows) {
             sz::string label;
             if (!format_into(label, "1gpu:tokens{}{}{} rows={}", (subset & 1u) ? "+image" : "",
                              (subset & 2u) ? "+video" : "", (subset & 4u) ? "+audio" : "", rows))
                 return suite.check(false, "sweep label format failed");
-            run_sweep_cell_(suite, cheap.topology, cheap.domain, cheap.colocated, label.view(),
+            run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.colocated, label.view(),
                             sweep_config_(subset, rows, 64u));
         }
-    run_sweep_cell_(suite, cheap.topology, cheap.domain, cheap.colocated, "1gpu:omni rows=5",
+    run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.colocated, "1gpu:omni rows=5",
                     sweep_config_(7u, 5u, 64u));
-    run_sweep_cell_(suite, cheap.topology, cheap.domain, cheap.colocated, "1gpu:omni rows=2 columns=96",
+    run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.colocated, "1gpu:omni rows=2 columns=96",
                     sweep_config_(7u, 2u, 96u));
     base_config_t tuned = sweep_config_(7u, 2u, 64u);
     tuned.algo_pick = algo_pick_t::benchmarked_k;
-    run_sweep_cell_(suite, cheap.topology, cheap.domain, cheap.colocated, "1gpu:omni rows=2 tuned", tuned);
+    run_sweep_cell_(suite, health, cheap.topology, cheap.domain, cheap.colocated, "1gpu:omni rows=2 tuned", tuned);
     for (u32_t subset = 0; subset != 8u; ++subset) {
         sz::string label;
         if (!format_into(label, "wide:tokens{}{}{} rows=2", (subset & 1u) ? "+image" : "",
                          (subset & 2u) ? "+video" : "", (subset & 4u) ? "+audio" : ""))
             return suite.check(false, "sweep label format failed");
-        run_sweep_cell_(suite, wide.topology, wide.domain, wide.colocated, label.view(),
+        run_sweep_cell_(suite, health, wide.topology, wide.domain, wide.colocated, label.view(),
                         sweep_config_(subset, 2u, 64u));
     }
 }
@@ -506,7 +552,8 @@ static void mixture_sweep(test_suite_t &suite, tier_t wide, tier_t cheap) {
 /** @brief The capture contract holds — one replay graph per replica builds — and two replays over one fixed
  *      eager preamble produce a bitwise-identical shared @c d(normalized) . Needs no domain or optimizer: the
  *      model region is pure local math, so this stays green even where multicast is not provisioned. */
-static void graph_capture(test_suite_t &suite, mesh_topology_t const &topology) {
+static void graph_capture(test_suite_t &suite, world_health_t &health, mesh_topology_t const &topology) {
+    if (!world_still_healthy_(suite, health)) return;
     base_config_t const config = test_geometry_(false);
     base_trainer_t trainer;
     if (expected_t built = base_trainer_t::make(trainer, config, topology); !built)
@@ -589,10 +636,11 @@ int main() {
     }
     tier_t const wide {topology.value_, wide_domain.value_, wide_colocated.value_};
     tier_t const cheap {narrow.value_, cheap_domain.value_, cheap_colocated.value_};
+    world_health_t health;
 
-    run_base_conformance(suite, "tokens", test_geometry_(false), wide.topology, wide.domain, wide.colocated);
-    run_base_conformance(suite, "omni", test_geometry_(true), wide.topology, wide.domain, wide.colocated);
-    mixture_sweep(suite, wide, cheap);
-    graph_capture(suite, narrow.value_);
+    run_base_conformance(suite, health, "tokens", test_geometry_(false), wide.topology, wide.domain, wide.colocated);
+    run_base_conformance(suite, health, "omni", test_geometry_(true), wide.topology, wide.domain, wide.colocated);
+    mixture_sweep(suite, health, wide, cheap);
+    graph_capture(suite, health, narrow.value_);
     return suite.finish();
 }
