@@ -23,10 +23,11 @@
  *
  *  Weights are data-parallel replicas. Each rank casts its BFloat16 gradient buffers into its multicast
  *  replica, one generation barrier proves every replica complete, and every rank materialises the @b same
- *  Float32 gradient sum through @c multimem.ld_reduce — deterministic by construction — so identical
- *  Adafactor states receive identical inputs and every replica takes the identical step. Across
- *  multimem_domains the gateway's materialised sum rides the GDAKI all-reduce first, and every member
- *  reads the gateway's world sum over NVLink.
+ *  Float32 gradient @b mean (the switch sum scaled by @c 1/gpus_per_colocated_domain , so learning-rate
+ *  semantics are world-size-invariant) through @c multimem.ld_reduce — deterministic by construction — so
+ *  identical Adafactor states receive identical inputs and every replica takes the identical step. Across
+ *  multimem_domains the gateway's pre-scaled domain term rides the GDAKI all-reduce first, and every
+ *  member reads the gateway's world mean over NVLink.
  */
 #pragma once
 

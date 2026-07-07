@@ -146,25 +146,28 @@ static __global__ void adafactor_stage_gradient_kernel_(bf16r1_span_t gradient, 
         destination[index] = __bfloat162float(gradient[index]);
 }
 
-/** @brief Materialise the deterministic domain-reduced world gradient into this rank's own buffer —
- *      one switch-fused load per element from this consumer's window at @p shard_begin , or the peer
- *      tier's fixed-order serial fold.
+/** @brief Materialise the deterministic domain-reduced gradient into this rank's own buffer — one
+ *      switch-fused load per element from this consumer's window at @p shard_begin , or the peer tier's
+ *      fixed-order serial fold — scaled by @p world_scale , the @c 1/gpus_per_colocated_domain that turns
+ *      the world @b sum into the world @b mean : the learning-rate semantics stay world-size-invariant,
+ *      and the cross-domain all-reduce of domain terms each pre-scaled by @c 1/world sums to exactly the
+ *      world mean (the scale is linear, so applying it before or after the sum is the same value).
  *  __grid_size__ grid-stride; no dynamic shared memory. */
 static __global__ void adafactor_reduce_gradient_kernel_(multimem_member_t member, f32r1_span_t destination,
-                                                         std::size_t shard_begin) {
+                                                         std::size_t shard_begin, f32_t world_scale) {
     std::size_t const total = destination.extent(0);
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
     for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < total;
          index += stride) {
         if (member.multimem_payload != nullptr)
-            destination[index] = multimem_load_reduce_add_(member.multimem_payload + shard_begin + index);
+            destination[index] = multimem_load_reduce_add_(member.multimem_payload + shard_begin + index) * world_scale;
         else {
             f32_t total_value = 0.0f;
             for (u32_t peer = 0; peer != member.member_count; ++peer) {
                 f32_t const *peer_payload = member.peer_payload(peer);
                 total_value = __fadd_rn(total_value, peer_payload[shard_begin + index]);
             }
-            destination[index] = total_value;
+            destination[index] = total_value * world_scale;
         }
     }
 }
@@ -340,11 +343,14 @@ expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, 
     if (staged) staged = domain_->barrier(rank, stream);
     if (!staged) return staged;
     std::size_t const scalars = ranks_[rank].state.gradient_scalars();
+    // The mean over gpus_per_colocated_domain, so the update's learning-rate semantics are
+    // world-size-invariant — the same scalar on every rank, keeping the replicas bitwise identical.
+    f32_t const world_scale = 1.0f / static_cast<f32_t>(gpus * world_reduce_->multimem_domain_count());
     if (world_reduce_->identity()) {
-        // Materialise the domain sum locally; the world IS the domain.
+        // Materialise the domain mean locally; the world IS the domain.
         staged = launch_kernel(reinterpret_cast<void const *>(&adafactor_reduce_gradient_kernel_),
                                dim3 {grid_size_for(scalars), 1u, 1u}, block_shape, stream, domain_->member(rank),
-                               ranks_[rank].reduced.span(), window_.offset);
+                               ranks_[rank].reduced.span(), window_.offset, world_scale);
         if (staged) staged = ranks_[rank].state.step(learning_rate, stream, ranks_[rank].reduced.view());
         return staged;
     }
@@ -366,9 +372,13 @@ expected_t distributed_adafactor_t::world_gradient_step_(std::size_t rank, f32_t
     f32_t *const world_gradient = world_reduce_->payload().data();
     expected_t staged {};
     if (rank == 0) {
+        // Each domain stages its sum pre-scaled by 1/world; the elementwise cross-domain sum of those
+        // terms lands exactly on the world mean (the scale is linear either side of the sum).
+        f32_t const world_scale = 1.0f / static_cast<f32_t>(ranks_.size() * world_reduce_->multimem_domain_count());
         staged = launch_kernel(reinterpret_cast<void const *>(&adafactor_reduce_gradient_kernel_),
                                dim3 {grid_size_for(scalars), 1u, 1u}, dim3 {kernel_block_size_default_k, 1u, 1u},
-                               stream, domain_->member(rank), f32r1_span_t {world_gradient, scalars}, window_.offset);
+                               stream, domain_->member(rank), f32r1_span_t {world_gradient, scalars}, window_.offset,
+                               world_scale);
         if (staged) staged = (*world_reduce_)(stream);
         if (staged)
             if (CUresult result = cuEventRecord(world_ready_.get(), stream.get()); result != CUDA_SUCCESS)

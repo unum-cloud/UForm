@@ -1,7 +1,7 @@
 /**
  *  @brief Device-initiated InfiniBand collectives across multimem_domains — the vertex all-gather and
  *      the force / gradient all-reduce-sum, each an argument-free method of one member's wired
- *      @ref infiniband_member_t (the doorbell path NVIDIA documents as GDAKI, GPUDirect Async
+ *      @ref infiniband_reach_t (the doorbell path NVIDIA documents as GDAKI, GPUDirect Async
  *      Kernel-Initiated).
  *
  *  @file cuda/primitives/infiniband_collectives.cuh
@@ -30,7 +30,7 @@
  *  Reliable-Connection delivery is in-order, so the flag's arrival proves the payload landed. Flags are
  *  @b monotonic never-reset counters — a waiter spins with @c >= against the absolute target
  *  @c *round+round+1 , so replays of a captured step need no flag reset (a reset would be a host
- *  write inside the replay loop). Each @ref infiniband_member_t owns its round scalar and
+ *  write inside the replay loop). Each @ref infiniband_reach_t owns its round scalar and
  *  @c advance() s it once per step by its round count — distinct members' flags can never alias, because
  *  they live in distinct heaps.
  *
@@ -49,7 +49,7 @@
  *         record, and BlueFlame register, and the mapping registers them into the GPU's address space
  *         so @ref infiniband_post_write builds one MLX5 work-queue entry and rings the doorbell
  *         entirely from device code — capture-safe graph nodes, no @c ibv_post_send .
- *      4. @ref infiniband_member_t — one member's wired reach into the other domains, owning the
+ *      4. @ref infiniband_reach_t — one member's wired reach into the other domains, owning the
  *         registered symmetric heap and running the two collectives above as methods.
  *
  *  @section infiniband_platform Platform contract
@@ -934,7 +934,7 @@ using infiniband_round_view_t = nk::tensor_view<infiniband_round_t, 1>;
 
 /**
  *  @brief The static description of one all-gather invocation — the two scalars its kernels need
- *      beyond the links and the round. Internal to @ref infiniband_member_t 's dispatch: the member
+ *      beyond the links and the round. Internal to @ref infiniband_reach_t 's dispatch: the member
  *      bakes both at wiring time and builds this by value at enqueue; consumers never construct one.
  */
 struct infiniband_allgather_plan_t {
@@ -944,15 +944,9 @@ struct infiniband_allgather_plan_t {
     u32_t this_multimem_domain = 0;
 };
 
-/** @brief Which cross-domain collective a member's heap and rounds are wired for — the role its factory bakes,
- *      checked by each argument-free method so a member can never run a collective its layout can't serve.
- *      @c allreduce and @c alltoall both carry per-round landings, so the role, not the landing size,
- *      disambiguates them. */
-enum collective_role_t : u32_t { collective_allreduce_k = 0, collective_allgather_k = 1, collective_alltoall_k = 2 };
-
 /** @brief The static description of one all-to-all invocation — this domain's per-peer send blocks live at
  *      @b [D·block_bytes] ( block @c p is what this domain sends domain @c p ; block @c self stays local ), and
- *      each round's landing receives that round's partner's block. Internal to @ref infiniband_member_t 's
+ *      each round's landing receives that round's partner's block. Internal to @ref infiniband_reach_t 's
  *      dispatch; consumers never construct one. */
 struct infiniband_alltoall_plan_t {
     /** @brief Bytes this domain sends to (and receives from) any one peer — the per-pair block size. */
@@ -965,39 +959,46 @@ struct infiniband_alltoall_plan_t {
 using infiniband_links_tensor_t = nk::tensor<infiniband_link_t, gpu_arena_alloc<infiniband_link_t>, 1>;
 
 /**
- *  @brief One member's wired reach into the other multimem_domains: the registered symmetric heap,
- *      one RC
- *      endpoint with its device-initiated queue / completion mappings per recursive-doubling round,
- *      the exchanged coordinates, the device-resident link table, and the collective's round
- *      scalar — the level-2 counterpart of @ref multimem_domain_t 's per-member surface.
+ *  @brief The shared RDMA body every typed collective handle holds — one member's wired reach into the
+ *      other multimem_domains: the registered symmetric heap, one RC endpoint with its device-initiated
+ *      queue / completion mappings per recursive-doubling round, the exchanged coordinates, the
+ *      device-resident link table, and the collective's round scalar — the level-2 counterpart of
+ *      @ref multimem_domain_t 's per-member surface.
  *
- *  Constructed only through @ref colocated_domain_t 's role factories — @c wire_allreduce (a Float32
- *  shard summed across domains, per-round landings) or @c wire_allgather (domain-major blocks gathered
- *  in place, the payload doubling as the landing) — so a member's heap layout can never contradict the
- *  collective it runs, and the adapters underneath are always the shared ones. The collectives
- *  themselves are the argument-free methods @ref allreduce_sum and @ref allgather : payload, links,
- *  round, and the domain coordinate are all baked at wiring time.
+ *  @b Internal : consumers hold @ref infiniband_all_reduce , @ref infiniband_all_gather , or
+ *  @ref infiniband_all_to_all , whose @c make constructs this body through @ref colocated_domain_t —
+ *  the handle's type @b is the role, so a heap layout can never contradict the collective it runs, and
+ *  the adapters underneath are always the shared ones. Payload, links, round, and the domain coordinate
+ *  are all baked at wiring time; the per-collective methods here are the handles' implementation.
  */
-struct infiniband_member_t {
+struct infiniband_reach_t {
 
   private:
     friend struct colocated_domain_t;
+    /** @brief The typed handles set each layout's payload and landing bytes at their @c make . */
+    template <typename value_type_>
+    friend struct infiniband_all_reduce;
+    /** @copydoc infiniband_all_reduce */
+    template <typename value_type_>
+    friend struct infiniband_all_gather;
+    /** @copydoc infiniband_all_reduce */
+    template <typename value_type_>
+    friend struct infiniband_all_to_all;
 
     /**
      *  @brief Byte offsets of one member's registered symmetric heap — the identical formula on every
-     *      domain: the
-     *      symmetric-heap contract the remote writes rely on. Layout: @b [payload | rounds landings |
-     *      rounds flags] , every region 128-byte aligned; derived only by the role factories.
+     *      domain: the symmetric-heap contract the remote writes rely on. Layout: @b [payload | parity
+     *      landing pairs | parity flag pairs] , every region 128-byte aligned; the typed handles set the
+     *      payload and landing bytes, and @ref colocated_domain_t derives the rounds.
      */
     struct heap_layout_t {
         /** @brief The shard / world buffer the collective operates on — the heap's prefix. */
         std::size_t payload_bytes = 0;
         /** @brief Per-round landing size; 0 means the payload doubles as the landing. */
         std::size_t landing_bytes = 0;
-        /** @brief Recursive-doubling rounds — the link, landing, and flag count. */
+        /** @brief Recursive-doubling rounds — the link, landing, and flag count; the wiring derives it
+         *      from the world's domain count, so the typed handles never spell it. */
         u32_t rounds = 0;
-        /** @brief The collective this heap serves — the method dispatch validates against it. */
-        collective_role_t role = collective_allreduce_k;
 
         [[nodiscard]] std::size_t landings_offset() const noexcept {
             return round_up_to_multiple(payload_bytes, cache_line_bytes_k);
@@ -1013,14 +1014,13 @@ struct infiniband_member_t {
         }
     };
 
-    /** @brief The shared wiring body behind @ref colocated_domain_t 's role factories: allocate the heap,
-     *      wire one endpoint per round on the shared @p nic , exchange coordinates, stage the links. The
-     *      @p stream seeds the member's round scalar (ordered after its zero). */
-    [[nodiscard]] static expected<infiniband_member_t> make_(mesh_topology_t const &topology, u32_t member_index,
-                                                             infiniband_nic_t &nic, gpu_arena_t &arena,
-                                                             gpu_stream_t &stream, heap_layout_t layout,
-                                                             sz::string_view key_prefix,
-                                                             f64_t timeout_seconds) noexcept;
+    /** @brief The shared wiring body behind @ref colocated_domain_t : allocate the heap, wire one
+     *      endpoint per round on the shared @p nic , exchange coordinates, prove both ends armed, and
+     *      stage the links. The @p stream seeds the member's round scalar (ordered after its zero). */
+    [[nodiscard]] static expected<infiniband_reach_t> make_(mesh_topology_t const &topology, u32_t member_index,
+                                                            infiniband_nic_t &nic, gpu_arena_t &arena,
+                                                            gpu_stream_t &stream, heap_layout_t layout,
+                                                            sz::string_view key_prefix, f64_t timeout_seconds) noexcept;
 
   public:
     /** @brief The registered payload region — the shard the all-reduce sums in place, or the
@@ -1043,6 +1043,9 @@ struct infiniband_member_t {
 
     /** @brief Whether this member is the zero-round single-domain identity — every collective a no-op. */
     [[nodiscard]] bool identity() const noexcept { return layout_.rounds == 0; }
+    /** @brief How many multimem_domains this member's recursive doubling spans — @c 2^rounds , exact
+     *      because the wiring rejects non-power-of-two domain counts. */
+    [[nodiscard]] u32_t multimem_domain_count() const noexcept { return 1u << layout_.rounds; }
 
     /**
      *  @brief Device-initiated inter-domain all-reduce-sum of this member's Float32 payload, in place —
@@ -1089,7 +1092,7 @@ struct infiniband_member_t {
     [[nodiscard]] expected_t alltoall(gpu_stream_t &stream) noexcept;
 
   private:
-    /** @brief The heap's byte-offset formula — identical on every domain, baked by the role factory. */
+    /** @brief The heap's byte-offset formula — identical on every domain, baked at wiring. */
     heap_layout_t layout_ {};
     /** @brief This rank's multimem_domain index — the recursive-doubling coordinate, baked at wiring. */
     u32_t multimem_domain_index_ = 0;
@@ -1118,10 +1121,11 @@ struct infiniband_member_t {
  *      and threaded by reference to every cross-domain consumer, exactly like the per-rank arenas and
  *      the one @ref multimem_domain_t .
  *
- *  Wiring a member is a consumer's own lane — its queue pairs (the single-poster concurrency
+ *  Wiring a handle is a consumer's own lane — its queue pairs (the single-poster concurrency
  *  granularity, so consumers' collectives can overlap), its heap, its round; this domain only lends
- *  the shared adapters and the exchange. Batch-shuffle payload movement is added later as a third role
- *  ( @c wire_alltoall with per-pair sizes) without touching the NIC or member layers.
+ *  the shared adapters and the exchange. The typed handles ( @ref infiniband_all_reduce ,
+ *  @ref infiniband_all_gather , @ref infiniband_all_to_all ) are the whole wiring surface — the
+ *  handle's type is the role, and rendezvous keys never appear in any API.
  */
 struct colocated_domain_t {
 
@@ -1131,80 +1135,68 @@ struct colocated_domain_t {
      *      GPU count alongside the cross-process multicast bind. */
     [[nodiscard]] static expected<colocated_domain_t> make(mesh_topology_t const &topology) noexcept;
 
-    /**
-     *  @brief Wire one member for the cross-domain Float32 all-reduce-sum of a @p shard_bytes payload:
-     *      heap @b [shard | rounds landings | rounds flags] . One member per (consumer, role) — own
-     *      queue pairs, own round. Runs once, at setup, outside any capture; the calling thread must
-     *      hold the member's context.
-     *
-     *  @param[in] member_index This GPU's index inside its multimem_domain; the partner's same-index
-     *      GPU pairs with it.
-     *  @param[in] arena The member's arena; the heap, the link table, and the mapping counters allocate
-     *      from it (its chunks are GPUDirect-RDMA-capable by construction).
-     *  @param[in] stream The member's lead stream; the round scalar is seeded on it at setup.
-     *  @param[in] key_prefix Exchange-key namespace; keys are @c "<prefix>.<round>" , so distinct
-     *      consumers never collide.
-     */
-    [[nodiscard]] expected<infiniband_member_t> wire_allreduce(u32_t member_index, gpu_arena_t &arena,
-                                                               gpu_stream_t &stream, std::size_t shard_bytes,
-                                                               sz::string_view key_prefix,
-                                                               f64_t timeout_seconds = 120.0) noexcept;
-
-    /** @brief Wire one member for the cross-domain all-gather of domain-major @p block_bytes blocks:
-     *      the payload spans @b [domains·block_bytes] and doubles as the landing — blocks land in
-     *      place. Same contract as @ref wire_allreduce otherwise. */
-    [[nodiscard]] expected<infiniband_member_t> wire_allgather(u32_t member_index, gpu_arena_t &arena,
-                                                               gpu_stream_t &stream, std::size_t block_bytes,
-                                                               sz::string_view key_prefix,
-                                                               f64_t timeout_seconds = 120.0) noexcept;
-
-    /** @brief Wire one member for the cross-domain all-to-all of per-peer @p block_bytes blocks: the send region
-     *      spans @b [domains·block_bytes] ( block @c p ships to domain @c p , block for this domain stays local )
-     *      and each round lands its partner's block. Same contract as @ref wire_allreduce otherwise. Two domains
-     *      today (one pairwise exchange); beyond two fails loudly until the multi-hop schedule lands. */
-    [[nodiscard]] expected<infiniband_member_t> wire_alltoall(u32_t member_index, gpu_arena_t &arena,
-                                                              gpu_stream_t &stream, std::size_t block_bytes,
-                                                              sz::string_view key_prefix,
-                                                              f64_t timeout_seconds = 120.0) noexcept;
-
     /** @brief The bootstrapped world this domain was wired against. */
     [[nodiscard]] mesh_topology_t const &topology() const noexcept { return *topology_; }
     /** @brief How many multimem_domains the world spans — 1 means no member ever posts. */
     [[nodiscard]] u32_t multimem_domain_count() const noexcept { return topology_->shape.multimem_domain_count(); }
 
-    /** @brief Mint the next collective handle's rendezvous namespace — a monotonic per-domain id, rank-consistent
-     *      because every rank constructs its collectives in the same SPMD order. Replaces the caller-supplied
-     *      @c key_prefix : the typed handles pass this into the wire path, so keys never leave the API. */
-    [[nodiscard]] bool next_collective_key(sz::string &out) noexcept {
-        return static_cast<bool>(format_into(out, "collective.{}", next_collective_id_++));
-    }
-
   private:
+    /** @brief The typed collective handles are the only wiring consumers — the handle's type is the role. */
+    template <typename value_type_>
+    friend struct infiniband_all_reduce;
+    /** @copydoc infiniband_all_reduce */
+    template <typename value_type_>
+    friend struct infiniband_all_gather;
+    /** @copydoc infiniband_all_reduce */
+    template <typename value_type_>
+    friend struct infiniband_all_to_all;
+
+    /**
+     *  @brief Wire one typed handle's shared RDMA body: mint the rendezvous namespace (a monotonic
+     *      per-domain id, rank-consistent because every rank constructs its collectives in the same SPMD
+     *      order — keys never appear in any API), derive the recursive-doubling rounds from the world's
+     *      domain span, and build @p layout 's heap, endpoints, and links over the member's shared
+     *      adapter. Single-domain worlds return the zero-round identity without touching InfiniBand.
+     *      Runs once, at setup, outside any capture; the calling thread must hold the member's context.
+     *
+     *  @param[in] member_index This GPU's index inside its multimem_domain; the partner's same-index
+     *      GPU pairs with it.
+     *  @param[inout] arena The member's arena; the heap, the link table, and the mapping counters
+     *      allocate from it (its chunks are GPUDirect-RDMA-capable by construction).
+     *  @param[inout] stream The member's lead stream; the round scalar is seeded on it at setup.
+     *  @param[in] layout The handle's heap shape — payload and landing bytes; the rounds are derived here.
+     *  @param[in] timeout_seconds Deadline on the coordinate and armed-peer rendezvous.
+     */
+    [[nodiscard]] expected<infiniband_reach_t> reach_(u32_t member_index, gpu_arena_t &arena, gpu_stream_t &stream,
+                                                      infiniband_reach_t::heap_layout_t layout,
+                                                      f64_t timeout_seconds) noexcept;
+
     /** @brief The bootstrapped world — borrowed; main owns it for the process lifetime. */
     mesh_topology_t const *topology_ = nullptr;
     /** @brief One opened adapter per local GPU, member order. */
     per_gpu_array<infiniband_nic_t> nics_ {};
-    /** @brief Monotonic id handed to each collective handle at make — the auto-derived rendezvous namespace. */
+    /** @brief Monotonic id minted per wired handle — the auto-derived rendezvous namespace. */
     u32_t next_collective_id_ = 0;
 };
 
 /** @brief Cross-domain Float32 all-reduce-sum in place — the typed op-handle over @ref colocated_domain_t . Wires
  *      one endpoint per recursive-doubling round at @ref make (no lazy-init), auto-keys its rendezvous, and exposes
  *      the shard as a typed @c nk::tensor_span the caller stages before each step. @c operator() folds @c advance
- *      and the reduce into one enqueue. (Phase 1 wraps @ref infiniband_member_t ; the shared body is renamed to
- *      @c infiniband_reach_t when the legacy wire_* surface retires.) */
+ *      and the reduce into one enqueue. */
 template <typename value_type_>
 struct infiniband_all_reduce {
     using value_type = value_type_;
+    /** @brief Wire the reduce's shared body: heap @b [shard | parity landings | parity flags] , one
+     *      endpoint per recursive-doubling round — a single-domain world gets the zero-round identity. */
     [[nodiscard]] static expected<infiniband_all_reduce> make(colocated_domain_t &domain, u32_t member_index,
                                                               gpu_arena_t &arena, std::size_t scalars,
                                                               gpu_stream_t &stream,
                                                               f64_t timeout_seconds = 120.0) noexcept {
         using result_t = expected<infiniband_all_reduce>;
-        sz::string key;
-        if (!domain.next_collective_key(key)) return result_t::fail(status_t::bad_alloc_k, "collective key failed");
-        auto wired = domain.wire_allreduce(member_index, arena, stream, scalars * sizeof(value_type_), key.view(),
-                                           timeout_seconds);
+        infiniband_reach_t::heap_layout_t layout;
+        layout.payload_bytes = scalars * sizeof(value_type_);
+        layout.landing_bytes = layout.payload_bytes;
+        auto wired = domain.reach_(member_index, arena, stream, layout, timeout_seconds);
         if (!wired) return result_t::fail(std::move(wired));
         infiniband_all_reduce handle;
         handle.reach_ = std::move(wired.value_);
@@ -1223,9 +1215,11 @@ struct infiniband_all_reduce {
     }
     /** @brief Whether this buffer is the zero-round single-domain identity — the collective a no-op. */
     [[nodiscard]] bool identity() const noexcept { return reach_.identity(); }
+    /** @brief How many multimem_domains the reduce spans — the world-mean divisor's domain factor. */
+    [[nodiscard]] u32_t multimem_domain_count() const noexcept { return reach_.multimem_domain_count(); }
 
   private:
-    infiniband_member_t reach_ {};
+    infiniband_reach_t reach_ {};
 };
 
 /** @brief Cross-domain all-gather of domain-major blocks — the typed op-handle. This domain's block sits at
@@ -1233,15 +1227,18 @@ struct infiniband_all_reduce {
 template <typename value_type_>
 struct infiniband_all_gather {
     using value_type = value_type_;
+    /** @brief Wire the gather's shared body: the domain-major payload @b [domains·block] doubles as the
+     *      landing (blocks gather in place) — a single-domain world gets the zero-round identity. */
     [[nodiscard]] static expected<infiniband_all_gather> make(colocated_domain_t &domain, u32_t member_index,
                                                               gpu_arena_t &arena, std::size_t block_scalars,
                                                               gpu_stream_t &stream,
                                                               f64_t timeout_seconds = 120.0) noexcept {
         using result_t = expected<infiniband_all_gather>;
-        sz::string key;
-        if (!domain.next_collective_key(key)) return result_t::fail(status_t::bad_alloc_k, "collective key failed");
-        auto wired = domain.wire_allgather(member_index, arena, stream, block_scalars * sizeof(value_type_), key.view(),
-                                           timeout_seconds);
+        infiniband_reach_t::heap_layout_t layout;
+        layout.payload_bytes = static_cast<std::size_t>(domain.multimem_domain_count()) * block_scalars *
+                               sizeof(value_type_);
+        layout.landing_bytes = 0;
+        auto wired = domain.reach_(member_index, arena, stream, layout, timeout_seconds);
         if (!wired) return result_t::fail(std::move(wired));
         infiniband_all_gather handle;
         handle.reach_ = std::move(wired.value_);
@@ -1261,7 +1258,7 @@ struct infiniband_all_gather {
     [[nodiscard]] static nk::tensor_span<value_type_, 1> typed_(b8r1_span_t bytes) noexcept {
         return {reinterpret_cast<value_type_ *>(bytes.data()), bytes.extent(0) / sizeof(value_type_)};
     }
-    infiniband_member_t reach_ {};
+    infiniband_reach_t reach_ {};
 };
 
 /** @brief Cross-domain all-to-all of per-peer blocks — the typed op-handle. The caller stages each
@@ -1270,15 +1267,23 @@ struct infiniband_all_gather {
 template <typename value_type_>
 struct infiniband_all_to_all {
     using value_type = value_type_;
+    /** @brief Wire the exchange's shared body: per-peer send blocks @b [domains·block] in the payload,
+     *      one parity landing pair per round — a single-domain world gets the zero-round identity.
+     *      Recursive doubling reaches every peer only at two domains; beyond that a direct all-to-all
+     *      needs the D-1 links (or a multi-hop schedule) the round wiring does not lay down. */
     [[nodiscard]] static expected<infiniband_all_to_all> make(colocated_domain_t &domain, u32_t member_index,
                                                               gpu_arena_t &arena, std::size_t block_scalars,
                                                               gpu_stream_t &stream,
                                                               f64_t timeout_seconds = 120.0) noexcept {
         using result_t = expected<infiniband_all_to_all>;
-        sz::string key;
-        if (!domain.next_collective_key(key)) return result_t::fail(status_t::bad_alloc_k, "collective key failed");
-        auto wired = domain.wire_alltoall(member_index, arena, stream, block_scalars * sizeof(value_type_), key.view(),
-                                          timeout_seconds);
+        u32_t const domains = domain.multimem_domain_count();
+        if (domains > 2u)
+            return result_t::fail(status_t::shape_unsupported_k,
+                                  "all-to-all is wired for two domains; {} needs the multi-hop schedule", domains);
+        infiniband_reach_t::heap_layout_t layout;
+        layout.payload_bytes = static_cast<std::size_t>(domains) * block_scalars * sizeof(value_type_);
+        layout.landing_bytes = block_scalars * sizeof(value_type_);
+        auto wired = domain.reach_(member_index, arena, stream, layout, timeout_seconds);
         if (!wired) return result_t::fail(std::move(wired));
         infiniband_all_to_all handle;
         handle.reach_ = std::move(wired.value_);
@@ -1312,7 +1317,7 @@ struct infiniband_all_to_all {
     [[nodiscard]] static nk::tensor_span<value_type_, 1> typed_(b8r1_span_t bytes) noexcept {
         return {reinterpret_cast<value_type_ *>(bytes.data()), bytes.extent(0) / sizeof(value_type_)};
     }
-    infiniband_member_t reach_ {};
+    infiniband_reach_t reach_ {};
     /** @brief Host-side exchange count mirroring the device round — only for @ref recv_block 's parity
      *      pick, legal because the mixer consumes eagerly (see the accessor's contract). */
     u32_t exchanges_ = 0;
@@ -1322,7 +1327,7 @@ struct infiniband_all_to_all {
 
 /** @brief The build-gate stub: only the zero-round single-domain identity exists — every collective is
  *      a no-op, and wiring a real member fails loudly naming the gate. */
-struct infiniband_member_t {
+struct infiniband_reach_t {
     [[nodiscard]] b8r1_span_t payload() noexcept { return {}; }
     [[nodiscard]] b8r1_span_t own_block() noexcept { return {}; }
     [[nodiscard]] expected_t advance(gpu_stream_t &) noexcept { return {}; }
@@ -1332,6 +1337,7 @@ struct infiniband_member_t {
     [[nodiscard]] b8r1_span_t send_block(u32_t) noexcept { return {}; }
     [[nodiscard]] b8r1_span_t recv_block(u32_t, u32_t) noexcept { return {}; }
     [[nodiscard]] bool identity() const noexcept { return true; }
+    [[nodiscard]] u32_t multimem_domain_count() const noexcept { return 1; }
 };
 
 /** @brief The build-gate stub of the colocated domain: single-domain topologies work (nothing to
@@ -1347,27 +1353,11 @@ struct colocated_domain_t {
         domain.topology_ = &topology;
         return expected<colocated_domain_t> {std::move(domain)};
     }
-    [[nodiscard]] expected<infiniband_member_t> wire_allreduce(u32_t, gpu_arena_t &, gpu_stream_t &, std::size_t,
-                                                               sz::string_view, f64_t = 120.0) noexcept {
-        return expected<infiniband_member_t> {infiniband_member_t {}};
-    }
-    [[nodiscard]] expected<infiniband_member_t> wire_allgather(u32_t, gpu_arena_t &, gpu_stream_t &, std::size_t,
-                                                               sz::string_view, f64_t = 120.0) noexcept {
-        return expected<infiniband_member_t> {infiniband_member_t {}};
-    }
-    [[nodiscard]] expected<infiniband_member_t> wire_alltoall(u32_t, gpu_arena_t &, gpu_stream_t &, std::size_t,
-                                                              sz::string_view, f64_t = 120.0) noexcept {
-        return expected<infiniband_member_t> {infiniband_member_t {}};
-    }
     [[nodiscard]] mesh_topology_t const &topology() const noexcept { return *topology_; }
     [[nodiscard]] u32_t multimem_domain_count() const noexcept { return 1u; }
-    [[nodiscard]] bool next_collective_key(sz::string &out) noexcept {
-        return static_cast<bool>(format_into(out, "collective.{}", next_collective_id_++));
-    }
 
   private:
     mesh_topology_t const *topology_ = nullptr;
-    u32_t next_collective_id_ = 0;
 };
 
 /** @brief Build-gate stubs of the typed collective handles — the zero-round identity: @c make succeeds with a
@@ -1382,6 +1372,7 @@ struct infiniband_all_reduce {
     [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept { return {}; }
     [[nodiscard]] expected_t operator()(gpu_stream_t &) noexcept { return {}; }
     [[nodiscard]] bool identity() const noexcept { return true; }
+    [[nodiscard]] u32_t multimem_domain_count() const noexcept { return 1; }
 };
 template <typename value_type_>
 struct infiniband_all_gather {
