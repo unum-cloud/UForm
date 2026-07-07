@@ -440,32 +440,67 @@ expected<std::size_t> ul::file_size_bytes(sz::string_view path) noexcept {
 expected<array<sz::string>> ul::expand_glob(sz::string_view path_or_glob) noexcept {
     using result_t = expected<array<sz::string>>;
 
-    // Split "directory/pattern" at the last '/' with StringZilla's rpartition; a bare filename has no
-    // slash, so the match comes back empty and the directory defaults to ".".
-    auto const parts = path_or_glob.rpartition('/');
-    sz::string_view const directory = parts.match.empty() ? sz::string_view {".", 1} : parts.before;
-    sz::string_view const pattern = parts.match.empty() ? parts.before : parts.after;
+    // Wildcards may sit in ANY component — the mixture manifests spell mid-path patterns like
+    // `data/*/train/*.parquet` — so the expansion walks the path left to right, forking the running
+    // directory prefixes at every patterned component and matching files at the last one. A forked
+    // branch that lacks a later component simply contributes nothing; only a wholly empty match fails.
+    array<sz::string_view> components;
+    for (sz::string_view component : path_or_glob.split(sz::byteset {"/", 1}))
+        if (!component.empty() && components.try_push_back(component) != status_t::success_k)
+            return result_t::fail(status_t::bad_alloc_k, "glob component table allocation failed");
+    if (components.size() == 0) return result_t::fail(status_t::invalid_input_k, "no files match {}", path_or_glob);
 
-    sz::string directory_text, pattern_text; // null-terminated for opendir / fnmatch
-    if (!directory_text.try_assign(directory) || !pattern_text.try_assign(pattern))
-        return result_t::fail(status_t::bad_alloc_k, "glob split allocation failed");
-
-    ::DIR *const handle = ::opendir(directory_text.c_str());
-    if (handle == nullptr) return result_t::fail(status_t::io_error_k, "cannot open directory {}", directory);
+    bool const absolute = path_or_glob.starts_with(sz::string_view {"/", 1});
+    array<sz::string> prefixes;
+    {
+        sz::string seed_prefix;
+        if (!seed_prefix.try_assign(absolute ? sz::string_view {"/", 1} : sz::string_view {".", 1}) ||
+            prefixes.try_push_back(std::move(seed_prefix)) != status_t::success_k)
+            return result_t::fail(status_t::bad_alloc_k, "glob prefix allocation failed");
+    }
 
     array<sz::string> paths;
-    for (::dirent const *entry = ::readdir(handle); entry != nullptr; entry = ::readdir(handle)) {
-        if (entry->d_type == DT_DIR) continue;
-        if (::fnmatch(pattern_text.c_str(), entry->d_name, 0) != 0) continue;
-        sz::string full;
-        if (!full.try_assign(directory) || !full.try_append(sz::string_view {"/", 1}) ||
-            !full.try_append(sz::string_view {entry->d_name}) ||
-            paths.try_push_back(std::move(full)) != status_t::success_k) {
-            ::closedir(handle);
-            return result_t::fail(status_t::bad_alloc_k, "path string allocation failed");
+    sz::byteset const wildcards {"*?[", 3};
+    for (std::size_t level = 0; level != components.size(); ++level) {
+        sz::string_view const component = components[level];
+        bool const last = level + 1 == components.size();
+        bool const patterned = component.find_first_of(wildcards) != sz::string_view::npos;
+
+        // A literal directory component descends every prefix without touching the filesystem — the
+        // next level's opendir discovers a missing branch and drops it.
+        if (!patterned && !last) {
+            for (std::size_t index = 0; index != prefixes.size(); ++index)
+                if (!prefixes[index].try_append(sz::string_view {"/", 1}) || !prefixes[index].try_append(component))
+                    return result_t::fail(status_t::bad_alloc_k, "glob prefix growth failed");
+            continue;
         }
+
+        sz::string pattern_text; // null-terminated for fnmatch
+        if (!pattern_text.try_assign(component))
+            return result_t::fail(status_t::bad_alloc_k, "glob pattern allocation failed");
+        array<sz::string> next_prefixes;
+        for (std::size_t index = 0; index != prefixes.size(); ++index) {
+            ::DIR *const handle = ::opendir(prefixes[index].c_str());
+            if (handle == nullptr) continue; // a forked branch without this component matches nothing
+            for (::dirent const *entry = ::readdir(handle); entry != nullptr; entry = ::readdir(handle)) {
+                bool const is_directory = entry->d_type == DT_DIR;
+                if (last == is_directory) continue; // files close the walk; directories continue it
+                if (is_directory && (std::strcmp(entry->d_name, ".") == 0 || std::strcmp(entry->d_name, "..") == 0))
+                    continue;
+                if (::fnmatch(pattern_text.c_str(), entry->d_name, 0) != 0) continue;
+                sz::string full;
+                if (!full.try_assign(prefixes[index].view()) || !full.try_append(sz::string_view {"/", 1}) ||
+                    !full.try_append(sz::string_view {entry->d_name}) ||
+                    (last ? paths.try_push_back(std::move(full)) : next_prefixes.try_push_back(std::move(full))) !=
+                        status_t::success_k) {
+                    ::closedir(handle);
+                    return result_t::fail(status_t::bad_alloc_k, "path string allocation failed");
+                }
+            }
+            ::closedir(handle);
+        }
+        if (!last) prefixes = std::move(next_prefixes);
     }
-    ::closedir(handle);
     if (paths.empty()) return result_t::fail(status_t::invalid_input_k, "no files match {}", path_or_glob);
 
     // readdir order is filesystem-dependent; sort so the shard order is deterministic across every rank.
