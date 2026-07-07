@@ -413,6 +413,7 @@ struct infiniband_nic_t {
     infiniband_nic_t(infiniband_nic_t &&other) noexcept
         : device_context_(std::exchange(other.device_context_, nullptr)),
           protection_domain_(std::exchange(other.protection_domain_, nullptr)),
+          primary_context_(std::exchange(other.primary_context_, nullptr)), paired_gpu_(other.paired_gpu_),
           page_registry_(std::move(other.page_registry_)), local_identifier_(other.local_identifier_),
           path_mtu_(other.path_mtu_), port_(other.port_) {
         std::memcpy(global_identifier_, other.global_identifier_, sizeof(global_identifier_));
@@ -422,6 +423,8 @@ struct infiniband_nic_t {
             destroy_();
             device_context_ = std::exchange(other.device_context_, nullptr);
             protection_domain_ = std::exchange(other.protection_domain_, nullptr);
+            primary_context_ = std::exchange(other.primary_context_, nullptr);
+            paired_gpu_ = other.paired_gpu_;
             page_registry_ = std::move(other.page_registry_);
             local_identifier_ = other.local_identifier_;
             path_mtu_ = other.path_mtu_;
@@ -460,12 +463,22 @@ struct infiniband_nic_t {
     void destroy_() noexcept {
         if (protection_domain_ != nullptr) ibv_dealloc_pd(std::exchange(protection_domain_, nullptr));
         if (device_context_ != nullptr) ibv_close_device(std::exchange(device_context_, nullptr));
+        if (primary_context_ != nullptr) {
+            primary_context_ = nullptr;
+            cuDevicePrimaryCtxRelease(paired_gpu_);
+        }
     }
 
     /** @brief The opened mlx5 device. */
     ibv_context *device_context_ = nullptr;
     /** @brief The one protection domain every endpoint on this GPU shares. */
     ibv_pd *protection_domain_ = nullptr;
+    /** @brief The paired GPU's primary context, retained for the NIC's lifetime — the page registrations
+     *      below are scoped to it, and a transient wiring stream releasing the last reference would reset
+     *      the context and destroy them under the doorbell kernels. */
+    CUcontext primary_context_ = nullptr;
+    /** @brief The paired GPU the retained context (and every registration) belongs to. */
+    CUdevice paired_gpu_ = 0;
     /** @brief The page-registration ledger — outlives every mapping on this NIC, exactly like the
      *      protection domain above. */
     host_page_registry_t page_registry_ {};

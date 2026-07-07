@@ -132,6 +132,16 @@ static __global__ void infiniband_alltoall_post_kernel_(infiniband_links_view_t 
 expected<infiniband_nic_t> infiniband_nic_t::make(u32_t local_gpu_index, u8_t infiniband_port) noexcept {
     infiniband_nic_t nic;
     nic.port_ = infiniband_port;
+    // The NIC's page registrations ( @c cuMemHostRegister ) are scoped to its GPU's primary context, so
+    // the NIC holds one reference for its lifetime — otherwise a transient wiring stream releasing the
+    // last reference resets the context and silently destroys every registration the doorbell kernels
+    // still dereference.
+    CUdevice paired_gpu = 0;
+    if (CUresult resolved = cuDeviceGet(&paired_gpu, static_cast<int>(local_gpu_index)); resolved != CUDA_SUCCESS)
+        return expected<infiniband_nic_t>::fail(resolved, "paired GPU {} resolution failed", local_gpu_index);
+    if (CUresult retained = cuDevicePrimaryCtxRetain(&nic.primary_context_, paired_gpu); retained != CUDA_SUCCESS)
+        return expected<infiniband_nic_t>::fail(retained, "primary-context retain failed (gpu={})", local_gpu_index);
+    nic.paired_gpu_ = paired_gpu;
     sz::string nic_name;
     if (!format_into(nic_name, "mlx5_{}", local_gpu_index))
         return expected<infiniband_nic_t>::fail(status_t::bad_alloc_k, "nic name formatting failed");
