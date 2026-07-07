@@ -327,6 +327,17 @@ struct encoder_tower_e4m3_t {
     /** @brief Sentinel for a modality with no pinned projection plan. */
     static constexpr std::size_t plan_absent_k = ~std::size_t {0};
 
+    /** @brief Make one pinned cuBLASLt plan (forcing a BFloat16 @c C ), record it at @p role (post-incremented
+     *      into @c plans_ ), and grow @p workspace_bytes to its scratch demand — the twin's mirror of the
+     *      training tower's plan-pinning step, repeated by @ref encoder_tower_bf16_t::quantize_weights . */
+    [[nodiscard]] expected_t pin_plan(cublaslt_plan_config_t plan_config, std::size_t &role,
+                                      std::size_t &workspace_bytes) noexcept;
+    /** @brief Pin one present media modality's single forward projection plan at @p role , recording its
+     *      base into @p plan_base — forward-only, so no weight-grad sibling; the row extent is pinned at
+     *      @p max_tokens (the worst case) purely to size the heuristic + workspace. */
+    [[nodiscard]] expected_t pin_media_plan(std::size_t &plan_base, u32_t fan_in, u32_t max_tokens, u32_t hidden,
+                                            std::size_t &role, std::size_t &workspace_bytes) noexcept;
+
     /** @brief The baked geometry and the two borrowed vendor sessions — never owned here. */
     encoder_tower_config_t config_ {};
     cublaslt_session_t *blas_ = nullptr;
@@ -357,6 +368,10 @@ struct encoder_tower_e4m3_t {
     /** @brief The pool's @b [segments+1]/[segments] Int32 ragged staging, filled behind the one vendor
      *      boundary. */
     i32r1_tensor_arena_t pool_ragged_offsets_ {}, pool_ragged_seq_lens_ {};
+    /** @brief The pool's constant all-ones @b [segments] Int32 query lengths, filled once at quantization. */
+    i32r1_tensor_arena_t pool_seq_ones_ {};
+    /** @brief The pool's device-resident attention scale @c 1/√head_dim , uploaded once at quantization. */
+    f32r1_tensor_arena_t pool_attn_scale_ {};
     /** @brief The attention pool's SDPA workspace. */
     b8r1_tensor_arena_t pool_workspace_ {};
     /** @brief The head's learnable-scale RMSNorm @c γ ( @b [hidden] vector), BFloat16. */

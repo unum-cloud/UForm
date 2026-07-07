@@ -841,6 +841,48 @@ static void run_pool_parity_case() {
         check(all_finite, "every pool / head gradient is finite");
         check(query_grad_energy > 0.0, "the pool query gradient is nonzero");
     }
+
+    // The quarter-precision twin: quantize the same tower and require every live vertex to stay on the
+    // BFloat16 tower's direction — the blocks carry the E4M3 error, the tail is a BFloat16 snapshot.
+    auto twin = tower.value_.quantize_weights(arena.value_, stream.value_);
+    if (!twin) std::printf("    %s\n", twin.description_.c_str());
+    check(static_cast<bool>(twin), "twin quantization");
+    if (twin) {
+        bf16r2_tensor_arena_t twin_vertices = bf16r2_tensor_arena_t::try_empty({segments_k, hidden_k},
+                                                                               gpu_arena_alloc<bf16_t> {arena.value_});
+        if (!twin_vertices) {
+            check(false, "twin vertices alloc");
+            cuCtxPopCurrent(nullptr);
+            return;
+        }
+        auto twin_ran = twin.value_.forward(batch.value_, twin_vertices.span(), stream.value_);
+        if (!twin_ran) std::printf("    %s\n", twin_ran.description_.c_str());
+        check(static_cast<bool>(twin_ran), "twin forward");
+        if (twin_ran) {
+            cuStreamSynchronize(stream.value_.get());
+            std::vector<bf16_t> twin_host(std::size_t(segments_k) * hidden_k);
+            cuMemcpyDtoH(twin_host.data(), reinterpret_cast<CUdeviceptr>(twin_vertices.data()),
+                         twin_host.size() * sizeof(bf16_t));
+            double worst_cosine = 1.0;
+            for (u32_t segment = 0; segment != segments_k; ++segment) {
+                if (lengths_host[segment] == 0u) continue; // PAD vertices stay outside the parity
+                double dot = 0.0, norm_bf16 = 0.0, norm_twin = 0.0;
+                for (u32_t channel = 0; channel != hidden_k; ++channel) {
+                    std::size_t const index = std::size_t(segment) * hidden_k + channel;
+                    double const reference = double(__bfloat162float(vertices_device[index]));
+                    double const quantized = double(__bfloat162float(twin_host[index]));
+                    dot += reference * quantized;
+                    norm_bf16 += reference * reference;
+                    norm_twin += quantized * quantized;
+                }
+                worst_cosine = std::min(worst_cosine, dot / (std::sqrt(norm_bf16 * norm_twin) + 1e-30));
+            }
+            std::printf("    twin vertex cosine worst %.4f\n", worst_cosine);
+            // Keyed-random weights are the quantizer's worst case (trained weights are smoother), and
+            // this observed 0.979 at depth 1 already beats the R&D's FP8 embedding acceptance gates.
+            check(worst_cosine > 0.95, "twin vertices stay on the BFloat16 tower's direction");
+        }
+    }
     cuCtxPopCurrent(nullptr);
 }
 

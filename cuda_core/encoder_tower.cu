@@ -778,14 +778,33 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
     return result_t {std::move(tower)};
 }
 
-expected_t encoder_tower_bf16_t::build_pool_sdpa(gpu_arena_t &arena) noexcept {
-    i64_t const segments = config_.block.max_segments;
-    i64_t const seq = config_.block.max_segment_tokens;
-    i64_t const heads = config_.block.hidden / transformer_head_dim_k;
-    i64_t const dim = transformer_head_dim_k;
-    i64_t const hidden_stride = static_cast<i64_t>(config_.block.hidden);
+/** @brief The pool graph's construction-stable device bindings — one struct so both towers hand the
+ *      shared builder the same seven addresses (nine graph bindings — the states serve K and V, the
+ *      ragged offsets both axes) in one move. */
+struct tower_pool_bindings_t_ {
+    bf16_t const *query = nullptr;
+    bf16_t const *states = nullptr;
+    bf16_t *pooled = nullptr;
+    f32_t const *attention_scale = nullptr;
+    i32_t const *seq_ones = nullptr;
+    i32_t const *seq_lens = nullptr;
+    i32_t const *ragged_offsets = nullptr;
+};
 
-    fe::graph::Graph &graph = pool_forward_sdpa_.graph;
+/** @brief Build one attention-pool forward SDPA graph — the stride-0 broadcast query over ragged
+ *      K=V states with the padding mask driven by the per-segment lengths — shared by the training
+ *      tower and its E4M3 twin (whose tail runs the same BFloat16 pool). Binds only construction-stable
+ *      arena addresses, so execution is a pure enqueue with no per-call pointer stores. */
+[[nodiscard]] static expected_t tower_pool_graph_build_(sdpa_plan_t &plan, transformer_block_config_t const &block,
+                                                        cudnn_session_t &cudnn,
+                                                        tower_pool_bindings_t_ bindings) noexcept {
+    i64_t const segments = block.max_segments;
+    i64_t const seq = block.max_segment_tokens;
+    i64_t const heads = block.hidden / transformer_head_dim_k;
+    i64_t const dim = transformer_head_dim_k;
+    i64_t const hidden_stride = static_cast<i64_t>(block.hidden);
+
+    fe::graph::Graph &graph = plan.graph;
     graph.set_io_data_type(fe::DataType_t::BFLOAT16)
         .set_intermediate_data_type(fe::DataType_t::FLOAT)
         .set_compute_data_type(fe::DataType_t::FLOAT);
@@ -798,7 +817,7 @@ expected_t encoder_tower_bf16_t::build_pool_sdpa(gpu_arena_t &arena) noexcept {
                                     .set_uid(sdpa_uid_query_k)
                                     .set_dim({segments, heads, 1, dim})
                                     .set_stride({0, dim, hidden_stride, 1}));
-    auto make_states_operand = [&](i64_t uid, char const *name, i64_t ragged_uid) {
+    auto make_states_operand = [&](i64_t uid, char const *name, i64_t ragged_uid) { // vendor-boundary
         auto node = graph.tensor(fe::graph::Tensor_attributes()
                                      .set_name(name)
                                      .set_uid(uid)
@@ -824,21 +843,33 @@ expected_t encoder_tower_bf16_t::build_pool_sdpa(gpu_arena_t &arena) noexcept {
         .set_uid(sdpa_uid_output_k)
         .set_dim({segments, heads, 1, dim})
         .set_stride({hidden_stride, dim, hidden_stride, 1});
-    if (auto status = graph.build(cudnn_->get(), {fe::HeurMode_t::A}); status.is_bad())
+    if (auto status = graph.build(cudnn.get(), {fe::HeurMode_t::A}); status.is_bad())
         return expected_t::fail(status_t::cuda_error_k, "pool SDPA forward graph build failed: {}",
                                 status.get_message().c_str()); // vendor-boundary
 
-    // Every binding is a construction-time-stable arena address — no per-call pointer stores at all.
-    pool_forward_sdpa_.bind(sdpa_uid_query_k, pool_query_.data());
-    pool_forward_sdpa_.bind(sdpa_uid_key_k, normalized_.data());
-    pool_forward_sdpa_.bind(sdpa_uid_value_k, normalized_.data());
-    pool_forward_sdpa_.bind(sdpa_uid_output_k, pooled_.data());
-    pool_forward_sdpa_.bind(sdpa_uid_attn_scale_k, pool_attn_scale_.data());
-    pool_forward_sdpa_.bind(sdpa_uid_seq_len_q_k, pool_seq_ones_.data());
-    pool_forward_sdpa_.bind(sdpa_uid_seq_len_kv_k, pool_ragged_seq_lens_.data());
-    pool_forward_sdpa_.bind(sdpa_uid_ragged_base_k + 1, pool_ragged_offsets_.data());
-    pool_forward_sdpa_.bind(sdpa_uid_ragged_base_k + 2, pool_ragged_offsets_.data());
-    if (expected_t finalized = pool_forward_sdpa_.finalize_dispatch(); !finalized) return finalized;
+    plan.bind(sdpa_uid_query_k, const_cast<bf16_t *>(bindings.query));
+    plan.bind(sdpa_uid_key_k, const_cast<bf16_t *>(bindings.states));
+    plan.bind(sdpa_uid_value_k, const_cast<bf16_t *>(bindings.states));
+    plan.bind(sdpa_uid_output_k, bindings.pooled);
+    plan.bind(sdpa_uid_attn_scale_k, const_cast<f32_t *>(bindings.attention_scale));
+    plan.bind(sdpa_uid_seq_len_q_k, const_cast<i32_t *>(bindings.seq_ones));
+    plan.bind(sdpa_uid_seq_len_kv_k, const_cast<i32_t *>(bindings.seq_lens));
+    plan.bind(sdpa_uid_ragged_base_k + 1, const_cast<i32_t *>(bindings.ragged_offsets));
+    plan.bind(sdpa_uid_ragged_base_k + 2, const_cast<i32_t *>(bindings.ragged_offsets));
+    return plan.finalize_dispatch();
+}
+
+expected_t encoder_tower_bf16_t::build_pool_sdpa(gpu_arena_t &arena) noexcept {
+    tower_pool_bindings_t_ bindings;
+    bindings.query = pool_query_.data();
+    bindings.states = normalized_.data();
+    bindings.pooled = pooled_.data();
+    bindings.attention_scale = pool_attn_scale_.data();
+    bindings.seq_ones = pool_seq_ones_.data();
+    bindings.seq_lens = pool_ragged_seq_lens_.data();
+    bindings.ragged_offsets = pool_ragged_offsets_.data();
+    if (expected_t built = tower_pool_graph_build_(pool_forward_sdpa_, config_.block, *cudnn_, bindings); !built)
+        return built;
     if (pool_forward_sdpa_.workspace_bytes != 0) {
         gpu_arena_alloc<b8_t> b8_pool_alloc {arena};
         pool_workspace_ = b8r1_tensor_arena_t::try_empty({static_cast<std::size_t>(pool_forward_sdpa_.workspace_bytes)},
@@ -1243,9 +1274,237 @@ expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) 
     return {};
 }
 
-expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_t &, gpu_stream_t &) noexcept {
-    return expected<encoder_tower_e4m3_t>::fail(status_t::shape_unsupported_k,
-                                                "the E4M3 inference twin is not yet built");
+/** @brief Snapshot one BFloat16 matrix into a fresh arena tensor — the twin's tail tiers (entries,
+ *      norms, pool, head) stay BFloat16, so their quantization is a plain device-to-device copy.
+ *      @p name tags the failure diagnostic with the weight's role. */
+[[nodiscard]] static expected<bf16r2_tensor_arena_t> snapshot_weight_(bf16r2_view_t source, gpu_arena_t &arena,
+                                                                      gpu_stream_t &stream,
+                                                                      sz::string_view name) noexcept {
+    using result_t = expected<bf16r2_tensor_arena_t>;
+    gpu_arena_alloc<bf16_t> bf16_alloc {arena};
+    bf16r2_tensor_arena_t copy = bf16r2_tensor_arena_t::try_empty({source.extent(0), source.extent(1)}, bf16_alloc);
+    if (!copy) return result_t::fail(status_t::bad_alloc_k, "twin {} allocation failed", name);
+    // vendor-boundary: device→device weight snapshot — no typed DtoD helper exists, so the driver copy
+    // is spelled by hand over the views' raw `data()` pointers.
+    if (CUresult result = cuMemcpyDtoDAsync(reinterpret_cast<CUdeviceptr>(copy.data()),
+                                            reinterpret_cast<CUdeviceptr>(source.data()),
+                                            source.extent(0) * source.extent(1) * sizeof(bf16_t), stream.get());
+        result != CUDA_SUCCESS)
+        return result_t::fail(result, "twin {} snapshot failed", name);
+    return result_t {std::move(copy)};
+}
+
+/** @brief The rank-1 overload of @ref snapshot_weight_ for the norm scales and the pool query. */
+[[nodiscard]] static expected<bf16r1_tensor_arena_t> snapshot_weight_(bf16r1_view_t source, gpu_arena_t &arena,
+                                                                      gpu_stream_t &stream,
+                                                                      sz::string_view name) noexcept {
+    using result_t = expected<bf16r1_tensor_arena_t>;
+    gpu_arena_alloc<bf16_t> bf16_alloc {arena};
+    bf16r1_tensor_arena_t copy = bf16r1_tensor_arena_t::try_empty({source.extent(0)}, bf16_alloc);
+    if (!copy) return result_t::fail(status_t::bad_alloc_k, "twin {} allocation failed", name);
+    // vendor-boundary: device→device weight snapshot, as in the rank-2 overload above.
+    if (CUresult result = cuMemcpyDtoDAsync(reinterpret_cast<CUdeviceptr>(copy.data()),
+                                            reinterpret_cast<CUdeviceptr>(source.data()),
+                                            source.extent(0) * sizeof(bf16_t), stream.get());
+        result != CUDA_SUCCESS)
+        return result_t::fail(result, "twin {} snapshot failed", name);
+    return result_t {std::move(copy)};
+}
+
+expected_t encoder_tower_e4m3_t::pin_plan(cublaslt_plan_config_t plan_config, std::size_t &role,
+                                          std::size_t &workspace_bytes) noexcept {
+    plan_config.c_type = CUDA_R_16BF;
+    expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(*blas_, plan_config);
+    if (!plan) return expected_t::fail(std::move(plan));
+    workspace_bytes = std::max(workspace_bytes, plan.value_.workspace_bytes());
+    plans_[role++] = std::move(plan.value_);
+    return {};
+}
+
+expected_t encoder_tower_e4m3_t::pin_media_plan(std::size_t &plan_base, u32_t fan_in, u32_t max_tokens, u32_t hidden,
+                                                std::size_t &role, std::size_t &workspace_bytes) noexcept {
+    plan_base = role;
+    return pin_plan({max_tokens, fan_in, fan_in, hidden, fan_in, fan_in, max_tokens, hidden, hidden, false, true}, role,
+                    workspace_bytes);
+}
+
+expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_t &arena,
+                                                                      gpu_stream_t &stream) noexcept {
+    using result_t = expected<encoder_tower_e4m3_t>;
+    encoder_tower_e4m3_t twin;
+    twin.config_ = config_;
+    twin.blas_ = blas_;
+    twin.cudnn_ = cudnn_;
+
+    std::size_t const hidden = config_.block.hidden;
+    std::size_t const tokens = config_.block.max_tokens;
+    std::size_t const segments = config_.block.max_segments;
+    u32_t const hidden32 = config_.block.hidden;
+    u32_t const max_tokens32 = config_.block.max_tokens;
+    u32_t const segments32 = config_.block.max_segments;
+    gpu_arena_alloc<bf16_t> bf16_alloc {arena};
+    gpu_arena_alloc<f32_t> f32_alloc {arena};
+    gpu_arena_alloc<i32_t> i32_alloc {arena};
+    gpu_arena_alloc<i16_t> i16_alloc {arena};
+    gpu_arena_alloc<b8_t> b8_alloc {arena};
+
+    // The block stack quantizes per layer; everything else below is a BFloat16 snapshot.
+    if (twin.blocks_.try_resize(config_.depth) != status_t::success_k)
+        return result_t::fail(status_t::bad_alloc_k, "twin block table allocation failed ({})", config_.depth);
+    for (u32_t layer_index = 0; layer_index != config_.depth; ++layer_index) {
+        expected<transformer_block_e4m3_t> block = blocks_[layer_index].quantize_weights(arena, stream);
+        if (!block) return result_t::fail(std::move(block));
+        twin.blocks_[layer_index] = std::move(block.value_);
+    }
+
+    // The BFloat16 tail weights, snapshotted from the trained tower.
+    expected<bf16r2_tensor_arena_t> entry_copy = snapshot_weight_(entry_weight_.view(), arena, stream, "embedding");
+    if (!entry_copy) return result_t::fail(std::move(entry_copy));
+    twin.entry_weight_ = std::move(entry_copy.value_);
+    expected<bf16r1_tensor_arena_t> final_norm_copy = snapshot_weight_(final_norm_scale_.view(), arena, stream,
+                                                                       "final norm");
+    if (!final_norm_copy) return result_t::fail(std::move(final_norm_copy));
+    twin.final_norm_scale_ = std::move(final_norm_copy.value_);
+    expected<bf16r1_tensor_arena_t> query_copy = snapshot_weight_(pool_query_.view(), arena, stream, "pool query");
+    if (!query_copy) return result_t::fail(std::move(query_copy));
+    twin.pool_query_ = std::move(query_copy.value_);
+    expected<bf16r1_tensor_arena_t> head_norm_copy = snapshot_weight_(head_norm_scale_.view(), arena, stream,
+                                                                      "head norm");
+    if (!head_norm_copy) return result_t::fail(std::move(head_norm_copy));
+    twin.head_norm_scale_ = std::move(head_norm_copy.value_);
+    expected<bf16r2_tensor_arena_t> fc1_copy = snapshot_weight_(head_fc1_.view(), arena, stream, "head fc1");
+    if (!fc1_copy) return result_t::fail(std::move(fc1_copy));
+    twin.head_fc1_ = std::move(fc1_copy.value_);
+    expected<bf16r2_tensor_arena_t> fc2_copy = snapshot_weight_(head_fc2_.view(), arena, stream, "head fc2");
+    if (!fc2_copy) return result_t::fail(std::move(fc2_copy));
+    twin.head_fc2_ = std::move(fc2_copy.value_);
+
+    // The fused head product first, then — per present media modality — the projection snapshot and its one
+    // forward plan, in modality order, exactly as the training tower's make pins its own.
+    std::size_t workspace_bytes = 0;
+    std::size_t plan_role = 0;
+    expected_t pinned = twin.pin_plan(
+        {segments32, hidden32, hidden32, hidden32, hidden32, hidden32, segments32, hidden32, hidden32, false, true},
+        plan_role, workspace_bytes);
+    if (!pinned) return result_t::fail(std::move(pinned));
+
+    u32_t max_entry_scalars = 0;
+    if (image_projection_.data() != nullptr) {
+        u32_t const fan_in = static_cast<u32_t>(image_projection_.view().extent(1));
+        expected<bf16r2_tensor_arena_t> projection = snapshot_weight_(image_projection_.view(), arena, stream,
+                                                                      "image projection");
+        if (!projection) return result_t::fail(std::move(projection));
+        twin.image_projection_ = std::move(projection.value_);
+        pinned = twin.pin_media_plan(twin.image_plan_base_, fan_in, max_tokens32, hidden32, plan_role, workspace_bytes);
+        if (!pinned) return result_t::fail(std::move(pinned));
+        max_entry_scalars = std::max(max_entry_scalars, fan_in);
+    }
+    if (video_projection_.data() != nullptr) {
+        u32_t const fan_in = static_cast<u32_t>(video_projection_.view().extent(1));
+        expected<bf16r2_tensor_arena_t> projection = snapshot_weight_(video_projection_.view(), arena, stream,
+                                                                      "video projection");
+        if (!projection) return result_t::fail(std::move(projection));
+        twin.video_projection_ = std::move(projection.value_);
+        pinned = twin.pin_media_plan(twin.video_plan_base_, fan_in, max_tokens32, hidden32, plan_role, workspace_bytes);
+        if (!pinned) return result_t::fail(std::move(pinned));
+        max_entry_scalars = std::max(max_entry_scalars, fan_in);
+    }
+    if (audio_projection_.data() != nullptr) {
+        u32_t const fan_in = static_cast<u32_t>(audio_projection_.view().extent(1));
+        expected<bf16r2_tensor_arena_t> projection = snapshot_weight_(audio_projection_.view(), arena, stream,
+                                                                      "audio projection");
+        if (!projection) return result_t::fail(std::move(projection));
+        twin.audio_projection_ = std::move(projection.value_);
+        pinned = twin.pin_media_plan(twin.audio_plan_base_, fan_in, max_tokens32, hidden32, plan_role, workspace_bytes);
+        if (!pinned) return result_t::fail(std::move(pinned));
+        max_entry_scalars = std::max(max_entry_scalars, fan_in);
+    }
+    if (twin.image_plan_base_ != encoder_tower_e4m3_t::plan_absent_k) {
+        expected_t uploaded = upload_pixel_constants(twin.image_pixel_mean_, twin.image_pixel_inverse_std_,
+                                                     config_.image_pixel_mean, config_.image_pixel_std,
+                                                     config_.image_channels, f32_alloc, arena);
+        if (!uploaded) return result_t::fail(std::move(uploaded));
+    }
+    if (twin.video_plan_base_ != encoder_tower_e4m3_t::plan_absent_k) {
+        expected_t uploaded = upload_pixel_constants(twin.video_pixel_mean_, twin.video_pixel_inverse_std_,
+                                                     config_.video_pixel_mean, config_.video_pixel_std,
+                                                     config_.video_channels, f32_alloc, arena);
+        if (!uploaded) return result_t::fail(std::move(uploaded));
+    }
+
+    // The rotary tables rebuild from the same config (their content is a pure function of it), and the
+    // forward activations allocate at the tower's capacities.
+    expected<rope_angles_t> angles = rope_angles_t::make(arena, config_.rope_max_positions, config_.rope,
+                                                         config_.rope_base);
+    if (!angles) return result_t::fail(std::move(angles));
+    twin.angles_ = std::move(angles.value_);
+    twin.coords_ = i16r2_tensor_arena_t::try_empty({tokens, 3}, i16_alloc);
+    twin.entry_output_ = bf16r2_tensor_arena_t::try_empty({tokens, hidden}, bf16_alloc);
+    twin.normalized_ = bf16r2_tensor_arena_t::try_empty({tokens, hidden}, bf16_alloc);
+    twin.pooled_ = bf16r2_tensor_arena_t::try_empty({segments, hidden}, bf16_alloc);
+    twin.head_normalized_ = bf16r2_tensor_arena_t::try_empty({segments, hidden}, bf16_alloc);
+    twin.head_hidden_ = bf16r2_tensor_arena_t::try_empty({segments, hidden}, bf16_alloc);
+    twin.head_activated_ = bf16r2_tensor_arena_t::try_empty({segments, hidden}, bf16_alloc);
+    twin.final_inverse_rms_ = f32r1_tensor_arena_t::try_empty({tokens}, f32_alloc);
+    twin.head_inverse_rms_ = f32r1_tensor_arena_t::try_empty({segments}, f32_alloc);
+    twin.activations_a_ = bf16r2_tensor_arena_t::try_empty({tokens, hidden}, bf16_alloc);
+    twin.activations_b_ = bf16r2_tensor_arena_t::try_empty({tokens, hidden}, bf16_alloc);
+    if (!twin.coords_ || !twin.entry_output_ || !twin.normalized_ || !twin.pooled_ || !twin.head_normalized_ ||
+        !twin.head_hidden_ || !twin.head_activated_ || !twin.final_inverse_rms_ || !twin.head_inverse_rms_ ||
+        !twin.activations_a_ || !twin.activations_b_)
+        return result_t::fail(status_t::bad_alloc_k, "twin activation allocation failed (arena_used={})", arena.used());
+    if (max_entry_scalars != 0) {
+        twin.patch_scratch_ = bf16r2_tensor_arena_t::try_empty({tokens, max_entry_scalars}, bf16_alloc);
+        if (!twin.patch_scratch_)
+            return result_t::fail(status_t::bad_alloc_k, "twin patch scratch allocation failed (arena_used={})",
+                                  arena.used());
+    }
+    if (workspace_bytes != 0) {
+        twin.workspace_ = b8r1_tensor_arena_t::try_empty({workspace_bytes}, b8_alloc);
+        if (!twin.workspace_)
+            return result_t::fail(status_t::bad_alloc_k, "twin workspace allocation failed ({} bytes)",
+                                  workspace_bytes);
+    }
+
+    // The pool staging and its forward graph — the same shared builder the training tower ran at make.
+    twin.pool_ragged_offsets_ = i32r1_tensor_arena_t::try_empty({segments + 1}, i32_alloc);
+    twin.pool_ragged_seq_lens_ = i32r1_tensor_arena_t::try_empty({segments}, i32_alloc);
+    twin.pool_seq_ones_ = i32r1_tensor_arena_t::try_empty({segments}, i32_alloc);
+    twin.pool_attn_scale_ = f32r1_tensor_arena_t::try_empty({1}, f32_alloc);
+    if (!twin.pool_ragged_offsets_ || !twin.pool_ragged_seq_lens_ || !twin.pool_seq_ones_ || !twin.pool_attn_scale_)
+        return result_t::fail(status_t::bad_alloc_k, "twin pool staging allocation failed (arena_used={})",
+                              arena.used());
+    if (CUresult result = cuMemsetD32(reinterpret_cast<CUdeviceptr>(twin.pool_seq_ones_.data()), 1u, segments);
+        result != CUDA_SUCCESS)
+        return result_t::fail(result, "twin pool query-length fill failed");
+    f32_t const attention_scale = tower_pool_scale_();
+    if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(twin.pool_attn_scale_.data()), &attention_scale,
+                                       sizeof(attention_scale));
+        result != CUDA_SUCCESS)
+        return result_t::fail(result, "twin pool attention-scale upload failed");
+    tower_pool_bindings_t_ bindings;
+    bindings.query = twin.pool_query_.data();
+    bindings.states = twin.normalized_.data();
+    bindings.pooled = twin.pooled_.data();
+    bindings.attention_scale = twin.pool_attn_scale_.data();
+    bindings.seq_ones = twin.pool_seq_ones_.data();
+    bindings.seq_lens = twin.pool_ragged_seq_lens_.data();
+    bindings.ragged_offsets = twin.pool_ragged_offsets_.data();
+    if (expected_t built = tower_pool_graph_build_(twin.pool_forward_sdpa_, twin.config_.block, *twin.cudnn_, bindings);
+        !built)
+        return result_t::fail(std::move(built));
+    if (twin.pool_forward_sdpa_.workspace_bytes != 0) {
+        twin.pool_workspace_ = b8r1_tensor_arena_t::try_empty(
+            {static_cast<std::size_t>(twin.pool_forward_sdpa_.workspace_bytes)}, b8_alloc);
+        if (!twin.pool_workspace_)
+            return result_t::fail(status_t::bad_alloc_k, "twin pool workspace allocation failed ({} bytes)",
+                                  twin.pool_forward_sdpa_.workspace_bytes);
+    }
+
+    // The snapshots above are stream-ordered; drain them so the twin owns settled weights.
+    if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
+        return result_t::fail(result, "twin snapshot drain failed");
+    return result_t {std::move(twin)};
 }
 
 expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t vertices,
@@ -1313,7 +1572,40 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
         layer_input = layer_output.view();
     }
 
-    (void)vertices;
-    return expected_t::fail(status_t::shape_unsupported_k,
-                            "the E4M3 final norm + attention pool + head are not yet built");
+    // Final norm over the packed token states — the block stack already emits BFloat16, so the tail
+    // runs the training twin's own kernels with no dtype boundary.
+    if (!normalized_.try_resize({live_tokens, hidden}))
+        return expected_t::fail(status_t::shape_unsupported_k, "twin norm scratch cannot hold {} live tokens",
+                                live_tokens);
+    dim3 const token_grid {static_cast<u32_t>(live_tokens), 1u, 1u};
+    staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_forward_kernel), token_grid, block_shape, stream,
+                           layer_input, final_norm_scale_.view(), normalized_.span(), final_inverse_rms_.span(),
+                           config_.block.rms_eps);
+    if (!staged) return staged;
+
+    // Masked path stops here; the contrastive path pools + heads, exactly as the training twin.
+    if (vertices.data() == nullptr) return {};
+    if (vertices.extent(0) != segments || vertices.extent(1) != hidden)
+        return expected_t::fail(status_t::shape_unsupported_k, "vertices must be [{},{}] (got [{},{}])", segments,
+                                hidden, vertices.extent(0), vertices.extent(1));
+    staged = launch_kernel(reinterpret_cast<void const *>(&tower_pool_ragged_kernel_), dim3 {1u, 1u, 1u}, block_shape,
+                           stream, segment_offsets, segment_lengths, pool_ragged_offsets_.span(),
+                           pool_ragged_seq_lens_.span(), hidden);
+    if (!staged) return staged;
+    if (expected_t bound = cudnn_->bind(stream); !bound) return bound;
+    if (expected_t pooled = pool_forward_sdpa_.execute(cudnn_->get(), pool_workspace_.data()); !pooled) return pooled;
+    staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_forward_kernel), segment_grid, block_shape, stream,
+                           pooled_.view(), head_norm_scale_.view(), head_normalized_.span(), head_inverse_rms_.span(),
+                           config_.block.rms_eps);
+    if (!staged) return staged;
+    staged = plans_[plan_head_forward_k].matmul(*blas_, head_normalized_.view(), head_fc1_.view(), head_hidden_.span(),
+                                                0.0f, workspace_.span(), stream);
+    if (!staged) return staged;
+    dim3 const head_cell_grid {static_cast<u32_t>(divide_round_up(segments * hidden, kernel_block_size_default_k)), 1u,
+                               1u};
+    staged = launch_kernel(reinterpret_cast<void const *>(&tower_silu_kernel_), head_cell_grid, block_shape, stream,
+                           head_hidden_.span().flatten<1>(), head_activated_.span().flatten<1>());
+    if (!staged) return staged;
+    return plans_[plan_head_forward_k].matmul(*blas_, head_activated_.view(), head_fc2_.view(), vertices, 0.0f,
+                                              workspace_.span(), stream);
 }
