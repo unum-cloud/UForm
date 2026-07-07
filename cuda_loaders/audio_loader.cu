@@ -212,10 +212,12 @@ struct decode_session_ {
         return status_t::io_error_k;
 
     // Output is one interleaved Float32 mono channel at the target rate — the raw waveform the encoder's
-    // learnable frontend consumes; input layout / rate / format come from the decoder.
-    AVChannelLayout output_layout;
+    // learnable frontend consumes; input layout / rate / format come from the decoder. Both layouts are
+    // value-initialized: `av_channel_layout_copy` uninitializes its destination first, and on a garbage
+    // stack struct that free()s a garbage custom-map pointer — a residue-dependent worker-thread crash.
+    AVChannelLayout output_layout {};
     av_channel_layout_default(&output_layout, /*channels=*/1);
-    AVChannelLayout input_layout;
+    AVChannelLayout input_layout {};
     if (session.decoder->ch_layout.nb_channels > 0) {
         if (av_channel_layout_copy(&input_layout, &session.decoder->ch_layout) < 0) {
             av_channel_layout_uninit(&output_layout);
