@@ -14,6 +14,8 @@
 #include <bit>       // `std::byteswap`, `std::endian`
 #include <algorithm> // `std::upper_bound`, `std::find`, `std::min`, `std::max`
 
+#include <unistd.h> // `::write`, `STDERR_FILENO` — the triage-drop diagnostic
+
 #include <nvjpeg.h>                   // vendor-boundary: device-native batched JPEG decode
 #include <nppi_geometry_transforms.h> // vendor-boundary: batched crop+resize
 #include <jpeglib.h>                  // vendor-boundary: CPU JPEG fallback (progressive / rejected)
@@ -370,6 +372,10 @@ enum class route_t : u8_t {
     jpeg_device_k = 0,
     /** @brief Decoded on the CPU pool — PNG / WebP, or a JPEG the device batch rejected. */
     cpu_fallback_k = 1,
+    /** @brief Unprobeable at triage (unrecognized magic, a header prefix swallowed by oversized
+     *      metadata, a truncated blob) — decodes nothing and PADs its segment through the zero grid,
+     *      the same containment the overflow drop has. */
+    dropped_k = 2,
 };
 
 /** @brief One drawn image's decode plan: its format and native size, the size it actually decodes to in the
@@ -552,8 +558,22 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
         sz::string_view const header {reinterpret_cast<char const *>(probe.data() + index * header_probe_bytes_k),
                                       host_entries[index].length};
         auto probed = probe_image_(header);
-        if (!probed) return result_t::fail(std::move(probed));
         image_plan_t &plan = plans[index];
+        if (!probed) {
+            // Web-scale shards carry the occasional unprobeable blob — one bad row PADs its segment
+            // loudly instead of failing the whole fill, the same containment the overflow drop has.
+            sz::string warning;
+            if (format_into(warning, "uform: image row {} dropped at triage: {}\n", drawn_rows[index],
+                            probed.description_.view())) {
+                sz::string_view const text = warning.view();
+                ssize_t const written = ::write(STDERR_FILENO, text.data(), text.size());
+                (void)written;
+            }
+            plan = image_plan_t {};
+            plan.route = route_t::dropped_k;
+            plan.scratch_offset = scratch_bytes;
+            continue;
+        }
         plan.format = probed.value_.format;
         plan.native = probed.value_.extent;
         // The image's column budget is native-resolution driven, then factored toward its aspect. The grid
@@ -837,6 +857,7 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
     // serialize on the one stream exactly like a batched launch would.
     for (std::size_t index = 0; index != images; ++index) {
         image_plan_t const &plan = plans[index];
+        if (plan.route == route_t::dropped_k) continue; // a triage-dropped blob PADs — nothing to resize
         image_extent_t const source = plan.decoded;
         image_extent_t const target {u32_t(plan.grid.cols) * patch_size, u32_t(plan.grid.rows) * patch_size};
         NppiSize const source_size {static_cast<int>(source.width), static_cast<int>(source.height)};
