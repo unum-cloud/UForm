@@ -92,6 +92,11 @@ struct base_config_t {
     algo_pick_t algo_pick = algo_pick_t::heuristic_k;
     /** @brief Checkpoint path; empty writes none. Borrows the argv storage it was parsed from. */
     sz::string_view checkpoint {};
+    /** @brief Warm-start path; empty starts from the keyed seed. Every replica loads the same file
+     *      (they are bitwise-identical by construction) and the run continues from the file's saved
+     *      step — the learning-rate schedule and the keyed data draws pick up where the save left off.
+     *      Borrows the argv storage it was parsed from. */
+    sz::string_view resume {};
 
     /** @brief Fold the @c --flag value pairs into a config; unknown flags keep their default. The
      *      @c --mixture @c tokens|omni preset fills the media slices of @ref batch (omni: 8-pixel RGB image

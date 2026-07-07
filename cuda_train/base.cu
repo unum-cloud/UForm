@@ -34,7 +34,7 @@
 
 #include "cuda_train/base.cuh"
 
-#include "cuda_core/checkpoint.hpp" // `checkpoint_to_save_t` — the lead replica's snapshot
+#include "cuda_core/checkpoint.hpp" // `checkpoint_to_save_t`, `checkpoint_to_load_t` — snapshot and warm start
 
 using namespace unum::uform::core;
 using namespace unum::uform::train;
@@ -296,6 +296,33 @@ struct row_partition_t {
 
 /** @brief Snapshot one replica's registration list to @p path with the run's step count, each matrix keyed
  *      by the name its cell's @c fill spelled, under this composition root's @c model. prefix. */
+/** @brief Warm-start one replica from @p checkpoint : every weight matrix uploads its by-name tensor —
+ *      a missing name or a shape mismatch fails loudly (warm starts are all-or-nothing; partial loads
+ *      would silently train a half-seeded model). Async on @p stream off the pinned payload; the caller
+ *      drains before the checkpoint's backing is released. */
+[[nodiscard]] static expected_t load_checkpoint_(checkpoint_to_load_t const &checkpoint,
+                                                 array<differentiable_weights_t> const &weights,
+                                                 gpu_stream_t &stream) noexcept {
+    std::span<differentiable_weights_t const> const list {weights.view().data(), weights.size()};
+    sz::string name_text;
+    for (differentiable_weights_t const &matrix : list) {
+        name_text.clear();
+        if (!format_into(name_text, "model.{}", matrix.name))
+            return expected_t::fail(status_t::bad_alloc_k, "matrix name format failed ({})", matrix.name);
+        nk::tensor_view<bf16_t, 2> const saved = checkpoint[name_text.view()];
+        if (saved.empty())
+            return expected_t::fail(status_t::invalid_input_k, "the checkpoint misses {}", name_text.view());
+        if (saved.extent(0) != matrix.weights.extent(0) || saved.extent(1) != matrix.weights.extent(1))
+            return expected_t::fail(status_t::shape_unsupported_k, "{} is [{},{}] in the checkpoint, [{},{}] live",
+                                    name_text.view(), saved.extent(0), saved.extent(1), matrix.weights.extent(0),
+                                    matrix.weights.extent(1));
+        if (expected_t uploaded = copy_host_to_device(saved.flatten<1>(), matrix.weights.flatten<1>(), stream);
+            !uploaded)
+            return uploaded;
+    }
+    return {};
+}
+
 [[nodiscard]] static expected_t save_checkpoint_(sz::string_view path, array<differentiable_weights_t> const &weights,
                                                  u32_t steps, gpu_stream_t &stream) noexcept {
     switch_to_gpu_t gpu_scope {stream};
@@ -350,6 +377,7 @@ base_config_t base_config_t::parse(int argc, char **argv) noexcept {
             config.batch.audio = audio_batch_shape_t {256u, 16000u};
         }
         else if (flag == "--checkpoint") config.checkpoint = value;
+        else if (flag == "--resume") config.resume = value;
     }
     return config;
 }
@@ -450,6 +478,13 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cublaslt_sessi
     return result_t {std::move(replica)};
 }
 
+// TODO: The REAL-DATA JOIN — the biggest remaining gap. This synthetic draw is the boundary where the
+// validated pieces meet: the Parquet loaders decode green end to end (tokens/image/video/audio fill a
+// multimodal_batch_on_gpu_t, keyed by the same (seed, gpu_index_in_colocated_domain, step) contract), and
+// the cross-node multimodal_batch_mixer_t is validated at 16 GPUs — but nothing wires loader fills into
+// the trainer's loaded batches and runs the mixer between fill and model_region. The join replaces this
+// function's synthetic kernels with loader fills under a config switch, keeps the synthetic path for the
+// conformance suites, and threads the loaders' GDS session + CPU decode pool from the composition root.
 expected_t base_replica_t::prepare(base_config_t const &config, u32_t gpu_index_in_colocated_domain,
                                    data_epoch_t data_epoch, gpu_stream_t &stream) noexcept {
     multimodal_batch_shape_t const &shape = config.batch;
@@ -805,14 +840,44 @@ int base_trainer_t::run(base_config_t const &config) noexcept {
     if (!optimizer_made) return fail_out_(optimizer_made.description_.view());
     distributed_adafactor_t optimizer = std::move(optimizer_made.value_);
 
-    // 4. Capture each replica's model region (the collective region stays eager); `--eager` skips it and
+    // 4. Warm start under --resume: every replica uploads the same file's tensors (replicas are
+    //    bitwise-identical by construction) and the run continues from the file's saved step, so the
+    //    learning-rate schedule and the keyed data draws pick up exactly where the save left off. The
+    //    load precedes the capture — captured graphs read the weights by address, never by value.
+    u32_t resumed_step = 0;
+    if (!config.resume.empty()) {
+        switch_to_gpu_t lead_scope {trainer.streams[0]};
+        if (!lead_scope.ok()) return fail_out_("context entry failed for the warm start");
+        expected<checkpoint_to_load_t> loaded = checkpoint_to_load_t::make(config.resume, pinned_alloc_t {});
+        if (!loaded) return fail_out_(loaded.description_.view());
+        for (u32_t member_index = 0; member_index != gpus; ++member_index) {
+            switch_to_gpu_t gpu_scope {trainer.streams[member_index]};
+            if (expected_t warmed = load_checkpoint_(loaded.value_, trainer.replicas[member_index].weights,
+                                                     trainer.streams[member_index]);
+                !warmed)
+                return fail_out_(warmed.description_.view());
+        }
+        // The uploads ride the pinned payload — drain before `loaded` releases it.
+        for (u32_t member_index = 0; member_index != gpus; ++member_index) {
+            switch_to_gpu_t gpu_scope {trainer.streams[member_index]};
+            if (cuStreamSynchronize(trainer.streams[member_index].get()) != CUDA_SUCCESS)
+                return fail_out_("warm-start drain failed");
+        }
+        resumed_step = static_cast<u32_t>(loaded.value_.step());
+        sz::string line;
+        if (format_into(line, "uform_base: resumed {} tensors from {} at step {}", loaded.value_.size(), config.resume,
+                        resumed_step))
+            report_(line.view());
+    }
+
+    // 5. Capture each replica's model region (the collective region stays eager); `--eager` skips it and
     //    the loop below re-enqueues the region inline.
     per_gpu_array<gpu_replay_graph_t> graphs;
     if (config.capture == replayed_k)
         if (expected_t captured = trainer.capture(graphs); !captured) return fail_out_(captured.description_.view());
 
-    // 5. The steady loop — one whole two-region step per ordinal, telemetry on cadence.
-    for (u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
+    // 6. The steady loop — one whole two-region step per ordinal, telemetry on cadence.
+    for (u32_t ordinal = resumed_step; ordinal != resumed_step + config.steps; ++ordinal) {
         if (expected_t stepped = trainer.step(optimizer_step_t {ordinal}, optimizer, graphs); !stepped) {
             sz::string line;
             if (!format_into(line, "step {} failed: {}", ordinal, stepped.description_.view())) return 1;
@@ -821,10 +886,11 @@ int base_trainer_t::run(base_config_t const &config) noexcept {
         if ((ordinal + 1u) % 10u == 0u) trainer.telemetry(domain, optimizer_step_t {ordinal}).report();
     }
 
-    // 6. Checkpoint the lead replica (all replicas are bitwise-identical by construction), then drain.
+    // 7. Checkpoint the lead replica (all replicas are bitwise-identical by construction) at the run's
+    //    final step — a later --resume continues the schedule from here — then drain.
     if (!config.checkpoint.empty()) {
-        if (expected_t saved = save_checkpoint_(config.checkpoint, trainer.replicas[0].weights, config.steps,
-                                                trainer.streams[0]);
+        if (expected_t saved = save_checkpoint_(config.checkpoint, trainer.replicas[0].weights,
+                                                resumed_step + config.steps, trainer.streams[0]);
             !saved)
             return fail_out_(saved.description_.view());
         sz::string line;
