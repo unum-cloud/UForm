@@ -283,7 +283,8 @@ expected_t infiniband_endpoint_t::register_gpu_memory_(ibv_pd *protection_domain
     return {};
 }
 
-expected<infiniband_queue_mapping_t> infiniband_queue_mapping_t::make(ibv_qp *queue_pair, gpu_arena_t &arena) noexcept {
+expected<infiniband_queue_mapping_t> infiniband_queue_mapping_t::make(ibv_qp *queue_pair, gpu_arena_t &arena,
+                                                                      host_page_registry_t &registry) noexcept {
     if (queue_pair == nullptr)
         return expected<infiniband_queue_mapping_t>::fail(status_t::invalid_input_k, "null queue pair");
     mlx5dv_qp raw_queue {};
@@ -303,31 +304,31 @@ expected<infiniband_queue_mapping_t> infiniband_queue_mapping_t::make(ibv_qp *qu
     mapping.handles_.send_queue_entry_count = raw_queue.sq.wqe_cnt;
     mapping.handles_.send_queue_stride = raw_queue.sq.stride;
 
+    mapping.registry_ = &registry;
     std::size_t const send_queue_bytes = static_cast<std::size_t>(raw_queue.sq.wqe_cnt) *
                                          static_cast<std::size_t>(raw_queue.sq.stride);
     void *send_queue_device = nullptr;
-    if (expected_t mapped = infiniband_map_for_device(raw_queue.sq.buf, send_queue_bytes, false,
-                                                      mapping.send_queue_registration_, send_queue_device);
-        !mapped)
+    if (expected_t mapped = registry.acquire(raw_queue.sq.buf, send_queue_bytes, false, send_queue_device); !mapped)
         return expected<infiniband_queue_mapping_t>::fail(std::move(mapped));
+    mapping.send_queue_range_ = {raw_queue.sq.buf, send_queue_bytes};
     mapping.handles_.send_queue = {static_cast<std::byte *>(send_queue_device), send_queue_bytes};
+
     void *doorbell_device = nullptr;
-    if (expected_t mapped = infiniband_map_for_device(raw_queue.dbrec, sizeof(u32_t) * 2, false,
-                                                      mapping.doorbell_registration_, doorbell_device);
-        !mapped)
+    if (expected_t mapped = registry.acquire(raw_queue.dbrec, sizeof(u32_t) * 2, false, doorbell_device); !mapped)
         return expected<infiniband_queue_mapping_t>::fail(std::move(mapped));
+    mapping.doorbell_range_ = {raw_queue.dbrec, sizeof(u32_t) * 2};
     mapping.handles_.doorbell_record = static_cast<u32_t *>(doorbell_device);
 
     std::size_t const blueflame_bytes = raw_queue.bf.size != 0 ? raw_queue.bf.size : sizeof(u64_t);
-    if (expected_t mapped = infiniband_map_for_device(raw_queue.bf.reg, blueflame_bytes, true,
-                                                      mapping.blueflame_registration_,
-                                                      mapping.handles_.blueflame_register);
+    if (expected_t mapped = registry.acquire(raw_queue.bf.reg, blueflame_bytes, true,
+                                             mapping.handles_.blueflame_register);
         !mapped)
         return expected<infiniband_queue_mapping_t>::fail( //
             status_t::io_error_k,
             "the BlueFlame MMIO page would not map into GPU address space (CU_MEMHOSTREGISTER_IOMEMORY) — " //
             "device-initiated GDAKI is blocked on this platform: {}",
             mapped.description_);
+    mapping.blueflame_range_ = {raw_queue.bf.reg, blueflame_bytes};
 
     mapping.handles_.producer_index = arena.allocate_object<u32_t>(1);
     if (mapping.handles_.producer_index == nullptr)
@@ -339,8 +340,8 @@ expected<infiniband_queue_mapping_t> infiniband_queue_mapping_t::make(ibv_qp *qu
     return expected<infiniband_queue_mapping_t> {std::move(mapping)};
 }
 
-expected<infiniband_completion_mapping_t> infiniband_completion_mapping_t::make(ibv_cq *completion_queue,
-                                                                                gpu_arena_t &arena) noexcept {
+expected<infiniband_completion_mapping_t> infiniband_completion_mapping_t::make(
+    ibv_cq *completion_queue, gpu_arena_t &arena, host_page_registry_t &registry) noexcept {
     if (completion_queue == nullptr)
         return expected<infiniband_completion_mapping_t>::fail(status_t::invalid_input_k, "null completion queue");
     mlx5dv_cq raw_completion {};
@@ -372,19 +373,19 @@ expected<infiniband_completion_mapping_t> infiniband_completion_mapping_t::make(
     mapping.handles_.initial_owner = 0u;
     mapping.handles_.compressed = 0u;
 
+    mapping.registry_ = &registry;
     std::size_t const ring_bytes = static_cast<std::size_t>(raw_completion.cqe_cnt) *
                                    static_cast<std::size_t>(raw_completion.cqe_size);
     void *ring_device = nullptr;
-    if (expected_t mapped = infiniband_map_for_device(raw_completion.buf, ring_bytes, false, mapping.ring_registration_,
-                                                      ring_device);
-        !mapped)
+    if (expected_t mapped = registry.acquire(raw_completion.buf, ring_bytes, false, ring_device); !mapped)
         return expected<infiniband_completion_mapping_t>::fail(std::move(mapped));
+    mapping.ring_range_ = {raw_completion.buf, ring_bytes};
     mapping.handles_.ring = {static_cast<std::byte *>(ring_device), ring_bytes};
+
     void *doorbell_device = nullptr;
-    if (expected_t mapped = infiniband_map_for_device(raw_completion.dbrec, sizeof(u32_t) * 2, false,
-                                                      mapping.doorbell_registration_, doorbell_device);
-        !mapped)
+    if (expected_t mapped = registry.acquire(raw_completion.dbrec, sizeof(u32_t) * 2, false, doorbell_device); !mapped)
         return expected<infiniband_completion_mapping_t>::fail(std::move(mapped));
+    mapping.doorbell_range_ = {raw_completion.dbrec, sizeof(u32_t) * 2};
     mapping.handles_.doorbell_record = static_cast<u32_t *>(doorbell_device);
 
     mapping.handles_.consumer_index = arena.allocate_object<u32_t>(1);
@@ -460,11 +461,11 @@ expected<infiniband_member_t> infiniband_member_t::make_(mesh_topology_t const &
         if (expected_t connected = member.endpoints_[round].connect(peer); !connected)
             return result_t::fail(std::move(connected));
         expected<infiniband_queue_mapping_t> queue = infiniband_queue_mapping_t::make(
-            member.endpoints_[round].queue_pair(), arena);
+            member.endpoints_[round].queue_pair(), arena, nic.page_registry());
         if (!queue) return result_t::fail(std::move(queue));
         member.queues_[round] = std::move(queue.value_);
         expected<infiniband_completion_mapping_t> completion = infiniband_completion_mapping_t::make(
-            member.endpoints_[round].completion_queue(), arena);
+            member.endpoints_[round].completion_queue(), arena, nic.page_registry());
         if (!completion) return result_t::fail(std::move(completion));
         member.completions_[round] = std::move(completion.value_);
 

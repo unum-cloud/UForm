@@ -282,10 +282,128 @@ enum class infiniband_signal_t : u32_t {
     with_immediate_k = 1,
 };
 
+/** @brief One registered host page and its reference count — mlx5 packs many doorbell records (and
+ *      neighboring rings) per OS page, so several mappings routinely share one page. A page someone
+ *      outside the registry registered first is @b borrowed ( @c owned false) and never unregistered. */
+struct host_page_registration_t {
+    /** @brief The page base; null marks a free table entry reused by the next @c acquire . */
+    void *page = nullptr;
+    /** @brief Live acquisitions covering this page; the last @c release unregisters an owned page. */
+    u32_t references = 0;
+    /** @brief Whether this registry performed the registration — only owned pages are unregistered. */
+    bool owned = false;
+};
+
 /**
- *  @brief One opened mlx5 adapter serving one GPU: the device context, the protection domain, and the
- *      port identity (LID, GID, MTU) every endpoint on this GPU borrows — opened @b once, in main,
- *      never per queue pair. Move-only; teardown deallocates the domain and closes the device.
+ *  @brief The NIC's ledger of host pages registered for GPU access — owned by @ref infiniband_nic_t ,
+ *      borrowed by every queue / completion mapping on that NIC.
+ *
+ *  mlx5 allocates work queues, completion rings, and doorbell records from page-shared pools, so two
+ *  mappings routinely land on one OS page. An unshared @c cuMemHostRegister per mapping then either fails
+ *  ( @c CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED , leaving a range's tail pages unmapped for the GPU) or,
+ *  worse, the first mapping's teardown unregisters a page the second mapping's doorbell kernel still
+ *  dereferences — a roaming device fault (Xid 43). Registering page by page with reference counts makes
+ *  both impossible: a shared page is counted, a partially-covered range still gets its tail pages, and a
+ *  page lives until its @b last user releases it.
+ */
+struct host_page_registry_t {
+
+    /** @brief Register every page covering @c [host_pointer,host_pointer+span) for GPU access — counting
+     *      pages other mappings already hold — and resolve @p device_pointer for @p host_pointer .
+     *  @param[in] host_pointer The NIC structure's host address; any alignment.
+     *  @param[in] span The structure's byte extent.
+     *  @param[in] io_memory NIC BAR space (the BlueFlame register) versus ordinary DMA memory.
+     *  @param[out] device_pointer The GPU-dereferenceable address for @p host_pointer . */
+    [[nodiscard]] expected_t acquire(void *host_pointer, std::size_t span, bool io_memory,
+                                     void *&device_pointer) noexcept {
+        device_pointer = nullptr;
+        std::uintptr_t const page_bytes = static_cast<std::uintptr_t>(sysconf(_SC_PAGESIZE));
+        std::uintptr_t const first = reinterpret_cast<std::uintptr_t>(host_pointer) & ~(page_bytes - 1u);
+        std::uintptr_t const last = (reinterpret_cast<std::uintptr_t>(host_pointer) + span + page_bytes - 1u) &
+                                    ~(page_bytes - 1u);
+        unsigned const flags = CU_MEMHOSTREGISTER_DEVICEMAP | (io_memory ? CU_MEMHOSTREGISTER_IOMEMORY : 0u);
+        for (std::uintptr_t page = first; page != last; page += page_bytes) {
+            if (host_page_registration_t *held = find_(reinterpret_cast<void *>(page)); held != nullptr) {
+                ++held->references;
+                continue;
+            }
+            host_page_registration_t entry {reinterpret_cast<void *>(page), 1u, false};
+            CUresult const registered = cuMemHostRegister(entry.page, page_bytes, flags);
+            if (registered == CUDA_SUCCESS) entry.owned = true;
+            else if (registered != CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED) {
+                release(reinterpret_cast<void *>(first), page - first); // exactly the pages acquired so far
+                return expected_t::fail(registered, "host page registration failed ({} memory, page=0x{:x})",
+                                        io_memory ? "NIC MMIO" : "DMA", page);
+            }
+            if (status_t inserted = insert_(entry); inserted != status_t::success_k) {
+                if (entry.owned) cuMemHostUnregister(entry.page);
+                release(reinterpret_cast<void *>(first), page - first);
+                return expected_t::fail(inserted, "page-registration table allocation failed");
+            }
+        }
+        CUdeviceptr resolved = 0;
+        if (CUresult result = cuMemHostGetDevicePointer(&resolved, host_pointer, 0); result != CUDA_SUCCESS) {
+            release(host_pointer, span);
+            return expected_t::fail(result, "device-pointer resolution failed");
+        }
+        device_pointer = reinterpret_cast<void *>(resolved);
+        return {};
+    }
+
+    /** @brief Drop one reference from every page covering @c [host_pointer,host_pointer+span) — the exact
+     *      range of a prior @ref acquire ; the last reference unregisters an owned page. A zero @p span
+     *      covers no page and is the no-op an unwound partial acquire relies on. */
+    void release(void *host_pointer, std::size_t span) noexcept {
+        if (host_pointer == nullptr) return;
+        std::uintptr_t const page_bytes = static_cast<std::uintptr_t>(sysconf(_SC_PAGESIZE));
+        std::uintptr_t const first = reinterpret_cast<std::uintptr_t>(host_pointer) & ~(page_bytes - 1u);
+        std::uintptr_t const last = (reinterpret_cast<std::uintptr_t>(host_pointer) + span + page_bytes - 1u) &
+                                    ~(page_bytes - 1u);
+        for (std::uintptr_t page = first; page != last; page += page_bytes) {
+            host_page_registration_t *held = find_(reinterpret_cast<void *>(page));
+            if (held == nullptr || held->references == 0) continue; // release without acquire — nothing to drop
+            if (--held->references == 0) {
+                if (held->owned) cuMemHostUnregister(held->page);
+                *held = host_page_registration_t {}; // the entry becomes free for reuse
+            }
+        }
+    }
+
+  private:
+    /** @brief The live entry for @p page , or null. */
+    [[nodiscard]] host_page_registration_t *find_(void *page) noexcept {
+        for (host_page_registration_t &entry : pages_)
+            if (entry.page == page) return &entry;
+        return nullptr;
+    }
+    /** @brief Record @p entry in a free table entry, growing the table when none is free. */
+    [[nodiscard]] status_t insert_(host_page_registration_t entry) noexcept {
+        for (host_page_registration_t &free_entry : pages_)
+            if (free_entry.page == nullptr) {
+                free_entry = entry;
+                return status_t::success_k;
+            }
+        return pages_.try_push_back(entry);
+    }
+
+    /** @brief The page table — a handful of entries, walked linearly. */
+    array<host_page_registration_t> pages_ {};
+};
+
+/** @brief One acquired page range a mapping must release — the exact @c (host,span) it passed to
+ *      @ref host_page_registry_t::acquire ; a null host is the empty range. */
+struct host_page_range_t {
+    /** @brief The NIC structure's host address, as acquired. */
+    void *host = nullptr;
+    /** @brief The structure's byte extent, as acquired. */
+    std::size_t span = 0;
+};
+
+/**
+ *  @brief One opened mlx5 adapter serving one GPU: the device context, the protection domain, the page
+ *      registry, and the port identity (LID, GID, MTU) every endpoint on this GPU borrows — opened
+ *      @b once, in main, never per queue pair. Move-only; teardown deallocates the domain and closes the
+ *      device.
  */
 struct infiniband_nic_t {
 
@@ -295,7 +413,8 @@ struct infiniband_nic_t {
     infiniband_nic_t(infiniband_nic_t &&other) noexcept
         : device_context_(std::exchange(other.device_context_, nullptr)),
           protection_domain_(std::exchange(other.protection_domain_, nullptr)),
-          local_identifier_(other.local_identifier_), path_mtu_(other.path_mtu_), port_(other.port_) {
+          page_registry_(std::move(other.page_registry_)), local_identifier_(other.local_identifier_),
+          path_mtu_(other.path_mtu_), port_(other.port_) {
         std::memcpy(global_identifier_, other.global_identifier_, sizeof(global_identifier_));
     }
     infiniband_nic_t &operator=(infiniband_nic_t &&other) noexcept {
@@ -303,6 +422,7 @@ struct infiniband_nic_t {
             destroy_();
             device_context_ = std::exchange(other.device_context_, nullptr);
             protection_domain_ = std::exchange(other.protection_domain_, nullptr);
+            page_registry_ = std::move(other.page_registry_);
             local_identifier_ = other.local_identifier_;
             path_mtu_ = other.path_mtu_;
             port_ = other.port_;
@@ -332,6 +452,9 @@ struct infiniband_nic_t {
     [[nodiscard]] u8_t port() const noexcept { return port_; }
     /** @brief The 16-byte port GID — carried in coordinates for a future routed fabric. */
     [[nodiscard]] u8_t const *global_identifier() const noexcept { return global_identifier_; }
+    /** @brief The NIC's page-registration ledger every mapping on this NIC acquires through — mlx5's
+     *      page-shared pools make the reference counting mandatory (see @ref host_page_registry_t ). */
+    [[nodiscard]] host_page_registry_t &page_registry() noexcept { return page_registry_; }
 
   private:
     void destroy_() noexcept {
@@ -343,6 +466,9 @@ struct infiniband_nic_t {
     ibv_context *device_context_ = nullptr;
     /** @brief The one protection domain every endpoint on this GPU shares. */
     ibv_pd *protection_domain_ = nullptr;
+    /** @brief The page-registration ledger — outlives every mapping on this NIC, exactly like the
+     *      protection domain above. */
+    host_page_registry_t page_registry_ {};
     /** @brief Cached port identity — queried once at @ref make . */
     u32_t local_identifier_ = 0;
     /** @brief The port's active MTU. */
@@ -514,35 +640,6 @@ struct infiniband_endpoint_t {
     infiniband_coordinates_t peer_coordinates_ {};
 };
 
-/** @brief Register the page(s) covering @p host_pointer for GPU access and resolve its device pointer;
- *      @p registration_base receives the page-floor base to later unregister (null when the page was
- *      already registered by someone else and must stay theirs). */
-[[nodiscard]] inline expected_t infiniband_map_for_device(void *host_pointer, std::size_t span, bool io_memory,
-                                                          void *&registration_base, void *&device_pointer) noexcept {
-    registration_base = nullptr;
-    device_pointer = nullptr;
-    long const page_size = sysconf(_SC_PAGESIZE);
-    std::uintptr_t const page_mask = ~(static_cast<std::uintptr_t>(page_size) - 1u);
-    std::uintptr_t const value = reinterpret_cast<std::uintptr_t>(host_pointer);
-    void *base = reinterpret_cast<void *>(value & page_mask);
-    std::size_t const bytes = ((value + span + static_cast<std::uintptr_t>(page_size) - 1u) & page_mask) -
-                              (value & page_mask);
-
-    unsigned const flags = CU_MEMHOSTREGISTER_DEVICEMAP | (io_memory ? CU_MEMHOSTREGISTER_IOMEMORY : 0u);
-    CUresult const registered = cuMemHostRegister(base, bytes, flags);
-    if (registered == CUDA_SUCCESS) registration_base = base;
-    else if (registered != CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED)
-        return expected_t::fail(registered, "host registration failed ({} memory, {} bytes)",
-                                io_memory ? "NIC MMIO" : "DMA", bytes);
-    CUdeviceptr resolved = 0;
-    if (CUresult result = cuMemHostGetDevicePointer(&resolved, host_pointer, 0); result != CUDA_SUCCESS) {
-        if (registration_base != nullptr) cuMemHostUnregister(std::exchange(registration_base, nullptr));
-        return expected_t::fail(result, "device-pointer resolution failed");
-    }
-    device_pointer = reinterpret_cast<void *>(resolved);
-    return {};
-}
-
 /**
  *  @brief The GPU-reachable send path of one queue pair: the work-queue buffer, the doorbell record, and
  *      the BlueFlame register mapped into GPU address space, plus a device producer-index counter.
@@ -559,39 +656,53 @@ struct infiniband_queue_mapping_t {
     infiniband_queue_mapping_t &operator=(infiniband_queue_mapping_t const &) = delete;
     infiniband_queue_mapping_t(infiniband_queue_mapping_t &&other) noexcept
         : handles_(std::exchange(other.handles_, infiniband_queue_handles_t {})),
-          send_queue_registration_(std::exchange(other.send_queue_registration_, nullptr)),
-          doorbell_registration_(std::exchange(other.doorbell_registration_, nullptr)),
-          blueflame_registration_(std::exchange(other.blueflame_registration_, nullptr)) {}
+          registry_(std::exchange(other.registry_, nullptr)),
+          send_queue_range_(std::exchange(other.send_queue_range_, host_page_range_t {})),
+          doorbell_range_(std::exchange(other.doorbell_range_, host_page_range_t {})),
+          blueflame_range_(std::exchange(other.blueflame_range_, host_page_range_t {})) {}
     infiniband_queue_mapping_t &operator=(infiniband_queue_mapping_t &&other) noexcept {
         if (this != &other) {
             destroy_();
             handles_ = std::exchange(other.handles_, infiniband_queue_handles_t {});
-            send_queue_registration_ = std::exchange(other.send_queue_registration_, nullptr);
-            doorbell_registration_ = std::exchange(other.doorbell_registration_, nullptr);
-            blueflame_registration_ = std::exchange(other.blueflame_registration_, nullptr);
+            registry_ = std::exchange(other.registry_, nullptr);
+            send_queue_range_ = std::exchange(other.send_queue_range_, host_page_range_t {});
+            doorbell_range_ = std::exchange(other.doorbell_range_, host_page_range_t {});
+            blueflame_range_ = std::exchange(other.blueflame_range_, host_page_range_t {});
         }
         return *this;
     }
     ~infiniband_queue_mapping_t() noexcept { destroy_(); }
 
     /** @brief Expose @p queue_pair 's raw mlx5 send queue / doorbell / BlueFlame register and map all
-     *      three for the GPU; the producer counter is allocated from @p arena (capture-stable address). */
-    [[nodiscard]] static expected<infiniband_queue_mapping_t> make(ibv_qp *queue_pair, gpu_arena_t &arena) noexcept;
+     *      three for the GPU through @p registry (pages are shared across queue pairs, so acquisitions
+     *      are reference-counted); the producer counter is allocated from @p arena (capture-stable). */
+    [[nodiscard]] static expected<infiniband_queue_mapping_t> make(ibv_qp *queue_pair, gpu_arena_t &arena,
+                                                                   host_page_registry_t &registry) noexcept;
 
     /** @brief A by-value snapshot for kernels and @ref infiniband_post_write . */
     [[nodiscard]] infiniband_queue_handles_t device_handles() const noexcept { return handles_; }
 
   private:
     void destroy_() noexcept {
-        for (void **base : {&blueflame_registration_, &doorbell_registration_, &send_queue_registration_})
-            if (*base != nullptr) cuMemHostUnregister(std::exchange(*base, nullptr));
+        if (registry_ != nullptr) {
+            for (host_page_range_t *range : {&blueflame_range_, &doorbell_range_, &send_queue_range_}) {
+                registry_->release(range->host, range->span);
+                *range = host_page_range_t {};
+            }
+            registry_ = nullptr;
+        }
         handles_ = infiniband_queue_handles_t {};
     }
 
     infiniband_queue_handles_t handles_ {};
-    void *send_queue_registration_ = nullptr;
-    void *doorbell_registration_ = nullptr;
-    void *blueflame_registration_ = nullptr;
+    /** @brief The owning NIC's page ledger — borrowed; outlives the mapping like the protection domain. */
+    host_page_registry_t *registry_ = nullptr;
+    /** @brief The send queue's acquired range, released through @ref registry_ at teardown. */
+    host_page_range_t send_queue_range_ {};
+    /** @brief The doorbell record's acquired range — routinely a page shared with other queue pairs. */
+    host_page_range_t doorbell_range_ {};
+    /** @brief The BlueFlame register's acquired range — NIC BAR space. */
+    host_page_range_t blueflame_range_ {};
 };
 
 /**
@@ -606,37 +717,50 @@ struct infiniband_completion_mapping_t {
     infiniband_completion_mapping_t &operator=(infiniband_completion_mapping_t const &) = delete;
     infiniband_completion_mapping_t(infiniband_completion_mapping_t &&other) noexcept
         : handles_(std::exchange(other.handles_, infiniband_completion_handles_t {})),
-          ring_registration_(std::exchange(other.ring_registration_, nullptr)),
-          doorbell_registration_(std::exchange(other.doorbell_registration_, nullptr)) {}
+          registry_(std::exchange(other.registry_, nullptr)),
+          ring_range_(std::exchange(other.ring_range_, host_page_range_t {})),
+          doorbell_range_(std::exchange(other.doorbell_range_, host_page_range_t {})) {}
     infiniband_completion_mapping_t &operator=(infiniband_completion_mapping_t &&other) noexcept {
         if (this != &other) {
             destroy_();
             handles_ = std::exchange(other.handles_, infiniband_completion_handles_t {});
-            ring_registration_ = std::exchange(other.ring_registration_, nullptr);
-            doorbell_registration_ = std::exchange(other.doorbell_registration_, nullptr);
+            registry_ = std::exchange(other.registry_, nullptr);
+            ring_range_ = std::exchange(other.ring_range_, host_page_range_t {});
+            doorbell_range_ = std::exchange(other.doorbell_range_, host_page_range_t {});
         }
         return *this;
     }
     ~infiniband_completion_mapping_t() noexcept { destroy_(); }
 
-    /** @brief Expose @p completion_queue 's raw mlx5 ring + doorbell and map both for the GPU; the
-     *      consumer counter is allocated from @p arena . The ring must be a power of two and uncompressed. */
-    [[nodiscard]] static expected<infiniband_completion_mapping_t> make(ibv_cq *completion_queue,
-                                                                        gpu_arena_t &arena) noexcept;
+    /** @brief Expose @p completion_queue 's raw mlx5 ring + doorbell and map both for the GPU through
+     *      @p registry (pages are shared across completion queues, so acquisitions are
+     *      reference-counted); the consumer counter is allocated from @p arena . The ring must be a power
+     *      of two and uncompressed. */
+    [[nodiscard]] static expected<infiniband_completion_mapping_t> make(ibv_cq *completion_queue, gpu_arena_t &arena,
+                                                                        host_page_registry_t &registry) noexcept;
 
     /** @brief A by-value snapshot for kernels and @ref infiniband_drain_one . */
     [[nodiscard]] infiniband_completion_handles_t device_handles() const noexcept { return handles_; }
 
   private:
     void destroy_() noexcept {
-        for (void **base : {&doorbell_registration_, &ring_registration_})
-            if (*base != nullptr) cuMemHostUnregister(std::exchange(*base, nullptr));
+        if (registry_ != nullptr) {
+            for (host_page_range_t *range : {&doorbell_range_, &ring_range_}) {
+                registry_->release(range->host, range->span);
+                *range = host_page_range_t {};
+            }
+            registry_ = nullptr;
+        }
         handles_ = infiniband_completion_handles_t {};
     }
 
     infiniband_completion_handles_t handles_ {};
-    void *ring_registration_ = nullptr;
-    void *doorbell_registration_ = nullptr;
+    /** @brief The owning NIC's page ledger — borrowed; outlives the mapping like the protection domain. */
+    host_page_registry_t *registry_ = nullptr;
+    /** @brief The completion ring's acquired range, released through @ref registry_ at teardown. */
+    host_page_range_t ring_range_ {};
+    /** @brief The completion doorbell's acquired range — routinely a page shared with other queues. */
+    host_page_range_t doorbell_range_ {};
 };
 
 #if defined(__CUDACC__)
@@ -895,6 +1019,9 @@ struct infiniband_member_t {
         return round_.advance(stream);
     }
 
+    /** @brief Whether this member is the zero-round single-domain identity — every collective a no-op. */
+    [[nodiscard]] bool identity() const noexcept { return layout_.rounds == 0; }
+
     /**
      *  @brief Device-initiated inter-domain all-reduce-sum of this member's Float32 payload, in place —
      *      the cross-domain gradient / force reduce, enqueued on @p stream as capture-safe graph nodes.
@@ -1069,6 +1196,8 @@ struct infiniband_all_reduce {
         if (expected_t advanced = reach_.advance(stream); !advanced) return advanced;
         return reach_.allreduce_sum(stream);
     }
+    /** @brief Whether this buffer is the zero-round single-domain identity — the collective a no-op. */
+    [[nodiscard]] bool identity() const noexcept { return reach_.identity(); }
 
   private:
     infiniband_member_t reach_ {};
@@ -1164,6 +1293,7 @@ struct infiniband_member_t {
     [[nodiscard]] expected_t alltoall(gpu_stream_t &) noexcept { return {}; }
     [[nodiscard]] b8r1_span_t send_block(u32_t) noexcept { return {}; }
     [[nodiscard]] b8r1_span_t recv_block(u32_t) noexcept { return {}; }
+    [[nodiscard]] bool identity() const noexcept { return true; }
 };
 
 /** @brief The build-gate stub of the colocated domain: single-domain topologies work (nothing to
@@ -1213,6 +1343,7 @@ struct infiniband_all_reduce {
     }
     [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept { return {}; }
     [[nodiscard]] expected_t operator()(gpu_stream_t &) noexcept { return {}; }
+    [[nodiscard]] bool identity() const noexcept { return true; }
 };
 template <typename value_type_>
 struct infiniband_all_gather {
