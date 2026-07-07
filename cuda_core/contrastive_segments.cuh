@@ -46,8 +46,8 @@
  *
  *      - this rank's own vertices — the single-GPU case, or several local tiles of one bag;
  *      - a peer GPU's vertices inside this host_domain, reachable over NVLink peer mappings;
- *      - a @b landed copy of a remote multimem_domain's vertices, delivered into a gather member's
- *        symmetric heap by @ref infiniband_member_t::allgather — the cross-cluster case. The math is
+ *      - a @b landed copy of a remote multimem_domain's vertices, delivered into a gather handle's
+ *        symmetric heap by @ref infiniband_all_gather — the cross-cluster case. The math is
  *        placement-blind: the transport fills subgraphs, the loss never knows the difference.
  *
  *  @section labels Edges come from the relation graph
@@ -68,7 +68,7 @@
  *  summand (one all-reduce-sum yields the global mean), @c from_vertices_grad is the full force on the
  *  rank-owned vertices, and each subgraph's @c to_vertices_grad is this rank's Float32 force contribution
  *  to that subgraph's vertices (reduce-scatter-summed across ranks by the caller —
- *  @ref infiniband_member_t::allreduce_sum across domains — then cast). Ordering is the caller's; no
+ *  @ref infiniband_all_reduce across domains — then cast). Ordering is the caller's; no
  *  rank writes memory another rank reads during the loss.
  *
  *  @section traffic What the distributed case actually moves
