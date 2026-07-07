@@ -260,11 +260,17 @@ struct infiniband_link_t {
     /** @brief This rank's landing buffer where the partner's remote write arrives, shaped
      *      @b [landing_bytes] — the consuming collective reinterprets the scalar type it landed. */
     b8r1_span_t local_landing {};
-    /** @brief Symmetric-heap byte offset of the partner's landing buffer. */
+    /** @brief Symmetric-heap byte offset of the partner's even-step landing buffer. */
     std::size_t landing_offset = 0;
-    /** @brief Symmetric-heap byte offset of the partner's arrival flag. */
+    /** @brief Byte stride from a round's even-step landing to its odd-step twin — the parity doubling
+     *      that keeps a fast partner's next-step write off a buffer the slower side still folds; zero
+     *      when the payload doubles as the landing (the all-gather). */
+    u32_t landing_parity_stride = 0;
+    /** @brief Symmetric-heap byte offset of the partner's even-step arrival flag; the odd twin sits one
+     *      @c u32_t further. */
     std::size_t remote_flag_offset = 0;
-    /** @brief This rank's monotonic arrival flag (device VRAM) the waiting kernel acquire-spins on. */
+    /** @brief This rank's monotonic even-step arrival flag (device VRAM) the waiting kernel
+     *      acquire-spins on; the odd-step twin is the next @c u32_t . */
     infiniband_round_t *arrival_flag = nullptr;
 };
 
@@ -996,11 +1002,14 @@ struct infiniband_member_t {
         [[nodiscard]] std::size_t landings_offset() const noexcept {
             return round_up_to_multiple(payload_bytes, cache_line_bytes_k);
         }
+        /** @brief Landings and flags are @b parity-doubled (even / odd step): without the second copy a
+         *      fast partner's next-step write can land on a buffer the slower side is still folding —
+         *      the flag only proves arrival, never consumption. */
         [[nodiscard]] std::size_t flags_offset() const noexcept {
-            return round_up_to_multiple(landings_offset() + rounds * landing_bytes, cache_line_bytes_k);
+            return round_up_to_multiple(landings_offset() + 2u * rounds * landing_bytes, cache_line_bytes_k);
         }
         [[nodiscard]] std::size_t total_bytes() const noexcept {
-            return round_up_to_multiple(flags_offset() + rounds * sizeof(u32_t), cache_line_bytes_k);
+            return round_up_to_multiple(flags_offset() + 2u * rounds * sizeof(u32_t), cache_line_bytes_k);
         }
     };
 
@@ -1061,10 +1070,13 @@ struct infiniband_member_t {
         return {heap_.data() + static_cast<std::size_t>(destination_domain) * block_bytes, block_bytes};
     }
     /** @brief The block @ref alltoall received from round @p round 's partner ( @c multimem_domain_index ^ 2^round )
-     *      — that round's landing. Meaningful only on an all-to-all-wired member. */
-    [[nodiscard]] b8r1_span_t recv_block(u32_t round) noexcept {
+     *      — that round's landing at @p step_parity (landings are even/odd doubled, so the caller names
+     *      which step's landing it consumes). Meaningful only on an all-to-all-wired member. */
+    [[nodiscard]] b8r1_span_t recv_block(u32_t round, u32_t step_parity) noexcept {
         std::size_t const block_bytes = layout_.landing_bytes;
-        return {heap_.data() + layout_.landings_offset() + static_cast<std::size_t>(round) * block_bytes, block_bytes};
+        std::size_t const landing = layout_.landings_offset() +
+                                    (static_cast<std::size_t>(round) * 2u + (step_parity & 1u)) * block_bytes;
+        return {heap_.data() + landing, block_bytes};
     }
 
     /**
@@ -1276,14 +1288,24 @@ struct infiniband_all_to_all {
     [[nodiscard]] nk::tensor_span<value_type_, 1> send_block(u32_t destination_domain) noexcept {
         return typed_(reach_.send_block(destination_domain));
     }
-    /** @brief The block received from round @p round 's partner — valid after @c operator() . */
-    [[nodiscard]] nk::tensor_span<value_type_, 1> recv_block(u32_t round) noexcept {
-        return typed_(reach_.recv_block(round));
+    /** @brief The parity of this handle's @b latest exchange — even/odd landings alternate per step, and
+     *      a consumer reading @b several handles wired in lockstep (the mixer's per-member buffers) names
+     *      the shared mix parity from its @b own handle, whose count already ticked. Host-side, so this
+     *      serves the eager consumer only — a captured replay's device-side advances are invisible here. */
+    [[nodiscard]] u32_t latest_parity() const noexcept {
+        return (exchanges_ + 1u) & 1u; // exchange e (1-based) used parity (e-1)&1
+    }
+    /** @brief The block received from round @p round 's partner at @p step_parity — valid after the
+     *      exchange of that parity; see @ref latest_parity for the eager-only host contract. */
+    [[nodiscard]] nk::tensor_span<value_type_, 1> recv_block(u32_t round, u32_t step_parity) noexcept {
+        return typed_(reach_.recv_block(round, step_parity));
     }
     /** @brief Advance the round and enqueue the all-to-all exchange — one op per step, capture-safe. */
     [[nodiscard]] expected_t operator()(gpu_stream_t &stream) noexcept {
         if (expected_t advanced = reach_.advance(stream); !advanced) return advanced;
-        return reach_.alltoall(stream);
+        expected_t exchanged = reach_.alltoall(stream);
+        if (exchanged) ++exchanges_;
+        return exchanged;
     }
 
   private:
@@ -1291,6 +1313,9 @@ struct infiniband_all_to_all {
         return {reinterpret_cast<value_type_ *>(bytes.data()), bytes.extent(0) / sizeof(value_type_)};
     }
     infiniband_member_t reach_ {};
+    /** @brief Host-side exchange count mirroring the device round — only for @ref recv_block 's parity
+     *      pick, legal because the mixer consumes eagerly (see the accessor's contract). */
+    u32_t exchanges_ = 0;
 };
 
 #else // !defined(UFORM_WITH_INFINIBAND)
@@ -1305,7 +1330,7 @@ struct infiniband_member_t {
     [[nodiscard]] expected_t allgather(gpu_stream_t &) noexcept { return {}; }
     [[nodiscard]] expected_t alltoall(gpu_stream_t &) noexcept { return {}; }
     [[nodiscard]] b8r1_span_t send_block(u32_t) noexcept { return {}; }
-    [[nodiscard]] b8r1_span_t recv_block(u32_t) noexcept { return {}; }
+    [[nodiscard]] b8r1_span_t recv_block(u32_t, u32_t) noexcept { return {}; }
     [[nodiscard]] bool identity() const noexcept { return true; }
 };
 
@@ -1377,7 +1402,8 @@ struct infiniband_all_to_all {
         return expected<infiniband_all_to_all> {infiniband_all_to_all {}};
     }
     [[nodiscard]] nk::tensor_span<value_type_, 1> send_block(u32_t) noexcept { return {}; }
-    [[nodiscard]] nk::tensor_span<value_type_, 1> recv_block(u32_t) noexcept { return {}; }
+    [[nodiscard]] u32_t latest_parity() const noexcept { return 0; }
+    [[nodiscard]] nk::tensor_span<value_type_, 1> recv_block(u32_t, u32_t) noexcept { return {}; }
     [[nodiscard]] expected_t operator()(gpu_stream_t &) noexcept { return {}; }
 };
 

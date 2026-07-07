@@ -38,11 +38,13 @@ static __global__ void infiniband_allreduce_post_kernel_(infiniband_links_view_t
                                                          infiniband_round_view_t flag_round) {
     if (threadIdx.x != 0) return;
     infiniband_link_t const link = links[round];
+    u32_t const step_parity = (flag_round[0] / static_cast<u32_t>(links.extent(0))) & 1u;
     u32_t const flag_value = flag_round[0] + round + 1u;
     infiniband_post_write(link.queue, reinterpret_cast<u64_t>(shard), link.local_access_key,
-                          link.remote_heap_base + link.landing_offset, link.remote_access_key,
-                          static_cast<u32_t>(shard_scalars * sizeof(f32_t)), false, nullptr);
-    infiniband_post_write(link.queue, 0u, link.local_access_key, link.remote_heap_base + link.remote_flag_offset,
+                          link.remote_heap_base + link.landing_offset + step_parity * link.landing_parity_stride,
+                          link.remote_access_key, static_cast<u32_t>(shard_scalars * sizeof(f32_t)), false, nullptr);
+    infiniband_post_write(link.queue, 0u, link.local_access_key,
+                          link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
                           link.remote_access_key, sizeof(u32_t), true, &flag_value);
     infiniband_drain_one(link.completion);
 }
@@ -54,8 +56,9 @@ static __global__ void infiniband_flag_wait_kernel_(infiniband_links_view_t link
                                                     infiniband_round_view_t flag_round) {
     if (threadIdx.x == 0) {
         infiniband_link_t const link = links[round];
+        u32_t const step_parity = (flag_round[0] / static_cast<u32_t>(links.extent(0))) & 1u;
         u32_t const target = flag_round[0] + round + 1u;
-        while (infiniband_load_acquire_u32(link.arrival_flag) < target) {
+        while (infiniband_load_acquire_u32(link.arrival_flag + step_parity) < target) {
             // Spin until the partner's flag write for this round lands; its payload already did.
         }
         __threadfence_system();
@@ -67,9 +70,12 @@ static __global__ void infiniband_flag_wait_kernel_(infiniband_links_view_t link
  *      one explicit round-to-nearest-even add per element — no fused-multiply-add contraction, so the
  *      SPMD-static fold order is bit-identical on every domain. */
 static __global__ void infiniband_accumulate_f32_kernel_(infiniband_links_view_t links, u32_t round, f32_t *shard,
-                                                         std::size_t shard_scalars) {
+                                                         std::size_t shard_scalars,
+                                                         infiniband_round_view_t flag_round) {
     infiniband_link_t const link = links[round];
-    f32_t const *landing = reinterpret_cast<f32_t const *>(link.local_landing.data());
+    u32_t const step_parity = (flag_round[0] / static_cast<u32_t>(links.extent(0))) & 1u;
+    f32_t const *landing = reinterpret_cast<f32_t const *>(link.local_landing.data() +
+                                                           step_parity * link.landing_parity_stride);
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
     for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < shard_scalars;
          index += stride)
@@ -99,10 +105,12 @@ static __global__ void infiniband_allgather_post_kernel_(infiniband_links_view_t
     std::size_t const send_bytes = (static_cast<std::size_t>(1u) << bit_round) * plan.block_bytes;
     u32_t const flag_value = flag_round[0] + round + 1u;
 
+    u32_t const step_parity = (flag_round[0] / static_cast<u32_t>(links.extent(0))) & 1u;
     infiniband_post_write(link.queue, reinterpret_cast<u64_t>(gathered_bytes + send_byte_offset), link.local_access_key,
                           link.remote_heap_base + send_byte_offset, link.remote_access_key,
                           static_cast<u32_t>(send_bytes), false, nullptr);
-    infiniband_post_write(link.queue, 0u, link.local_access_key, link.remote_heap_base + link.remote_flag_offset,
+    infiniband_post_write(link.queue, 0u, link.local_access_key,
+                          link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
                           link.remote_access_key, sizeof(u32_t), true, &flag_value);
     infiniband_drain_one(link.completion);
 }
@@ -119,12 +127,14 @@ static __global__ void infiniband_alltoall_post_kernel_(infiniband_links_view_t 
     if (threadIdx.x != 0) return;
     infiniband_link_t const link = links[round];
     std::size_t const send_byte_offset = static_cast<std::size_t>(link.remote_multimem_domain_index) * plan.block_bytes;
+    u32_t const step_parity = (flag_round[0] / static_cast<u32_t>(links.extent(0))) & 1u;
     u32_t const flag_value = flag_round[0] + round + 1u;
 
     infiniband_post_write(link.queue, reinterpret_cast<u64_t>(send_bytes + send_byte_offset), link.local_access_key,
-                          link.remote_heap_base + link.landing_offset, link.remote_access_key,
-                          static_cast<u32_t>(plan.block_bytes), false, nullptr);
-    infiniband_post_write(link.queue, 0u, link.local_access_key, link.remote_heap_base + link.remote_flag_offset,
+                          link.remote_heap_base + link.landing_offset + step_parity * link.landing_parity_stride,
+                          link.remote_access_key, static_cast<u32_t>(plan.block_bytes), false, nullptr);
+    infiniband_post_write(link.queue, 0u, link.local_access_key,
+                          link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
                           link.remote_access_key, sizeof(u32_t), true, &flag_value);
     infiniband_drain_one(link.completion);
 }
@@ -488,18 +498,20 @@ expected<infiniband_member_t> infiniband_member_t::make_(mesh_topology_t const &
         link.queue = member.queues_[round].device_handles();
         link.completion = member.completions_[round].device_handles();
         if (layout.landing_bytes != 0) {
-            // Each round its own landing, so a fast partner never overwrites a slower one's
-            // still-unfolded payload.
-            std::size_t const landing = layout.landings_offset() + round * layout.landing_bytes;
+            // Each round its own even/odd landing pair, so a fast partner's next-step write never lands
+            // on a buffer the slower side is still folding — the flag proves arrival, not consumption.
+            std::size_t const landing = layout.landings_offset() + round * 2u * layout.landing_bytes;
             link.local_landing = b8r1_span_t {member.heap_.data() + landing, layout.landing_bytes};
             link.landing_offset = landing;
+            link.landing_parity_stride = static_cast<u32_t>(layout.landing_bytes);
         }
         else {
-            // The payload doubles as the landing — the all-gather's domain-major buffer.
+            // The payload doubles as the landing — the all-gather's domain-major buffer, parity-free.
             link.local_landing = b8r1_span_t {member.heap_.data(), layout.payload_bytes};
             link.landing_offset = 0;
+            link.landing_parity_stride = 0;
         }
-        link.remote_flag_offset = layout.flags_offset() + round * sizeof(u32_t);
+        link.remote_flag_offset = layout.flags_offset() + round * 2u * sizeof(u32_t);
         link.arrival_flag = reinterpret_cast<infiniband_round_t *>(member.heap_.data() + link.remote_flag_offset);
         host_links[round] = link;
     }
@@ -531,7 +543,7 @@ expected_t infiniband_member_t::allreduce_sum(gpu_stream_t &stream) noexcept {
         if (launched)
             launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_accumulate_f32_kernel_),
                                      dim3 {accumulate_grid, 1u, 1u}, dim3 {kernel_block_size_default_k, 1u, 1u}, stream,
-                                     links, round, shard, shard_scalars);
+                                     links, round, shard, shard_scalars, round_view);
         if (!launched) return launched;
     }
     return {};

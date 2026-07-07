@@ -496,6 +496,10 @@ expected_t multimodal_batch_mixer_t::operator()(std::size_t member_index, data_e
     };
     batch_sources_t_ sources;
     sources.count = static_cast<u32_t>(members) * domains_;
+    // One mix advances every member's buffer once, but the loop below runs before the OTHER members'
+    // exchanges of this mix enqueue — so the shared landing parity comes from this member's own buffer,
+    // whose count already ticked, never from each entry's.
+    u32_t const landing_parity = domains_ > 1u ? alltoall_buffers_[member_index].latest_parity() : 0u;
     for (u32_t source_gpu_index = 0; source_gpu_index != sources.count; ++source_gpu_index) {
         u32_t const local_member = source_gpu_index % static_cast<u32_t>(members);
         u32_t const source_multimem_domain = source_gpu_index / static_cast<u32_t>(members);
@@ -503,7 +507,7 @@ expected_t multimodal_batch_mixer_t::operator()(std::size_t member_index, data_e
             if (expected_t built = local_source(local_member, sources.entries[source_gpu_index]); !built) return built;
         }
         else {
-            b8r1_span_t const landing = alltoall_buffers_[local_member].recv_block(0u);
+            b8r1_span_t const landing = alltoall_buffers_[local_member].recv_block(0u, landing_parity);
             sources.entries[source_gpu_index] = source_from_landing_(landing, block_layout, shape_);
         }
     }
