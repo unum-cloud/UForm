@@ -40,7 +40,7 @@
 
 #include <fork_union.hpp> // vendor-boundary: `fu::basic_pool_t` — the borrowed CPU-decode pool
 
-#include "cuda_core/types.hpp"             // `expected`, `status_t`, the scalar aliases, `epoch_t`, `epoch_permutation`
+#include "cuda_core/types.hpp"             // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
 #include "cuda_core/array.hpp"             // `array` — the per-fill index scratch
 #include "cuda_core/gpu_allocators.hpp"    // `pinned_alloc` — the non-JPEG fallback's host tapes
 #include "cuda_core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`

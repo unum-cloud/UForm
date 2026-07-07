@@ -583,7 +583,7 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
     if (record_indices.try_resize_uninitialized(total_clips) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "row index allocation failed ({} draws)", total_clips);
     for (std::size_t segment = 0; segment != total_clips; ++segment)
-        record_indices[segment] = epoch_permutation(row_key, epoch_t {training_step}, segment, pooled_rows);
+        record_indices[segment] = epoch_permutation(row_key, data_epoch_t {training_step}, segment, pooled_rows);
 
     sz::span<u64_t const> const host_offsets {reservoir_offsets.data(), reservoir_offsets.size()};
     column_view_t const tape {column.buffer_, host_offsets};

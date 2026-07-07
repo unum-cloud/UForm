@@ -33,10 +33,11 @@
  *  the configured representations (each a flat @ref video_batch_shape_t ). Each job emits exactly @b one segment
  *  packed onto the @c [rows,columns] grid — the @b segment / column axis, not a tensor rank — whose footprint is
  *  derived from the clip's decoded native resolution ( @ref derive_triple_ ), never a fixed budget. The common
- *  single-representation (Omni) config is one decode per clip. Representations of one clip now share its native
- *  resolution (they differ only in @c frame_stride ), so a multi-representation config could decode a clip once and
- *  sample it per representation; the current drive still decodes per job, so sharing one decode across
- *  representations is a deferred optimization that only affects the not-yet-used multi-representation path.
+ *  single-representation (Omni) config is one decode per clip. Representations of one clip differ only in
+ *  @c frame_stride and (almost always) share their spatial target, so the drive decodes each clip @b once per
+ *  distinct spatial target — keeping every frame at temporal_stride 1 in a shared buffer — and each representation
+ *  temporally subsamples those frames by its own @c frame_stride when the tile kernel gathers its tubes. A
+ *  multi-representation config therefore pays one decode per distinct @c (patch_rows,patch_cols) , not one per job.
  *
  *  @section video_shape The patch-arranged contract
  *
@@ -59,7 +60,7 @@
 
 #include <fork_union.hpp> // vendor-boundary: `fu::basic_pool_t` — the borrowed CPU demux / decode-drive pool
 
-#include "cuda_core/types.hpp"             // `expected`, `status_t`, the scalar aliases, `epoch_t`, `epoch_permutation`
+#include "cuda_core/types.hpp"             // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
 #include "cuda_core/array.hpp"             // `array`
 #include "cuda_core/gpu_allocators.hpp"    // `pinned_alloc`
 #include "cuda_core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`

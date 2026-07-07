@@ -27,7 +27,7 @@
 #include <cstddef> // `std::size_t`
 #include <span>    // `std::span`
 
-#include "cuda_core/types.hpp"             // `expected`, `status_t`, `token_id_t`, `epoch_t`, `epoch_permutation`
+#include "cuda_core/types.hpp"             // `expected`, `status_t`, `token_id_t`, `data_epoch_t`, `epoch_permutation`
 #include "cuda_core/array.hpp"             // `array` — the loader's footer metadata
 #include "cuda_core/gpu_allocators.hpp"    // `gpu_alloc` — the per-fill scratch allocator
 #include "cuda_core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`, `grid_size_for`
@@ -81,7 +81,22 @@ struct tokens_loader_parquet_t {
         gpu_stream_t &gpu_stream, tokens_base_loader_parquet_config_t config, //
         u32_t gpu_rank, u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
+    /** @brief The distinct shard paths this rank draws for @p training_step — the keyed weighted file pick,
+     *      pure over the loader's footer table (no IO), exposed for observability and cross-rank sampling
+     *      conformance. @p target_segments is the pool target ( @c unroll·segments_per_batch ) a @ref fill would
+     *      cover; the returned views borrow the loader's owned paths, valid for the loader's lifetime.
+     *  @param[in] gpu_rank The GPU rank the draw is keyed by — different ranks draw different shard sets.
+     *  @param[in] training_step The step the draw is keyed by.
+     *  @param[in] target_segments The number of rows the pooled shards must cover. */
+    [[nodiscard]] expected<array<sz::string_view>> drawn_shards(u32_t gpu_rank, u32_t training_step,
+                                                                std::size_t target_segments) const noexcept;
+
   private:
+    /** @brief The keyed weighted file pick shared by @ref fill and @ref drawn_shards : draw distinct shards
+     *      with probability proportional to their row count, keyed by @c (seed,step,rank) , until the pool
+     *      covers @p target_segments rows (≥2 shards unless the dataset is one). Pure over the footer table. */
+    [[nodiscard]] expected<array<sz::string_view>> pick_shards_(u32_t gpu_rank, u32_t training_step,
+                                                                std::size_t target_segments) const noexcept;
     /** @brief The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
     gpu_direct_storage_session_t *storage_ = nullptr;
     /** @brief The dataset's Parquet shard paths — borrowed from the composition root. */

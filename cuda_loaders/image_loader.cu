@@ -795,9 +795,10 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
     }
 }
 
-/** @brief Crop each decoded RGBA scratch image to its factor-pair aspect, resize it into a contiguous scratch
- *      tape with one NPP batched call, then scatter each into its column sub-range of the batch's shared patch
- *      grid — the scratch and device-resident descriptors are held alive until the whole stream-ordered chain
+/** @brief Crop each decoded RGBA scratch image to its factor-pair aspect, Lanczos-resize it into a contiguous
+ *      scratch tape (one @c nppiResize per image — NPP's batched variant takes neither single-image batches
+ *      nor Lanczos), then scatter each into its column sub-range of the batch's shared patch
+ *      grid — the scratch and device-resident offsets are held alive until the whole stream-ordered chain
  *      retires. Budgets vary per image now, so each resized frame's byte size (and its base in the tape) is a
  *      running prefix, not a fixed stride. @p segment_offsets / @p segment_lengths carry the placement the
  *      segment kernel laid down. */
@@ -810,13 +811,9 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
     auto context = npp_context_(stream);
     if (!context) return expected_t::fail(std::move(context));
 
-    array<NppiImageDescriptor> host_src, host_dst;
-    array<NppiResizeBatchROI_Advanced> host_roi;
     array<u32_t> host_resized_offsets; // each image's element base in the packed resized tape
-    if (host_src.try_resize(images) != status_t::success_k || host_dst.try_resize(images) != status_t::success_k ||
-        host_roi.try_resize(images) != status_t::success_k ||
-        host_resized_offsets.try_resize(images) != status_t::success_k)
-        return expected_t::fail(status_t::bad_alloc_k, "resize descriptor allocation failed");
+    if (host_resized_offsets.try_resize(images) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "resize offset allocation failed");
     // Lay the variable-budget resized frames end to end; a prefix scan gives each one's base in the tape.
     std::size_t resized_elements = 0;
     for (std::size_t index = 0; index != images; ++index) {
@@ -834,52 +831,35 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
                                 resized_elements);
     pixel_t *const resized_base = resized.data();
 
-    int max_width = 0, max_height = 0;
+    // NPP's batched resize rejects single-image batches (its @c nBatchSize contract demands more than one)
+    // and rejects Lanczos outright ( @c NPP_INTERPOLATION_ERROR ) — per-image @c nppiResize keeps the
+    // Lanczos quality the training data wants, needs no device-resident descriptor tables, and the calls
+    // serialize on the one stream exactly like a batched launch would.
     for (std::size_t index = 0; index != images; ++index) {
         image_plan_t const &plan = plans[index];
         image_extent_t const source = plan.decoded;
         image_extent_t const target {u32_t(plan.grid.cols) * patch_size, u32_t(plan.grid.rows) * patch_size};
         NppiSize const source_size {static_cast<int>(source.width), static_cast<int>(source.height)};
         NppiSize const target_size {static_cast<int>(target.width), static_cast<int>(target.height)};
-        host_src[index] = NppiImageDescriptor {scratch + plan.scratch_offset,
-                                               static_cast<int>(source.width * image_channels_k), source_size};
-        host_dst[index] = NppiImageDescriptor {resized_base + host_resized_offsets[index],
-                                               static_cast<int>(target.width * image_channels_k), target_size};
-        host_roi[index] = NppiResizeBatchROI_Advanced {center_crop_(source, target),
-                                                       NppiRect {0, 0, target_size.width, target_size.height}};
-        max_width = std::max(max_width, source_size.width);
-        max_height = std::max(max_height, source_size.height);
+        NppStatus const resized_one = nppiResize_8u_C4R_Ctx(
+            reinterpret_cast<Npp8u const *>(scratch + plan.scratch_offset),
+            static_cast<int>(source.width * image_channels_k), source_size, center_crop_(source, target),
+            reinterpret_cast<Npp8u *>(resized_base + host_resized_offsets[index]),
+            static_cast<int>(target.width * image_channels_k), target_size,
+            NppiRect {0, 0, target_size.width, target_size.height}, NPPI_INTER_LANCZOS, context.value_);
+        if (resized_one != NPP_SUCCESS)
+            return expected_t::fail(status_t::cuda_error_k, "image resize failed (status={} image={})",
+                                    static_cast<int>(resized_one), index);
     }
-    // The descriptor arrays plus the per-image resized base must be device-resident — owning. The tile kernel
-    // reads each segment's column count straight from the device-side @c image_shapes , no second copy here.
-    array<NppiImageDescriptor, gpu_alloc<NppiImageDescriptor>> device_src {
-        gpu_alloc<NppiImageDescriptor> {stream.get()}};
-    array<NppiImageDescriptor, gpu_alloc<NppiImageDescriptor>> device_dst {
-        gpu_alloc<NppiImageDescriptor> {stream.get()}};
-    array<NppiResizeBatchROI_Advanced, gpu_alloc<NppiResizeBatchROI_Advanced>> device_roi {
-        gpu_alloc<NppiResizeBatchROI_Advanced> {stream.get()}};
+    // The per-image resized bases must be device-resident for the tile kernel — owning. It reads each
+    // segment's column count straight from the device-side @c image_shapes , no second copy here.
     array<u32_t, gpu_alloc<u32_t>> device_resized_offsets {gpu_alloc<u32_t> {stream.get()}};
-    if (device_src.try_resize_uninitialized(images) != status_t::success_k ||
-        device_dst.try_resize_uninitialized(images) != status_t::success_k ||
-        device_roi.try_resize_uninitialized(images) != status_t::success_k ||
-        device_resized_offsets.try_resize_uninitialized(images) != status_t::success_k)
-        return expected_t::fail(status_t::bad_alloc_k, "resize descriptor device allocation failed");
-    // Accumulate the first failing driver result and push it up typed — never collapse it to a bare bool.
-    CUresult uploaded = CUDA_SUCCESS;
-    auto upload = [&](void const *device, void const *host, std::size_t bytes) {
-        if (uploaded == CUDA_SUCCESS)
-            uploaded = cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(device), host, bytes, stream.get());
-    };
-    upload(device_src.data(), host_src.data(), images * sizeof(NppiImageDescriptor));
-    upload(device_dst.data(), host_dst.data(), images * sizeof(NppiImageDescriptor));
-    upload(device_roi.data(), host_roi.data(), images * sizeof(NppiResizeBatchROI_Advanced));
-    upload(device_resized_offsets.data(), host_resized_offsets.data(), images * sizeof(u32_t));
-    if (uploaded != CUDA_SUCCESS) return expected_t::fail(uploaded, "resize descriptor upload failed");
-    NppStatus const done = nppiResizeBatch_8u_C4R_Advanced_Ctx(
-        max_width, max_height, device_src.data(), device_dst.data(), device_roi.data(),
-        static_cast<unsigned int>(images), NPPI_INTER_LANCZOS, context.value_);
-    if (done != NPP_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "batched resize failed (status={})", static_cast<int>(done));
+    if (device_resized_offsets.try_resize_uninitialized(images) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "resize offset device allocation failed");
+    if (CUresult uploaded = cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(device_resized_offsets.data()),
+                                              host_resized_offsets.data(), images * sizeof(u32_t), stream.get());
+        uploaded != CUDA_SUCCESS)
+        return expected_t::fail(uploaded, "resize offset upload failed");
 
     // Scatter every resized image into its column sub-range (one CTA per segment), then retire the whole
     // stream-ordered chain before the owning scratch / descriptor arrays fall out of scope.
@@ -1069,7 +1049,7 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
     if (record_indices.try_resize_uninitialized(total_images) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "row index allocation failed ({} draws)", total_images);
     for (std::size_t index = 0; index != total_images; ++index)
-        record_indices[index] = epoch_permutation(row_key, epoch_t {training_step}, index, pooled_rows);
+        record_indices[index] = epoch_permutation(row_key, data_epoch_t {training_step}, index, pooled_rows);
 
     // The blob column re-viewed with its offsets on host: device bytes, host-indexable via @c tape[row] .
     sz::span<u64_t const> const host_offsets {reservoir_offsets.data(), reservoir_offsets.size()};

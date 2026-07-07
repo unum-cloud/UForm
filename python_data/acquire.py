@@ -74,7 +74,7 @@ def _data_root() -> Path:
 
 def _read_compression(shard_name: str) -> str | None:
     """The cuDF `read_json` compression for a JSON-lines shard, by longest matching JSONL extension."""
-    from repack_one import COMPRESSION_OF_EXTENSION, JSONL_EXTENSIONS  # lazy: pulls cuDF
+    from repack_one import COMPRESSION_OF_EXTENSION, JSONL_EXTENSIONS  # noqa: PLC0415 — lazy: pulls cuDF
 
     for extension in sorted(JSONL_EXTENSIONS, key=len, reverse=True):
         if shard_name.endswith(extension):
@@ -105,7 +105,7 @@ def _enumerate_shards(source_kind: str, repo_id: str | None, revision: str, shar
 def _matches_only(shard: str, tokens: list[str]) -> bool:
     """Whether a shard belongs to one of the named `--only` groups (split / language).
 
-    Matches on PATH COMPONENTS, not raw substrings, so `bal_train` selects `data/bal_train/…` but not
+    Matches on path components, not raw substrings, so `bal_train` selects `data/bal_train/…` but not
     `data/unbal_train/…`, and also accepts a filename-prefix layout where the group is a `<token>-` /
     `<token>_` / `<token>.` prefix of a component (e.g. `bal_train-00007.parquet`).
     """
@@ -230,7 +230,7 @@ def _fetch_one_shard(
             return set(table.column_names)
 
         if source_kind == "webdataset":
-            from repack_webdataset_to_parquet import (  # lazy: pulls orjson/xxhash
+            from repack_webdataset_to_parquet import (  # noqa: PLC0415 — lazy: pulls orjson/xxhash
                 ROW_GROUP_SIZE,
                 read_shard_samples,
                 samples_to_table,
@@ -245,7 +245,7 @@ def _fetch_one_shard(
             return set(table.column_names)
 
         if source_kind == "text_jsonl":
-            from repack_one import repack_zstd_via_cpu_chunks  # lazy: pulls cuDF
+            from repack_one import repack_zstd_via_cpu_chunks  # noqa: PLC0415 — lazy: pulls cuDF
 
             compression = _read_compression(source)
             if compression == "zstd":

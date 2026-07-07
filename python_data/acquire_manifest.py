@@ -230,7 +230,7 @@ STAGING_ROWS: list[StagingRow] = [
         dataset="pes2o",
         modality="text",
         fraction=0.40,
-        estimated_full_gigabytes=80.0,  # peS2o v3 train, full (136 zstd shards).
+        estimated_full_gigabytes=250.0,  # measured: 251 parquet shards = 198 GB at fraction 1.0 (near full).
         estimated_download_gigabytes=32.0,
         fraction_mechanism="fraction",
         download_command=_uv("python_data/download_pes2o.py", "--out-dir", f"{DATA_ROOT}/peS2o", "--fraction", "0.40"),
@@ -298,7 +298,7 @@ STAGING_ROWS: list[StagingRow] = [
         glob_override="data/compile-ir/data/**/*.parquet",  # no compile_ir entry in any mixture
         modality="text",
         fraction=0.012,
-        estimated_full_gigabytes=2700.0,  # full ComPile LLVM-IR corpus.
+        estimated_full_gigabytes=783.0,  # measured: 116 shards = 34 GB -> ~0.29 GB/shard x 2700.
         estimated_download_gigabytes=32.0,  # first 50 of ~2700 shards.
         fraction_mechanism="max-shards",
         download_command=_uv("python_data/download_compile_ir.py", "--max-shards", "50"),
@@ -381,19 +381,19 @@ STAGING_ROWS: list[StagingRow] = [
         dataset="datacomp_small",
         modality="image",
         fraction=0.10,
-        estimated_full_gigabytes=450.0,  # ~12.8M image-text pairs (DataComp-small), decoded bytes in parquet.
-        estimated_download_gigabytes=45.0,
+        estimated_full_gigabytes=16.0,  # skipped in bulk; ~16 GB partial already on disk.
+        estimated_download_gigabytes=0.0,
         fraction_mechanism="fraction",
-        download_command=_uv("python_data/download_datacomp_small.py", "--fraction", "0.10"),
-        weight=1.5,
-        cap_flag="--fraction",
-        flag="url_crawl via acquire (img2dataset over the URL index); carried by data/image_caption.json (weight 0.10).",
+        # Skipped in bulk staging: img2dataset URL-crawl hangs on dead links and blocks every worker; stage
+        # datacomp_small on its own with tuned img2dataset timeouts/retries, then restore the _uv(...) command.
+        download_command=None,
+        flag="url_crawl via acquire (img2dataset); skipped in bulk run — stage separately (dead-link crawl too slow).",
     ),
     StagingRow(
         dataset="cc12m",
         modality="image",
         fraction=0.35,
-        estimated_full_gigabytes=1500.0,  # 12M image+caption WebDataset, ~2176 tar shards.
+        estimated_full_gigabytes=3100.0,  # measured: 762 tars = 1098 GB -> ~1.44 GB/tar x 2176.
         estimated_download_gigabytes=525.0,
         fraction_mechanism="max-shards",
         download_command=_uv("python_data/download_cc12m.py", "--out-dir", f"{DATA_ROOT}/cc12m", "--max-shards", "762"),
@@ -410,7 +410,7 @@ STAGING_ROWS: list[StagingRow] = [
         dataset="laion_cc3m",
         modality="image",
         fraction=0.35,
-        estimated_full_gigabytes=500.0,  # 3M image+caption WebDataset, ~575 tar shards.
+        estimated_full_gigabytes=1070.0,  # measured: 200 tars = 372 GB -> ~1.86 GB/tar x 575.
         estimated_download_gigabytes=175.0,
         fraction_mechanism="max-shards",
         download_command=_uv(
@@ -540,7 +540,7 @@ STAGING_ROWS: list[StagingRow] = [
         glob_override="data/webvid-10m/data/train-*.parquet",  # no webvid_10m entry in any mixture
         modality="video",
         fraction=0.24,
-        estimated_full_gigabytes=385.0,  # ~452 parquet shards; on-disk 108 shards measured at ~92 GB.
+        estimated_full_gigabytes=411.0,  # measured: 108 shards = 98 GB -> ~0.91 GB/shard x 452.
         estimated_download_gigabytes=92.0,
         fraction_mechanism="max-shards",
         download_command=_uv(
@@ -557,7 +557,7 @@ STAGING_ROWS: list[StagingRow] = [
         glob_override="data/kinetics400/train/*.parquet",  # no kinetics400 entry in any mixture
         modality="video",
         fraction=0.30,
-        estimated_full_gigabytes=467.0,  # 242 train tar.gz shards, ~240K clips.
+        estimated_full_gigabytes=850.0,  # measured: 34 shards = 119 GB -> ~3.5 GB/shard x 242.
         estimated_download_gigabytes=140.0,
         fraction_mechanism="max-shards",
         download_command=_uv(
@@ -667,7 +667,7 @@ STAGING_ROWS: list[StagingRow] = [
         glob_override="data/audioset/data/**/*.parquet",  # no audioset entry in any mixture; bal_train/eval splits
         modality="audio",
         fraction=0.02,
-        estimated_full_gigabytes=2400.0,  # full AudioSet (943 parquet shards: bal_train/eval/unbal_train).
+        estimated_full_gigabytes=641.0,  # measured: 73 shards = 50 GB -> ~0.68 GB/shard x 943.
         estimated_download_gigabytes=48.0,
         fraction_mechanism="fraction",
         download_command=_uv(

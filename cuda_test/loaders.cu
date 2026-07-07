@@ -26,12 +26,15 @@
 
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
-#include "cuda_core/types.hpp"             // `splitmix64_hash_t`, `epoch_permutation`, `epoch_t`, `to_string`, aliases
+#include "cuda_core/types.hpp"             // `splitmix64_hash_t`, `epoch_permutation`, `data_epoch_t`, `to_string`
 #include "cuda_core/array.hpp"             // `array`, `stack_array` — the host-oracle and staging scratch
 #include "cuda_core/gpu_allocators.hpp"    // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`, the tensor aliases
 #include "cuda_core/schedule.cuh"          // `gpu_stream_t`, `copy_host_to_device`, `copy_device_to_host`
+#include "cuda_core/mesh.hpp"              // `mesh_topology_t`, `host_domain_index_from_environment`
 #include "cuda_core/multimodal_batch.hpp"  // `multimodal_batch_on_gpu_t`, the shape, `fill_coords`, `modality_t`
+#include "cuda_loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
 #include "cuda_loaders/dataset_shards.hpp" // `column_view_t`
+#include "cuda_loaders/tokens_loader.cuh"  // `tokens_loader_parquet_t`, `drawn_shards`
 #include "cuda_loaders/audio_loader.cuh"   // `decode_audios`, `cpu_decode_pool_t`
 #include "cuda_loaders/image_loader.cuh"   // `nvjpeg_session_t`, `decode_images`
 #include "cuda_loaders/video_loader.cuh"   // `nvdec_session_t`, `decode_videos`
@@ -97,8 +100,12 @@ struct fabricated_tape_t {
                 return result_t::fail(status_t::bad_alloc_k, "tape offset append failed");
         }
         std::size_t const total = std::max<std::size_t>(host.size(), 1u);
-        tape.device_bytes = b8r1_tensor_arena_t::try_zeros({total}, gpu_arena_alloc<b8_t> {arena});
+        // Device memory: `try_empty` + explicit memset — `try_zeros` writes through the host pointer.
+        tape.device_bytes = b8r1_tensor_arena_t::try_empty({total}, gpu_arena_alloc<b8_t> {arena});
         if (!tape.device_bytes) return result_t::fail(status_t::bad_alloc_k, "tape device buffer alloc failed");
+        if (CUresult reset = cuMemsetD8(reinterpret_cast<CUdeviceptr>(tape.device_bytes.data()), 0, total);
+            reset != CUDA_SUCCESS)
+            return result_t::fail(reset, "tape device buffer reset failed");
         nk::tensor_view<b8_t, 1> const host_view {host.data(), host.size()};
         if (expected_t staged = copy_host_to_device(host_view, tape.device_bytes.span(), stream); !staged)
             return result_t::fail(std::move(staged));
@@ -177,7 +184,8 @@ static void draw_primitives_are_stable(test_suite_t &suite) {
     if (seen.try_resize(draw_count) != status_t::success_k) return suite.check(false, "seen scratch alloc failed");
     bool bijection = true;
     for (std::size_t index = 0; index != draw_count; ++index) {
-        std::size_t const row = epoch_permutation(hash(seed, 3u, row_draw_salt_k), epoch_t {7u}, index, draw_count);
+        std::size_t const row = epoch_permutation(hash(seed, 3u, row_draw_salt_k), data_epoch_t {7u}, index,
+                                                  draw_count);
         bijection = bijection && row < draw_count && seen[row] == 0;
         if (row < draw_count) seen[row] = 1;
     }
@@ -185,8 +193,9 @@ static void draw_primitives_are_stable(test_suite_t &suite) {
 
     bool differs = false;
     for (std::size_t index = 0; index != draw_count; ++index)
-        differs = differs || epoch_permutation(hash(seed, 3u, row_draw_salt_k), epoch_t {7u}, index, draw_count) !=
-                                 epoch_permutation(hash(seed, 4u, row_draw_salt_k), epoch_t {7u}, index, draw_count);
+        differs = differs ||
+                  epoch_permutation(hash(seed, 3u, row_draw_salt_k), data_epoch_t {7u}, index, draw_count) !=
+                      epoch_permutation(hash(seed, 4u, row_draw_salt_k), data_epoch_t {7u}, index, draw_count);
     suite.check(differs, "a different rank must reshuffle the draw");
 }
 
@@ -336,8 +345,11 @@ static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &
         return suite.check(false, "coords staging copy failed");
 
     std::size_t const tokens = columns; // one row
-    i16r2_tensor_arena_t coords = i16r2_tensor_arena_t::try_zeros({tokens, 3u}, gpu_arena_alloc<i16_t> {arena});
+    // Device memory: `try_empty` + explicit memset — `try_zeros` writes through the host pointer.
+    i16r2_tensor_arena_t coords = i16r2_tensor_arena_t::try_empty({tokens, 3u}, gpu_arena_alloc<i16_t> {arena});
     if (!coords) return suite.check(false, "coords scratch alloc failed");
+    if (cuMemsetD8(reinterpret_cast<CUdeviceptr>(coords.data()), 0, tokens * 3u * sizeof(i16_t)) != CUDA_SUCCESS)
+        return suite.check(false, "coords scratch reset failed");
     expected_t filled = fill_coords(batch.segment_offsets.span(), batch.segment_lengths.span(),
                                     batch.segment_modality.span(), batch.image_shapes.view(), batch.video_shapes.view(),
                                     tube_frames, coords.span(), stream);
@@ -539,7 +551,7 @@ static void run_image_decode(test_suite_t &suite, sz::string_view label, array<b
     expected_t decoded = decode_images(jpeg, pool, tape.view(), drawn.view(), representations, batch.images.span(),
                                        batch.image_shapes.span(), batch.segment_offsets.span(),
                                        batch.segment_lengths.span(), batch.segment_modality.span(), stream);
-    suite.check(static_cast<bool>(decoded), "[{}] decode_images should succeed: {}", label, to_string(decoded.status_));
+    suite.check(static_cast<bool>(decoded), "[{}] decode_images should succeed: {}", label, decoded.description_);
     if (!decoded) return;
 
     modr1_tensor_pinned_t modality = modr1_tensor_pinned_t::try_zeros({max_segments}, pinned_alloc<modality_t> {});
@@ -765,8 +777,11 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
         return suite.check(false, "multimodal: mixed staging copy failed");
 
     std::size_t const tokens = columns;
-    i16r2_tensor_arena_t coords = i16r2_tensor_arena_t::try_zeros({tokens, 3u}, gpu_arena_alloc<i16_t> {arena});
+    // Device memory: `try_empty` + explicit memset — `try_zeros` writes through the host pointer.
+    i16r2_tensor_arena_t coords = i16r2_tensor_arena_t::try_empty({tokens, 3u}, gpu_arena_alloc<i16_t> {arena});
     if (!coords) return suite.check(false, "multimodal: coords alloc failed");
+    if (cuMemsetD8(reinterpret_cast<CUdeviceptr>(coords.data()), 0, tokens * 3u * sizeof(i16_t)) != CUDA_SUCCESS)
+        return suite.check(false, "multimodal: coords reset failed");
     expected_t filled = fill_coords(mixed.segment_offsets.span(), mixed.segment_lengths.span(),
                                     mixed.segment_modality.span(), mixed.image_shapes.view(), mixed.video_shapes.view(),
                                     tube_frames, coords.span(), stream);
@@ -796,6 +811,58 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
     suite.check(image_ok, "multimodal: the packed image segment's real cells must route to (0,row,col)");
 }
 
+/**
+ *  @brief The distributed sampling tier: every rank bootstraps the mesh, draws its shard set from a shared
+ *      dataset (the keyed weighted pick), publishes it to the rendezvous, and asserts its set differs from every
+ *      peer's — the cross-node "different nodes sample different files" contract the single-process oracle can
+ *      only assert as arithmetic. Gated on @c UFORM_HOST_DOMAIN_INDEX ; a no-op without a @c UFORM_TEST_DATASET
+ *      glob, so a laptop run skips it and a 4-8-16 launch exercises it (see @c loaders-4-8-16.sbatch ).
+ */
+static void cross_rank_sampling(test_suite_t &suite) {
+    char const *const dataset = std::getenv("UFORM_TEST_DATASET");
+    if (dataset == nullptr) return; // no shared dataset — the distributed tier is inert on a single box
+
+    u32_t const index = host_domain_index_from_environment();
+    u32_t count = 0;
+    for (char const *const variable : {"UFORM_HOST_DOMAIN_COUNT", "SLURM_NTASKS"})
+        if (char const *const value = std::getenv(variable)) {
+            count = static_cast<u32_t>(std::atoi(value));
+            break;
+        }
+    if (count == 0) return suite.check(false, "world size should be set ($UFORM_HOST_DOMAIN_COUNT / $SLURM_NTASKS)");
+
+    auto bootstrapped = mesh_topology_t::bootstrap(index, count);
+    if (!bootstrapped) return suite.check(false, "the cluster should bootstrap: {}", bootstrapped.description_);
+    mesh_topology_t topology = std::move(bootstrapped.value_);
+
+    auto session_made = gpu_direct_storage_session_t::make();
+    if (!session_made) return suite.check(false, "the GDS session should make: {}", session_made.description_);
+    gpu_direct_storage_session_t session = std::move(session_made.value_);
+
+    auto loader_made = tokens_loader_parquet_t::make(session, sz::string_view {dataset}, 0xC0FFEEull);
+    if (!loader_made) return suite.check(false, "the tokens loader should make: {}", loader_made.description_);
+    tokens_loader_parquet_t loader = std::move(loader_made.value_);
+
+    // This rank's shard set for step 0 — 64 segments is a generous pool target that draws several shards.
+    auto drawn = loader.drawn_shards(index, 0u, 64u);
+    if (!drawn) return suite.check(false, "drawn_shards should succeed: {}", drawn.description_);
+    sz::string mine;
+    for (sz::string_view shard : drawn.value_) (void)format_into(mine, "{}\n", shard);
+
+    if (expected_t published = topology.publish_text("shards", mine.view()); !published)
+        return suite.check(false, "publishing the shard set should succeed: {}", published.description_);
+
+    bool distinct = true;
+    for (u32_t peer = 0; peer != count; ++peer) {
+        if (peer == index) continue;
+        sz::string other;
+        if (expected_t awaited = topology.await_text(peer, "shards", other, 60.0); !awaited) distinct = false;
+        else if (other.view() == mine.view()) distinct = false; // a peer drew the byte-identical shard set
+    }
+    suite.check(distinct, "rank {} must draw a shard set distinct from every peer", index);
+    suite.check(static_cast<bool>(topology.barrier("done", 60.0)), "the closing barrier should complete");
+}
+
 int main() {
     test_suite_t suite {"loaders conformance"};
 
@@ -805,9 +872,18 @@ int main() {
 
     if (cuInit(0) != CUDA_SUCCESS) return suite.finish(); // no GPU — the host tiers already ran
 
+    if (std::getenv("UFORM_HOST_DOMAIN_INDEX") != nullptr) { // the distributed sampling tier owns the process
+        cross_rank_sampling(suite);
+        return suite.finish();
+    }
+
     auto stream_made = gpu_stream_t::make(0);
     if (!stream_made) return suite.finish();
     gpu_stream_t stream = std::move(stream_made.value_);
+    // Every decode tier below allocates pinned staging, and `cuMemAllocHost` needs a current context —
+    // `gpu_stream_t::make` deliberately pushes and pops, so the suite holds the scope itself.
+    switch_to_gpu_t gpu_scope {stream};
+    if (!gpu_scope.ok()) return suite.check(false, "context entry should succeed"), suite.finish();
     auto arena_made = gpu_arena_t::make(0, 2ull << 30);
     if (!arena_made) return suite.check(false, "gpu arena make: {}", to_string(arena_made.status_)), suite.finish();
     gpu_arena_t arena = std::move(arena_made.value_);
