@@ -27,9 +27,10 @@
 #include <infiniband/verbs.h> // `ibv_get_device_list`, `ibv_alloc_pd`, `ibv_reg_mr`
 #endif
 
-#include "cuda_core/gpu_allocators.hpp" // `gpu_arena_t`, `gpu_registrable_alloc`
-#include "cuda_core/mesh.hpp"           // `host_domain_count_from_environment`
-#include "cuda_test/harness.hpp"        // `test_suite_t`
+#include "cuda_core/gpu_allocators.hpp"         // `gpu_arena_t`, `gpu_registrable_alloc`
+#include "cuda_core/mesh.hpp"                   // `host_domain_count_from_environment`
+#include "cuda_core/infiniband_collectives.cuh" // `infiniband_access_flags_k` — the flags the heaps register with
+#include "cuda_test/harness.hpp"                // `test_suite_t`
 
 using namespace unum::uform::core;
 using namespace unum::uform::test;
@@ -74,9 +75,8 @@ static void probe_gpu_registration_(test_suite_t &suite, int device) noexcept {
     ibv_pd *const protection_domain = ibv_alloc_pd(nic);
     suite.check(protection_domain != nullptr, "protection-domain allocation failed (device={})", device);
     if (protection_domain != nullptr) {
-        int const access = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ;
         errno = 0;
-        ibv_mr *const region = ibv_reg_mr(protection_domain, heap, probe_heap_bytes_k, access);
+        ibv_mr *const region = ibv_reg_mr(protection_domain, heap, probe_heap_bytes_k, infiniband_access_flags_k);
         suite.check(region != nullptr,
                     "GPUDirect registration failed: GPU {} + {} errno={} — check nvidia_peermem and the " //
                     "single-chunk heap contract",

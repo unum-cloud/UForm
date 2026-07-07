@@ -62,5 +62,5 @@ endforeach ()
 list(LENGTH bundle_resolved bundle_library_count)
 list(LENGTH BUNDLE_EXECUTABLES bundle_executable_count)
 message(
-    STATUS "bundled ${bundle_executable_count} executable(s) + ${bundle_library_count} librarie(s) into ${BUNDLE_DIR}"
+    STATUS "bundled ${bundle_executable_count} executable(s) + ${bundle_library_count} libraries into ${BUNDLE_DIR}"
 )
