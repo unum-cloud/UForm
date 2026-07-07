@@ -206,8 +206,9 @@ static __global__ void transformer_qk_norm_backward_kernel_(bf16r2_span_t grads,
 
 /**
  *  @brief Rotary rotation in place over one strided role slice (Q or K inside the packed QKV):
- *      channel pair @b (2k,2k+1) rotates by the axis angle its index selects; @p angle_sign @c -1 gives
- *      the inverse rotation the backward applies to the post-RoPE gradients.
+ *      the split-half channel pair @b (k,k+64) rotates by the axis angle its index selects — the
+ *      NeoX convention the CPU inference kernels and the wider ecosystem share; @p angle_sign
+ *      @c -1 gives the inverse rotation the backward applies to the post-RoPE gradients.
  *
  *  __grid_size__ @c [ceil(tokens·heads·64/block),1,1] grid-stride over channel pairs; no dynamic
  *  shared memory.
@@ -226,13 +227,13 @@ static __global__ void transformer_rope_kernel_(bf16r2_span_t values, rope_angle
         std::size_t const token = pair_index / pairs_per_token;
         u32_t const head = static_cast<u32_t>((pair_index % pairs_per_token) / pairs_per_head);
         u32_t const pair = static_cast<u32_t>(pair_index % pairs_per_head);
-        u32_t const channel = role_offset + head * transformer_head_dim_k + 2u * pair;
+        u32_t const channel = role_offset + head * transformer_head_dim_k + pair;
         f32_t const real = __bfloat162float(values[token, channel]);
-        f32_t const imaginary = __bfloat162float(values[token, channel + 1u]);
+        f32_t const imaginary = __bfloat162float(values[token, channel + pairs_per_head]);
         f32_t sin_value, cos_value;
         __sincosf(angle_sign * transformer_rope_angle_(pair, coords, token, angles), &sin_value, &cos_value);
         values[token, channel] = __float2bfloat16_rn(real * cos_value - imaginary * sin_value);
-        values[token, channel + 1u] = __float2bfloat16_rn(real * sin_value + imaginary * cos_value);
+        values[token, channel + pairs_per_head] = __float2bfloat16_rn(real * sin_value + imaginary * cos_value);
     }
 }
 

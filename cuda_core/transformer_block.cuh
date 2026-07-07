@@ -50,8 +50,9 @@
  *  The precomputed angle grids are model state owned by @ref rope_angles_t and shared by every block;
  *  per-token
  *  @b (t,h,w) coordinates are the tower's derived scratch, recomputed each forward from the batch
- *  geometry and borrowed per call as a plain view. The channel-pair convention and the per-axis
- *  shape follow the storage invariant of the angle grids (temporal pairs first, then height, then
+ *  geometry and borrowed per call as a plain view. Pairing is the NeoX split-half convention —
+ *  pair @c k couples channels @b (k,k+64) inside the 128-wide head — and the per-axis shape
+ *  follows the storage invariant of the angle grids (temporal pairs first, then height, then
  *  width); a text token @b (position,0,0) leaves the spatial pairs at identity.
  *
  *  @section transformer_ragged The ragged boundary
