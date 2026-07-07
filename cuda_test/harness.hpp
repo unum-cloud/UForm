@@ -14,7 +14,9 @@
  */
 #pragma once
 
-#include <format> // `std::vformat_to`, `std::make_format_args`
+#include <cstdlib> // `std::getenv` — the `UFORM_TEST_FILTER` launcher contract
+#include <format>  // `std::vformat_to`, `std::make_format_args`
+#include <regex>   // `std::regex`, `std::regex_search` — the case-name filter
 
 #include <unistd.h> // `::write`, `STDERR_FILENO`
 
@@ -37,6 +39,37 @@ using namespace unum::uform::core;
 inline void emit_line(sz::string_view line) noexcept {
     ssize_t const written = ::write(STDERR_FILENO, line.data(), line.size());
     (void)written;
+}
+
+/**
+ *  @brief The launcher's case filter: `UFORM_TEST_FILTER` holds a regular expression matched against each
+ *      case's formatted name — the NumKong / StringZilla convention — so a targeted question about one
+ *      case answers in minutes instead of re-running the whole matrix. An unset variable accepts every
+ *      case; a malformed pattern warns once and also accepts every case, because a broken filter must
+ *      never silently skip the suite.
+ */
+[[nodiscard]] inline bool test_filter_accepts(sz::string_view case_name) noexcept {
+    static char const *const pattern = std::getenv("UFORM_TEST_FILTER"); // vendor-boundary: launcher contract
+    if (pattern == nullptr) return true;
+    struct parsed_filter_t {
+        std::regex expression {};
+        bool valid = false;
+    };
+    static parsed_filter_t const filter = []() noexcept {
+        parsed_filter_t parsed;
+        try {
+            parsed.expression = std::regex {pattern, std::regex_constants::ECMAScript | std::regex_constants::nosubs};
+            parsed.valid = true;
+        }
+        catch (std::regex_error const &) {
+            sz::string line;
+            (void)format_into(line, "UFORM_TEST_FILTER is not a valid regular expression: {}\n", pattern);
+            emit_line(line.view());
+        }
+        return parsed;
+    }();
+    if (!filter.valid) return true; // a broken filter must never silently skip the suite
+    return std::regex_search(case_name.data(), case_name.data() + case_name.size(), filter.expression);
 }
 
 /**

@@ -526,6 +526,7 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
 static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, mesh_topology_t const &topology,
                             multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce,
                             sz::string_view label, base_config_t const &config) {
+    if (!test_filter_accepts(label)) return;
     if (!world_still_healthy_(suite, health)) return;
     base_trainer_t trainer;
     if (expected_t built = base_trainer_t::make(trainer, config, topology); !built)
@@ -719,9 +720,16 @@ int main() {
     tier_t const cheap {narrow.value_, cheap_domain.value_, cheap_reduce.value_};
     world_health_t health;
 
-    run_base_conformance(suite, health, "tokens", test_geometry_(false), wide.topology, wide.domain, wide.world_reduce);
-    run_base_conformance(suite, health, "omni", test_geometry_(true), wide.topology, wide.domain, wide.world_reduce);
+    // Targeted runs: UFORM_TEST_FILTER is a regular expression against each case's name (the
+    // NumKong / StringZilla convention), so a wire-run question about one cell answers in a couple of
+    // minutes instead of re-running the whole matrix.
+    if (test_filter_accepts("conformance/tokens"))
+        run_base_conformance(suite, health, "tokens", test_geometry_(false), wide.topology, wide.domain,
+                             wide.world_reduce);
+    if (test_filter_accepts("conformance/omni"))
+        run_base_conformance(suite, health, "omni", test_geometry_(true), wide.topology, wide.domain,
+                             wide.world_reduce);
     mixture_sweep(suite, health, wide, cheap);
-    graph_capture(suite, health, narrow.value_);
+    if (test_filter_accepts("capture/replay")) graph_capture(suite, health, narrow.value_);
     return suite.finish();
 }

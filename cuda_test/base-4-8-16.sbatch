@@ -57,5 +57,7 @@ if [[ -x "${env_binary}" ]]; then
     srun --ntasks="${host_domain_count}" --ntasks-per-node=1 --gpu-bind=none "${env_binary}"
 fi
 
+# Line-buffered so a hung run shows how far it got instead of a silent block-buffered void; the optional
+# UFORM_TEST_ONLY=tokens|omni|sweep fast lane rides through --export like the rest of the contract.
 srun --ntasks="${host_domain_count}" --ntasks-per-node=1 --gpu-bind=none \
-    "${UFORM_TEST_BINARY:-./build/cuda_test_base}"
+    stdbuf -oL "${UFORM_TEST_BINARY:-./build/cuda_test_base}"
