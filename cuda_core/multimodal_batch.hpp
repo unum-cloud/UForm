@@ -185,6 +185,11 @@ struct multimodal_batch_shape_t {
     u32_t max_segments_per_gpu = 0;
     /** @brief How many positions one row spans — what most of the literature calls @c seq_len . */
     u32_t max_columns_per_row = 0;
+    /** @brief How many contrastive bags one GPU's step carries — the mixer's routing unit, so a bag's
+     *      segments land together on one member. The @b count is latched capacity while each bag's
+     *      segment degree is content (fixed capacity, variable degree). Zero keeps every segment its own
+     *      routing unit — the masked pipeline's degenerate case and the default. */
+    u32_t max_bags_per_gpu = 0;
 
     /** @brief The image modality's geometry (patch side, channels) — handed to the image loader alone. */
     image_batch_shape_t image {};
@@ -234,6 +239,12 @@ struct multimodal_batch {
      *      the tag is per segment, not per row. The coordinate adapter dispatches on it, the mixer copies it,
      *      and the tower routes each segment to its modality's projection. PAD segments carry @c text_k . */
     nk::tensor<modality_t, rebound<modality_t>, 1> segment_modality {};
+    /** @brief @b [max_segments_per_gpu] each live segment's bag — the loader packs a bag's segments
+     *      contiguously and tags them with its local bag index in @c [0,max_bags_per_gpu) , and the mixer
+     *      routes whole bags, renumbering to the destination-local index. Meaningful only when the shape's
+     *      @ref multimodal_batch_shape_t::max_bags_per_gpu is nonzero; a PAD segment's bag value is inert —
+     *      the mixer's nonzero-length filter excludes it from every bag before the tag is consulted. */
+    nk::tensor<u32_t, rebound<u32_t>, 1> segment_bag {};
     /** @brief @b [rows,columns] discrete token ids — text is the degenerate modality, a scalar per grid
      *      position whose coordinate is @c (position,0,0) . Every media modality lifts this same
      *      @c [rows,columns] grid one rank higher, replacing the scalar with a patch vector; one encoder
@@ -289,6 +300,10 @@ struct multimodal_batch {
             return result_t::fail(status_t::invalid_input_k,
                                   "a batch needs all three capacities (rows={} segments={} columns={})",
                                   shape.max_rows_per_gpu, shape.max_segments_per_gpu, shape.max_columns_per_row);
+        if (shape.max_bags_per_gpu > shape.max_segments_per_gpu)
+            return result_t::fail(status_t::invalid_input_k,
+                                  "bag budget exceeds segment budget (bags={} segments={}) — each bag needs a segment",
+                                  shape.max_bags_per_gpu, shape.max_segments_per_gpu);
         multimodal_batch batch;
         batch.segment_offsets = nk::tensor<u32_t, rebound<u32_t>, 1>::try_empty({shape.max_segments_per_gpu + 1u},
                                                                                 rebound<u32_t> {allocator});
@@ -296,14 +311,16 @@ struct multimodal_batch {
                                                                                 rebound<u32_t> {allocator});
         batch.segment_modality = nk::tensor<modality_t, rebound<modality_t>, 1>::try_empty(
             {shape.max_segments_per_gpu}, rebound<modality_t> {allocator});
+        batch.segment_bag = nk::tensor<u32_t, rebound<u32_t>, 1>::try_empty({shape.max_segments_per_gpu},
+                                                                            rebound<u32_t> {allocator});
         batch.tokens = nk::tensor<token_id_t, rebound<token_id_t>, 2>::try_empty(
             {shape.max_rows_per_gpu, shape.max_columns_per_row}, rebound<token_id_t> {allocator});
         batch.image_shapes = nk::tensor<u16_t, rebound<u16_t>, 2>::try_empty({shape.max_segments_per_gpu, 2u},
                                                                              rebound<u16_t> {allocator});
         batch.video_shapes = nk::tensor<u16_t, rebound<u16_t>, 2>::try_empty({shape.max_segments_per_gpu, 3u},
                                                                              rebound<u16_t> {allocator});
-        if (!batch.segment_offsets || !batch.segment_lengths || !batch.segment_modality || !batch.tokens ||
-            !batch.image_shapes || !batch.video_shapes)
+        if (!batch.segment_offsets || !batch.segment_lengths || !batch.segment_modality || !batch.segment_bag ||
+            !batch.tokens || !batch.image_shapes || !batch.video_shapes)
             return result_t::fail(status_t::bad_alloc_k, "batch allocation failed (rows={} segments={} columns={})",
                                   shape.max_rows_per_gpu, shape.max_segments_per_gpu, shape.max_columns_per_row);
         if (shape.image.patch_side != 0) {
@@ -445,6 +462,11 @@ struct multimodal_batch_mixer_t {
     /** @brief One cross-domain full-batch exchange buffer per member — empty on a single-multimem_domain
      *      world, where @ref domains_ is 1 and the exchange path is skipped entirely. */
     per_gpu_array<infiniband_all_to_all<b8_t>> alltoall_buffers_ {};
+    /** @brief Per-member @b [max_segments_per_gpu] routing scratch — each mix's geometry pass records
+     *      every mixed segment's world source here and the gather pass reads it back (variable-degree bags
+     *      make a destination's source un-derivable per segment). On the member's own arena; never
+     *      exchanged, never part of a batch. */
+    per_gpu_array<u32r1_tensor_arena_t> mixed_sources_ {};
     /** @brief How many multimem_domains the world spans; 1 is the single-NVLink-domain fast path. */
     u32_t domains_ = 1;
     /** @brief This process's multimem_domain index — the source of a segment whose source GPU sits here is

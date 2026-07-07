@@ -170,6 +170,258 @@ static void routing_is_a_bijection(test_suite_t &suite, u32_t member_count, u64_
     suite.check(bijection, "the routing must be a bijection over {} world segments", world);
 }
 
+/** @brief Bags per member in the bag-cohesion tier — the latched routing capacity. */
+inline constexpr u32_t bags_per_member_k = 3u;
+
+/** @brief The bag id a PAD segment carries — one past the last valid bag, the mixer's no-bag @c end
+ *      sentinel. */
+inline constexpr u32_t pad_bag_k = bags_per_member_k;
+
+/** @brief Bag @p bag 's live segment count — deliberately different per bag ( @c {3,1,2} ), so the tier
+ *      exercises the fixed-capacity / variable-degree law rather than a uniform special case. */
+[[nodiscard]] static u32_t bag_degree_(u32_t bag) noexcept {
+    u32_t const degrees[bags_per_member_k] = {3u, 1u, 2u};
+    return degrees[bag];
+}
+
+/** @brief The segment index where bag @p bag 's contiguous run starts in a fabricated bagged batch. */
+[[nodiscard]] static u32_t bag_first_segment_(u32_t bag) noexcept {
+    u32_t first = 0;
+    for (u32_t earlier = 0; earlier != bag; ++earlier) first += bag_degree_(earlier);
+    return first;
+}
+
+/** @brief Fabricate member @p member 's bagged loaded batch: @ref bags_per_member_k bags of
+ *      @ref bag_degree_ segments packed contiguously in bag order, each @ref tokens_per_segment_k columns
+ *      of @ref signature_token_ , the tail PAD (zero length). Mirrors @ref fabricate_loaded_ 's staging.
+ *  @param[inout] batch The member's loaded batch, its geometry, bags, and tokens overwritten.
+ *  @param[in] member This member's world coordinate, folded into every token signature.
+ *  @param[inout] stream The member's stream the staging enqueues on. */
+[[nodiscard]] static expected_t fabricate_bagged_(multimodal_batch_on_gpu_t &batch, u32_t member,
+                                                  gpu_stream_t &stream) noexcept {
+    u32_t const S = segments_per_member_k, L = tokens_per_segment_k;
+
+    switch_to_gpu_t gpu_scope {stream};
+    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for member {}", member);
+
+    auto offsets = pinned1_t<u32_t>::try_zeros({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {});
+    auto lengths = pinned1_t<u32_t>::try_zeros({S}, pinned_alloc<u32_t> {});
+    auto modality = pinned1_t<modality_t>::try_zeros({S}, pinned_alloc<modality_t> {});
+    auto bags = pinned1_t<u32_t>::try_zeros({S}, pinned_alloc<u32_t> {});
+    auto tokens = pinned1_t<token_id_t>::try_zeros({batch.tokens.extent(0) * batch.tokens.extent(1)},
+                                                   pinned_alloc<token_id_t> {});
+    if (!offsets || !lengths || !modality || !bags || !tokens)
+        return expected_t::fail(status_t::bad_alloc_k, "bagged fabrication scratch alloc failed");
+
+    u32_t segment = 0;
+    for (u32_t bag = 0; bag != bags_per_member_k; ++bag)
+        for (u32_t position = 0; position != bag_degree_(bag); ++position, ++segment) {
+            offsets[segment] = segment * L;
+            lengths[segment] = L;
+            modality[segment] = modality_t::text_k;
+            bags[segment] = bag;
+            for (u32_t j = 0; j != L; ++j) tokens[segment * L + j] = signature_token_(member, segment, j);
+        }
+    for (u32_t pad = segment; pad != S; ++pad) {
+        offsets[pad] = segment * L;
+        // Keeps the fabrication self-consistent; the mixer's nonzero-length filter is what actually
+        // excludes a PAD from every bag, whatever its tag.
+        bags[pad] = pad_bag_k;
+    }
+    offsets[S] = segment * L;
+
+    if (expected_t staged = copy_host_to_device(offsets.view(), batch.segment_offsets.span(), stream); !staged)
+        return staged;
+    if (expected_t staged = copy_host_to_device(lengths.view(), batch.segment_lengths.span(), stream); !staged)
+        return staged;
+    if (expected_t staged = copy_host_to_device(modality.view(), batch.segment_modality.span(), stream); !staged)
+        return staged;
+    if (expected_t staged = copy_host_to_device(bags.view(), batch.segment_bag.span(), stream); !staged) return staged;
+    if (expected_t staged = copy_host_to_device(tokens.view(), batch.tokens.span().flatten<1>(), stream); !staged)
+        return staged;
+    if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
+        return expected_t::fail(synced, "bagged fabrication sync failed for member {}", member);
+    return {};
+}
+
+/** @brief One host-mirrored mixed segment — what the geometry kernel must have written for it. */
+struct mirrored_segment_t {
+    /** @brief The segment's flat pack position in the mixed grid. */
+    u32_t offset = 0;
+    /** @brief The segment's live token count. */
+    u32_t length = 0;
+    /** @brief The destination-local bag the segment was renumbered into. */
+    u32_t bag = 0;
+    /** @brief The world member the segment was gathered from. */
+    u32_t source_member = 0;
+    /** @brief The segment's index within its source member's batch. */
+    u32_t source_segment = 0;
+};
+
+/** @brief A member's host-mirrored bag walk — each placed segment's placement and world source,
+ *      index-aligned to the mixed batch; everything past @c size() is the PAD tail. */
+using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_k>;
+
+/** @brief Host-mirror the bag-cohesive geometry walk for destination @p member — the same trial-then-commit
+ *      cursor scan the kernel runs, over the fabrication's known degrees. A bag that cannot land whole is
+ *      skipped whole, exactly as the kernel drops it.
+ *  @param[in] member The destination's world coordinate — its bag range's base.
+ *  @param[in] world_member_count The world's member count — the bag permutation spans
+ *      @c bags_per_member_k·world_member_count .
+ *  @param[in] seed The routing seed the mixer was built with.
+ *  @param[in] epoch The data epoch the mix ran at.
+ *  @param[in] rows The mixed grid's row capacity.
+ *  @param[in] columns_per_row The mixed grid's row width. */
+[[nodiscard]] static mirrored_geometry_t mirror_bag_geometry_(u32_t member, u32_t world_member_count, u64_t seed,
+                                                              data_epoch_t epoch, u32_t rows,
+                                                              u32_t columns_per_row) noexcept {
+    u32_t const L = tokens_per_segment_k;
+    u32_t const capacity = rows * columns_per_row;
+    std::size_t const world_bags = static_cast<std::size_t>(bags_per_member_k) * world_member_count;
+    mirrored_geometry_t mirror;
+    u32_t cursor = 0;
+    for (u32_t bag = 0; bag != bags_per_member_k; ++bag) {
+        std::size_t const destination_bag = static_cast<std::size_t>(member) * bags_per_member_k + bag;
+        std::size_t const source_bag_world = epoch_permutation(seed, epoch, destination_bag, world_bags);
+        u32_t const source_member = static_cast<u32_t>(source_bag_world / bags_per_member_k);
+        u32_t const source_bag = static_cast<u32_t>(source_bag_world % bags_per_member_k);
+        u32_t const degree = bag_degree_(source_bag);
+
+        u32_t trial_cursor = cursor;
+        bool fits = mirror.size() + degree <= segments_per_member_k;
+        for (u32_t position = 0; position != degree && fits; ++position) {
+            u32_t const room_in_row = columns_per_row - trial_cursor % columns_per_row;
+            if (L > room_in_row) trial_cursor += room_in_row;
+            fits = trial_cursor + L <= capacity;
+            trial_cursor += L;
+        }
+        if (!fits) continue; // dropped whole, exactly as the kernel drops it
+
+        for (u32_t position = 0; position != degree; ++position) {
+            u32_t const room_in_row = columns_per_row - cursor % columns_per_row;
+            if (L > room_in_row) cursor += room_in_row;
+            mirrored_segment_t placed;
+            placed.offset = cursor;
+            placed.length = L;
+            placed.bag = bag;
+            placed.source_member = source_member;
+            placed.source_segment = bag_first_segment_(source_bag) + position;
+            (void)mirror.try_push_back(placed);
+            cursor += L;
+        }
+    }
+    return mirror;
+}
+
+/** @brief Read member @p member 's bagged mixed batch back and assert it equals the host mirror exactly:
+ *      every placed segment's offset, length, destination-local bag, and tokens; contiguous bag runs in
+ *      ascending order (cohesion); and a zero-length, no-bag tail — so a dropped bag is provably dropped
+ *      @b whole and a surviving one provably intact.
+ *  @param[inout] suite The conformance suite the checks report into.
+ *  @param[inout] mixed The member's mixed batch to read back.
+ *  @param[in] member This member's world coordinate — its destination range's base.
+ *  @param[in] world_member_count The world's member count — the bag permutation spans
+ *      @c bags_per_member_k·world_member_count .
+ *  @param[in] seed The routing seed the mixer was built with.
+ *  @param[in] epoch The data epoch the mix ran at.
+ *  @param[inout] stream The member's stream the readback enqueues on. */
+[[nodiscard]] static expected_t verify_bagged_(test_suite_t &suite, multimodal_batch_on_gpu_t &mixed, u32_t member,
+                                               u32_t world_member_count, u64_t seed, data_epoch_t epoch,
+                                               gpu_stream_t &stream) noexcept {
+    u32_t const S = segments_per_member_k, L = tokens_per_segment_k;
+    u32_t const rows = static_cast<u32_t>(mixed.tokens.extent(0));
+    u32_t const columns = static_cast<u32_t>(mixed.tokens.extent(1));
+
+    switch_to_gpu_t gpu_scope {stream};
+    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for member {}", member);
+
+    auto offsets = pinned1_t<u32_t>::try_empty({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {});
+    auto lengths = pinned1_t<u32_t>::try_empty({S}, pinned_alloc<u32_t> {});
+    auto bags = pinned1_t<u32_t>::try_empty({S}, pinned_alloc<u32_t> {});
+    auto tokens = pinned1_t<token_id_t>::try_empty({static_cast<std::size_t>(rows) * columns},
+                                                   pinned_alloc<token_id_t> {});
+    if (!offsets || !lengths || !bags || !tokens)
+        return expected_t::fail(status_t::bad_alloc_k, "bagged readback scratch alloc failed");
+
+    if (expected_t read = copy_device_to_host(mixed.segment_offsets.view(), offsets.span(), stream); !read) return read;
+    if (expected_t read = copy_device_to_host(mixed.segment_lengths.view(), lengths.span(), stream); !read) return read;
+    if (expected_t read = copy_device_to_host(mixed.segment_bag.view(), bags.span(), stream); !read) return read;
+    if (expected_t read = copy_device_to_host(mixed.tokens.view().flatten<1>(), tokens.span(), stream); !read)
+        return read;
+    if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
+        return expected_t::fail(synced, "bagged readback sync failed for member {}", member);
+
+    mirrored_geometry_t const mirror = mirror_bag_geometry_(member, world_member_count, seed, epoch, rows, columns);
+    u32_t const placed = static_cast<u32_t>(mirror.size());
+    for (u32_t s = 0; s != placed; ++s) {
+        mirrored_segment_t const &want = mirror[s];
+        suite.check(offsets[s] == want.offset && lengths[s] == want.length && bags[s] == want.bag,
+                    "member {} segment {}: placed (offset={},length={},bag={}) != mirror ({},{},{})", member, s,
+                    offsets[s], lengths[s], bags[s], want.offset, want.length, want.bag);
+        suite.check(s == 0 || bags[s] >= bags[s - 1u], "member {} segment {}: bag {} breaks the cohesive order", member,
+                    s, bags[s]);
+        for (u32_t j = 0; j != L; ++j) {
+            token_id_t const got = tokens[offsets[s] + j];
+            token_id_t const want_token = signature_token_(want.source_member, want.source_segment, j);
+            suite.check(got == want_token, "member {} segment {} column {}: token {} != source ({},{}) token {}",
+                        member, s, j, got, want.source_member, want.source_segment, want_token);
+        }
+    }
+    for (u32_t s = placed; s != S; ++s)
+        suite.check(lengths[s] == 0u && bags[s] == pad_bag_k,
+                    "member {} segment {}: the tail must be a no-bag PAD (length={} bag={})", member, s, lengths[s],
+                    bags[s]);
+    return {};
+}
+
+/** @brief One tier's per-member surfaces — the movable half of the world stand-up both tiers share; the
+ *      domains and the mixer pin references into it, so they are constructed in the tier itself and never
+ *      moved. */
+struct mixer_members_t {
+    /** @brief The visible device ordinals, table-shaped for the arena visibility lists. */
+    array<i32_t> devices {};
+    /** @brief One stream per member — every fabrication, mix, and readback enqueues here. */
+    array<gpu_stream_t> streams {};
+    /** @brief One peer-visible arena per member — the batches and the mixer's scratch live off these. */
+    array<gpu_arena_t> arenas {};
+    /** @brief Each member's loaded (source) batch. */
+    array<multimodal_batch_on_gpu_t> loaded {};
+    /** @brief Each member's mixed (destination) batch. */
+    array<multimodal_batch_on_gpu_t> mixed {};
+};
+
+/** @brief Stand up @p member_count members' streams, peer-visible arenas, and loaded / mixed batches at
+ *      @p shape — the bring-up both mixer tiers share; fabrication and the domains stay tier-local. */
+[[nodiscard]] static expected<mixer_members_t> stand_up_members_(u32_t member_count,
+                                                                 multimodal_batch_shape_t shape) noexcept {
+    using result_t = expected<mixer_members_t>;
+    mixer_members_t members;
+    if (members.devices.try_resize(member_count) != status_t::success_k)
+        return result_t::fail(status_t::bad_alloc_k, "device table alloc failed");
+    for (u32_t member = 0; member != member_count; ++member) members.devices[member] = static_cast<i32_t>(member);
+    if (members.streams.try_reserve(member_count) != status_t::success_k ||
+        members.arenas.try_reserve(member_count) != status_t::success_k ||
+        members.loaded.try_reserve(member_count) != status_t::success_k ||
+        members.mixed.try_reserve(member_count) != status_t::success_k)
+        return result_t::fail(status_t::bad_alloc_k, "per-member table reservation failed");
+    for (u32_t member = 0; member != member_count; ++member) {
+        auto stream_made = gpu_stream_t::make(static_cast<int>(member));
+        if (!stream_made) return result_t::fail(std::move(stream_made));
+        (void)members.streams.try_push_back(std::move(stream_made.value_));
+        switch_to_gpu_t gpu_scope {members.streams[member]};
+        auto arena_made = gpu_arena_t::make(static_cast<int>(member), 512ull << 20, members.devices.view());
+        if (!arena_made) return result_t::fail(std::move(arena_made));
+        (void)members.arenas.try_push_back(std::move(arena_made.value_));
+        auto loaded_made = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {members.arenas[member]}, shape);
+        if (!loaded_made) return result_t::fail(std::move(loaded_made));
+        (void)members.loaded.try_push_back(std::move(loaded_made.value_));
+        auto mixed_made = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {members.arenas[member]}, shape);
+        if (!mixed_made) return result_t::fail(std::move(mixed_made));
+        (void)members.mixed.try_push_back(std::move(mixed_made.value_));
+    }
+    return result_t {std::move(members)};
+}
+
 /** @brief The mixer tier: stand up the domains over every visible GPU — one process per host_domain,
  *      reading the same @c UFORM_HOST_DOMAIN_COUNT contract as the base suite, so a two-node run exercises
  *      the InfiniBand full-batch exchange — fabricate each member's loaded batch under its @b global member
@@ -198,69 +450,112 @@ static void mixer_routes_segments(test_suite_t &suite) {
     shape.max_segments_per_gpu = segments_per_member_k;
     shape.max_columns_per_row = 64u; // > segments_per_member_k·tokens_per_segment_k, so no packing row-jump
 
-    array<i32_t> devices;
-    if (devices.try_resize(member_count) != status_t::success_k) return suite.check(false, "device table alloc failed");
-    for (u32_t member = 0; member != member_count; ++member) devices[member] = static_cast<i32_t>(member);
-
-    array<gpu_stream_t> streams;
-    array<gpu_arena_t> arenas;
-    array<multimodal_batch_on_gpu_t> loaded;
-    array<multimodal_batch_on_gpu_t> mixed;
-    if (streams.try_reserve(member_count) != status_t::success_k ||
-        arenas.try_reserve(member_count) != status_t::success_k ||
-        loaded.try_reserve(member_count) != status_t::success_k ||
-        mixed.try_reserve(member_count) != status_t::success_k)
-        return suite.check(false, "per-member table reservation failed");
-
-    for (u32_t member = 0; member != member_count; ++member) {
-        auto stream_made = gpu_stream_t::make(static_cast<int>(member));
-        if (!stream_made) return suite.check(false, "stream make on GPU {}: {}", member, stream_made.description_);
-        (void)streams.try_push_back(std::move(stream_made.value_));
-        switch_to_gpu_t gpu_scope {streams[member]};
-        auto arena_made = gpu_arena_t::make(static_cast<int>(member), 512ull << 20, devices.view());
-        if (!arena_made) return suite.check(false, "arena make on GPU {}: {}", member, arena_made.description_);
-        (void)arenas.try_push_back(std::move(arena_made.value_));
-        auto loaded_made = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {arenas[member]}, shape);
-        if (!loaded_made)
-            return suite.check(false, "loaded batch make on GPU {}: {}", member, loaded_made.description_);
-        (void)loaded.try_push_back(std::move(loaded_made.value_));
-        auto mixed_made = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {arenas[member]}, shape);
-        if (!mixed_made) return suite.check(false, "mixed batch make on GPU {}: {}", member, mixed_made.description_);
-        (void)mixed.try_push_back(std::move(mixed_made.value_));
-        if (expected_t built = fabricate_loaded_(loaded[member], first_gpu_index_in_colocated_domain + member,
-                                                 streams[member]);
+    auto members_made = stand_up_members_(member_count, shape);
+    if (!members_made) return suite.check(false, "member stand-up: {}", members_made.description_);
+    mixer_members_t members = std::move(members_made.value_);
+    for (u32_t member = 0; member != member_count; ++member)
+        if (expected_t built = fabricate_loaded_(members.loaded[member], first_gpu_index_in_colocated_domain + member,
+                                                 members.streams[member]);
             !built)
             return suite.check(false, "fabricate loaded on GPU {}: {}", member, built.description_);
-    }
 
     routing_is_a_bijection(suite, world_member_count, seed, epoch);
 
-    auto multimem_made = multimem_domain_t::make(topology, devices.view(), 1024u,
-                                                 std::span<gpu_stream_t> {streams.data(), streams.size()});
+    auto multimem_made = multimem_domain_t::make(
+        topology, members.devices.view(), 1024u,
+        std::span<gpu_stream_t> {members.streams.data(), members.streams.size()});
     if (!multimem_made)
         return suite.check(false, "multimem_domain make (needs multicast capability): {}", multimem_made.description_);
     multimem_domain_t multimem = std::move(multimem_made.value_);
     auto colocated_made = colocated_domain_t::make(topology);
     if (!colocated_made) return suite.check(false, "colocated_domain make: {}", colocated_made.description_);
     colocated_domain_t colocated = std::move(colocated_made.value_);
-    auto mixer_made = multimodal_batch_mixer_t::make(multimem, colocated,
-                                                     std::span<gpu_arena_t> {arenas.data(), arenas.size()}, shape, seed,
-                                                     std::span<gpu_stream_t> {streams.data(), streams.size()});
+    auto mixer_made = multimodal_batch_mixer_t::make(
+        multimem, colocated, std::span<gpu_arena_t> {members.arenas.data(), members.arenas.size()}, shape, seed,
+        std::span<gpu_stream_t> {members.streams.data(), members.streams.size()});
     if (!mixer_made) return suite.check(false, "mixer make: {}", mixer_made.description_);
     multimodal_batch_mixer_t mixer = std::move(mixer_made.value_);
 
-    std::span<multimodal_batch_on_gpu_t const> const loaded_view {loaded.data(), loaded.size()};
+    std::span<multimodal_batch_on_gpu_t const> const loaded_view {members.loaded.data(), members.loaded.size()};
     if (expected_t mixed_ok = mixer(epoch, loaded_view,
-                                    std::span<multimodal_batch_on_gpu_t> {mixed.data(), mixed.size()},
-                                    std::span<gpu_stream_t> {streams.data(), streams.size()});
+                                    std::span<multimodal_batch_on_gpu_t> {members.mixed.data(), members.mixed.size()},
+                                    std::span<gpu_stream_t> {members.streams.data(), members.streams.size()});
         !mixed_ok)
         return suite.check(false, "the mix should run: {}", mixed_ok.description_);
 
     for (u32_t member = 0; member != member_count; ++member)
-        if (expected_t verified = verify_mixed_(suite, mixed[member], first_gpu_index_in_colocated_domain + member,
-                                                world_member_count, seed, epoch, streams[member]);
+        if (expected_t verified = verify_mixed_(suite, members.mixed[member],
+                                                first_gpu_index_in_colocated_domain + member, world_member_count, seed,
+                                                epoch, members.streams[member]);
             !verified)
             suite.check(false, "verify mixed on GPU {}: {}", member, verified.description_);
+}
+
+/** @brief The bag-cohesion tier: the same bring-up as @ref mixer_routes_segments but with a nonzero bag
+ *      budget, bagged fabrication, and the exact host mirror of the bag walk as the oracle. Runs twice —
+ *      @p rows × @p columns_per_row sized roomy (every bag lands) and tight (the grid barely holds one
+ *      member's own load, so a permutation draw that concentrates heavy bags on one destination forces
+ *      whole-bag drops; the mirror predicts each drop exactly, so the tier is a strict oracle either
+ *      way). Every source batch stays valid — only the receive side can overflow. */
+static void mixer_routes_bags(test_suite_t &suite, u32_t rows, u32_t columns_per_row) {
+    int device_count = 0;
+    if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 1) return;
+    u32_t const member_count = std::min<u32_t>(static_cast<u32_t>(device_count), members_cap_k);
+    u64_t const seed = 0xBA65C0FFEEULL;
+    data_epoch_t const epoch {2u};
+
+    u32_t const host_domain_index = host_domain_index_from_environment();
+    u32_t const host_domain_count = host_domain_count_from_environment();
+    auto bootstrapped = mesh_topology_t::bootstrap(host_domain_index, host_domain_count, member_count);
+    if (!bootstrapped) return suite.check(false, "mesh bootstrap: {}", bootstrapped.description_);
+    mesh_topology_t topology = std::move(bootstrapped.value_);
+    u32_t const world_member_count = member_count * host_domain_count;
+    u32_t const first_gpu_index_in_colocated_domain = topology.shape.gpu_index_of_multimem_member(
+        topology.multimem_domain_index(), 0u);
+
+    multimodal_batch_shape_t shape;
+    shape.max_rows_per_gpu = rows;
+    shape.max_segments_per_gpu = segments_per_member_k;
+    shape.max_columns_per_row = columns_per_row;
+    shape.max_bags_per_gpu = bags_per_member_k;
+
+    auto members_made = stand_up_members_(member_count, shape);
+    if (!members_made) return suite.check(false, "member stand-up: {}", members_made.description_);
+    mixer_members_t members = std::move(members_made.value_);
+    for (u32_t member = 0; member != member_count; ++member)
+        if (expected_t built = fabricate_bagged_(members.loaded[member], first_gpu_index_in_colocated_domain + member,
+                                                 members.streams[member]);
+            !built)
+            return suite.check(false, "fabricate bagged on GPU {}: {}", member, built.description_);
+
+    auto multimem_made = multimem_domain_t::make(
+        topology, members.devices.view(), 1024u,
+        std::span<gpu_stream_t> {members.streams.data(), members.streams.size()});
+    if (!multimem_made)
+        return suite.check(false, "multimem_domain make (needs multicast capability): {}", multimem_made.description_);
+    multimem_domain_t multimem = std::move(multimem_made.value_);
+    auto colocated_made = colocated_domain_t::make(topology);
+    if (!colocated_made) return suite.check(false, "colocated_domain make: {}", colocated_made.description_);
+    colocated_domain_t colocated = std::move(colocated_made.value_);
+    auto mixer_made = multimodal_batch_mixer_t::make(
+        multimem, colocated, std::span<gpu_arena_t> {members.arenas.data(), members.arenas.size()}, shape, seed,
+        std::span<gpu_stream_t> {members.streams.data(), members.streams.size()});
+    if (!mixer_made) return suite.check(false, "mixer make: {}", mixer_made.description_);
+    multimodal_batch_mixer_t mixer = std::move(mixer_made.value_);
+
+    std::span<multimodal_batch_on_gpu_t const> const loaded_view {members.loaded.data(), members.loaded.size()};
+    if (expected_t mixed_ok = mixer(epoch, loaded_view,
+                                    std::span<multimodal_batch_on_gpu_t> {members.mixed.data(), members.mixed.size()},
+                                    std::span<gpu_stream_t> {members.streams.data(), members.streams.size()});
+        !mixed_ok)
+        return suite.check(false, "the bagged mix should run: {}", mixed_ok.description_);
+
+    for (u32_t member = 0; member != member_count; ++member)
+        if (expected_t verified = verify_bagged_(suite, members.mixed[member],
+                                                 first_gpu_index_in_colocated_domain + member, world_member_count, seed,
+                                                 epoch, members.streams[member]);
+            !verified)
+            suite.check(false, "verify bagged on GPU {}: {}", member, verified.description_);
 }
 
 int main() {
@@ -272,5 +567,9 @@ int main() {
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
     if (cuInit(0) != CUDA_SUCCESS) return suite.finish(); // no GPU — nothing to exercise
     mixer_routes_segments(suite);
+    mixer_routes_bags(suite, 2u, 64u); // roomy: every bag lands whole
+    // Tight: 20 cells hold one member's own 18-token load (sources stay valid) but not every receive
+    // combination — a destination drawing two heavy bags overflows and must drop whole, mirror-verified.
+    mixer_routes_bags(suite, 1u, 20u);
     return suite.finish();
 }
