@@ -142,6 +142,17 @@ struct mesh_shape_t {
     [[nodiscard]] u32_t index_in_multimem_domain(u32_t gpu_index) const noexcept {
         return gpu_index % gpus_per_multimem_domain;
     }
+    /** @brief The colocated_domain (world) coordinate of host_domain @p host_domain_index 's member
+     *      @p member_index — the inverse of @ref host_domain_of , so a process turns its local member
+     *      indexes into world coordinates. */
+    [[nodiscard]] u32_t gpu_index_of_host_member(u32_t host_domain_index, u32_t member_index) const noexcept {
+        return host_domain_index * gpus_per_host_domain + member_index;
+    }
+    /** @brief The colocated_domain (world) coordinate of multimem_domain @p multimem_domain_index 's
+     *      member @p member_index — the inverse of @ref multimem_domain_of + @ref index_in_multimem_domain . */
+    [[nodiscard]] u32_t gpu_index_of_multimem_member(u32_t multimem_domain_index, u32_t member_index) const noexcept {
+        return multimem_domain_index * gpus_per_multimem_domain + member_index;
+    }
     /** @brief Number of host_domains (processes) in the colocated_domain. */
     [[nodiscard]] u32_t host_domain_count() const noexcept { return gpus_per_colocated_domain / gpus_per_host_domain; }
     /** @brief Number of multimem_domains in the colocated_domain — the inter-domain collective width. */
@@ -856,8 +867,12 @@ struct mesh_topology_t {
  *      never a count — the counts are explicit @ref mesh_topology_t::bootstrap arguments, so a
  *      misconfigured launcher cannot change the math. */
 [[nodiscard]] inline u32_t host_domain_index_from_environment() noexcept {
-    for (char const *variable : {"UFORM_HOST_DOMAIN_INDEX", "SLURM_NODEID", "OMPI_COMM_WORLD_RANK"})
-        if (char const *value = std::getenv(variable); value != nullptr) return static_cast<u32_t>(std::atoi(value));
+    // `std::getenv` speaks C strings; the names never escape this loop.
+    char const *const variables[] = {"UFORM_HOST_DOMAIN_INDEX", "SLURM_NODEID", // vendor-boundary
+                                     "OMPI_COMM_WORLD_RANK"};                   // vendor-boundary
+    for (char const *variable : variables)                                      // vendor-boundary
+        if (char const *value = std::getenv(variable); value != nullptr)        // vendor-boundary
+            return static_cast<u32_t>(std::atoi(value));
     return 0u;
 }
 

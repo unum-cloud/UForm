@@ -12,7 +12,8 @@
  *  Each step partitions the row budget across the live modalities with a keyed draw — any counts, no
  *  per-modality caps — and assigns the rows in the @ref modality_t order (tokens, image, video, audio), each row
  *  modality-uniform with one segment, so projections tile contiguous row runs. The partition, the contents, and
- *  the corruption are all pure functions of @c (seed,data_epoch,member_index) : every run and the capture-vs-eager
+ *  the corruption are all pure functions of @c (seed,data_epoch,gpu_index_in_colocated_domain) — the mesh's
+ *  global world coordinate, so every world GPU trains on distinct data: every run and the capture-vs-eager
  *  parity re-run draw bitwise-identically, with no files.
  *
  *  @section base_impl_schedule The learning-rate schedule
@@ -40,16 +41,17 @@ using namespace unum::uform::train;
 
 /**
  *  @brief Fill the token grid with a keyed synthetic byte corpus — every row, media rows included (their bytes
- *      are simply never read); the draw is a pure function of @c (seed,data_epoch,member_index,row,column) .
+ *      are simply never read); the draw is a pure function of @c (seed,data_epoch,gpu_index,row,column) with
+ *      the @b world GPU coordinate.
  *
  *  @b grid_size @c [rows,1,1] , one CTA per row; no dynamic shared memory.
  */
 static __global__ void synthetic_tokens_kernel_(nk::tensor_span<token_id_t, 2> tokens, u64_t seed,
-                                                data_epoch_t data_epoch, u32_t member_index) {
+                                                data_epoch_t data_epoch, u32_t gpu_index_in_colocated_domain) {
     u32_t const columns = static_cast<u32_t>(tokens.extent(1));
     u32_t const row = blockIdx.x;
     for (u32_t column = threadIdx.x; column < columns; column += blockDim.x) {
-        u64_t const draw = splitmix64_hash_t {}(seed, data_epoch.ordinal, member_index, row, column);
+        u64_t const draw = splitmix64_hash_t {}(seed, data_epoch.ordinal, gpu_index_in_colocated_domain, row, column);
         tokens[row, column] = static_cast<token_id_t>(draw % 256u);
     }
 }
@@ -96,7 +98,7 @@ static __global__ void synthetic_segments_kernel_(u32r1_span_t segment_offsets, 
  *  @b grid_size capped grid-stride over @c rows·patch_scalars scalars; no dynamic shared memory.
  */
 static __global__ void synthetic_pixels_kernel_(nk::tensor_span<pixel_t, 2> media, u64_t seed, data_epoch_t data_epoch,
-                                                u32_t member_index, u32_t salt) {
+                                                u32_t gpu_index_in_colocated_domain, u32_t salt) {
     u32_t const width = static_cast<u32_t>(media.extent(1));
     std::size_t const total = static_cast<std::size_t>(media.extent(0)) * width;
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
@@ -104,7 +106,8 @@ static __global__ void synthetic_pixels_kernel_(nk::tensor_span<pixel_t, 2> medi
          index += stride) {
         u32_t const row = static_cast<u32_t>(index / width);
         u32_t const column = static_cast<u32_t>(index % width);
-        u64_t const draw = splitmix64_hash_t {}(seed, data_epoch.ordinal + salt, member_index, row, column);
+        u64_t const draw = splitmix64_hash_t {}(seed, data_epoch.ordinal + salt, gpu_index_in_colocated_domain, row,
+                                                column);
         media[row, column] = static_cast<pixel_t>(draw & 0xFFu);
     }
 }
@@ -116,7 +119,7 @@ static __global__ void synthetic_pixels_kernel_(nk::tensor_span<pixel_t, 2> medi
  *  @b grid_size capped grid-stride over @c frames·chunk_samples scalars; no dynamic shared memory.
  */
 static __global__ void synthetic_audio_kernel_(f32r2_span_t frames, u64_t seed, data_epoch_t data_epoch,
-                                               u32_t member_index, u32_t salt) {
+                                               u32_t gpu_index_in_colocated_domain, u32_t salt) {
     u32_t const width = static_cast<u32_t>(frames.extent(1));
     std::size_t const total = static_cast<std::size_t>(frames.extent(0)) * width;
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
@@ -124,7 +127,8 @@ static __global__ void synthetic_audio_kernel_(f32r2_span_t frames, u64_t seed, 
          index += stride) {
         u32_t const row = static_cast<u32_t>(index / width);
         u32_t const column = static_cast<u32_t>(index % width);
-        u64_t const draw = splitmix64_hash_t {}(seed, data_epoch.ordinal + salt, member_index, row, column);
+        u64_t const draw = splitmix64_hash_t {}(seed, data_epoch.ordinal + salt, gpu_index_in_colocated_domain, row,
+                                                column);
         f32_t const uniform = static_cast<f32_t>(draw >> 40) * 0x1.0p-24f;
         frames[row, column] = uniform * 2.0f - 1.0f;
     }
@@ -233,7 +237,7 @@ struct row_partition_t {
  *      freedom the real mixer has. Every live modality gets the floor share; the keyed draw rotates which ones
  *      carry the remainder, so every mixture recurs across passes (and a one-row omni batch deterministically
  *      leaves most heads with zero live rows — the dynamic-M edge). */
-[[nodiscard]] static row_partition_t partition_rows_(base_config_t const &config, u32_t member_index,
+[[nodiscard]] static row_partition_t partition_rows_(base_config_t const &config, u32_t gpu_index_in_colocated_domain,
                                                      data_epoch_t data_epoch) noexcept {
     multimodal_batch_shape_t const &shape = config.batch;
     bool const live[4] = {true, shape.contains(modality_t::image_k), shape.contains(modality_t::video_k),
@@ -242,7 +246,7 @@ struct row_partition_t {
     for (bool flag : live) live_count += flag ? 1u : 0u;
     u32_t const total = shape.max_rows_per_gpu;
     u32_t const floor_rows = total / live_count, extra = total % live_count;
-    u64_t const draw = splitmix64_hash_t {}(config.seed, data_epoch.ordinal, member_index, 5u, 0u);
+    u64_t const draw = splitmix64_hash_t {}(config.seed, data_epoch.ordinal, gpu_index_in_colocated_domain, 5u, 0u);
     u32_t const rotation = static_cast<u32_t>(draw % live_count);
 
     row_partition_t partition;
@@ -446,14 +450,14 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cublaslt_sessi
     return result_t {std::move(replica)};
 }
 
-expected_t base_replica_t::prepare(base_config_t const &config, u32_t member_index, data_epoch_t data_epoch,
-                                   gpu_stream_t &stream) noexcept {
+expected_t base_replica_t::prepare(base_config_t const &config, u32_t gpu_index_in_colocated_domain,
+                                   data_epoch_t data_epoch, gpu_stream_t &stream) noexcept {
     multimodal_batch_shape_t const &shape = config.batch;
     bool const image_live = shape.contains(modality_t::image_k);
     bool const video_live = shape.contains(modality_t::video_k);
     bool const audio_live = shape.contains(modality_t::audio_k);
     masking_recipe_t const recipe = masking_recipe_(config);
-    row_partition_t const partition = partition_rows_(config, member_index, data_epoch);
+    row_partition_t const partition = partition_rows_(config, gpu_index_in_colocated_domain, data_epoch);
     grid_factor_t const factor = square_factor_(shape.max_columns_per_row);
     dim3 const row_grid {shape.max_rows_per_gpu, 1u, 1u};
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
@@ -463,7 +467,7 @@ expected_t base_replica_t::prepare(base_config_t const &config, u32_t member_ind
     // 1. The keyed byte grid, then every row's segment descriptor from the drawn partition.
     if (expected_t drawn = launch_kernel(reinterpret_cast<void const *>(&synthetic_tokens_kernel_), row_grid,
                                          block_shape, stream, batch.tokens.span(), config.seed, data_epoch,
-                                         member_index);
+                                         gpu_index_in_colocated_domain);
         !drawn)
         return drawn;
     if (expected_t laid = launch_kernel(reinterpret_cast<void const *>(&synthetic_segments_kernel_), row_grid,
@@ -480,7 +484,8 @@ expected_t base_replica_t::prepare(base_config_t const &config, u32_t member_ind
         nk::tensor_span<pixel_t, 2> const raw = batch.images.span().reshape<2>({max_tokens, patch_pixels});
         dim3 const grid {grid_size_for(raw.extent(0) * raw.extent(1)), 1u, 1u};
         if (expected_t filled = launch_kernel(reinterpret_cast<void const *>(&synthetic_pixels_kernel_), grid,
-                                              block_shape, stream, raw, config.seed, data_epoch, member_index, 101u);
+                                              block_shape, stream, raw, config.seed, data_epoch,
+                                              gpu_index_in_colocated_domain, 101u);
             !filled)
             return filled;
     }
@@ -490,7 +495,8 @@ expected_t base_replica_t::prepare(base_config_t const &config, u32_t member_ind
         nk::tensor_span<pixel_t, 2> const raw = batch.videos.span().reshape<2>({max_tokens, patch_pixels});
         dim3 const grid {grid_size_for(raw.extent(0) * raw.extent(1)), 1u, 1u};
         if (expected_t filled = launch_kernel(reinterpret_cast<void const *>(&synthetic_pixels_kernel_), grid,
-                                              block_shape, stream, raw, config.seed, data_epoch, member_index, 202u);
+                                              block_shape, stream, raw, config.seed, data_epoch,
+                                              gpu_index_in_colocated_domain, 202u);
             !filled)
             return filled;
     }
@@ -498,7 +504,8 @@ expected_t base_replica_t::prepare(base_config_t const &config, u32_t member_ind
         f32r2_span_t const raw = batch.audio_samples.span().reshape<2>({max_tokens, shape.audio.chunk_samples});
         dim3 const grid {grid_size_for(raw.extent(0) * raw.extent(1)), 1u, 1u};
         if (expected_t filled = launch_kernel(reinterpret_cast<void const *>(&synthetic_audio_kernel_), grid,
-                                              block_shape, stream, raw, config.seed, data_epoch, member_index, 303u);
+                                              block_shape, stream, raw, config.seed, data_epoch,
+                                              gpu_index_in_colocated_domain, 303u);
             !filled)
             return filled;
     }
@@ -508,7 +515,7 @@ expected_t base_replica_t::prepare(base_config_t const &config, u32_t member_ind
                                             reinterpret_cast<CUdeviceptr>(tokens_flat.data()),
                                             max_tokens * sizeof(token_id_t), stream.get());
         result != CUDA_SUCCESS)
-        return expected_t::fail(result, "clean-token snapshot failed (member={})", member_index);
+        return expected_t::fail(result, "clean-token snapshot failed (gpu_index={})", gpu_index_in_colocated_domain);
     if (expected_t corrupted = tokens.corrupt(clean_tokens.view(), tokens_flat, token_loss_weights.span(),
                                               batch.segment_offsets.view(), batch.segment_lengths.view(),
                                               batch.segment_modality.view(), recipe, data_epoch, stream);
@@ -529,7 +536,8 @@ expected_t base_replica_t::prepare(base_config_t const &config, u32_t member_ind
                 reinterpret_cast<CUdeviceptr>(batch.audio_samples.data()),
                 static_cast<std::size_t>(max_tokens) * shape.audio.chunk_samples * sizeof(f32_t), stream.get());
             result != CUDA_SUCCESS)
-            return expected_t::fail(result, "clean-audio snapshot failed (member={})", member_index);
+            return expected_t::fail(result, "clean-audio snapshot failed (gpu_index={})",
+                                    gpu_index_in_colocated_domain);
 
     // 5. The media masks and the in-place raw corruption — sampled eagerly so the masks persist into the
     //    captured model region.
@@ -599,6 +607,8 @@ expected_t base_trainer_t::make(base_trainer_t &trainer, base_config_t const &co
                                 mesh_topology_t const &topology) noexcept {
     trainer.config = config;
     u32_t const gpus = topology.shape.gpus_per_host_domain;
+    trainer.first_gpu_index_in_colocated_domain = topology.shape.gpu_index_of_host_member(topology.host_domain_index,
+                                                                                          0u);
     if (trainer.devices.try_resize(gpus) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "device table allocation failed");
     for (u32_t member_index = 0; member_index != gpus; ++member_index)
@@ -659,7 +669,8 @@ expected_t base_trainer_t::step(optimizer_step_t optimizer_step, distributed_ada
     for (u32_t member_index = 0; member_index != gpus; ++member_index) {
         switch_to_gpu_t gpu_scope {streams[member_index]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-        expected_t stepped = replicas[member_index].prepare(config, member_index, data_epoch, streams[member_index]);
+        expected_t stepped = replicas[member_index].prepare(config, first_gpu_index_in_colocated_domain + member_index,
+                                                            data_epoch, streams[member_index]);
         if (stepped)
             stepped = graphs.empty() ? replicas[member_index].model_region(streams[member_index])
                                      : graphs[member_index].launch(streams[member_index].get());

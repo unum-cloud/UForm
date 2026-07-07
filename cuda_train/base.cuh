@@ -155,11 +155,12 @@ struct base_replica_t {
                                                        cudnn_session_t &dnn, base_config_t const &config) noexcept;
 
     /** @brief The eager per-step preamble: draw the keyed synthetic mixture (row partition, contents, and
-     *      corruption all pure functions of @c config.seed , @p data_epoch , and @p member_index ), snapshot every
-     *      live head's clean target, and corrupt each modality in place into the tower's distorted input. Pure
-     *      enqueue onto @p stream ; never captured. */
-    [[nodiscard]] expected_t prepare(base_config_t const &config, u32_t member_index, data_epoch_t data_epoch,
-                                     gpu_stream_t &stream) noexcept;
+     *      corruption all pure functions of @c config.seed , @p data_epoch , and
+     *      @p gpu_index_in_colocated_domain — the world coordinate, so every world GPU draws distinct
+     *      data), snapshot every live head's clean target, and corrupt each modality in place into the
+     *      tower's distorted input. Pure enqueue onto @p stream ; never captured. */
+    [[nodiscard]] expected_t prepare(base_config_t const &config, u32_t gpu_index_in_colocated_domain,
+                                     data_epoch_t data_epoch, gpu_stream_t &stream) noexcept;
 
     /** @brief The captured model region: tower forward → every live head scores its clean target,
      *      accumulating into @ref normalized_grad → tower backward. Pure enqueue, shape-stable, no per-step
@@ -175,6 +176,10 @@ struct base_replica_t {
 struct base_trainer_t {
     /** @brief The run description every method reads — the single copy. */
     base_config_t config {};
+    /** @brief This host_domain's first GPU's world coordinate — the synthetic draws key on
+     *      @c first_gpu_index_in_colocated_domain+member_index , so every world GPU trains on distinct
+     *      data; a single-host world keeps it zero and the draws are the local indexes unchanged. */
+    u32_t first_gpu_index_in_colocated_domain = 0;
     /** @brief The device ordinals this host_domain drives; decays to the borrowing collectives. */
     array<i32_t> devices {};
     /** @brief One owning stream per GPU — the ordered chain a replica's whole step enqueues onto. */
