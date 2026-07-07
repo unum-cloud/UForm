@@ -89,9 +89,11 @@ using namespace unum::uform::test;
  *      window count; @c reserve fails loudly if a geometry change ever outgrows it. */
 inline constexpr std::size_t tier_window_scalars_k = 4u << 20;
 
-/** @brief The test tier's rendezvous deadline — a healthy rendezvous completes in well under a second, and
- *      the short deadline keeps a dead peer from costing the surviving domain two minutes per case. */
-inline constexpr f64_t test_rendezvous_timeout_seconds_k = 20.0;
+/** @brief The test tier's rendezvous deadline — short enough that a dead peer never costs the surviving
+ *      domain two minutes per case, but long enough for the real two-node cold start: the FIRST exchange
+ *      rides NFS attribute-cache latency plus the peers' eager-module-loading skew, which can take tens
+ *      of seconds (a warm local rendezvous completes in well under one). */
+inline constexpr f64_t test_rendezvous_timeout_seconds_k = 60.0;
 
 /** @brief One width tier's shared surfaces: the topology plus the collective state every cell of the tier
  *      reuses instead of re-creating — threaded by reference from @c main , like production. */

@@ -480,6 +480,18 @@ expected<infiniband_member_t> infiniband_member_t::make_(mesh_topology_t const &
             return result_t::fail(std::move(exchanged));
         if (expected_t connected = member.endpoints_[round].connect(peer); !connected)
             return result_t::fail(std::move(connected));
+        // The connect above arms only THIS side; the first post must find the partner's queue pair in
+        // Ready-to-Receive too, or the responder NIC silently drops until the ~0.5s retry budget dies
+        // (transport-retry-exceeded on the wire — loopback's lockstep pacing never exposes it). One more
+        // tiny rendezvous proves both ends armed before either member returns wired.
+        sz::string wired_key;
+        if (!format_into(wired_key, "{}.{}.wired", key_prefix, round))
+            return result_t::fail(status_t::bad_alloc_k, "wired key formatting failed");
+        if (expected_t published = topology.publish_text(wired_key.view(), "1\n"); !published)
+            return result_t::fail(std::move(published));
+        sz::string wired_ack;
+        if (expected_t armed = topology.await_text(partner_host, wired_key.view(), wired_ack, timeout_seconds); !armed)
+            return result_t::fail(std::move(armed));
         expected<infiniband_queue_mapping_t> queue = infiniband_queue_mapping_t::make(
             member.endpoints_[round].queue_pair(), arena, nic.page_registry());
         if (!queue) return result_t::fail(std::move(queue));
