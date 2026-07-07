@@ -230,8 +230,88 @@ static __global__ void batch_gather_kernel_(batch_sources_t_ sources, batch_dest
     }
 }
 
+/** @brief The nine batch tensors, in their fixed block-serialization order — the index into a
+ *      @ref batch_block_layout_t_ . A fixed family, so it is an enum, not a run of constants; every GPU
+ *      shares one shape, so the order (and thus every landing's byte layout) is identical across
+ *      multimem_domains. */
+enum batch_block_tensor_t_ : u32_t {
+    block_segment_offsets_k = 0,
+    block_segment_lengths_k = 1,
+    block_segment_modality_k = 2,
+    block_tokens_k = 3,
+    block_image_shapes_k = 4,
+    block_video_shapes_k = 5,
+    block_images_k = 6,
+    block_videos_k = 7,
+    block_audio_samples_k = 8,
+};
+
+/** @brief How many tensors one exchanged block serializes — the extent of @ref batch_block_tensor_t_ . */
+static constexpr u32_t block_tensor_count_k = block_audio_samples_k + 1u;
+
+/**
+ *  @brief The serialization map of one @ref multimodal_batch_on_gpu_t inside an exchanged block: a
+ *      cache-line-aligned byte offset and a byte count per tensor, packed back to back in
+ *      @ref batch_block_tensor_t_ order. A dead modality (its content tensor unallocated) still gets an
+ *      offset but a zero byte count, so it contributes nothing and its offset is never dereferenced.
+ *      @ref total_bytes is the whole block — the @c block_scalars an @c infiniband_all_to_all<b8_t> is
+ *      wired with.
+ */
+struct batch_block_layout_t_ {
+    /** @brief Each tensor's cache-line-aligned byte offset from the block base. */
+    std::size_t offsets[block_tensor_count_k] {};
+    /** @brief Each tensor's serialized byte count; zero for a dead modality's content tensor. */
+    std::size_t byte_counts[block_tensor_count_k] {};
+    /** @brief The whole block's cache-line-rounded size. */
+    std::size_t block_bytes = 0;
+
+    /** @brief This tensor's byte offset from the block base. */
+    [[nodiscard]] constexpr std::size_t offset(batch_block_tensor_t_ tensor) const noexcept { return offsets[tensor]; }
+    /** @brief This tensor's serialized byte count — zero when its modality is out of the composition. */
+    [[nodiscard]] constexpr std::size_t byte_count(batch_block_tensor_t_ tensor) const noexcept {
+        return byte_counts[tensor];
+    }
+    /** @brief The whole block's size — every landing and send block spans exactly this. */
+    [[nodiscard]] constexpr std::size_t total_bytes() const noexcept { return block_bytes; }
+};
+
+/** @brief Compute the layout @p shape implies — pure shape math, so every GPU on every multimem_domain
+ *      derives the identical map with no exchanged descriptor, and the mixer re-derives it on demand
+ *      instead of storing it. */
+[[nodiscard]] static constexpr batch_block_layout_t_ batch_block_layout_(
+    multimodal_batch_shape_t const &shape) noexcept {
+    batch_block_layout_t_ layout;
+    std::size_t const segments = shape.max_segments_per_gpu;
+    std::size_t const cells = static_cast<std::size_t>(shape.max_rows_per_gpu) * shape.max_columns_per_row;
+    layout.byte_counts[block_segment_offsets_k] = (segments + 1u) * sizeof(u32_t);
+    layout.byte_counts[block_segment_lengths_k] = segments * sizeof(u32_t);
+    layout.byte_counts[block_segment_modality_k] = segments * sizeof(modality_t);
+    layout.byte_counts[block_tokens_k] = cells * sizeof(token_id_t);
+    layout.byte_counts[block_image_shapes_k] = segments * 2u * sizeof(u16_t);
+    layout.byte_counts[block_video_shapes_k] = segments * 3u * sizeof(u16_t);
+    layout.byte_counts[block_images_k] = shape.contains(modality_t::image_k)
+                                             ? cells * patch_scalars(shape.image.patch_side, shape.image.channels) *
+                                                   sizeof(pixel_t)
+                                             : 0u;
+    layout.byte_counts[block_videos_k] =
+        shape.contains(modality_t::video_k)
+            ? cells * tube_scalars(shape.video.tube_frames, shape.video.patch_side, shape.video.channels) *
+                  sizeof(pixel_t)
+            : 0u;
+    layout.byte_counts[block_audio_samples_k] = shape.contains(modality_t::audio_k)
+                                                    ? cells * shape.audio.chunk_samples * sizeof(f32_t)
+                                                    : 0u;
+    std::size_t running = 0;
+    for (u32_t tensor = 0; tensor != block_tensor_count_k; ++tensor) {
+        layout.offsets[tensor] = round_up_to_multiple(running, cache_line_bytes_k);
+        running = layout.offsets[tensor] + layout.byte_counts[tensor];
+    }
+    layout.block_bytes = round_up_to_multiple(running, cache_line_bytes_k);
+    return layout;
+}
+
 /** @brief Build the read view of a member's own loaded batch — its eight content and descriptor pointers, a
- *      direct NVLink peer read for a source GPU on this island. A modality absent from the batch leaves a null
+ *      direct NVLink peer read for a source GPU on this multimem_domain. A modality absent from the batch leaves a null
  *      pointer, exactly as the gather kernels expect. */
 static batch_source_t_ source_from_loaded_(multimodal_batch_on_gpu_t const &loaded) noexcept {
     batch_source_t_ source;
@@ -247,67 +327,67 @@ static batch_source_t_ source_from_loaded_(multimodal_batch_on_gpu_t const &load
     return source;
 }
 
-/** @brief Build the read view of a same-index landing — the block a cross-island all-to-all deposited, holding
- *      the other island's same-index GPU's loaded batch. Every pointer is the landing base plus this tensor's
+/** @brief Build the read view of a same-index landing — the block a cross-domain all-to-all deposited, holding
+ *      the other multimem_domain's same-index GPU's loaded batch. Every pointer is the landing base plus this tensor's
  *      shared wire offset, reinterpreted to the field's type; a dead modality's content pointer stays null (its
  *      offset addresses nothing). The descriptor tensors always exist, so their offsets are always valid. */
-static batch_source_t_ source_from_landing_(b8r1_span_t landing, batch_wire_layout_t const &layout,
+static batch_source_t_ source_from_landing_(b8r1_span_t landing, batch_block_layout_t_ const &layout,
                                             multimodal_batch_shape_t const &shape) noexcept {
     b8_t const *base = landing.data();
     batch_source_t_ source;
-    source.segment_offsets = reinterpret_cast<u32_t const *>(base + layout.offset(wire_segment_offsets_k));
-    source.segment_lengths = reinterpret_cast<u32_t const *>(base + layout.offset(wire_segment_lengths_k));
-    source.segment_modality = reinterpret_cast<modality_t const *>(base + layout.offset(wire_segment_modality_k));
-    source.tokens = reinterpret_cast<token_id_t const *>(base + layout.offset(wire_tokens_k));
-    source.image_shapes = reinterpret_cast<u16_t const *>(base + layout.offset(wire_image_shapes_k));
-    source.video_shapes = reinterpret_cast<u16_t const *>(base + layout.offset(wire_video_shapes_k));
+    source.segment_offsets = reinterpret_cast<u32_t const *>(base + layout.offset(block_segment_offsets_k));
+    source.segment_lengths = reinterpret_cast<u32_t const *>(base + layout.offset(block_segment_lengths_k));
+    source.segment_modality = reinterpret_cast<modality_t const *>(base + layout.offset(block_segment_modality_k));
+    source.tokens = reinterpret_cast<token_id_t const *>(base + layout.offset(block_tokens_k));
+    source.image_shapes = reinterpret_cast<u16_t const *>(base + layout.offset(block_image_shapes_k));
+    source.video_shapes = reinterpret_cast<u16_t const *>(base + layout.offset(block_video_shapes_k));
     source.images = shape.contains(modality_t::image_k)
-                        ? reinterpret_cast<pixel_t const *>(base + layout.offset(wire_images_k))
+                        ? reinterpret_cast<pixel_t const *>(base + layout.offset(block_images_k))
                         : nullptr;
     source.videos = shape.contains(modality_t::video_k)
-                        ? reinterpret_cast<pixel_t const *>(base + layout.offset(wire_videos_k))
+                        ? reinterpret_cast<pixel_t const *>(base + layout.offset(block_videos_k))
                         : nullptr;
     source.audio_samples = shape.contains(modality_t::audio_k)
-                               ? reinterpret_cast<f32_t const *>(base + layout.offset(wire_audio_samples_k))
+                               ? reinterpret_cast<f32_t const *>(base + layout.offset(block_audio_samples_k))
                                : nullptr;
     return source;
 }
 
-/** @brief One tensor's region in the wire block — its identity and its device source pointer, a named pair so
- *      the pack loop is a plain table walk rather than nine hand-spelled copies. */
-struct wire_copy_t_ {
-    batch_wire_tensor_t tensor;
+/** @brief One tensor's region in the exchanged block — its identity and its device source pointer, a named
+ *      pair so the pack loop is a plain table walk rather than nine hand-spelled copies. */
+struct block_copy_t_ {
+    batch_block_tensor_t_ tensor;
     void const *source;
 };
 
-/** @brief Serialize a member's loaded batch into its outgoing wire block: one device→device copy per live
- *      tensor into that tensor's shared wire offset, enqueued on @p stream ahead of the exchange. A dead
+/** @brief Serialize a member's loaded batch into its outgoing block: one device→device copy per live
+ *      tensor into that tensor's shared block offset, enqueued on @p stream ahead of the exchange. A dead
  *      modality's zero-byte tensor (and any null source) is skipped; the landing's source view nulls the same
  *      modality, so those bytes are never read. */
-static expected_t pack_batch_into_wire_(multimodal_batch_on_gpu_t const &loaded, b8r1_span_t destination,
-                                        batch_wire_layout_t const &layout, gpu_stream_t &stream) noexcept {
-    wire_copy_t_ const copies[wire_tensor_count_k] = {
-        {wire_segment_offsets_k, loaded.segment_offsets.data()},
-        {wire_segment_lengths_k, loaded.segment_lengths.data()},
-        {wire_segment_modality_k, loaded.segment_modality.data()},
-        {wire_tokens_k, loaded.tokens.data()},
-        {wire_image_shapes_k, loaded.image_shapes.data()},
-        {wire_video_shapes_k, loaded.video_shapes.data()},
-        {wire_images_k, loaded.images.data()},
-        {wire_videos_k, loaded.videos.data()},
-        {wire_audio_samples_k, loaded.audio_samples.data()},
+static expected_t pack_batch_into_block_(multimodal_batch_on_gpu_t const &loaded, b8r1_span_t destination,
+                                         batch_block_layout_t_ const &layout, gpu_stream_t &stream) noexcept {
+    block_copy_t_ const copies[block_tensor_count_k] = {
+        {block_segment_offsets_k, loaded.segment_offsets.data()},
+        {block_segment_lengths_k, loaded.segment_lengths.data()},
+        {block_segment_modality_k, loaded.segment_modality.data()},
+        {block_tokens_k, loaded.tokens.data()},
+        {block_image_shapes_k, loaded.image_shapes.data()},
+        {block_video_shapes_k, loaded.video_shapes.data()},
+        {block_images_k, loaded.images.data()},
+        {block_videos_k, loaded.videos.data()},
+        {block_audio_samples_k, loaded.audio_samples.data()},
     };
-    for (wire_copy_t_ const &copy : copies) {
+    for (block_copy_t_ const &copy : copies) {
         std::size_t const bytes = layout.byte_count(copy.tensor);
         if (bytes == 0u || copy.source == nullptr) continue;
-        // vendor-boundary: device→device pack of one batch tensor into its wire region — the tensors' `data()`
+        // vendor-boundary: device→device pack of one batch tensor into its block region — the tensors' `data()`
         // pointers are raw CUdeviceptr sources, not views, so the driver copy is spelled by hand here.
         if (CUresult packed = cuMemcpyDtoDAsync(
                 reinterpret_cast<CUdeviceptr>(destination.data() + layout.offset(copy.tensor)),
                 reinterpret_cast<CUdeviceptr>(copy.source), bytes, stream.get());
             packed != CUDA_SUCCESS)
             return expected_t::fail(packed,
-                                    "packing batch tensor {} into the wire block failed " //
+                                    "packing batch tensor {} into the exchanged block failed " //
                                     "(destination=0x{:x} source=0x{:x} bytes={})",
                                     static_cast<u32_t>(copy.tensor),
                                     reinterpret_cast<u64_t>(destination.data() + layout.offset(copy.tensor)),
@@ -334,8 +414,8 @@ expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
     u32_t const domains = colocated.multimem_domain_count();
     if (members * domains > max_gpus_per_host_k)
         return result_t::fail(status_t::shape_unsupported_k,
-                              "the {}-member × {}-island world exceeds the {}-GPU source table", members, domains,
-                              max_gpus_per_host_k);
+                              "the {}-member × {}-multimem_domain world exceeds the {}-GPU source table", members,
+                              domains, max_gpus_per_host_k);
     // Level-1 precondition: every member's arena readable by every other member — visibility is the
     // arenas' construction-time configuration, validated here, never granted here.
     for (std::size_t member = 0; member != members; ++member)
@@ -350,11 +430,14 @@ expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
     mixer.seed_ = seed;
     mixer.shape_ = shape;
     mixer.domains_ = domains;
-    mixer.home_island_ = colocated.topology().multimem_domain_index();
-    mixer.wire_layout_ = batch_wire_layout_t::for_shape(shape);
-    // A single-island world never posts — the all-to-all buffers stay empty and the exchange path is skipped.
-    // A multi-island world wires one buffer per member, same-index-paired with the other island's GPU; each
-    // buffer's block is the whole serialized batch, so a landing holds the remote same-index GPU's batch.
+    mixer.multimem_domain_index_ = colocated.topology().multimem_domain_index();
+    mixer.first_gpu_index_in_colocated_domain_ = colocated.topology().shape.gpu_index_of_multimem_member(
+        mixer.multimem_domain_index_, 0u);
+    // The block layout is pure shape math — re-derived where needed, never stored.
+    std::size_t const block_bytes = batch_block_layout_(shape).total_bytes();
+    // A single-multimem_domain world never posts — the all-to-all buffers stay empty and the exchange path
+    // is skipped. A wider world wires one buffer per member, same-index-paired with the other domain's GPU;
+    // each buffer's block is the whole serialized batch, so a landing holds the remote same-index GPU's batch.
     if (mixer.domains_ > 1u) {
         if (mixer.alltoall_buffers_.try_resize(members) != status_t::success_k)
             return result_t::fail(status_t::bad_alloc_k, "all-to-all buffer table allocation failed ({} members)",
@@ -364,8 +447,7 @@ expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
             if (!gpu_scope.ok())
                 return result_t::fail(status_t::cuda_error_k, "context entry failed wiring member {}", member);
             auto wired = infiniband_all_to_all<b8_t>::make(colocated, static_cast<u32_t>(member), arenas[member],
-                                                           mixer.wire_layout_.total_bytes(), streams[member],
-                                                           timeout_seconds);
+                                                           block_bytes, streams[member], timeout_seconds);
             if (!wired) return result_t::fail(std::move(wired));
             mixer.alltoall_buffers_[member] = std::move(wired.value_);
         }
@@ -385,22 +467,23 @@ expected_t multimodal_batch_mixer_t::operator()(std::size_t member_index, data_e
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed ({})", member_index);
 
-    // A multi-island world ships this member's whole loaded batch to the other island's same-index GPU before
-    // the barrier: pack every live tensor into the outgoing wire block, then enqueue the exchange. After it,
-    // this island's member-m landing holds the other island's member-m batch, so a segment whose source GPU
-    // sits on the other island is read from that landing rather than peer-read over NVLink.
+    // A multi-multimem_domain world ships this member's whole loaded batch to the other domain's same-index
+    // GPU before the barrier: pack every live tensor into the outgoing block, then enqueue the exchange.
+    // After it, this domain's member-m landing holds the other domain's member-m batch, so a segment whose
+    // source GPU sits on the other domain is read from that landing rather than peer-read over NVLink.
+    batch_block_layout_t_ const block_layout = batch_block_layout_(shape_); // pure shape math, never stored
     if (domains_ > 1u) {
-        u32_t const other_island = home_island_ ^ 1u;
-        b8r1_span_t const outgoing = alltoall_buffers_[member_index].send_block(other_island);
-        if (expected_t packed = pack_batch_into_wire_(loaded[member_index], outgoing, wire_layout_, stream); !packed)
+        u32_t const other_multimem_domain = multimem_domain_index_ ^ 1u;
+        b8r1_span_t const outgoing = alltoall_buffers_[member_index].send_block(other_multimem_domain);
+        if (expected_t packed = pack_batch_into_block_(loaded[member_index], outgoing, block_layout, stream); !packed)
             return packed;
         if (expected_t exchanged = alltoall_buffers_[member_index](stream); !exchanged) return exchanged;
     }
 
-    // The peer table travels as a kernel argument — no device copy, no staging, nothing owned. On one island
-    // the entries are the members' loaded batches; across islands the source space doubles to
-    // `members·domains_` global GPUs, entry g being loaded[g%members] when g's island is home and the
-    // landing of the same-index buffer otherwise.
+    // The peer table travels as a kernel argument — no device copy, no staging, nothing owned. On one
+    // multimem_domain the entries are the members' loaded batches; across domains the source space doubles
+    // to `members·domains_` world GPUs, entry g being loaded[g%members] when g's domain is this process's
+    // own and the landing of the same-index buffer otherwise.
     auto local_source = [&](std::size_t member, batch_source_t_ &source) noexcept -> expected_t {
         source = source_from_loaded_(loaded[member]);
         if (source.tokens == nullptr || source.segment_offsets == nullptr || source.segment_lengths == nullptr ||
@@ -413,15 +496,15 @@ expected_t multimodal_batch_mixer_t::operator()(std::size_t member_index, data_e
     };
     batch_sources_t_ sources;
     sources.count = static_cast<u32_t>(members) * domains_;
-    for (u32_t global = 0; global != sources.count; ++global) {
-        u32_t const local_member = global % static_cast<u32_t>(members);
-        u32_t const island = global / static_cast<u32_t>(members);
-        if (island == home_island_) {
-            if (expected_t built = local_source(local_member, sources.entries[global]); !built) return built;
+    for (u32_t source_gpu_index = 0; source_gpu_index != sources.count; ++source_gpu_index) {
+        u32_t const local_member = source_gpu_index % static_cast<u32_t>(members);
+        u32_t const source_multimem_domain = source_gpu_index / static_cast<u32_t>(members);
+        if (source_multimem_domain == multimem_domain_index_) {
+            if (expected_t built = local_source(local_member, sources.entries[source_gpu_index]); !built) return built;
         }
         else {
             b8r1_span_t const landing = alltoall_buffers_[local_member].recv_block(0u);
-            sources.entries[global] = source_from_landing_(landing, wire_layout_, shape_);
+            sources.entries[source_gpu_index] = source_from_landing_(landing, block_layout, shape_);
         }
     }
 
@@ -451,19 +534,19 @@ expected_t multimodal_batch_mixer_t::operator()(std::size_t member_index, data_e
     dim3 const one_block {1u, 1u, 1u};
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const segment_grid {shape_.max_segments_per_gpu, 1u, 1u};
-    // The routing destination is this member's GLOBAL index — home-island offset plus the local member — so the
-    // two islands' same-index GPUs claim disjoint destination ranges in the members·domains world (in a single
-    // island home_island_ is 0, so this is the local index unchanged).
-    u32_t const global_member = home_island_ * static_cast<u32_t>(members) + static_cast<u32_t>(member_index);
+    // The routing destination is this member's world coordinate — the multimem_domains claim disjoint
+    // destination ranges in the members·domains world (a single domain's base is 0 — the local index unchanged).
+    u32_t const gpu_index_in_colocated_domain = first_gpu_index_in_colocated_domain_ + static_cast<u32_t>(member_index);
     expected_t staged = launch_kernel(reinterpret_cast<void const *>(&batch_geometry_kernel_), one_block, block_shape,
-                                      stream, sources, mixed_offsets, mixed_lengths, global_member, data_epoch, seed_,
-                                      shape_.max_segments_per_gpu, shape_.max_rows_per_gpu, shape_.max_columns_per_row);
+                                      stream, sources, mixed_offsets, mixed_lengths, gpu_index_in_colocated_domain,
+                                      data_epoch, seed_, shape_.max_segments_per_gpu, shape_.max_rows_per_gpu,
+                                      shape_.max_columns_per_row);
     if (staged)
         staged = launch_kernel(reinterpret_cast<void const *>(&batch_gather_kernel_), segment_grid, block_shape, stream,
                                sources, dest, u32r1_view_t {mixed_offsets.data(), mixed_offsets.extent(0)},
-                               u32r1_view_t {mixed_lengths.data(), mixed_lengths.extent(0)}, global_member, data_epoch,
-                               seed_, shape_.max_segments_per_gpu, image_patch_scalars, video_tube_scalars,
-                               audio_frame_scalars);
+                               u32r1_view_t {mixed_lengths.data(), mixed_lengths.extent(0)},
+                               gpu_index_in_colocated_domain, data_epoch, seed_, shape_.max_segments_per_gpu,
+                               image_patch_scalars, video_tube_scalars, audio_frame_scalars);
     return staged;
 }
 

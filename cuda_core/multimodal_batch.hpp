@@ -381,85 +381,6 @@ using video_shape_span_t = nk::tensor_span<u16_t, 2>;
                                      video_shape_view_t video_shapes, u32_t tube_frames, i16r2_span_t coords,
                                      gpu_stream_t &stream) noexcept;
 
-/** @brief The nine batch tensors, in their fixed serialization order — the index into a
- *      @ref batch_wire_layout_t . A fixed family, so it is an enum, not a run of constants; every GPU shares
- *      one shape, so the order (and thus every landing's byte layout) is identical across islands. */
-enum batch_wire_tensor_t : u32_t {
-    wire_segment_offsets_k = 0,
-    wire_segment_lengths_k = 1,
-    wire_segment_modality_k = 2,
-    wire_tokens_k = 3,
-    wire_image_shapes_k = 4,
-    wire_video_shapes_k = 5,
-    wire_images_k = 6,
-    wire_videos_k = 7,
-    wire_audio_samples_k = 8,
-};
-
-/** @brief How many tensors one wire block serializes — the extent of @ref batch_wire_tensor_t . */
-inline constexpr u32_t wire_tensor_count_k = 9u;
-
-/**
- *  @brief The cross-node serialization map of one @ref multimodal_batch_on_gpu_t : a cache-line-aligned byte
- *      offset and a byte count for each of the nine batch tensors, packed back to back in
- *      @ref batch_wire_tensor_t order. Derived purely from a @ref multimodal_batch_shape_t (plus the per-cell
- *      patch / tube / frame scalar counts), so every GPU on every island computes the identical layout — which
- *      is what lets a same-index landing be reinterpreted with the local offsets, no exchanged descriptor.
- *
- *  A dead modality (its content tensor unallocated) still gets an offset but a zero byte count, so it
- *  contributes nothing and its offset is simply never dereferenced. @ref total_bytes is the whole block's
- *  size — the @c block_scalars an @c infiniband_all_to_all<b8_t> is wired with.
- */
-struct batch_wire_layout_t {
-    /** @brief Each tensor's cache-line-aligned byte offset from the block base, in @ref batch_wire_tensor_t order. */
-    std::size_t offsets[wire_tensor_count_k] {};
-    /** @brief Each tensor's serialized byte count; zero for a dead modality's content tensor. */
-    std::size_t byte_counts[wire_tensor_count_k] {};
-    /** @brief The whole block's cache-line-rounded size — the all-to-all buffer's @c block_scalars for @c b8_t . */
-    std::size_t block_bytes = 0;
-
-    /** @brief This tensor's byte offset from the block base. */
-    [[nodiscard]] constexpr std::size_t offset(batch_wire_tensor_t tensor) const noexcept { return offsets[tensor]; }
-    /** @brief This tensor's serialized byte count — zero when its modality is out of the composition. */
-    [[nodiscard]] constexpr std::size_t byte_count(batch_wire_tensor_t tensor) const noexcept {
-        return byte_counts[tensor];
-    }
-    /** @brief The whole block's size — every landing and send block spans exactly this. */
-    [[nodiscard]] constexpr std::size_t total_bytes() const noexcept { return block_bytes; }
-
-    /** @brief Compute the layout a @p shape implies — the single source every island agrees on. */
-    [[nodiscard]] static constexpr batch_wire_layout_t for_shape(multimodal_batch_shape_t const &shape) noexcept {
-        batch_wire_layout_t layout;
-        std::size_t const segments = shape.max_segments_per_gpu;
-        std::size_t const cells = static_cast<std::size_t>(shape.max_rows_per_gpu) * shape.max_columns_per_row;
-        layout.byte_counts[wire_segment_offsets_k] = (segments + 1u) * sizeof(u32_t);
-        layout.byte_counts[wire_segment_lengths_k] = segments * sizeof(u32_t);
-        layout.byte_counts[wire_segment_modality_k] = segments * sizeof(modality_t);
-        layout.byte_counts[wire_tokens_k] = cells * sizeof(token_id_t);
-        layout.byte_counts[wire_image_shapes_k] = segments * 2u * sizeof(u16_t);
-        layout.byte_counts[wire_video_shapes_k] = segments * 3u * sizeof(u16_t);
-        layout.byte_counts[wire_images_k] = shape.contains(modality_t::image_k)
-                                                ? cells * patch_scalars(shape.image.patch_side, shape.image.channels) *
-                                                      sizeof(pixel_t)
-                                                : 0u;
-        layout.byte_counts[wire_videos_k] =
-            shape.contains(modality_t::video_k)
-                ? cells * tube_scalars(shape.video.tube_frames, shape.video.patch_side, shape.video.channels) *
-                      sizeof(pixel_t)
-                : 0u;
-        layout.byte_counts[wire_audio_samples_k] = shape.contains(modality_t::audio_k)
-                                                       ? cells * shape.audio.chunk_samples * sizeof(f32_t)
-                                                       : 0u;
-        std::size_t running = 0;
-        for (u32_t tensor = 0; tensor != wire_tensor_count_k; ++tensor) {
-            layout.offsets[tensor] = round_up_to_multiple(running, cache_line_bytes_k);
-            running = layout.offsets[tensor] + layout.byte_counts[tensor];
-        }
-        layout.block_bytes = round_up_to_multiple(running, cache_line_bytes_k);
-        return layout;
-    }
-};
-
 /**
  *  @brief Shuffles the loaded batches between the GPUs of one multimem_domain — and, once wired,
  *      across the colocated_domain via InfiniBand — so every step trains on a fresh cross-GPU mix.
@@ -521,17 +442,18 @@ struct multimodal_batch_mixer_t {
     u64_t seed_ = 0;
     /** @brief The baked batch capacities every route and repack cursor is bounded by. */
     multimodal_batch_shape_t shape_ {};
-    /** @brief One cross-island full-batch exchange buffer per member — empty on a single-island world, where
-     *      @ref domains_ is 1 and the exchange path is skipped entirely. */
+    /** @brief One cross-domain full-batch exchange buffer per member — empty on a single-multimem_domain
+     *      world, where @ref domains_ is 1 and the exchange path is skipped entirely. */
     per_gpu_array<infiniband_all_to_all<b8_t>> alltoall_buffers_ {};
-    /** @brief How many multimem_domains (islands) the world spans; 1 is the single-NVLink-island fast path. */
+    /** @brief How many multimem_domains the world spans; 1 is the single-NVLink-domain fast path. */
     u32_t domains_ = 1;
-    /** @brief This process's island index — the source of a segment whose source GPU sits here is a direct
-     *      NVLink peer read; any other island's is read from that member's landing. */
-    u32_t home_island_ = 0;
-    /** @brief The serialization map every send block is packed into and every landing is reinterpreted through —
-     *      identical on every island, so the local offsets address a remote same-index landing. */
-    batch_wire_layout_t wire_layout_ {};
+    /** @brief This process's multimem_domain index — the source of a segment whose source GPU sits here is
+     *      a direct NVLink peer read; any other domain's is read from that member's landing. */
+    u32_t multimem_domain_index_ = 0;
+    /** @brief This multimem_domain's first member's world coordinate (the mesh's inverse mapping) — member
+     *      @c m 's routing destination is @c first+m , so the domains claim disjoint destination ranges in
+     *      the @c members·domains world. */
+    u32_t first_gpu_index_in_colocated_domain_ = 0;
 };
 
 } // namespace unum::uform::core
