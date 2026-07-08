@@ -1,0 +1,27 @@
+[package]
+name = "uform"
+version = "4.0.0"
+edition = "2021"
+rust-version = "1.73"
+license = "Apache-2.0"
+publish = false
+description = "PyTorch-free CPU inference for the UForm v4 encoders over NumKong kernels"
+
+[lib]
+name = "uform"
+path = "rust/uform.rs"
+
+[[bin]]
+name = "uform-bench"
+path = "rust/bench.rs"
+
+[dependencies]
+numkong = { version = "7.7", features = ["std", "parallel"] }
+fork_union = "2.3"
+memmap2 = "0.9"
+serde_json = "1.0"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
