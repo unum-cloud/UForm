@@ -77,7 +77,7 @@ project(
     VERSION 4.0.0
     LANGUAGES CXX CUDA
     DESCRIPTION "Pocket-sized multimodal AI for content understanding and generation"
-    HOMEPAGE_URL "https://github.com/unum-cloud/uform"
+    HOMEPAGE_URL "https://github.com/unum-cloud/UForm"
 )
 
 # C++23: the multidimensional subscript `tensor[row, column]` is the project's indexing default — device code included,

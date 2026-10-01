@@ -1,7 +1,7 @@
 # UForm Model Benchmarks
 
 These results cover the UForm 3 models.
-The scripts below ship with the [`v3.1.4`](https://github.com/unum-cloud/uform/tree/v3.1.4) release, so run them from a checkout of that tag.
+The scripts below ship with the [`v3.1.4`](https://github.com/unum-cloud/UForm/tree/v3.1.4) release, so run them from a checkout of that tag.
 
 ## Accuracy
 

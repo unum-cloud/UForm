@@ -3,7 +3,7 @@
 # For the full list of built-in configuration values, see the documentation:
 # https://www.sphinx-doc.org/en/master/usage/configuration.html
 
-# -- Project information -----------------------------------------------------
+# Project information
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "Unum · UForm"
@@ -16,7 +16,7 @@ with open("_static/custom.js", "r+") as js:
     js.truncate()
     js.write(content.replace("$(VERSION)", release))
 
-# -- General configuration ---------------------------------------------------
+# General configuration
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
 extensions = [
@@ -36,7 +36,7 @@ exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "*.md"]
 googleanalytics_id = "341385789"
 googleanalytics_enabled = True
 
-# -- Options for HTML output -------------------------------------------------
+# Options for HTML output
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#options-for-html-output
 
 html_logo = "../assets/unum.png"

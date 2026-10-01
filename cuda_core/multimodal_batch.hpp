@@ -53,7 +53,6 @@
  *  the coordinate blind to which modality produced it.
  *
  *      Modality    Content stored as     Coordinate @c (t,h,w)
- *      --------    ------------------    -------------------------------------------------
  *      text        a scalar token id     @c (pos,0,0) — 1-D, the temporal axis is sequence
  *      image       a patch vector        @c (0,row,col) — 2-D spatial
  *      video       a tube vector         @c (frame,row,col) — 3-D

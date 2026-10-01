@@ -53,3 +53,11 @@ yarn-error.log
 
 # macOS
 .DS_Store
+
+# Editors, assistants, language servers and tool caches
+.cache/
+.claude/
+CMakeUserPresets.json
+/compile_commands.json
+target/
+Cargo.lock

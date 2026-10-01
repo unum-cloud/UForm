@@ -498,7 +498,7 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
     return feed_unit(temporal_unit_start, stream.size(), true);
 }
 
-// ---- Host container demux ( libavformat ) ---------------------------------------------------------
+#pragma region Host Container Demux
 
 /** @brief One demuxed clip: its Annex-B elementary stream, its resolved codec, native frame dimensions and count,
  *      and whether the demux succeeded — filled in parallel over the pool, consumed by the engine decoders. */
@@ -1366,7 +1366,9 @@ expected_t nvdec_session_t::decode_into(cpu_decode_pool_t &pool, column_view_t c
                           {plan.prefix.data(), job_count + 1u}, stream);
 }
 
-// ---- The free decode orchestrator + the dataset-scoped loader --------------------------------------
+#pragma endregion Host Container Demux
+
+#pragma region Decode Orchestrator and Dataset Loader
 
 expected_t ul::decode_videos(nvdec_session_t &nvdec, cpu_decode_pool_t &pool, column_view_t tape,
                              std::span<u64_t const> drawn_rows, std::span<video_batch_shape_t const> representations,
@@ -1538,3 +1540,5 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
     }
     return {};
 }
+
+#pragma endregion Decode Orchestrator and Dataset Loader

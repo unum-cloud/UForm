@@ -14,7 +14,7 @@ For Content Understanding and Generation<br/>
 &nbsp; &nbsp; &nbsp;
 <a href="https://unum.cloud/post"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/blog.svg" alt="Blog"></a>
 &nbsp; &nbsp; &nbsp;
-<a href="https://github.com/unum-cloud/uform"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/github.svg" alt="GitHub"></a>
+<a href="https://github.com/unum-cloud/UForm"><img height="25" src="https://github.com/unum-cloud/.github/raw/main/assets/github.svg" alt="GitHub"></a>
 </p>
 
 <p align="center">
@@ -24,11 +24,11 @@ Text • Images • Videos • Audio • Code • Graphs
 <br/>
 CUDA Training • CUDA Inference • ONNX • CoreML
 <br/>
-<a href="https://github.com/unum-cloud/uform/blob/main/python/README.md">Python</a>
+<a href="https://github.com/unum-cloud/UForm/blob/main/python/README.md">Python</a>
  • 
-<a href="https://github.com/unum-cloud/uform/blob/main/javascript/README.md">JavaScript</a>
+<a href="https://github.com/unum-cloud/UForm/blob/main/javascript/README.md">JavaScript</a>
  • 
-<a href="https://github.com/unum-cloud/uform/blob/main/swift/README.md">Swift</a>
+<a href="https://github.com/unum-cloud/UForm/blob/main/swift/README.md">Swift</a>
 </p>
 
 ---

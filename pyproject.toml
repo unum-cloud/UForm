@@ -53,12 +53,12 @@ version = "4.0.0"
 uform-chat = "uform.chat:main"
 
 [project.optional-dependencies]
-# ── GPU inference backends ────────────────────────────────────────────────────────────────────────
+# GPU inference backends
 torch = ["torch>=2.7.0", "torchvision", "transformers>=4.50.0"]
 onnx = ["onnx>=1.16.0", "onnxruntime>=1.20.0"]
 onnx-gpu = ["onnx>=1.16.0", "onnxruntime-gpu>=1.20.0", "tensorrt-cu12>=10.0.0; platform_system=='Linux'"]
 
-# ── GPU training + data tooling ───────────────────────────────────────────────────────────────────
+# GPU training + data tooling
 # Everything a training run and the `python_data/` loaders / repack scripts need. The `cuda-toolkit`
 # extras ship cudart / cublas / cufft / cufile / curand / cusparse / nvrtc / nvjitlink / nvcc / nvvm
 # as wheels so the native extension resolves them from inside `.venv` (via $ORIGIN RPATH) with no
@@ -105,7 +105,7 @@ dev = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/unum-cloud/uform"
+"Homepage" = "https://github.com/unum-cloud/UForm"
 
 # Groups rather than extras, so none of this reaches the published wheel's metadata.
 [dependency-groups]
