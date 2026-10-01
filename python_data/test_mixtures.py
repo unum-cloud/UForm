@@ -19,7 +19,7 @@ weight is > 0 rather than that a mixture sums to exactly 1.0.
 Run as a script for a PASS summary:
     uv run python_data/test_mixtures.py
 Or under pytest (every `test_*` function below is an independent case):
-    uv run python_data/test_mixtures.py
+    python -m pytest python_data/test_mixtures.py
 """
 
 from __future__ import annotations

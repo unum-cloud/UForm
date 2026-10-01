@@ -1,21 +1,28 @@
 # Contributing to UForm
 
-We welcome contributions to UForm!
+UForm 4 is a CUDA training and inference stack with Python data tooling around it.
+
+## CUDA
+
+The prerequisites are listed at the top of `CMakeLists.txt`.
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
 
 ## Python
 
-Before submitting any changes, please make sure that the tests pass.
+The `python_data/` tooling is tested the way CI runs it:
 
 ```sh
-pip install -e ".[dev]"         # For development dependencies
-pip install -e ".[torch]"       # For PyTorch
-pip install -e ".[onnx]"        # For ONNX on CPU
-pip install -e ".[onnx-gpu]"    # For ONNX on GPU, available for some platforms
-pip install -e ".[torch,onnx,onnx-gpu,dev]"  # For all
-
-pytest python/scripts/ -s -x -Wd -v
-pytest python/scripts/ -s -x -Wd -v -k onnx # To run only ONNX tests without loading Torch
+pip install --group test
+python -X faulthandler -m pytest -x
 ```
+
+`UFORM_FILTER` keeps the tests whose node id matches it, as a regex or else as a substring.
+`UFORM_SEED` pins the seed, `42` by default or `random`, and pytest prints both in its header.
 
 ## Swift
 
@@ -52,15 +59,3 @@ Before submitting any changes, please make sure that the tests pass.
 npm install
 npm test
 ```
-
-## Benchmarking
-
-If you want to double check, how fast the model may work on your hardware, you can clone the library and repeat the benchmarks locally.
-The following benchmark will exclude PyTorch backend, CUDA-capable devices, and all the `-base` and `-large` models, running only the ONNX benchmarks on the CPU.
-
-```sh
-git clone https://github.com/unum-cloud/uform --depth 1 # Clone the repository
-cd uform && pip install -e ".[torch,onnx,onnx-gpu,dev]" # Install all dependencies
-python python/scripts/bench_encoders.py --filter-out "torch|cuda|base|large"
-```
-

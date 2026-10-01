@@ -10,7 +10,7 @@ It is deliberately separate from the __data-acquisition__ job (`python_data/acqu
 
 ## The mesh, in one paragraph
 
-The world is a shape `{host_domain, multimem_domain, colocated_domain}` with `1 <= host_domain <= multimem_domain <= colocated_domain` (see `cuda_core/mesh.hpp`).
+The world is a shape `{host_domain, multimem_domain, colocated_domain}` with 1 ≤ `host_domain` ≤ `multimem_domain` ≤ `colocated_domain` (see `cuda_core/mesh.hpp`).
 `host_domain` is the GPUs __one process__ drives; `multimem_domain` is the GPUs reachable by `multimem.*` over one NVLink/NVSwitch island (HGX = 8, NVL72 = 72); `colocated_domain` is the whole job.
 When `host_domain < multimem_domain`, __several processes compose one multicast domain__ — the interesting cross-process case (NVL72 is `{4, 72, 144}`: 18 processes per rack-wide multicast domain).
 

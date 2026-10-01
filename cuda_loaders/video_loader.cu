@@ -782,7 +782,7 @@ static void demux_container(std::span<b8_t const> container, demuxed_clip_t &out
 
 /** @brief The feed granularity of the interleaved decode drive — small enough that no single parse call monopolizes
  *      the one host thread, so decode work stays submitted across every engine at once. Measured on a 7-engine
- *      H100: a whole-clip-per-call feed uses one engine and runs slower than a single decoder, while 64 KiB chunks
+ *      H100: a whole-clip-per-call feed uses one engine and runs slower than a single decoder, while 64 KB chunks
  *      reach ~6x — near the engine count. */
 inline constexpr std::size_t nvdec_feed_chunk_bytes_k = 64u * 1024u;
 

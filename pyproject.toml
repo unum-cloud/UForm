@@ -95,10 +95,6 @@ eval = ["mteb>=1.40.0", "datasets>=4.8.0", "scipy>=1.14.0"]
 
 # Development tooling for both the inference package and the training / data code.
 dev = [
-    "pytest>=8.3.0",
-    "pytest-cov>=7.0.0",
-    "pytest-xdist>=3.8.0",
-    "ruff>=0.9.0",
     "mypy>=1.14.0",
     "pre-commit>=4.0.0",
     "pandas",
@@ -110,6 +106,21 @@ dev = [
 
 [project.urls]
 "Homepage" = "https://github.com/unum-cloud/uform"
+
+# Groups rather than extras, so none of this reaches the published wheel's metadata.
+[dependency-groups]
+lint = ["ruff>=0.15.8"]
+# The `python_data/test_*.py` suites import only the standard library and their sibling modules.
+test = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+# `-p no:randomly` keeps `<PROJECT>_SEED` in charge wherever pytest-randomly happens to be installed.
+addopts = ["-ra", "--showlocals", "--strict-markers", "--strict-config", "-p", "no:randomly"]
+filterwarnings = ["error"]
+minversion = "8.0"
+python_files = ["test_*.py"]
+testpaths = ["python_data"]
+xfail_strict = true
 
 # RAPIDS cuDF / RMM and the versioned NVIDIA CUDA wheels live on NVIDIA's index alongside PyPI.
 [[tool.uv.index]]
@@ -127,13 +138,14 @@ namespaces = false
 line-length = 120
 ignore = ["C408", "C901", "E501", "E741"]
 ignore-init-module-imports = true
-select = ["C", "E", "F", "I", "UP", "W", "D", "PLC0415"]
+select = ["C", "D", "E", "F", "I", "PLC0415", "TID", "UP", "W"]
 
-[tool.ruff.isort]
-lines-after-imports = 2
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
 known-first-party = ["python_data", "uform"]
+combine-as-imports = true
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

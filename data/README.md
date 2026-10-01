@@ -54,8 +54,8 @@ The text stack spans masked-language pretraining (`MLM`), contrastive retrieval 
 
 ### Web & Reference
 
-| Dataset                      | Role       | Format  | Coverage                             |
-| ---------------------------- | ---------- | ------- | ------------------------------------ |
+| Dataset                       | Role       | Format  | Coverage                             |
+| ----------------------------- | ---------- | ------- | ------------------------------------ |
 | ✅ [FineWeb][fineweb]         | MLM        | parquet | English web, 100-billion-token slice |
 | ✅ [FineWeb-2][fineweb2]      | MLM        | parquet | Multilingual web, 42 languages       |
 | ✅ [FineWiki][finewiki]       | MLM, pairs | parquet | Wikipedia, 325 languages ¹           |
@@ -79,8 +79,8 @@ The text stack spans masked-language pretraining (`MLM`), contrastive retrieval 
 
 ### Retrieval & QA Pairs
 
-| Dataset                          | Role            | Format         | Coverage                                            |
-| -------------------------------- | --------------- | -------------- | --------------------------------------------------- |
+| Dataset                           | Role            | Format         | Coverage                                            |
+| --------------------------------- | --------------- | -------------- | --------------------------------------------------- |
 | ✅ [MS MARCO][msmarco]            | pairs, triplets | parquet        | Query → passage; 1 or 50 BM25 hard negatives ¹      |
 | 🔜 [mMARCO][mmarco]               | pairs           | parquet        | Multilingual MS MARCO ²                             |
 | ✅ [Mr. TyDi][mrtydi]             | triplets        | parquet        | 11-language retrieval, multiple positives per query |
@@ -127,8 +127,8 @@ The on-device local fuzzy-search use case — a short, typo-laden query against 
 Each entry slots into the mixture JSONs' `(anchor / positive / negative)` field contract; hard negatives are BM25- or ANN-mined at pack time where the source ships none.
 The augmentation family supplies the _multi-positive_ side by construction: each query variant (reformatted date, regrouped digits, mixed case, injected typo) is an additional positive of the same target, which is also what satisfies the multi-positive/multi-negative CSR guard.
 
-| Dataset                     | Role  | Format         | Coverage                                                          |
-| --------------------------- | ----- | -------------- | ----------------------------------------------------------------- |
+| Dataset                      | Role  | Format         | Coverage                                                          |
+| ---------------------------- | ----- | -------------- | ----------------------------------------------------------------- |
 | ✅ [Enron Email][enron]      | pairs | tar → parquet  | subject → body, the only large real email corpus ¹                |
 | ✅ [AESLC][aeslc]            | pairs | parquet        | email body → subject line (Annotated Enron Subject Line) ²        |
 | 🔜 [Ubuntu Dialogue][ubuntu] | pairs | parquet        | multi-turn chat context → next turn, informal register            |
@@ -136,7 +136,8 @@ The augmentation family supplies the _multi-positive_ side by construction: each
 | 🔜 [MultiWOZ][multiwoz]      | pairs | JSON → parquet | multi-domain goal-oriented dialog turn → response                 |
 | 🔜 [WikiHow][wikihow]        | pairs | parquet        | step title → step body, a public proxy for note-like short docs ³ |
 
-> ¹ Public (FERC release); named `enron_email` and acquired via `uv run python_data/download_enron.py`, whose `webdataset` source kind muxes the tarball into `(subject, body)` pairs (quoted / forwarded thread history stripped). Thread → reply pairs and cross-thread hard-negative mining remain future work.
+> ¹ Public (FERC release); named `enron_email` and acquired via `uv run python_data/download_enron.py`, whose `webdataset` source kind muxes the tarball into `(subject, body)` pairs (quoted / forwarded thread history stripped).
+> Thread → reply pairs and cross-thread hard-negative mining remain future work.
 > ² Named `aeslc` and acquired via `uv run python_data/download_aeslc.py` (the `hf_snapshot` source kind); ~14K body→subject pairs where the subject is a terse, abbreviation-heavy "query" over the body, matching the short-query regime.
 > ³ Notes are private by nature, so no public corpus exists; WikiHow's title→body and the synthetic augmentation variants stand in until any opt-in on-device personalization is added.
 
@@ -149,8 +150,8 @@ The augmentation family supplies the _multi-positive_ side by construction: each
 
 ### Code
 
-| Dataset                              | Role         | Format                | Coverage                                                             |
-| ------------------------------------ | ------------ | --------------------- | -------------------------------------------------------------------- |
+| Dataset                               | Role         | Format                | Coverage                                                             |
+| ------------------------------------- | ------------ | --------------------- | -------------------------------------------------------------------- |
 | ✅ [CodeSearchNet][codesearchnet]     | MLM, pairs   | parquet               | Docstring → function, 6 languages                                    |
 | ✅ [POJ-104][poj104]                  | pairs        | parquet               | 104 C++ problems × ~500 clone solutions; equivalence-class positives |
 | ✅ [The Vault][thevault]              | pairs        | parquet               | Docstring → function, 10 languages, 11 docstring styles              |
@@ -187,16 +188,18 @@ The augmentation family supplies the _multi-positive_ side by construction: each
 Paired `(corrupted → canonical)` transductions that pressure the uniform byte encoder toward surface-invariant semantics (the denoising-autoencoder regularizer in `NORMALIZATION_TASKS.md`).
 These now parse through the mixture JSONs' `(anchor, positive)` contract on the standard `TextPairLoader` path, supplying the multi-positive surface-robustness side of the personal-search mixture; in-place corruption-MLM over the web corpora above remains a complementary cheap vehicle.
 
-| Dataset                                 | Role             | Format         | Coverage                                             |
-| --------------------------------------- | ---------------- | -------------- | ---------------------------------------------------- |
+| Dataset                                  | Role             | Format         | Coverage                                             |
+| ---------------------------------------- | ---------------- | -------------- | ---------------------------------------------------- |
 | ✅ [C4\_200M][c4200m]                    | denoise pair     | zip → parquet  | 185M synthetic GEC pairs; permissive training bulk ¹ |
 | ✅ [Google Text Normalization][googletn] | denoise pair     | CSV → parquet  | written ↔ spoken hard classes; best non-AR fit ²     |
 | 🔜 [LogHub / LogHub-2.0][loghub]         | denoise, extract | logs → parquet | `{time}{source}{priority}{message}` schema-fill      |
 | ✅ [PleIAs Post-OCR][pleias]             | denoise pair     | parquet        | \~1B words permissive OCR → clean                    |
 | ✅ [GitHub Typo Corpus][githubtypo]      | denoise pair     | parquet        | real code-comment-register typos ³                   |
 
-> ¹ Named `c4_200m` and acquired via `uv run python_data/download_c4_200m.py --max-shards N`, whose `text_jsonl` source kind repacks one TSV shard at a time (default one ~18M-pair shard); C4-derived with Apache-licensed corruption code — the permissive workhorse for the semantic-regularizer A/B. The gold GEC sets (cLang-8, JFLEG, W\&I+LOCNESS, CoNLL-2014) stay as evals because they are non-commercial or gated.
-> ² Named `google_text_norm` and acquired via `uv run python_data/download_google_text_norm.py`, whose `text_jsonl` source kind repacks into `(written, spoken, semiotic_class)` columns; the downloader drops the PLAIN / PUNCT identity rows on device so only the class-conditional rewrites (date / cardinal / ordinal / decimal / money / measure / time / telephone / electronic / fraction / address / letters) reach the loss — the sweet spot for the one-pass non-AR head. Ships via the `pavanBuduguppa/asr_inverse_text_normalization` mirror of the Sproat data (the original GCS bucket is now gated).
+> ¹ Named `c4_200m` and acquired via `uv run python_data/download_c4_200m.py --max-shards N`, whose `text_jsonl` source kind repacks one TSV shard at a time (default one ~18M-pair shard); C4-derived with Apache-licensed corruption code — the permissive workhorse for the semantic-regularizer A/B.
+> The gold GEC sets (cLang-8, JFLEG, W\&I+LOCNESS, CoNLL-2014) stay as evals because they are non-commercial or gated.
+> ² Named `google_text_norm` and acquired via `uv run python_data/download_google_text_norm.py`, whose `text_jsonl` source kind repacks into `(written, spoken, semiotic_class)` columns; the downloader drops the PLAIN / PUNCT identity rows on device so only the class-conditional rewrites (date / cardinal / ordinal / decimal / money / measure / time / telephone / electronic / fraction / address / letters) reach the loss — the sweet spot for the one-pass non-AR head.
+> Ships via the `pavanBuduguppa/asr_inverse_text_normalization` mirror of the Sproat data (the original GCS bucket is now gated).
 > ³ Named `github_typo` and acquired via `uv run python_data/download_github_typo.py` (the `hf_snapshot` source kind) from the `chirunder/github_typo_corrections` parquet mirror (the upstream S3 bucket is decommissioned); ~353K real edits with the best register match to the code mix, but a murky GitHub-ToS license — stage research-only, complementing the free synthetic keyboard/OCR-confusion generators.
 
 [c4200m]: https://huggingface.co/datasets/liweili/c4_200m
@@ -210,8 +213,8 @@ These now parse through the mixture JSONs' `(anchor, positive)` contract on the 
 A defensive content-moderation / safe-search track, mirroring the de-identification track: the model learns a robust toxic/benign boundary, never a generation target.
 CSAM is entirely out of scope.
 
-| Dataset                      | Role   | Format  | Coverage                                                                    |
-| ---------------------------- | ------ | ------- | --------------------------------------------------------------------------- |
+| Dataset                       | Role   | Format  | Coverage                                                                    |
+| ----------------------------- | ------ | ------- | --------------------------------------------------------------------------- |
 | ✅ [ToxiGen][toxigen]         | safety | parquet | ~260K implicit toxic/benign statements over 13 groups; text+label ¹         |
 | ✅ [Civil Comments][civilcom] | safety | parquet | ~1.9M real comments with continuous toxicity scores; text+label, CC0 ²      |
 | 🔜 [Hateful Memes][hmemes]    | safety | —       | multimodal hate; Meta/DrivenData-gated, non-commercial — not HF-stageable ³ |
@@ -219,8 +222,10 @@ CSAM is entirely out of scope.
 | 🔜 [UCF-Crime][ucfc]          | safety | —       | 13 real-crime surveillance classes; zip video, license tag needs vetting ⁵  |
 
 > ¹ `toxigen`, acquired via `uv run python_data/download_toxigen.py` (the `hf_snapshot` source kind; configs annotated+train → flat text/label/toxicity_score/target_group/source).
-> RESEARCH-USE: no SPDX license on HF — vet before commercial. `label==1/0` is the unsafe/safe contrastive split.
-> ² `civil_comments`, acquired via `uv run python_data/download_civil_comments.py` (the `hf_snapshot` source kind; same flat schema; label from toxicity ≥ 0.5). CC0-1.0, commercial-OK.
+> RESEARCH-USE: no SPDX license on HF — vet before commercial.
+> `label==1/0` is the unsafe/safe contrastive split.
+> ² `civil_comments`, acquired via `uv run python_data/download_civil_comments.py` (the `hf_snapshot` source kind; same flat schema; label from toxicity ≥ 0.5).
+> CC0-1.0, commercial-OK.
 > ³ Original gated via DrivenData under a Meta research-only / non-commercial agreement; HF mirrors are unlicensed re-uploads — not staged.
 > ⁴ `jherng/xd-violence` (MIT tag) exposes C3D/I3D/Swin `.npy` features + copyrighted movie clips; doesn't fit the raw-media parquet loaders.
 > ⁵ `jinmang2/ucf_crime` (cc0 tag) ships anomaly/normal video zips; raw-video → parquet repack + license-provenance vetting required before staging.
@@ -235,8 +240,8 @@ CSAM is entirely out of scope.
 
 ### Captioning & Contrastive
 
-| Dataset                        | Role       | Format               | Coverage                                                   |
-| ------------------------------ | ---------- | -------------------- | ---------------------------------------------------------- |
+| Dataset                         | Role       | Format               | Coverage                                                   |
+| ------------------------------- | ---------- | -------------------- | ---------------------------------------------------------- |
 | ✅ [COCO Captions][coco]        | image-text | parquet              | Human captions; 5 per image, 8 hard negatives ¹            |
 | ✅ [Conceptual 12M][cc12m]      | image-text | WebDataset → parquet | 12M web alt-text pairs ²                                   |
 | ✅ [LAION-CC3M][cc3m]           | image-text | WebDataset → parquet | \~3M web image-text pairs ²                                |
@@ -268,15 +273,16 @@ CSAM is entirely out of scope.
 
 ### Grounding
 
-| Dataset                         | Role       | Format  | Coverage                                                                   |
-| ------------------------------- | ---------- | ------- | -------------------------------------------------------------------------- |
+| Dataset                          | Role       | Format  | Coverage                                                                   |
+| -------------------------------- | ---------- | ------- | -------------------------------------------------------------------------- |
 | ✅ [Visual Genome][visualgenome] | image-text | parquet | \~108K images, dense region descriptions (≤16 per image, multi-positive) ² |
 | ✅ [Flickr30k][flickr30k]        | image-text | parquet | caption retrieval; Entities variant is phrase → bbox, gated ¹              |
 | ✅ [Fashion-IQ][fashioniq]       | image-text | parquet | composed retrieval; SIMPLIFIED to (modifier caption, target image) ³       |
 
 > ¹ The plain `nlphuji/flickr30k` captions mirror is parquet; the Flickr30k-Entities grounding variant (276K phrase → bbox links) is a separate, gated artifact.
 > ² Acquired via `uv run python_data/download_visual_genome.py` (the `hf_snapshot` source kind, nirmalendu01/visual_genome mirror, image bytes inline), flattening up to 16 region descriptions per image into a `captions` list<string>; the bbox/relation graph stays out of scope.
-> ³ Fashion-IQ is natively a (reference image, modifier text, target image) triplet; the `royokong/fashioniq_val` mirror ships both images' bytes, but it is staged here as a lossy (modifier, target) pair (reference dropped, val-only ~6K). Proper composed retrieval needs a bespoke triplet loader.
+> ³ Fashion-IQ is natively a (reference image, modifier text, target image) triplet; the `royokong/fashioniq_val` mirror ships both images' bytes, but it is staged here as a lossy (modifier, target) pair (reference dropped, val-only ~6K).
+> Proper composed retrieval needs a bespoke triplet loader.
 
 [fashioniq]: https://huggingface.co/datasets/royokong/fashioniq_val
 
@@ -285,8 +291,8 @@ CSAM is entirely out of scope.
 
 ### VLM Instructions
 
-| Dataset                     | Role       | Format         | Coverage                                 |
-| --------------------------- | ---------- | -------------- | ---------------------------------------- |
+| Dataset                      | Role       | Format         | Coverage                                 |
+| ---------------------------- | ---------- | -------------- | ---------------------------------------- |
 | 🔜 [LLaVA (Mix-665K)][llava] | image-text | JSON → parquet | single-image instruction SFT, Apache-2.0 |
 | 🔜 [ShareGPT4V][sharegpt4v]  | image-text | JSON → parquet | dense GPT-4V captions, CC BY 4.0         |
 | 🔜 [M4-Instruct][m4]         | image-text | ZIP → parquet  | multi-image instruction tuning ¹         |
@@ -299,8 +305,8 @@ CSAM is entirely out of scope.
 
 ### Documents
 
-| Dataset                        | Role     | Format  | Coverage                             |
-| ------------------------------ | -------- | ------- | ------------------------------------ |
+| Dataset                         | Role     | Format  | Coverage                             |
+| ------------------------------- | -------- | ------- | ------------------------------------ |
 | 🔜 [FUNSD][funsd]               | document | parquet | Scanned forms; words + boxes + NER ¹ |
 | 🔜 [FUNSD-LayoutLMv3][funsd-v3] | document | parquet | LayoutLMv3 repackaging of FUNSD ¹    |
 
@@ -311,15 +317,16 @@ CSAM is entirely out of scope.
 
 ### Privacy & De-identification
 
-| Dataset                    | Role   | Format               | Coverage                                                                         |
-| -------------------------- | ------ | -------------------- | -------------------------------------------------------------------------------- |
+| Dataset                     | Role   | Format               | Coverage                                                                         |
+| --------------------------- | ------ | -------------------- | -------------------------------------------------------------------------------- |
 | 🔜 [WIDER FACE][widerface]  | redact | imgs+boxes → parquet | Face detection, 32K images / 393K faces; heavy scale, pose, occlusion variation  |
 | 🔜 [CrowdHuman][crowdhuman] | redact | imgs+boxes → parquet | Dense persons in crowds; head, visible, and full-body boxes                      |
 | 🔜 [CCPD][ccpd]             | redact | imgs+quads → parquet | \~250K license plates with 4-corner polygons and plate strings (China)           |
 | 🔜 [RodoSol-ALPR][rodosol]  | redact | imgs+quads → parquet | Brazilian car + motorcycle plates; geographic coverage beyond CCPD               |
 | 🔜 _synthetic composites_   | redact | rendered → parquet   | Faces / plates / PII composited onto scenes → unlimited exact masks, no labeling |
 
-> The training target is a per-pixel __redaction mask__ keyed by type (face / plate / person / PII), composited (blur / replace) _externally_ so the encoder never regenerates pixels. The street corpora below (Cityscapes, Mapillary) and the on-disk DROID dashcam clips supply in-the-wild faces + plates; synthetic compositing is the scalable, annotation-free source.
+> The training target is a per-pixel __redaction mask__ keyed by type (face / plate / person / PII), composited (blur / replace) _externally_ so the encoder never regenerates pixels.
+> The street corpora below (Cityscapes, Mapillary) and the on-disk DROID dashcam clips supply in-the-wild faces + plates; synthetic compositing is the scalable, annotation-free source.
 
 [widerface]: http://shuoyang1213.me/WIDERFACE/
 [crowdhuman]: https://www.crowdhuman.org/
@@ -328,15 +335,16 @@ CSAM is entirely out of scope.
 
 ### Dense Labeling & Segmentation
 
-| Dataset                         | Role        | Format               | Coverage                                                                    |
-| ------------------------------- | ----------- | -------------------- | --------------------------------------------------------------------------- |
+| Dataset                          | Role        | Format               | Coverage                                                                    |
+| -------------------------------- | ----------- | -------------------- | --------------------------------------------------------------------------- |
 | 🔜 [ADE20K][ade20k]              | seg         | imgs+masks → parquet | Scene parsing, 150 classes; the semantic-segmentation standard              |
 | 🔜 [COCO-Stuff][cocostuff]       | seg         | imgs+masks → parquet | Things + stuff, 171 classes, \~120K images                                  |
 | 🔜 [Cityscapes][cityscapes]      | seg, redact | imgs+masks → parquet | Urban street, 19 classes; dual-use — in-frame faces + plates feed de-id too |
 | 🔜 [Mapillary Vistas][mapillary] | seg, redact | imgs+masks → parquet | Global street-level, 66+ classes; geographic + de-id overlap                |
 | 🔜 [SA-1B][sa1b]                 | masks       | imgs+masks → parquet | 11M images / 1.1B class-agnostic masks; warm-starts the dense mask head     |
 
-> The target is a per-patch __class map__ aligned to the encoder output grid. SA-1B is class-agnostic (mask-head pretraining, not semantics); the street corpora are shared with de-identification, so one download feeds both dense heads.
+> The target is a per-patch __class map__ aligned to the encoder output grid.
+> SA-1B is class-agnostic (mask-head pretraining, not semantics); the street corpora are shared with de-identification, so one download feeds both dense heads.
 
 [ade20k]: https://groups.csail.mit.edu/vision/datasets/ADE20K/
 [cocostuff]: https://github.com/nightrome/cocostuff
@@ -346,8 +354,8 @@ CSAM is entirely out of scope.
 
 ## Video
 
-| Dataset                                 | Role          | Format                  | Coverage                                               |
-| --------------------------------------- | ------------- | ----------------------- | ------------------------------------------------------ |
+| Dataset                                  | Role          | Format                  | Coverage                                               |
+| ---------------------------------------- | ------------- | ----------------------- | ------------------------------------------------------ |
 | ✅ [MSR-VTT][msrvtt]                     | video-text    | parquet                 | 9K clips, \~20 captions each, 8 hard negatives ¹       |
 | ✅ [WebVid-10M][webvid]                  | video-text    | WebDataset → parquet    | 10M caption → clip pairs ²                             |
 | ✅ [Panda-70M][panda70m]                 | video-text    | WebDataset → parquet    | Captioned clips, testing split staged ²                |
@@ -361,10 +369,12 @@ CSAM is entirely out of scope.
 
 > ¹ Fetched and repacked on demand via `uv run python_data/download_msrvtt.py` (its media-fetch downloader) because the license blocks redistribution, with an in-batch shuffle synthesizing rerank negatives.
 > ² Repacked to parquet by the `webdataset` source kind (Panda-70M's tars), the `hf_snapshot` source kind (WebVid's snapshot parquet), or its media-fetch downloader (Kinetics-400's CSV-joined action label); WebVid is Shutterstock-licensed stock video.
-> ³ Acquired via `uv run python_data/download_howto100m.py`: streams a bounded per-clip ASR-caption parquet index (`bpiyush/howto100m_captions_with_verb_nouns`, capped by `--index-cap` / `$UFORM_INDEX_CAP` windows), then fetches an H.264 mp4 per window via `acquire_clips` (rank/world split); bulk YouTube fetch needs `yt-dlp` cookies. HMDB-51 (`uv run python_data/download_hmdb51.py`) is kept only as a small VideoMAE smoke, not a training corpus.
+> ³ Acquired via `uv run python_data/download_howto100m.py`: streams a bounded per-clip ASR-caption parquet index (`bpiyush/howto100m_captions_with_verb_nouns`, capped by `--index-cap` / `$UFORM_INDEX_CAP` windows), then fetches an H.264 mp4 per window via `acquire_clips` (rank/world split); bulk YouTube fetch needs `yt-dlp` cookies.
+> HMDB-51 (`uv run python_data/download_hmdb51.py`) is kept only as a small VideoMAE smoke, not a training corpus.
 > ⁴ The per-moment descriptions are packed into a `captions` list<string> by the `webdataset` source kind, which muxes the MP4 tars to parquet inline; no external fetch.
 > ⁵ The `webdataset` source kind re-encodes each clip's JPEG frames to MP4 (ffmpeg) and packs the referring motion expressions into a `captions` list<string>; the dense masks are dropped (mask-head loader out of scope), and expressions refer to sub-clip object motion, so treat MeViS as supplementary video-text rather than a precision benchmark.
-> ⁶ Fetched on demand from YouTube by its media-fetch downloader — `uv run python_data/download_vatex.py` / `uv run python_data/download_activitynet_captions.py` — because the media is not redistributable. Real-world yield is ~60-80% (dead / private / geo-blocked / bot-gated ids are dropped and audited in each build's `fetch_manifest.json`, never silently truncated); research-only under YouTube's Terms of Service.
+> ⁶ Fetched on demand from YouTube by its media-fetch downloader — `uv run python_data/download_vatex.py` / `uv run python_data/download_activitynet_captions.py` — because the media is not redistributable.
+> Real-world yield is ~60-80% (dead / private / geo-blocked / bot-gated ids are dropped and audited in each build's `fetch_manifest.json`, never silently truncated); research-only under YouTube's Terms of Service.
 
 [msrvtt]: https://huggingface.co/datasets/friedrichor/MSR-VTT
 [didemo]: https://github.com/LisaAnne/LocalizingMoments
@@ -383,8 +393,8 @@ UForm carries no custom audio kernels, and no GPU audio codec exists across the 
 Audio is decoded host-side to PCM via libavformat, then an on-GPU `cuFFT` short-time Fourier transform (Hann window) and a mel-filterbank `cuBLAS` GEMM produce log-mel frames in the same token-stream shape as the byte encoder.
 AudioCaps and AudioSet are read through `AudioParquetLoader`; VGGSound is on the roadmap.
 
-| Dataset                  | Modalities            | Format                  | Scale                            | License   |
-| ------------------------ | --------------------- | ----------------------- | -------------------------------- | --------- |
+| Dataset                   | Modalities            | Format                  | Scale                            | License   |
+| ------------------------- | --------------------- | ----------------------- | -------------------------------- | --------- |
 | ✅ [AudioCaps][audiocaps] | audio + text          | parquet                 | 50K captioned clips ¹            | research  |
 | ✅ [Clotho v2][clotho]    | audio + text          | WAV → parquet           | 6,974 clips × 5 human captions ³ | research  |
 | ✅ [Auto-ACD][autoacd]    | audio + text          | YouTube fetch → parquet | 1.9M captioned clips ⁴           | research  |
@@ -409,8 +419,8 @@ AudioCaps and AudioSet are read through `AudioParquetLoader`; VGGSound is on the
 A future modality with nothing staged yet, so the corpus and its loader will land together.
 The two text-richest options:
 
-| Dataset                                      | Format         | Text per object                                | License                         |
-| -------------------------------------------- | -------------- | ---------------------------------------------- | ------------------------------- |
+| Dataset                                       | Format         | Text per object                                | License                         |
+| --------------------------------------------- | -------------- | ---------------------------------------------- | ------------------------------- |
 | 🔜 [Objaverse-XL][objaverse] + [Cap3D][cap3d] | mesh → parquet | \~10M meshes; \~660K with \~10-word captions ¹ | mixed; Cap3D subset CC0 / CC BY |
 | 🔜 [ABO][abo]                                 | mesh → parquet | \~398K products with full e-commerce text ²    | CC BY-NC 4.0                    |
 
@@ -426,8 +436,8 @@ The two text-richest options:
 Vision-language-action trajectories for the VLA trainer (`image_text_act.py`, today a synthetic smoke).
 Neither is staged; both need an RLDS → parquet repacker plus a `VLAParquetLoader`.
 
-| Dataset                      | Role              | Format           | Coverage                                  |
-| ---------------------------- | ----------------- | ---------------- | ----------------------------------------- |
+| Dataset                       | Role              | Format           | Coverage                                  |
+| ----------------------------- | ----------------- | ---------------- | ----------------------------------------- |
 | 🔜 [DROID][droid]             | image+text+action | RLDS → parquet ¹ | 1K-trajectory subset                      |
 | 🔜 [Open-X-Embodiment][openx] | image+text+action | RLDS → parquet   | umbrella robotics corpus DROID belongs to |
 
@@ -441,8 +451,8 @@ Neither is staged; both need an RLDS → parquet repacker plus a `VLAParquetLoad
 Video paired with audio, dialogue, narration, or sensor streams, for scene-level understanding and reconstruction — a future tier whose candidate set is below.
 VGGSound and AudioSet (see Audio) also serve here in their audio-visual role.
 
-| Dataset                         | Modalities                                      | Format          | Scale                  | License                |
-| ------------------------------- | ----------------------------------------------- | --------------- | ---------------------- | ---------------------- |
+| Dataset                          | Modalities                                      | Format          | Scale                  | License                |
+| -------------------------------- | ----------------------------------------------- | --------------- | ---------------------- | ---------------------- |
 | 🔜 [HD-VILA-100M][hdvila]        | video + audio + ASR                             | video → parquet | 100M clips             | MIT                    |
 | 🔜 [Ego4D][ego4d]                | video + audio + speech + gaze + IMU + narration | video → parquet | 3,670 hours            | research               |
 | 🔜 [LSMDC][lsmdc]                | video + audio + audio-description + dialogue    | video → parquet | 200 movies, 128K clips | research               |

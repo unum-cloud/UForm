@@ -201,7 +201,7 @@ This easily supersedes single-process PyTorch `DataLoader`s by \~25× even for t
 
 Each modality goes from raw bytes to a masked batch on-device, and every item — a caption, an image, a clip — becomes a variable-width __segment__ packed onto one shared `[rows, columns]` grid and tagged by modality, so a single uniform encoder ingests them all:
 
-- __Tokens__ — byte-tokenized, bucket-stratified, packed, and span-masked in CUDA; paired sentences average a few hundred bytes, so packing many into one 4 KiB row keeps the batch dense without wasting context on padding.
+- __Tokens__ — byte-tokenized, bucket-stratified, packed, and span-masked in CUDA; paired sentences average a few hundred bytes, so packing many into one 4 KB row keeps the batch dense without wasting context on padding.
 - __Images__ — decoded from JPEG, PNG, or WebP by nvImageCodec into __4-channel RGBA__ (alpha is 255 where the codec carries none), then __2D patchified__ and MAE-masked.
 - __Video__ — decoded by NVDEC, NV12 → planar RGB, then __3D tube-extracted__ and tube-masked into a `[3, T, H, W]` tensor.
 - __Audio__ — decoded from WAV, FLAC, or OGG-Opus by a pool of libavcodec workers, then chunked into __raw waveform frames__ on the GPU — the mel / STFT frontend is a learnable layer of the encoder, not a fixed loader transform — and masked like the rest.

@@ -14,9 +14,9 @@ from __future__ import annotations
 import math
 import os
 
-import acquire_shared
 import acquire_clips
 import acquire_manifest
+import acquire_shared
 
 
 def test_cap_shards_leading_slice() -> None:

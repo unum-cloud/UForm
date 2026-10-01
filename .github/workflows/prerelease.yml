@@ -49,17 +49,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-
       - name: Install dependencies
         run: |
-          uv pip install --system -e ".[onnx]"
-          uv pip install --system pytest
+          python -m pip install --upgrade pip
+          python -m pip install --group test
 
-        # When running tests in CI, limit ourselves to the small model tests
       - name: Test with PyTest
-        run: pytest python/scripts/ -s -x -Wd -v -k small
+        run: python -X faulthandler -m pytest -x
 
   test_javascript:
     name: Test JavaScript

@@ -91,7 +91,7 @@ class _HttpRangeReader:
     handful. It exposes just the surface pyarrow touches: `read` / `seek` / `tell` / `seekable` / `closed`.
     """
 
-    _BLOCK: int = 1 << 22  # 4 MiB read-ahead; a footer read larger than this fetches exactly what it asks
+    _BLOCK: int = 1 << 22  # 4 MB read-ahead; a footer read larger than this fetches exactly what it asks
 
     def __init__(self, url: str) -> None:
         self._url = url

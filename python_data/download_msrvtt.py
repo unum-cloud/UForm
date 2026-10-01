@@ -150,10 +150,10 @@ def repack(json_path: Path, zip_path: Path, out_path: Path, *, force: bool = Fal
     tmp_path = str(out_path) + ".tmp"
     pq.write_table(table, tmp_path, compression="zstd", row_group_size=1024)
     os.replace(tmp_path, out_path)
-    size_mib = out_path.stat().st_size / (1 << 20)
+    size_mb = out_path.stat().st_size / (1 << 20)
     print(
         f"repack_msrvtt: wrote {out_path} — {len(columns['captions'])} rows, "
-        f"{size_mib:.1f} MiB, schema={table.schema.names}."
+        f"{size_mb:.1f} MB, schema={table.schema.names}."
     )
 
 

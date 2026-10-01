@@ -74,7 +74,7 @@ struct memory_reader_t {
     std::size_t position = 0;
 };
 
-/** @brief Working buffer size of the custom @c AVIOContext ; FFmpeg's own 32 KiB default. */
+/** @brief Working buffer size of the custom @c AVIOContext ; FFmpeg's own 32 KB default. */
 constexpr std::size_t avio_buffer_bytes_k = 32u * 1024u;
 
 /** @brief Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay

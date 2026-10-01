@@ -93,7 +93,7 @@ def carve(
         test_json: Path to ``msrvtt_test_1k.json`` defining the 1K video ID list.
         out_path: Destination parquet path.
         limit: If set, read at most this many rows from ``source_parquet`` before
-            filtering.  Useful for schema validation without scanning the full 1.9 GiB
+            filtering.  Useful for schema validation without scanning the full 1.9 GB
             shard.
         dry_run: When ``True``, print schema and match count but do NOT write.
         force: Overwrite ``out_path`` if it already exists.
@@ -175,8 +175,8 @@ def carve(
     tmp_path = str(out_path) + ".tmp"
     pq.write_table(table, tmp_path, compression="zstd", row_group_size=512)
     os.replace(tmp_path, str(out_path))
-    size_mib = out_path.stat().st_size / (1 << 20)
-    print(f"carve_msrvtt_val: wrote {out_path} — {len(table)} rows, {size_mib:.1f} MiB")
+    size_mb = out_path.stat().st_size / (1 << 20)
+    print(f"carve_msrvtt_val: wrote {out_path} — {len(table)} rows, {size_mb:.1f} MB")
     return 0
 
 

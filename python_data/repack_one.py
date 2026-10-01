@@ -147,7 +147,7 @@ def repack_shard(shard_path: str, compression: str, overwrite: bool) -> bool:
 
     source_bytes = os.path.getsize(shard_path)
     parquet_bytes = os.path.getsize(parquet_path)
-    print(f"[done] {shard_path}  {source_bytes / 1e6:.0f} MB -> {parquet_bytes / 1e6:.0f} MB", flush=True)
+    print(f"[done] {shard_path}  {source_bytes / 2**20:.0f} MB -> {parquet_bytes / 2**20:.0f} MB", flush=True)
     return True
 
 
