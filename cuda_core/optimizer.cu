@@ -212,9 +212,10 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
         }
     }
     gpu_arena_alloc<f32_t> f32_alloc {arena};
-    optimizer.moments_ = f32r1_tensor_arena_t::try_empty({moment_scalars}, f32_alloc);
-    optimizer.masters_ = f32r1_tensor_arena_t::try_empty({master_scalars != 0 ? master_scalars : 1}, f32_alloc);
-    optimizer.state_scales_ = f32r2_tensor_arena_t::try_empty({count, 2}, f32_alloc);
+    optimizer.moments_ = f32r1_tensor_arena_t::uninitialized({moment_scalars}, f32_alloc).value;
+    optimizer.masters_ =
+        f32r1_tensor_arena_t::uninitialized({master_scalars != 0 ? master_scalars : 1}, f32_alloc).value;
+    optimizer.state_scales_ = f32r2_tensor_arena_t::uninitialized({count, 2}, f32_alloc).value;
     if (!optimizer.moments_ || !optimizer.masters_ || !optimizer.state_scales_)
         return result_t::fail(status_t::bad_alloc_k, "optimizer state allocation failed ({} moments)", moment_scalars);
     if (CUresult result = cuMemsetD8(reinterpret_cast<CUdeviceptr>(optimizer.moments_.data()), 0,
@@ -290,7 +291,7 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
         if (single_domain) {
             gpu_arena_alloc<f32_t> f32_alloc {arenas[rank]};
             std::size_t const scalars = optimizer.ranks_[rank].state.gradient_scalars();
-            optimizer.ranks_[rank].reduced = f32r1_tensor_arena_t::try_empty({scalars}, f32_alloc);
+            optimizer.ranks_[rank].reduced = f32r1_tensor_arena_t::uninitialized({scalars}, f32_alloc).value;
             if (!optimizer.ranks_[rank].reduced)
                 return result_t::fail(status_t::bad_alloc_k, "reduced-gradient allocation failed (rank={})", rank);
         }

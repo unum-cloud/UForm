@@ -214,6 +214,8 @@ struct gpu_arena_t {
 
     /** @brief Bytes allocated so far. */
     [[nodiscard]] std::size_t used() const noexcept { return used_bytes_; }
+    /** @brief The device ordinal the arena's memory lives on. */
+    [[nodiscard]] int device() const noexcept { return device_; }
     /** @brief Physically committed bytes; grows monotonically, never shrinks before destruction. */
     [[nodiscard]] std::size_t mapped() const noexcept { return mapped_bytes_; }
     /** @brief The current cursor position, to be rewound to with @ref rewind . */
@@ -346,7 +348,7 @@ struct gpu_arena_t {
 /**
  *  @brief Standard-allocator facade over a borrowed @ref gpu_arena_t , so owning containers size
  *      arena allocations without the bespoke allocation spelling:
- *      @c nk::tensor<f32_t,gpu_arena_alloc<f32_t>,2>::try_empty({rows,cols},gpu_arena_alloc<f32_t>{arena})
+ *      @c nk::tensor<f32_t,gpu_arena_alloc<f32_t>,2>::uninitialized({rows,cols},gpu_arena_alloc<f32_t>{arena})
  *      allocates — and grows the arena — automatically; @ref array composes the same way.
  *
  *  Deallocation is deliberately a no-op: a bump arena reclaims through @ref gpu_arena_t::rewind /
@@ -492,8 +494,8 @@ using pinned_alloc_t = pinned_alloc<b8_t>;
  *  chain needs no host fences; the memory is valid only in that stream's order (host access requires a
  *  sync). Satisfies @c std::alloc_traits — a stateful, trivially-copyable handle over the device's
  *  default memory pool — so NumKong's owning tensor composes directly:
- *  @c nk::tensor<f32_t,gpu_alloc<f32_t>,2>::try_empty({rows,cols},alloc) . Only @c try_empty applies:
- *  the other factories ( @c try_zeros / @c try_full ) initialize through host writes, which device memory
+ *  @c nk::tensor<f32_t,gpu_alloc<f32_t>,2>::uninitialized({rows,cols},alloc) . Only @c uninitialized applies:
+ *  the other factories ( @c zeros / @c full ) initialize through host writes, which device memory
  *  forbids — fill with a kernel or @c cuMemsetD*Async instead.
  */
 template <typename value_type_ = std::byte>

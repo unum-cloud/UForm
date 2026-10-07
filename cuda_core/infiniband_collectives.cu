@@ -438,9 +438,9 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
     gpu_registrable_alloc<b8_t> heap_alloc {arena};
     gpu_arena_alloc<infiniband_link_t> link_alloc {arena};
     gpu_arena_alloc<u32_t> u32_alloc {arena};
-    member.heap_ = b8r1_tensor_registrable_t::try_empty({heap_bytes}, heap_alloc);
-    member.links_ = infiniband_links_tensor_t::try_empty({layout.rounds}, link_alloc);
-    member.round_scalar_ = u32r1_tensor_arena_t::try_empty({1}, u32_alloc);
+    member.heap_ = b8r1_tensor_registrable_t::uninitialized({heap_bytes}, heap_alloc).value;
+    member.links_ = infiniband_links_tensor_t::uninitialized({layout.rounds}, link_alloc).value;
+    member.round_scalar_ = u32r1_tensor_arena_t::uninitialized({1}, u32_alloc).value;
     if (!member.heap_ || !member.links_ || !member.round_scalar_)
         return result_t::fail(status_t::bad_alloc_k, "member heap / table allocation failed ({} bytes, arena_used={})",
                               heap_bytes, arena.used());

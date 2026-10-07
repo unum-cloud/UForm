@@ -75,7 +75,7 @@ endif ()
 project(
     uform
     VERSION 4.0.0
-    LANGUAGES CXX CUDA
+    LANGUAGES C CXX CUDA
     DESCRIPTION "Pocket-sized multimodal AI for content understanding and generation"
     HOMEPAGE_URL "https://github.com/unum-cloud/UForm"
 )
@@ -115,12 +115,17 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/local.cmake" OPTIONAL)
 # Source dependencies — a local checkout wins, otherwise a pinned download (see `cmake/dependency.cmake`). Lean by
 # design: NumKong spans the tensor substrate, StringZilla parses exchange payloads, yyjson reads checkpoint headers,
 # cudnn-frontend is the fused-attention graph DSL, fork_union is the host-side demux/decode thread pool.
-uform_dependency(
-    NAME numkong
-    MODE SUBDIR
-    ROOT_VAR UFORM_NUMKONG_ROOT
-    REPO https://github.com/ashvardanian/NumKong.git
-    TAG main-dev
+# NumKong links as its compiled CUDA library, since the header-only target stubs out the `_best` dispatch the inference
+# products and attention run through: an install prefix built with `NUMKONG_BUILD_CUDA`, found under
+# `UFORM_NUMKONG_ROOT` or `CMAKE_PREFIX_PATH`, and the configure fails without one.
+set(UFORM_NUMKONG_ROOT
+    ""
+    CACHE PATH "Install prefix of a NumKong build with CUDA"
+)
+find_package(
+    numkong CONFIG REQUIRED
+    COMPONENTS shared cuda
+    HINTS "${UFORM_NUMKONG_ROOT}"
 )
 uform_dependency(
     NAME stringzilla
@@ -166,8 +171,9 @@ set_property(CACHE UFORM_WITH_INFINIBAND PROPERTY STRINGS ON OFF AUTO)
 uform_probe_infiniband()
 
 # `cuda_core` → `uform`: one static library for the whole core cell, compiled once, never per consumer.
-# Dependencies stay lean: NumKong, StringZilla, yyjson, the CUDA Driver API (no runtime, no NCCL, no NVSHMEM),
-# cuBLASLt, plus the fused-attention tier (nvrtc + cuDNN + cudnn-frontend) the transformer / tower cells need.
+# Dependencies stay lean: NumKong, StringZilla, yyjson, the CUDA Driver API (no NCCL, no NVSHMEM; the runtime arrives
+# only through NumKong's kernel units), cuBLASLt, plus the fused-attention tier (nvrtc + cuDNN + cudnn-frontend) the
+# transformer / tower cells need.
 add_library(
     uform STATIC
     cuda_core/schedule.cu
@@ -185,7 +191,7 @@ add_library(
 target_include_directories(uform PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${UFORM_CUDNN_FRONTEND_INCLUDE}")
 target_link_libraries(
     uform
-    PUBLIC numkong
+    PUBLIC numkong::shared
            stringzilla_header
            yyjson
            CUDA::cuda_driver

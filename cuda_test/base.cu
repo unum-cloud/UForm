@@ -255,13 +255,14 @@ static void synchronize_(base_trainer_t &trainer) noexcept {
     array<bf16_t> host;
     if (host.try_resize_uninitialized(total) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "snapshot allocation failed");
-    nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging = nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::try_empty(
-        {largest}, pinned_alloc<bf16_t> {});
+    nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging =
+        nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::uninitialized({largest}, pinned_alloc<bf16_t> {}).value;
     if (!staging) return result_t::fail(status_t::bad_alloc_k, "pinned staging allocation failed");
     std::size_t cursor = 0;
     for (differentiable_weights_t const &matrix : list) {
         std::size_t const scalars = matrix.weights.numel();
-        if (!staging.try_resize({scalars})) return result_t::fail(status_t::bad_alloc_k, "staging resize failed");
+        if (nk::failed(staging.resize({scalars})))
+            return result_t::fail(status_t::bad_alloc_k, "staging resize failed");
         nk::tensor_view<bf16_t, 1> const source = matrix.weights.flatten<1>();
         if (expected_t copied = copy_device_to_host(source, staging.span(), stream); !copied)
             return result_t::fail(std::move(copied));
@@ -280,8 +281,8 @@ static void synchronize_(base_trainer_t &trainer) noexcept {
     if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed");
     bf16r2_view_t const view = replica.normalized_grad.view();
     std::size_t const scalars = static_cast<std::size_t>(view.extent(0)) * view.extent(1);
-    nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging = nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::try_empty(
-        {scalars}, pinned_alloc<bf16_t> {});
+    nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging =
+        nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::uninitialized({scalars}, pinned_alloc<bf16_t> {}).value;
     if (!staging) return result_t::fail(status_t::bad_alloc_k, "pinned staging allocation failed");
     if (expected_t copied = copy_device_to_host(view.flatten<1>(), staging.span(), stream); !copied)
         return result_t::fail(std::move(copied));

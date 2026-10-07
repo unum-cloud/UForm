@@ -5,8 +5,10 @@
 # file is included before any dependency resolution, so plain `set(... CACHE ... FORCE)` here wins over stale caches.
 #
 
+# NumKong is found as an installed package, the install prefix of a build configured with `NUMKONG_BUILD_CUDA=ON`.
+# set(UFORM_NUMKONG_ROOT "/path/to/numkong/prefix" CACHE PATH "" FORCE)
+
 # Source dependencies fetched by cmake/dependency.cmake — point at sibling checkouts to develop against a fork.
-# set(UFORM_NUMKONG_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../NumKong" CACHE PATH "" FORCE)
 # set(UFORM_STRINGZILLA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../StringZilla" CACHE PATH "" FORCE)
 # set(UFORM_YYJSON_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../yyjson" CACHE PATH "" FORCE)
 # set(UFORM_CUDNN_FRONTEND_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../cudnn-frontend" CACHE PATH "" FORCE)

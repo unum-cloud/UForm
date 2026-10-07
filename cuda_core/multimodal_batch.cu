@@ -532,8 +532,9 @@ expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
         if (!gpu_scope.ok())
             return result_t::fail(status_t::cuda_error_k, "context entry failed for member {}'s routing scratch",
                                   member);
-        mixer.mixed_sources_[member] = u32r1_tensor_arena_t::try_empty({shape.max_segments_per_gpu},
-                                                                       gpu_arena_alloc<u32_t> {arenas[member]});
+        mixer.mixed_sources_[member] = u32r1_tensor_arena_t::uninitialized({shape.max_segments_per_gpu},
+                                                                           gpu_arena_alloc<u32_t> {arenas[member]})
+                                           .value;
         if (!mixer.mixed_sources_[member])
             return result_t::fail(status_t::bad_alloc_k, "member {}'s routing scratch allocation failed ({} segments)",
                                   member, shape.max_segments_per_gpu);

@@ -83,8 +83,9 @@ expected<telemetry_ledger_t> telemetry_ledger_t::make(gpu_arena_t &arena, u32_t 
     ledger.channels_ = channels;
     if (channels == 0u) return result_t {std::move(ledger)};            // an explicit disarmed make is legal
     std::size_t const rows = static_cast<std::size_t>(max_probes) + 1u; // row 0 is the inert sentinel
-    ledger.rows_ = nk::tensor<telemetry_row_t, gpu_arena_alloc<telemetry_row_t>, 1>::try_empty(
-        {rows}, gpu_arena_alloc<telemetry_row_t> {arena});
+    ledger.rows_ = nk::tensor<telemetry_row_t, gpu_arena_alloc<telemetry_row_t>, 1>::uninitialized(
+                       {rows}, gpu_arena_alloc<telemetry_row_t> {arena})
+                       .value;
     if (!ledger.rows_) return result_t::fail(status_t::bad_alloc_k, "ledger row table allocation failed ({})", rows);
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "ledger context entry failed");

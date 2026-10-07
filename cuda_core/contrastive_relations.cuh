@@ -241,7 +241,7 @@ struct contrastive_relations_view_t {
 struct contrastive_relations_t {
 
     /** @brief Allocate the eight columns off @p arena at their worst-case capacity; every upload
-     *      @c try_resize s them to the step's live extents without moving an address — the columns' own
+     *      @c resize s them to the step's live extents without moving an address — the columns' own
      *      shapes are the single source of the live counts.
      *  @param[in] max_vertices Most local vertex rows any step will carry.
      *  @param[in] max_edges Most explicit edges any step will carry, per edge set. */
@@ -254,16 +254,16 @@ struct contrastive_relations_t {
         gpu_arena_alloc<u32_t> index_alloc {arena};
         gpu_arena_alloc<f32_t> score_alloc {arena};
         std::size_t const offsets_count = max_vertices + 1u;
-        relations.attract_offsets_ = u32r1_tensor_arena_t::try_empty({offsets_count}, index_alloc);
-        relations.repel_offsets_ = u32r1_tensor_arena_t::try_empty({offsets_count}, index_alloc);
-        relations.ignore_offsets_ = u32r1_tensor_arena_t::try_empty({offsets_count}, index_alloc);
+        relations.attract_offsets_ = u32r1_tensor_arena_t::uninitialized({offsets_count}, index_alloc).value;
+        relations.repel_offsets_ = u32r1_tensor_arena_t::uninitialized({offsets_count}, index_alloc).value;
+        relations.ignore_offsets_ = u32r1_tensor_arena_t::uninitialized({offsets_count}, index_alloc).value;
         bool allocated = relations.attract_offsets_ && relations.repel_offsets_ && relations.ignore_offsets_;
         if (max_edges != 0) {
-            relations.attract_ids_ = u32r1_tensor_arena_t::try_empty({max_edges}, index_alloc);
-            relations.repel_ids_ = u32r1_tensor_arena_t::try_empty({max_edges}, index_alloc);
-            relations.ignore_ids_ = u32r1_tensor_arena_t::try_empty({max_edges}, index_alloc);
-            relations.attract_scores_ = f32r1_tensor_arena_t::try_empty({max_edges}, score_alloc);
-            relations.repel_scores_ = f32r1_tensor_arena_t::try_empty({max_edges}, score_alloc);
+            relations.attract_ids_ = u32r1_tensor_arena_t::uninitialized({max_edges}, index_alloc).value;
+            relations.repel_ids_ = u32r1_tensor_arena_t::uninitialized({max_edges}, index_alloc).value;
+            relations.ignore_ids_ = u32r1_tensor_arena_t::uninitialized({max_edges}, index_alloc).value;
+            relations.attract_scores_ = f32r1_tensor_arena_t::uninitialized({max_edges}, score_alloc).value;
+            relations.repel_scores_ = f32r1_tensor_arena_t::uninitialized({max_edges}, score_alloc).value;
             allocated = allocated && relations.attract_ids_ && relations.repel_ids_ && relations.ignore_ids_ &&
                         relations.attract_scores_ && relations.repel_scores_;
         }
@@ -326,14 +326,14 @@ struct contrastive_relations_t {
 
         // Resize every column to the step's live extents — no address moves, and an overflow beyond the
         // reserved capacity fails here, loudly, before anything is staged.
-        bool resized = attract_offsets_.try_resize({from_vertices_per_gpu + 1u});
-        resized = resized && repel_offsets_.try_resize({from_vertices_per_gpu + 1u});
-        resized = resized && attract_ids_.try_resize({attract_ids.extent(0)});
-        resized = resized && attract_scores_.try_resize({attract_scores.extent(0)});
-        resized = resized && repel_ids_.try_resize({repel_ids.extent(0)});
-        resized = resized && repel_scores_.try_resize({repel_scores.extent(0)});
-        resized = resized && ignore_offsets_.try_resize({has_ignores ? from_vertices_per_gpu + 1u : 0u});
-        resized = resized && ignore_ids_.try_resize({has_ignores ? ignore_ids.extent(0) : 0u});
+        bool resized = nk::succeeded(attract_offsets_.resize({from_vertices_per_gpu + 1u}));
+        resized = resized && nk::succeeded(repel_offsets_.resize({from_vertices_per_gpu + 1u}));
+        resized = resized && nk::succeeded(attract_ids_.resize({attract_ids.extent(0)}));
+        resized = resized && nk::succeeded(attract_scores_.resize({attract_scores.extent(0)}));
+        resized = resized && nk::succeeded(repel_ids_.resize({repel_ids.extent(0)}));
+        resized = resized && nk::succeeded(repel_scores_.resize({repel_scores.extent(0)}));
+        resized = resized && nk::succeeded(ignore_offsets_.resize({has_ignores ? from_vertices_per_gpu + 1u : 0u}));
+        resized = resized && nk::succeeded(ignore_ids_.resize({has_ignores ? ignore_ids.extent(0) : 0u}));
         if (!resized)
             return expected_t::fail( //
                 status_t::shape_unsupported_k,
@@ -366,11 +366,12 @@ struct contrastive_relations_t {
     [[nodiscard]] expected_t upload_self_edges(u32_t from_vertices_per_gpu, u32r1_view_t from_vertex_effective_length,
                                                u32r1_view_t to_vertex_effective_length, std::size_t self_edge_base,
                                                f32_t ambient_repulsion_weight, gpu_stream_t &stream) noexcept {
-        bool resized = from_vertices_per_gpu != 0 && attract_offsets_.try_resize({from_vertices_per_gpu + 1u});
-        resized = resized && repel_offsets_.try_resize({from_vertices_per_gpu + 1u});
-        resized = resized && attract_ids_.try_resize({0}) && attract_scores_.try_resize({0});
-        resized = resized && repel_ids_.try_resize({0}) && repel_scores_.try_resize({0});
-        resized = resized && ignore_offsets_.try_resize({0}) && ignore_ids_.try_resize({0});
+        bool resized = from_vertices_per_gpu != 0 &&
+                       nk::succeeded(attract_offsets_.resize({from_vertices_per_gpu + 1u}));
+        resized = resized && nk::succeeded(repel_offsets_.resize({from_vertices_per_gpu + 1u}));
+        resized = resized && nk::succeeded(attract_ids_.resize({0})) && nk::succeeded(attract_scores_.resize({0}));
+        resized = resized && nk::succeeded(repel_ids_.resize({0})) && nk::succeeded(repel_scores_.resize({0}));
+        resized = resized && nk::succeeded(ignore_offsets_.resize({0})) && nk::succeeded(ignore_ids_.resize({0}));
         if (!resized)
             return expected_t::fail(status_t::shape_unsupported_k,
                                     "self-edge relations for {} vertices exceed the column capacity of {}",

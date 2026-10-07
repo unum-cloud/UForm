@@ -156,12 +156,13 @@ expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, cublaslt_ses
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
     gpu_arena_alloc<b8_t> byte_alloc {arena};
-    head.decoder_weight_ = bf16r2_tensor_arena_t::try_empty({config.vocabulary, config.hidden}, bf16_alloc);
-    head.decoder_weight_grad_ = bf16r2_tensor_arena_t::try_empty({config.vocabulary, config.hidden}, bf16_alloc);
-    head.logits_ = f32r2_tensor_arena_t::try_empty({config.max_tokens, config.vocabulary}, f32_alloc);
-    head.logit_grad_ = bf16r2_tensor_arena_t::try_empty({config.max_tokens, config.vocabulary}, bf16_alloc);
-    head.position_loss_ = f32r1_tensor_arena_t::try_empty({config.max_tokens}, f32_alloc);
-    head.gradient_scale_ = f32r1_tensor_arena_t::try_empty({2}, f32_alloc);
+    head.decoder_weight_ = bf16r2_tensor_arena_t::uninitialized({config.vocabulary, config.hidden}, bf16_alloc).value;
+    head.decoder_weight_grad_ =
+        bf16r2_tensor_arena_t::uninitialized({config.vocabulary, config.hidden}, bf16_alloc).value;
+    head.logits_ = f32r2_tensor_arena_t::uninitialized({config.max_tokens, config.vocabulary}, f32_alloc).value;
+    head.logit_grad_ = bf16r2_tensor_arena_t::uninitialized({config.max_tokens, config.vocabulary}, bf16_alloc).value;
+    head.position_loss_ = f32r1_tensor_arena_t::uninitialized({config.max_tokens}, f32_alloc).value;
+    head.gradient_scale_ = f32r1_tensor_arena_t::uninitialized({2}, f32_alloc).value;
     if (!head.decoder_weight_ || !head.decoder_weight_grad_ || !head.logits_ || !head.logit_grad_ ||
         !head.position_loss_ || !head.gradient_scale_)
         return result_t::fail(status_t::bad_alloc_k, "masked head allocation failed (arena_used={})", arena.used());
@@ -201,7 +202,7 @@ expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, cublaslt_ses
         head.plans_[family] = std::move(plan.value_);
     }
     if (workspace_bytes != 0) {
-        head.workspace_ = b8r1_tensor_arena_t::try_empty({workspace_bytes}, byte_alloc);
+        head.workspace_ = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, byte_alloc).value;
         if (!head.workspace_)
             return result_t::fail(status_t::bad_alloc_k, "tensor-core workspace allocation failed ({} bytes)",
                                   workspace_bytes);
@@ -393,13 +394,15 @@ expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, cublaslt_s
     gpu_arena_alloc<f32_t> f32_alloc {arena};
     gpu_arena_alloc<u32_t> u32_alloc {arena};
     gpu_arena_alloc<b8_t> byte_alloc {arena};
-    head.recon_weight_ = bf16r2_tensor_arena_t::try_empty({config.patch_pixels, config.hidden}, bf16_alloc);
-    head.recon_weight_grad_ = bf16r2_tensor_arena_t::try_empty({config.patch_pixels, config.hidden}, bf16_alloc);
-    head.predicted_ = bf16r2_tensor_arena_t::try_empty({config.max_patches, config.patch_pixels}, bf16_alloc);
-    head.predicted_grad_ = bf16r2_tensor_arena_t::try_empty({config.max_patches, config.patch_pixels}, bf16_alloc);
-    head.mask_ = u32r1_tensor_arena_t::try_empty({config.max_patches}, u32_alloc);
-    head.position_loss_ = f32r1_tensor_arena_t::try_empty({config.max_patches}, f32_alloc);
-    head.gradient_scale_ = f32r1_tensor_arena_t::try_empty({2}, f32_alloc);
+    head.recon_weight_ = bf16r2_tensor_arena_t::uninitialized({config.patch_pixels, config.hidden}, bf16_alloc).value;
+    head.recon_weight_grad_ =
+        bf16r2_tensor_arena_t::uninitialized({config.patch_pixels, config.hidden}, bf16_alloc).value;
+    head.predicted_ = bf16r2_tensor_arena_t::uninitialized({config.max_patches, config.patch_pixels}, bf16_alloc).value;
+    head.predicted_grad_ =
+        bf16r2_tensor_arena_t::uninitialized({config.max_patches, config.patch_pixels}, bf16_alloc).value;
+    head.mask_ = u32r1_tensor_arena_t::uninitialized({config.max_patches}, u32_alloc).value;
+    head.position_loss_ = f32r1_tensor_arena_t::uninitialized({config.max_patches}, f32_alloc).value;
+    head.gradient_scale_ = f32r1_tensor_arena_t::uninitialized({2}, f32_alloc).value;
     if (!head.recon_weight_ || !head.recon_weight_grad_ || !head.predicted_ || !head.predicted_grad_ || !head.mask_ ||
         !head.position_loss_ || !head.gradient_scale_)
         return result_t::fail(status_t::bad_alloc_k, "patch head allocation failed (arena_used={})", arena.used());
@@ -440,7 +443,7 @@ expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, cublaslt_s
         head.plans_[family] = std::move(plan.value_);
     }
     if (workspace_bytes != 0) {
-        head.workspace_ = b8r1_tensor_arena_t::try_empty({workspace_bytes}, byte_alloc);
+        head.workspace_ = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, byte_alloc).value;
         if (!head.workspace_)
             return result_t::fail(status_t::bad_alloc_k, "tensor-core workspace allocation failed ({} bytes)",
                                   workspace_bytes);
@@ -619,13 +622,15 @@ expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, cublaslt_ses
     gpu_arena_alloc<f32_t> f32_alloc {arena};
     gpu_arena_alloc<u32_t> u32_alloc {arena};
     gpu_arena_alloc<b8_t> byte_alloc {arena};
-    head.recon_weight_ = bf16r2_tensor_arena_t::try_empty({config.chunk_samples, config.hidden}, bf16_alloc);
-    head.recon_weight_grad_ = bf16r2_tensor_arena_t::try_empty({config.chunk_samples, config.hidden}, bf16_alloc);
-    head.predicted_ = bf16r2_tensor_arena_t::try_empty({config.max_frames, config.chunk_samples}, bf16_alloc);
-    head.predicted_grad_ = bf16r2_tensor_arena_t::try_empty({config.max_frames, config.chunk_samples}, bf16_alloc);
-    head.mask_ = u32r1_tensor_arena_t::try_empty({config.max_frames}, u32_alloc);
-    head.position_loss_ = f32r1_tensor_arena_t::try_empty({config.max_frames}, f32_alloc);
-    head.gradient_scale_ = f32r1_tensor_arena_t::try_empty({2}, f32_alloc);
+    head.recon_weight_ = bf16r2_tensor_arena_t::uninitialized({config.chunk_samples, config.hidden}, bf16_alloc).value;
+    head.recon_weight_grad_ =
+        bf16r2_tensor_arena_t::uninitialized({config.chunk_samples, config.hidden}, bf16_alloc).value;
+    head.predicted_ = bf16r2_tensor_arena_t::uninitialized({config.max_frames, config.chunk_samples}, bf16_alloc).value;
+    head.predicted_grad_ =
+        bf16r2_tensor_arena_t::uninitialized({config.max_frames, config.chunk_samples}, bf16_alloc).value;
+    head.mask_ = u32r1_tensor_arena_t::uninitialized({config.max_frames}, u32_alloc).value;
+    head.position_loss_ = f32r1_tensor_arena_t::uninitialized({config.max_frames}, f32_alloc).value;
+    head.gradient_scale_ = f32r1_tensor_arena_t::uninitialized({2}, f32_alloc).value;
     if (!head.recon_weight_ || !head.recon_weight_grad_ || !head.predicted_ || !head.predicted_grad_ || !head.mask_ ||
         !head.position_loss_ || !head.gradient_scale_)
         return result_t::fail(status_t::bad_alloc_k, "frame head allocation failed (arena_used={})", arena.used());
@@ -666,7 +671,7 @@ expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, cublaslt_ses
         head.plans_[family] = std::move(plan.value_);
     }
     if (workspace_bytes != 0) {
-        head.workspace_ = b8r1_tensor_arena_t::try_empty({workspace_bytes}, byte_alloc);
+        head.workspace_ = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, byte_alloc).value;
         if (!head.workspace_)
             return result_t::fail(status_t::bad_alloc_k, "tensor-core workspace allocation failed ({} bytes)",
                                   workspace_bytes);

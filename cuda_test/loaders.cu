@@ -100,8 +100,8 @@ struct fabricated_tape_t {
                 return result_t::fail(status_t::bad_alloc_k, "tape offset append failed");
         }
         std::size_t const total = std::max<std::size_t>(host.size(), 1u);
-        // Device memory: `try_empty` + explicit memset — `try_zeros` writes through the host pointer.
-        tape.device_bytes = b8r1_tensor_arena_t::try_empty({total}, gpu_arena_alloc<b8_t> {arena});
+        // Device memory: `uninitialized` + explicit memset — `zeros` writes through the host pointer.
+        tape.device_bytes = b8r1_tensor_arena_t::uninitialized({total}, gpu_arena_alloc<b8_t> {arena}).value;
         if (!tape.device_bytes) return result_t::fail(status_t::bad_alloc_k, "tape device buffer alloc failed");
         if (CUresult reset = cuMemsetD8(reinterpret_cast<CUdeviceptr>(tape.device_bytes.data()), 0, total);
             reset != CUDA_SUCCESS)
@@ -314,11 +314,11 @@ static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &
     multimodal_batch_on_gpu_t batch = std::move(made.value_);
 
     // Four packed segments in one row: text(3), image(6 = 2×3), video(8 = tg2·pr2·pc2), audio(4).
-    u32r1_tensor_pinned_t offsets = u32r1_tensor_pinned_t::try_zeros({max_segments + 1u}, pinned_alloc<u32_t> {});
-    u32r1_tensor_pinned_t lengths = u32r1_tensor_pinned_t::try_zeros({max_segments}, pinned_alloc<u32_t> {});
-    modr1_tensor_pinned_t modality = modr1_tensor_pinned_t::try_zeros({max_segments}, pinned_alloc<modality_t> {});
-    u16r2_tensor_pinned_t image_shapes = u16r2_tensor_pinned_t::try_zeros({max_segments, 2u}, pinned_alloc<u16_t> {});
-    u16r2_tensor_pinned_t video_shapes = u16r2_tensor_pinned_t::try_zeros({max_segments, 3u}, pinned_alloc<u16_t> {});
+    u32r1_tensor_pinned_t offsets = u32r1_tensor_pinned_t::zeros({max_segments + 1u}, pinned_alloc<u32_t> {}).value;
+    u32r1_tensor_pinned_t lengths = u32r1_tensor_pinned_t::zeros({max_segments}, pinned_alloc<u32_t> {}).value;
+    modr1_tensor_pinned_t modality = modr1_tensor_pinned_t::zeros({max_segments}, pinned_alloc<modality_t> {}).value;
+    u16r2_tensor_pinned_t image_shapes = u16r2_tensor_pinned_t::zeros({max_segments, 2u}, pinned_alloc<u16_t> {}).value;
+    u16r2_tensor_pinned_t video_shapes = u16r2_tensor_pinned_t::zeros({max_segments, 3u}, pinned_alloc<u16_t> {}).value;
     if (!offsets || !lengths || !modality || !image_shapes || !video_shapes)
         return suite.check(false, "coords staging alloc failed");
     u32_t const live_offsets[] = {0u, 3u, 9u, 17u, 21u, 21u, 21u, 21u, 21u};
@@ -345,8 +345,9 @@ static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &
         return suite.check(false, "coords staging copy failed");
 
     std::size_t const tokens = columns; // one row
-    // Device memory: `try_empty` + explicit memset — `try_zeros` writes through the host pointer.
-    i16r2_tensor_arena_t coords = i16r2_tensor_arena_t::try_empty({tokens, 3u}, gpu_arena_alloc<i16_t> {arena});
+    // Device memory: `uninitialized` + explicit memset — `zeros` writes through the host pointer.
+    i16r2_tensor_arena_t coords =
+        i16r2_tensor_arena_t::uninitialized({tokens, 3u}, gpu_arena_alloc<i16_t> {arena}).value;
     if (!coords) return suite.check(false, "coords scratch alloc failed");
     if (cuMemsetD8(reinterpret_cast<CUdeviceptr>(coords.data()), 0, tokens * 3u * sizeof(i16_t)) != CUDA_SUCCESS)
         return suite.check(false, "coords scratch reset failed");
@@ -356,7 +357,7 @@ static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &
     suite.check(static_cast<bool>(filled), "fill_coords should succeed: {}", to_string(filled.status_));
     if (!filled) return;
 
-    i16r2_tensor_pinned_t host = i16r2_tensor_pinned_t::try_zeros({tokens, 3u}, pinned_alloc<i16_t> {});
+    i16r2_tensor_pinned_t host = i16r2_tensor_pinned_t::zeros({tokens, 3u}, pinned_alloc<i16_t> {}).value;
     if (!host) return suite.check(false, "coords readback alloc failed");
     if (!copy_device_to_host(coords.view().flatten<1>(), host.span().flatten<1>(), stream))
         return suite.check(false, "coords readback copy failed");
@@ -426,11 +427,11 @@ static void run_audio_decode(test_suite_t &suite, sz::string_view label, array<b
     suite.check(static_cast<bool>(decoded), "[{}] decode_audios should succeed: {}", label, to_string(decoded.status_));
     if (!decoded) return;
 
-    modr1_tensor_pinned_t modality = modr1_tensor_pinned_t::try_zeros({max_segments}, pinned_alloc<modality_t> {});
-    u32r1_tensor_pinned_t lengths = u32r1_tensor_pinned_t::try_zeros({max_segments}, pinned_alloc<u32_t> {});
-    u32r1_tensor_pinned_t offsets = u32r1_tensor_pinned_t::try_zeros({max_segments + 1u}, pinned_alloc<u32_t> {});
-    f32r1_tensor_pinned_t samples = f32r1_tensor_pinned_t::try_zeros({batch.audio_samples.numel()},
-                                                                     pinned_alloc<f32_t> {});
+    modr1_tensor_pinned_t modality = modr1_tensor_pinned_t::zeros({max_segments}, pinned_alloc<modality_t> {}).value;
+    u32r1_tensor_pinned_t lengths = u32r1_tensor_pinned_t::zeros({max_segments}, pinned_alloc<u32_t> {}).value;
+    u32r1_tensor_pinned_t offsets = u32r1_tensor_pinned_t::zeros({max_segments + 1u}, pinned_alloc<u32_t> {}).value;
+    f32r1_tensor_pinned_t samples =
+        f32r1_tensor_pinned_t::zeros({batch.audio_samples.numel()}, pinned_alloc<f32_t> {}).value;
     if (!modality || !lengths || !offsets || !samples) return suite.check(false, "[{}] audio readback alloc", label);
     if (!copy_device_to_host(batch.segment_modality.view(), modality.span(), stream) ||
         !copy_device_to_host(batch.segment_lengths.view(), lengths.span(), stream) ||
@@ -499,9 +500,9 @@ static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_s
                 to_string(decoded.status_));
     if (!decoded) return;
 
-    modr1_tensor_pinned_t modality = modr1_tensor_pinned_t::try_zeros({max_segments}, pinned_alloc<modality_t> {});
-    f32r2_tensor_pinned_t samples = f32r2_tensor_pinned_t::try_zeros({2u, std::size_t {columns} * chunk},
-                                                                     pinned_alloc<f32_t> {});
+    modr1_tensor_pinned_t modality = modr1_tensor_pinned_t::zeros({max_segments}, pinned_alloc<modality_t> {}).value;
+    f32r2_tensor_pinned_t samples =
+        f32r2_tensor_pinned_t::zeros({2u, std::size_t {columns} * chunk}, pinned_alloc<f32_t> {}).value;
     if (!modality || !samples) return suite.check(false, "isolation readback alloc failed");
     if (!copy_device_to_host(batch.segment_modality.view(), modality.span(), stream) ||
         !copy_device_to_host(batch.audio_samples.view().flatten<1>(), samples.span().flatten<1>(), stream))
@@ -554,12 +555,14 @@ static void run_image_decode(test_suite_t &suite, sz::string_view label, array<b
     suite.check(static_cast<bool>(decoded), "[{}] decode_images should succeed: {}", label, decoded.description_);
     if (!decoded) return;
 
-    modr1_tensor_pinned_t modality = modr1_tensor_pinned_t::try_zeros({max_segments}, pinned_alloc<modality_t> {});
-    u32r1_tensor_pinned_t lengths = u32r1_tensor_pinned_t::try_zeros({max_segments}, pinned_alloc<u32_t> {});
-    u32r1_tensor_pinned_t offsets = u32r1_tensor_pinned_t::try_zeros({max_segments + 1u}, pinned_alloc<u32_t> {});
-    u16r2_tensor_pinned_t shapes = u16r2_tensor_pinned_t::try_zeros({max_segments, 2u}, pinned_alloc<u16_t> {});
-    pixelr2_tensor_pinned_t pixels = pixelr2_tensor_pinned_t::try_zeros(
-        {batch.images.numel() / channels, std::size_t {channels}}, pinned_alloc<pixel_t> {});
+    modr1_tensor_pinned_t modality = modr1_tensor_pinned_t::zeros({max_segments}, pinned_alloc<modality_t> {}).value;
+    u32r1_tensor_pinned_t lengths = u32r1_tensor_pinned_t::zeros({max_segments}, pinned_alloc<u32_t> {}).value;
+    u32r1_tensor_pinned_t offsets = u32r1_tensor_pinned_t::zeros({max_segments + 1u}, pinned_alloc<u32_t> {}).value;
+    u16r2_tensor_pinned_t shapes = u16r2_tensor_pinned_t::zeros({max_segments, 2u}, pinned_alloc<u16_t> {}).value;
+    pixelr2_tensor_pinned_t pixels = pixelr2_tensor_pinned_t::zeros(
+                                         {batch.images.numel() / channels, std::size_t {channels}},
+                                         pinned_alloc<pixel_t> {})
+                                         .value;
     if (!modality || !lengths || !offsets || !shapes || !pixels)
         return suite.check(false, "[{}] image readback alloc", label);
     if (!copy_device_to_host(batch.segment_modality.view(), modality.span(), stream) ||
@@ -630,9 +633,9 @@ static void run_video_decode(test_suite_t &suite, sz::string_view label, array<b
     suite.check(static_cast<bool>(decoded), "[{}] decode_videos should succeed: {}", label, to_string(decoded.status_));
     if (!decoded) return;
 
-    modr1_tensor_pinned_t modality = modr1_tensor_pinned_t::try_zeros({max_segments}, pinned_alloc<modality_t> {});
-    u32r1_tensor_pinned_t lengths = u32r1_tensor_pinned_t::try_zeros({max_segments}, pinned_alloc<u32_t> {});
-    u16r2_tensor_pinned_t shapes = u16r2_tensor_pinned_t::try_zeros({max_segments, 3u}, pinned_alloc<u16_t> {});
+    modr1_tensor_pinned_t modality = modr1_tensor_pinned_t::zeros({max_segments}, pinned_alloc<modality_t> {}).value;
+    u32r1_tensor_pinned_t lengths = u32r1_tensor_pinned_t::zeros({max_segments}, pinned_alloc<u32_t> {}).value;
+    u16r2_tensor_pinned_t shapes = u16r2_tensor_pinned_t::zeros({max_segments, 3u}, pinned_alloc<u16_t> {}).value;
     if (!modality || !lengths || !shapes) return suite.check(false, "[{}] video readback alloc", label);
     if (!copy_device_to_host(batch.segment_modality.view(), modality.span(), stream) ||
         !copy_device_to_host(batch.segment_lengths.view(), lengths.span(), stream) ||
@@ -726,9 +729,9 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
         return suite.check(false, "multimodal: image decode failed");
 
     // Read both decodes' real geometry back before assembling the mixed row.
-    u32r1_tensor_pinned_t audio_len = u32r1_tensor_pinned_t::try_zeros({2u}, pinned_alloc<u32_t> {});
-    u32r1_tensor_pinned_t image_len = u32r1_tensor_pinned_t::try_zeros({2u}, pinned_alloc<u32_t> {});
-    u16r2_tensor_pinned_t image_grid = u16r2_tensor_pinned_t::try_zeros({2u, 2u}, pinned_alloc<u16_t> {});
+    u32r1_tensor_pinned_t audio_len = u32r1_tensor_pinned_t::zeros({2u}, pinned_alloc<u32_t> {}).value;
+    u32r1_tensor_pinned_t image_len = u32r1_tensor_pinned_t::zeros({2u}, pinned_alloc<u32_t> {}).value;
+    u16r2_tensor_pinned_t image_grid = u16r2_tensor_pinned_t::zeros({2u, 2u}, pinned_alloc<u16_t> {}).value;
     if (!audio_len || !image_len || !image_grid) return suite.check(false, "multimodal: geometry readback alloc");
     if (!copy_device_to_host(audio_batch.segment_lengths.view(), audio_len.span(), stream) ||
         !copy_device_to_host(image_batch.segment_lengths.view(), image_len.span(), stream) ||
@@ -753,11 +756,11 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
     if (!mixed_made) return suite.check(false, "multimodal: mixed batch make: {}", to_string(mixed_made.status_));
     multimodal_batch_on_gpu_t mixed = std::move(mixed_made.value_);
 
-    u32r1_tensor_pinned_t offsets = u32r1_tensor_pinned_t::try_zeros({max_segments + 1u}, pinned_alloc<u32_t> {});
-    u32r1_tensor_pinned_t lengths = u32r1_tensor_pinned_t::try_zeros({max_segments}, pinned_alloc<u32_t> {});
-    modr1_tensor_pinned_t modality = modr1_tensor_pinned_t::try_zeros({max_segments}, pinned_alloc<modality_t> {});
-    u16r2_tensor_pinned_t shapes = u16r2_tensor_pinned_t::try_zeros({max_segments, 2u}, pinned_alloc<u16_t> {});
-    u16r2_tensor_pinned_t video_shapes = u16r2_tensor_pinned_t::try_zeros({max_segments, 3u}, pinned_alloc<u16_t> {});
+    u32r1_tensor_pinned_t offsets = u32r1_tensor_pinned_t::zeros({max_segments + 1u}, pinned_alloc<u32_t> {}).value;
+    u32r1_tensor_pinned_t lengths = u32r1_tensor_pinned_t::zeros({max_segments}, pinned_alloc<u32_t> {}).value;
+    modr1_tensor_pinned_t modality = modr1_tensor_pinned_t::zeros({max_segments}, pinned_alloc<modality_t> {}).value;
+    u16r2_tensor_pinned_t shapes = u16r2_tensor_pinned_t::zeros({max_segments, 2u}, pinned_alloc<u16_t> {}).value;
+    u16r2_tensor_pinned_t video_shapes = u16r2_tensor_pinned_t::zeros({max_segments, 3u}, pinned_alloc<u16_t> {}).value;
     if (!offsets || !lengths || !modality || !shapes || !video_shapes)
         return suite.check(false, "multimodal: mixed staging alloc failed");
     for (u32_t s = 0; s != max_segments + 1u; ++s) offsets[s] = audio_length + image_length;
@@ -777,8 +780,9 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
         return suite.check(false, "multimodal: mixed staging copy failed");
 
     std::size_t const tokens = columns;
-    // Device memory: `try_empty` + explicit memset — `try_zeros` writes through the host pointer.
-    i16r2_tensor_arena_t coords = i16r2_tensor_arena_t::try_empty({tokens, 3u}, gpu_arena_alloc<i16_t> {arena});
+    // Device memory: `uninitialized` + explicit memset — `zeros` writes through the host pointer.
+    i16r2_tensor_arena_t coords =
+        i16r2_tensor_arena_t::uninitialized({tokens, 3u}, gpu_arena_alloc<i16_t> {arena}).value;
     if (!coords) return suite.check(false, "multimodal: coords alloc failed");
     if (cuMemsetD8(reinterpret_cast<CUdeviceptr>(coords.data()), 0, tokens * 3u * sizeof(i16_t)) != CUDA_SUCCESS)
         return suite.check(false, "multimodal: coords reset failed");
@@ -789,7 +793,7 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
                 to_string(filled.status_));
     if (!filled) return;
 
-    i16r2_tensor_pinned_t host = i16r2_tensor_pinned_t::try_zeros({tokens, 3u}, pinned_alloc<i16_t> {});
+    i16r2_tensor_pinned_t host = i16r2_tensor_pinned_t::zeros({tokens, 3u}, pinned_alloc<i16_t> {}).value;
     if (!host) return suite.check(false, "multimodal: coords readback alloc failed");
     if (!copy_device_to_host(coords.view().flatten<1>(), host.span().flatten<1>(), stream))
         return suite.check(false, "multimodal: coords readback copy failed");

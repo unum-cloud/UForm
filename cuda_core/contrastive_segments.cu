@@ -414,7 +414,7 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
     loss.config_ = config;
 
     // Scratch tensors — the former "workspace", owned like the relation columns are: plain
-    // `try_empty` allocations, checked in named groups so a failure names the arena pressure.
+    // `uninitialized` allocations, checked in named groups so a failure names the arena pressure.
 
     std::size_t const rows = config.from_vertices_per_gpu, hidden = config.hidden;
     u32_t const to_vertices_per_gpu = config.to_vertices_per_gpu;
@@ -423,18 +423,22 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
     gpu_arena_alloc<f32_t> f32_alloc {arena};
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<b8_t> byte_alloc {arena};
-    loss.from_vertex_norms_ = f32r2_tensor_arena_t::try_empty({prefix_count, rows}, f32_alloc);
-    loss.to_vertex_norms_ = f32r2_tensor_arena_t::try_empty({prefix_count, to_vertices_per_gpu}, f32_alloc);
-    loss.running_dot_accumulator_ = f32r2_tensor_arena_t::try_empty({rows, to_vertices_per_gpu}, f32_alloc);
-    loss.raw_dot_ = f32r3_tensor_arena_t::try_empty({prefix_count, rows, to_vertices_per_gpu}, f32_alloc);
-    loss.scaled_cosine_ = f32r3_tensor_arena_t::try_empty({prefix_count, rows, to_vertices_per_gpu}, f32_alloc);
-    loss.logit_grad_ = f32r3_tensor_arena_t::try_empty({prefix_count, rows, to_vertices_per_gpu}, f32_alloc);
-    loss.raw_dot_grad_ = f32r3_tensor_arena_t::try_empty({prefix_count, rows, to_vertices_per_gpu}, f32_alloc);
-    loss.raw_dot_grad_bf16_ = bf16r3_tensor_arena_t::try_empty({prefix_count, rows, to_vertices_per_gpu}, bf16_alloc);
-    loss.from_vertex_accumulator_ = f32r2_tensor_arena_t::try_empty({6, rows}, f32_alloc);
-    loss.from_vertex_self_coefficients_ = f32r2_tensor_arena_t::try_empty({prefix_count, rows}, f32_alloc);
-    loss.to_vertex_self_coefficients_ = f32r2_tensor_arena_t::try_empty({prefix_count, to_vertices_per_gpu}, f32_alloc);
-    loss.from_vertices_grad_f32_ = f32r2_tensor_arena_t::try_empty({rows, hidden}, f32_alloc);
+    loss.from_vertex_norms_ = f32r2_tensor_arena_t::uninitialized({prefix_count, rows}, f32_alloc).value;
+    loss.to_vertex_norms_ = f32r2_tensor_arena_t::uninitialized({prefix_count, to_vertices_per_gpu}, f32_alloc).value;
+    loss.running_dot_accumulator_ = f32r2_tensor_arena_t::uninitialized({rows, to_vertices_per_gpu}, f32_alloc).value;
+    loss.raw_dot_ = f32r3_tensor_arena_t::uninitialized({prefix_count, rows, to_vertices_per_gpu}, f32_alloc).value;
+    loss.scaled_cosine_ =
+        f32r3_tensor_arena_t::uninitialized({prefix_count, rows, to_vertices_per_gpu}, f32_alloc).value;
+    loss.logit_grad_ = f32r3_tensor_arena_t::uninitialized({prefix_count, rows, to_vertices_per_gpu}, f32_alloc).value;
+    loss.raw_dot_grad_ =
+        f32r3_tensor_arena_t::uninitialized({prefix_count, rows, to_vertices_per_gpu}, f32_alloc).value;
+    loss.raw_dot_grad_bf16_ =
+        bf16r3_tensor_arena_t::uninitialized({prefix_count, rows, to_vertices_per_gpu}, bf16_alloc).value;
+    loss.from_vertex_accumulator_ = f32r2_tensor_arena_t::uninitialized({6, rows}, f32_alloc).value;
+    loss.from_vertex_self_coefficients_ = f32r2_tensor_arena_t::uninitialized({prefix_count, rows}, f32_alloc).value;
+    loss.to_vertex_self_coefficients_ =
+        f32r2_tensor_arena_t::uninitialized({prefix_count, to_vertices_per_gpu}, f32_alloc).value;
+    loss.from_vertices_grad_f32_ = f32r2_tensor_arena_t::uninitialized({rows, hidden}, f32_alloc).value;
     if (!loss.from_vertex_norms_ || !loss.to_vertex_norms_ || !loss.running_dot_accumulator_ || !loss.raw_dot_ ||
         !loss.scaled_cosine_ || !loss.logit_grad_ || !loss.raw_dot_grad_ || !loss.raw_dot_grad_bf16_ ||
         !loss.from_vertex_accumulator_ || !loss.from_vertex_self_coefficients_ || !loss.to_vertex_self_coefficients_ ||
@@ -497,7 +501,7 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
         }
     }
     if (workspace_bytes != 0) {
-        loss.cublaslt_workspace_ = b8r1_tensor_arena_t::try_empty({workspace_bytes}, byte_alloc);
+        loss.cublaslt_workspace_ = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, byte_alloc).value;
         if (!loss.cublaslt_workspace_)
             return expected<contrastive_segments_t>::fail(
                 status_t::bad_alloc_k, "tensor-core workspace allocation failed ({} bytes)", workspace_bytes);
@@ -847,7 +851,7 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
         if (!gather_buffer) return result_t::fail(std::move(gather_buffer));
         distributed.gather_buffer_ = std::move(gather_buffer.value_);
         gpu_arena_alloc<f32_t> f32_alloc {arenas[0]};
-        distributed.loss_outs_ = f32r1_tensor_arena_t::try_empty({gpus}, f32_alloc);
+        distributed.loss_outs_ = f32r1_tensor_arena_t::uninitialized({gpus}, f32_alloc).value;
         if (!distributed.loss_outs_)
             return result_t::fail(status_t::bad_alloc_k, "scalar bookkeeping allocation failed");
         expected<gpu_event_t> event = gpu_event_t::make();

@@ -66,11 +66,11 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for member {}", member);
 
-    auto offsets = pinned1_t<u32_t>::try_zeros({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {});
-    auto lengths = pinned1_t<u32_t>::try_zeros({S}, pinned_alloc<u32_t> {});
-    auto modality = pinned1_t<modality_t>::try_zeros({S}, pinned_alloc<modality_t> {});
-    auto tokens = pinned1_t<token_id_t>::try_zeros({static_cast<std::size_t>(rows) * columns},
-                                                   pinned_alloc<token_id_t> {});
+    auto offsets = pinned1_t<u32_t>::zeros({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {}).value;
+    auto lengths = pinned1_t<u32_t>::zeros({S}, pinned_alloc<u32_t> {}).value;
+    auto modality = pinned1_t<modality_t>::zeros({S}, pinned_alloc<modality_t> {}).value;
+    auto tokens =
+        pinned1_t<token_id_t>::zeros({static_cast<std::size_t>(rows) * columns}, pinned_alloc<token_id_t> {}).value;
     if (!offsets || !lengths || !modality || !tokens)
         return expected_t::fail(status_t::bad_alloc_k, "loaded fabrication scratch alloc failed");
 
@@ -116,11 +116,11 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for member {}", member);
 
-    auto offsets = pinned1_t<u32_t>::try_zeros({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {});
-    auto lengths = pinned1_t<u32_t>::try_zeros({S}, pinned_alloc<u32_t> {});
-    auto modality = pinned1_t<modality_t>::try_zeros({S}, pinned_alloc<modality_t> {});
-    auto tokens = pinned1_t<token_id_t>::try_zeros({static_cast<std::size_t>(rows) * columns},
-                                                   pinned_alloc<token_id_t> {});
+    auto offsets = pinned1_t<u32_t>::zeros({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {}).value;
+    auto lengths = pinned1_t<u32_t>::zeros({S}, pinned_alloc<u32_t> {}).value;
+    auto modality = pinned1_t<modality_t>::zeros({S}, pinned_alloc<modality_t> {}).value;
+    auto tokens =
+        pinned1_t<token_id_t>::zeros({static_cast<std::size_t>(rows) * columns}, pinned_alloc<token_id_t> {}).value;
     if (!offsets || !lengths || !modality || !tokens)
         return expected_t::fail(status_t::bad_alloc_k, "mixed readback scratch alloc failed");
 
@@ -204,12 +204,13 @@ inline constexpr u32_t pad_bag_k = bags_per_member_k;
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for member {}", member);
 
-    auto offsets = pinned1_t<u32_t>::try_zeros({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {});
-    auto lengths = pinned1_t<u32_t>::try_zeros({S}, pinned_alloc<u32_t> {});
-    auto modality = pinned1_t<modality_t>::try_zeros({S}, pinned_alloc<modality_t> {});
-    auto bags = pinned1_t<u32_t>::try_zeros({S}, pinned_alloc<u32_t> {});
-    auto tokens = pinned1_t<token_id_t>::try_zeros({batch.tokens.extent(0) * batch.tokens.extent(1)},
-                                                   pinned_alloc<token_id_t> {});
+    auto offsets = pinned1_t<u32_t>::zeros({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {}).value;
+    auto lengths = pinned1_t<u32_t>::zeros({S}, pinned_alloc<u32_t> {}).value;
+    auto modality = pinned1_t<modality_t>::zeros({S}, pinned_alloc<modality_t> {}).value;
+    auto bags = pinned1_t<u32_t>::zeros({S}, pinned_alloc<u32_t> {}).value;
+    auto tokens = pinned1_t<token_id_t>::zeros({batch.tokens.extent(0) * batch.tokens.extent(1)},
+                                               pinned_alloc<token_id_t> {})
+                      .value;
     if (!offsets || !lengths || !modality || !bags || !tokens)
         return expected_t::fail(status_t::bad_alloc_k, "bagged fabrication scratch alloc failed");
 
@@ -335,11 +336,12 @@ using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for member {}", member);
 
-    auto offsets = pinned1_t<u32_t>::try_empty({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {});
-    auto lengths = pinned1_t<u32_t>::try_empty({S}, pinned_alloc<u32_t> {});
-    auto bags = pinned1_t<u32_t>::try_empty({S}, pinned_alloc<u32_t> {});
-    auto tokens = pinned1_t<token_id_t>::try_empty({static_cast<std::size_t>(rows) * columns},
-                                                   pinned_alloc<token_id_t> {});
+    auto offsets = pinned1_t<u32_t>::uninitialized({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {}).value;
+    auto lengths = pinned1_t<u32_t>::uninitialized({S}, pinned_alloc<u32_t> {}).value;
+    auto bags = pinned1_t<u32_t>::uninitialized({S}, pinned_alloc<u32_t> {}).value;
+    auto tokens = pinned1_t<token_id_t>::uninitialized({static_cast<std::size_t>(rows) * columns},
+                                                       pinned_alloc<token_id_t> {})
+                      .value;
     if (!offsets || !lengths || !bags || !tokens)
         return expected_t::fail(status_t::bad_alloc_k, "bagged readback scratch alloc failed");
 

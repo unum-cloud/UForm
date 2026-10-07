@@ -304,46 +304,56 @@ struct multimodal_batch {
                                   "bag budget exceeds segment budget (bags={} segments={}) — each bag needs a segment",
                                   shape.max_bags_per_gpu, shape.max_segments_per_gpu);
         multimodal_batch batch;
-        batch.segment_offsets = nk::tensor<u32_t, rebound<u32_t>, 1>::try_empty({shape.max_segments_per_gpu + 1u},
-                                                                                rebound<u32_t> {allocator});
-        batch.segment_lengths = nk::tensor<u32_t, rebound<u32_t>, 1>::try_empty({shape.max_segments_per_gpu},
-                                                                                rebound<u32_t> {allocator});
-        batch.segment_modality = nk::tensor<modality_t, rebound<modality_t>, 1>::try_empty(
-            {shape.max_segments_per_gpu}, rebound<modality_t> {allocator});
-        batch.segment_bag = nk::tensor<u32_t, rebound<u32_t>, 1>::try_empty({shape.max_segments_per_gpu},
-                                                                            rebound<u32_t> {allocator});
-        batch.tokens = nk::tensor<token_id_t, rebound<token_id_t>, 2>::try_empty(
-            {shape.max_rows_per_gpu, shape.max_columns_per_row}, rebound<token_id_t> {allocator});
-        batch.image_shapes = nk::tensor<u16_t, rebound<u16_t>, 2>::try_empty({shape.max_segments_per_gpu, 2u},
-                                                                             rebound<u16_t> {allocator});
-        batch.video_shapes = nk::tensor<u16_t, rebound<u16_t>, 2>::try_empty({shape.max_segments_per_gpu, 3u},
-                                                                             rebound<u16_t> {allocator});
+        batch.segment_offsets = nk::tensor<u32_t, rebound<u32_t>, 1>::uninitialized({shape.max_segments_per_gpu + 1u},
+                                                                                    rebound<u32_t> {allocator})
+                                    .value;
+        batch.segment_lengths = nk::tensor<u32_t, rebound<u32_t>, 1>::uninitialized({shape.max_segments_per_gpu},
+                                                                                    rebound<u32_t> {allocator})
+                                    .value;
+        batch.segment_modality = nk::tensor<modality_t, rebound<modality_t>, 1>::uninitialized(
+                                     {shape.max_segments_per_gpu}, rebound<modality_t> {allocator})
+                                     .value;
+        batch.segment_bag = nk::tensor<u32_t, rebound<u32_t>, 1>::uninitialized({shape.max_segments_per_gpu},
+                                                                                rebound<u32_t> {allocator})
+                                .value;
+        batch.tokens = nk::tensor<token_id_t, rebound<token_id_t>, 2>::uninitialized(
+                           {shape.max_rows_per_gpu, shape.max_columns_per_row}, rebound<token_id_t> {allocator})
+                           .value;
+        batch.image_shapes = nk::tensor<u16_t, rebound<u16_t>, 2>::uninitialized({shape.max_segments_per_gpu, 2u},
+                                                                                 rebound<u16_t> {allocator})
+                                 .value;
+        batch.video_shapes = nk::tensor<u16_t, rebound<u16_t>, 2>::uninitialized({shape.max_segments_per_gpu, 3u},
+                                                                                 rebound<u16_t> {allocator})
+                                 .value;
         if (!batch.segment_offsets || !batch.segment_lengths || !batch.segment_modality || !batch.segment_bag ||
             !batch.tokens || !batch.image_shapes || !batch.video_shapes)
             return result_t::fail(status_t::bad_alloc_k, "batch allocation failed (rows={} segments={} columns={})",
                                   shape.max_rows_per_gpu, shape.max_segments_per_gpu, shape.max_columns_per_row);
         if (shape.image.patch_side != 0) {
-            batch.images = nk::tensor<pixel_t, rebound<pixel_t>, 5>::try_empty(
-                {shape.max_rows_per_gpu, shape.max_columns_per_row, shape.image.patch_side, shape.image.patch_side,
-                 shape.image.channels},
-                rebound<pixel_t> {allocator});
+            batch.images = nk::tensor<pixel_t, rebound<pixel_t>, 5>::uninitialized(
+                               {shape.max_rows_per_gpu, shape.max_columns_per_row, shape.image.patch_side,
+                                shape.image.patch_side, shape.image.channels},
+                               rebound<pixel_t> {allocator})
+                               .value;
             if (!batch.images)
                 return result_t::fail(status_t::bad_alloc_k, "image allocation failed ({} rows of {} patches)",
                                       shape.max_rows_per_gpu, shape.max_columns_per_row);
         }
         if (shape.video.patch_side != 0) {
-            batch.videos = nk::tensor<pixel_t, rebound<pixel_t>, 6>::try_empty(
-                {shape.max_rows_per_gpu, shape.max_columns_per_row, shape.video.tube_frames, shape.video.patch_side,
-                 shape.video.patch_side, shape.video.channels},
-                rebound<pixel_t> {allocator});
+            batch.videos = nk::tensor<pixel_t, rebound<pixel_t>, 6>::uninitialized(
+                               {shape.max_rows_per_gpu, shape.max_columns_per_row, shape.video.tube_frames,
+                                shape.video.patch_side, shape.video.patch_side, shape.video.channels},
+                               rebound<pixel_t> {allocator})
+                               .value;
             if (!batch.videos)
                 return result_t::fail(status_t::bad_alloc_k, "video allocation failed ({} rows of {} tubes)",
                                       shape.max_rows_per_gpu, shape.max_columns_per_row);
         }
         if (shape.audio.chunk_samples != 0) {
-            batch.audio_samples = nk::tensor<f32_t, rebound<f32_t>, 3>::try_empty(
-                {shape.max_rows_per_gpu, shape.max_columns_per_row, shape.audio.chunk_samples},
-                rebound<f32_t> {allocator});
+            batch.audio_samples = nk::tensor<f32_t, rebound<f32_t>, 3>::uninitialized(
+                                      {shape.max_rows_per_gpu, shape.max_columns_per_row, shape.audio.chunk_samples},
+                                      rebound<f32_t> {allocator})
+                                      .value;
             if (!batch.audio_samples)
                 return result_t::fail(status_t::bad_alloc_k, "audio allocation failed ({} rows of {} frames)",
                                       shape.max_rows_per_gpu, shape.max_columns_per_row);
