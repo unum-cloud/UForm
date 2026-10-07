@@ -60,7 +60,7 @@
 
 #include <cuda.h> // `cuMemsetD8Async`, `cuMemcpyDtoDAsync`
 
-#include <numkong/attention.h> // `nk_attention_pack_bf16_best`, `nk_attention_bidirectional_packed_bf16_best`
+#include <numkong/attention.h> // `nk_attention_pack_bf16_best`, `nk_attention_packed_bf16_best`
 #include <numkong/cast.h>      // `nk_cast_best` — the pooled Float32 rows into BFloat16
 #include <numkong/tensor.hpp>  // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 

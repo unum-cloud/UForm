@@ -84,7 +84,7 @@
 #include <cuda_fp8.h>       // `__nv_fp8_e4m3`
 #include <cudnn_frontend.h> // the SDPA graph builder; execution is raw backend wherever provably exact
 
-#include <numkong/attention.h> // `nk_attention_pack_e4m3_best`, `nk_attention_bidirectional_packed_e4m3_best`
+#include <numkong/attention.h> // `nk_attention_pack_e4m3_best`, `nk_attention_packed_e4m3_best`
 #include <numkong/cast.h>      // `nk_cast_best` — Float32 norm scales and the narrowed products
 #include <numkong/dots.h>      // `nk_dots_pack_bf16_best`, `nk_dots_packed_bf16_best` — every product
 #include <numkong/each.h>      // `nk_each_rmscast_bf16_best`, `nk_each_swiglu_f32_best`, `nk_each_sum_f32_best`
@@ -598,8 +598,7 @@ struct transformer_block_e4m3_t {
     /**
      *  @brief One quantized block forward — pure enqueue over the packed multi-segment layout. Norms and
      *      rotation run BFloat16; matmuls run E4M3 with @b per-token activation scales (folded back
-     *      after each product); attention runs E4M3 over the ragged segments under one dynamic
-     *      per-tensor Q/K/V scale, which NumKong reads from the device.
+     *      after each product); attention runs unscaled E4M3 over the ragged segments.
      */
     [[nodiscard]] expected_t forward(bf16r2_view_t input, bf16r2_span_t output, u32r1_view_t segment_offsets,
                                      u32r1_view_t segment_lengths, rope_angles_view_t angles, i16r2_view_t coords,
@@ -648,17 +647,13 @@ struct transformer_block_e4m3_t {
     bf16r2_tensor_arena_t normalized_ {}, qkv_ {}, attn_residual_ {}, gate_up_ {}, silu_up_ {};
     /** @brief The matmul operands ride per-token scales, @b [tokens,·] like their BFloat16 sources. */
     e4m3r2_tensor_arena_t normalized_e4m3_ {}, attn_output_e4m3_ {}, silu_up_e4m3_ {};
-    /** @brief @b [tokens,3·hidden] the packed Q|K|V under the one dynamic per-tensor scale. */
+    /** @brief @b [tokens,3·hidden] the packed Q|K|V, cast unscaled. */
     e4m3r2_tensor_arena_t qkv_e4m3_ {};
     /** @brief The K and V slices of @ref qkv_e4m3_ in NumKong's attention layout, sized for
      *      @c max_tokens over @c max_segments . */
     b8r1_tensor_arena_t packed_keys_values_ {};
     /** @brief The per-token activation scales the matmul fold reads. */
     f32r1_tensor_arena_t token_scales_ {};
-    /** @brief @b [2] the attention's device scales: @c d² for the Q·K scores, then the Q/K/V descale @c d . */
-    f32r1_tensor_arena_t attention_scales_ {};
-    /** @brief @b [1] the packed maximum-absolute bits the dynamic descale is derived from. */
-    u32r1_tensor_arena_t max_bits_ {};
 };
 
 #endif // defined(__CUDACC__)

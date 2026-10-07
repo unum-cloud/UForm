@@ -304,14 +304,6 @@ static __global__ void transformer_descale_from_max_kernel_(u32r1_span_t max_bit
     descale[0] = fmaxf(max_abs / e4m3_range_k, e4m3_descale_floor_k);
 }
 
-/** @brief Resolve the Q/K/V max-abs bits into NumKong's attention @p scales : the descale @c d at @b [1] ,
- *      which the quantisation divides by, and @c d² at @b [0] , which multiplies the Q·K scores. One thread. */
-static __global__ void transformer_attention_scales_kernel_(u32r1_span_t max_bits, f32r1_span_t scales) {
-    if (threadIdx.x != 0u || blockIdx.x != 0u) return;
-    f32_t const descale = fmaxf(__uint_as_float(max_bits[0]) / e4m3_range_k, e4m3_descale_floor_k);
-    scales[0] = descale * descale, scales[1] = descale;
-}
-
 /**
  *  @brief Quantise BFloat16 into the E4M3 shadow, dividing by the descale scalar the matmuls will
  *      multiply back through their native scale pointers.
@@ -322,7 +314,7 @@ static __global__ void transformer_quantize_e4m3_kernel_(bf16r1_view_t values, e
                                                          f32r1_view_t descale) {
     std::size_t const total = values.extent(0);
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    f32_t const inverse_scale = descale.empty() ? 1.0f : 1.0f / descale[0];
+    f32_t const inverse_scale = 1.0f / descale[0];
     for (std::size_t cell = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; cell < total;
          cell += stride)
         shadow[cell] = __nv_fp8_e4m3 {__bfloat162float(values[cell]) * inverse_scale};
@@ -1196,27 +1188,13 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
                                  stream, qkv_.span(), angles, coords, heads, key_offset, forward_sign);
     if (!launched) return launched;
 
-    // Quantise the rotated Q / K and raw V under one dynamic per-tensor scale d, pack K / V per segment,
-    // and attend over the ragged segments, NumKong multiplying the scores by d² and the output by d.
-    // The gaps between segments ride along as extra query rows of the segment before; nothing reads them.
+    // QK-norm leaves Q and K at unit RMS per head and V stays well inside E4M3's range, so all three cast
+    // unscaled. The gaps between segments ride along as extra query rows of the segment before; nothing reads them.
     std::size_t const segments = segment_lengths.extent(0);
-    if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(max_bits_.data()), 0, sizeof(u32_t),
-                                          stream.get());
-        result != CUDA_SUCCESS)
-        return expected_t::fail(result, "dynamic-scale reset failed");
-    bf16r1_view_t const qkv_flat = qkv_.view().flatten<1>();
-    dim3 const qkv_grid {static_cast<u32_t>(divide_round_up(qkv_flat.extent(0), kernel_block_size_default_k)), 1u, 1u};
-    launched = launch_kernel(reinterpret_cast<void const *>(&transformer_absolute_max_kernel_), qkv_grid, block_shape,
-                             stream, qkv_flat, max_bits_.span());
-    if (launched)
-        launched = launch_kernel(reinterpret_cast<void const *>(&transformer_attention_scales_kernel_),
-                                 dim3 {1u, 1u, 1u}, dim3 {1u, 1u, 1u}, stream, max_bits_.span(),
-                                 attention_scales_.span());
-    if (launched)
-        launched = launch_kernel(reinterpret_cast<void const *>(&transformer_quantize_e4m3_kernel_), qkv_grid,
-                                 block_shape, stream, qkv_flat, qkv_e4m3_.span().flatten<1>(),
-                                 f32r1_view_t {attention_scales_.data() + 1, 1});
-    if (!launched) return launched;
+    if (nk_status_t const status = nk_cast_best(qkv_.data(), nk_bf16_k, qkv_e4m3_.data(), nk_e4m3_k,
+                                                tokens * 3 * hidden, capabilities_, stream.get());
+        status != nk_success_k)
+        return expected_t::fail(status_t::cuda_error_k, "Q/K/V cast failed: {}", nk_status_name(status));
     if (nk::failed(products_.resize({tokens, hidden})))
         return expected_t::fail(status_t::shape_unsupported_k, "attention scratch cannot hold [{}x{}]", tokens, hidden);
     auto const *const qkv_e4m3 = reinterpret_cast<nk_e4m3_t const *>(qkv_e4m3_.data());
@@ -1226,11 +1204,11 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
         segment_lengths.data(), segments, qkv_bytes, qkv_bytes, packed_keys_values_.data(), 0, segments * heads,
         capabilities_, stream.get());
     if (status == nk_success_k)
-        status = nk_attention_bidirectional_packed_e4m3_best(
+        status = nk_attention_packed_e4m3_best(
             qkv_e4m3, packed_keys_values_.data(), products_.data(), NUMKONG_NULL, heads, heads, transformer_head_dim_k,
             segment_offsets.data(), qkv_bytes, hidden * sizeof(f32_t),
-            1.0f / sqrtf(static_cast<f32_t>(transformer_head_dim_k)), attention_scales_.data(), 0, NUMKONG_SIZE_MAX,
-            capabilities_, stream.get());
+            1.0f / sqrtf(static_cast<f32_t>(transformer_head_dim_k)), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, 0,
+            NUMKONG_SIZE_MAX, capabilities_, stream.get());
     if (status != nk_success_k)
         return expected_t::fail(status_t::cuda_error_k, "E4M3 attention failed: {}", nk_status_name(status));
 
@@ -1341,11 +1319,9 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
     block.silu_up_e4m3_ = e4m3r2_tensor_arena_t::uninitialized({tokens, ffn}, e4m3_alloc).value;
     block.products_ = f32r2_tensor_arena_t::uninitialized({tokens, std::max(3 * hidden, 2 * ffn)}, f32_alloc).value;
     block.token_scales_ = f32r1_tensor_arena_t::uninitialized({tokens}, f32_alloc).value;
-    block.attention_scales_ = f32r1_tensor_arena_t::uninitialized({2}, f32_alloc).value;
-    block.max_bits_ = u32r1_tensor_arena_t::uninitialized({1}, u32_alloc).value;
     max_bits = u32r1_tensor_arena_t::uninitialized({1}, u32_alloc).value;
     if (!block.normalized_e4m3_ || !block.qkv_e4m3_ || !block.packed_keys_values_ || !block.silu_up_e4m3_ ||
-        !block.products_ || !block.token_scales_ || !block.attention_scales_ || !block.max_bits_ || !max_bits)
+        !block.products_ || !block.token_scales_ || !max_bits)
         return result_t::fail(status_t::bad_alloc_k, "quantized operands allocation failed (arena_used={})",
                               arena.used());
 

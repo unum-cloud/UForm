@@ -6,7 +6,7 @@
  *  @author Ash Vardanian
  *  @date July 4, 2026
  */
-#include <algorithm> // `std::max` — the running plan-workspace maximum
+#include <algorithm> // `std::max` for the running plan-workspace maximum, `std::min` for the pool pack
 
 #include <cub/device/device_radix_sort.cuh> // the deterministic embedding-gradient scatter
 
@@ -763,9 +763,10 @@ expected<tower_pool_t> tower_pool_t::make(gpu_arena_t &arena, transformer_block_
     std::size_t const segments = block.max_segments;
     std::size_t const heads = block.hidden / transformer_head_dim_k;
 
+    // Live tokens of all segments together never exceed the batch, however they split.
+    std::size_t const tokens = std::min<std::size_t>(block.max_tokens, segments * block.max_segment_tokens);
     nk_size_t packed_bytes = 0;
-    if (nk_status_t const status = nk_attention_pack_size_bf16_best(heads, transformer_head_dim_k,
-                                                                    segments * block.max_segment_tokens, segments,
+    if (nk_status_t const status = nk_attention_pack_size_bf16_best(heads, transformer_head_dim_k, tokens, segments,
                                                                     pool.capabilities_, &packed_bytes);
         status != nk_success_k)
         return result_t::fail(status_t::cuda_error_k, "pool pack sizing failed: {}", nk_status_name(status));
@@ -798,10 +799,10 @@ expected_t tower_pool_t::forward(bf16r1_view_t query, bf16r2_view_t states, u32r
         segments, hidden * sizeof(bf16_t), hidden * sizeof(bf16_t), packed_.data(), 0, segments * heads,
         capabilities_, stream.get());
     if (status == nk_success_k)
-        status = nk_attention_bidirectional_packed_bf16_best(
+        status = nk_attention_packed_bf16_best(
             reinterpret_cast<nk_bf16_t const *>(query.data()), packed_.data(), pooled_.data(), NUMKONG_NULL, heads,
             heads, transformer_head_dim_k, query_offsets_.data(), 0, hidden * sizeof(f32_t), tower_pool_scale_(),
-            NUMKONG_NULL, 0, NUMKONG_SIZE_MAX, capabilities_, stream.get());
+            NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, 0, NUMKONG_SIZE_MAX, capabilities_, stream.get());
     if (status == nk_success_k)
         status = nk_cast_best(pooled_.data(), nk_f32_k, pooled.data(), nk_bf16_k, segments * hidden, capabilities_,
                               stream.get());
