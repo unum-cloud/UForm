@@ -708,10 +708,10 @@ static void run_pool_parity_case() {
     // Forward with vertices, then read back the tower's own final-norm states — the oracle's input, so
     // the parity isolates exactly the new pool + head math.
     std::vector<bf16_t> vertices_device(std::size_t(segments_k) * hidden_k);
-    bf16r2_tensor_arena_t vertices_tensor = bf16r2_tensor_arena_t::try_empty({segments_k, hidden_k},
-                                                                             gpu_arena_alloc<bf16_t> {arena.value_});
-    bf16r2_tensor_arena_t vertices_grad_tensor = bf16r2_tensor_arena_t::try_empty(
-        {segments_k, hidden_k}, gpu_arena_alloc<bf16_t> {arena.value_});
+    bf16r2_tensor_arena_t vertices_tensor =
+        bf16r2_tensor_arena_t::uninitialized({segments_k, hidden_k}, gpu_arena_alloc<bf16_t> {arena.value_}).value;
+    bf16r2_tensor_arena_t vertices_grad_tensor =
+        bf16r2_tensor_arena_t::uninitialized({segments_k, hidden_k}, gpu_arena_alloc<bf16_t> {arena.value_}).value;
     if (!vertices_tensor || !vertices_grad_tensor) {
         check(false, "pool-parity vertices alloc");
         cuCtxPopCurrent(nullptr);
@@ -721,7 +721,8 @@ static void run_pool_parity_case() {
                std::size_t(segments_k) * hidden_k * sizeof(bf16_t));
     cuMemsetD8(reinterpret_cast<CUdeviceptr>(vertices_grad_tensor.data()), 0,
                std::size_t(segments_k) * hidden_k * sizeof(bf16_t));
-    auto ran = tower.value_.forward(batch.value_, vertices_tensor.span(), stream.value_);
+    auto ran = tower.value_.pack_weights(stream.value_);
+    if (ran) ran = tower.value_.forward(batch.value_, vertices_tensor.span(), stream.value_);
     if (!ran) std::printf("    %s\n", ran.description_.c_str());
     check(static_cast<bool>(ran), "pool-parity forward");
     if (!ran) {
@@ -848,8 +849,8 @@ static void run_pool_parity_case() {
     if (!twin) std::printf("    %s\n", twin.description_.c_str());
     check(static_cast<bool>(twin), "twin quantization");
     if (twin) {
-        bf16r2_tensor_arena_t twin_vertices = bf16r2_tensor_arena_t::try_empty({segments_k, hidden_k},
-                                                                               gpu_arena_alloc<bf16_t> {arena.value_});
+        bf16r2_tensor_arena_t twin_vertices =
+            bf16r2_tensor_arena_t::uninitialized({segments_k, hidden_k}, gpu_arena_alloc<bf16_t> {arena.value_}).value;
         if (!twin_vertices) {
             check(false, "twin vertices alloc");
             cuCtxPopCurrent(nullptr);

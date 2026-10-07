@@ -55,15 +55,18 @@
 #include <cstddef> // `std::size_t`
 #include <cmath>   // `sqrtf`, `expf`
 
-#include <array> // `std::array` — the fixed-size pinned-plan tables
+#include <array>  // `std::array` — the fixed-size pinned-plan tables
+#include <memory> // `std::unique_ptr` — the blocks' shared scratch
 
 #include <cuda.h> // `cuMemsetD8Async`, `cuMemcpyDtoDAsync`
 
-#include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
+#include <numkong/attention.h> // `nk_attention_pack_bf16_best`, `nk_attention_bidirectional_packed_bf16_best`
+#include <numkong/cast.h>      // `nk_cast_best` — the pooled Float32 rows into BFloat16
+#include <numkong/tensor.hpp>  // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
 #include "cuda_core/types.hpp"             // `expected`, `expected_t`, `status_t`, `differentiable_weights_t`
 #include "cuda_core/multimodal_batch.hpp"  // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`, `modality_t`
-#include "cuda_core/transformer_block.cuh" // the block stack, `rope_angles_t`, `sdpa_plan_t`, shared `rmsnorm_*`
+#include "cuda_core/transformer_block.cuh" // the block stack, `rope_angles_t`, shared `rmsnorm_*`
 
 namespace unum::uform::core {
 
@@ -111,6 +114,41 @@ struct encoder_tower_config_t {
 };
 
 #if defined(__CUDACC__)
+
+/**
+ *  @brief The attention pool's forward, shared by both towers: one learned query attends each segment's
+ *      live states as both keys and values, through NumKong's ragged attention.
+ */
+struct tower_pool_t {
+
+    /** @brief Allocate the pool off @p arena for @p block 's capacities: the query offsets
+     *      @c {0,1,…,segments} that give every segment the one query, the K=V pack sized for every segment at
+     *      @c max_segment_tokens , and the Float32 pooled rows. Uploads the offsets — outside any capture. */
+    [[nodiscard]] static expected<tower_pool_t> make(gpu_arena_t &arena,
+                                                     transformer_block_config_t const &block) noexcept;
+
+    /**
+     *  @brief Pool every segment of @p states — pure enqueue: pack K=V, attend, cast to BFloat16.
+     *  @param[in] query @b [hidden] the learned pool query.
+     *  @param[in] states @b [tokens,hidden] the final-norm states.
+     *  @param[in] segment_offsets @b [segments+1] flat segment starts.
+     *  @param[in] segment_lengths @b [segments] live token counts, zero for PAD, which pools to zeros.
+     *  @param[out] pooled @b [segments,hidden] the pooled rows.
+     *  @param[inout] stream The stream every launch enqueues on.
+     */
+    [[nodiscard]] expected_t forward(bf16r1_view_t query, bf16r2_view_t states, u32r1_view_t segment_offsets,
+                                     u32r1_view_t segment_lengths, bf16r2_span_t pooled, gpu_stream_t &stream) noexcept;
+
+  private:
+    /** @brief The NumKong capabilities of the arena's device, picking every launch. */
+    nk_capability_t capabilities_ = 0;
+    /** @brief @b [segments+1] the query offsets @c {0,1,…,segments} . */
+    u32r1_tensor_arena_t query_offsets_ {};
+    /** @brief The K=V pack, sized by NumKong's pack-size query. */
+    b8r1_tensor_arena_t packed_ {};
+    /** @brief @b [segments,hidden] the Float32 pooled rows before their BFloat16 cast. */
+    f32r2_tensor_arena_t pooled_ {};
+};
 
 /**
  *  @brief The training tower: entry + block stack + final norm + attention pool + head, every weight,
@@ -161,6 +199,11 @@ struct encoder_tower_bf16_t {
      *      its @c model. prefix. */
     [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;
 
+    /** @brief Pack every block's weights for NumKong's products — pure enqueue, capture-safe. Call once per
+     *      optimizer step, after the weights change and before the first @ref forward ; every forward and
+     *      backward of the step reuses the packs. */
+    [[nodiscard]] expected_t pack_weights(gpu_stream_t &stream) noexcept;
+
     /** @brief Quantize this tower's block stack into the E4M3 inference twin (entries / pool / head stay
      *      BFloat16) — the twin's only constructor. */
     [[nodiscard]] expected<struct encoder_tower_e4m3_t> quantize_weights(gpu_arena_t &arena,
@@ -204,16 +247,15 @@ struct encoder_tower_bf16_t {
      *      case) purely to size the heuristic + workspace, the live tile count coming from the operands. */
     [[nodiscard]] expected_t pin_media_plans(std::size_t &plan_base, u32_t fan_in, u32_t max_tokens, u32_t hidden,
                                              std::size_t &role, std::size_t &workspace_bytes) noexcept;
-    /** @brief Build the attention pool's forward SDPA graph — once, at @ref make , after the pool buffers
-     *      exist: the stride-0 broadcast query over ragged K=V=@ref normalized_ with the padding mask
-     *      driven by the per-segment lengths. Sizes @ref pool_workspace_ . */
-    [[nodiscard]] expected_t build_pool_sdpa(gpu_arena_t &arena) noexcept;
 
-    /** @brief The baked geometry and the two borrowed vendor sessions — never owned here. */
+    /** @brief The baked geometry and the borrowed cuBLASLt session — never owned here. */
     encoder_tower_config_t config_ {};
     cublaslt_session_t *blas_ = nullptr;
-    cudnn_session_t *cudnn_ = nullptr;
+    /** @brief The NumKong capabilities of the arena's device, picking the residual stream's casts and norm. */
+    nk_capability_t capabilities_ = 0;
 
+    /** @brief The transients every block shares; heap-held so the blocks' borrows survive the tower's moves. */
+    std::unique_ptr<transformer_scratch_t> scratch_ {};
     /** @brief The @c depth transformer blocks, owned in order. */
     array<transformer_block_bf16_t> blocks_ {};
 
@@ -236,25 +278,14 @@ struct encoder_tower_bf16_t {
 
     /** @brief The final norm scale and its gradient. */
     bf16r1_tensor_arena_t final_norm_scale_ {}, final_norm_scale_grad_ {};
+    /** @brief The final norm scale widened to the Float32 @c γ NumKong's rmscast reads, each forward. */
+    f32r1_tensor_arena_t widened_final_norm_scale_ {};
 
     /** @brief The learned attention-pool query @b [heads,head_dim]=[hidden] and its gradient. */
     bf16r1_tensor_arena_t pool_query_ {}, pool_query_grad_ {};
-    /** @brief The attention pool's forward cross-SDPA plan — the single query rides a stride-0 batch axis
-     *      so cuDNN broadcasts it over every segment, and each segment's live tokens arrive through the
-     *      ragged K/V offsets. The backward is a house kernel pair, not a cuDNN graph: the vendor's
-     *      @c sdpa_backward emits non-finite gradients at single-query shapes, so the backward recomputes
-     *      the softmax and folds the exact Jacobian itself. */
-    sdpa_plan_t pool_forward_sdpa_ {};
-    /** @brief The pool's @b [segments+1]/[segments] Int32 ragged staging, filled behind the one vendor
-     *      boundary. */
-    i32r1_tensor_arena_t pool_ragged_offsets_ {}, pool_ragged_seq_lens_ {};
-    /** @brief The pool's constant all-ones @b [segments] Int32 query lengths — every segment carries
-     *      exactly the one broadcast query; filled once at @ref make . */
-    i32r1_tensor_arena_t pool_seq_ones_ {};
-    /** @brief The pool's device-resident attention scale @c 1/√head_dim , uploaded once at @ref make . */
-    f32r1_tensor_arena_t pool_attn_scale_ {};
-    /** @brief The attention pool's SDPA workspace. */
-    b8r1_tensor_arena_t pool_workspace_ {};
+    /** @brief The attention pool's forward. The backward is a house kernel pair that recomputes the softmax
+     *      and folds the exact Jacobian itself. */
+    tower_pool_t pool_ {};
 
     /** @brief The head's learnable-scale RMSNorm @c γ and its gradient (@b [hidden] vectors). */
     bf16r1_tensor_arena_t head_norm_scale_ {}, head_norm_scale_grad_ {};
@@ -272,14 +303,21 @@ struct encoder_tower_bf16_t {
      *      final-norm states, and the pooled / head activations. */
     bf16r2_tensor_arena_t entry_output_ {}, normalized_ {}, pooled_ {}, head_normalized_ {}, head_hidden_ {},
         head_activated_ {};
-    /** @brief Float32 @c 1/rms stashes for the final ( @b [tokens] ) and head ( @b [segments] ) norms. */
+    /** @brief Float32 @c 1/rms of the final ( @b [tokens] ) and head ( @b [segments] ) norms: the head norm's
+     *      forward stashes its own, and the final norm's backward recomputes its own. */
     f32r1_tensor_arena_t final_inverse_rms_ {}, head_inverse_rms_ {};
-    /** @brief The block stack's @b [tokens,hidden] activation ping-pong and the borrowed last-layer view. */
-    bf16r2_tensor_arena_t activations_a_ {}, activations_b_ {};
-    bf16r2_view_t stack_output_ {};
+    /** @brief The block stack's @b [tokens,hidden] Float32 residual-stream ping-pong, the widened entry state
+     *      entering at @c activations_b_ , and the borrowed last-layer view. */
+    f32r2_tensor_arena_t activations_a_ {}, activations_b_ {};
+    f32r2_view_t stack_output_ {};
 
-    /** @brief The @b [rows,hidden] gradient ping-pong buffers (token-axis and segment-axis). */
-    bf16r2_tensor_arena_t token_grad_a_ {}, token_grad_b_ {}, segment_grad_a_ {}, segment_grad_b_ {};
+    /** @brief The @b [tokens,hidden] BFloat16 final-norm states' gradient, later the narrowed entry gradient. */
+    bf16r2_tensor_arena_t normalized_grad_ {};
+    /** @brief The @b [tokens,hidden] Float32 gradient ping-pong: the widened final-norm gradient, then the block
+     *      stack's flowing gradient. */
+    f32r2_tensor_arena_t token_grad_a_ {}, token_grad_b_ {};
+    /** @brief The @b [segments,hidden] head gradient ping-pong. */
+    bf16r2_tensor_arena_t segment_grad_a_ {}, segment_grad_b_ {};
 
     /** @brief The deterministic embedding-scatter scratch: (key,value) double buffers + radix workspace. */
     tokens_tensor_arena_t sort_keys_ {};
@@ -338,10 +376,9 @@ struct encoder_tower_e4m3_t {
     [[nodiscard]] expected_t pin_media_plan(std::size_t &plan_base, u32_t fan_in, u32_t max_tokens, u32_t hidden,
                                             std::size_t &role, std::size_t &workspace_bytes) noexcept;
 
-    /** @brief The baked geometry and the two borrowed vendor sessions — never owned here. */
+    /** @brief The baked geometry and the borrowed cuBLASLt session — never owned here. */
     encoder_tower_config_t config_ {};
     cublaslt_session_t *blas_ = nullptr;
-    cudnn_session_t *cudnn_ = nullptr;
 
     /** @brief The @c depth E4M3 transformer blocks, owned in order — the quantized-precision tier. */
     array<transformer_block_e4m3_t> blocks_ {};
@@ -362,18 +399,8 @@ struct encoder_tower_e4m3_t {
     bf16r1_tensor_arena_t final_norm_scale_ {};
     /** @brief The learned attention-pool query @b [heads,head_dim]=[hidden] , BFloat16. */
     bf16r1_tensor_arena_t pool_query_ {};
-    /** @brief The attention pool's forward cross-SDPA plan — a single broadcast query attends each
-     *      segment's live tokens (forward only). */
-    sdpa_plan_t pool_forward_sdpa_ {};
-    /** @brief The pool's @b [segments+1]/[segments] Int32 ragged staging, filled behind the one vendor
-     *      boundary. */
-    i32r1_tensor_arena_t pool_ragged_offsets_ {}, pool_ragged_seq_lens_ {};
-    /** @brief The pool's constant all-ones @b [segments] Int32 query lengths, filled once at quantization. */
-    i32r1_tensor_arena_t pool_seq_ones_ {};
-    /** @brief The pool's device-resident attention scale @c 1/√head_dim , uploaded once at quantization. */
-    f32r1_tensor_arena_t pool_attn_scale_ {};
-    /** @brief The attention pool's SDPA workspace. */
-    b8r1_tensor_arena_t pool_workspace_ {};
+    /** @brief The attention pool's forward. */
+    tower_pool_t pool_ {};
     /** @brief The head's learnable-scale RMSNorm @c γ ( @b [hidden] vector), BFloat16. */
     bf16r1_tensor_arena_t head_norm_scale_ {};
     /** @brief The head's two @b [hidden,hidden] projections, BFloat16. */

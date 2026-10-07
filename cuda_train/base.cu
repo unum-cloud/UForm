@@ -183,8 +183,8 @@ struct grid_factor_t {
     for (std::size_t weight_index = 0; weight_index != list.size(); ++weight_index) {
         differentiable_weights_t const &matrix = list[weight_index];
         std::size_t const rows = matrix.weights.extent(0), columns = matrix.weights.extent(1);
-        nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging = nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::try_empty(
-            {rows * columns}, pinned_alloc<bf16_t> {});
+        nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging =
+            nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::uninitialized({rows * columns}, pinned_alloc<bf16_t> {}).value;
         if (!staging) return expected_t::fail(status_t::bad_alloc_k, "weight staging failed (matrix={})", weight_index);
         bf16r1_span_t const host = staging.span();
         for (std::size_t index = 0; index != host.extent(0); ++index)
@@ -207,7 +207,7 @@ struct summand_pair_t {
 /** @brief Read one head's @b [2] @c {λ·Σ, count} summands back to host. Best-effort: a slipped readback
  *      reports zeros, never fails the run. Caller holds the stream's context. */
 [[nodiscard]] static summand_pair_t read_summands_(f32r1_tensor_arena_t &summands, gpu_stream_t &stream) noexcept {
-    f32r1_tensor_pinned_t staging = f32r1_tensor_pinned_t::try_empty({2}, pinned_alloc<f32_t> {});
+    f32r1_tensor_pinned_t staging = f32r1_tensor_pinned_t::uninitialized({2}, pinned_alloc<f32_t> {}).value;
     if (!staging) return {};
     if (!copy_device_to_host(summands.view(), staging.span(), stream)) return {};
     cuStreamSynchronize(stream.get());
@@ -417,10 +417,10 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cublaslt_sessi
     gpu_arena_alloc<u32_t> u32_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
-    replica.clean_tokens = tokens_tensor_arena_t::try_empty({max_tokens}, token_alloc);
-    replica.token_loss_weights = u32r1_tensor_arena_t::try_empty({max_tokens}, u32_alloc);
-    replica.tokens_summands = f32r1_tensor_arena_t::try_empty({2}, f32_alloc);
-    replica.normalized_grad = bf16r2_tensor_arena_t::try_empty({max_tokens, config.hidden}, bf16_alloc);
+    replica.clean_tokens = tokens_tensor_arena_t::uninitialized({max_tokens}, token_alloc).value;
+    replica.token_loss_weights = u32r1_tensor_arena_t::uninitialized({max_tokens}, u32_alloc).value;
+    replica.tokens_summands = f32r1_tensor_arena_t::uninitialized({2}, f32_alloc).value;
+    replica.normalized_grad = bf16r2_tensor_arena_t::uninitialized({max_tokens, config.hidden}, bf16_alloc).value;
     if (!replica.clean_tokens || !replica.token_loss_weights || !replica.tokens_summands || !replica.normalized_grad)
         return result_t::fail(status_t::bad_alloc_k, "masked scratch allocation failed");
 
@@ -434,9 +434,9 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cublaslt_sessi
         expected<masked_patches_t> head = masked_patches_t::make(arena, blas, head_config);
         if (!head) return result_t::fail(std::move(head));
         replica.image = std::move(head.value_);
-        replica.clean_image_patches = bf16r2_tensor_arena_t::try_empty({max_tokens, head_config.patch_pixels}, //
-                                                                       bf16_alloc);
-        replica.image_summands = f32r1_tensor_arena_t::try_empty({2}, f32_alloc);
+        replica.clean_image_patches =
+            bf16r2_tensor_arena_t::uninitialized({max_tokens, head_config.patch_pixels}, bf16_alloc).value;
+        replica.image_summands = f32r1_tensor_arena_t::uninitialized({2}, f32_alloc).value;
         if (!replica.clean_image_patches || !replica.image_summands)
             return result_t::fail(status_t::bad_alloc_k, "image scratch allocation failed");
     }
@@ -450,9 +450,9 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cublaslt_sessi
         expected<masked_patches_t> head = masked_patches_t::make(arena, blas, head_config);
         if (!head) return result_t::fail(std::move(head));
         replica.video = std::move(head.value_);
-        replica.clean_video_patches = bf16r2_tensor_arena_t::try_empty({max_tokens, head_config.patch_pixels}, //
-                                                                       bf16_alloc);
-        replica.video_summands = f32r1_tensor_arena_t::try_empty({2}, f32_alloc);
+        replica.clean_video_patches =
+            bf16r2_tensor_arena_t::uninitialized({max_tokens, head_config.patch_pixels}, bf16_alloc).value;
+        replica.video_summands = f32r1_tensor_arena_t::uninitialized({2}, f32_alloc).value;
         if (!replica.clean_video_patches || !replica.video_summands)
             return result_t::fail(status_t::bad_alloc_k, "video scratch allocation failed");
     }
@@ -465,8 +465,9 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cublaslt_sessi
         expected<masked_frames_t> head = masked_frames_t::make(arena, blas, head_config);
         if (!head) return result_t::fail(std::move(head));
         replica.audio = std::move(head.value_);
-        replica.clean_audio = f32r2_tensor_arena_t::try_empty({max_tokens, shape.audio.chunk_samples}, f32_alloc);
-        replica.audio_summands = f32r1_tensor_arena_t::try_empty({2}, f32_alloc);
+        replica.clean_audio =
+            f32r2_tensor_arena_t::uninitialized({max_tokens, shape.audio.chunk_samples}, f32_alloc).value;
+        replica.audio_summands = f32r1_tensor_arena_t::uninitialized({2}, f32_alloc).value;
         if (!replica.clean_audio || !replica.audio_summands)
             return result_t::fail(status_t::bad_alloc_k, "audio scratch allocation failed");
     }
@@ -614,6 +615,7 @@ expected_t base_replica_t::model_region(gpu_stream_t &stream) noexcept {
     bool const audio_live = audio_summands.data() != nullptr;
     bool const composite = image_live || video_live || audio_live;
 
+    if (expected_t packed = tower.pack_weights(stream); !packed) return packed;
     if (expected_t encoded = tower.forward(batch, bf16r2_span_t {}, stream); !encoded) return encoded;
 
     // The shared d(normalized): the token head overwrites first, so the reset matters only when media heads add.
@@ -811,7 +813,7 @@ base_trainer_t::telemetry_t base_trainer_t::telemetry(multimem_domain_t &domain,
     }
     switch_to_gpu_t gpu_scope {streams[0]};
     if (u32_t const *const round = domain.member(0).round; gpu_scope.ok() && round != nullptr) {
-        u32r1_tensor_pinned_t staging = u32r1_tensor_pinned_t::try_empty({1}, pinned_alloc<u32_t> {});
+        u32r1_tensor_pinned_t staging = u32r1_tensor_pinned_t::uninitialized({1}, pinned_alloc<u32_t> {}).value;
         nk::tensor_view<u32_t, 1> const source {round, 1};
         if (staging && copy_device_to_host(source, staging.span(), streams[0])) {
             cuStreamSynchronize(streams[0].get());

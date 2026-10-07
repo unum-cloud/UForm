@@ -14,15 +14,19 @@
  *
  *  @section transformer_backends Backends — the fast primitive for every op
  *
- *      - Every matmul is a pinned @ref cublaslt_plan_t tensor-core product — BFloat16 operands with
- *        Float32 accumulation on the training block, E4M3 operands with pinned native descale pointers
- *        on the inference block. The QKV and gate/up projections are @b fused single products.
- *      - Attention is cuDNN's fused SDPA through the frontend graph DSL — the flash-attention-class
+ *      - Every matmul is a NumKong packed product into Float32: BFloat16 operands on the training block,
+ *        E4M3 on the inference block. The QKV and gate/up projections are @b fused single products. NumKong
+ *        packs row-major B operands only, so each optimizer step @ref transformer_block_bf16_t::pack_weights
+ *        packs every W for the forward @c Y=X·Wᵀ and, from @ref transpose_bf16 , every Wᵀ for the data gradient
+ *        @c dX=dY·W , once for every micro-batch and call of the step. The weight gradient @c dW=dYᵀ·X
+ *        transposes @c dY and @c X per call and packs Xᵀ into the shared scratch.
+ *      - Training attention is cuDNN's fused SDPA through the frontend graph DSL — the flash-attention-class
  *        kernel, built once per block at construction with the ragged (packed-segments) layout, the
- *        BFloat16 backward consuming the stashed @c softmax_log_sum_exp_ .
- *      - Everything else — RMSNorm forward / backward, the non-learnable unit QK-norm, M-RoPE rotation
- *        and its inverse, SiLU·up and its backward, residual adds, and the E4M3 quantisation — is a
- *        deterministic house kernel launched through @ref launch_kernel .
+ *        BFloat16 backward consuming the stashed @c softmax_log_sum_exp_ . Inference attention is NumKong's
+ *        ragged E4M3 attention.
+ *      - The forward norms, SwiGLU, residual adds and casts are NumKong element-wise verbs; the backward of
+ *        the norms, the unit QK-norm and SwiGLU, M-RoPE rotation and its inverse, and the E4M3 quantisation
+ *        are deterministic house kernels launched through @ref launch_kernel .
  *
  *  @section transformer_shapes Shapes, packing, capture
  *
@@ -37,13 +41,15 @@
  *
  *  @section transformer_precision Precision recipe
  *
- *  Training is BFloat16 end-to-end with Float32 accumulation in every matmul and every reduction; the
- *  RMSNorm statistics ( @c 1/rms ) and the SDPA @c softmax_log_sum_exp_ stash in Float32. Inference quantisation
- *  is per-tensor @b static E4M3: each weight is scaled by @c max_abs/240 into its shadow, the Float32
- *  descale scalar rides the matmul descriptor's native scale pointer (no post-matmul descale kernel),
- *  and activations carry per-token activation scales, folded back after each product. Weight gradients
- *  are written with @c beta=0 into per-block BFloat16 buffers; cross-microbatch accumulation is the
- *  optimizer's concern.
+ *  Training keeps the residual stream between blocks in Float32 and feeds every matmul BFloat16 operands:
+ *  each product writes Float32 and its consumer narrows it. A product feeding a norm is narrowed by that norm,
+ *  NumKong's @c rmscast : the pre- and post-attention norms over the residual stream, and the unit QK-norm
+ *  over the Float32 QKV product, which doubles as the pre-norm stash. A product no norm follows is narrowed
+ *  by a plain cast: the V slice, the SwiGLU output, and the weight gradients. The norm backwards recompute
+ *  @c 1/rms from the Float32 input they read; the SDPA @c softmax_log_sum_exp_ stashes in Float32. Inference
+ *  quantisation is per-tensor @b static E4M3: each weight is scaled by @c max_abs/240 into its shadow, and
+ *  activations carry per-token scales, both folded back after each product. Weight gradients overwrite
+ *  per-block BFloat16 buffers; cross-microbatch accumulation is the optimizer's concern.
  *
  *  @section transformer_rope Rotary position embedding
  *
@@ -78,7 +84,11 @@
 #include <cuda_fp8.h>       // `__nv_fp8_e4m3`
 #include <cudnn_frontend.h> // the SDPA graph builder; execution is raw backend wherever provably exact
 
-#include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
+#include <numkong/attention.h> // `nk_attention_pack_e4m3_best`, `nk_attention_bidirectional_packed_e4m3_best`
+#include <numkong/cast.h>      // `nk_cast_best` — Float32 norm scales and the narrowed products
+#include <numkong/dots.h>      // `nk_dots_pack_bf16_best`, `nk_dots_packed_bf16_best` — every product
+#include <numkong/each.h>      // `nk_each_rmscast_bf16_best`, `nk_each_swiglu_f32_best`, `nk_each_sum_f32_best`
+#include <numkong/tensor.hpp>  // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
 #include "cuda_core/types.hpp"    // `expected`, `expected_t`, `status_t`, the integer aliases
 #include "cuda_core/schedule.cuh" // `gpu_stream_t`, `launch_kernel`, `cublaslt_*`, `cudnn_session_t`
@@ -174,14 +184,13 @@ struct rope_angles_t {
 #if defined(__CUDACC__)
 
 /**
- *  @brief Learnable RMSNorm forward over strided rows: @c y = x·rsqrt(mean(x²)+eps)·γ , saving the
+ *  @brief Learnable RMSNorm forward over strided BFloat16 rows: @c y = x·rsqrt(mean(x²)+eps)·γ , saving the
  *      Float32 @c 1/rms per row for the backward.
  *
- *  The three @c rmsnorm_* kernels carry @b external linkage so both this block (its pre / post-attention
- *  norms) and the encoder tower (its final and head norms) launch the same symbols through
- *  @ref launch_kernel — one definition each, no wrapper, no extra file. RMSNorm is a shared primitive, so
- *  the names take no @c transformer_ prefix; the block's unit QK-norm below is a different operator (no
- *  learnable scale, per-head-vector) and stays file-local.
+ *  The @c rmsnorm_* and @c rmscast_* kernels carry @b external linkage so both this block and the encoder tower
+ *  launch the same symbols through @ref launch_kernel : one definition each, no wrapper, no extra file. RMSNorm
+ *  is a shared primitive, so the names take no @c transformer_ prefix; the block's unit QK-norm is a different
+ *  operator (no learnable scale, per-head-vector) and stays file-local.
  *
  *  __grid_size__ @c [rows,1,1] ; one CTA per row; threads stripe the row's channels; no dynamic shared
  *  memory.
@@ -209,6 +218,26 @@ __global__ void rmsnorm_scale_grad_kernel(bf16r2_view_t input, f32r1_view_t inve
                                           bf16r1_span_t scale_grad);
 
 /**
+ *  @brief The row-gradient backward of NumKong's rmscast over the Float32 residual stream:
+ *      @c dx = residual + (dy·γ − x̂·mean(dy·γ·x̂))·(1/rms) , recomputing @c 1/rms from @p input into
+ *      @p inverse_rms for @ref rmscast_scale_grad_kernel ; an empty @p residual_grad adds nothing.
+ *
+ *  __grid_size__ @c [rows,1,1] ; one CTA per row; no dynamic shared memory.
+ */
+__global__ void rmscast_backward_kernel(f32r2_view_t input, bf16r1_view_t scale, f32r2_view_t output_grad,
+                                        f32r2_view_t residual_grad, f32r2_span_t input_grad, f32r1_span_t inverse_rms,
+                                        f32_t epsilon);
+
+/**
+ *  @brief The scale-gradient backward of rmscast: @c dγ[c] = Σ_r dy[r,c]·x̂[r,c] , reading the @c 1/rms
+ *      @ref rmscast_backward_kernel wrote, in the same fixed serial fold as @ref rmsnorm_scale_grad_kernel .
+ *
+ *  __grid_size__ @c [ceil(width/block),1,1] ; no dynamic shared memory.
+ */
+__global__ void rmscast_scale_grad_kernel(f32r2_view_t input, f32r1_view_t inverse_rms, f32r2_view_t output_grad,
+                                          bf16r1_span_t scale_grad);
+
+/**
  *  @brief Inverted dropout, in place and keyed — declared here with @b external linkage (like the
  *      @c rmsnorm_* family) so the block, the tower, and any future consumer launch the one shared symbol.
  *      A single op serves both directions: forward runs it on the activations, backward on the same site's
@@ -229,9 +258,6 @@ inline constexpr i64_t sdpa_uid_stats_k = 5, sdpa_uid_seq_len_q_k = 8, sdpa_uid_
 inline constexpr i64_t sdpa_uid_attn_scale_k = 10, sdpa_uid_output_grad_k = 101, sdpa_uid_query_grad_k = 102;
 inline constexpr i64_t sdpa_uid_key_grad_k = 103, sdpa_uid_value_grad_k = 104;
 inline constexpr i64_t sdpa_uid_ragged_base_k = 20; // 20..27: Q,K,V,O,dO,dQ,dK,dV ragged prefix offsets.
-inline constexpr i64_t sdpa_uid_descale_q_k = 11, sdpa_uid_descale_k_k = 12, sdpa_uid_descale_v_k = 13;
-inline constexpr i64_t sdpa_uid_descale_s_k = 14, sdpa_uid_scale_s_k = 15, sdpa_uid_scale_o_k = 16;
-inline constexpr i64_t sdpa_uid_amax_s_k = 17, sdpa_uid_amax_o_k = 18;
 
 /** @brief Most tensors any of the SDPA variant packs binds — the fixed capacity of the binding table. */
 inline constexpr u32_t sdpa_binding_capacity_k = 20u;
@@ -361,38 +387,83 @@ struct sdpa_plan_t {
 };
 
 /**
- *  @brief The training transformer block: BFloat16 forward + backward, every tensor and plan owned —
- *      weights, gradients, stashes, matmul plans, and SDPA graphs are all baked at @ref make .
+ *  @brief The transients every block of a stack shares: blocks run one after another on one stream and no
+ *      transient outlives the block that wrote it, so a stack's footprint is one scratch plus the per-block
+ *      stashes, weights and packs. Owned by the stack, borrowed by each @ref transformer_block_bf16_t .
+ */
+struct transformer_scratch_t {
+
+    /** @brief Allocate every transient off @p arena for @p config 's capacities; the NumKong pack size comes
+     *      from the capabilities of the arena's device. */
+    [[nodiscard]] static expected<transformer_scratch_t> make(gpu_arena_t &arena,
+                                                              transformer_block_config_t const &config) noexcept;
+
+    /** @brief Float32 @b [tokens·ffn] the SwiGLU output before its cast, then each data gradient before the
+     *      house kernel or cast consuming it. */
+    f32r1_tensor_arena_t products {};
+    /** @brief Float32 @b [tokens,hidden] the residual-stream gradient between the two norm backwards. */
+    f32r2_tensor_arena_t residual_grad {};
+    /** @brief @b [tokens] the per-token @c 1/rms each norm backward recomputes for its scale gradient. */
+    f32r1_tensor_arena_t inverse_rms {};
+    /** @brief BFloat16 @b [tokens·max(3·hidden,2·ffn)] each product's output gradient narrowed into the A
+     *      operand of its data and weight gradients. */
+    bf16r1_tensor_arena_t narrowed_grad {};
+    /** @brief BFloat16 @b [max(3·hidden,2·ffn),tokens] @c dYᵀ with token rows padded to 8, which keeps NumKong's
+     *      16-byte stride rule for any token count. */
+    bf16r1_tensor_arena_t transposed_grad {};
+    /** @brief BFloat16 @b [max(hidden,ffn),tokens] @c Xᵀ with token rows padded to 8. */
+    bf16r1_tensor_arena_t transposed_input {};
+    /** @brief BFloat16 @b [max(3·hidden,2·ffn)·hidden] the one weight @c pack_weights transposes at a time. */
+    bf16r1_tensor_arena_t transposed_weight {};
+    /** @brief @b [tokens,3·hidden] the packed Q|K|V gradient SDPA's backward writes. */
+    bf16r2_tensor_arena_t qkv_grad {};
+    /** @brief Float32 @b [max(3·hidden,2·ffn)·hidden] each weight gradient before its cast. */
+    f32r1_tensor_arena_t weight_grad_products {};
+    /** @brief The NumKong pack of @c Xᵀ , sized for the largest. */
+    b8r1_tensor_arena_t packed_input {};
+};
+
+/**
+ *  @brief The training transformer block: BFloat16 products over a Float32 residual stream, forward +
+ *      backward, every tensor and graph owned; weights, gradients, stashes, the product scratch and the SDPA
+ *      graphs are all baked at @ref make .
  */
 struct transformer_block_bf16_t {
 
-    /** @brief Allocate and plan everything: weights and their gradients, every stash the backward reads,
-     *      twelve pinned matmul plans, the forward and backward SDPA graphs, and the shared workspace —
-     *      construction is the validation and the planning; calls are pure enqueues. */
+    /** @brief Allocate and plan everything: weights and their gradients, every stash the backward reads, the
+     *      one NumKong pack every product's B operand passes through, the forward and backward SDPA graphs,
+     *      and their workspace. Construction is the validation and the planning; calls are pure enqueues. */
     [[nodiscard]] static expected<transformer_block_bf16_t> make(gpu_arena_t &arena, cublaslt_session_t &blas,
-                                                                 cudnn_session_t &cudnn,
+                                                                 cudnn_session_t &cudnn, transformer_scratch_t &scratch,
                                                                  transformer_block_config_t config) noexcept;
+
+    /**
+     *  @brief Pack the four weights as the forward's B operands and their transposes as the data gradients' —
+     *      pure enqueue, capture-safe. Call once per optimizer step, after the weights change and before the
+     *      first @ref forward ; every micro-batch and call of the step reuses the packs.
+     */
+    [[nodiscard]] expected_t pack_weights(gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief One block forward — pure enqueue, capture-safe; stashes everything the backward reads.
      *
-     *  @param[in] input Packed @b [tokens,hidden] BFloat16 buffer; @c tokens<=max_tokens .
-     *  @param[out] output Same-shaped destination; may not alias @p input .
+     *  @param[in] input Packed @b [tokens,hidden] Float32 residual stream; @c tokens<=max_tokens .
+     *  @param[out] output Same-shaped Float32 destination; may not alias @p input .
      *  @param[in] segment_offsets @b [segments+1] flat segment START positions (gapped at row jumps).
      *  @param[in] segment_lengths @b [segments] live token count per segment; PAD segments carry 0.
      *  @param[in] angles Borrowed rotary angle grids.
      *  @param[in] coords @b [tokens,3] the tower-derived per-token @b (t,h,w) coordinates.
      */
-    [[nodiscard]] expected_t forward(bf16r2_view_t input, bf16r2_span_t output, u32r1_view_t segment_offsets,
+    [[nodiscard]] expected_t forward(f32r2_view_t input, f32r2_span_t output, u32r1_view_t segment_offsets,
                                      u32r1_view_t segment_lengths, rope_angles_view_t angles, i16r2_view_t coords,
                                      gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief One block backward, consuming the stashes @ref forward wrote — pure enqueue, capture-safe.
-     *      Weight gradients overwrite this block's buffers ( @c beta=0 ); @p input_grad receives the full
-     *      upstream token gradient.
+     *      Weight gradients overwrite this block's buffers; @p input_grad receives the full upstream Float32
+     *      token gradient and may not alias @p output_grad .
      */
-    [[nodiscard]] expected_t backward(bf16r2_view_t output_grad, bf16r2_span_t input_grad, u32r1_view_t segment_offsets,
+    [[nodiscard]] expected_t backward(f32r2_view_t output_grad, f32r2_span_t input_grad, u32r1_view_t segment_offsets,
                                       u32r1_view_t segment_lengths, rope_angles_view_t angles, i16r2_view_t coords,
                                       gpu_stream_t &stream) noexcept;
 
@@ -425,22 +496,28 @@ struct transformer_block_bf16_t {
   private:
     friend struct transformer_block_e4m3_t;
 
-    /** @brief Plan roles, in the order @ref plan_matmuls_ builds them. */
-    static constexpr std::size_t plan_qkv_forward_k = 0, plan_out_forward_k = 1, plan_gate_up_forward_k = 2,
-                                 plan_down_forward_k = 3, plan_qkv_data_grad_k = 4, plan_out_data_grad_k = 5,
-                                 plan_gate_up_data_grad_k = 6, plan_down_data_grad_k = 7, plan_qkv_weight_grad_k = 8,
-                                 plan_out_weight_grad_k = 9, plan_gate_up_weight_grad_k = 10,
-                                 plan_down_weight_grad_k = 11;
+    /**
+     *  @brief One NumKong product @c c=a·bᵀ into Float32 against a packed B operand.
+     *  @param[in] a @b [rows,depth] the row-major A operand.
+     *  @param[in] packed_b The pack of @b [columns,depth] , from @ref pack_weights or the shared scratch.
+     *  @param[in] columns The B rows packed, the product's width.
+     *  @param[out] c @b [rows,columns] the Float32 product.
+     *  @param[inout] stream The stream the launch enqueues on.
+     */
+    [[nodiscard]] expected_t multiply_(bf16r2_view_t a, b8r1_tensor_arena_t const &packed_b, std::size_t columns,
+                                       f32r2_span_t c, gpu_stream_t &stream) noexcept;
 
-    /** @brief Pin one matmul plan into @p plans at @p role (advancing it) and track the largest
-     *      @p workspace_bytes; the caller sets the operand types on @p config , this stamps the
-     *      BFloat16 @c c_type shared by every product. Reused by the BFloat16 and the FP8 twin's plans. */
-    [[nodiscard]] expected_t pin_matmul_plan_(cublaslt_plan_config_t config, std::span<cublaslt_plan_t> plans,
-                                              std::size_t &role, std::size_t &workspace_bytes) noexcept;
-
-    /** @brief Pin the twelve BFloat16 matmul plans: four forward products, four data gradients
-     *      ( @c dX=dY·W ), four weight gradients ( @c dW=dYᵀ·X ), and allocate the shared workspace. */
-    [[nodiscard]] expected_t plan_matmuls_(gpu_arena_t &arena) noexcept;
+    /**
+     *  @brief One weight gradient @c dW=dYᵀ·X : transposes @p output_grad and @p input into the shared scratch,
+     *      since NumKong reads A row-major and packs B row-major, multiplies @c dYᵀ by the packed @c Xᵀ , and
+     *      narrows the Float32 product into @p weight_grad .
+     *  @param[in] output_grad @b [tokens,outputs] the product's BFloat16 output gradient.
+     *  @param[in] input @b [tokens,inputs] the product's forward A operand.
+     *  @param[out] weight_grad @b [outputs,inputs] the BFloat16 weight gradient.
+     *  @param[inout] stream The stream every launch enqueues on.
+     */
+    [[nodiscard]] expected_t weight_gradient_(bf16r2_view_t output_grad, bf16r2_view_t input, bf16r2_span_t weight_grad,
+                                              gpu_stream_t &stream) noexcept;
 
     /** @brief Build the ragged THD SDPA graphs — forward with stats, backward — over the packed QKV
      *      strides, and allocate their shared workspace. Built once, outside capture. */
@@ -466,26 +543,31 @@ struct transformer_block_bf16_t {
     transformer_block_config_t config_ {};
     cublaslt_session_t *blas_ = nullptr;
     cudnn_session_t *cudnn_ = nullptr;
+    /** @brief The NumKong capabilities of the arena's device, picking every product and element-wise verb. */
+    nk_capability_t capabilities_ = 0;
 
+    /** @brief The shared transients — borrowed, owned by the stack. */
+    transformer_scratch_t *scratch_ = nullptr;
+    /** @brief Product roles, indexing @ref packed_weights_ and @ref packed_weights_transposed_ . */
+    static constexpr std::size_t product_qkv_k = 0, product_out_k = 1, product_gate_up_k = 2, product_down_k = 3;
     /** @brief The four learnable weight buffers: fused QKV, out-projection, fused gate/up, down —
      *      @b [out,in] row-major each. */
     bf16r2_tensor_arena_t qkv_weight_ {}, out_weight_ {}, gate_up_weight_ {}, down_weight_ {};
     /** @brief The two RMSNorm scale vectors @c γ , pre-attention and post-attention. */
     bf16r1_tensor_arena_t pre_norm_scale_ {}, post_norm_scale_ {};
-    /** @brief The weight gradients, one per weight buffer, written @c beta=0 each backward. */
+    /** @brief @b [2·hidden] both scales widened to the Float32 @c γ NumKong's rmscast reads, each forward. */
+    f32r1_tensor_arena_t widened_norm_scales_ {};
+    /** @brief The weight gradients, one per weight buffer, overwritten each backward. */
     bf16r2_tensor_arena_t qkv_weight_grad_ {}, out_weight_grad_ {}, gate_up_weight_grad_ {}, down_weight_grad_ {};
     /** @brief The two norm-scale gradients. */
     bf16r1_tensor_arena_t pre_norm_scale_grad_ {}, post_norm_scale_grad_ {};
-    /** @brief Forward stashes the backward reads: the raw input, the pre-attention norm output, the
-     *      packed QKV, and the pre-QK-norm query / key slices — all @b [tokens,·] , resized to the
-     *      step's live token count each forward. */
-    bf16r2_tensor_arena_t input_stash_ {}, normalized_ {}, qkv_ {}, query_prenorm_ {}, key_prenorm_ {};
-    /** @brief Forward stashes: the SDPA output, the attention residual, the post-norm MLP input, and
-     *      the packed gate/up and SiLU·up activations — all @b [tokens,·] . */
-    bf16r2_tensor_arena_t attn_output_ {}, attn_residual_ {}, mlp_normalized_ {}, gate_up_ {}, silu_up_ {};
-    /** @brief Float32 @c 1/rms stashes: the two RMSNorms (per token) and the unit QK-norms (per head
-     *      vector), all recomputed-free in the backward. */
-    f32r1_tensor_arena_t pre_inverse_rms_ {}, post_inverse_rms_ {}, query_inverse_rms_ {}, key_inverse_rms_ {};
+    /** @brief Float32 forward stashes the backward reads: the residual-stream input, the QKV product holding the
+     *      pre-norm Q and K, the attention residual, and the gate/up product, all @b [tokens,·] and resized to
+     *      the step's live token count each forward. */
+    f32r2_tensor_arena_t input_stash_ {}, qkv_products_ {}, attn_residual_ {}, gate_up_products_ {};
+    /** @brief BFloat16 forward stashes, every product's A operand: the pre-attention norm output, the
+     *      normalized and rotated Q|K beside V, the SDPA output, the post-attention norm output, and SiLU·up. */
+    bf16r2_tensor_arena_t normalized_ {}, qkv_ {}, attn_output_ {}, mlp_normalized_ {}, silu_up_ {};
     /** @brief The SDPA log-sum-exp the fused forward emits and the fused backward consumes. */
     f32r1_tensor_arena_t softmax_log_sum_exp_ {};
     /** @brief @b [1] device @c 1/sqrt(head_dim) — the SDPA scale as a bound tensor, not a baked scalar. */
@@ -493,13 +575,11 @@ struct transformer_block_bf16_t {
     /** @brief @b [max_segments+1] element-offset tables, one per SDPA operand stride family, plus the
      *      @b [max_segments] Int32 lengths — the block-owned staging behind the vendor boundary. */
     i32r1_tensor_arena_t ragged_qkv_offsets_ {}, ragged_hidden_offsets_ {}, ragged_seq_lens_ {};
-    /** @brief Backward transients: the packed QKV gradient, the two hidden-gradient ping-pong buffers,
-     *      and the gate/up and SiLU·up gradients — all @b [tokens,·] . */
-    bf16r2_tensor_arena_t qkv_grad_ {}, hidden_grad_a_ {}, hidden_grad_b_ {}, gate_up_grad_ {}, silu_up_grad_ {};
-    /** @brief The shared cuBLASLt and cuDNN scratch, sized to the max any pinned plan / graph needs. */
-    b8r1_tensor_arena_t blas_workspace_ {}, sdpa_workspace_ {};
-    /** @brief The twelve pinned products, indexed by the @c plan_*_k role constants. */
-    std::array<cublaslt_plan_t, 12> plans_ {};
+    /** @brief Each weight @b [out,in] and its transpose @b [in,out] in NumKong's packed layout, refreshed by
+     *      @ref pack_weights : the forward's and the data gradients' B operands. */
+    std::array<b8r1_tensor_arena_t, 4> packed_weights_ {}, packed_weights_transposed_ {};
+    /** @brief The cuDNN scratch, sized to the max either SDPA graph needs. */
+    b8r1_tensor_arena_t sdpa_workspace_ {};
     /** @brief The two SDPA plans built once at construction — forward (stats-generating) and backward. */
     sdpa_plan_t forward_sdpa_ {}, backward_sdpa_ {};
     /** @brief Pointer-table entries of the per-call bindings: the seq-length pair and the first ragged
@@ -508,8 +588,8 @@ struct transformer_block_bf16_t {
 };
 
 /**
- *  @brief The quantized forward-only inference twin: E4M3 shadow weights with pinned native descale
- *      pointers, per-token activation scales, and the FP8 SDPA graph — @b no gradients, @b no stashes,
+ *  @brief The quantized forward-only inference twin: E4M3 weights packed once for NumKong's products,
+ *      per-token activation scales, and NumKong's E4M3 attention — @b no gradients, @b no stashes,
  *      roughly a quarter of the training block's memory. Constructed only through
  *      @ref transformer_block_bf16_t::quantize_weights , so an instance is always fully quantized.
  */
@@ -518,8 +598,8 @@ struct transformer_block_e4m3_t {
     /**
      *  @brief One quantized block forward — pure enqueue over the packed multi-segment layout. Norms and
      *      rotation run BFloat16; matmuls run E4M3 with @b per-token activation scales (folded back
-     *      after each product); SDPA runs E4M3 dense per segment with one dynamic per-tensor scale —
-     *      the engines' own granularity.
+     *      after each product); attention runs E4M3 over the ragged segments under one dynamic
+     *      per-tensor Q/K/V scale, which NumKong reads from the device.
      */
     [[nodiscard]] expected_t forward(bf16r2_view_t input, bf16r2_span_t output, u32r1_view_t segment_offsets,
                                      u32r1_view_t segment_lengths, rope_angles_view_t angles, i16r2_view_t coords,
@@ -531,59 +611,54 @@ struct transformer_block_e4m3_t {
   private:
     friend struct transformer_block_bf16_t;
 
-    /** @brief Plan roles, in the order the FP8 plans are built. */
-    static constexpr std::size_t plan_qkv_k = 0, plan_out_k = 1, plan_gate_up_k = 2, plan_down_k = 3;
+    /** @brief Product roles, indexing @ref packed_weights_ and @ref weight_descales_ alike. */
+    static constexpr std::size_t product_qkv_k = 0, product_out_k = 1, product_gate_up_k = 2, product_down_k = 3;
 
-    /** @brief Bind and execute the FP8 SDPA graph over the dense packed operands; the Q / K / V descale
-     *      is the shared dynamic scalar the pack pass just wrote. Lengths pass through the twin's own
-     *      Int32 staging — the vendor boundary. */
-    [[nodiscard]] expected_t run_sdpa_(u32r1_view_t segment_lengths, gpu_stream_t &stream) noexcept;
+    /**
+     *  @brief One E4M3 projection: @c activations·Wᵀ into the Float32 @ref products_ , then one pass folding
+     *      @p token_scales and the weight descale back and adding @p residual into the BFloat16 @p values .
+     *  @param[in] product The role, one of the @c product_*_k constants.
+     *  @param[in] activations @b [tokens,in] the per-token-quantized operand.
+     *  @param[in] token_scales @b [tokens] per-token scales, or empty when the operand carries none.
+     *  @param[in] residual @b [tokens,out] added after the scales, or empty.
+     *  @param[out] values @b [tokens,out] the BFloat16 result.
+     *  @param[inout] stream The stream every launch enqueues on.
+     */
+    [[nodiscard]] expected_t project_(std::size_t product, e4m3r2_view_t activations, f32r1_view_t token_scales,
+                                      bf16r2_view_t residual, bf16r2_span_t values, gpu_stream_t &stream) noexcept;
 
-    /** @brief The baked geometry and the two borrowed vendor sessions — never owned here. */
+    /** @brief The baked geometry. */
     transformer_block_config_t config_ {};
-    cublaslt_session_t *blas_ = nullptr;
-    cudnn_session_t *cudnn_ = nullptr;
+    /** @brief The NumKong capabilities of the device the twin was quantized on, picking every product. */
+    nk_capability_t capabilities_ = 0;
 
     /** @brief The four E4M3 shadow weights: fused QKV, out-projection, fused gate/up, down —
-     *      @b [out,in] row-major each. */
+     *      @b [out,in] row-major each, the source of @ref packed_weights_ . */
     e4m3r2_tensor_arena_t qkv_weight_e4m3_ {}, out_weight_e4m3_ {}, gate_up_weight_e4m3_ {}, down_weight_e4m3_ {};
-    /** @brief @b [4] Float32 weight descales, pinned into the matmul descriptors: qkv, out, gate_up, down. */
+    /** @brief The four shadow weights in NumKong's packed layout, sized by its pack-size query. */
+    std::array<b8r1_tensor_arena_t, 4> packed_weights_ {};
+    /** @brief @b [4] Float32 weight descales, folded after each product: qkv, out, gate_up, down. */
     f32r1_tensor_arena_t weight_descales_ {};
-    /** @brief The two RMSNorm scale vectors @c γ , copied verbatim from the training block. */
-    bf16r1_tensor_arena_t pre_norm_scale_ {}, post_norm_scale_ {};
+    /** @brief @b [tokens,max(3·hidden,2·ffn)] the Float32 output of the projection or attention in flight. */
+    f32r2_tensor_arena_t products_ {};
+    /** @brief The two RMSNorm scale vectors @c γ , widened from the training block's. */
+    f32r1_tensor_arena_t pre_norm_scale_ {}, post_norm_scale_ {};
     /** @brief The BFloat16 activation ping-pong, sized once — no stashes and no gradients on this twin;
      *      all @b [tokens,·] . */
     bf16r2_tensor_arena_t normalized_ {}, qkv_ {}, attn_residual_ {}, gate_up_ {}, silu_up_ {};
-    /** @brief Throwaway pre-QK-norm stash the unit-norm kernel needs but no backward reads —
-     *      @b [tokens,hidden] . */
-    bf16r2_tensor_arena_t prenorm_scratch_ {};
     /** @brief The matmul operands ride per-token scales, @b [tokens,·] like their BFloat16 sources. */
     e4m3r2_tensor_arena_t normalized_e4m3_ {}, attn_output_e4m3_ {}, silu_up_e4m3_ {};
-    /** @brief The SDPA operands: dense zero-padded @b [segments,seq_max,·] blocks (Q|K|V packed one
-     *      after another, then the attention output) under one dynamic per-tensor scale — the FP8
-     *      engine's own granularity, kept flat since no tensor owns the Q|K|V role split; the per-role
-     *      @ref e4m3r3_span_t / @ref e4m3r3_view_t rides a manual offset, mirroring @ref rope_angles_t
-     *      's per-axis slices. */
-    e4m3r1_tensor_arena_t qkv_e4m3_ {}, attn_dense_e4m3_ {};
-    /** @brief The per-token activation scales the matmul fold reads, and the dynamic Q/K/V descale. */
-    f32r1_tensor_arena_t token_scales_ {}, qkv_descale_ {};
+    /** @brief @b [tokens,3·hidden] the packed Q|K|V under the one dynamic per-tensor scale. */
+    e4m3r2_tensor_arena_t qkv_e4m3_ {};
+    /** @brief The K and V slices of @ref qkv_e4m3_ in NumKong's attention layout, sized for
+     *      @c max_tokens over @c max_segments . */
+    b8r1_tensor_arena_t packed_keys_values_ {};
+    /** @brief The per-token activation scales the matmul fold reads. */
+    f32r1_tensor_arena_t token_scales_ {};
+    /** @brief @b [2] the attention's device scales: @c d² for the Q·K scores, then the Q/K/V descale @c d . */
+    f32r1_tensor_arena_t attention_scales_ {};
     /** @brief @b [1] the packed maximum-absolute bits the dynamic descale is derived from. */
     u32r1_tensor_arena_t max_bits_ {};
-    /** @brief Float32 @c 1/rms scratch the norms write and discard — per token for @c inverse_rms_ ,
-     *      per QK-norm head vector for @c inverse_rms_heads_ ; no backward reads either. */
-    f32r1_tensor_arena_t inverse_rms_ {}, inverse_rms_heads_ {};
-    /** @brief @b [1] the unit scale bound to the FP8 graph's scale entries, and the mandatory amax output. */
-    f32r1_tensor_arena_t ones_ {}, absolute_max_scratch_ {};
-    /** @brief @b [max_segments] Int32 padding-mask lengths — the twin's slice of the vendor boundary. */
-    i32r1_tensor_arena_t ragged_seq_lens_ {};
-    /** @brief The shared cuBLASLt and cuDNN scratch, sized to the max any pinned plan / graph needs. */
-    b8r1_tensor_arena_t blas_workspace_ {}, sdpa_workspace_ {};
-    /** @brief Pointer-table entry of the per-call seq-length pair. */
-    u32_t seq_entry_ = 0;
-    /** @brief The four pinned FP8 products, indexed by the @c plan_*_k role constants. */
-    std::array<cublaslt_plan_t, 4> plans_ {};
-    /** @brief The FP8 SDPA plan built once at construction. */
-    sdpa_plan_t sdpa_ {};
 };
 
 #endif // defined(__CUDACC__)

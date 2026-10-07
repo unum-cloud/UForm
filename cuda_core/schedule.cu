@@ -1,10 +1,12 @@
 /**
- *  @brief The device-side barrier-round increment declared in @ref schedule.cuh — the one kernel
- *      that lets a captured collective region self-advance its round.
+ *  @brief The device-side kernels declared in @ref schedule.cuh : the barrier-round increment that lets a
+ *      captured collective region self-advance its round, and the BFloat16 transpose.
  *  @file cuda_core/schedule.cu
  *  @author Ash Vardanian
  *  @date July 5, 2026
  */
+#include <cstdint> // `std::uintptr_t`
+
 #include <cuda.h> // `CUdeviceptr`, driver launch surface
 
 #include "cuda_core/schedule.cuh" // `barrier_round_t`, `launch_kernel`, `u32r1_span_t`
@@ -27,6 +29,65 @@ static __global__ void barrier_round_increment_kernel_(u32r1_span_t round, u32_t
 expected_t barrier_round_t::advance(gpu_stream_t &stream) noexcept {
     return launch_kernel(reinterpret_cast<void const *>(&barrier_round_increment_kernel_), dim3 {1, 1, 1},
                          dim3 {1, 1, 1}, stream, device_round_, increment_);
+}
+
+/** @brief Loads the eight elements at @p column of @p row as four packed words; out-of-range cells read zero. */
+[[nodiscard]] static __device__ inline uint4 transpose_load_(bf16_t const *row_start, std::size_t column,
+                                                             std::size_t columns, bool aligned) {
+    if (aligned && column + 8u <= columns) return *reinterpret_cast<uint4 const *>(row_start + column);
+    u16_t const *const halves = reinterpret_cast<u16_t const *>(row_start);
+    u32_t words[4] = {0u, 0u, 0u, 0u};
+    for (u32_t lane = 0; lane != 8u && column + lane < columns; ++lane)
+        words[lane >> 1] |= static_cast<u32_t>(halves[column + lane]) << (16u * (lane & 1u));
+    return make_uint4(words[0], words[1], words[2], words[3]);
+}
+
+__global__ void __launch_bounds__(256)
+    unum::uform::core::transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destination) {
+    __shared__ u32_t tile[64][33];
+    std::size_t const rows = source.extent(0), columns = source.extent(1);
+    std::size_t const source_stride = source.stride_bytes(0) / sizeof(bf16_t);
+    std::size_t const destination_stride = destination.stride_bytes(0) / sizeof(bf16_t);
+    bool const aligned = ((reinterpret_cast<std::uintptr_t>(source.data()) |
+                           reinterpret_cast<std::uintptr_t>(destination.data()) |
+                           static_cast<std::uintptr_t>(source.stride_bytes(0)) |
+                           static_cast<std::uintptr_t>(destination.stride_bytes(0))) &
+                          15u) == 0u;
+    std::size_t const row_start = static_cast<std::size_t>(blockIdx.y) * 64u;
+    std::size_t const column_start = static_cast<std::size_t>(blockIdx.x) * 64u;
+    u32_t const pair = threadIdx.x >> 3, quad = threadIdx.x & 7u;
+
+    std::size_t const upper_row = row_start + 2u * pair, column = column_start + quad * 8u;
+    uint4 const zero = make_uint4(0u, 0u, 0u, 0u);
+    uint4 const upper = upper_row < rows ? transpose_load_(source.data() + upper_row * source_stride, column, columns,
+                                                          aligned)
+                                         : zero;
+    uint4 const lower = upper_row + 1u < rows
+                            ? transpose_load_(source.data() + (upper_row + 1u) * source_stride, column, columns,
+                                              aligned)
+                            : zero;
+    u32_t const first[4] = {upper.x, upper.y, upper.z, upper.w};
+    u32_t const second[4] = {lower.x, lower.y, lower.z, lower.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4u; ++word) {
+        tile[quad * 8u + 2u * word][pair] = __byte_perm(first[word], second[word], 0x5410);
+        tile[quad * 8u + 2u * word + 1u][pair] = __byte_perm(first[word], second[word], 0x7632);
+    }
+    __syncthreads();
+
+    for (u32_t chunk = threadIdx.x; chunk < 512u; chunk += 256u) {
+        std::size_t const target_row = column_start + (chunk >> 3), target_column = row_start + (chunk & 7u) * 8u;
+        if (target_row >= columns || target_column >= rows) continue;
+        u32_t const *words = &tile[chunk >> 3][(chunk & 7u) * 4u];
+        bf16_t *const target = destination.data() + target_row * destination_stride + target_column;
+        if (aligned && target_column + 8u <= rows)
+            *reinterpret_cast<uint4 *>(target) = make_uint4(words[0], words[1], words[2], words[3]);
+        else {
+            u16_t *const halves = reinterpret_cast<u16_t *>(target);
+            for (u32_t lane = 0; lane != 8u && target_column + lane < rows; ++lane)
+                halves[lane] = static_cast<u16_t>(words[lane >> 1] >> (16u * (lane & 1u)));
+        }
+    }
 }
 
 /** @brief Element bytes of one cuBLASLt operand dtype — the benchmark's transient-buffer sizing. */

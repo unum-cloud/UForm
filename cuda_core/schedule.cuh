@@ -251,6 +251,34 @@ template <typename... arg_types_>
 }
 
 /**
+ *  @brief The BFloat16 matrix transpose @c destination=sourceᵀ , tiled 64x64 through shared memory with 16-byte
+ *      global accesses on both sides; either operand may be a strided view into a wider buffer.
+ *
+ *  Each thread loads two neighbouring source rows, so the pair packs into 32-bit words that make the transposed
+ *  rows contiguous in shared memory. Edge tiles are masked, and operands whose pointers or row strides are not
+ *  16-byte multiples fall back to element accesses.
+ *
+ *  Launches a @c [ceil(columns/64),ceil(rows/64),1] grid of @c [256,1,1] blocks with 8.4 KB of static shared memory.
+ */
+__global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destination);
+
+/**
+ *  @brief Enqueue @p destination = @p source ᵀ for BFloat16 matrices: one capture-safe launch of
+ *      @ref transpose_bf16_kernel on @p stream .
+ */
+[[nodiscard]] inline expected_t transpose_bf16(bf16r2_view_t source, bf16r2_span_t destination,
+                                               gpu_stream_t &stream) noexcept {
+    if (destination.extent(0) != source.extent(1) || destination.extent(1) != source.extent(0))
+        return expected_t::fail(status_t::shape_unsupported_k, "[{}x{}] cannot hold the transposed [{}x{}]",
+                                destination.extent(0), destination.extent(1), source.extent(0), source.extent(1));
+    if (source.extent(0) == 0 || source.extent(1) == 0) return {};
+    dim3 const grid {static_cast<u32_t>(divide_round_up(source.extent(1), std::size_t {64})),
+                     static_cast<u32_t>(divide_round_up(source.extent(0), std::size_t {64})), 1u};
+    return launch_kernel(reinterpret_cast<void const *>(&transpose_bf16_kernel), grid, dim3 {256u, 1u, 1u}, stream,
+                         source, destination);
+}
+
+/**
  *  @brief All-lanes-get-the-total shuffle sum of one warp — the fixed-order tree every deterministic
  *      reduction in the cell builds on.
  *

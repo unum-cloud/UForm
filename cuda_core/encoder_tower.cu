@@ -125,26 +125,6 @@ static __global__ void tower_silu_backward_kernel_(bf16r1_span_t input, bf16r1_s
 }
 
 /**
- *  @brief The pool's slice of the one cuDNN Int32 boundary: scale the batch's flat @c u32_t segment starts
- *      into K/V @b element offsets and cast the stored lengths for the padding mask. A PAD segment
- *      (length zero) is retargeted at the grid's first token with length one — cuDNN's softmax over zero
- *      keys is undefined, a PAD's repeated offset may sit one past the grid's end, and token zero always
- *      exists; the pooled PAD vertex stays finite while the loss PADs it out. vendor-boundary.
- *
- *  __grid_size__ @c [1,1,1] , threads stripe @c segments+1 entries; no dynamic shared memory.
- */
-static __global__ void tower_pool_ragged_kernel_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                                 i32r1_span_t ragged_offsets, i32r1_span_t seq_lens, u32_t hidden) {
-    std::size_t const entries = segment_offsets.extent(0);
-    for (std::size_t entry = threadIdx.x; entry < entries; entry += blockDim.x) {
-        bool const pad = entry + 1u < entries && segment_lengths[entry] == 0u;
-        u32_t const base = pad ? 0u : segment_offsets[entry];
-        ragged_offsets[entry] = static_cast<i32_t>(base) * static_cast<i32_t>(hidden);
-        if (entry + 1u < entries) seq_lens[entry] = pad ? 1 : static_cast<i32_t>(segment_lengths[entry]);
-    }
-}
-
-/**
  *  @brief The attention pool's backward — the house replacement for cuDNN's @c sdpa_backward , which
  *      emits non-finite gradients at single-query shapes. CTA @c (s,h) owns segment @c s 's head @c h ,
  *      thread @c c its channel: four streaming passes recompute the softmax the forward ran (max, then
@@ -321,8 +301,8 @@ static constexpr std::size_t plan_absent_k = ~std::size_t {0};
 static expected_t upload_pixel_constants(f32r1_tensor_arena_t &mean_arena, f32r1_tensor_arena_t &inverse_std_arena,
                                          f32_t const *mean_source, f32_t const *std_source, u32_t channels,
                                          gpu_arena_alloc<f32_t> &f32_alloc, gpu_arena_t &arena) noexcept {
-    mean_arena = f32r1_tensor_arena_t::try_empty({channels}, f32_alloc);
-    inverse_std_arena = f32r1_tensor_arena_t::try_empty({channels}, f32_alloc);
+    mean_arena = f32r1_tensor_arena_t::uninitialized({channels}, f32_alloc).value;
+    inverse_std_arena = f32r1_tensor_arena_t::uninitialized({channels}, f32_alloc).value;
     if (!mean_arena || !inverse_std_arena)
         return expected_t::fail(status_t::bad_alloc_k, "pixel constant allocation failed (arena_used={})",
                                 arena.used());
@@ -554,7 +534,11 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
     encoder_tower_bf16_t tower;
     tower.config_ = config;
     tower.blas_ = &blas;
-    tower.cudnn_ = &cudnn;
+    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
+                                                                &tower.capabilities_);
+        status != nk_success_k)
+        return result_t::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}", arena.device(),
+                              nk_status_name(status));
 
     std::size_t const hidden = config.block.hidden;
     std::size_t const tokens = config.block.max_tokens;
@@ -567,62 +551,64 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
     gpu_arena_alloc<i16_t> i16_alloc {arena};
 
     // The token embedding table + its gradient, and the deterministic-scatter double buffers.
-    tower.entry_weight_ = bf16r2_tensor_arena_t::try_empty({vocabulary, hidden}, bf16_alloc);
-    tower.entry_weight_grad_ = bf16r2_tensor_arena_t::try_empty({vocabulary, hidden}, bf16_alloc);
+    tower.entry_weight_ = bf16r2_tensor_arena_t::uninitialized({vocabulary, hidden}, bf16_alloc).value;
+    tower.entry_weight_grad_ = bf16r2_tensor_arena_t::uninitialized({vocabulary, hidden}, bf16_alloc).value;
     gpu_arena_alloc<token_id_t> token_alloc {arena};
-    tower.sort_keys_ = tokens_tensor_arena_t::try_empty({2 * tokens}, token_alloc);
-    tower.sort_values_ = u32r1_tensor_arena_t::try_empty({2 * tokens}, u32_alloc);
+    tower.sort_keys_ = tokens_tensor_arena_t::uninitialized({2 * tokens}, token_alloc).value;
+    tower.sort_values_ = u32r1_tensor_arena_t::uninitialized({2 * tokens}, u32_alloc).value;
     if (tower.sort_keys_ && tower.sort_values_) {
         std::size_t sort_bytes = 0;
         cub::DeviceRadixSort::SortPairs(nullptr, sort_bytes, tower.sort_keys_.data(), tower.sort_keys_.data() + tokens,
                                         tower.sort_values_.data(), tower.sort_values_.data() + tokens,
                                         static_cast<int>(tokens));
-        tower.sort_workspace_ = b8r1_tensor_arena_t::try_empty({sort_bytes}, b8_alloc);
+        tower.sort_workspace_ = b8r1_tensor_arena_t::uninitialized({sort_bytes}, b8_alloc).value;
     }
     if (!tower.entry_weight_ || !tower.entry_weight_grad_ || !tower.sort_keys_ || !tower.sort_values_ ||
         !tower.sort_workspace_)
         return result_t::fail(status_t::bad_alloc_k, "token entry allocation failed (arena_used={})", arena.used());
 
     // Final norm, attention-pool query, and the head weights, each with their gradient.
-    tower.final_norm_scale_ = bf16r1_tensor_arena_t::try_empty({hidden}, bf16_alloc);
-    tower.final_norm_scale_grad_ = bf16r1_tensor_arena_t::try_empty({hidden}, bf16_alloc);
-    tower.pool_query_ = bf16r1_tensor_arena_t::try_empty({hidden}, bf16_alloc);
-    tower.pool_query_grad_ = bf16r1_tensor_arena_t::try_empty({hidden}, bf16_alloc);
-    tower.head_norm_scale_ = bf16r1_tensor_arena_t::try_empty({hidden}, bf16_alloc);
-    tower.head_norm_scale_grad_ = bf16r1_tensor_arena_t::try_empty({hidden}, bf16_alloc);
-    tower.head_fc1_ = bf16r2_tensor_arena_t::try_empty({hidden, hidden}, bf16_alloc);
-    tower.head_fc1_grad_ = bf16r2_tensor_arena_t::try_empty({hidden, hidden}, bf16_alloc);
-    tower.head_fc2_ = bf16r2_tensor_arena_t::try_empty({hidden, hidden}, bf16_alloc);
-    tower.head_fc2_grad_ = bf16r2_tensor_arena_t::try_empty({hidden, hidden}, bf16_alloc);
-    if (!tower.final_norm_scale_ || !tower.final_norm_scale_grad_ || !tower.pool_query_ || !tower.pool_query_grad_ ||
-        !tower.head_norm_scale_ || !tower.head_norm_scale_grad_ || !tower.head_fc1_ || !tower.head_fc1_grad_ ||
-        !tower.head_fc2_ || !tower.head_fc2_grad_)
+    tower.final_norm_scale_ = bf16r1_tensor_arena_t::uninitialized({hidden}, bf16_alloc).value;
+    tower.final_norm_scale_grad_ = bf16r1_tensor_arena_t::uninitialized({hidden}, bf16_alloc).value;
+    tower.widened_final_norm_scale_ = f32r1_tensor_arena_t::uninitialized({hidden}, f32_alloc).value;
+    tower.pool_query_ = bf16r1_tensor_arena_t::uninitialized({hidden}, bf16_alloc).value;
+    tower.pool_query_grad_ = bf16r1_tensor_arena_t::uninitialized({hidden}, bf16_alloc).value;
+    tower.head_norm_scale_ = bf16r1_tensor_arena_t::uninitialized({hidden}, bf16_alloc).value;
+    tower.head_norm_scale_grad_ = bf16r1_tensor_arena_t::uninitialized({hidden}, bf16_alloc).value;
+    tower.head_fc1_ = bf16r2_tensor_arena_t::uninitialized({hidden, hidden}, bf16_alloc).value;
+    tower.head_fc1_grad_ = bf16r2_tensor_arena_t::uninitialized({hidden, hidden}, bf16_alloc).value;
+    tower.head_fc2_ = bf16r2_tensor_arena_t::uninitialized({hidden, hidden}, bf16_alloc).value;
+    tower.head_fc2_grad_ = bf16r2_tensor_arena_t::uninitialized({hidden, hidden}, bf16_alloc).value;
+    if (!tower.final_norm_scale_ || !tower.final_norm_scale_grad_ || !tower.widened_final_norm_scale_ ||
+        !tower.pool_query_ || !tower.pool_query_grad_ || !tower.head_norm_scale_ || !tower.head_norm_scale_grad_ ||
+        !tower.head_fc1_ || !tower.head_fc1_grad_ || !tower.head_fc2_ || !tower.head_fc2_grad_)
         return result_t::fail(status_t::bad_alloc_k, "head weights allocation failed (arena_used={})", arena.used());
 
     // Forward stashes and the two inverse-rms stashes.
-    tower.entry_output_ = bf16r2_tensor_arena_t::try_empty({tokens, hidden}, bf16_alloc);
-    tower.normalized_ = bf16r2_tensor_arena_t::try_empty({tokens, hidden}, bf16_alloc);
-    tower.pooled_ = bf16r2_tensor_arena_t::try_empty({segments, hidden}, bf16_alloc);
-    tower.head_normalized_ = bf16r2_tensor_arena_t::try_empty({segments, hidden}, bf16_alloc);
-    tower.head_hidden_ = bf16r2_tensor_arena_t::try_empty({segments, hidden}, bf16_alloc);
-    tower.head_activated_ = bf16r2_tensor_arena_t::try_empty({segments, hidden}, bf16_alloc);
-    tower.final_inverse_rms_ = f32r1_tensor_arena_t::try_empty({tokens}, f32_alloc);
-    tower.head_inverse_rms_ = f32r1_tensor_arena_t::try_empty({segments}, f32_alloc);
-    tower.coords_ = i16r2_tensor_arena_t::try_empty({tokens, 3}, i16_alloc);
+    tower.entry_output_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
+    tower.normalized_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
+    tower.pooled_ = bf16r2_tensor_arena_t::uninitialized({segments, hidden}, bf16_alloc).value;
+    tower.head_normalized_ = bf16r2_tensor_arena_t::uninitialized({segments, hidden}, bf16_alloc).value;
+    tower.head_hidden_ = bf16r2_tensor_arena_t::uninitialized({segments, hidden}, bf16_alloc).value;
+    tower.head_activated_ = bf16r2_tensor_arena_t::uninitialized({segments, hidden}, bf16_alloc).value;
+    tower.final_inverse_rms_ = f32r1_tensor_arena_t::uninitialized({tokens}, f32_alloc).value;
+    tower.head_inverse_rms_ = f32r1_tensor_arena_t::uninitialized({segments}, f32_alloc).value;
+    tower.coords_ = i16r2_tensor_arena_t::uninitialized({tokens, 3}, i16_alloc).value;
     if (!tower.entry_output_ || !tower.normalized_ || !tower.pooled_ || !tower.head_normalized_ ||
         !tower.head_hidden_ || !tower.head_activated_ || !tower.final_inverse_rms_ || !tower.head_inverse_rms_ ||
         !tower.coords_)
         return result_t::fail(status_t::bad_alloc_k, "stashes allocation failed (arena_used={})", arena.used());
 
     // The activation and gradient ping-pong buffers.
-    tower.activations_a_ = bf16r2_tensor_arena_t::try_empty({tokens, hidden}, bf16_alloc);
-    tower.activations_b_ = bf16r2_tensor_arena_t::try_empty({tokens, hidden}, bf16_alloc);
-    tower.token_grad_a_ = bf16r2_tensor_arena_t::try_empty({tokens, hidden}, bf16_alloc);
-    tower.token_grad_b_ = bf16r2_tensor_arena_t::try_empty({tokens, hidden}, bf16_alloc);
-    tower.segment_grad_a_ = bf16r2_tensor_arena_t::try_empty({segments, hidden}, bf16_alloc);
-    tower.segment_grad_b_ = bf16r2_tensor_arena_t::try_empty({segments, hidden}, bf16_alloc);
-    if (!tower.activations_a_ || !tower.activations_b_ || !tower.token_grad_a_ || !tower.token_grad_b_ ||
-        !tower.segment_grad_a_ || !tower.segment_grad_b_)
+    tower.activations_a_ = f32r2_tensor_arena_t::uninitialized({tokens, hidden}, f32_alloc).value;
+    tower.activations_b_ = f32r2_tensor_arena_t::uninitialized({tokens, hidden}, f32_alloc).value;
+    tower.normalized_grad_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
+    tower.token_grad_a_ = f32r2_tensor_arena_t::uninitialized({tokens, hidden}, f32_alloc).value;
+    tower.token_grad_b_ = f32r2_tensor_arena_t::uninitialized({tokens, hidden}, f32_alloc).value;
+    tower.segment_grad_a_ = bf16r2_tensor_arena_t::uninitialized({segments, hidden}, bf16_alloc).value;
+    tower.segment_grad_b_ = bf16r2_tensor_arena_t::uninitialized({segments, hidden}, bf16_alloc).value;
+    if (!tower.activations_a_ || !tower.activations_b_ || !tower.normalized_grad_ || !tower.token_grad_a_ ||
+        !tower.token_grad_b_ || !tower.segment_grad_a_ || !tower.segment_grad_b_)
         return result_t::fail(status_t::bad_alloc_k, "ping-pong allocation failed (arena_used={})", arena.used());
 
     // The RoPE angle tables (model state; the frontend derives the per-token coordinates).
@@ -635,8 +621,12 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
     // The block stack.
     if (tower.blocks_.try_resize(config.depth) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "block table allocation failed ({})", config.depth);
+    expected<transformer_scratch_t> scratch = transformer_scratch_t::make(arena, config.block);
+    if (!scratch) return result_t::fail(std::move(scratch));
+    tower.scratch_ = std::make_unique<transformer_scratch_t>(std::move(scratch.value_));
     for (u32_t layer_index = 0; layer_index != config.depth; ++layer_index) {
-        expected<transformer_block_bf16_t> block = transformer_block_bf16_t::make(arena, blas, cudnn, config.block);
+        expected<transformer_block_bf16_t> block =
+            transformer_block_bf16_t::make(arena, blas, cudnn, *tower.scratch_, config.block);
         if (!block) return result_t::fail(std::move(block));
         tower.blocks_[layer_index] = std::move(block.value_);
     }
@@ -660,29 +650,9 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
             plan_role, workspace_bytes);
     if (!pinned) return result_t::fail(std::move(pinned));
 
-    // The attention pool's staging — the ragged K/V element offsets, the per-segment padding lengths,
-    // the constant all-ones query lengths, and the device attention scale — then the forward SDPA graph
-    // over them. The two constant fills are setup-path host writes, outside any capture.
-    {
-        gpu_arena_alloc<i32_t> i32_pool_alloc {arena};
-        tower.pool_ragged_offsets_ = i32r1_tensor_arena_t::try_empty({segments + 1}, i32_pool_alloc);
-        tower.pool_ragged_seq_lens_ = i32r1_tensor_arena_t::try_empty({segments}, i32_pool_alloc);
-        tower.pool_seq_ones_ = i32r1_tensor_arena_t::try_empty({segments}, i32_pool_alloc);
-        tower.pool_attn_scale_ = f32r1_tensor_arena_t::try_empty({1}, f32_alloc);
-        if (!tower.pool_ragged_offsets_ || !tower.pool_ragged_seq_lens_ || !tower.pool_seq_ones_ ||
-            !tower.pool_attn_scale_)
-            return result_t::fail(status_t::bad_alloc_k, "pool staging allocation failed (arena_used={})",
-                                  arena.used());
-        if (CUresult result = cuMemsetD32(reinterpret_cast<CUdeviceptr>(tower.pool_seq_ones_.data()), 1u, segments);
-            result != CUDA_SUCCESS)
-            return result_t::fail(result, "pool query-length fill failed");
-        f32_t const attention_scale = tower_pool_scale_();
-        if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(tower.pool_attn_scale_.data()),
-                                           &attention_scale, sizeof(attention_scale));
-            result != CUDA_SUCCESS)
-            return result_t::fail(result, "pool attention-scale upload failed");
-        if (expected_t built = tower.build_pool_sdpa(arena); !built) return result_t::fail(std::move(built));
-    }
+    expected<tower_pool_t> pool = tower_pool_t::make(arena, config.block);
+    if (!pool) return result_t::fail(std::move(pool));
+    tower.pool_ = std::move(pool.value_);
 
     // Media entries: each present modality patch-cuts its raw signal and projects it through pinned cuBLASLt
     // plans. A modality is present iff its geometry is fully specified — zero extents leave its projection,
@@ -717,8 +687,9 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
                                                          config.image_channels, f32_alloc, arena);
             !uploaded)
             return result_t::fail(std::move(uploaded));
-        tower.image_projection_ = bf16r2_tensor_arena_t::try_empty({hidden, image_patch_scalars}, bf16_alloc);
-        tower.image_projection_grad_ = bf16r2_tensor_arena_t::try_empty({hidden, image_patch_scalars}, bf16_alloc);
+        tower.image_projection_ = bf16r2_tensor_arena_t::uninitialized({hidden, image_patch_scalars}, bf16_alloc).value;
+        tower.image_projection_grad_ =
+            bf16r2_tensor_arena_t::uninitialized({hidden, image_patch_scalars}, bf16_alloc).value;
         if (!tower.image_projection_ || !tower.image_projection_grad_)
             return result_t::fail(status_t::bad_alloc_k, "image projection allocation failed (arena_used={})",
                                   arena.used());
@@ -729,15 +700,17 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
                                                          config.video_channels, f32_alloc, arena);
             !uploaded)
             return result_t::fail(std::move(uploaded));
-        tower.video_projection_ = bf16r2_tensor_arena_t::try_empty({hidden, video_tube_scalars}, bf16_alloc);
-        tower.video_projection_grad_ = bf16r2_tensor_arena_t::try_empty({hidden, video_tube_scalars}, bf16_alloc);
+        tower.video_projection_ = bf16r2_tensor_arena_t::uninitialized({hidden, video_tube_scalars}, bf16_alloc).value;
+        tower.video_projection_grad_ =
+            bf16r2_tensor_arena_t::uninitialized({hidden, video_tube_scalars}, bf16_alloc).value;
         if (!tower.video_projection_ || !tower.video_projection_grad_)
             return result_t::fail(status_t::bad_alloc_k, "video projection allocation failed (arena_used={})",
                                   arena.used());
     }
     if (audio_present) {
-        tower.audio_projection_ = bf16r2_tensor_arena_t::try_empty({hidden, audio_frame_scalars}, bf16_alloc);
-        tower.audio_projection_grad_ = bf16r2_tensor_arena_t::try_empty({hidden, audio_frame_scalars}, bf16_alloc);
+        tower.audio_projection_ = bf16r2_tensor_arena_t::uninitialized({hidden, audio_frame_scalars}, bf16_alloc).value;
+        tower.audio_projection_grad_ =
+            bf16r2_tensor_arena_t::uninitialized({hidden, audio_frame_scalars}, bf16_alloc).value;
         if (!tower.audio_projection_ || !tower.audio_projection_grad_)
             return result_t::fail(status_t::bad_alloc_k, "audio projection allocation failed (arena_used={})",
                                   arena.used());
@@ -763,14 +736,15 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
 
     if (image_present || video_present || audio_present) {
         u32_t const max_entry_scalars = std::max({image_patch_scalars, video_tube_scalars, audio_frame_scalars});
-        tower.patch_scratch_ = bf16r2_tensor_arena_t::try_empty({max_tokens32, max_entry_scalars}, bf16_alloc);
+        tower.patch_scratch_ =
+            bf16r2_tensor_arena_t::uninitialized({max_tokens32, max_entry_scalars}, bf16_alloc).value;
         if (!tower.patch_scratch_)
             return result_t::fail(status_t::bad_alloc_k, "patch scratch allocation failed (arena_used={})",
                                   arena.used());
     }
 
     if (workspace_bytes != 0) {
-        tower.workspace_ = b8r1_tensor_arena_t::try_empty({workspace_bytes}, b8_alloc);
+        tower.workspace_ = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, b8_alloc).value;
         if (!tower.workspace_)
             return result_t::fail(status_t::bad_alloc_k, "tower workspace allocation failed ({} bytes)",
                                   workspace_bytes);
@@ -778,106 +752,61 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
     return result_t {std::move(tower)};
 }
 
-/** @brief The pool graph's construction-stable device bindings — one struct so both towers hand the
- *      shared builder the same seven addresses (nine graph bindings — the states serve K and V, the
- *      ragged offsets both axes) in one move. */
-struct tower_pool_bindings_t_ {
-    bf16_t const *query = nullptr;
-    bf16_t const *states = nullptr;
-    bf16_t *pooled = nullptr;
-    f32_t const *attention_scale = nullptr;
-    i32_t const *seq_ones = nullptr;
-    i32_t const *seq_lens = nullptr;
-    i32_t const *ragged_offsets = nullptr;
-};
+expected<tower_pool_t> tower_pool_t::make(gpu_arena_t &arena, transformer_block_config_t const &block) noexcept {
+    using result_t = expected<tower_pool_t>;
+    tower_pool_t pool;
+    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
+                                                                &pool.capabilities_);
+        status != nk_success_k)
+        return result_t::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}", arena.device(),
+                              nk_status_name(status));
+    std::size_t const segments = block.max_segments;
+    std::size_t const heads = block.hidden / transformer_head_dim_k;
 
-/** @brief Build one attention-pool forward SDPA graph — the stride-0 broadcast query over ragged
- *      K=V states with the padding mask driven by the per-segment lengths — shared by the training
- *      tower and its E4M3 twin (whose tail runs the same BFloat16 pool). Binds only construction-stable
- *      arena addresses, so execution is a pure enqueue with no per-call pointer stores. */
-[[nodiscard]] static expected_t tower_pool_graph_build_(sdpa_plan_t &plan, transformer_block_config_t const &block,
-                                                        cudnn_session_t &cudnn,
-                                                        tower_pool_bindings_t_ bindings) noexcept {
-    i64_t const segments = block.max_segments;
-    i64_t const seq = block.max_segment_tokens;
-    i64_t const heads = block.hidden / transformer_head_dim_k;
-    i64_t const dim = transformer_head_dim_k;
-    i64_t const hidden_stride = static_cast<i64_t>(block.hidden);
+    nk_size_t packed_bytes = 0;
+    if (nk_status_t const status = nk_attention_pack_size_bf16_best(heads, transformer_head_dim_k,
+                                                                    segments * block.max_segment_tokens, segments,
+                                                                    pool.capabilities_, &packed_bytes);
+        status != nk_success_k)
+        return result_t::fail(status_t::cuda_error_k, "pool pack sizing failed: {}", nk_status_name(status));
+    array<u32_t> host;
+    if (host.try_resize(segments + 1u) != status_t::success_k)
+        return result_t::fail(status_t::bad_alloc_k, "pool staging allocation failed ({} segments)", segments);
+    for (std::size_t segment = 0; segment <= segments; ++segment) host[segment] = static_cast<u32_t>(segment);
 
-    fe::graph::Graph &graph = plan.graph;
-    graph.set_io_data_type(fe::DataType_t::BFLOAT16)
-        .set_intermediate_data_type(fe::DataType_t::FLOAT)
-        .set_compute_data_type(fe::DataType_t::FLOAT);
-    // The one learned query broadcasts over every segment through a stride-0 batch axis; its length-1
-    // query axis needs no ragged offset. K and V both read the final-norm states through the same
-    // per-segment element bases, and the padding mask over the per-segment lengths hides everything
-    // past each segment's live tokens.
-    auto queries = graph.tensor(fe::graph::Tensor_attributes()
-                                    .set_name("Q")
-                                    .set_uid(sdpa_uid_query_k)
-                                    .set_dim({segments, heads, 1, dim})
-                                    .set_stride({0, dim, hidden_stride, 1}));
-    auto make_states_operand = [&](i64_t uid, char const *name, i64_t ragged_uid) { // vendor-boundary
-        auto node = graph.tensor(fe::graph::Tensor_attributes()
-                                     .set_name(name)
-                                     .set_uid(uid)
-                                     .set_dim({segments, heads, seq, dim})
-                                     .set_stride(sdpa_thd_strides(heads, hidden_stride)));
-        node->set_ragged_offset(sdpa_ragged_offset(graph, ragged_uid, segments));
-        return node;
-    };
-    auto keys = make_states_operand(sdpa_uid_key_k, "K", sdpa_uid_ragged_base_k + 1);
-    auto values = make_states_operand(sdpa_uid_value_k, "V", sdpa_uid_ragged_base_k + 2);
-    auto seq_q = sdpa_seq_lengths(graph, sdpa_uid_seq_len_q_k, "seq_len_q", segments);
-    auto seq_kv = sdpa_seq_lengths(graph, sdpa_uid_seq_len_kv_k, "seq_len_kv", segments);
-    auto options = fe::graph::SDPA_attributes()
-                       .set_name("uform_pool_sdpa_fwd")
-                       .set_generate_stats(false)
-                       .set_attn_scale(sdpa_scalar(graph, sdpa_uid_attn_scale_k, "attn_scale"))
-                       .set_padding_mask(true)
-                       .set_seq_len_q(seq_q)
-                       .set_seq_len_kv(seq_kv);
-    auto [output, stats] = graph.sdpa(queries, keys, values, options);
-    (void)stats; // forward-only — the backward is the house kernel pair, never cuDNN's.
-    output->set_output(true)
-        .set_uid(sdpa_uid_output_k)
-        .set_dim({segments, heads, 1, dim})
-        .set_stride({hidden_stride, dim, hidden_stride, 1});
-    if (auto status = graph.build(cudnn.get(), {fe::HeurMode_t::A}); status.is_bad())
-        return expected_t::fail(status_t::cuda_error_k, "pool SDPA forward graph build failed: {}",
-                                status.get_message().c_str()); // vendor-boundary
-
-    plan.bind(sdpa_uid_query_k, const_cast<bf16_t *>(bindings.query));
-    plan.bind(sdpa_uid_key_k, const_cast<bf16_t *>(bindings.states));
-    plan.bind(sdpa_uid_value_k, const_cast<bf16_t *>(bindings.states));
-    plan.bind(sdpa_uid_output_k, bindings.pooled);
-    plan.bind(sdpa_uid_attn_scale_k, const_cast<f32_t *>(bindings.attention_scale));
-    plan.bind(sdpa_uid_seq_len_q_k, const_cast<i32_t *>(bindings.seq_ones));
-    plan.bind(sdpa_uid_seq_len_kv_k, const_cast<i32_t *>(bindings.seq_lens));
-    plan.bind(sdpa_uid_ragged_base_k + 1, const_cast<i32_t *>(bindings.ragged_offsets));
-    plan.bind(sdpa_uid_ragged_base_k + 2, const_cast<i32_t *>(bindings.ragged_offsets));
-    return plan.finalize_dispatch();
+    pool.query_offsets_ = u32r1_tensor_arena_t::uninitialized({segments + 1u}, gpu_arena_alloc<u32_t> {arena}).value;
+    pool.packed_ = b8r1_tensor_arena_t::uninitialized({static_cast<std::size_t>(packed_bytes)},
+                                                      gpu_arena_alloc<b8_t> {arena})
+                       .value;
+    pool.pooled_ = f32r2_tensor_arena_t::uninitialized({segments, block.hidden}, gpu_arena_alloc<f32_t> {arena}).value;
+    if (!pool.query_offsets_ || !pool.packed_ || !pool.pooled_)
+        return result_t::fail(status_t::bad_alloc_k, "pool allocation failed (arena_used={})", arena.used());
+    if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(pool.query_offsets_.data()), host.data(),
+                                       (segments + 1u) * sizeof(u32_t));
+        result != CUDA_SUCCESS)
+        return result_t::fail(result, "pool query-offset upload failed");
+    return result_t {std::move(pool)};
 }
 
-expected_t encoder_tower_bf16_t::build_pool_sdpa(gpu_arena_t &arena) noexcept {
-    tower_pool_bindings_t_ bindings;
-    bindings.query = pool_query_.data();
-    bindings.states = normalized_.data();
-    bindings.pooled = pooled_.data();
-    bindings.attention_scale = pool_attn_scale_.data();
-    bindings.seq_ones = pool_seq_ones_.data();
-    bindings.seq_lens = pool_ragged_seq_lens_.data();
-    bindings.ragged_offsets = pool_ragged_offsets_.data();
-    if (expected_t built = tower_pool_graph_build_(pool_forward_sdpa_, config_.block, *cudnn_, bindings); !built)
-        return built;
-    if (pool_forward_sdpa_.workspace_bytes != 0) {
-        gpu_arena_alloc<b8_t> b8_pool_alloc {arena};
-        pool_workspace_ = b8r1_tensor_arena_t::try_empty({static_cast<std::size_t>(pool_forward_sdpa_.workspace_bytes)},
-                                                         b8_pool_alloc);
-        if (!pool_workspace_)
-            return expected_t::fail(status_t::bad_alloc_k, "pool SDPA workspace allocation failed ({} bytes)",
-                                    pool_forward_sdpa_.workspace_bytes);
-    }
+expected_t tower_pool_t::forward(bf16r1_view_t query, bf16r2_view_t states, u32r1_view_t segment_offsets,
+                                 u32r1_view_t segment_lengths, bf16r2_span_t pooled, gpu_stream_t &stream) noexcept {
+    std::size_t const segments = pooled_.extent(0), hidden = pooled_.extent(1);
+    std::size_t const heads = hidden / transformer_head_dim_k;
+    auto const *const states_data = reinterpret_cast<nk_bf16_t const *>(states.data());
+    nk_status_t status = nk_attention_pack_bf16_best(
+        states_data, states_data, heads, transformer_head_dim_k, segment_offsets.data(), segment_lengths.data(),
+        segments, hidden * sizeof(bf16_t), hidden * sizeof(bf16_t), packed_.data(), 0, segments * heads,
+        capabilities_, stream.get());
+    if (status == nk_success_k)
+        status = nk_attention_bidirectional_packed_bf16_best(
+            reinterpret_cast<nk_bf16_t const *>(query.data()), packed_.data(), pooled_.data(), NUMKONG_NULL, heads,
+            heads, transformer_head_dim_k, query_offsets_.data(), 0, hidden * sizeof(f32_t), tower_pool_scale_(),
+            NUMKONG_NULL, 0, NUMKONG_SIZE_MAX, capabilities_, stream.get());
+    if (status == nk_success_k)
+        status = nk_cast_best(pooled_.data(), nk_f32_k, pooled.data(), nk_bf16_k, segments * hidden, capabilities_,
+                              stream.get());
+    if (status != nk_success_k)
+        return expected_t::fail(status_t::cuda_error_k, "attention pool failed: {}", nk_status_name(status));
     return {};
 }
 
@@ -896,10 +825,11 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
     // row band to trim; PAD and inter-segment gap cells ride through as zeros. Resized within each arena's
     // reserved capacity (the check above makes this infallible; the bool is still verified, never assumed).
 
-    bool const resized = entry_output_.try_resize({live_tokens, hidden}) &&
-                         normalized_.try_resize({live_tokens, hidden}) &&
-                         activations_a_.try_resize({live_tokens, hidden}) &&
-                         activations_b_.try_resize({live_tokens, hidden}) && coords_.try_resize({live_tokens, 3});
+    bool const resized = nk::succeeded(entry_output_.resize({live_tokens, hidden})) &&
+                         nk::succeeded(normalized_.resize({live_tokens, hidden})) &&
+                         nk::succeeded(activations_a_.resize({live_tokens, hidden})) &&
+                         nk::succeeded(activations_b_.resize({live_tokens, hidden})) &&
+                         nk::succeeded(coords_.resize({live_tokens, 3}));
     if (!resized)
         return expected_t::fail(status_t::shape_unsupported_k, "tower scratch cannot hold {} live tokens (capacity {})",
                                 live_tokens, entry_output_.capacity() / hidden);
@@ -916,7 +846,6 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
         return expected_t::fail(result, "entry state reset failed");
 
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
-    dim3 const token_grid {static_cast<u32_t>(live_tokens), 1u, 1u};
     dim3 const segment_grid {static_cast<u32_t>(segments), 1u, 1u};
     u32r1_view_t const segment_offsets = batch.segment_offsets.view();
     u32r1_view_t const segment_lengths = batch.segment_lengths.view();
@@ -951,12 +880,16 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
                                    video_pixel_inverse_std_, video_projection_, audio_projection_, *blas_, stream);
     if (!staged) return staged;
 
-    // The block stack: layer n reads layer n-1's output, ping-ponging two dedicated buffers; the last
-    // output is a stash the backward reads.
+    // The block stack carries the Float32 residual stream: the entry state widens into `activations_b_`, layer n
+    // reads layer n-1's output, ping-ponging the two buffers, and the last output is a stash the backward reads.
 
-    bf16r2_view_t layer_input = entry_output_.view();
+    if (nk_status_t const status = nk_cast_best(entry_output_.data(), nk_bf16_k, activations_b_.data(), nk_f32_k,
+                                                live_tokens * hidden, capabilities_, stream.get());
+        status != nk_success_k)
+        return expected_t::fail(status_t::cuda_error_k, "entry widening failed: {}", nk_status_name(status));
+    f32r2_view_t layer_input = activations_b_.view();
     for (u32_t layer_index = 0; layer_index != config_.depth; ++layer_index) {
-        bf16r2_tensor_arena_t &layer_output = layer_index % 2 == 0 ? activations_a_ : activations_b_;
+        f32r2_tensor_arena_t &layer_output = layer_index % 2 == 0 ? activations_a_ : activations_b_;
         staged = blocks_[layer_index].forward(layer_input, layer_output.span(), segment_offsets, segment_lengths,
                                               angles_.view(), coords_.view(), stream);
         if (!staged) return staged;
@@ -964,11 +897,16 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
     }
     stack_output_ = layer_input;
 
-    // Final norm over the packed token states.
-    staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_forward_kernel), token_grid, block_shape, stream,
-                           stack_output_, final_norm_scale_.view(), normalized_.span(), final_inverse_rms_.span(),
-                           config_.block.rms_eps);
-    if (!staged) return staged;
+    // Final norm narrows the stack output into the per-token states, under the scale widened for rmscast.
+    nk_status_t status = nk_cast_best(final_norm_scale_.data(), nk_bf16_k, widened_final_norm_scale_.data(), nk_f32_k,
+                                      hidden, capabilities_, stream.get());
+    if (status == nk_success_k)
+        status = nk_each_rmscast_bf16_best(stack_output_.data(), widened_final_norm_scale_.data(),
+                                           reinterpret_cast<nk_bf16_t *>(normalized_.data()), live_tokens, 1, hidden,
+                                           hidden * sizeof(f32_t), hidden * sizeof(bf16_t), config_.block.rms_eps,
+                                           capabilities_, stream.get());
+    if (status != nk_success_k)
+        return expected_t::fail(status_t::cuda_error_k, "final norm failed: {}", nk_status_name(status));
 
     // Masked path stops here — the masked head reads normalized(); the contrastive path pools + heads.
     if (vertices.data() == nullptr) return {};
@@ -976,14 +914,10 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
         return expected_t::fail(status_t::shape_unsupported_k, "vertices must be [{},{}] (got [{},{}])", segments,
                                 hidden, vertices.extent(0), vertices.extent(1));
 
-    // The attention pool: stage the ragged bases + padding lengths, then the prebuilt cuDNN graph pools
-    // every segment's live tokens under the one broadcast query into pooled_.
-    staged = launch_kernel(reinterpret_cast<void const *>(&tower_pool_ragged_kernel_), dim3 {1u, 1u, 1u}, block_shape,
-                           stream, segment_offsets, segment_lengths, pool_ragged_offsets_.span(),
-                           pool_ragged_seq_lens_.span(), hidden);
+    // The attention pool: every segment's live tokens under the one learned query into pooled_.
+    staged = pool_.forward(pool_query_.view(), normalized_.view(), segment_offsets, segment_lengths, pooled_.span(),
+                           stream);
     if (!staged) return staged;
-    if (expected_t bound = cudnn_->bind(stream); !bound) return bound;
-    if (expected_t pooled = pool_forward_sdpa_.execute(cudnn_->get(), pool_workspace_.data()); !pooled) return pooled;
 
     // The head: learnable-γ RMSNorm, then the biasless fc1 → SiLU → fc2 into the caller's vertices —
     // raw, never L2-normalized here (the loss owns the cosine geometry).
@@ -1056,8 +990,9 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
 
     // The step's live extent, resized within each arena's reserved capacity — no address moves.
 
-    bool const resized = token_grad_a_.try_resize({live_tokens, hidden}) &&
-                         token_grad_b_.try_resize({live_tokens, hidden});
+    bool const resized = nk::succeeded(normalized_grad_.resize({live_tokens, hidden})) &&
+                         nk::succeeded(token_grad_a_.resize({live_tokens, hidden})) &&
+                         nk::succeeded(token_grad_b_.resize({live_tokens, hidden}));
     if (!resized)
         return expected_t::fail(status_t::shape_unsupported_k,
                                 "gradient scratch cannot hold {} live tokens (capacity {})", live_tokens,
@@ -1105,7 +1040,7 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
         // The pool backward scatters d(normalized) onto each segment's live token rows (uncovered rows
         // stay the zeros this reset writes) and folds the query gradient; head_activated_ is free after
         // fc2's weight grad, so it carries the per-segment query partials.
-        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(token_grad_a_.data()), 0,
+        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(normalized_grad_.data()), 0,
                                               live_tokens * hidden * sizeof(bf16_t), stream.get());
             result != CUDA_SUCCESS)
             return expected_t::fail(result, "pool gradient reset failed");
@@ -1114,7 +1049,7 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
         dim3 const pool_block {transformer_head_dim_k, 1u, 1u};
         staged = launch_kernel(reinterpret_cast<void const *>(&tower_pool_backward_kernel_), pool_grid, pool_block,
                                stream, normalized_.view(), pool_query_.view(), segment_grad_b_.view(), segment_offsets,
-                               segment_lengths, token_grad_a_.span(), head_activated_.span(), attention_scale);
+                               segment_lengths, normalized_grad_.span(), head_activated_.span(), attention_scale);
         if (staged)
             staged = launch_kernel(reinterpret_cast<void const *>(&tower_pool_query_grad_kernel_), channel_grid,
                                    block_shape, stream, head_activated_.view(), pool_query_grad_.span());
@@ -1125,31 +1060,37 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
             dim3 const cell_grid {
                 static_cast<u32_t>(divide_round_up(live_tokens * hidden, kernel_block_size_default_k)), 1u, 1u};
             staged = launch_kernel(reinterpret_cast<void const *>(&tower_grad_add_kernel_), cell_grid, block_shape,
-                                   stream, token_grad_a_.span().flatten<1>(),
+                                   stream, normalized_grad_.span().flatten<1>(),
                                    hidden_grad(nk::range(0, live_tokens), nk::slice).flatten<1>());
             if (!staged) return staged;
         }
     }
 
     // Final-norm backward: the total d(normalized) — the pool's scatter (plus the co-trained add) or the
-    // caller's masked force alone — → d(stack output) into token_grad_b_, plus the scale grad. The
-    // caller's hidden_grad may carry a wider capacity than the live extent, so it is narrowed to match.
-    bf16r2_view_t const normalized_grad_total = pooled_present ? token_grad_a_.view()
+    // caller's masked force alone — widens into token_grad_a_, then → the Float32 d(stack output) into
+    // token_grad_b_, plus the scale grad. The caller's hidden_grad may carry a wider capacity than the live
+    // extent, so it is narrowed to match.
+    bf16r2_view_t const normalized_grad_total = pooled_present ? normalized_grad_.view()
                                                                : hidden_grad(nk::range(0, live_tokens), nk::slice);
-    staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_backward_kernel), row_grid, block_shape, stream,
-                           stack_output_, final_norm_scale_.view(), final_inverse_rms_.view(), normalized_grad_total,
-                           token_grad_b_.span(), /*accumulate=*/false);
+    if (nk_status_t const status = nk_cast_best(normalized_grad_total.data(), nk_bf16_k, token_grad_a_.data(), nk_f32_k,
+                                                live_tokens * hidden, capabilities_, stream.get());
+        status != nk_success_k)
+        return expected_t::fail(status_t::cuda_error_k, "final-norm gradient widening failed: {}",
+                                nk_status_name(status));
+    staged = launch_kernel(reinterpret_cast<void const *>(&rmscast_backward_kernel), row_grid, block_shape, stream,
+                           stack_output_, final_norm_scale_.view(), token_grad_a_.view(), f32r2_view_t {},
+                           token_grad_b_.span(), final_inverse_rms_.span(), config_.block.rms_eps);
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_scale_grad_kernel), channel_grid, block_shape,
-                               stream, stack_output_, final_inverse_rms_.view(), normalized_grad_total,
+        staged = launch_kernel(reinterpret_cast<void const *>(&rmscast_scale_grad_kernel), channel_grid, block_shape,
+                               stream, stack_output_, final_inverse_rms_.view(), token_grad_a_.view(),
                                final_norm_scale_grad_.span());
     if (!staged) return staged;
 
     // Blocks in reverse; the flowing gradient ping-pongs the two token-gradient buffers. `coords_` still
     // holds this step's coordinates from the paired forward.
-    bf16r2_tensor_arena_t *grad_in = &token_grad_b_;
-    bf16r2_tensor_arena_t *grad_out = &token_grad_a_;
-    bf16r2_view_t flowing = grad_in->view();
+    f32r2_tensor_arena_t *grad_in = &token_grad_b_;
+    f32r2_tensor_arena_t *grad_out = &token_grad_a_;
+    f32r2_view_t flowing = grad_in->view();
     for (u32_t layer_index = config_.depth; layer_index != 0; --layer_index) {
         staged = blocks_[layer_index - 1].backward(flowing, grad_out->span(), segment_offsets, segment_lengths,
                                                    angles_.view(), coords_.view(), stream);
@@ -1157,7 +1098,12 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
         flowing = grad_out->view();
         std::swap(grad_in, grad_out);
     }
-    bf16r2_view_t const entry_grad = flowing;
+    // The entry backward reads BFloat16, so the stack's gradient narrows into the free normalized-grad buffer.
+    if (nk_status_t const status = nk_cast_best(flowing.data(), nk_f32_k, normalized_grad_.data(), nk_bf16_k,
+                                                live_tokens * hidden, capabilities_, stream.get());
+        status != nk_success_k)
+        return expected_t::fail(status_t::cuda_error_k, "entry gradient narrowing failed: {}", nk_status_name(status));
+    bf16r2_view_t const entry_grad = normalized_grad_.view();
 
     // Entry backward, text cells: deterministic embedding scatter over the whole packed grid. Keys start at
     // the sentinel (max token id) so every non-text cell folds into one trailing run the scatter skips; the
@@ -1209,6 +1155,12 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     if (!staged) return staged;
 
     return staged;
+}
+
+expected_t encoder_tower_bf16_t::pack_weights(gpu_stream_t &stream) noexcept {
+    for (transformer_block_bf16_t &layer : blocks_)
+        if (expected_t packed = layer.pack_weights(stream); !packed) return packed;
+    return {};
 }
 
 expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) noexcept {
@@ -1282,7 +1234,8 @@ expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) 
                                                                       sz::string_view name) noexcept {
     using result_t = expected<bf16r2_tensor_arena_t>;
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
-    bf16r2_tensor_arena_t copy = bf16r2_tensor_arena_t::try_empty({source.extent(0), source.extent(1)}, bf16_alloc);
+    bf16r2_tensor_arena_t copy =
+        bf16r2_tensor_arena_t::uninitialized({source.extent(0), source.extent(1)}, bf16_alloc).value;
     if (!copy) return result_t::fail(status_t::bad_alloc_k, "twin {} allocation failed", name);
     // vendor-boundary: device→device weight snapshot — no typed DtoD helper exists, so the driver copy
     // is spelled by hand over the views' raw `data()` pointers.
@@ -1300,7 +1253,7 @@ expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) 
                                                                       sz::string_view name) noexcept {
     using result_t = expected<bf16r1_tensor_arena_t>;
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
-    bf16r1_tensor_arena_t copy = bf16r1_tensor_arena_t::try_empty({source.extent(0)}, bf16_alloc);
+    bf16r1_tensor_arena_t copy = bf16r1_tensor_arena_t::uninitialized({source.extent(0)}, bf16_alloc).value;
     if (!copy) return result_t::fail(status_t::bad_alloc_k, "twin {} allocation failed", name);
     // vendor-boundary: device→device weight snapshot, as in the rank-2 overload above.
     if (CUresult result = cuMemcpyDtoDAsync(reinterpret_cast<CUdeviceptr>(copy.data()),
@@ -1334,7 +1287,6 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
     encoder_tower_e4m3_t twin;
     twin.config_ = config_;
     twin.blas_ = blas_;
-    twin.cudnn_ = cudnn_;
 
     std::size_t const hidden = config_.block.hidden;
     std::size_t const tokens = config_.block.max_tokens;
@@ -1344,7 +1296,6 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
     u32_t const segments32 = config_.block.max_segments;
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
-    gpu_arena_alloc<i32_t> i32_alloc {arena};
     gpu_arena_alloc<i16_t> i16_alloc {arena};
     gpu_arena_alloc<b8_t> b8_alloc {arena};
 
@@ -1438,68 +1389,37 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
                                                          config_.rope_base);
     if (!angles) return result_t::fail(std::move(angles));
     twin.angles_ = std::move(angles.value_);
-    twin.coords_ = i16r2_tensor_arena_t::try_empty({tokens, 3}, i16_alloc);
-    twin.entry_output_ = bf16r2_tensor_arena_t::try_empty({tokens, hidden}, bf16_alloc);
-    twin.normalized_ = bf16r2_tensor_arena_t::try_empty({tokens, hidden}, bf16_alloc);
-    twin.pooled_ = bf16r2_tensor_arena_t::try_empty({segments, hidden}, bf16_alloc);
-    twin.head_normalized_ = bf16r2_tensor_arena_t::try_empty({segments, hidden}, bf16_alloc);
-    twin.head_hidden_ = bf16r2_tensor_arena_t::try_empty({segments, hidden}, bf16_alloc);
-    twin.head_activated_ = bf16r2_tensor_arena_t::try_empty({segments, hidden}, bf16_alloc);
-    twin.final_inverse_rms_ = f32r1_tensor_arena_t::try_empty({tokens}, f32_alloc);
-    twin.head_inverse_rms_ = f32r1_tensor_arena_t::try_empty({segments}, f32_alloc);
-    twin.activations_a_ = bf16r2_tensor_arena_t::try_empty({tokens, hidden}, bf16_alloc);
-    twin.activations_b_ = bf16r2_tensor_arena_t::try_empty({tokens, hidden}, bf16_alloc);
+    twin.coords_ = i16r2_tensor_arena_t::uninitialized({tokens, 3}, i16_alloc).value;
+    twin.entry_output_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
+    twin.normalized_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
+    twin.pooled_ = bf16r2_tensor_arena_t::uninitialized({segments, hidden}, bf16_alloc).value;
+    twin.head_normalized_ = bf16r2_tensor_arena_t::uninitialized({segments, hidden}, bf16_alloc).value;
+    twin.head_hidden_ = bf16r2_tensor_arena_t::uninitialized({segments, hidden}, bf16_alloc).value;
+    twin.head_activated_ = bf16r2_tensor_arena_t::uninitialized({segments, hidden}, bf16_alloc).value;
+    twin.final_inverse_rms_ = f32r1_tensor_arena_t::uninitialized({tokens}, f32_alloc).value;
+    twin.head_inverse_rms_ = f32r1_tensor_arena_t::uninitialized({segments}, f32_alloc).value;
+    twin.activations_a_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
+    twin.activations_b_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
     if (!twin.coords_ || !twin.entry_output_ || !twin.normalized_ || !twin.pooled_ || !twin.head_normalized_ ||
         !twin.head_hidden_ || !twin.head_activated_ || !twin.final_inverse_rms_ || !twin.head_inverse_rms_ ||
         !twin.activations_a_ || !twin.activations_b_)
         return result_t::fail(status_t::bad_alloc_k, "twin activation allocation failed (arena_used={})", arena.used());
     if (max_entry_scalars != 0) {
-        twin.patch_scratch_ = bf16r2_tensor_arena_t::try_empty({tokens, max_entry_scalars}, bf16_alloc);
+        twin.patch_scratch_ = bf16r2_tensor_arena_t::uninitialized({tokens, max_entry_scalars}, bf16_alloc).value;
         if (!twin.patch_scratch_)
             return result_t::fail(status_t::bad_alloc_k, "twin patch scratch allocation failed (arena_used={})",
                                   arena.used());
     }
     if (workspace_bytes != 0) {
-        twin.workspace_ = b8r1_tensor_arena_t::try_empty({workspace_bytes}, b8_alloc);
+        twin.workspace_ = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, b8_alloc).value;
         if (!twin.workspace_)
             return result_t::fail(status_t::bad_alloc_k, "twin workspace allocation failed ({} bytes)",
                                   workspace_bytes);
     }
 
-    // The pool staging and its forward graph — the same shared builder the training tower ran at make.
-    twin.pool_ragged_offsets_ = i32r1_tensor_arena_t::try_empty({segments + 1}, i32_alloc);
-    twin.pool_ragged_seq_lens_ = i32r1_tensor_arena_t::try_empty({segments}, i32_alloc);
-    twin.pool_seq_ones_ = i32r1_tensor_arena_t::try_empty({segments}, i32_alloc);
-    twin.pool_attn_scale_ = f32r1_tensor_arena_t::try_empty({1}, f32_alloc);
-    if (!twin.pool_ragged_offsets_ || !twin.pool_ragged_seq_lens_ || !twin.pool_seq_ones_ || !twin.pool_attn_scale_)
-        return result_t::fail(status_t::bad_alloc_k, "twin pool staging allocation failed (arena_used={})",
-                              arena.used());
-    if (CUresult result = cuMemsetD32(reinterpret_cast<CUdeviceptr>(twin.pool_seq_ones_.data()), 1u, segments);
-        result != CUDA_SUCCESS)
-        return result_t::fail(result, "twin pool query-length fill failed");
-    f32_t const attention_scale = tower_pool_scale_();
-    if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(twin.pool_attn_scale_.data()), &attention_scale,
-                                       sizeof(attention_scale));
-        result != CUDA_SUCCESS)
-        return result_t::fail(result, "twin pool attention-scale upload failed");
-    tower_pool_bindings_t_ bindings;
-    bindings.query = twin.pool_query_.data();
-    bindings.states = twin.normalized_.data();
-    bindings.pooled = twin.pooled_.data();
-    bindings.attention_scale = twin.pool_attn_scale_.data();
-    bindings.seq_ones = twin.pool_seq_ones_.data();
-    bindings.seq_lens = twin.pool_ragged_seq_lens_.data();
-    bindings.ragged_offsets = twin.pool_ragged_offsets_.data();
-    if (expected_t built = tower_pool_graph_build_(twin.pool_forward_sdpa_, twin.config_.block, *twin.cudnn_, bindings);
-        !built)
-        return result_t::fail(std::move(built));
-    if (twin.pool_forward_sdpa_.workspace_bytes != 0) {
-        twin.pool_workspace_ = b8r1_tensor_arena_t::try_empty(
-            {static_cast<std::size_t>(twin.pool_forward_sdpa_.workspace_bytes)}, b8_alloc);
-        if (!twin.pool_workspace_)
-            return result_t::fail(status_t::bad_alloc_k, "twin pool workspace allocation failed ({} bytes)",
-                                  twin.pool_forward_sdpa_.workspace_bytes);
-    }
+    expected<tower_pool_t> pool = tower_pool_t::make(arena, twin.config_.block);
+    if (!pool) return result_t::fail(std::move(pool));
+    twin.pool_ = std::move(pool.value_);
 
     // The snapshots above are stream-ordered; drain them so the twin owns settled weights.
     if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
@@ -1518,9 +1438,10 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
                                 "batch disagrees with the baked capacities (tokens={} segments={})", live_tokens,
                                 segments);
 
-    bool const resized = entry_output_.try_resize({live_tokens, hidden}) &&
-                         activations_a_.try_resize({live_tokens, hidden}) &&
-                         activations_b_.try_resize({live_tokens, hidden}) && coords_.try_resize({live_tokens, 3});
+    bool const resized = nk::succeeded(entry_output_.resize({live_tokens, hidden})) &&
+                         nk::succeeded(activations_a_.resize({live_tokens, hidden})) &&
+                         nk::succeeded(activations_b_.resize({live_tokens, hidden})) &&
+                         nk::succeeded(coords_.resize({live_tokens, 3}));
     if (!resized)
         return expected_t::fail(status_t::shape_unsupported_k, "tower scratch cannot hold {} live tokens (capacity {})",
                                 live_tokens, entry_output_.capacity() / hidden);
@@ -1574,7 +1495,7 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
 
     // Final norm over the packed token states — the block stack already emits BFloat16, so the tail
     // runs the training twin's own kernels with no dtype boundary.
-    if (!normalized_.try_resize({live_tokens, hidden}))
+    if (nk::failed(normalized_.resize({live_tokens, hidden})))
         return expected_t::fail(status_t::shape_unsupported_k, "twin norm scratch cannot hold {} live tokens",
                                 live_tokens);
     dim3 const token_grid {static_cast<u32_t>(live_tokens), 1u, 1u};
@@ -1588,12 +1509,9 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
     if (vertices.extent(0) != segments || vertices.extent(1) != hidden)
         return expected_t::fail(status_t::shape_unsupported_k, "vertices must be [{},{}] (got [{},{}])", segments,
                                 hidden, vertices.extent(0), vertices.extent(1));
-    staged = launch_kernel(reinterpret_cast<void const *>(&tower_pool_ragged_kernel_), dim3 {1u, 1u, 1u}, block_shape,
-                           stream, segment_offsets, segment_lengths, pool_ragged_offsets_.span(),
-                           pool_ragged_seq_lens_.span(), hidden);
+    staged = pool_.forward(pool_query_.view(), normalized_.view(), segment_offsets, segment_lengths, pooled_.span(),
+                           stream);
     if (!staged) return staged;
-    if (expected_t bound = cudnn_->bind(stream); !bound) return bound;
-    if (expected_t pooled = pool_forward_sdpa_.execute(cudnn_->get(), pool_workspace_.data()); !pooled) return pooled;
     staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_forward_kernel), segment_grid, block_shape, stream,
                            pooled_.view(), head_norm_scale_.view(), head_normalized_.span(), head_inverse_rms_.span(),
                            config_.block.rms_eps);
