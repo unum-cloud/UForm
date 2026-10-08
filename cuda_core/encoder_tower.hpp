@@ -32,7 +32,7 @@
  *  embedding table into their cells; each media modality memsets its patch scratch, a segment-driven
  *  kernel normalises only that modality's cells in place (a cell's content lives at the same flat grid
  *  position as its state, so no gather offset is needed — image / video pixels by per-modality mean / std,
- *  audio raw waveform frames as-is), and one @ref cublaslt_plan_t projection @b accumulates ( @c β=1 ) into the
+ *  audio raw waveform frames as-is), and one NumKong projection @b adds its Float32 product into the widened
  *  state — its zero non-modality rows leave every other cell untouched, so the four writes compose with no
  *  scatter and no atomics. The step processes the full @c max_tokens capacity; PAD and inter-segment gap
  *  cells stay zero.
@@ -55,7 +55,6 @@
 #include <cstddef> // `std::size_t`
 #include <cmath>   // `sqrtf`, `expf`
 
-#include <array>  // `std::array` — the fixed-size pinned-plan tables
 #include <memory> // `std::unique_ptr` — the blocks' shared scratch
 
 #include <cuda.h> // `cuMemsetD8Async`, `cuMemcpyDtoDAsync`
@@ -72,7 +71,7 @@ namespace unum::uform::core {
 
 /**
  *  @brief The baked geometry of one tower — a different config is a different object. Media modalities
- *      are opt-in: a modality whose patch geometry is zero has no entry, projection, or plan.
+ *      are opt-in: a modality whose patch geometry is zero has no entry, projection, or pack.
  */
 struct encoder_tower_config_t {
     /** @brief Token-embedding rows; 0 ⇒ the tower carries no token entry. */
@@ -116,14 +115,15 @@ struct encoder_tower_config_t {
 #if defined(__CUDACC__)
 
 /**
- *  @brief The attention pool's forward, shared by both towers: one learned query attends each segment's
- *      live states as both keys and values, through NumKong's ragged attention.
+ *  @brief The attention pool, shared by both towers: one learned query attends each segment's live states as
+ *      both keys and values, through NumKong's ragged attention and its gradients.
  */
 struct tower_pool_t {
 
     /** @brief Allocate the pool off @p arena for @p block 's capacities: the query offsets
      *      @c {0,1,…,segments} that give every segment the one query, the K=V pack sized for every segment at
-     *      @c max_segment_tokens , and the Float32 pooled rows. Uploads the offsets — outside any capture. */
+     *      @c max_segment_tokens , the Float32 pooled rows with their log-sum-exps, and the Float32 gradient
+     *      rows the backward reads and writes. Uploads the offsets — outside any capture. */
     [[nodiscard]] static expected<tower_pool_t> make(gpu_arena_t &arena,
                                                      transformer_block_config_t const &block) noexcept;
 
@@ -139,6 +139,21 @@ struct tower_pool_t {
     [[nodiscard]] expected_t forward(bf16r1_view_t query, bf16r2_view_t states, u32r1_view_t segment_offsets,
                                      u32r1_view_t segment_lengths, bf16r2_span_t pooled, gpu_stream_t &stream) noexcept;
 
+    /**
+     *  @brief Differentiate the last @ref forward — pure enqueue: NumKong recomputes the weights from the
+     *      stashed log-sum-exps, then K=V folds @c dK+dV into one row per token, and the per-segment query
+     *      gradients sum in a fixed order.
+     *  @param[in] query @b [hidden] the learned pool query the forward read.
+     *  @param[in] pooled_grad @b [segments,hidden] the gradient of the pooled rows.
+     *  @param[in] key_grad,value_grad @b [tokens,hidden] Float32 scratch, overwritten.
+     *  @param[out] states_grad @b [tokens,hidden] the gradient of the states, zero on rows no segment covers.
+     *  @param[out] query_grad @b [hidden] the gradient of @p query .
+     *  @param[inout] stream The stream every launch enqueues on.
+     */
+    [[nodiscard]] expected_t backward(bf16r1_view_t query, bf16r2_view_t pooled_grad, f32r2_span_t key_grad,
+                                      f32r2_span_t value_grad, bf16r2_span_t states_grad, bf16r1_span_t query_grad,
+                                      gpu_stream_t &stream) noexcept;
+
   private:
     /** @brief The NumKong capabilities of the arena's device, picking every launch. */
     nk_capability_t capabilities_ = 0;
@@ -148,19 +163,23 @@ struct tower_pool_t {
     b8r1_tensor_arena_t packed_ {};
     /** @brief @b [segments,hidden] the Float32 pooled rows before their BFloat16 cast. */
     f32r2_tensor_arena_t pooled_ {};
+    /** @brief @b [segments,heads] each pooled row's log-sum-exp, which the backward recomputes weights from. */
+    f32r2_tensor_arena_t log_sum_exp_ {};
+    /** @brief @b [segments,hidden] the pooled rows' gradient widened, then each segment's query gradient. */
+    f32r2_tensor_arena_t pooled_grad_ {}, query_partials_ {};
 };
 
 /**
  *  @brief The training tower: entry + block stack + final norm + attention pool + head, every weight,
- *      gradient, stash, and plan owned — @ref forward stashes, @ref backward consumes, both pure enqueues.
+ *      gradient, stash, and pack owned — @ref forward stashes, @ref backward consumes, both pure enqueues.
  */
 struct encoder_tower_bf16_t {
 
     /** @brief Allocate and plan the whole tower off @p arena — token / media entries, @c depth blocks,
      *      the attention pool, and the head — validating each present modality's patch count against
      *      @p shape 's @c max_columns_per_row . */
-    [[nodiscard]] static expected<encoder_tower_bf16_t> make(gpu_arena_t &arena, cublaslt_session_t &blas,
-                                                             cudnn_session_t &cudnn, encoder_tower_config_t config,
+    [[nodiscard]] static expected<encoder_tower_bf16_t> make(gpu_arena_t &arena, cudnn_session_t &cudnn,
+                                                             encoder_tower_config_t config,
                                                              multimodal_batch_shape_t shape) noexcept;
 
     /** @brief One tower forward over @p batch — pure enqueue; every stash the backward reads is written
@@ -199,9 +218,9 @@ struct encoder_tower_bf16_t {
      *      its @c model. prefix. */
     [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;
 
-    /** @brief Pack every block's weights for NumKong's products — pure enqueue, capture-safe. Call once per
-     *      optimizer step, after the weights change and before the first @ref forward ; every forward and
-     *      backward of the step reuses the packs. */
+    /** @brief Pack every block's, head's and media projection's weights for NumKong's products — pure enqueue,
+     *      capture-safe. Call once per optimizer step, after the weights change and before the first @ref forward ;
+     *      every forward and backward of the step reuses the packs. */
     [[nodiscard]] expected_t pack_weights(gpu_stream_t &stream) noexcept;
 
     /** @brief Quantize this tower's block stack into the E4M3 inference twin (entries / pool / head stay
@@ -222,36 +241,9 @@ struct encoder_tower_bf16_t {
   private:
     friend struct encoder_tower_e4m3_t;
 
-    /** @brief The pinned @b cuBLASLt plan roles, in the order @ref make pins them: the three head
-     *      products, then two per present media modality (projection forward, projection weight grad)
-     *      from @ref plan_media_base_k , each modality's base recorded into @c *_plan_base_ . The token
-     *      entry is a kernel, not a plan. */
-    enum cublaslt_plan_role_t : std::size_t {
-        plan_head_forward_k = 0,
-        plan_head_data_grad_k = 1,
-        plan_head_weight_grad_k = 2,
-        plan_media_base_k = 3,
-    };
-    /** @brief The @c plans_ capacity: the head roles plus two per media modality. */
-    static constexpr std::size_t plan_capacity_k = plan_media_base_k + 2u * 3u;
-    /** @brief Sentinel for a modality with no pinned projection plan. */
-    static constexpr std::size_t plan_absent_k = ~std::size_t {0};
-
-    /** @brief Make one pinned cuBLASLt plan (forcing a BFloat16 @c C ), record it at @p role (post-incremented
-     *      into @c plans_ ), and grow @p workspace_bytes to its scratch demand — the plan-pinning step @ref make
-     *      repeats for the head and every media projection. */
-    [[nodiscard]] expected_t pin_plan(cublaslt_plan_config_t plan_config, std::size_t &role,
-                                      std::size_t &workspace_bytes) noexcept;
-    /** @brief Pin one present media modality's two plans (projection forward, projection weight grad) from
-     *      @p role , recording its base into @p plan_base ; the row extent is pinned at @p max_tokens (the worst
-     *      case) purely to size the heuristic + workspace, the live tile count coming from the operands. */
-    [[nodiscard]] expected_t pin_media_plans(std::size_t &plan_base, u32_t fan_in, u32_t max_tokens, u32_t hidden,
-                                             std::size_t &role, std::size_t &workspace_bytes) noexcept;
-
-    /** @brief The baked geometry and the borrowed cuBLASLt session — never owned here. */
+    /** @brief The baked geometry. */
     encoder_tower_config_t config_ {};
-    cublaslt_session_t *blas_ = nullptr;
-    /** @brief The NumKong capabilities of the arena's device, picking the residual stream's casts and norm. */
+    /** @brief The NumKong capabilities of the arena's device, picking the products, casts and norm. */
     nk_capability_t capabilities_ = 0;
 
     /** @brief The transients every block shares; heap-held so the blocks' borrows survive the tower's moves. */
@@ -273,8 +265,8 @@ struct encoder_tower_bf16_t {
      *      statistics, so audio uploads no mean/inverse-std. */
     f32r1_tensor_arena_t image_pixel_mean_ {}, image_pixel_inverse_std_ {};
     f32r1_tensor_arena_t video_pixel_mean_ {}, video_pixel_inverse_std_ {};
-    /** @brief Recorded plan-role bases per present media modality (or @c plan_absent_k ). */
-    std::size_t image_plan_base_ = plan_absent_k, video_plan_base_ = plan_absent_k, audio_plan_base_ = plan_absent_k;
+    /** @brief Each present media projection packed as the B operand of its entry product. */
+    b8r1_tensor_arena_t packed_image_projection_ {}, packed_video_projection_ {}, packed_audio_projection_ {};
 
     /** @brief The final norm scale and its gradient. */
     bf16r1_tensor_arena_t final_norm_scale_ {}, final_norm_scale_grad_ {};
@@ -283,14 +275,16 @@ struct encoder_tower_bf16_t {
 
     /** @brief The learned attention-pool query @b [heads,head_dim]=[hidden] and its gradient. */
     bf16r1_tensor_arena_t pool_query_ {}, pool_query_grad_ {};
-    /** @brief The attention pool's forward. The backward is a house kernel pair that recomputes the softmax
-     *      and folds the exact Jacobian itself. */
+    /** @brief The attention pool's forward and backward. */
     tower_pool_t pool_ {};
 
     /** @brief The head's learnable-scale RMSNorm @c γ and its gradient (@b [hidden] vectors). */
     bf16r1_tensor_arena_t head_norm_scale_ {}, head_norm_scale_grad_ {};
     /** @brief The head's two @b [hidden,hidden] projections and their gradients. */
     bf16r2_tensor_arena_t head_fc1_ {}, head_fc1_grad_ {}, head_fc2_ {}, head_fc2_grad_ {};
+    /** @brief The head projections packed as their forward B operands, and transposed as their data gradients'. */
+    b8r1_tensor_arena_t packed_head_fc1_ {}, packed_head_fc2_ {}, packed_head_fc1_transposed_ {},
+        packed_head_fc2_transposed_ {};
 
     /** @brief RoPE angle tables (model state). */
     rope_angles_t angles_ {};
@@ -327,11 +321,6 @@ struct encoder_tower_bf16_t {
     bf16r2_tensor_arena_t patch_scratch_ {};
     /** @brief The step's token ids / media presence, borrowed for the entry backward. */
     tokens_view_t live_token_ids_ {};
-
-    /** @brief The shared cuBLASLt scratch, sized to the max any pinned plan needs. */
-    b8r1_tensor_arena_t workspace_ {};
-    /** @brief The pinned products, indexed by the @c plan_*_k role constants. */
-    std::array<cublaslt_plan_t, plan_capacity_k> plans_ {};
 };
 
 /**
@@ -354,31 +343,9 @@ struct encoder_tower_e4m3_t {
   private:
     friend struct encoder_tower_bf16_t;
 
-    /** @brief The pinned @b cuBLASLt plan roles: the fused head product, then one projection per present
-     *      media modality from @ref plan_media_base_k . The token entry is a kernel, not a plan. */
-    enum cublaslt_plan_role_t : std::size_t {
-        plan_head_forward_k = 0,
-        plan_media_base_k = 1,
-    };
-    /** @brief The @c plans_ capacity: the head role plus one per media modality. */
-    static constexpr std::size_t plan_capacity_k = plan_media_base_k + 3u;
-    /** @brief Sentinel for a modality with no pinned projection plan. */
-    static constexpr std::size_t plan_absent_k = ~std::size_t {0};
-
-    /** @brief Make one pinned cuBLASLt plan (forcing a BFloat16 @c C ), record it at @p role (post-incremented
-     *      into @c plans_ ), and grow @p workspace_bytes to its scratch demand — the twin's mirror of the
-     *      training tower's plan-pinning step, repeated by @ref encoder_tower_bf16_t::quantize_weights . */
-    [[nodiscard]] expected_t pin_plan(cublaslt_plan_config_t plan_config, std::size_t &role,
-                                      std::size_t &workspace_bytes) noexcept;
-    /** @brief Pin one present media modality's single forward projection plan at @p role , recording its
-     *      base into @p plan_base — forward-only, so no weight-grad sibling; the row extent is pinned at
-     *      @p max_tokens (the worst case) purely to size the heuristic + workspace. */
-    [[nodiscard]] expected_t pin_media_plan(std::size_t &plan_base, u32_t fan_in, u32_t max_tokens, u32_t hidden,
-                                            std::size_t &role, std::size_t &workspace_bytes) noexcept;
-
-    /** @brief The baked geometry and the borrowed cuBLASLt session — never owned here. */
+    /** @brief The baked geometry and the NumKong capabilities of the arena's device. */
     encoder_tower_config_t config_ {};
-    cublaslt_session_t *blas_ = nullptr;
+    nk_capability_t capabilities_ = 0;
 
     /** @brief The @c depth E4M3 transformer blocks, owned in order — the quantized-precision tier. */
     array<transformer_block_e4m3_t> blocks_ {};
@@ -392,8 +359,8 @@ struct encoder_tower_e4m3_t {
     /** @brief The device per-channel image and video pixel mean and inverse-std, uploaded once at make. */
     f32r1_tensor_arena_t image_pixel_mean_ {}, image_pixel_inverse_std_ {};
     f32r1_tensor_arena_t video_pixel_mean_ {}, video_pixel_inverse_std_ {};
-    /** @brief Recorded plan-role bases per present media modality (or @c plan_absent_k ). */
-    std::size_t image_plan_base_ = plan_absent_k, video_plan_base_ = plan_absent_k, audio_plan_base_ = plan_absent_k;
+    /** @brief Each present media projection packed as the B operand of its entry product. */
+    b8r1_tensor_arena_t packed_image_projection_ {}, packed_video_projection_ {}, packed_audio_projection_ {};
 
     /** @brief The final norm scale — the norm tier stays BFloat16. */
     bf16r1_tensor_arena_t final_norm_scale_ {};
@@ -405,6 +372,8 @@ struct encoder_tower_e4m3_t {
     bf16r1_tensor_arena_t head_norm_scale_ {};
     /** @brief The head's two @b [hidden,hidden] projections, BFloat16. */
     bf16r2_tensor_arena_t head_fc1_ {}, head_fc2_ {};
+    /** @brief The head projections packed as their B operands, once — the twin's weights never change. */
+    b8r1_tensor_arena_t packed_head_fc1_ {}, packed_head_fc2_ {};
 
     /** @brief RoPE angle tables (model state). */
     rope_angles_t angles_ {};
@@ -422,10 +391,10 @@ struct encoder_tower_e4m3_t {
     bf16r2_tensor_arena_t activations_a_ {}, activations_b_ {};
     /** @brief The @b [rows,patch_pixels] patch-cut scratch the media entries fill before their projection. */
     bf16r2_tensor_arena_t patch_scratch_ {};
-    /** @brief The shared cuBLASLt scratch, sized to the max any pinned plan needs. */
-    b8r1_tensor_arena_t workspace_ {};
-    /** @brief The pinned products, indexed by the @c plan_*_k role constants. */
-    std::array<cublaslt_plan_t, plan_capacity_k> plans_ {};
+    /** @brief @b [tokens,hidden] Float32 the entry state the media products add into, present with any media. */
+    f32r2_tensor_arena_t entry_state_ {};
+    /** @brief Float32 @b [tokens·hidden] each product before the addition or cast consuming it. */
+    f32r1_tensor_arena_t products_ {};
 };
 
 #endif // defined(__CUDACC__)

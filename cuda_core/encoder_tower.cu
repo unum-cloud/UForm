@@ -6,7 +6,7 @@
  *  @author Ash Vardanian
  *  @date July 4, 2026
  */
-#include <algorithm> // `std::max` for the running plan-workspace maximum, `std::min` for the pool pack
+#include <algorithm> // `std::max` for the widest media entry, `std::min` for the pool pack
 
 #include <cub/device/device_radix_sort.cuh> // the deterministic embedding-gradient scatter
 
@@ -125,84 +125,18 @@ static __global__ void tower_silu_backward_kernel_(bf16r1_span_t input, bf16r1_s
 }
 
 /**
- *  @brief The attention pool's backward — the house replacement for cuDNN's @c sdpa_backward , which
- *      emits non-finite gradients at single-query shapes. CTA @c (s,h) owns segment @c s 's head @c h ,
- *      thread @c c its channel: four streaming passes recompute the softmax the forward ran (max, then
- *      the denominator, then the @c Σp·dp projection, then the fold), so no attention weights are ever
- *      stashed. K=V, so one write per token row carries @c dV+dK ; the per-segment query-gradient
- *      partials land in @p query_partials for @ref tower_pool_query_grad_kernel_ 's fixed-order fold. A
- *      zero-length (PAD) segment writes only its zero partial.
- *
- *  __grid_size__ @c [segments,heads,1] , one @ref transformer_head_dim_k -wide block; no dynamic shared
- *      memory.
- */
-static __global__ void tower_pool_backward_kernel_(bf16r2_view_t states, bf16r1_view_t query, bf16r2_view_t pooled_grad,
-                                                   u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                                   bf16r2_span_t states_grad, bf16r2_span_t query_partials,
-                                                   f32_t scale) {
-    u32_t const segment = blockIdx.x, head = blockIdx.y, channel = threadIdx.x;
-    u32_t const base_channel = head * transformer_head_dim_k + channel;
-    u32_t const length = segment_lengths[segment];
-    if (length == 0u) {
-        // Sound because the loss zeroes PAD-vertex forces by relation precedence (PAD outranks every
-        // edge in contrastive_pair_relation), so nothing real ever flows back through a PAD vertex.
-        query_partials[segment, base_channel] = __float2bfloat16(0.0f);
-        return;
-    }
-    u32_t const offset = segment_offsets[segment];
-    f32_t const query_value = __bfloat162float(query[base_channel]);
-    f32_t const output_grad = __bfloat162float(pooled_grad[segment, base_channel]);
-
-    f32_t score_max = -INFINITY;
-    for (u32_t token = 0; token != length; ++token) {
-        f32_t const score = block_reduce_broadcast<transformer_head_dim_k>(
-                                query_value * __bfloat162float(states[offset + token, base_channel])) *
-                            scale;
-        score_max = fmaxf(score_max, score);
-    }
-    f32_t denominator = 0.0f;
-    for (u32_t token = 0; token != length; ++token) {
-        f32_t const score = block_reduce_broadcast<transformer_head_dim_k>(
-                                query_value * __bfloat162float(states[offset + token, base_channel])) *
-                            scale;
-        denominator += expf(score - score_max);
-    }
-    f32_t projection = 0.0f; // Σ_t p_t·dp_t — the softmax Jacobian's rank-1 term.
-    for (u32_t token = 0; token != length; ++token) {
-        f32_t const value = __bfloat162float(states[offset + token, base_channel]);
-        f32_t const score = block_reduce_broadcast<transformer_head_dim_k>(query_value * value) * scale;
-        f32_t const probability = expf(score - score_max) / denominator;
-        f32_t const value_projection = block_reduce_broadcast<transformer_head_dim_k>(output_grad * value);
-        projection += probability * value_projection;
-    }
-    f32_t query_grad = 0.0f;
-    for (u32_t token = 0; token != length; ++token) {
-        f32_t const value = __bfloat162float(states[offset + token, base_channel]);
-        f32_t const score = block_reduce_broadcast<transformer_head_dim_k>(query_value * value) * scale;
-        f32_t const probability = expf(score - score_max) / denominator;
-        f32_t const value_projection = block_reduce_broadcast<transformer_head_dim_k>(output_grad * value);
-        f32_t const score_grad = probability * (value_projection - projection);
-        states_grad[offset + token, base_channel] = __float2bfloat16_rn(probability * output_grad +
-                                                                        score_grad * scale * query_value);
-        query_grad += score_grad * scale * value;
-    }
-    query_partials[segment, base_channel] = __float2bfloat16_rn(query_grad);
-}
-
-/**
  *  @brief Fold the pool's per-segment query-gradient partials into the one @b [hidden] gradient — a
  *      fixed-order serial sum per channel, deterministic by construction.
  *
  *  __grid_size__ grid-stride over @c hidden channels; no dynamic shared memory.
  */
-static __global__ void tower_pool_query_grad_kernel_(bf16r2_view_t query_partials, bf16r1_span_t query_grad) {
+static __global__ void tower_pool_query_grad_kernel_(f32r2_view_t query_partials, bf16r1_span_t query_grad) {
     std::size_t const segments = query_partials.extent(0), hidden = query_partials.extent(1);
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
     for (std::size_t channel = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; channel < hidden;
          channel += stride) {
         f32_t total = 0.0f;
-        for (std::size_t segment = 0; segment != segments; ++segment)
-            total += __bfloat162float(query_partials[segment, channel]);
+        for (std::size_t segment = 0; segment != segments; ++segment) total += query_partials[segment, channel];
         query_grad[channel] = __float2bfloat16_rn(total);
     }
 }
@@ -289,9 +223,33 @@ static __global__ void tower_audio_segment_kernel_(nk::tensor_view<f32_t, 2> con
     return 1.0f / sqrtf(static_cast<f32_t>(transformer_head_dim_k));
 }
 
-/** @brief File-scope mirror of the towers' @c plan_absent_k sentinel, so the shared media helpers below can
- *      skip an absent modality without reaching into either tower's private constants. */
-static constexpr std::size_t plan_absent_k = ~std::size_t {0};
+/**
+ *  @brief The head's biasless fc1 → SiLU → fc2 over the normalized pooled rows into @p vertices — raw, never
+ *      L2-normalized here, since the loss owns the cosine geometry. Each product lands in the Float32 @p products
+ *      and narrows into its BFloat16 destination. Shared verbatim by both towers' forwards.
+ */
+static expected_t head_forward_(bf16r2_view_t normalized, b8r1_tensor_arena_t const &packed_fc1,
+                                b8r1_tensor_arena_t const &packed_fc2, bf16r2_span_t hidden_state,
+                                bf16r2_span_t activated, f32r2_span_t products, bf16r2_span_t vertices,
+                                nk_capability_t capabilities, gpu_stream_t &stream) noexcept {
+    std::size_t const cells = normalized.extent(0) * normalized.extent(1);
+    dim3 const cell_grid {static_cast<u32_t>(divide_round_up(cells, kernel_block_size_default_k)), 1u, 1u};
+    expected_t staged = multiply_bf16(normalized, packed_fc1.view(), products, capabilities, stream);
+    if (staged)
+        staged = numkong_result(nk_cast_best(products.data(), nk_f32_k, hidden_state.data(), nk_bf16_k, cells,
+                                             capabilities, stream.numkong()),
+                                "head fc1 narrowing");
+    if (staged)
+        staged = launch_kernel(reinterpret_cast<void const *>(&tower_silu_kernel_), cell_grid,
+                               dim3 {kernel_block_size_default_k, 1u, 1u}, stream, hidden_state.flatten<1>(),
+                               activated.flatten<1>());
+    if (staged) staged = multiply_bf16(activated, packed_fc2.view(), products, capabilities, stream);
+    if (staged)
+        staged = numkong_result(
+            nk_cast_best(products.data(), nk_f32_k, vertices.data(), nk_bf16_k, cells, capabilities, stream.numkong()),
+            "head fc2 narrowing");
+    return staged;
+}
 
 /**
  *  @brief Upload one modality's per-channel pixel mean and inverse-std to the device, allocating the two
@@ -350,58 +308,65 @@ static expected_t stage_pixel_patches(nk::tensor_view<pixel_t, 3> raw, modality_
 }
 
 /**
- *  @brief Project every present media modality's raw signal into the packed entry state: for each present
+ *  @brief Project every present media modality's raw signal into the Float32 entry state: for each present
  *      modality zero @p patch_scratch , stage only that modality's cells in place (image / video pixels
  *      normalized by their per-channel mean / inverse-std, audio raw frames cast as-is — a cell's content
- *      shares the flat grid position of its state), and accumulate the pinned projection ( @c β=1 ) so the
- *      zero non-modality rows leave every other cell untouched — no scatter, no atomics. Shared verbatim by
- *      both towers' forwards; the text entry (a kernel) is the caller's.
+ *      shares the flat grid position of its state), multiply by the packed projection, and add the product into
+ *      @p entry_state , so the zero non-modality rows leave every other cell untouched — no scatter, no atomics.
+ *      A modality is present iff its projection is packed. Shared verbatim by both towers' forwards; the text
+ *      entry (a kernel) is the caller's.
  */
-static expected_t project_media_entries(
-    multimodal_batch_on_gpu_t const &batch, cublaslt_plan_t *plans, std::size_t image_plan_base,
-    std::size_t video_plan_base, std::size_t audio_plan_base, bf16r2_tensor_arena_t &patch_scratch,
-    b8r1_tensor_arena_t &workspace, bf16r2_tensor_arena_t &entry_output, f32r1_tensor_arena_t &image_mean,
-    f32r1_tensor_arena_t &image_inverse_std, bf16r2_tensor_arena_t &image_projection, f32r1_tensor_arena_t &video_mean,
-    f32r1_tensor_arena_t &video_inverse_std, bf16r2_tensor_arena_t &video_projection,
-    bf16r2_tensor_arena_t &audio_projection, cublaslt_session_t &blas, gpu_stream_t &stream) noexcept {
+static expected_t project_media_entries(multimodal_batch_on_gpu_t const &batch, bf16r2_tensor_arena_t &patch_scratch,
+                                        f32r1_tensor_arena_t &image_mean, f32r1_tensor_arena_t &image_inverse_std,
+                                        b8r1_tensor_arena_t &packed_image, f32r1_tensor_arena_t &video_mean,
+                                        f32r1_tensor_arena_t &video_inverse_std, b8r1_tensor_arena_t &packed_video,
+                                        b8r1_tensor_arena_t &packed_audio, f32r2_span_t entry_state,
+                                        f32r1_span_t products, nk_capability_t capabilities,
+                                        gpu_stream_t &stream) noexcept {
     std::size_t const columns = batch.tokens.extent(1);
     std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
+    std::size_t const hidden = entry_state.extent(1);
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const segment_grid {static_cast<u32_t>(batch.live_segments()), 1u, 1u};
     u32r1_view_t const segment_offsets = batch.segment_offsets.view();
     u32r1_view_t const segment_lengths = batch.segment_lengths.view();
     modality_view_t const segment_modality = batch.segment_modality.view();
+    f32r2_span_t const projected {products.data(), live_tokens, hidden};
 
-    // One pixel modality's forward: zero the scratch, normalize its cells in place, accumulate the projection.
-    auto project_pixels = [&](std::size_t plan_base, nk::tensor_view<pixel_t, 3> raw, modality_t target,
-                              f32r1_view_t mean, f32r1_view_t inverse_std,
-                              bf16r2_view_t projection) noexcept -> expected_t {
+    auto add_projection = [&](bf16r2_view_t patches, b8r1_tensor_arena_t const &packed) noexcept -> expected_t {
+        expected_t staged = multiply_bf16(patches, packed.view(), projected, capabilities, stream);
+        if (staged)
+            staged = numkong_result(nk_each_sum_f32_best(entry_state.data(), projected.data(), live_tokens * hidden,
+                                                         entry_state.data(), capabilities, stream.numkong()),
+                                    "entry projection");
+        return staged;
+    };
+    // One pixel modality's forward: zero the scratch, normalize its cells in place, add the projection.
+    auto project_pixels = [&](nk::tensor_view<pixel_t, 3> raw, modality_t target, f32r1_view_t mean,
+                              f32r1_view_t inverse_std, b8r1_tensor_arena_t const &packed) noexcept -> expected_t {
         u32_t const scalars = static_cast<u32_t>(raw.extent(1)) * static_cast<u32_t>(raw.extent(2));
         bf16r2_span_t const patches {patch_scratch.data(), live_tokens, scalars};
         expected_t staged = stage_pixel_patches(raw, target, mean, inverse_std, segment_offsets, segment_lengths,
                                                 segment_modality, segment_grid, patches, stream);
         if (!staged) return staged;
-        return plans[plan_base].matmul(blas, bf16r2_view_t {patches}, projection, entry_output.span(), 1.0f,
-                                       workspace.span(), stream);
+        return add_projection(patches, packed);
     };
 
     expected_t staged {};
-    if (image_plan_base != plan_absent_k && batch.images.data() != nullptr) {
+    if (packed_image.data() != nullptr && batch.images.data() != nullptr) {
         std::size_t const spatial = static_cast<std::size_t>(batch.images.extent(2)) * batch.images.extent(3);
-        staged = project_pixels(
-            image_plan_base, batch.images.view().reshape<3>({live_tokens, spatial, batch.images.extent(4)}),
-            modality_t::image_k, image_mean.view(), image_inverse_std.view(), image_projection.view());
+        staged = project_pixels(batch.images.view().reshape<3>({live_tokens, spatial, batch.images.extent(4)}),
+                                modality_t::image_k, image_mean.view(), image_inverse_std.view(), packed_image);
         if (!staged) return staged;
     }
-    if (video_plan_base != plan_absent_k && batch.videos.data() != nullptr) {
+    if (packed_video.data() != nullptr && batch.videos.data() != nullptr) {
         std::size_t const spatial = static_cast<std::size_t>(batch.videos.extent(2)) * batch.videos.extent(3) *
                                     batch.videos.extent(4);
-        staged = project_pixels(
-            video_plan_base, batch.videos.view().reshape<3>({live_tokens, spatial, batch.videos.extent(5)}),
-            modality_t::video_k, video_mean.view(), video_inverse_std.view(), video_projection.view());
+        staged = project_pixels(batch.videos.view().reshape<3>({live_tokens, spatial, batch.videos.extent(5)}),
+                                modality_t::video_k, video_mean.view(), video_inverse_std.view(), packed_video);
         if (!staged) return staged;
     }
-    if (audio_plan_base != plan_absent_k && batch.audio_samples.data() != nullptr) {
+    if (packed_audio.data() != nullptr && batch.audio_samples.data() != nullptr) {
         u32_t const scalars = static_cast<u32_t>(batch.audio_samples.extent(2));
         if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(patch_scratch.data()), 0,
                                               live_tokens * scalars * sizeof(bf16_t), stream.get());
@@ -411,10 +376,7 @@ static expected_t project_media_entries(
         bf16r2_span_t const patches {patch_scratch.data(), live_tokens, scalars};
         staged = launch_kernel(reinterpret_cast<void const *>(&tower_audio_segment_kernel_), segment_grid, block_shape,
                                stream, raw, segment_offsets, segment_lengths, segment_modality, patches);
-        if (!staged) return staged;
-        staged = plans[audio_plan_base].matmul(blas, bf16r2_view_t {patches}, audio_projection.view(),
-                                               entry_output.span(), 1.0f, workspace.span(), stream);
-        if (!staged) return staged;
+        if (staged) staged = add_projection(patches, packed_audio);
     }
     return staged;
 }
@@ -422,18 +384,17 @@ static expected_t project_media_entries(
 /**
  *  @brief Fold the packed entry gradient against each present media modality's re-staged patches into that
  *      modality's projection weight gradient: re-stage exactly as @ref project_media_entries (segment-driven,
- *      so non-modality rows stay zero), then run each modality's weight-grad product ( @c plan_base+1 , @c β=0 )
- *      — the backward twin of @ref project_media_entries , differing only in the matmul direction and offset.
+ *      so non-modality rows stay zero), then take the weight gradient through the blocks' shared @p scratch —
+ *      the backward twin of @ref project_media_entries . A modality is present iff its gradient is allocated.
  */
-static expected_t project_media_weight_grads(multimodal_batch_on_gpu_t const &batch, cublaslt_plan_t *plans,
-                                             std::size_t image_plan_base, std::size_t video_plan_base,
-                                             std::size_t audio_plan_base, bf16r2_tensor_arena_t &patch_scratch,
-                                             b8r1_tensor_arena_t &workspace, bf16r2_view_t entry_grad,
+static expected_t project_media_weight_grads(multimodal_batch_on_gpu_t const &batch,
+                                             bf16r2_tensor_arena_t &patch_scratch, bf16r2_view_t entry_grad,
                                              f32r1_tensor_arena_t &image_mean, f32r1_tensor_arena_t &image_inverse_std,
                                              bf16r2_tensor_arena_t &image_projection_grad,
                                              f32r1_tensor_arena_t &video_mean, f32r1_tensor_arena_t &video_inverse_std,
                                              bf16r2_tensor_arena_t &video_projection_grad,
-                                             bf16r2_tensor_arena_t &audio_projection_grad, cublaslt_session_t &blas,
+                                             bf16r2_tensor_arena_t &audio_projection_grad,
+                                             transformer_scratch_t &scratch, nk_capability_t capabilities,
                                              gpu_stream_t &stream) noexcept {
     std::size_t const columns = batch.tokens.extent(1);
     std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
@@ -443,44 +404,39 @@ static expected_t project_media_weight_grads(multimodal_batch_on_gpu_t const &ba
     u32r1_view_t const segment_lengths = batch.segment_lengths.view();
     modality_view_t const segment_modality = batch.segment_modality.view();
 
+    auto weight_gradient = [&](bf16r2_view_t patches, bf16r2_span_t projection_grad) noexcept {
+        return weight_gradient_bf16(entry_grad, patches, projection_grad, scratch.transposed_grad.span(),
+                                    scratch.transposed_input.span(), scratch.packed_input.span(),
+                                    scratch.weight_grad_products.span(), capabilities, stream);
+    };
     // One pixel modality's weight grad: re-stage its cells, then fold the whole entry gradient against them.
-    auto project_pixels_grad = [&](std::size_t plan_base, nk::tensor_view<pixel_t, 3> raw, modality_t target,
-                                   f32r1_view_t mean, f32r1_view_t inverse_std,
-                                   bf16r2_span_t projection_grad) noexcept -> expected_t {
-        u32_t const spatial = static_cast<u32_t>(raw.extent(1));
-        u32_t const channels = static_cast<u32_t>(raw.extent(2));
-        u32_t const scalars = spatial * channels;
-        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(patch_scratch.data()), 0,
-                                              live_tokens * scalars * sizeof(bf16_t), stream.get());
-            result != CUDA_SUCCESS)
-            return expected_t::fail(result, "pixel patch scratch reset failed");
+    auto project_pixels_grad = [&](nk::tensor_view<pixel_t, 3> raw, modality_t target, f32r1_view_t mean,
+                                   f32r1_view_t inverse_std, bf16r2_span_t projection_grad) noexcept -> expected_t {
+        u32_t const scalars = static_cast<u32_t>(raw.extent(1)) * static_cast<u32_t>(raw.extent(2));
         bf16r2_span_t const patches {patch_scratch.data(), live_tokens, scalars};
-        expected_t normalized = launch_kernel(reinterpret_cast<void const *>(&tower_normalize_segment_kernel_),
-                                              segment_grid, block_shape, stream, raw, segment_offsets, segment_lengths,
-                                              segment_modality, target, mean, inverse_std,
-                                              patches.reshape<3>({live_tokens, spatial, channels}));
-        if (!normalized) return normalized;
-        return plans[plan_base + 1].matmul(blas, entry_grad, bf16r2_view_t {patches}, projection_grad, 0.0f,
-                                           workspace.span(), stream);
+        expected_t staged = stage_pixel_patches(raw, target, mean, inverse_std, segment_offsets, segment_lengths,
+                                                segment_modality, segment_grid, patches, stream);
+        if (!staged) return staged;
+        return weight_gradient(patches, projection_grad);
     };
 
     expected_t staged {};
-    if (image_plan_base != plan_absent_k && batch.images.data() != nullptr) {
+    if (image_projection_grad.data() != nullptr && batch.images.data() != nullptr) {
         std::size_t const spatial = static_cast<std::size_t>(batch.images.extent(2)) * batch.images.extent(3);
-        staged = project_pixels_grad(
-            image_plan_base, batch.images.view().reshape<3>({live_tokens, spatial, batch.images.extent(4)}),
-            modality_t::image_k, image_mean.view(), image_inverse_std.view(), image_projection_grad.span());
+        staged = project_pixels_grad(batch.images.view().reshape<3>({live_tokens, spatial, batch.images.extent(4)}),
+                                     modality_t::image_k, image_mean.view(), image_inverse_std.view(),
+                                     image_projection_grad.span());
         if (!staged) return staged;
     }
-    if (video_plan_base != plan_absent_k && batch.videos.data() != nullptr) {
+    if (video_projection_grad.data() != nullptr && batch.videos.data() != nullptr) {
         std::size_t const spatial = static_cast<std::size_t>(batch.videos.extent(2)) * batch.videos.extent(3) *
                                     batch.videos.extent(4);
-        staged = project_pixels_grad(
-            video_plan_base, batch.videos.view().reshape<3>({live_tokens, spatial, batch.videos.extent(5)}),
-            modality_t::video_k, video_mean.view(), video_inverse_std.view(), video_projection_grad.span());
+        staged = project_pixels_grad(batch.videos.view().reshape<3>({live_tokens, spatial, batch.videos.extent(5)}),
+                                     modality_t::video_k, video_mean.view(), video_inverse_std.view(),
+                                     video_projection_grad.span());
         if (!staged) return staged;
     }
-    if (audio_plan_base != plan_absent_k && batch.audio_samples.data() != nullptr) {
+    if (audio_projection_grad.data() != nullptr && batch.audio_samples.data() != nullptr) {
         u32_t const scalars = static_cast<u32_t>(batch.audio_samples.extent(2));
         if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(patch_scratch.data()), 0,
                                               live_tokens * scalars * sizeof(bf16_t), stream.get());
@@ -490,38 +446,13 @@ static expected_t project_media_weight_grads(multimodal_batch_on_gpu_t const &ba
         bf16r2_span_t const patches {patch_scratch.data(), live_tokens, scalars};
         staged = launch_kernel(reinterpret_cast<void const *>(&tower_audio_segment_kernel_), segment_grid, block_shape,
                                stream, raw, segment_offsets, segment_lengths, segment_modality, patches);
-        if (!staged) return staged;
-        staged = plans[audio_plan_base + 1].matmul(blas, entry_grad, bf16r2_view_t {patches},
-                                                   audio_projection_grad.span(), 0.0f, workspace.span(), stream);
-        if (!staged) return staged;
+        if (staged) staged = weight_gradient(patches, audio_projection_grad.span());
     }
     return staged;
 }
 
-expected_t encoder_tower_bf16_t::pin_plan(cublaslt_plan_config_t plan_config, std::size_t &role,
-                                          std::size_t &workspace_bytes) noexcept {
-    plan_config.c_type = CUDA_R_16BF;
-    expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(*blas_, plan_config);
-    if (!plan) return expected_t::fail(std::move(plan));
-    workspace_bytes = std::max(workspace_bytes, plan.value_.workspace_bytes());
-    plans_[role++] = std::move(plan.value_);
-    return {};
-}
-
-expected_t encoder_tower_bf16_t::pin_media_plans(std::size_t &plan_base, u32_t fan_in, u32_t max_tokens, u32_t hidden,
-                                                 std::size_t &role, std::size_t &workspace_bytes) noexcept {
-    plan_base = role;
-    expected_t pinned = pin_plan(
-        {max_tokens, fan_in, fan_in, hidden, fan_in, fan_in, max_tokens, hidden, hidden, false, true}, role,
-        workspace_bytes);
-    if (pinned)
-        pinned = pin_plan({max_tokens, hidden, hidden, max_tokens, fan_in, fan_in, hidden, fan_in, fan_in, true, false},
-                          role, workspace_bytes);
-    return pinned;
-}
-
-expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cublaslt_session_t &blas,
-                                                          cudnn_session_t &cudnn, encoder_tower_config_t config,
+expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cudnn_session_t &cudnn,
+                                                          encoder_tower_config_t config,
                                                           multimodal_batch_shape_t shape) noexcept {
     using result_t = expected<encoder_tower_bf16_t>;
     if (config.depth == 0) return result_t::fail(status_t::invalid_input_k, "a tower needs at least one block");
@@ -533,7 +464,6 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
 
     encoder_tower_bf16_t tower;
     tower.config_ = config;
-    tower.blas_ = &blas;
     if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
                                                                 &tower.capabilities_);
         status != nk_success_k)
@@ -618,45 +548,13 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
     if (!angles) return result_t::fail(std::move(angles));
     tower.angles_ = std::move(angles.value_);
 
-    // The block stack.
-    if (tower.blocks_.try_resize(config.depth) != status_t::success_k)
-        return result_t::fail(status_t::bad_alloc_k, "block table allocation failed ({})", config.depth);
-    expected<transformer_scratch_t> scratch = transformer_scratch_t::make(arena, config.block);
-    if (!scratch) return result_t::fail(std::move(scratch));
-    tower.scratch_ = std::make_unique<transformer_scratch_t>(std::move(scratch.value_));
-    for (u32_t layer_index = 0; layer_index != config.depth; ++layer_index) {
-        expected<transformer_block_bf16_t> block =
-            transformer_block_bf16_t::make(arena, blas, cudnn, *tower.scratch_, config.block);
-        if (!block) return result_t::fail(std::move(block));
-        tower.blocks_[layer_index] = std::move(block.value_);
-    }
-
-    // The head's pinned products: forward (fc1 and fc2 share the [H,H] shape), data grad, weight grad.
-
-    std::size_t workspace_bytes = 0;
-    std::size_t plan_role = 0;
-    u32_t const hidden32 = config.block.hidden;
-    u32_t const segments32 = config.block.max_segments;
-    expected_t pinned = tower.pin_plan(
-        {segments32, hidden32, hidden32, hidden32, hidden32, hidden32, segments32, hidden32, hidden32, false, true},
-        plan_role, workspace_bytes);
-    if (pinned)
-        pinned = tower.pin_plan({segments32, hidden32, hidden32, hidden32, hidden32, hidden32, segments32, hidden32,
-                                 hidden32, false, false},
-                                plan_role, workspace_bytes);
-    if (pinned)
-        pinned = tower.pin_plan(
-            {segments32, hidden32, hidden32, segments32, hidden32, hidden32, hidden32, hidden32, hidden32, true, false},
-            plan_role, workspace_bytes);
-    if (!pinned) return result_t::fail(std::move(pinned));
-
     expected<tower_pool_t> pool = tower_pool_t::make(arena, config.block);
     if (!pool) return result_t::fail(std::move(pool));
     tower.pool_ = std::move(pool.value_);
 
-    // Media entries: each present modality patch-cuts its raw signal and projects it through pinned cuBLASLt
-    // plans. A modality is present iff its geometry is fully specified — zero extents leave its projection,
-    // plan, and scratch untouched. Fan-ins are per-modality: image is ph·pw·image_channels, video folds
+    // Media entries: each present modality patch-cuts its raw signal and projects it through a NumKong pack.
+    // A modality is present iff its geometry is fully specified — zero extents leave its projection, pack, and
+    // scratch untouched. Fan-ins are per-modality: image is ph·pw·image_channels, video folds
     // video_tube_frames ahead of ph·pw·video_channels, and audio — a 1-D signal, unpatched — is just
     // chunk_samples raw samples per frame (its projection is the learnable spectral frontend). Image and video
     // pixels carry an ImageNet-style per-channel normalization; audio raw frames upload no constants.
@@ -716,26 +614,24 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
                                   arena.used());
     }
 
-    // Media projection plans, pinned from plan_media_base_k in modality order (image, video, audio): a forward
-    // product (patches·Wᵀ → entry) and a weight-grad product (d_entryᵀ·patches → dW) each — no data-grad plan
-    // exists, since raw pixels are never differentiated. Batches are heterogeneous — any mix of modalities
-    // fills the one row budget, so each plan's row extent is pinned at the WORST case (max_tokens) purely to
-    // size the heuristic + workspace; the view-driven @ref cublaslt_plan_t::matmul then takes the live per-step
-    // tile count from the operand extents, the same algorithm serving any M.
+    auto allocate_pack = [&](b8r1_tensor_arena_t &packed, std::size_t depth) noexcept -> expected_t {
+        expected<b8r1_tensor_arena_t> allocated = allocate_pack_bf16(hidden, depth, tower.capabilities_, arena);
+        if (!allocated) return expected_t::fail(std::move(allocated));
+        packed = std::move(allocated.value_);
+        return {};
+    };
+    expected_t packs = allocate_pack(tower.packed_head_fc1_, hidden);
+    if (packs) packs = allocate_pack(tower.packed_head_fc2_, hidden);
+    if (packs) packs = allocate_pack(tower.packed_head_fc1_transposed_, hidden);
+    if (packs) packs = allocate_pack(tower.packed_head_fc2_transposed_, hidden);
+    if (packs && image_present) // raw pixels are never differentiated, so no transposed pack
+        packs = allocate_pack(tower.packed_image_projection_, image_patch_scalars);
+    if (packs && video_present) packs = allocate_pack(tower.packed_video_projection_, video_tube_scalars);
+    if (packs && audio_present) packs = allocate_pack(tower.packed_audio_projection_, audio_frame_scalars);
+    if (!packs) return result_t::fail(std::move(packs));
 
-    if (pinned && image_present)
-        pinned = tower.pin_media_plans(tower.image_plan_base_, image_patch_scalars, max_tokens32, hidden32, plan_role,
-                                       workspace_bytes);
-    if (pinned && video_present)
-        pinned = tower.pin_media_plans(tower.video_plan_base_, video_tube_scalars, max_tokens32, hidden32, plan_role,
-                                       workspace_bytes);
-    if (pinned && audio_present)
-        pinned = tower.pin_media_plans(tower.audio_plan_base_, audio_frame_scalars, max_tokens32, hidden32, plan_role,
-                                       workspace_bytes);
-    if (!pinned) return result_t::fail(std::move(pinned));
-
-    if (image_present || video_present || audio_present) {
-        u32_t const max_entry_scalars = std::max({image_patch_scalars, video_tube_scalars, audio_frame_scalars});
+    u32_t const max_entry_scalars = std::max({image_patch_scalars, video_tube_scalars, audio_frame_scalars});
+    if (max_entry_scalars != 0) {
         tower.patch_scratch_ =
             bf16r2_tensor_arena_t::uninitialized({max_tokens32, max_entry_scalars}, bf16_alloc).value;
         if (!tower.patch_scratch_)
@@ -743,11 +639,17 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
                                   arena.used());
     }
 
-    if (workspace_bytes != 0) {
-        tower.workspace_ = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, b8_alloc).value;
-        if (!tower.workspace_)
-            return result_t::fail(status_t::bad_alloc_k, "tower workspace allocation failed ({} bytes)",
-                                  workspace_bytes);
+    // The block stack, over one scratch wide enough for the entries' and the head's weight gradients too.
+    if (tower.blocks_.try_resize(config.depth) != status_t::success_k)
+        return result_t::fail(status_t::bad_alloc_k, "block table allocation failed ({})", config.depth);
+    expected<transformer_scratch_t> scratch = transformer_scratch_t::make(arena, config.block, max_entry_scalars);
+    if (!scratch) return result_t::fail(std::move(scratch));
+    tower.scratch_ = std::make_unique<transformer_scratch_t>(std::move(scratch.value_));
+    for (u32_t layer_index = 0; layer_index != config.depth; ++layer_index) {
+        expected<transformer_block_bf16_t> block = transformer_block_bf16_t::make(arena, cudnn, *tower.scratch_,
+                                                                                  config.block);
+        if (!block) return result_t::fail(std::move(block));
+        tower.blocks_[layer_index] = std::move(block.value_);
     }
     return result_t {std::move(tower)};
 }
@@ -779,8 +681,13 @@ expected<tower_pool_t> tower_pool_t::make(gpu_arena_t &arena, transformer_block_
     pool.packed_ = b8r1_tensor_arena_t::uninitialized({static_cast<std::size_t>(packed_bytes)},
                                                       gpu_arena_alloc<b8_t> {arena})
                        .value;
-    pool.pooled_ = f32r2_tensor_arena_t::uninitialized({segments, block.hidden}, gpu_arena_alloc<f32_t> {arena}).value;
-    if (!pool.query_offsets_ || !pool.packed_ || !pool.pooled_)
+    gpu_arena_alloc<f32_t> const f32_alloc {arena};
+    pool.pooled_ = f32r2_tensor_arena_t::uninitialized({segments, block.hidden}, f32_alloc).value;
+    pool.log_sum_exp_ = f32r2_tensor_arena_t::uninitialized({segments, heads}, f32_alloc).value;
+    pool.pooled_grad_ = f32r2_tensor_arena_t::uninitialized({segments, block.hidden}, f32_alloc).value;
+    pool.query_partials_ = f32r2_tensor_arena_t::uninitialized({segments, block.hidden}, f32_alloc).value;
+    if (!pool.query_offsets_ || !pool.packed_ || !pool.pooled_ || !pool.log_sum_exp_ || !pool.pooled_grad_ ||
+        !pool.query_partials_)
         return result_t::fail(status_t::bad_alloc_k, "pool allocation failed (arena_used={})", arena.used());
     if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(pool.query_offsets_.data()), host.data(),
                                        (segments + 1u) * sizeof(u32_t));
@@ -794,21 +701,58 @@ expected_t tower_pool_t::forward(bf16r1_view_t query, bf16r2_view_t states, u32r
     std::size_t const segments = pooled_.extent(0), hidden = pooled_.extent(1);
     std::size_t const heads = hidden / transformer_head_dim_k;
     auto const *const states_data = reinterpret_cast<nk_bf16_t const *>(states.data());
-    nk_status_t status = nk_attention_pack_bf16_best(
-        states_data, states_data, heads, transformer_head_dim_k, segment_offsets.data(), segment_lengths.data(),
-        segments, hidden * sizeof(bf16_t), hidden * sizeof(bf16_t), packed_.data(), 0, segments * heads,
-        capabilities_, stream.get());
+    nk_status_t status = nk_attention_pack_bf16_best(states_data, states_data, heads, transformer_head_dim_k,
+                                                     segment_offsets.data(), segment_lengths.data(), segments,
+                                                     hidden * sizeof(bf16_t), hidden * sizeof(bf16_t), packed_.data(),
+                                                     0, segments * heads, capabilities_, stream.numkong());
     if (status == nk_success_k)
         status = nk_attention_packed_bf16_best(
-            reinterpret_cast<nk_bf16_t const *>(query.data()), packed_.data(), pooled_.data(), NUMKONG_NULL, heads,
-            heads, transformer_head_dim_k, query_offsets_.data(), 0, hidden * sizeof(f32_t), tower_pool_scale_(),
-            NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, 0, NUMKONG_SIZE_MAX, capabilities_, stream.get());
+            reinterpret_cast<nk_bf16_t const *>(query.data()), packed_.data(), pooled_.data(), log_sum_exp_.data(),
+            heads, heads, transformer_head_dim_k, query_offsets_.data(), 0, hidden * sizeof(f32_t), tower_pool_scale_(),
+            NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, 0, NUMKONG_SIZE_MAX, capabilities_, stream.numkong());
     if (status == nk_success_k)
         status = nk_cast_best(pooled_.data(), nk_f32_k, pooled.data(), nk_bf16_k, segments * hidden, capabilities_,
-                              stream.get());
+                              stream.numkong());
     if (status != nk_success_k)
         return expected_t::fail(status_t::cuda_error_k, "attention pool failed: {}", nk_status_name(status));
     return {};
+}
+
+expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad, f32r2_span_t key_grad,
+                                  f32r2_span_t value_grad, bf16r2_span_t states_grad, bf16r1_span_t query_grad,
+                                  gpu_stream_t &stream) noexcept {
+    std::size_t const segments = pooled_.extent(0), hidden = pooled_.extent(1);
+    std::size_t const heads = hidden / transformer_head_dim_k;
+    std::size_t const tokens = states_grad.extent(0);
+    // NumKong never writes rows past a segment's live keys, nor the query rows of key-less PAD segments.
+    for (void *const zeroed : {static_cast<void *>(key_grad.data()), static_cast<void *>(value_grad.data())})
+        if (CUresult result = cuMemsetD32Async(reinterpret_cast<CUdeviceptr>(zeroed), 0, tokens * hidden, stream.get());
+            result != CUDA_SUCCESS)
+            return expected_t::fail(result, "pool gradient reset failed");
+    if (CUresult result = cuMemsetD32Async(reinterpret_cast<CUdeviceptr>(query_partials_.data()), 0, segments * hidden,
+                                           stream.get());
+        result != CUDA_SUCCESS)
+        return expected_t::fail(result, "pool query gradient reset failed");
+    nk_status_t status = nk_cast_best(pooled_grad.data(), nk_bf16_k, pooled_grad_.data(), nk_f32_k, segments * hidden,
+                                      capabilities_, stream.numkong());
+    if (status == nk_success_k)
+        status = nk_attention_packed_gradients_bf16_best(
+            reinterpret_cast<nk_bf16_t const *>(query.data()), packed_.data(), pooled_.data(), pooled_grad_.data(),
+            log_sum_exp_.data(), query_partials_.data(), key_grad.data(), value_grad.data(), heads, heads,
+            transformer_head_dim_k, query_offsets_.data(), 0, hidden * sizeof(f32_t), hidden * sizeof(f32_t),
+            key_grad.stride_bytes(0), tower_pool_scale_(), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, 0, NUMKONG_SIZE_MAX,
+            capabilities_, stream.numkong());
+    if (status == nk_success_k)
+        status = nk_each_sum_f32_best(key_grad.data(), value_grad.data(), tokens * hidden, value_grad.data(),
+                                      capabilities_, stream.numkong());
+    if (status == nk_success_k)
+        status = nk_cast_best(value_grad.data(), nk_f32_k, states_grad.data(), nk_bf16_k, tokens * hidden,
+                              capabilities_, stream.numkong());
+    if (status != nk_success_k)
+        return expected_t::fail(status_t::cuda_error_k, "attention pool backward failed: {}", nk_status_name(status));
+    dim3 const channel_grid {static_cast<u32_t>(divide_round_up(hidden, kernel_block_size_default_k)), 1u, 1u};
+    return launch_kernel(reinterpret_cast<void const *>(&tower_pool_query_grad_kernel_), channel_grid,
+                         dim3 {kernel_block_size_default_k, 1u, 1u}, stream, query_partials_.view(), query_grad);
 }
 
 expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t vertices,
@@ -836,7 +780,7 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
                                 live_tokens, entry_output_.capacity() / hidden);
 
     // Zero the coordinates (PAD / gap cells stay (0,0,0)) and the packed entry state (cells no segment writes
-    // stay 0, and the media projections accumulate onto that zero with β=1).
+    // stay 0, and the media projections add onto that zero).
     if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(coords_.data()), 0,
                                           live_tokens * 3u * sizeof(i16_t), stream.get());
         result != CUDA_SUCCESS)
@@ -862,32 +806,29 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
                                     batch.video_shapes.view(), config_.video_tube_frames, coords_.span(), stream);
     if (!staged) return staged;
 
-    // Entry, per-segment gather: text segments look up the embedding table into their cells; each present
-    // media modality zeroes the scratch, stages only its own cells in place (image / video pixels normalized,
-    // audio raw frames cast as-is; content shares the flat grid position of its state), and accumulates its
-    // projection (β=1) so the zero non-modality rows leave every other cell untouched — no scatter, no atomics.
+    // Entry, per-segment gather: text segments look up the embedding table into their cells, which widen into
+    // the Float32 state `activations_b_`; each present media modality zeroes the scratch, stages only its own
+    // cells in place (image / video pixels normalized, audio raw frames cast as-is; content shares the flat grid
+    // position of its state), and adds its projection, so the zero non-modality rows leave every other cell
+    // untouched — no scatter, no atomics.
 
     live_token_ids_ = batch.tokens.flatten<1>();
     staged = launch_kernel(reinterpret_cast<void const *>(&tower_text_entry_kernel_), segment_grid, block_shape, stream,
                            live_token_ids_, entry_weight_.span(), segment_offsets, segment_lengths, segment_modality,
                            entry_output_.span());
+    if (staged)
+        staged = numkong_result(nk_cast_best(entry_output_.data(), nk_bf16_k, activations_b_.data(), nk_f32_k,
+                                             live_tokens * hidden, capabilities_, stream.numkong()),
+                                "entry widening");
+    if (staged)
+        staged = project_media_entries(batch, patch_scratch_, image_pixel_mean_, image_pixel_inverse_std_,
+                                       packed_image_projection_, video_pixel_mean_, video_pixel_inverse_std_,
+                                       packed_video_projection_, packed_audio_projection_, activations_b_.span(),
+                                       scratch_->products.span(), capabilities_, stream);
     if (!staged) return staged;
 
-    // One β=1 projection accumulate per present media modality (zero non-modality rows compose); the shared
-    // helper stages each modality's cells and folds its projection, identical to the E4M3 twin's forward.
-    staged = project_media_entries(batch, plans_.data(), image_plan_base_, video_plan_base_, audio_plan_base_,
-                                   patch_scratch_, workspace_, entry_output_, image_pixel_mean_,
-                                   image_pixel_inverse_std_, image_projection_, video_pixel_mean_,
-                                   video_pixel_inverse_std_, video_projection_, audio_projection_, *blas_, stream);
-    if (!staged) return staged;
-
-    // The block stack carries the Float32 residual stream: the entry state widens into `activations_b_`, layer n
-    // reads layer n-1's output, ping-ponging the two buffers, and the last output is a stash the backward reads.
-
-    if (nk_status_t const status = nk_cast_best(entry_output_.data(), nk_bf16_k, activations_b_.data(), nk_f32_k,
-                                                live_tokens * hidden, capabilities_, stream.get());
-        status != nk_success_k)
-        return expected_t::fail(status_t::cuda_error_k, "entry widening failed: {}", nk_status_name(status));
+    // The block stack carries the Float32 residual stream: layer n reads layer n-1's output, ping-ponging the two
+    // buffers, and the last output is a stash the backward reads.
     f32r2_view_t layer_input = activations_b_.view();
     for (u32_t layer_index = 0; layer_index != config_.depth; ++layer_index) {
         f32r2_tensor_arena_t &layer_output = layer_index % 2 == 0 ? activations_a_ : activations_b_;
@@ -900,12 +841,12 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
 
     // Final norm narrows the stack output into the per-token states, under the scale widened for rmscast.
     nk_status_t status = nk_cast_best(final_norm_scale_.data(), nk_bf16_k, widened_final_norm_scale_.data(), nk_f32_k,
-                                      hidden, capabilities_, stream.get());
+                                      hidden, capabilities_, stream.numkong());
     if (status == nk_success_k)
         status = nk_each_rmscast_bf16_best(stack_output_.data(), widened_final_norm_scale_.data(),
                                            reinterpret_cast<nk_bf16_t *>(normalized_.data()), live_tokens, 1, hidden,
                                            hidden * sizeof(f32_t), hidden * sizeof(bf16_t), config_.block.rms_eps,
-                                           capabilities_, stream.get());
+                                           capabilities_, stream.numkong());
     if (status != nk_success_k)
         return expected_t::fail(status_t::cuda_error_k, "final norm failed: {}", nk_status_name(status));
 
@@ -926,16 +867,9 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
                            pooled_.view(), head_norm_scale_.view(), head_normalized_.span(), head_inverse_rms_.span(),
                            config_.block.rms_eps);
     if (!staged) return staged;
-    staged = plans_[plan_head_forward_k].matmul(*blas_, head_normalized_.view(), head_fc1_.view(), head_hidden_.span(),
-                                                0.0f, workspace_.span(), stream);
-    if (!staged) return staged;
-    dim3 const head_cell_grid {static_cast<u32_t>(divide_round_up(segments * hidden, kernel_block_size_default_k)), 1u,
-                               1u};
-    staged = launch_kernel(reinterpret_cast<void const *>(&tower_silu_kernel_), head_cell_grid, block_shape, stream,
-                           head_hidden_.span().flatten<1>(), head_activated_.span().flatten<1>());
-    if (!staged) return staged;
-    return plans_[plan_head_forward_k].matmul(*blas_, head_activated_.view(), head_fc2_.view(), vertices, 0.0f,
-                                              workspace_.span(), stream);
+    return head_forward_(head_normalized_.view(), packed_head_fc1_, packed_head_fc2_, head_hidden_.span(),
+                         head_activated_.span(), f32r2_span_t {scratch_->products.data(), segments, hidden}, vertices,
+                         capabilities_, stream);
 }
 
 expected_t encoder_tower_bf16_t::patchify_media_targets(multimodal_batch_on_gpu_t const &batch,
@@ -953,7 +887,7 @@ expected_t encoder_tower_bf16_t::patchify_media_targets(multimodal_batch_on_gpu_
     modality_view_t const segment_modality = batch.segment_modality.view();
 
     expected_t staged {};
-    if (image_plan_base_ != plan_absent_k && batch.images.data() != nullptr && image_patches.data() != nullptr &&
+    if (image_projection_.data() != nullptr && batch.images.data() != nullptr && image_patches.data() != nullptr &&
         image_patches.extent(0) != 0) {
         std::size_t const spatial = static_cast<std::size_t>(batch.images.extent(2)) * batch.images.extent(3);
         staged = stage_pixel_patches(batch.images.view().reshape<3>({live_tokens, spatial, batch.images.extent(4)}),
@@ -962,7 +896,7 @@ expected_t encoder_tower_bf16_t::patchify_media_targets(multimodal_batch_on_gpu_
                                      stream);
         if (!staged) return staged;
     }
-    if (video_plan_base_ != plan_absent_k && batch.videos.data() != nullptr && video_patches.data() != nullptr &&
+    if (video_projection_.data() != nullptr && batch.videos.data() != nullptr && video_patches.data() != nullptr &&
         video_patches.extent(0) != 0) {
         std::size_t const spatial = static_cast<std::size_t>(batch.videos.extent(2)) * batch.videos.extent(3) *
                                     batch.videos.extent(4);
@@ -1011,23 +945,34 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     if (pooled_present) {
         // The head backward, mirroring the forward in reverse through the segment ping-pong: fc2's two
         // grads, the SiLU derivative on the stashed pre-activation, fc1's two grads, then the head norm.
-        dim3 const head_cell_grid {static_cast<u32_t>(divide_round_up(segments * hidden, kernel_block_size_default_k)),
-                                   1u, 1u};
-        staged = plans_[plan_head_weight_grad_k].matmul(*blas_, vertices_grad, head_activated_.view(),
-                                                        head_fc2_grad_.span(), 0.0f, workspace_.span(), stream);
-        if (staged)
-            staged = plans_[plan_head_data_grad_k].matmul(*blas_, vertices_grad, head_fc2_.view(),
-                                                          segment_grad_a_.span(), 0.0f, workspace_.span(), stream);
+        std::size_t const head_cells = segments * hidden;
+        dim3 const head_cell_grid {static_cast<u32_t>(divide_round_up(head_cells, kernel_block_size_default_k)), 1u,
+                                   1u};
+        transformer_scratch_t &scratch = *scratch_;
+        f32r2_span_t const head_products {scratch.products.data(), segments, hidden};
+        auto weight_gradient = [&](bf16r2_view_t product_grad, bf16r2_view_t product_input,
+                                   bf16r2_span_t weight_grad) noexcept {
+            return weight_gradient_bf16(product_grad, product_input, weight_grad, scratch.transposed_grad.span(),
+                                        scratch.transposed_input.span(), scratch.packed_input.span(),
+                                        scratch.weight_grad_products.span(), capabilities_, stream);
+        };
+        auto data_gradient = [&](bf16r2_view_t product_grad, b8r1_tensor_arena_t const &packed_transposed) noexcept {
+            expected_t multiplied = multiply_bf16(product_grad, packed_transposed.view(), head_products, capabilities_,
+                                                  stream);
+            if (multiplied)
+                multiplied = numkong_result(nk_cast_best(head_products.data(), nk_f32_k, segment_grad_a_.data(),
+                                                         nk_bf16_k, head_cells, capabilities_, stream.numkong()),
+                                            "head gradient narrowing");
+            return multiplied;
+        };
+        staged = weight_gradient(vertices_grad, head_activated_.view(), head_fc2_grad_.span());
+        if (staged) staged = data_gradient(vertices_grad, packed_head_fc2_transposed_);
         if (staged)
             staged = launch_kernel(reinterpret_cast<void const *>(&tower_silu_backward_kernel_), head_cell_grid,
                                    block_shape, stream, head_hidden_.span().flatten<1>(),
                                    segment_grad_a_.span().flatten<1>(), segment_grad_b_.span().flatten<1>());
-        if (staged)
-            staged = plans_[plan_head_weight_grad_k].matmul(*blas_, segment_grad_b_.view(), head_normalized_.view(),
-                                                            head_fc1_grad_.span(), 0.0f, workspace_.span(), stream);
-        if (staged)
-            staged = plans_[plan_head_data_grad_k].matmul(*blas_, segment_grad_b_.view(), head_fc1_.view(),
-                                                          segment_grad_a_.span(), 0.0f, workspace_.span(), stream);
+        if (staged) staged = weight_gradient(segment_grad_b_.view(), head_normalized_.view(), head_fc1_grad_.span());
+        if (staged) staged = data_gradient(segment_grad_b_.view(), packed_head_fc1_transposed_);
         if (staged)
             staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_backward_kernel), segment_grid, block_shape,
                                    stream, pooled_.view(), head_norm_scale_.view(), head_inverse_rms_.view(),
@@ -1038,22 +983,10 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
                                    segment_grad_a_.view(), head_norm_scale_grad_.span());
         if (!staged) return staged;
 
-        // The pool backward scatters d(normalized) onto each segment's live token rows (uncovered rows
-        // stay the zeros this reset writes) and folds the query gradient; head_activated_ is free after
-        // fc2's weight grad, so it carries the per-segment query partials.
-        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(normalized_grad_.data()), 0,
-                                              live_tokens * hidden * sizeof(bf16_t), stream.get());
-            result != CUDA_SUCCESS)
-            return expected_t::fail(result, "pool gradient reset failed");
-        f32_t const attention_scale = tower_pool_scale_();
-        dim3 const pool_grid {static_cast<u32_t>(segments), hidden / transformer_head_dim_k, 1u};
-        dim3 const pool_block {transformer_head_dim_k, 1u, 1u};
-        staged = launch_kernel(reinterpret_cast<void const *>(&tower_pool_backward_kernel_), pool_grid, pool_block,
-                               stream, normalized_.view(), pool_query_.view(), segment_grad_b_.view(), segment_offsets,
-                               segment_lengths, normalized_grad_.span(), head_activated_.span(), attention_scale);
-        if (staged)
-            staged = launch_kernel(reinterpret_cast<void const *>(&tower_pool_query_grad_kernel_), channel_grid,
-                                   block_shape, stream, head_activated_.view(), pool_query_grad_.span());
+        // The pool backward writes d(normalized) on every live token row, through both token-gradient
+        // buffers, which the final-norm backward overwrites next.
+        staged = pool_.backward(pool_query_.view(), segment_grad_b_.view(), token_grad_a_.span(), token_grad_b_.span(),
+                                normalized_grad_.span(), pool_query_grad_.span(), stream);
         if (!staged) return staged;
 
         // The co-trained join: the masked force adds onto the pooled force at the final-norm states.
@@ -1074,7 +1007,7 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     bf16r2_view_t const normalized_grad_total = pooled_present ? normalized_grad_.view()
                                                                : hidden_grad(nk::range(0, live_tokens), nk::slice);
     if (nk_status_t const status = nk_cast_best(normalized_grad_total.data(), nk_bf16_k, token_grad_a_.data(), nk_f32_k,
-                                                live_tokens * hidden, capabilities_, stream.get());
+                                                live_tokens * hidden, capabilities_, stream.numkong());
         status != nk_success_k)
         return expected_t::fail(status_t::cuda_error_k, "final-norm gradient widening failed: {}",
                                 nk_status_name(status));
@@ -1101,7 +1034,7 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     }
     // The entry backward reads BFloat16, so the stack's gradient narrows into the free normalized-grad buffer.
     if (nk_status_t const status = nk_cast_best(flowing.data(), nk_f32_k, normalized_grad_.data(), nk_bf16_k,
-                                                live_tokens * hidden, capabilities_, stream.get());
+                                                live_tokens * hidden, capabilities_, stream.numkong());
         status != nk_success_k)
         return expected_t::fail(status_t::cuda_error_k, "entry gradient narrowing failed: {}", nk_status_name(status));
     bf16r2_view_t const entry_grad = normalized_grad_.view();
@@ -1149,19 +1082,27 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     // zero) and fold the whole entry gradient against them — the zero patch rows drop every non-modality term,
     // so dW gathers exactly its modality's cells. The backward twin of project_media_entries; coords_ was
     // filled by the paired forward, so the backward derives no coordinates.
-    staged = project_media_weight_grads(
-        batch, plans_.data(), image_plan_base_, video_plan_base_, audio_plan_base_, patch_scratch_, workspace_,
-        entry_grad, image_pixel_mean_, image_pixel_inverse_std_, image_projection_grad_, video_pixel_mean_,
-        video_pixel_inverse_std_, video_projection_grad_, audio_projection_grad_, *blas_, stream);
-    if (!staged) return staged;
-
-    return staged;
+    return project_media_weight_grads(batch, patch_scratch_, entry_grad, image_pixel_mean_, image_pixel_inverse_std_,
+                                      image_projection_grad_, video_pixel_mean_, video_pixel_inverse_std_,
+                                      video_projection_grad_, audio_projection_grad_, *scratch_, capabilities_, stream);
 }
 
 expected_t encoder_tower_bf16_t::pack_weights(gpu_stream_t &stream) noexcept {
     for (transformer_block_bf16_t &layer : blocks_)
         if (expected_t packed = layer.pack_weights(stream); !packed) return packed;
-    return {};
+    bf16r1_span_t const transposed = scratch_->transposed_weight.span();
+    expected_t packed = pack_weight_bf16(head_fc1_.view(), transposed, packed_head_fc1_.span(),
+                                         packed_head_fc1_transposed_.span(), capabilities_, stream);
+    if (packed)
+        packed = pack_weight_bf16(head_fc2_.view(), transposed, packed_head_fc2_.span(),
+                                  packed_head_fc2_transposed_.span(), capabilities_, stream);
+    bf16r2_tensor_arena_t const *const projections[] = {&image_projection_, &video_projection_, &audio_projection_};
+    b8r1_tensor_arena_t *const packs[] = {&packed_image_projection_, &packed_video_projection_,
+                                          &packed_audio_projection_};
+    for (std::size_t modality = 0; packed && modality != 3; ++modality)
+        if (projections[modality]->data() != nullptr)
+            packed = pack_bf16(projections[modality]->view(), packs[modality]->span(), capabilities_, stream);
+    return packed;
 }
 
 expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) noexcept {
@@ -1181,14 +1122,14 @@ expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) 
         return push(name, bf16r2_span_t {weight.data(), rows, cols}, bf16r2_view_t {grad.data(), rows, cols});
     };
     status_t pushed = push("embedding", entry_weight_.span(), entry_weight_grad_.view());
-    // Media projections next, in modality order — each present iff its plan base was pinned. These rank-2
+    // Media projections next, in modality order — each present iff it was allocated. These rank-2
     // [hidden, fan_in] matrices join directly (like the head products), replica-identical with the grads
     // backward() produces, so the optimizer trains what was frozen before.
-    if (pushed == status_t::success_k && image_plan_base_ != plan_absent_k)
+    if (pushed == status_t::success_k && image_projection_.data() != nullptr)
         pushed = push("image_projection", image_projection_.span(), image_projection_grad_.view());
-    if (pushed == status_t::success_k && video_plan_base_ != plan_absent_k)
+    if (pushed == status_t::success_k && video_projection_.data() != nullptr)
         pushed = push("video_projection", video_projection_.span(), video_projection_grad_.view());
-    if (pushed == status_t::success_k && audio_plan_base_ != plan_absent_k)
+    if (pushed == status_t::success_k && audio_projection_.data() != nullptr)
         pushed = push("audio_projection", audio_projection_.span(), audio_projection_grad_.view());
     sz::string name_text;
     for (u32_t layer_index = 0; pushed == status_t::success_k && layer_index != config_.depth; ++layer_index) {
@@ -1265,40 +1206,19 @@ expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) 
     return result_t {std::move(copy)};
 }
 
-expected_t encoder_tower_e4m3_t::pin_plan(cublaslt_plan_config_t plan_config, std::size_t &role,
-                                          std::size_t &workspace_bytes) noexcept {
-    plan_config.c_type = CUDA_R_16BF;
-    expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(*blas_, plan_config);
-    if (!plan) return expected_t::fail(std::move(plan));
-    workspace_bytes = std::max(workspace_bytes, plan.value_.workspace_bytes());
-    plans_[role++] = std::move(plan.value_);
-    return {};
-}
-
-expected_t encoder_tower_e4m3_t::pin_media_plan(std::size_t &plan_base, u32_t fan_in, u32_t max_tokens, u32_t hidden,
-                                                std::size_t &role, std::size_t &workspace_bytes) noexcept {
-    plan_base = role;
-    return pin_plan({max_tokens, fan_in, fan_in, hidden, fan_in, fan_in, max_tokens, hidden, hidden, false, true}, role,
-                    workspace_bytes);
-}
-
 expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_t &arena,
                                                                       gpu_stream_t &stream) noexcept {
     using result_t = expected<encoder_tower_e4m3_t>;
     encoder_tower_e4m3_t twin;
     twin.config_ = config_;
-    twin.blas_ = blas_;
+    twin.capabilities_ = capabilities_;
 
     std::size_t const hidden = config_.block.hidden;
     std::size_t const tokens = config_.block.max_tokens;
     std::size_t const segments = config_.block.max_segments;
-    u32_t const hidden32 = config_.block.hidden;
-    u32_t const max_tokens32 = config_.block.max_tokens;
-    u32_t const segments32 = config_.block.max_segments;
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
     gpu_arena_alloc<i16_t> i16_alloc {arena};
-    gpu_arena_alloc<b8_t> b8_alloc {arena};
 
     // The block stack quantizes per layer; everything else below is a BFloat16 snapshot.
     if (twin.blocks_.try_resize(config_.depth) != status_t::success_k)
@@ -1324,60 +1244,39 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
                                                                       "head norm");
     if (!head_norm_copy) return result_t::fail(std::move(head_norm_copy));
     twin.head_norm_scale_ = std::move(head_norm_copy.value_);
-    expected<bf16r2_tensor_arena_t> fc1_copy = snapshot_weight_(head_fc1_.view(), arena, stream, "head fc1");
-    if (!fc1_copy) return result_t::fail(std::move(fc1_copy));
-    twin.head_fc1_ = std::move(fc1_copy.value_);
-    expected<bf16r2_tensor_arena_t> fc2_copy = snapshot_weight_(head_fc2_.view(), arena, stream, "head fc2");
-    if (!fc2_copy) return result_t::fail(std::move(fc2_copy));
-    twin.head_fc2_ = std::move(fc2_copy.value_);
 
-    // The fused head product first, then — per present media modality — the projection snapshot and its one
-    // forward plan, in modality order, exactly as the training tower's make pins its own.
-    std::size_t workspace_bytes = 0;
-    std::size_t plan_role = 0;
-    expected_t pinned = twin.pin_plan(
-        {segments32, hidden32, hidden32, hidden32, hidden32, hidden32, segments32, hidden32, hidden32, false, true},
-        plan_role, workspace_bytes);
-    if (!pinned) return result_t::fail(std::move(pinned));
-
-    u32_t max_entry_scalars = 0;
+    // Every product's B operand packs once here, since the twin's weights never change: the two head projections,
+    // then — per present media modality — the projection snapshot, in modality order.
+    auto snapshot_and_pack = [&](bf16r2_view_t weight, bf16r2_tensor_arena_t &copy, b8r1_tensor_arena_t &packed,
+                                 sz::string_view name) noexcept -> expected_t {
+        expected<bf16r2_tensor_arena_t> snapshot = snapshot_weight_(weight, arena, stream, name);
+        if (!snapshot) return expected_t::fail(std::move(snapshot));
+        copy = std::move(snapshot.value_);
+        expected<b8r1_tensor_arena_t> allocated = allocate_pack_bf16(weight.extent(0), weight.extent(1),
+                                                                     twin.capabilities_, arena);
+        if (!allocated) return expected_t::fail(std::move(allocated));
+        packed = std::move(allocated.value_);
+        return pack_bf16(copy.view(), packed.span(), twin.capabilities_, stream);
+    };
+    expected_t packed = snapshot_and_pack(head_fc1_.view(), twin.head_fc1_, twin.packed_head_fc1_, "head fc1");
+    if (packed) packed = snapshot_and_pack(head_fc2_.view(), twin.head_fc2_, twin.packed_head_fc2_, "head fc2");
+    if (packed && image_projection_.data() != nullptr)
+        packed = snapshot_and_pack(image_projection_.view(), twin.image_projection_, twin.packed_image_projection_,
+                                   "image projection");
+    if (packed && video_projection_.data() != nullptr)
+        packed = snapshot_and_pack(video_projection_.view(), twin.video_projection_, twin.packed_video_projection_,
+                                   "video projection");
+    if (packed && audio_projection_.data() != nullptr)
+        packed = snapshot_and_pack(audio_projection_.view(), twin.audio_projection_, twin.packed_audio_projection_,
+                                   "audio projection");
+    if (!packed) return result_t::fail(std::move(packed));
     if (image_projection_.data() != nullptr) {
-        u32_t const fan_in = static_cast<u32_t>(image_projection_.view().extent(1));
-        expected<bf16r2_tensor_arena_t> projection = snapshot_weight_(image_projection_.view(), arena, stream,
-                                                                      "image projection");
-        if (!projection) return result_t::fail(std::move(projection));
-        twin.image_projection_ = std::move(projection.value_);
-        pinned = twin.pin_media_plan(twin.image_plan_base_, fan_in, max_tokens32, hidden32, plan_role, workspace_bytes);
-        if (!pinned) return result_t::fail(std::move(pinned));
-        max_entry_scalars = std::max(max_entry_scalars, fan_in);
-    }
-    if (video_projection_.data() != nullptr) {
-        u32_t const fan_in = static_cast<u32_t>(video_projection_.view().extent(1));
-        expected<bf16r2_tensor_arena_t> projection = snapshot_weight_(video_projection_.view(), arena, stream,
-                                                                      "video projection");
-        if (!projection) return result_t::fail(std::move(projection));
-        twin.video_projection_ = std::move(projection.value_);
-        pinned = twin.pin_media_plan(twin.video_plan_base_, fan_in, max_tokens32, hidden32, plan_role, workspace_bytes);
-        if (!pinned) return result_t::fail(std::move(pinned));
-        max_entry_scalars = std::max(max_entry_scalars, fan_in);
-    }
-    if (audio_projection_.data() != nullptr) {
-        u32_t const fan_in = static_cast<u32_t>(audio_projection_.view().extent(1));
-        expected<bf16r2_tensor_arena_t> projection = snapshot_weight_(audio_projection_.view(), arena, stream,
-                                                                      "audio projection");
-        if (!projection) return result_t::fail(std::move(projection));
-        twin.audio_projection_ = std::move(projection.value_);
-        pinned = twin.pin_media_plan(twin.audio_plan_base_, fan_in, max_tokens32, hidden32, plan_role, workspace_bytes);
-        if (!pinned) return result_t::fail(std::move(pinned));
-        max_entry_scalars = std::max(max_entry_scalars, fan_in);
-    }
-    if (twin.image_plan_base_ != encoder_tower_e4m3_t::plan_absent_k) {
         expected_t uploaded = upload_pixel_constants(twin.image_pixel_mean_, twin.image_pixel_inverse_std_,
                                                      config_.image_pixel_mean, config_.image_pixel_std,
                                                      config_.image_channels, f32_alloc, arena);
         if (!uploaded) return result_t::fail(std::move(uploaded));
     }
-    if (twin.video_plan_base_ != encoder_tower_e4m3_t::plan_absent_k) {
+    if (video_projection_.data() != nullptr) {
         expected_t uploaded = upload_pixel_constants(twin.video_pixel_mean_, twin.video_pixel_inverse_std_,
                                                      config_.video_pixel_mean, config_.video_pixel_std,
                                                      config_.video_channels, f32_alloc, arena);
@@ -1401,21 +1300,18 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
     twin.head_inverse_rms_ = f32r1_tensor_arena_t::uninitialized({segments}, f32_alloc).value;
     twin.activations_a_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
     twin.activations_b_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
+    twin.products_ = f32r1_tensor_arena_t::uninitialized({tokens * hidden}, f32_alloc).value;
     if (!twin.coords_ || !twin.entry_output_ || !twin.normalized_ || !twin.pooled_ || !twin.head_normalized_ ||
         !twin.head_hidden_ || !twin.head_activated_ || !twin.final_inverse_rms_ || !twin.head_inverse_rms_ ||
-        !twin.activations_a_ || !twin.activations_b_)
+        !twin.activations_a_ || !twin.activations_b_ || !twin.products_)
         return result_t::fail(status_t::bad_alloc_k, "twin activation allocation failed (arena_used={})", arena.used());
-    if (max_entry_scalars != 0) {
-        twin.patch_scratch_ = bf16r2_tensor_arena_t::uninitialized({tokens, max_entry_scalars}, bf16_alloc).value;
-        if (!twin.patch_scratch_)
-            return result_t::fail(status_t::bad_alloc_k, "twin patch scratch allocation failed (arena_used={})",
+    if (patch_scratch_.data() != nullptr) {
+        twin.patch_scratch_ =
+            bf16r2_tensor_arena_t::uninitialized({tokens, patch_scratch_.extent(1)}, bf16_alloc).value;
+        twin.entry_state_ = f32r2_tensor_arena_t::uninitialized({tokens, hidden}, f32_alloc).value;
+        if (!twin.patch_scratch_ || !twin.entry_state_)
+            return result_t::fail(status_t::bad_alloc_k, "twin media scratch allocation failed (arena_used={})",
                                   arena.used());
-    }
-    if (workspace_bytes != 0) {
-        twin.workspace_ = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, b8_alloc).value;
-        if (!twin.workspace_)
-            return result_t::fail(status_t::bad_alloc_k, "twin workspace allocation failed ({} bytes)",
-                                  workspace_bytes);
     }
 
     expected<tower_pool_t> pool = tower_pool_t::make(arena, twin.config_.block);
@@ -1463,7 +1359,7 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
     modality_view_t const segment_modality = batch.segment_modality.view();
 
     // Coordinates + per-segment entry, mirroring the training twin: one fill_coords, a text-only embedding
-    // gather, and a β=1 projection accumulate per present media modality (zero non-modality rows compose).
+    // gather, and a projection added per present media modality (zero non-modality rows compose).
     u32r1_span_t const offsets_span {const_cast<u32_t *>(segment_offsets.data()), segment_offsets.extent(0)};
     u32r1_span_t const lengths_span {const_cast<u32_t *>(segment_lengths.data()), segment_lengths.extent(0)};
     modality_span_t const modality_span {const_cast<modality_t *>(segment_modality.data()), segment_modality.extent(0)};
@@ -1477,12 +1373,24 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
                            entry_output_.span());
     if (!staged) return staged;
 
-    // One β=1 projection accumulate per present media modality — the same shared helper the training twin runs.
-    staged = project_media_entries(batch, plans_.data(), image_plan_base_, video_plan_base_, audio_plan_base_,
-                                   patch_scratch_, workspace_, entry_output_, image_pixel_mean_,
-                                   image_pixel_inverse_std_, image_projection_, video_pixel_mean_,
-                                   video_pixel_inverse_std_, video_projection_, audio_projection_, *blas_, stream);
-    if (!staged) return staged;
+    // The media projections add in Float32, the same shared helper the training twin runs, then narrow once.
+    if (entry_state_.data() != nullptr) {
+        std::size_t const cells = live_tokens * hidden;
+        f32r2_span_t const entry_state {entry_state_.data(), live_tokens, hidden};
+        staged = numkong_result(nk_cast_best(entry_output_.data(), nk_bf16_k, entry_state.data(), nk_f32_k, cells,
+                                             capabilities_, stream.numkong()),
+                                "entry widening");
+        if (staged)
+            staged = project_media_entries(batch, patch_scratch_, image_pixel_mean_, image_pixel_inverse_std_,
+                                           packed_image_projection_, video_pixel_mean_, video_pixel_inverse_std_,
+                                           packed_video_projection_, packed_audio_projection_, entry_state,
+                                           products_.span(), capabilities_, stream);
+        if (staged)
+            staged = numkong_result(nk_cast_best(entry_state.data(), nk_f32_k, entry_output_.data(), nk_bf16_k, cells,
+                                                 capabilities_, stream.numkong()),
+                                    "entry narrowing");
+        if (!staged) return staged;
+    }
 
     // The E4M3 block stack: layer n reads layer n-1's output, ping-ponging two dedicated buffers.
     bf16r2_view_t layer_input = entry_output_.view();
@@ -1517,14 +1425,7 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
                            pooled_.view(), head_norm_scale_.view(), head_normalized_.span(), head_inverse_rms_.span(),
                            config_.block.rms_eps);
     if (!staged) return staged;
-    staged = plans_[plan_head_forward_k].matmul(*blas_, head_normalized_.view(), head_fc1_.view(), head_hidden_.span(),
-                                                0.0f, workspace_.span(), stream);
-    if (!staged) return staged;
-    dim3 const head_cell_grid {static_cast<u32_t>(divide_round_up(segments * hidden, kernel_block_size_default_k)), 1u,
-                               1u};
-    staged = launch_kernel(reinterpret_cast<void const *>(&tower_silu_kernel_), head_cell_grid, block_shape, stream,
-                           head_hidden_.span().flatten<1>(), head_activated_.span().flatten<1>());
-    if (!staged) return staged;
-    return plans_[plan_head_forward_k].matmul(*blas_, head_activated_.view(), head_fc2_.view(), vertices, 0.0f,
-                                              workspace_.span(), stream);
+    return head_forward_(head_normalized_.view(), packed_head_fc1_, packed_head_fc2_, head_hidden_.span(),
+                         head_activated_.span(), f32r2_span_t {products_.data(), segments, hidden}, vertices,
+                         capabilities_, stream);
 }

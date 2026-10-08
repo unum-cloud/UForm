@@ -1,6 +1,6 @@
 /**
- *  @brief The device-side kernels declared in @ref schedule.cuh : the barrier-round increment that lets a
- *      captured collective region self-advance its round, and the BFloat16 transpose.
+ *  @brief The bodies declared in @ref schedule.cuh : the barrier-round increment that lets a captured
+ *      collective region self-advance its round, the BFloat16 transpose, and the NumKong products built on it.
  *  @file cuda_core/schedule.cu
  *  @author Ash Vardanian
  *  @date July 5, 2026
@@ -9,9 +9,10 @@
 
 #include <cuda.h> // `CUdeviceptr`, driver launch surface
 
-#include "cuda_core/schedule.cuh" // `barrier_round_t`, `launch_kernel`, `u32r1_span_t`
+#include "cuda_core/schedule.cuh" // `barrier_round_t`, `launch_kernel`, `transpose_bf16`, the NumKong products
 
-using namespace unum::uform::core;
+namespace uc = unum::uform::core;
+using namespace uc;
 
 /**
  *  @brief One thread advances the round scalar and publishes it system-wide, so a captured replay
@@ -43,7 +44,7 @@ expected_t barrier_round_t::advance(gpu_stream_t &stream) noexcept {
 }
 
 __global__ void __launch_bounds__(256)
-    unum::uform::core::transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destination) {
+    uc::transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destination) {
     __shared__ u32_t tile[64][33];
     std::size_t const rows = source.extent(0), columns = source.extent(1);
     std::size_t const source_stride = source.stride_bytes(0) / sizeof(bf16_t);
@@ -90,91 +91,81 @@ __global__ void __launch_bounds__(256)
     }
 }
 
-/** @brief Element bytes of one cuBLASLt operand dtype — the benchmark's transient-buffer sizing. */
-[[nodiscard]] static std::size_t element_bytes_(u32_t data_type) noexcept {
-    switch (static_cast<cudaDataType_t>(data_type)) {
-    case CUDA_R_8F_E4M3: return 1;
-    case CUDA_R_16BF: return 2;
-    default: return 4;
-    }
+expected<std::size_t> uc::pack_bytes_bf16(std::size_t columns, std::size_t depth,
+                                                         nk_capability_t capabilities) noexcept {
+    nk_size_t bytes = 0;
+    if (nk_status_t const status = nk_dots_pack_size_bf16_best(columns, depth, capabilities, &bytes);
+        status != nk_success_k)
+        return expected<std::size_t>::fail(status_t::cuda_error_k, "pack sizing [{}x{}] failed: {}", columns, depth,
+                                           nk_status_name(status));
+    return expected<std::size_t> {static_cast<std::size_t>(bytes)};
 }
 
-expected<cublaslt_measured_t> unum::uform::core::cublaslt_benchmark_candidates(
-    cublaslt_session_t &session, cublasLtMatmulDesc_t description, cublasLtMatrixLayout_t a_layout,
-    cublasLtMatrixLayout_t b_layout, cublasLtMatrixLayout_t c_layout, cublaslt_plan_config_t const &config,
-    std::span<cublasLtMatmulHeuristicResult_t const> candidates) noexcept {
-    using result_t = expected<cublaslt_measured_t>;
-    if (candidates.empty()) return result_t::fail(status_t::invalid_input_k, "nothing to benchmark");
+expected<b8r1_tensor_arena_t> uc::allocate_pack_bf16(std::size_t columns, std::size_t depth,
+                                                                    nk_capability_t capabilities,
+                                                                    gpu_arena_t &arena) noexcept {
+    using result_t = expected<b8r1_tensor_arena_t>;
+    expected<std::size_t> bytes = pack_bytes_bf16(columns, depth, capabilities);
+    if (!bytes) return result_t::fail(std::move(bytes));
+    b8r1_tensor_arena_t packed =
+        b8r1_tensor_arena_t::uninitialized({bytes.value_}, gpu_arena_alloc<b8_t> {arena}).value;
+    if (!packed)
+        return result_t::fail(status_t::bad_alloc_k, "[{}x{}] pack allocation failed ({} bytes, arena_used={})",
+                              columns, depth, bytes.value_, arena.used());
+    return result_t {std::move(packed)};
+}
 
-    // Transient operands at the stored extents, plus one workspace at the largest candidate appetite.
-    std::size_t const a_bytes = static_cast<std::size_t>(config.a_rows) * config.a_row_stride *
-                                element_bytes_(static_cast<u32_t>(config.a_type));
-    std::size_t const b_bytes = static_cast<std::size_t>(config.b_rows) * config.b_row_stride *
-                                element_bytes_(static_cast<u32_t>(config.b_type));
-    std::size_t const c_bytes = static_cast<std::size_t>(config.c_rows) * config.c_row_stride *
-                                element_bytes_(static_cast<u32_t>(config.c_type));
-    std::size_t workspace_bytes = 0;
-    for (cublasLtMatmulHeuristicResult_t const &candidate : candidates)
-        workspace_bytes = candidate.workspaceSize > workspace_bytes ? candidate.workspaceSize : workspace_bytes;
+expected_t uc::pack_bf16(bf16r2_view_t b, b8r1_span_t packed, nk_capability_t capabilities,
+                                        gpu_stream_t &stream) noexcept {
+    std::size_t const columns = b.extent(0);
+    return numkong_result(
+        nk_dots_pack_bf16_best(reinterpret_cast<nk_bf16_t const *>(b.data()), columns, b.extent(1), b.stride_bytes(0),
+                               packed.data(), 0, columns, capabilities, stream.numkong()),
+        "packing");
+}
 
-    CUdeviceptr a = 0, b = 0, c = 0, workspace = 0;
-    CUstream stream = nullptr;
-    expected<gpu_event_t> begin = gpu_event_t::make_timed();
-    expected<gpu_event_t> end = gpu_event_t::make_timed();
-    result_t outcome = result_t::fail(status_t::cuda_error_k, "benchmark bring-up failed");
-    if (!begin || !end) return outcome;
-    if (cuMemAlloc(&a, a_bytes) != CUDA_SUCCESS || cuMemAlloc(&b, b_bytes) != CUDA_SUCCESS ||
-        cuMemAlloc(&c, c_bytes) != CUDA_SUCCESS ||
-        (workspace_bytes != 0 && cuMemAlloc(&workspace, workspace_bytes) != CUDA_SUCCESS))
-        outcome = result_t::fail(status_t::bad_alloc_k, "benchmark operands do not fit ({}+{}+{}+{} transient bytes)",
-                                 a_bytes, b_bytes, c_bytes, workspace_bytes);
-    else if (cuStreamCreate(&stream, CU_STREAM_NON_BLOCKING) != CUDA_SUCCESS)
-        outcome = result_t::fail(status_t::cuda_error_k, "benchmark stream creation failed");
-    else {
-        // Nonzero bytes everywhere — the timing is value-blind, the operands must merely be resident.
-        cuMemsetD8(a, 0x3C, a_bytes);
-        cuMemsetD8(b, 0x3C, b_bytes);
-        cuMemsetD8(c, 0, c_bytes);
-        f32_t const alpha = 1.0f, beta = 0.0f;
-        cublaslt_measured_t fastest;
-        f32_t fastest_ms = -1.0f;
-        for (std::size_t candidate = 0; candidate != candidates.size(); ++candidate) {
-            cublasLtMatmulAlgo_t const &algorithm = candidates[candidate].algo;
-            auto enqueue = [&]() noexcept {
-                return cublasLtMatmul(session.get(), description, &alpha, reinterpret_cast<void const *>(a), a_layout,
-                                      reinterpret_cast<void const *>(b), b_layout, &beta, reinterpret_cast<void *>(c),
-                                      c_layout, reinterpret_cast<void *>(c), c_layout, &algorithm,
-                                      reinterpret_cast<void *>(workspace), workspace_bytes, stream);
-            };
-            bool warmed = true;
-            for (int warm = 0; warm != 2 && warmed; ++warm) warmed = enqueue() == CUBLAS_STATUS_SUCCESS;
-            if (!warmed) continue; // a candidate the check accepted but the launch rejects is simply skipped
-            constexpr int iterations_k = 10;
-            if (cuEventRecord(begin.value_.get(), stream) != CUDA_SUCCESS) continue;
-            bool timed = true;
-            for (int iteration = 0; iteration != iterations_k && timed; ++iteration)
-                timed = enqueue() == CUBLAS_STATUS_SUCCESS;
-            if (!timed || cuEventRecord(end.value_.get(), stream) != CUDA_SUCCESS ||
-                cuEventSynchronize(end.value_.get()) != CUDA_SUCCESS)
-                continue;
-            f32_t elapsed_ms = 0.0f;
-            if (cuEventElapsedTime(&elapsed_ms, begin.value_.get(), end.value_.get()) != CUDA_SUCCESS) continue;
-            f32_t const per_call_ms = elapsed_ms / static_cast<f32_t>(iterations_k);
-            if (fastest_ms < 0.0f || per_call_ms < fastest_ms) {
-                fastest_ms = per_call_ms;
-                fastest.candidate_index = candidate;
-                fastest.workspace_bytes = candidates[candidate].workspaceSize;
-                fastest.microseconds = per_call_ms * 1000.0f;
-            }
-        }
-        outcome = fastest_ms < 0.0f
-                      ? result_t::fail(status_t::cuda_error_k, "no benchmark candidate survived its own launches")
-                      : result_t {fastest};
-    }
-    if (stream != nullptr) cuStreamDestroy(stream);
-    if (workspace != 0) cuMemFree(workspace);
-    if (c != 0) cuMemFree(c);
-    if (b != 0) cuMemFree(b);
-    if (a != 0) cuMemFree(a);
-    return outcome;
+expected_t uc::multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t c,
+                                            nk_capability_t capabilities, gpu_stream_t &stream) noexcept {
+    if (c.extent(0) != a.extent(0))
+        return expected_t::fail(status_t::shape_unsupported_k, "[{}x{}]·Bᵀ cannot fill [{}x{}]", a.extent(0),
+                                a.extent(1), c.extent(0), c.extent(1));
+    return numkong_result(nk_dots_packed_bf16_best(reinterpret_cast<nk_bf16_t const *>(a.data()), packed_b.data(),
+                                                   c.data(), a.extent(0), c.extent(1), a.extent(1), a.stride_bytes(0),
+                                                   c.stride_bytes(0), capabilities, stream.numkong()),
+                          "product");
+}
+
+expected_t uc::pack_weight_bf16(bf16r2_view_t weight, bf16r1_span_t transposed, b8r1_span_t packed,
+                                               b8r1_span_t packed_transposed, nk_capability_t capabilities,
+                                               gpu_stream_t &stream) noexcept {
+    std::size_t const outputs = weight.extent(0), inputs = weight.extent(1);
+    bf16r2_span_t const padded {transposed.data(), inputs, round_up_to_multiple(outputs, std::size_t {8})};
+    bf16r2_span_t const weight_transposed = padded(nk::all, nk::range(0, outputs), nk::slice);
+    expected_t staged = pack_bf16(weight, packed, capabilities, stream);
+    if (staged) staged = transpose_bf16(weight, weight_transposed, stream);
+    if (staged) staged = pack_bf16(weight_transposed, packed_transposed, capabilities, stream);
+    return staged;
+}
+
+expected_t uc::weight_gradient_bf16(bf16r2_view_t output_grad, bf16r2_view_t input,
+                                                   bf16r2_span_t weight_grad, bf16r1_span_t transposed_grad,
+                                                   bf16r1_span_t transposed_input, b8r1_span_t packed_input,
+                                                   f32r1_span_t product, nk_capability_t capabilities,
+                                                   gpu_stream_t &stream) noexcept {
+    std::size_t const tokens = output_grad.extent(0), outputs = output_grad.extent(1), inputs = input.extent(1);
+    std::size_t const padded_tokens = round_up_to_multiple(tokens, std::size_t {8});
+    bf16r2_span_t const output_grad_padded {transposed_grad.data(), outputs, padded_tokens};
+    bf16r2_span_t const input_padded {transposed_input.data(), inputs, padded_tokens};
+    bf16r2_span_t const output_grad_transposed = output_grad_padded(nk::all, nk::range(0, tokens), nk::slice);
+    bf16r2_span_t const input_transposed = input_padded(nk::all, nk::range(0, tokens), nk::slice);
+    f32r2_span_t const weight_grad_wide {product.data(), outputs, inputs};
+    expected_t staged = transpose_bf16(output_grad, output_grad_transposed, stream);
+    if (staged) staged = transpose_bf16(input, input_transposed, stream);
+    if (staged) staged = pack_bf16(input_transposed, packed_input, capabilities, stream);
+    if (staged) staged = multiply_bf16(output_grad_transposed, packed_input, weight_grad_wide, capabilities, stream);
+    if (staged)
+        staged = numkong_result(nk_cast_best(product.data(), nk_f32_k, weight_grad.data(), nk_bf16_k, outputs * inputs,
+                                             capabilities, stream.numkong()),
+                                "weight gradient narrowing");
+    return staged;
 }

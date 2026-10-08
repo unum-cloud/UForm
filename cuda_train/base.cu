@@ -392,14 +392,14 @@ base_config_t base_config_t::parse(int argc, char **argv) noexcept {
     return config;
 }
 
-expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cublaslt_session_t &blas, cudnn_session_t &dnn,
+expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cudnn_session_t &dnn,
                                               base_config_t const &config) noexcept {
     using result_t = expected<base_replica_t>;
     multimodal_batch_shape_t const &shape = config.batch;
     u32_t const max_tokens = shape.max_rows_per_gpu * shape.max_columns_per_row;
 
     base_replica_t replica;
-    expected<encoder_tower_bf16_t> tower = encoder_tower_bf16_t::make(arena, blas, dnn, tower_config_(config), shape);
+    expected<encoder_tower_bf16_t> tower = encoder_tower_bf16_t::make(arena, dnn, tower_config_(config), shape);
     if (!tower) return result_t::fail(std::move(tower));
     replica.tower = std::move(tower.value_);
     expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {arena}, shape);
@@ -410,7 +410,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cublaslt_sessi
     masked_tokens_config_t tokens_config;
     tokens_config.hidden = config.hidden;
     tokens_config.max_tokens = max_tokens;
-    expected<masked_tokens_t> tokens = masked_tokens_t::make(arena, blas, tokens_config);
+    expected<masked_tokens_t> tokens = masked_tokens_t::make(arena, tokens_config);
     if (!tokens) return result_t::fail(std::move(tokens));
     replica.tokens = std::move(tokens.value_);
     gpu_arena_alloc<token_id_t> token_alloc {arena};
@@ -431,7 +431,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cublaslt_sessi
         head_config.patch_pixels = patch_scalars(shape.image.patch_side, shape.image.channels);
         head_config.max_patches = max_tokens;
         head_config.mask_ratio = 0.75f;
-        expected<masked_patches_t> head = masked_patches_t::make(arena, blas, head_config);
+        expected<masked_patches_t> head = masked_patches_t::make(arena, head_config);
         if (!head) return result_t::fail(std::move(head));
         replica.image = std::move(head.value_);
         replica.clean_image_patches =
@@ -447,7 +447,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cublaslt_sessi
                                                 shape.video.channels);
         head_config.max_patches = max_tokens;
         head_config.mask_ratio = 0.90f;
-        expected<masked_patches_t> head = masked_patches_t::make(arena, blas, head_config);
+        expected<masked_patches_t> head = masked_patches_t::make(arena, head_config);
         if (!head) return result_t::fail(std::move(head));
         replica.video = std::move(head.value_);
         replica.clean_video_patches =
@@ -462,7 +462,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cublaslt_sessi
         head_config.chunk_samples = shape.audio.chunk_samples;
         head_config.max_frames = max_tokens;
         head_config.mask_ratio = 0.75f;
-        expected<masked_frames_t> head = masked_frames_t::make(arena, blas, head_config);
+        expected<masked_frames_t> head = masked_frames_t::make(arena, head_config);
         if (!head) return result_t::fail(std::move(head));
         replica.audio = std::move(head.value_);
         replica.clean_audio =
@@ -616,6 +616,13 @@ expected_t base_replica_t::model_region(gpu_stream_t &stream) noexcept {
     bool const composite = image_live || video_live || audio_live;
 
     if (expected_t packed = tower.pack_weights(stream); !packed) return packed;
+    if (expected_t packed = tokens.pack_weights(stream); !packed) return packed;
+    if (image_live)
+        if (expected_t packed = image.pack_weights(stream); !packed) return packed;
+    if (video_live)
+        if (expected_t packed = video.pack_weights(stream); !packed) return packed;
+    if (audio_live)
+        if (expected_t packed = audio.pack_weights(stream); !packed) return packed;
     if (expected_t encoded = tower.forward(batch, bf16r2_span_t {}, stream); !encoded) return encoded;
 
     // The shared d(normalized): the token head overwrites first, so the reset matters only when media heads add.
@@ -662,7 +669,7 @@ expected_t base_trainer_t::make(base_trainer_t &trainer, base_config_t const &co
     for (u32_t member_index = 0; member_index != gpus; ++member_index)
         trainer.devices[member_index] = static_cast<i32_t>(member_index);
 
-    // Per GPU: the stream, the arena, the two sessions (placed address-stable, borrowed by pointer for the
+    // Per GPU: the stream, the arena, the cuDNN session (placed address-stable, borrowed by pointer for the
     // replica's whole lifetime), then the replica itself — which publishes its own registration list.
     for (u32_t member_index = 0; member_index != gpus; ++member_index) {
         expected<gpu_stream_t> stream = gpu_stream_t::make(trainer.devices[member_index]);
@@ -676,16 +683,12 @@ expected_t base_trainer_t::make(base_trainer_t &trainer, base_config_t const &co
         if (!arena) return expected_t::fail(std::move(arena));
         if (trainer.arenas.try_push_back(std::move(arena.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "arena table full");
-        expected<cublaslt_session_t> blas_session = cublaslt_session_t::make(config.algo_pick, &trainer.algo_picks);
-        if (!blas_session) return expected_t::fail(std::move(blas_session));
-        if (trainer.blas.try_push_back(std::move(blas_session.value_)) != status_t::success_k)
-            return expected_t::fail(status_t::bad_alloc_k, "blas session table full");
         expected<cudnn_session_t> dnn_session = cudnn_session_t::make(config.algo_pick);
         if (!dnn_session) return expected_t::fail(std::move(dnn_session));
         if (trainer.dnn.try_push_back(std::move(dnn_session.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "dnn session table full");
-        expected<base_replica_t> replica = base_replica_t::make(
-            trainer.arenas[member_index], trainer.blas[member_index], trainer.dnn[member_index], config);
+        expected<base_replica_t> replica = base_replica_t::make(trainer.arenas[member_index], trainer.dnn[member_index],
+                                                                config);
         if (!replica) return expected_t::fail(std::move(replica));
         if (trainer.replicas.try_push_back(std::move(replica.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "replica table full");
@@ -880,12 +883,6 @@ int base_trainer_t::run(base_config_t const &config) noexcept {
     if (expected_t built = make(trainer, config, topology.value_, ledger); !built)
         return fail_out_(built.description_.view());
     u32_t const gpus = static_cast<u32_t>(trainer.replicas.size());
-    if (config.algo_pick == algo_pick_t::benchmarked_k) {
-        sz::string tuned;
-        if (format_into(tuned, "uform_base: benchmarked {} matmul shapes, winners sum to {:.1f} ms per pass",
-                        trainer.algo_picks.size(), trainer.algo_picks.total_microseconds() / 1000.0f))
-            report_(tuned.view());
-    }
 
     // 3. The one multimem / colocated surface and the optimizer — locals threaded by reference. The flat
     //    replica-major registration table is a construction-time transient: the optimizer copies the views into

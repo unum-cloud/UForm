@@ -4,7 +4,7 @@
  *      discovering it mid-suite. Three classes of gap it names:
  *
  *        1. Runtime closure — the binary links the full `uform_train` stack, so merely starting on a node
- *           proves every shared library (cuDNN, cuBLASLt, the verbs providers) resolves there.
+ *           proves every shared library (cuDNN, NumKong, the verbs providers) resolves there.
  *        2. GPUDirect RDMA — for every local GPU, an arena's registrable allocation must MR-register with
  *           the same-index NIC: the exact single-chunk contract the InfiniBand collectives' symmetric heaps
  *           rely on ( @c nvidia_peermem rejects handle-spanning ranges with @c EFAULT ). The probe first

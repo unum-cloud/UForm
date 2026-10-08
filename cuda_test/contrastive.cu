@@ -136,16 +136,13 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
     auto arena_made = gpu_arena_t::make(0, 1ull << 30);
     if (!arena_made) return check(false, "arena");
     gpu_arena_t arena = std::move(arena_made.value_);
-    auto blas_made = cublaslt_session_t::make(algo_pick_t::heuristic_k, nullptr);
-    if (!blas_made) return check(false, "blas session");
-    cublaslt_session_t blas = std::move(blas_made.value_);
 
     contrastive_segments_config_t config;
     config.from_vertices_per_gpu = u32_t(num_vertices);
     config.hidden = u32_t(hidden);
     config.to_vertices_per_gpu = u32_t(num_vertices);
     config.gpu_subgraphs_per_step = 1;
-    auto loss_made = contrastive_segments_t::make(arena, blas, config, {prefixes.data(), prefixes.size()});
+    auto loss_made = contrastive_segments_t::make(arena, config, {prefixes.data(), prefixes.size()});
     if (!loss_made) {
         std::printf("    %s\n", loss_made.description_.c_str());
         return check(false, "loss make");
@@ -350,7 +347,6 @@ static void run_distributed_case() {
     config.gpu_subgraphs_per_step = gpus_k;
     // The composition-root order: topology → arenas (visibility declared) → streams → the ONE
     // multimem domain → the ONE colocated domain → the consumer, borrowing all of it.
-    per_gpu_array<cublaslt_session_t> sessions;
     for (std::size_t rank = 0; rank != gpus_k; ++rank) {
         auto stream_made = gpu_stream_t::make(devices[rank]);
         if (!stream_made || streams.try_push_back(std::move(stream_made.value_)) != status_t::success_k) {
@@ -361,11 +357,6 @@ static void run_distributed_case() {
         auto arena_made = gpu_arena_t::make(devices[rank], 1ull << 30, {devices, gpus_k});
         if (!arena_made || arenas.try_push_back(std::move(arena_made.value_)) != status_t::success_k) {
             check(false, "distributed arena make");
-            return;
-        }
-        auto session_made = cublaslt_session_t::make(algo_pick_t::heuristic_k, nullptr);
-        if (!session_made || sessions.try_push_back(std::move(session_made.value_)) != status_t::success_k) {
-            check(false, "distributed session make");
             return;
         }
         bf16_t *tower = arenas[rank].allocate_object<bf16_t>(scalars_k);
@@ -406,8 +397,8 @@ static void run_distributed_case() {
         return;
     }
     auto distributed = distributed_contrastive_segments_t::make(domain.value_, colocated.value_, arenas, streams,
-                                                                sessions, {towers, gpus_k}, {relations, gpus_k},
-                                                                {grads, gpus_k}, config, {prefix_dims, 1});
+                                                                {towers, gpus_k}, {relations, gpus_k}, {grads, gpus_k},
+                                                                config, {prefix_dims, 1});
     if (!distributed) {
         std::printf("    %s\n", distributed.description_.c_str());
         check(false, "distributed make");
@@ -494,7 +485,6 @@ static int run_cross_domain_case() {
 
     per_gpu_array<gpu_stream_t> streams;
     per_gpu_array<gpu_arena_t> arenas;
-    per_gpu_array<cublaslt_session_t> sessions;
     std::vector<contrastive_relations_t> owners(gpus);
     std::vector<contrastive_relations_view_t> relations(gpus);
     std::vector<bf16r2_view_t> towers(gpus);
@@ -512,8 +502,6 @@ static int run_cross_domain_case() {
         cuCtxPushCurrent(streams[rank].context());
         auto arena_made = gpu_arena_t::make(i32_t(rank), 1ull << 30, {devices.data(), gpus});
         if (!arena_made || arenas.try_push_back(std::move(arena_made.value_)) != status_t::success_k) return 1;
-        auto session_made = cublaslt_session_t::make(algo_pick_t::heuristic_k, nullptr);
-        if (!session_made || sessions.try_push_back(std::move(session_made.value_)) != status_t::success_k) return 1;
         bf16_t *tower = arenas[rank].allocate_object<bf16_t>(scalars_k);
         bf16_t *grad = arenas[rank].allocate_object<bf16_t>(scalars_k);
         std::size_t const global_rank = std::size_t(domain) * gpus + rank;
@@ -545,9 +533,9 @@ static int run_cross_domain_case() {
         check(false, "colocated domain make");
         return 1;
     }
-    auto distributed = distributed_contrastive_segments_t::make(
-        multimem.value_, colocated.value_, arenas, streams, sessions, {towers.data(), gpus}, {relations.data(), gpus},
-        {grads.data(), gpus}, config, {prefix_dims, 1});
+    auto distributed = distributed_contrastive_segments_t::make(multimem.value_, colocated.value_, arenas, streams,
+                                                                {towers.data(), gpus}, {relations.data(), gpus},
+                                                                {grads.data(), gpus}, config, {prefix_dims, 1});
     if (!distributed) {
         std::printf("  make: %s\n", distributed.description_.c_str());
         check(false, "cross-domain make");
@@ -640,9 +628,8 @@ static void run_pool_parity_case() {
     }
     cuCtxPushCurrent(stream.value_.context());
     auto arena = gpu_arena_t::make(0, 1ull << 30, {});
-    auto blas = cublaslt_session_t::make(algo_pick_t::heuristic_k, nullptr);
     auto cudnn = cudnn_session_t::make(algo_pick_t::heuristic_k);
-    if (!arena || !blas || !cudnn) {
+    if (!arena || !cudnn) {
         check(false, "pool-parity bring-up");
         cuCtxPopCurrent(nullptr);
         return;
@@ -657,7 +644,7 @@ static void run_pool_parity_case() {
     config.block.max_segment_tokens = columns_k;
     config.rope_max_positions = columns_k;
     multimodal_batch_shape_t shape {rows_k, segments_k, columns_k};
-    auto tower = encoder_tower_bf16_t::make(arena.value_, blas.value_, cudnn.value_, config, shape);
+    auto tower = encoder_tower_bf16_t::make(arena.value_, cudnn.value_, config, shape);
     if (!tower) {
         std::printf("    %s\n", tower.description_.c_str());
         check(false, "pool-parity tower make");

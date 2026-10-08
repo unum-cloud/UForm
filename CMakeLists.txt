@@ -122,11 +122,7 @@ set(UFORM_NUMKONG_ROOT
     ""
     CACHE PATH "Install prefix of a NumKong build with CUDA"
 )
-find_package(
-    numkong CONFIG REQUIRED
-    COMPONENTS shared cuda
-    HINTS "${UFORM_NUMKONG_ROOT}"
-)
+find_package(numkong CONFIG REQUIRED COMPONENTS shared cuda HINTS "${UFORM_NUMKONG_ROOT}")
 uform_dependency(
     NAME stringzilla
     MODE SUBDIR
@@ -172,8 +168,8 @@ uform_probe_infiniband()
 
 # `cuda_core` → `uform`: one static library for the whole core cell, compiled once, never per consumer.
 # Dependencies stay lean: NumKong, StringZilla, yyjson, the CUDA Driver API (no NCCL, no NVSHMEM; the runtime arrives
-# only through NumKong's kernel units), cuBLASLt, plus the fused-attention tier (nvrtc + cuDNN + cudnn-frontend) the
-# transformer / tower cells need.
+# only through NumKong's kernel units), plus the fused-attention tier (nvrtc + cuDNN + cudnn-frontend) the transformer /
+# tower cells need.
 add_library(
     uform STATIC
     cuda_core/schedule.cu
@@ -190,14 +186,7 @@ add_library(
 )
 target_include_directories(uform PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${UFORM_CUDNN_FRONTEND_INCLUDE}")
 target_link_libraries(
-    uform
-    PUBLIC numkong::shared
-           stringzilla_header
-           yyjson
-           CUDA::cuda_driver
-           CUDA::cublasLt
-           CUDA::nvrtc
-           "${UFORM_CUDNN_LIBRARY}"
+    uform PUBLIC numkong::shared stringzilla_header yyjson CUDA::cuda_driver CUDA::nvrtc "${UFORM_CUDNN_LIBRARY}"
 )
 target_compile_features(uform PUBLIC cxx_std_23)
 # NumKong accessors are `constexpr` for device-callability; `nvcc` needs the (long-stable) flag to allow it.

@@ -5,6 +5,10 @@
  *  @author Ash Vardanian
  *  @date July 3, 2026
  */
+#include <algorithm> // `std::max` — the head product scratch sizing
+
+#include <numkong/each.h> // `nk_each_sum_f32_best` — the media heads adding onto the shared gradient
+
 #include "cuda_core/multimodal_masking.hpp"
 
 using namespace unum::uform::core;
@@ -142,8 +146,42 @@ static __global__ void masked_finalize_kernel_(f32r1_view_t position_loss, f32r1
     loss_summands[1] = scale_and_count[1];
 }
 
-expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, cublaslt_session_t &blas,
-                                                masked_tokens_config_t config) noexcept {
+/**
+ *  @brief Allocate off @p arena one linear head's NumKong packs and transients: its @b [outputs,hidden] weight packed
+ *      both ways, the weight gradient's transposes over @p rows states (the input one wide enough to stage the
+ *      weight's padded transpose too), the @c normalizedᵀ pack, and the Float32 products of all three products.
+ */
+static expected_t allocate_head_products_(gpu_arena_t &arena, nk_capability_t capabilities, std::size_t outputs,
+                                          std::size_t hidden, std::size_t rows, b8r1_tensor_arena_t &packed_weight,
+                                          b8r1_tensor_arena_t &packed_weight_transposed,
+                                          bf16r1_tensor_arena_t &transposed_grad,
+                                          bf16r1_tensor_arena_t &transposed_input, b8r1_tensor_arena_t &packed_input,
+                                          f32r1_tensor_arena_t &products) noexcept {
+    expected<b8r1_tensor_arena_t> forward = allocate_pack_bf16(outputs, hidden, capabilities, arena);
+    if (!forward) return expected_t::fail(std::move(forward));
+    expected<b8r1_tensor_arena_t> backward = allocate_pack_bf16(hidden, outputs, capabilities, arena);
+    if (!backward) return expected_t::fail(std::move(backward));
+    expected<b8r1_tensor_arena_t> input = allocate_pack_bf16(hidden, rows, capabilities, arena);
+    if (!input) return expected_t::fail(std::move(input));
+    packed_weight = std::move(forward.value_);
+    packed_weight_transposed = std::move(backward.value_);
+    packed_input = std::move(input.value_);
+    std::size_t const padded_rows = round_up_to_multiple(rows, std::size_t {8});
+    std::size_t const padded_outputs = round_up_to_multiple(outputs, std::size_t {8});
+    gpu_arena_alloc<bf16_t> bf16_alloc {arena};
+    transposed_grad = bf16r1_tensor_arena_t::uninitialized({outputs * padded_rows}, bf16_alloc).value;
+    transposed_input =
+        bf16r1_tensor_arena_t::uninitialized({hidden * std::max(padded_rows, padded_outputs)}, bf16_alloc).value;
+    products = f32r1_tensor_arena_t::uninitialized({std::max(rows, outputs) * std::max(outputs, hidden)},
+                                                   gpu_arena_alloc<f32_t> {arena})
+                   .value;
+    if (!transposed_grad || !transposed_input || !products)
+        return expected_t::fail(status_t::bad_alloc_k, "head product scratch allocation failed (arena_used={})",
+                                arena.used());
+    return {};
+}
+
+expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, masked_tokens_config_t config) noexcept {
     using result_t = expected<masked_tokens_t>;
     if (config.vocabulary == 0 || config.hidden == 0 || config.max_tokens == 0)
         return result_t::fail(status_t::shape_unsupported_k,
@@ -151,63 +189,37 @@ expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, cublaslt_ses
                               config.vocabulary, config.hidden, config.max_tokens);
     masked_tokens_t head;
     head.config_ = config;
-    head.session_ = &blas;
+    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
+                                                                &head.capabilities_);
+        status != nk_success_k)
+        return result_t::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}", arena.device(),
+                              nk_status_name(status));
 
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
-    gpu_arena_alloc<b8_t> byte_alloc {arena};
+    std::size_t const padded_vocabulary = round_up_to_multiple(config.vocabulary, std::size_t {8});
     head.decoder_weight_ = bf16r2_tensor_arena_t::uninitialized({config.vocabulary, config.hidden}, bf16_alloc).value;
     head.decoder_weight_grad_ =
         bf16r2_tensor_arena_t::uninitialized({config.vocabulary, config.hidden}, bf16_alloc).value;
     head.logits_ = f32r2_tensor_arena_t::uninitialized({config.max_tokens, config.vocabulary}, f32_alloc).value;
-    head.logit_grad_ = bf16r2_tensor_arena_t::uninitialized({config.max_tokens, config.vocabulary}, bf16_alloc).value;
+    head.logit_grad_ = bf16r2_tensor_arena_t::uninitialized({config.max_tokens, padded_vocabulary}, bf16_alloc).value;
     head.position_loss_ = f32r1_tensor_arena_t::uninitialized({config.max_tokens}, f32_alloc).value;
     head.gradient_scale_ = f32r1_tensor_arena_t::uninitialized({2}, f32_alloc).value;
     if (!head.decoder_weight_ || !head.decoder_weight_grad_ || !head.logits_ || !head.logit_grad_ ||
         !head.position_loss_ || !head.gradient_scale_)
         return result_t::fail(status_t::bad_alloc_k, "masked head allocation failed (arena_used={})", arena.used());
-
-    cublaslt_plan_config_t logits_config; // logits[M,V] = normalized[M,H]·Wᵀ, Float32 out for the CE
-    logits_config.a_rows = config.max_tokens, logits_config.a_cols = config.hidden;
-    logits_config.a_row_stride = config.hidden;
-    logits_config.b_rows = config.vocabulary, logits_config.b_cols = config.hidden;
-    logits_config.b_row_stride = config.hidden;
-    logits_config.c_rows = config.max_tokens, logits_config.c_cols = config.vocabulary;
-    logits_config.c_row_stride = config.vocabulary;
-    logits_config.transpose_b = true;
-    cublaslt_plan_config_t data_grad_config; // d(normalized) = d(logits) · W
-    data_grad_config.a_rows = config.max_tokens, data_grad_config.a_cols = config.vocabulary;
-    data_grad_config.a_row_stride = config.vocabulary;
-    data_grad_config.b_rows = config.vocabulary, data_grad_config.b_cols = config.hidden;
-    data_grad_config.b_row_stride = config.hidden;
-    data_grad_config.c_rows = config.max_tokens, data_grad_config.c_cols = config.hidden;
-    data_grad_config.c_row_stride = config.hidden;
-    data_grad_config.c_type = CUDA_R_16BF;
-    cublaslt_plan_config_t weight_grad_config; // d(W) = d(logits)ᵀ · normalized
-    weight_grad_config.a_rows = config.max_tokens, weight_grad_config.a_cols = config.vocabulary;
-    weight_grad_config.a_row_stride = config.vocabulary;
-    weight_grad_config.b_rows = config.max_tokens, weight_grad_config.b_cols = config.hidden;
-    weight_grad_config.b_row_stride = config.hidden;
-    weight_grad_config.c_rows = config.vocabulary, weight_grad_config.c_cols = config.hidden;
-    weight_grad_config.c_row_stride = config.hidden;
-    weight_grad_config.transpose_a = true;
-    weight_grad_config.c_type = CUDA_R_16BF;
-    cublaslt_plan_config_t const configs[linear_matmul_family_count_k] = {logits_config, data_grad_config,
-                                                                          weight_grad_config};
-    std::size_t workspace_bytes = 0;
-    for (u32_t family = 0; family != linear_matmul_family_count_k; ++family) {
-        expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(blas, configs[family]);
-        if (!plan) return result_t::fail(std::move(plan));
-        if (plan.value_.workspace_bytes() > workspace_bytes) workspace_bytes = plan.value_.workspace_bytes();
-        head.plans_[family] = std::move(plan.value_);
-    }
-    if (workspace_bytes != 0) {
-        head.workspace_ = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, byte_alloc).value;
-        if (!head.workspace_)
-            return result_t::fail(status_t::bad_alloc_k, "tensor-core workspace allocation failed ({} bytes)",
-                                  workspace_bytes);
-    }
+    if (expected_t allocated = allocate_head_products_(arena, head.capabilities_, config.vocabulary, config.hidden,
+                                                       config.max_tokens, head.packed_decoder_,
+                                                       head.packed_decoder_transposed_, head.transposed_grad_,
+                                                       head.transposed_input_, head.packed_input_, head.products_);
+        !allocated)
+        return result_t::fail(std::move(allocated));
     return result_t {std::move(head)};
+}
+
+expected_t masked_tokens_t::pack_weights(gpu_stream_t &stream) noexcept {
+    return pack_weight_bf16(decoder_weight_.view(), transposed_input_.span(), packed_decoder_.span(),
+                            packed_decoder_transposed_.span(), capabilities_, stream);
 }
 
 expected_t masked_tokens_t::corrupt(tokens_view_t clean, tokens_span_t distorted, u32r1_span_t loss_weights,
@@ -256,27 +268,30 @@ expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t c
     dim3 const one_block {1u, 1u, 1u};
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const row_grid {static_cast<u32_t>(tokens), 1u, 1u};
+    bf16r2_span_t const padded_logit_grad = logit_grad_.span();
+    bf16r2_span_t const logit_grad = padded_logit_grad(nk::all, nk::range(0, config_.vocabulary), nk::slice);
+    f32r2_span_t const normalized_products {products_.data(), tokens, hidden};
     expected_t staged = launch_kernel(reinterpret_cast<void const *>(&masked_count_kernel_), one_block, block_shape,
                                       stream, loss_weights, gradient_scale_.span(), config_.weight);
-    if (staged)
-        staged = plan_for(linear_matmul_family_t::forward_k)
-                     .matmul(*session_, normalized, decoder_weight_.view(), logits_.span(), 0.0f, workspace_.span(),
-                             stream);
+    if (staged) staged = multiply_bf16(normalized, packed_decoder_.view(), logits_.span(), capabilities_, stream);
     if (staged)
         staged = launch_kernel(reinterpret_cast<void const *>(&masked_cross_entropy_kernel_), row_grid, block_shape,
                                stream, logits_.view(), clean_targets, loss_weights, gradient_scale_.view(),
-                               position_loss_.span(), logit_grad_.span());
+                               position_loss_.span(), logit_grad);
     if (staged)
         staged = launch_kernel(reinterpret_cast<void const *>(&masked_finalize_kernel_), one_block, block_shape, stream,
                                position_loss_.view(), gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
-        staged = plan_for(linear_matmul_family_t::data_grad_k)
-                     .matmul(*session_, logit_grad_.view(), decoder_weight_.view(), normalized_grad, 0.0f,
-                             workspace_.span(), stream);
+        staged = multiply_bf16(logit_grad, packed_decoder_transposed_.view(), normalized_products, capabilities_,
+                               stream);
     if (staged)
-        staged = plan_for(linear_matmul_family_t::weight_grad_k)
-                     .matmul(*session_, logit_grad_.view(), normalized, decoder_weight_grad_.span(), 0.0f,
-                             workspace_.span(), stream);
+        staged = numkong_result(nk_cast_best(normalized_products.data(), nk_f32_k, normalized_grad.data(), nk_bf16_k,
+                                             tokens * hidden, capabilities_, stream.numkong()),
+                                "masked token gradient narrowing");
+    if (staged)
+        staged = weight_gradient_bf16(logit_grad, normalized, decoder_weight_grad_.span(), transposed_grad_.span(),
+                                      transposed_input_.span(), packed_input_.span(), products_.span(), capabilities_,
+                                      stream);
     return staged;
 }
 
@@ -378,8 +393,7 @@ static __global__ void patch_mae_loss_kernel_(bf16r2_view_t predicted, bf16r2_vi
     position_loss[row] = live ? total_loss * inverse_pixels : 0.0f;
 }
 
-expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, cublaslt_session_t &blas,
-                                                  masked_patches_config_t config) noexcept {
+expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, masked_patches_config_t config) noexcept {
     using result_t = expected<masked_patches_t>;
     if (config.hidden == 0 || config.patch_pixels == 0 || config.max_patches == 0 || config.temporal_groups == 0 ||
         config.max_patches % config.temporal_groups != 0)
@@ -388,12 +402,15 @@ expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, cublaslt_s
                               config.hidden, config.patch_pixels, config.max_patches, config.temporal_groups);
     masked_patches_t head;
     head.config_ = config;
-    head.session_ = &blas;
+    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
+                                                                &head.capabilities_);
+        status != nk_success_k)
+        return result_t::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}", arena.device(),
+                              nk_status_name(status));
 
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
     gpu_arena_alloc<u32_t> u32_alloc {arena};
-    gpu_arena_alloc<b8_t> byte_alloc {arena};
     head.recon_weight_ = bf16r2_tensor_arena_t::uninitialized({config.patch_pixels, config.hidden}, bf16_alloc).value;
     head.recon_weight_grad_ =
         bf16r2_tensor_arena_t::uninitialized({config.patch_pixels, config.hidden}, bf16_alloc).value;
@@ -407,48 +424,21 @@ expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, cublaslt_s
         !head.position_loss_ || !head.gradient_scale_)
         return result_t::fail(status_t::bad_alloc_k, "patch head allocation failed (arena_used={})", arena.used());
 
-    cublaslt_plan_config_t predicted_config; // predicted[P,X] = normalized[P,H]·Wᵀ, X = patch_pixels
-    predicted_config.a_rows = config.max_patches, predicted_config.a_cols = config.hidden;
-    predicted_config.a_row_stride = config.hidden;
-    predicted_config.b_rows = config.patch_pixels, predicted_config.b_cols = config.hidden;
-    predicted_config.b_row_stride = config.hidden;
-    predicted_config.c_rows = config.max_patches, predicted_config.c_cols = config.patch_pixels;
-    predicted_config.c_row_stride = config.patch_pixels;
-    predicted_config.transpose_b = true;
-    predicted_config.c_type = CUDA_R_16BF;
-    cublaslt_plan_config_t data_grad_config; // d(normalized) = d(predicted) · W
-    data_grad_config.a_rows = config.max_patches, data_grad_config.a_cols = config.patch_pixels;
-    data_grad_config.a_row_stride = config.patch_pixels;
-    data_grad_config.b_rows = config.patch_pixels, data_grad_config.b_cols = config.hidden;
-    data_grad_config.b_row_stride = config.hidden;
-    data_grad_config.c_rows = config.max_patches, data_grad_config.c_cols = config.hidden;
-    data_grad_config.c_row_stride = config.hidden;
-    data_grad_config.c_type = CUDA_R_16BF;
-    cublaslt_plan_config_t weight_grad_config; // d(W) = d(predicted)ᵀ · normalized
-    weight_grad_config.a_rows = config.max_patches, weight_grad_config.a_cols = config.patch_pixels;
-    weight_grad_config.a_row_stride = config.patch_pixels;
-    weight_grad_config.b_rows = config.max_patches, weight_grad_config.b_cols = config.hidden;
-    weight_grad_config.b_row_stride = config.hidden;
-    weight_grad_config.c_rows = config.patch_pixels, weight_grad_config.c_cols = config.hidden;
-    weight_grad_config.c_row_stride = config.hidden;
-    weight_grad_config.transpose_a = true;
-    weight_grad_config.c_type = CUDA_R_16BF;
-    cublaslt_plan_config_t const configs[linear_matmul_family_count_k] = {predicted_config, data_grad_config,
-                                                                          weight_grad_config};
-    std::size_t workspace_bytes = 0;
-    for (u32_t family = 0; family != linear_matmul_family_count_k; ++family) {
-        expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(blas, configs[family]);
-        if (!plan) return result_t::fail(std::move(plan));
-        if (plan.value_.workspace_bytes() > workspace_bytes) workspace_bytes = plan.value_.workspace_bytes();
-        head.plans_[family] = std::move(plan.value_);
-    }
-    if (workspace_bytes != 0) {
-        head.workspace_ = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, byte_alloc).value;
-        if (!head.workspace_)
-            return result_t::fail(status_t::bad_alloc_k, "tensor-core workspace allocation failed ({} bytes)",
-                                  workspace_bytes);
-    }
+    head.widened_grad_ = f32r1_tensor_arena_t::uninitialized({config.max_patches * config.hidden}, f32_alloc).value;
+    if (!head.widened_grad_)
+        return result_t::fail(status_t::bad_alloc_k, "patch head allocation failed (arena_used={})", arena.used());
+    if (expected_t allocated = allocate_head_products_(arena, head.capabilities_, config.patch_pixels, config.hidden,
+                                                       config.max_patches, head.packed_recon_,
+                                                       head.packed_recon_transposed_, head.transposed_grad_,
+                                                       head.transposed_input_, head.packed_input_, head.products_);
+        !allocated)
+        return result_t::fail(std::move(allocated));
     return result_t {std::move(head)};
+}
+
+expected_t masked_patches_t::pack_weights(gpu_stream_t &stream) noexcept {
+    return pack_weight_bf16(recon_weight_.view(), transposed_input_.span(), packed_recon_.span(),
+                            packed_recon_transposed_.span(), capabilities_, stream);
 }
 
 expected_t masked_patches_t::sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch,
@@ -488,12 +478,16 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
     dim3 const row_grid {static_cast<u32_t>(patches), 1u, 1u};
     bf16r2_view_t const predicted_view = predicted_.view();
     bf16r2_span_t const predicted_grad_span = predicted_grad_.span();
+    std::size_t const rows = patches, outputs = patch_pixels;
+    f32r2_span_t const predicted_products {products_.data(), rows, outputs};
+    f32r2_span_t const normalized_products {products_.data(), rows, static_cast<std::size_t>(hidden)};
     expected_t staged = launch_kernel(reinterpret_cast<void const *>(&patch_count_kernel_), one_block, block_shape,
                                       stream, mask_.view(), gradient_scale_.span(), config_.weight, patch_pixels);
+    if (staged) staged = multiply_bf16(normalized, packed_recon_.view(), predicted_products, capabilities_, stream);
     if (staged)
-        staged = plan_for(linear_matmul_family_t::forward_k)
-                     .matmul(*session_, normalized, recon_weight_.view(), predicted_.span(), 0.0f, workspace_.span(),
-                             stream);
+        staged = numkong_result(nk_cast_best(predicted_products.data(), nk_f32_k, predicted_.data(), nk_bf16_k,
+                                             rows * outputs, capabilities_, stream.numkong()),
+                                "prediction narrowing");
     if (staged)
         staged = launch_kernel(reinterpret_cast<void const *>(&patch_mae_loss_kernel_), row_grid, block_shape, stream,
                                predicted_view, clean_patches, mask_.view(), gradient_scale_.view(),
@@ -502,13 +496,24 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
         staged = launch_kernel(reinterpret_cast<void const *>(&masked_finalize_kernel_), one_block, block_shape, stream,
                                position_loss_.view(), gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
-        staged = plan_for(linear_matmul_family_t::data_grad_k)
-                     .matmul(*session_, predicted_grad_.view(), recon_weight_.view(), normalized_grad, 1.0f,
-                             workspace_.span(), stream);
+        staged = multiply_bf16(predicted_grad_.view(), packed_recon_transposed_.view(), normalized_products,
+                               capabilities_, stream);
     if (staged)
-        staged = plan_for(linear_matmul_family_t::weight_grad_k)
-                     .matmul(*session_, predicted_grad_.view(), normalized, recon_weight_grad_.span(), 0.0f,
-                             workspace_.span(), stream);
+        staged = numkong_result(nk_cast_best(normalized_grad.data(), nk_bf16_k, widened_grad_.data(), nk_f32_k,
+                                             rows * hidden, capabilities_, stream.numkong()),
+                                "normalized gradient widening");
+    if (staged)
+        staged = numkong_result(nk_each_sum_f32_best(widened_grad_.data(), normalized_products.data(), rows * hidden,
+                                                     widened_grad_.data(), capabilities_, stream.numkong()),
+                                "normalized gradient addition");
+    if (staged)
+        staged = numkong_result(nk_cast_best(widened_grad_.data(), nk_f32_k, normalized_grad.data(), nk_bf16_k,
+                                             rows * hidden, capabilities_, stream.numkong()),
+                                "normalized gradient narrowing");
+    if (staged)
+        staged = weight_gradient_bf16(predicted_grad_.view(), normalized, recon_weight_grad_.span(),
+                                      transposed_grad_.span(), transposed_input_.span(), packed_input_.span(),
+                                      products_.span(), capabilities_, stream);
     return staged;
 }
 
@@ -607,8 +612,7 @@ static __global__ void frame_mae_loss_kernel_(bf16r2_view_t predicted, f32r2_vie
     position_loss[row] = live ? total_loss * inverse_samples : 0.0f;
 }
 
-expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, cublaslt_session_t &blas,
-                                                masked_frames_config_t config) noexcept {
+expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, masked_frames_config_t config) noexcept {
     using result_t = expected<masked_frames_t>;
     if (config.hidden == 0 || config.chunk_samples == 0 || config.max_frames == 0)
         return result_t::fail(status_t::shape_unsupported_k,
@@ -616,12 +620,15 @@ expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, cublaslt_ses
                               config.chunk_samples, config.max_frames);
     masked_frames_t head;
     head.config_ = config;
-    head.session_ = &blas;
+    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
+                                                                &head.capabilities_);
+        status != nk_success_k)
+        return result_t::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}", arena.device(),
+                              nk_status_name(status));
 
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
     gpu_arena_alloc<u32_t> u32_alloc {arena};
-    gpu_arena_alloc<b8_t> byte_alloc {arena};
     head.recon_weight_ = bf16r2_tensor_arena_t::uninitialized({config.chunk_samples, config.hidden}, bf16_alloc).value;
     head.recon_weight_grad_ =
         bf16r2_tensor_arena_t::uninitialized({config.chunk_samples, config.hidden}, bf16_alloc).value;
@@ -635,48 +642,21 @@ expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, cublaslt_ses
         !head.position_loss_ || !head.gradient_scale_)
         return result_t::fail(status_t::bad_alloc_k, "frame head allocation failed (arena_used={})", arena.used());
 
-    cublaslt_plan_config_t predicted_config; // predicted[F,S] = normalized[F,H]·Wᵀ, S = chunk_samples
-    predicted_config.a_rows = config.max_frames, predicted_config.a_cols = config.hidden;
-    predicted_config.a_row_stride = config.hidden;
-    predicted_config.b_rows = config.chunk_samples, predicted_config.b_cols = config.hidden;
-    predicted_config.b_row_stride = config.hidden;
-    predicted_config.c_rows = config.max_frames, predicted_config.c_cols = config.chunk_samples;
-    predicted_config.c_row_stride = config.chunk_samples;
-    predicted_config.transpose_b = true;
-    predicted_config.c_type = CUDA_R_16BF;
-    cublaslt_plan_config_t data_grad_config; // d(normalized) = d(predicted) · W
-    data_grad_config.a_rows = config.max_frames, data_grad_config.a_cols = config.chunk_samples;
-    data_grad_config.a_row_stride = config.chunk_samples;
-    data_grad_config.b_rows = config.chunk_samples, data_grad_config.b_cols = config.hidden;
-    data_grad_config.b_row_stride = config.hidden;
-    data_grad_config.c_rows = config.max_frames, data_grad_config.c_cols = config.hidden;
-    data_grad_config.c_row_stride = config.hidden;
-    data_grad_config.c_type = CUDA_R_16BF;
-    cublaslt_plan_config_t weight_grad_config; // d(W) = d(predicted)ᵀ · normalized
-    weight_grad_config.a_rows = config.max_frames, weight_grad_config.a_cols = config.chunk_samples;
-    weight_grad_config.a_row_stride = config.chunk_samples;
-    weight_grad_config.b_rows = config.max_frames, weight_grad_config.b_cols = config.hidden;
-    weight_grad_config.b_row_stride = config.hidden;
-    weight_grad_config.c_rows = config.chunk_samples, weight_grad_config.c_cols = config.hidden;
-    weight_grad_config.c_row_stride = config.hidden;
-    weight_grad_config.transpose_a = true;
-    weight_grad_config.c_type = CUDA_R_16BF;
-    cublaslt_plan_config_t const configs[linear_matmul_family_count_k] = {predicted_config, data_grad_config,
-                                                                          weight_grad_config};
-    std::size_t workspace_bytes = 0;
-    for (u32_t family = 0; family != linear_matmul_family_count_k; ++family) {
-        expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(blas, configs[family]);
-        if (!plan) return result_t::fail(std::move(plan));
-        if (plan.value_.workspace_bytes() > workspace_bytes) workspace_bytes = plan.value_.workspace_bytes();
-        head.plans_[family] = std::move(plan.value_);
-    }
-    if (workspace_bytes != 0) {
-        head.workspace_ = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, byte_alloc).value;
-        if (!head.workspace_)
-            return result_t::fail(status_t::bad_alloc_k, "tensor-core workspace allocation failed ({} bytes)",
-                                  workspace_bytes);
-    }
+    head.widened_grad_ = f32r1_tensor_arena_t::uninitialized({config.max_frames * config.hidden}, f32_alloc).value;
+    if (!head.widened_grad_)
+        return result_t::fail(status_t::bad_alloc_k, "frame head allocation failed (arena_used={})", arena.used());
+    if (expected_t allocated = allocate_head_products_(arena, head.capabilities_, config.chunk_samples, config.hidden,
+                                                       config.max_frames, head.packed_recon_,
+                                                       head.packed_recon_transposed_, head.transposed_grad_,
+                                                       head.transposed_input_, head.packed_input_, head.products_);
+        !allocated)
+        return result_t::fail(std::move(allocated));
     return result_t {std::move(head)};
+}
+
+expected_t masked_frames_t::pack_weights(gpu_stream_t &stream) noexcept {
+    return pack_weight_bf16(recon_weight_.view(), transposed_input_.span(), packed_recon_.span(),
+                            packed_recon_transposed_.span(), capabilities_, stream);
 }
 
 expected_t masked_frames_t::sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch,
@@ -714,12 +694,16 @@ expected_t masked_frames_t::operator()(bf16r2_view_t normalized, f32r2_view_t cl
     dim3 const row_grid {static_cast<u32_t>(frames), 1u, 1u};
     bf16r2_view_t const predicted_view = predicted_.view();
     bf16r2_span_t const predicted_grad_span = predicted_grad_.span();
+    std::size_t const rows = frames, outputs = chunk_samples;
+    f32r2_span_t const predicted_products {products_.data(), rows, outputs};
+    f32r2_span_t const normalized_products {products_.data(), rows, static_cast<std::size_t>(hidden)};
     expected_t staged = launch_kernel(reinterpret_cast<void const *>(&frame_count_kernel_), one_block, block_shape,
                                       stream, mask_.view(), gradient_scale_.span(), config_.weight, chunk_samples);
+    if (staged) staged = multiply_bf16(normalized, packed_recon_.view(), predicted_products, capabilities_, stream);
     if (staged)
-        staged = plan_for(linear_matmul_family_t::forward_k)
-                     .matmul(*session_, normalized, recon_weight_.view(), predicted_.span(), 0.0f, workspace_.span(),
-                             stream);
+        staged = numkong_result(nk_cast_best(predicted_products.data(), nk_f32_k, predicted_.data(), nk_bf16_k,
+                                             rows * outputs, capabilities_, stream.numkong()),
+                                "prediction narrowing");
     if (staged)
         staged = launch_kernel(reinterpret_cast<void const *>(&frame_mae_loss_kernel_), row_grid, block_shape, stream,
                                predicted_view, clean_frames, mask_.view(), gradient_scale_.view(),
@@ -728,13 +712,24 @@ expected_t masked_frames_t::operator()(bf16r2_view_t normalized, f32r2_view_t cl
         staged = launch_kernel(reinterpret_cast<void const *>(&masked_finalize_kernel_), one_block, block_shape, stream,
                                position_loss_.view(), gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
-        staged = plan_for(linear_matmul_family_t::data_grad_k)
-                     .matmul(*session_, predicted_grad_.view(), recon_weight_.view(), normalized_grad, 1.0f,
-                             workspace_.span(), stream);
+        staged = multiply_bf16(predicted_grad_.view(), packed_recon_transposed_.view(), normalized_products,
+                               capabilities_, stream);
     if (staged)
-        staged = plan_for(linear_matmul_family_t::weight_grad_k)
-                     .matmul(*session_, predicted_grad_.view(), normalized, recon_weight_grad_.span(), 0.0f,
-                             workspace_.span(), stream);
+        staged = numkong_result(nk_cast_best(normalized_grad.data(), nk_bf16_k, widened_grad_.data(), nk_f32_k,
+                                             rows * hidden, capabilities_, stream.numkong()),
+                                "normalized gradient widening");
+    if (staged)
+        staged = numkong_result(nk_each_sum_f32_best(widened_grad_.data(), normalized_products.data(), rows * hidden,
+                                                     widened_grad_.data(), capabilities_, stream.numkong()),
+                                "normalized gradient addition");
+    if (staged)
+        staged = numkong_result(nk_cast_best(widened_grad_.data(), nk_f32_k, normalized_grad.data(), nk_bf16_k,
+                                             rows * hidden, capabilities_, stream.numkong()),
+                                "normalized gradient narrowing");
+    if (staged)
+        staged = weight_gradient_bf16(predicted_grad_.view(), normalized, recon_weight_grad_.span(),
+                                      transposed_grad_.span(), transposed_input_.span(), packed_input_.span(),
+                                      products_.span(), capabilities_, stream);
     return staged;
 }
 

@@ -52,14 +52,14 @@
 #include <cstring> // `std::memset` — zeroing pinned scalar cells
 
 #include <utility> // `std::exchange`, `std::forward`
-#include <array>   // `std::array` — the deterministic-algorithm candidate table
 #include <span>    // `std::span` — the multi-stream capture rank list
 
 #include <cuda.h>      // `CUstream`, `CUgraph`, `CUgraphExec`, `CUevent`
 #include <cuda_bf16.h> // `__nv_bfloat16` — the training-currency scalar of the rank-1 aliases
-#include <cublasLt.h>  // `cublasLtHandle_t`, `cublasLtMatmul` — the tensor-core matmul sessions
 #include <cudnn.h>     // `cudnnHandle_t` — the fused-attention session (graphs live with their consumers)
 
+#include <numkong/cast.h>     // `nk_cast_best` — narrowing a weight gradient's Float32 product
+#include <numkong/dots.h>     // `nk_dots_pack_bf16_best`, `nk_dots_packed_bf16_best` — every matrix product
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span` for the typed transfer helpers
 
 #include "cuda_core/types.hpp"          // `expected`, `expected_t`, `status_t`
@@ -134,6 +134,8 @@ struct gpu_stream_t {
     [[nodiscard]] CUstream get() const noexcept { return stream_; }
     /** @brief Implicit handle access — the stream passes straight into launchers. */
     operator CUstream() const noexcept { return stream_; }
+    /** @brief The same handle as NumKong's opaque stream, for its kernels and runtime calls. */
+    [[nodiscard]] nk_stream_t numkong() const noexcept { return reinterpret_cast<nk_stream_t>(stream_); }
     /** @brief The retained primary context the stream lives in. */
     [[nodiscard]] CUcontext context() const noexcept { return context_; }
     /** @brief The device ordinal the stream belongs to. */
@@ -278,6 +280,64 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
                          source, destination);
 }
 
+/** @brief Lift a NumKong status into the cell's diagnostics, naming the @p step that returned it. */
+[[nodiscard]] inline expected_t numkong_result(nk_status_t status, sz::string_view step) noexcept {
+    if (status == nk_success_k) return {};
+    return expected_t::fail(status_t::cuda_error_k, "{} failed: {}", step, nk_status_name(status));
+}
+
+/** @brief The bytes NumKong's pack of a @b [columns,depth] BFloat16 B operand takes on @p capabilities . */
+[[nodiscard]] expected<std::size_t> pack_bytes_bf16(std::size_t columns, std::size_t depth,
+                                                    nk_capability_t capabilities) noexcept;
+
+/** @brief Allocate off @p arena a buffer for the NumKong pack of a @b [columns,depth] BFloat16 B operand. */
+[[nodiscard]] expected<b8r1_tensor_arena_t> allocate_pack_bf16(std::size_t columns, std::size_t depth,
+                                                               nk_capability_t capabilities,
+                                                               gpu_arena_t &arena) noexcept;
+
+/**
+ *  @brief Enqueue NumKong's pack of @p b , read row-major as the @b [columns,depth] B operand of
+ *      @ref multiply_bf16 , into @p packed , sized by @ref pack_bytes_bf16 .
+ */
+[[nodiscard]] expected_t pack_bf16(bf16r2_view_t b, b8r1_span_t packed, nk_capability_t capabilities,
+                                   gpu_stream_t &stream) noexcept;
+
+/**
+ *  @brief Enqueue the Float32 product @c c=a·Bᵀ against @p packed_b , the pack of a @b [columns,depth] B with
+ *      @c columns=c.extent(1) and @c depth=a.extent(1) . NumKong products have no split-K, so they replay
+ *      bit-identically.
+ */
+[[nodiscard]] expected_t multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t c,
+                                       nk_capability_t capabilities, gpu_stream_t &stream) noexcept;
+
+/**
+ *  @brief Pack @p weight @b [outputs,inputs] as the B operand of its forward product into @p packed , and its
+ *      transpose, staged in @p transposed with rows padded to 8 for NumKong's 16-byte stride rule, as that of its
+ *      data gradient into @p packed_transposed . Call once per optimizer step, after the weights change.
+ *  @param[in] transposed At least @c inputs·round_up(outputs,8) scalars of scratch.
+ */
+[[nodiscard]] expected_t pack_weight_bf16(bf16r2_view_t weight, bf16r1_span_t transposed, b8r1_span_t packed,
+                                          b8r1_span_t packed_transposed, nk_capability_t capabilities,
+                                          gpu_stream_t &stream) noexcept;
+
+/**
+ *  @brief One weight gradient @c dW=dYᵀ·X : transposes @p output_grad and @p input with token rows padded to 8,
+ *      since NumKong reads A row-major and packs B row-major, multiplies @c dYᵀ by the packed @c Xᵀ , and narrows
+ *      the Float32 product into @p weight_grad .
+ *  @param[in] output_grad @b [tokens,outputs] the product's BFloat16 output gradient.
+ *  @param[in] input @b [tokens,inputs] the product's forward A operand.
+ *  @param[out] weight_grad @b [outputs,inputs] the contiguous BFloat16 weight gradient.
+ *  @param[in] transposed_grad,transposed_input At least @c outputs·round_up(tokens,8) and
+ *      @c inputs·round_up(tokens,8) scalars of scratch.
+ *  @param[in] packed_input At least @ref pack_bytes_bf16 of @c [inputs,tokens] .
+ *  @param[in] product At least @c outputs·inputs Float32 scalars of scratch.
+ *  @param[inout] stream The stream every launch enqueues on.
+ */
+[[nodiscard]] expected_t weight_gradient_bf16(bf16r2_view_t output_grad, bf16r2_view_t input, bf16r2_span_t weight_grad,
+                                              bf16r1_span_t transposed_grad, bf16r1_span_t transposed_input,
+                                              b8r1_span_t packed_input, f32r1_span_t product,
+                                              nk_capability_t capabilities, gpu_stream_t &stream) noexcept;
+
 /**
  *  @brief All-lanes-get-the-total shuffle sum of one warp — the fixed-order tree every deterministic
  *      reduction in the cell builds on.
@@ -323,11 +383,10 @@ template <unsigned block_size_>
  *      (the production default), or re-enqueued eagerly each step — the bring-up / debugging path, and the
  *      other half of every capture-vs-eager parity test. A trainer carries it as a run knob; the two modes must
  *      land on bitwise-identical weights over identical seeds. */
-/** @brief How the vendor sessions pin their per-shape algorithms. The default takes the library's own first
- *      deterministic heuristic pick — zero construction cost, the production behavior. The benchmarked mode
- *      times every gate-passing candidate at construction and pins the fastest, memoizing per argument
- *      combination so repeated shapes measure once; picks are measured on this machine at this moment, so
- *      tuned multi-host runs are for profiling, never for bitwise-parity conformance. */
+/** @brief How the cuDNN sessions pin their per-shape engines. The default takes the library's own first
+ *      heuristic pick — zero construction cost, the production behavior. The benchmarked mode will time the
+ *      candidates at construction and pin the fastest; picks measured on this machine at this moment make
+ *      tuned multi-host runs a profiling tool, never a bitwise-parity conformance one. */
 enum class algo_pick_t : u8_t {
     heuristic_k = 0,
     benchmarked_k = 1,
@@ -551,443 +610,6 @@ struct gpu_replay_graph_t {
 };
 
 /**
- *  @brief A shared cuBLASLt session: one handle per device, owned once and borrowed by every plan — the
- *      tensor-core matmul entry point for losses, projection heads, and anything else with large matrix
- *      products. Slow primitives are hated here: wide GEMMs go through this, never hand-rolled loops.
- */
-struct cublaslt_algo_picks_t;
-
-struct cublaslt_session_t {
-
-  private:
-    cublaslt_session_t() noexcept = default;
-
-  public:
-    cublaslt_session_t(cublaslt_session_t const &) = delete;
-    cublaslt_session_t &operator=(cublaslt_session_t const &) = delete;
-    cublaslt_session_t(cublaslt_session_t &&other) noexcept
-        : handle_(std::exchange(other.handle_, nullptr)), algo_pick_(other.algo_pick_),
-          picks_(std::exchange(other.picks_, nullptr)) {}
-    cublaslt_session_t &operator=(cublaslt_session_t &&other) noexcept {
-        if (this != &other) {
-            destroy_();
-            handle_ = std::exchange(other.handle_, nullptr);
-            algo_pick_ = other.algo_pick_;
-            picks_ = std::exchange(other.picks_, nullptr);
-        }
-        return *this;
-    }
-    ~cublaslt_session_t() noexcept { destroy_(); }
-
-    /** @brief Create the handle — once per device, outside any capture. @p algo_pick is the run's algorithm
-     *      policy and @p picks the composition-root-owned memo the benchmarked mode fills; under
-     *      @ref algo_pick_t::heuristic_k the memo is never touched and may be null. */
-    [[nodiscard]] static expected<cublaslt_session_t> make(algo_pick_t algo_pick,
-                                                           cublaslt_algo_picks_t *picks) noexcept {
-        cublaslt_session_t session;
-        session.algo_pick_ = algo_pick;
-        session.picks_ = picks;
-        if (cublasStatus_t status = cublasLtCreate(&session.handle_); status != CUBLAS_STATUS_SUCCESS)
-            return expected<cublaslt_session_t>::fail(
-                status_t::cuda_error_k, "cuBLASLt handle creation failed (status={})", static_cast<int>(status));
-        return expected<cublaslt_session_t> {std::move(session)};
-    }
-
-    /** @brief The wrapped handle, borrowed by plans. */
-    [[nodiscard]] cublasLtHandle_t get() const noexcept { return handle_; }
-    /** @brief The run's algorithm policy, applied by every plan this session builds. */
-    [[nodiscard]] algo_pick_t algo_pick() const noexcept { return algo_pick_; }
-    /** @brief The shared per-shape pick memo; null under the heuristic policy. */
-    [[nodiscard]] cublaslt_algo_picks_t *picks() const noexcept { return picks_; }
-
-  private:
-    void destroy_() noexcept {
-        if (handle_ != nullptr) cublasLtDestroy(std::exchange(handle_, nullptr));
-    }
-
-    cublasLtHandle_t handle_ = nullptr;
-    algo_pick_t algo_pick_ = algo_pick_t::heuristic_k;
-    cublaslt_algo_picks_t *picks_ = nullptr;
-};
-
-/**
- *  @brief The static description of one @ref cublaslt_plan_t : stored operand extents and row strides
- *      (all row-major, in elements), the transpose ops, and the effective product dimensions they imply.
- *      BFloat16 operands with Float32 accumulation and output — the one precision recipe this project
- *      trains with.
- */
-struct cublaslt_plan_config_t {
-    /** @brief Stored extents of operand A, before @ref transpose_a . */
-    u32_t a_rows = 0, a_cols = 0;
-    /** @brief Elements between consecutive rows of A (its allocated row width). */
-    u32_t a_row_stride = 0;
-    /** @brief Stored extents of operand B, before @ref transpose_b . */
-    u32_t b_rows = 0, b_cols = 0;
-    /** @brief Elements between consecutive rows of B. */
-    u32_t b_row_stride = 0;
-    /** @brief Extents of the output C. */
-    u32_t c_rows = 0, c_cols = 0;
-    /** @brief Elements between consecutive rows of C. */
-    u32_t c_row_stride = 0;
-    /** @brief Whether the product uses the transposed reading of the stored operand. */
-    bool transpose_a = false, transpose_b = false;
-    /** @brief Operand element types — BFloat16 by default; @c CUDA_R_8F_E4M3 selects the FP8 path. */
-    cudaDataType_t a_type = CUDA_R_16BF, b_type = CUDA_R_16BF;
-    /** @brief Output element type — Float32 accumulator surface by default, BFloat16 for activations. */
-    cudaDataType_t c_type = CUDA_R_32F;
-    /** @brief Optional per-tensor FP8 descale scalars (Float32, device-resident, capture-stable
-     *      addresses) pinned into the descriptor at @ref cublaslt_plan_t::make — the tensor-core native
-     *      dequantisation, no post-matmul descale kernel. Null means unscaled. */
-    f32_t const *a_descale = nullptr;
-    f32_t const *b_descale = nullptr;
-};
-
-/** @brief One matmul argument combination — every @ref cublaslt_plan_config_t field except the runtime
- *      descale addresses, which travel as presence bits: two plans differing only in where their descale
- *      scalars live pin the same algorithm. */
-struct cublaslt_algo_key_t {
-    u32_t a_rows = 0, a_cols = 0, a_row_stride = 0;
-    u32_t b_rows = 0, b_cols = 0, b_row_stride = 0;
-    u32_t c_rows = 0, c_cols = 0, c_row_stride = 0;
-    u32_t a_type = 0, b_type = 0, c_type = 0;
-    u8_t transpose_a = 0, transpose_b = 0;
-    u8_t a_descaled = 0, b_descaled = 0;
-
-    friend bool operator==(cublaslt_algo_key_t const &, cublaslt_algo_key_t const &) noexcept = default;
-
-    [[nodiscard]] static cublaslt_algo_key_t from(cublaslt_plan_config_t const &config) noexcept {
-        cublaslt_algo_key_t key;
-        key.a_rows = config.a_rows, key.a_cols = config.a_cols, key.a_row_stride = config.a_row_stride;
-        key.b_rows = config.b_rows, key.b_cols = config.b_cols, key.b_row_stride = config.b_row_stride;
-        key.c_rows = config.c_rows, key.c_cols = config.c_cols, key.c_row_stride = config.c_row_stride;
-        key.a_type = static_cast<u32_t>(config.a_type), key.b_type = static_cast<u32_t>(config.b_type);
-        key.c_type = static_cast<u32_t>(config.c_type);
-        key.transpose_a = config.transpose_a ? 1u : 0u, key.transpose_b = config.transpose_b ? 1u : 0u;
-        key.a_descaled = config.a_descale != nullptr ? 1u : 0u;
-        key.b_descaled = config.b_descale != nullptr ? 1u : 0u;
-        return key;
-    }
-};
-
-/** @brief One benchmarked pick: the argument combination it answers and the fastest deterministic algorithm
- *      measured for it, with the measurement for the construction report. */
-struct cublaslt_algo_pick_t {
-    cublaslt_algo_key_t key {};
-    cublasLtMatmulAlgo_t algorithm {};
-    std::size_t workspace_bytes = 0;
-    f32_t microseconds = 0.0f;
-};
-
-/** @brief The run's per-shape pick memo — owned at the composition root beside the session tables and shared
- *      by every replica's session, so identical blocks across replicas measure once. A future cluster-wide
- *      pre-profiling pass (uniform GPUs timing disjoint shape subsets simultaneously) merges into this same
- *      container. */
-struct cublaslt_algo_picks_t {
-
-    /** @brief The recorded pick for @p key , or null when the shape is unmeasured. */
-    [[nodiscard]] cublaslt_algo_pick_t const *find(cublaslt_algo_key_t const &key) const noexcept {
-        for (cublaslt_algo_pick_t const &pick : std::span<cublaslt_algo_pick_t const> {picks_.view()})
-            if (pick.key == key) return &pick;
-        return nullptr;
-    }
-
-    /** @brief Record one measured pick. */
-    [[nodiscard]] status_t try_record(cublaslt_algo_pick_t pick) noexcept { return picks_.try_push_back(pick); }
-
-    /** @brief How many distinct argument combinations were measured. */
-    [[nodiscard]] std::size_t size() const noexcept { return picks_.size(); }
-
-    /** @brief The summed per-call winners — the construction report's one number. */
-    [[nodiscard]] f32_t total_microseconds() const noexcept {
-        f32_t total = 0.0f;
-        for (cublaslt_algo_pick_t const &pick : std::span<cublaslt_algo_pick_t const> {picks_.view()})
-            total += pick.microseconds;
-        return total;
-    }
-
-  private:
-    array<cublaslt_algo_pick_t> picks_ {};
-};
-
-/** @brief One measured winner among a plan's gate-passing candidates — @ref cublaslt_benchmark_candidates
- *      hands it back for @ref cublaslt_plan_t::make to pin and memoize. */
-struct cublaslt_measured_t {
-    std::size_t candidate_index = 0;
-    std::size_t workspace_bytes = 0;
-    f32_t microseconds = 0.0f;
-};
-
-/** @brief Time every gate-passing candidate of one product on transient device operands and return the
- *      fastest — the benchmarked pick's stopwatch, compiled in @c schedule.cu . Allocates the operands and
- *      a workspace for the run's duration only, so benchmarked construction needs transient headroom for
- *      the largest product it measures. */
-[[nodiscard]] expected<cublaslt_measured_t> cublaslt_benchmark_candidates(
-    cublaslt_session_t &session, cublasLtMatmulDesc_t description, cublasLtMatrixLayout_t a_layout,
-    cublasLtMatrixLayout_t b_layout, cublasLtMatrixLayout_t c_layout, cublaslt_plan_config_t const &config,
-    std::span<cublasLtMatmulHeuristicResult_t const> candidates) noexcept;
-
-/**
- *  @brief One pre-planned tensor-core matmul: descriptors, layouts, and the pinned algorithm — the
- *      session's policy picks it (see @ref algo_pick_t ) at @ref make , so a @ref matmul call is a pure
- *      enqueue with a fixed kernel — hidden allocation cannot happen (the workspace is caller-owned) and
- *      results replay bit-identically (a pinned algorithm never re-tunes).
- */
-struct cublaslt_plan_t {
-
-    cublaslt_plan_t() noexcept = default;
-    cublaslt_plan_t(cublaslt_plan_t const &) = delete;
-    cublaslt_plan_t &operator=(cublaslt_plan_t const &) = delete;
-    cublaslt_plan_t(cublaslt_plan_t &&other) noexcept
-        : description_(std::exchange(other.description_, nullptr)), a_layout_(std::exchange(other.a_layout_, nullptr)),
-          b_layout_(std::exchange(other.b_layout_, nullptr)), c_layout_(std::exchange(other.c_layout_, nullptr)),
-          algorithm_(other.algorithm_), workspace_bytes_(std::exchange(other.workspace_bytes_, 0)),
-          a_cols_(std::exchange(other.a_cols_, 0)), b_cols_(std::exchange(other.b_cols_, 0)),
-          c_cols_(std::exchange(other.c_cols_, 0)) {}
-    cublaslt_plan_t &operator=(cublaslt_plan_t &&other) noexcept {
-        if (this != &other) {
-            destroy_();
-            description_ = std::exchange(other.description_, nullptr);
-            a_layout_ = std::exchange(other.a_layout_, nullptr);
-            b_layout_ = std::exchange(other.b_layout_, nullptr);
-            c_layout_ = std::exchange(other.c_layout_, nullptr);
-            algorithm_ = other.algorithm_;
-            workspace_bytes_ = std::exchange(other.workspace_bytes_, 0);
-            a_cols_ = std::exchange(other.a_cols_, 0);
-            b_cols_ = std::exchange(other.b_cols_, 0);
-            c_cols_ = std::exchange(other.c_cols_, 0);
-        }
-        return *this;
-    }
-    ~cublaslt_plan_t() noexcept { destroy_(); }
-
-    /** @brief Build the descriptors and pin the best @b deterministic heuristic algorithm — once, at
-     *      setup, outside any capture. The engine's chooser runs unbounded and reports what its pick
-     *      needs ( @ref workspace_bytes — the caller allocates exactly that, and the arena budget is
-     *      the real constraint); determinism is enforced by name, never by a size cap: the pinned
-     *      algorithm must be single-split with no cross-CTA reduction, so no atomics ever touch the
-     *      accumulator. The preference restricts the search to reduction-free algorithms up front and
-     *      scans a deep candidate pool — for unaligned shapes (the 258-wide byte-vocabulary decoder)
-     *      the deterministic pick ranks well below every split-K candidate, so an unrestricted or
-     *      shallow scan would surface nothing the gate accepts. */
-    [[nodiscard]] static expected<cublaslt_plan_t> make(cublaslt_session_t &session,
-                                                        cublaslt_plan_config_t config) noexcept {
-        cublaslt_plan_t plan;
-        if (cublasStatus_t status = cublasLtMatmulDescCreate(&plan.description_, CUBLAS_COMPUTE_32F, CUDA_R_32F);
-            status != CUBLAS_STATUS_SUCCESS)
-            return expected<cublaslt_plan_t>::fail(
-                status_t::cuda_error_k, "matmul description creation failed (status={})", static_cast<int>(status));
-        cublasOperation_t const a_operation = config.transpose_a ? CUBLAS_OP_T : CUBLAS_OP_N;
-        cublasOperation_t const b_operation = config.transpose_b ? CUBLAS_OP_T : CUBLAS_OP_N;
-        cublasLtMatmulDescSetAttribute(plan.description_, CUBLASLT_MATMUL_DESC_TRANSA, &a_operation,
-                                       sizeof(a_operation));
-        cublasLtMatmulDescSetAttribute(plan.description_, CUBLASLT_MATMUL_DESC_TRANSB, &b_operation,
-                                       sizeof(b_operation));
-        // FP8 dequantisation is the tensor core's own: the descale scalars live at capture-stable device
-        // addresses, so pinning the pointers into the descriptor is replay-safe — values may change,
-        // addresses never do. Fast accumulation is the FP8-native mode.
-        if (config.a_descale != nullptr)
-            cublasLtMatmulDescSetAttribute(plan.description_, CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &config.a_descale,
-                                           sizeof(config.a_descale));
-        if (config.b_descale != nullptr)
-            cublasLtMatmulDescSetAttribute(plan.description_, CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &config.b_descale,
-                                           sizeof(config.b_descale));
-        if (config.a_type == CUDA_R_8F_E4M3 || config.b_type == CUDA_R_8F_E4M3) {
-            std::int8_t const fast_accumulation = 1;
-            cublasLtMatmulDescSetAttribute(plan.description_, CUBLASLT_MATMUL_DESC_FAST_ACCUM, &fast_accumulation,
-                                           sizeof(fast_accumulation));
-        }
-
-        // Row-major layouts of the stored operands; the ops above provide any transposed reading.
-        auto make_layout = [](cublasLtMatrixLayout_t &layout, cudaDataType_t type, u32_t rows, u32_t cols,
-                              u32_t row_stride) noexcept {
-            if (cublasLtMatrixLayoutCreate(&layout, type, rows, cols, static_cast<i64_t>(row_stride)) !=
-                CUBLAS_STATUS_SUCCESS)
-                return false;
-            cublasLtOrder_t const row_major = CUBLASLT_ORDER_ROW;
-            return cublasLtMatrixLayoutSetAttribute(layout, CUBLASLT_MATRIX_LAYOUT_ORDER, &row_major,
-                                                    sizeof(row_major)) == CUBLAS_STATUS_SUCCESS;
-        };
-        if (!make_layout(plan.a_layout_, config.a_type, config.a_rows, config.a_cols, config.a_row_stride) ||
-            !make_layout(plan.b_layout_, config.b_type, config.b_rows, config.b_cols, config.b_row_stride) ||
-            !make_layout(plan.c_layout_, config.c_type, config.c_rows, config.c_cols, config.c_row_stride))
-            return expected<cublaslt_plan_t>::fail(status_t::cuda_error_k, "matrix layout creation failed");
-
-        cublasLtMatmulPreference_t preference = nullptr;
-        if (cublasLtMatmulPreferenceCreate(&preference) != CUBLAS_STATUS_SUCCESS)
-            return expected<cublaslt_plan_t>::fail(status_t::cuda_error_k, "matmul preference creation failed");
-        // No artificial ceiling: the chooser ranks freely, the pick reports its exact appetite, and
-        // the arena decides whether that fits — loudly, at the caller's allocation.
-        std::uint64_t const unbounded = ~std::uint64_t {0};
-        cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &unbounded,
-                                             sizeof(unbounded));
-        std::uint32_t const reduction_none = CUBLASLT_REDUCTION_SCHEME_NONE;
-        // Reduction-free picks only — see the brief: split-K would outrank the deterministic algorithm.
-        cublasLtMatmulPreferenceSetAttribute(preference, CUBLASLT_MATMUL_PREF_REDUCTION_SCHEME_MASK, &reduction_none,
-                                             sizeof(reduction_none));
-        std::array<cublasLtMatmulHeuristicResult_t, 64> heuristics {};
-        int heuristic_count = 0;
-        cublasStatus_t const searched = cublasLtMatmulAlgoGetHeuristic(
-            session.get(), plan.description_, plan.a_layout_, plan.b_layout_, plan.c_layout_, plan.c_layout_,
-            preference, static_cast<int>(heuristics.size()), heuristics.data(), &heuristic_count);
-        cublasLtMatmulPreferenceDestroy(preference);
-        if (searched != CUBLAS_STATUS_SUCCESS || heuristic_count == 0)
-            return expected<cublaslt_plan_t>::fail( //
-                status_t::shape_unsupported_k,
-                "no tensor-core algorithm for this product (a=[{}x{}] b=[{}x{}] c=[{}x{}] status={})", config.a_rows,
-                config.a_cols, config.b_rows, config.b_cols, config.c_rows, config.c_cols, static_cast<int>(searched));
-        // The determinism gate: single split, no cross-CTA reduction scheme — the properties a size
-        // cap only ever enforced by accident.
-        std::array<cublasLtMatmulHeuristicResult_t, 64> passing {};
-        std::size_t passing_count = 0;
-        for (int candidate = 0; candidate != heuristic_count; ++candidate) {
-            cublasLtMatmulHeuristicResult_t const &heuristic = heuristics[static_cast<std::size_t>(candidate)];
-            std::int32_t splits = 0;
-            std::uint32_t reduction = CUBLASLT_REDUCTION_SCHEME_NONE;
-            std::size_t written = 0;
-            if (cublasLtMatmulAlgoConfigGetAttribute(&heuristic.algo, CUBLASLT_ALGO_CONFIG_SPLITK_NUM, &splits,
-                                                     sizeof(splits), &written) != CUBLAS_STATUS_SUCCESS)
-                continue;
-            if (cublasLtMatmulAlgoConfigGetAttribute(&heuristic.algo, CUBLASLT_ALGO_CONFIG_REDUCTION_SCHEME, &reduction,
-                                                     sizeof(reduction), &written) != CUBLAS_STATUS_SUCCESS)
-                continue;
-            if (splits > 1 || reduction != CUBLASLT_REDUCTION_SCHEME_NONE) continue;
-            passing[passing_count++] = heuristic;
-        }
-        if (passing_count == 0)
-            return expected<cublaslt_plan_t>::fail(
-                status_t::shape_unsupported_k,
-                "no deterministic tensor-core algorithm among {} candidates (a=[{}x{}] b=[{}x{}] c=[{}x{}])",
-                heuristic_count, config.a_rows, config.a_cols, config.b_rows, config.b_cols, config.c_rows,
-                config.c_cols);
-        plan.a_cols_ = config.a_cols;
-        plan.b_cols_ = config.b_cols;
-        plan.c_cols_ = config.c_cols;
-
-        // The session's policy picks among the gate-passers: the heuristic's own first choice by default,
-        // or the memoized measured winner under the benchmarked mode.
-        if (session.algo_pick() == algo_pick_t::benchmarked_k && session.picks() != nullptr) {
-            cublaslt_algo_key_t const key = cublaslt_algo_key_t::from(config);
-            if (cublaslt_algo_pick_t const *memoized = session.picks()->find(key); memoized != nullptr) {
-                plan.algorithm_ = memoized->algorithm;
-                plan.workspace_bytes_ = memoized->workspace_bytes;
-                return expected<cublaslt_plan_t> {std::move(plan)};
-            }
-            expected<cublaslt_measured_t> measured = cublaslt_benchmark_candidates(
-                session, plan.description_, plan.a_layout_, plan.b_layout_, plan.c_layout_, config,
-                {passing.data(), passing_count});
-            if (!measured) return expected<cublaslt_plan_t>::fail(std::move(measured));
-            cublasLtMatmulHeuristicResult_t const &winner = passing[measured.value_.candidate_index];
-            cublaslt_algo_pick_t pick;
-            pick.key = key;
-            pick.algorithm = winner.algo;
-            pick.workspace_bytes = winner.workspaceSize;
-            pick.microseconds = measured.value_.microseconds;
-            if (session.picks()->try_record(pick) != status_t::success_k)
-                return expected<cublaslt_plan_t>::fail(status_t::bad_alloc_k, "algorithm pick memo append failed");
-            plan.algorithm_ = winner.algo;
-            plan.workspace_bytes_ = winner.workspaceSize;
-            return expected<cublaslt_plan_t> {std::move(plan)};
-        }
-        plan.algorithm_ = passing[0].algo;
-        plan.workspace_bytes_ = passing[0].workspaceSize;
-        return expected<cublaslt_plan_t> {std::move(plan)};
-    }
-
-    /** @brief The workspace bytes the pinned algorithm needs; the caller sizes one shared buffer to the
-     *      maximum over its plans. */
-    [[nodiscard]] std::size_t workspace_bytes() const noexcept { return workspace_bytes_; }
-
-  private:
-    /** @brief The shared enqueue: the row extent of each operand rides its view (set fresh every call —
-     *      no persistent layout state to revert), while the inner extents must equal the columns the
-     *      plan pinned at @ref make . */
-    /** @brief The row-major leading dimension (elements between consecutive rows) of an operand view —
-     *      @c extent(1) for a contiguous buffer, the parent width for a column slice. */
-    template <typename view_type_>
-    [[nodiscard]] static u32_t leading_dimension_(view_type_ const &view) noexcept {
-        using element_type = typename view_type_::value_type;
-        return static_cast<u32_t>(view.stride_bytes(0) /
-                                  static_cast<typename view_type_::difference_type>(sizeof(element_type)));
-    }
-
-    [[nodiscard]] expected_t run_(cublaslt_session_t const &session, void const *a, u32_t a_rows, u32_t a_cols,
-                                  u32_t a_ld, void const *b, u32_t b_rows, u32_t b_cols, u32_t b_ld, void *c,
-                                  u32_t c_rows, u32_t c_cols, u32_t c_ld, f32_t beta, b8r1_span_t workspace,
-                                  gpu_stream_t const &stream) const noexcept {
-        if (a_cols != a_cols_ || b_cols != b_cols_ || c_cols != c_cols_)
-            return expected_t::fail(status_t::shape_unsupported_k,
-                                    "operand columns {{{},{},{}}} disagree with the plan {{{},{},{}}}", a_cols, b_cols,
-                                    c_cols, a_cols_, b_cols_, c_cols_);
-        auto set_shape = [](cublasLtMatrixLayout_t layout, u32_t rows, u32_t leading) noexcept {
-            std::uint64_t const row_extent = rows;
-            std::int64_t const stride = leading;
-            return cublasLtMatrixLayoutSetAttribute(layout, CUBLASLT_MATRIX_LAYOUT_ROWS, &row_extent,
-                                                    sizeof(row_extent)) == CUBLAS_STATUS_SUCCESS &&
-                   cublasLtMatrixLayoutSetAttribute(layout, CUBLASLT_MATRIX_LAYOUT_LD, &stride, sizeof(stride)) ==
-                       CUBLAS_STATUS_SUCCESS;
-        };
-        if (!set_shape(a_layout_, a_rows, a_ld) || !set_shape(b_layout_, b_rows, b_ld) ||
-            !set_shape(c_layout_, c_rows, c_ld))
-            return expected_t::fail(status_t::cuda_error_k, "layout row/stride update failed");
-        f32_t const alpha = 1.0f;
-        if (cublasStatus_t status = cublasLtMatmul(session.get(), description_, &alpha, a, a_layout_, b, b_layout_,
-                                                   &beta, c, c_layout_, c, c_layout_, &algorithm_, workspace.data(),
-                                                   workspace.extent(0), stream.get());
-            status != CUBLAS_STATUS_SUCCESS)
-            return expected_t::fail(status_t::cuda_error_k, "tensor-core matmul failed (status={})",
-                                    static_cast<int>(status));
-        return {};
-    }
-
-  public:
-    /** @brief BFloat16 operands. Rows ride the views; the K/N columns are checked against the plan. */
-    [[nodiscard]] expected_t matmul(cublaslt_session_t const &session, bf16r2_view_t a, bf16r2_view_t b,
-                                    bf16r2_span_t c, f32_t beta, b8r1_span_t workspace,
-                                    gpu_stream_t const &stream) const noexcept {
-        return run_(session, a.data(), static_cast<u32_t>(a.extent(0)), static_cast<u32_t>(a.extent(1)),
-                    leading_dimension_(a), b.data(), static_cast<u32_t>(b.extent(0)), static_cast<u32_t>(b.extent(1)),
-                    leading_dimension_(b), c.data(), static_cast<u32_t>(c.extent(0)), static_cast<u32_t>(c.extent(1)),
-                    leading_dimension_(c), beta, workspace, stream);
-    }
-    /** @brief E4M3 operands (descales pinned at make); C is a BFloat16 activation surface. */
-    [[nodiscard]] expected_t matmul(cublaslt_session_t const &session, e4m3r2_view_t a, e4m3r2_view_t b,
-                                    bf16r2_span_t c, f32_t beta, b8r1_span_t workspace,
-                                    gpu_stream_t const &stream) const noexcept {
-        return run_(session, a.data(), static_cast<u32_t>(a.extent(0)), static_cast<u32_t>(a.extent(1)),
-                    leading_dimension_(a), b.data(), static_cast<u32_t>(b.extent(0)), static_cast<u32_t>(b.extent(1)),
-                    leading_dimension_(b), c.data(), static_cast<u32_t>(c.extent(0)), static_cast<u32_t>(c.extent(1)),
-                    leading_dimension_(c), beta, workspace, stream);
-    }
-    /** @brief BFloat16 operands accumulating into a Float32 surface — the loss-logit and gradient-fold
-     *      products whose plans pin @c c_type=CUDA_R_32F at @ref make . */
-    [[nodiscard]] expected_t matmul(cublaslt_session_t const &session, bf16r2_view_t a, bf16r2_view_t b, f32r2_span_t c,
-                                    f32_t beta, b8r1_span_t workspace, gpu_stream_t const &stream) const noexcept {
-        return run_(session, a.data(), static_cast<u32_t>(a.extent(0)), static_cast<u32_t>(a.extent(1)),
-                    leading_dimension_(a), b.data(), static_cast<u32_t>(b.extent(0)), static_cast<u32_t>(b.extent(1)),
-                    leading_dimension_(b), c.data(), static_cast<u32_t>(c.extent(0)), static_cast<u32_t>(c.extent(1)),
-                    leading_dimension_(c), beta, workspace, stream);
-    }
-
-  private:
-    void destroy_() noexcept {
-        if (c_layout_ != nullptr) cublasLtMatrixLayoutDestroy(std::exchange(c_layout_, nullptr));
-        if (b_layout_ != nullptr) cublasLtMatrixLayoutDestroy(std::exchange(b_layout_, nullptr));
-        if (a_layout_ != nullptr) cublasLtMatrixLayoutDestroy(std::exchange(a_layout_, nullptr));
-        if (description_ != nullptr) cublasLtMatmulDescDestroy(std::exchange(description_, nullptr));
-    }
-
-    cublasLtMatmulDesc_t description_ = nullptr;
-    cublasLtMatrixLayout_t a_layout_ = nullptr;
-    cublasLtMatrixLayout_t b_layout_ = nullptr;
-    cublasLtMatrixLayout_t c_layout_ = nullptr;
-    cublasLtMatmulAlgo_t algorithm_ {};
-    std::size_t workspace_bytes_ = 0;
-    /** @brief The K/N columns pinned at @ref make — the inner extents a call's operands must match; the
-     *      row extents are the only per-call freedom (they ride the caller's views). */
-    u32_t a_cols_ = 0, b_cols_ = 0, c_cols_ = 0;
-};
-
-/**
  *  @brief A move-only owning wrapper over a @c CUevent — the cross-stream ordering token (fork / join
  *      seams, gather-ready signals) with the timing machinery disabled.
  */
@@ -1012,15 +634,6 @@ struct gpu_event_t {
         gpu_event_t event;
         if (CUresult result = cuEventCreate(&event.event_, CU_EVENT_DISABLE_TIMING); result != CUDA_SUCCESS)
             return expected<gpu_event_t>::fail(result, "event creation failed");
-        return expected<gpu_event_t> {std::move(event)};
-    }
-
-    /** @brief Create a timing-capable event — the benchmarked algorithm pick's stopwatch; ordering-only
-     *      consumers keep @ref make 's cheaper @c CU_EVENT_DISABLE_TIMING events. */
-    [[nodiscard]] static expected<gpu_event_t> make_timed() noexcept {
-        gpu_event_t event;
-        if (CUresult result = cuEventCreate(&event.event_, CU_EVENT_DEFAULT); result != CUDA_SUCCESS)
-            return expected<gpu_event_t>::fail(result, "timed event creation failed");
         return expected<gpu_event_t> {std::move(event)};
     }
 

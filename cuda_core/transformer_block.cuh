@@ -91,7 +91,7 @@
 #include <numkong/tensor.hpp>  // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
 #include "cuda_core/types.hpp"    // `expected`, `expected_t`, `status_t`, the integer aliases
-#include "cuda_core/schedule.cuh" // `gpu_stream_t`, `launch_kernel`, `cublaslt_*`, `cudnn_session_t`
+#include "cuda_core/schedule.cuh" // `gpu_stream_t`, `launch_kernel`, the NumKong products, `cudnn_session_t`
 
 namespace unum::uform::core {
 
@@ -393,10 +393,12 @@ struct sdpa_plan_t {
  */
 struct transformer_scratch_t {
 
-    /** @brief Allocate every transient off @p arena for @p config 's capacities; the NumKong pack size comes
-     *      from the capabilities of the arena's device. */
+    /** @brief Allocate every transient off @p arena for @p config 's capacities, wide enough for the weight
+     *      gradients of an entry projecting @p entry_inputs scalars per token and of the tower head over the
+     *      segments; the NumKong pack sizes come from the capabilities of the arena's device. */
     [[nodiscard]] static expected<transformer_scratch_t> make(gpu_arena_t &arena,
-                                                              transformer_block_config_t const &config) noexcept;
+                                                              transformer_block_config_t const &config,
+                                                              std::size_t entry_inputs) noexcept;
 
     /** @brief Float32 @b [tokens·ffn] the SwiGLU output before its cast, then each data gradient before the
      *      house kernel or cast consuming it. */
@@ -433,8 +435,8 @@ struct transformer_block_bf16_t {
     /** @brief Allocate and plan everything: weights and their gradients, every stash the backward reads, the
      *      one NumKong pack every product's B operand passes through, the forward and backward SDPA graphs,
      *      and their workspace. Construction is the validation and the planning; calls are pure enqueues. */
-    [[nodiscard]] static expected<transformer_block_bf16_t> make(gpu_arena_t &arena, cublaslt_session_t &blas,
-                                                                 cudnn_session_t &cudnn, transformer_scratch_t &scratch,
+    [[nodiscard]] static expected<transformer_block_bf16_t> make(gpu_arena_t &arena, cudnn_session_t &cudnn,
+                                                                 transformer_scratch_t &scratch,
                                                                  transformer_block_config_t config) noexcept;
 
     /**
@@ -496,29 +498,6 @@ struct transformer_block_bf16_t {
   private:
     friend struct transformer_block_e4m3_t;
 
-    /**
-     *  @brief One NumKong product @c c=a·bᵀ into Float32 against a packed B operand.
-     *  @param[in] a @b [rows,depth] the row-major A operand.
-     *  @param[in] packed_b The pack of @b [columns,depth] , from @ref pack_weights or the shared scratch.
-     *  @param[in] columns The B rows packed, the product's width.
-     *  @param[out] c @b [rows,columns] the Float32 product.
-     *  @param[inout] stream The stream the launch enqueues on.
-     */
-    [[nodiscard]] expected_t multiply_(bf16r2_view_t a, b8r1_tensor_arena_t const &packed_b, std::size_t columns,
-                                       f32r2_span_t c, gpu_stream_t &stream) noexcept;
-
-    /**
-     *  @brief One weight gradient @c dW=dYᵀ·X : transposes @p output_grad and @p input into the shared scratch,
-     *      since NumKong reads A row-major and packs B row-major, multiplies @c dYᵀ by the packed @c Xᵀ , and
-     *      narrows the Float32 product into @p weight_grad .
-     *  @param[in] output_grad @b [tokens,outputs] the product's BFloat16 output gradient.
-     *  @param[in] input @b [tokens,inputs] the product's forward A operand.
-     *  @param[out] weight_grad @b [outputs,inputs] the BFloat16 weight gradient.
-     *  @param[inout] stream The stream every launch enqueues on.
-     */
-    [[nodiscard]] expected_t weight_gradient_(bf16r2_view_t output_grad, bf16r2_view_t input, bf16r2_span_t weight_grad,
-                                              gpu_stream_t &stream) noexcept;
-
     /** @brief Build the ragged THD SDPA graphs — forward with stats, backward — over the packed QKV
      *      strides, and allocate their shared workspace. Built once, outside capture. */
     [[nodiscard]] expected_t build_sdpa_(gpu_arena_t &arena, gpu_arena_alloc<b8_t> b8_alloc) noexcept;
@@ -539,9 +518,8 @@ struct transformer_block_bf16_t {
     [[nodiscard]] expected_t run_sdpa_backward_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
                                                 gpu_stream_t &stream) noexcept;
 
-    /** @brief The baked geometry and the two borrowed vendor sessions — never owned here. */
+    /** @brief The baked geometry and the borrowed cuDNN session — never owned here. */
     transformer_block_config_t config_ {};
-    cublaslt_session_t *blas_ = nullptr;
     cudnn_session_t *cudnn_ = nullptr;
     /** @brief The NumKong capabilities of the arena's device, picking every product and element-wise verb. */
     nk_capability_t capabilities_ = 0;

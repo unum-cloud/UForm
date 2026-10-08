@@ -5,8 +5,8 @@
  *  @author Ash Vardanian
  *  @date October 1, 2026
  *
- *  Two handles split the bytes by owner. A @c uform_model_t owns the weights and the cuBLASLt and cuDNN
- *  sessions on one device. A @c uform_executor_t owns the streams and the activation scratch, grown to its
+ *  Two handles split the bytes by owner. A @c uform_model_t owns the weights, their packed copies and the cuDNN
+ *  session on one device. A @c uform_executor_t owns the streams and the activation scratch, grown to its
  *  high-water mark and rewound every call. Embeddings, whose size @c count bounds, land in the caller's own
  *  memory, so no call allocates them, and no allocator, alignment or memory kind crosses this interface.
  *
@@ -80,8 +80,8 @@ extern "C" {
 #endif
 #endif
 
-/** @brief A model on one GPU: its weights and the cuBLASLt and cuDNN sessions that run them. Shared by every
- *      executor on its device; calls through different executors take turns on its sessions. */
+/** @brief A model on one GPU: its weights, their packed copies and the cuDNN session that runs its attention.
+ *      Shared by every executor on its device; calls through different executors take turns on its session. */
 typedef struct uform_model_handle_t *uform_model_t;
 
 /** @brief The streams and activation scratch that calls run on, in submission order, on one GPU. */

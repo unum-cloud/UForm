@@ -5,6 +5,10 @@
  *  @author Ash Vardanian
  *  @date July 2, 2026
  */
+#include <algorithm> // `std::max` — the largest product pack
+
+#include <numkong/each.h> // `nk_each_sum_f32_best` — the nested prefixes and the per-subgraph forces
+
 #include "cuda_core/contrastive_segments.cuh"
 
 using namespace unum::uform::core;
@@ -384,20 +388,19 @@ static __global__ void contrastive_finalize_kernel_(
 }
 
 /**
- *  @brief Elementwise Float32 → BFloat16 cast over flattened towers.
+ *  @brief Elementwise Float32 → BFloat16 cast of a matrix into a same-shaped, possibly row-padded destination.
  *
- *  __grid_size__ @c [ceil(count/block),1,1] ; grid-stride; no dynamic shared memory.
+ *  __grid_size__ @c [ceil(rows·columns/block),1,1] ; grid-stride; no dynamic shared memory.
  */
-static __global__ void contrastive_cast_f32_to_bf16_kernel_(f32r1_view_t source, bf16r1_span_t destination) {
-    std::size_t const count = source.extent(0);
+static __global__ void contrastive_cast_f32_to_bf16_kernel_(f32r2_view_t source, bf16r2_span_t destination) {
+    std::size_t const columns = source.extent(1), count = source.extent(0) * columns;
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
     for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < count;
          index += stride)
-        destination[index] = __float2bfloat16(source[index]);
+        destination[index / columns, index % columns] = __float2bfloat16(source[index / columns, index % columns]);
 }
 
-expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena, cublaslt_session_t &blas,
-                                                              contrastive_segments_config_t config,
+expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena, contrastive_segments_config_t config,
                                                               u32r1_view_t prefix_dims) noexcept {
     if (config.from_vertices_per_gpu == 0 || config.hidden == 0)
         return expected<contrastive_segments_t>::fail(status_t::shape_unsupported_k,
@@ -408,10 +411,21 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
                                                       "need at least one subgraph of at least one vertex");
     expected<matryoshka_prefixes_t> prefixes = matryoshka_prefixes_t::make(prefix_dims, config.hidden);
     if (!prefixes) return expected<contrastive_segments_t>::fail(std::move(prefixes));
+    bool aligned = config.hidden % 8u == 0u;
+    for (u32_t segment = 0; segment != prefixes.value_.size(); ++segment)
+        aligned = aligned && prefixes.value_.segment_begin(segment) % 8u == 0u;
+    if (!aligned)
+        return expected<contrastive_segments_t>::fail(
+            status_t::shape_unsupported_k, "hidden and every prefix must be multiples of 8 (hidden={})", config.hidden);
 
     contrastive_segments_t loss;
     loss.prefixes_ = prefixes.value_;
     loss.config_ = config;
+    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
+                                                                &loss.capabilities_);
+        status != nk_success_k)
+        return expected<contrastive_segments_t>::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}",
+                                                      arena.device(), nk_status_name(status));
 
     // Scratch tensors — the former "workspace", owned like the relation columns are: plain
     // `uninitialized` allocations, checked in named groups so a failure names the arena pressure.
@@ -420,12 +434,13 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
     u32_t const to_vertices_per_gpu = config.to_vertices_per_gpu;
     std::size_t const prefix_count = loss.prefixes_.size();
     std::size_t const block_cells = prefix_count * rows * to_vertices_per_gpu;
+    std::size_t const padded_rows = round_up_to_multiple(rows, std::size_t {8});
+    std::size_t const padded_neighbors = round_up_to_multiple(to_vertices_per_gpu, std::size_t {8});
     gpu_arena_alloc<f32_t> f32_alloc {arena};
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<b8_t> byte_alloc {arena};
     loss.from_vertex_norms_ = f32r2_tensor_arena_t::uninitialized({prefix_count, rows}, f32_alloc).value;
     loss.to_vertex_norms_ = f32r2_tensor_arena_t::uninitialized({prefix_count, to_vertices_per_gpu}, f32_alloc).value;
-    loss.running_dot_accumulator_ = f32r2_tensor_arena_t::uninitialized({rows, to_vertices_per_gpu}, f32_alloc).value;
     loss.raw_dot_ = f32r3_tensor_arena_t::uninitialized({prefix_count, rows, to_vertices_per_gpu}, f32_alloc).value;
     loss.scaled_cosine_ =
         f32r3_tensor_arena_t::uninitialized({prefix_count, rows, to_vertices_per_gpu}, f32_alloc).value;
@@ -433,79 +448,42 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
     loss.raw_dot_grad_ =
         f32r3_tensor_arena_t::uninitialized({prefix_count, rows, to_vertices_per_gpu}, f32_alloc).value;
     loss.raw_dot_grad_bf16_ =
-        bf16r3_tensor_arena_t::uninitialized({prefix_count, rows, to_vertices_per_gpu}, bf16_alloc).value;
+        bf16r2_tensor_arena_t::uninitialized({prefix_count * rows, padded_neighbors}, bf16_alloc).value;
     loss.from_vertex_accumulator_ = f32r2_tensor_arena_t::uninitialized({6, rows}, f32_alloc).value;
     loss.from_vertex_self_coefficients_ = f32r2_tensor_arena_t::uninitialized({prefix_count, rows}, f32_alloc).value;
     loss.to_vertex_self_coefficients_ =
         f32r2_tensor_arena_t::uninitialized({prefix_count, to_vertices_per_gpu}, f32_alloc).value;
     loss.from_vertices_grad_f32_ = f32r2_tensor_arena_t::uninitialized({rows, hidden}, f32_alloc).value;
-    if (!loss.from_vertex_norms_ || !loss.to_vertex_norms_ || !loss.running_dot_accumulator_ || !loss.raw_dot_ ||
-        !loss.scaled_cosine_ || !loss.logit_grad_ || !loss.raw_dot_grad_ || !loss.raw_dot_grad_bf16_ ||
-        !loss.from_vertex_accumulator_ || !loss.from_vertex_self_coefficients_ || !loss.to_vertex_self_coefficients_ ||
-        !loss.from_vertices_grad_f32_)
+    loss.from_vertices_grad_products_ = f32r2_tensor_arena_t::uninitialized({rows, hidden}, f32_alloc).value;
+    loss.vertices_transposed_ = bf16r1_tensor_arena_t::uninitialized({hidden * padded_rows}, bf16_alloc).value;
+    loss.to_vertices_transposed_ = bf16r1_tensor_arena_t::uninitialized({hidden * padded_neighbors}, bf16_alloc).value;
+    loss.gradient_transposed_ =
+        bf16r1_tensor_arena_t::uninitialized({to_vertices_per_gpu * padded_rows}, bf16_alloc).value;
+    if (!loss.from_vertex_norms_ || !loss.to_vertex_norms_ || !loss.raw_dot_ || !loss.scaled_cosine_ ||
+        !loss.logit_grad_ || !loss.raw_dot_grad_ || !loss.raw_dot_grad_bf16_ || !loss.from_vertex_accumulator_ ||
+        !loss.from_vertex_self_coefficients_ || !loss.to_vertex_self_coefficients_ || !loss.from_vertices_grad_f32_ ||
+        !loss.from_vertices_grad_products_ || !loss.vertices_transposed_ || !loss.to_vertices_transposed_ ||
+        !loss.gradient_transposed_)
         return expected<contrastive_segments_t>::fail(status_t::bad_alloc_k,
                                                       "loss scratch allocation failed ({} cells, arena_used={})",
                                                       block_cells, arena.used());
 
-    // One pinned plan per (segment, product family), against the borrowed session.
-    loss.session_ = &blas;
-    std::size_t workspace_bytes = 0;
-    for (u32_t segment = 0; segment != loss.prefixes_.size(); ++segment) {
-        u32_t const width = loss.prefixes_.segment_width(segment);
-        u32_t const rows32 = static_cast<u32_t>(rows), hidden32 = static_cast<u32_t>(hidden);
-        // dots: running[R,Rn] += V_seg[R,W]·(N_seg[Rn,W])ᵀ
-
-        cublaslt_plan_config_t dots_config {rows32,
-                                            width,
-                                            hidden32,
-                                            to_vertices_per_gpu,
-                                            width,
-                                            hidden32,
-                                            rows32,
-                                            to_vertices_per_gpu,
-                                            to_vertices_per_gpu,
-                                            false,
-                                            true};
-        // owned-vertex grad: from_vertices_grad_f32[:,seg][R,W] += G_seg[R,Rn]·N_seg[Rn,W]
-
-        cublaslt_plan_config_t vertex_grad_config {rows32,
-                                                   to_vertices_per_gpu,
-                                                   to_vertices_per_gpu,
-                                                   to_vertices_per_gpu,
-                                                   width,
-                                                   hidden32,
-                                                   rows32,
-                                                   width,
-                                                   hidden32,
-                                                   false,
-                                                   false};
-        // subgraph-vertex grad: subgraph.to_vertices_grad[:,seg][Rn,W] += (G_seg[R,Rn])ᵀ·V_seg[R,W]
-
-        cublaslt_plan_config_t neighbor_grad_config {rows32,
-                                                     to_vertices_per_gpu,
-                                                     to_vertices_per_gpu,
-                                                     rows32,
-                                                     width,
-                                                     hidden32,
-                                                     to_vertices_per_gpu,
-                                                     width,
-                                                     hidden32,
-                                                     true,
-                                                     false};
-        cublaslt_plan_config_t const configs[3] = {dots_config, vertex_grad_config, neighbor_grad_config};
-        for (u32_t family = 0; family != matmul_family_count_k; ++family) {
-            expected<cublaslt_plan_t> plan = cublaslt_plan_t::make(*loss.session_, configs[family]);
-            if (!plan) return expected<contrastive_segments_t>::fail(std::move(plan));
-            if (plan.value_.workspace_bytes() > workspace_bytes) workspace_bytes = plan.value_.workspace_bytes();
-            loss.plans_[matmul_family_count_k * segment + family] = std::move(plan.value_);
+    std::size_t packed_bytes = 0;
+    for (u32_t segment = 0; segment != prefix_count; ++segment) {
+        std::size_t const width = loss.prefixes_.segment_width(segment);
+        std::size_t const pack_shapes[][2] = {{to_vertices_per_gpu, width},
+                                              {width, to_vertices_per_gpu},
+                                              {width, rows}};
+        for (auto const &[columns, depth] : pack_shapes) {
+            expected<std::size_t> shape_bytes = pack_bytes_bf16(columns, depth, loss.capabilities_);
+            if (!shape_bytes) return expected<contrastive_segments_t>::fail(std::move(shape_bytes));
+            packed_bytes = std::max(packed_bytes, shape_bytes.value_);
         }
     }
-    if (workspace_bytes != 0) {
-        loss.cublaslt_workspace_ = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, byte_alloc).value;
-        if (!loss.cublaslt_workspace_)
-            return expected<contrastive_segments_t>::fail(
-                status_t::bad_alloc_k, "tensor-core workspace allocation failed ({} bytes)", workspace_bytes);
-    }
+    loss.packed_ = b8r1_tensor_arena_t::uninitialized({packed_bytes}, byte_alloc).value;
+    if (!loss.packed_)
+        return expected<contrastive_segments_t>::fail(status_t::bad_alloc_k,
+                                                      "product pack allocation failed ({} bytes)", packed_bytes);
     return expected<contrastive_segments_t> {std::move(loss)};
 }
 
@@ -570,10 +548,11 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
                                           from_vertex_accumulator_.numel() * sizeof(f32_t), stream.get());
         result != CUDA_SUCCESS)
         return expected_t::fail(result, "accumulator-row reset failed");
-    if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(from_vertices_grad_f32_.data()), 0,
-                                          from_vertices_grad_f32_.numel() * sizeof(f32_t), stream.get());
-        result != CUDA_SUCCESS)
-        return expected_t::fail(result, "vertex-force accumulator reset failed");
+    for (f32r2_tensor_arena_t *const zeroed : {&from_vertices_grad_f32_, &from_vertices_grad_products_})
+        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(zeroed->data()), 0,
+                                              zeroed->numel() * sizeof(f32_t), stream.get());
+            result != CUDA_SUCCESS)
+            return expected_t::fail(result, "vertex-force accumulator reset failed");
 
     f32_t const vertices_per_mesh_float = static_cast<f32_t>(vertices_per_mesh);
     u32_t const prefix_count = prefixes_.size();
@@ -584,7 +563,6 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
     dim3 const vertex_grid {config_.from_vertices_per_gpu, 1u, 1u};
     dim3 const neighbor_grid {config_.to_vertices_per_gpu, 1u, 1u};
     dim3 const block_grid {grid_size_for(block_cells), 1u, 1u};
-    b8r1_span_t const cublaslt_workspace = cublaslt_workspace_.span();
 
     // The scratch views the read-only kernel parameters bind to; the launcher copies raw bytes, so
     // spans convert to views here, explicitly. The six accumulator rows are consecutive rows of one
@@ -606,11 +584,28 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
     f32r2_view_t const from_vertex_self_view = from_vertex_self_coefficients_.view();
     f32r2_view_t const to_vertex_self_view = to_vertex_self_coefficients_.view();
     std::size_t const num_neighbors = config_.to_vertices_per_gpu;
+    std::size_t const rows = config_.from_vertices_per_gpu, hidden = config_.hidden;
+    std::size_t const padded_rows = round_up_to_multiple(rows, std::size_t {8});
+    std::size_t const padded_neighbors = round_up_to_multiple(num_neighbors, std::size_t {8});
+    bf16r2_span_t const vertices_padded {vertices_transposed_.data(), hidden, padded_rows};
+    bf16r2_span_t const to_vertices_padded {to_vertices_transposed_.data(), hidden, padded_neighbors};
+    bf16r2_span_t const gradient_padded {gradient_transposed_.data(), num_neighbors, padded_rows};
+    bf16r2_span_t const raw_dot_grad_padded {raw_dot_grad_bf16_.data(), prefix_count * rows, padded_neighbors};
+    bf16r2_span_t const vertices_transposed = vertices_padded(nk::all, nk::range(0, rows), nk::slice);
+    bf16r2_span_t const to_vertices_transposed = to_vertices_padded(nk::all, nk::range(0, num_neighbors), nk::slice);
+    bf16r2_span_t const gradient_transposed = gradient_padded(nk::all, nk::range(0, rows), nk::slice);
+    bf16r2_span_t const raw_dot_grad_bf16 = raw_dot_grad_padded(nk::all, nk::range(0, num_neighbors), nk::slice);
+    auto multiply = [&](bf16r2_view_t a, bf16r2_view_t b, f32r2_span_t c) noexcept {
+        expected_t multiplied = pack_bf16(b, packed_.span(), capabilities_, stream);
+        if (multiplied) multiplied = multiply_bf16(a, packed_.view(), c, capabilities_, stream);
+        return multiplied;
+    };
 
     // Per-prefix owned-vertex norms, once; each subgraph recomputes only its own vertex norms.
 
     expected_t launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_prefix_norms_kernel_), vertex_grid,
                                         block_shape, stream, vertices, from_vertex_norms_.span(), prefixes_);
+    if (launched) launched = transpose_bf16(vertices, vertices_transposed, stream);
     if (!launched) return launched;
 
     // Signed Σw pre-pass over every subgraph: the per-vertex weight totals must span the whole
@@ -628,30 +623,24 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
 
         launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_prefix_norms_kernel_), neighbor_grid,
                                  block_shape, stream, subgraph.to_vertices, to_vertex_norms_.span(), prefixes_);
+        if (launched) launched = transpose_bf16(subgraph.to_vertices, to_vertices_transposed, stream);
         if (!launched) return launched;
 
-        // Tensor-core dots per segment: the running block after segment p IS prefix p's raw dot. Each
-        // operand is a column slice of the full @c [·,hidden] tile over this segment's prefix band — an
-        // honest strided view whose row stride is the parent width, which @ref cublaslt_plan_t::matmul
-        // forwards as the layout's leading dimension; the destination plane is the arena's leading
-        // (prefix) axis, so it's a row.
+        // Dots per segment over the column slices of the full `[·,hidden]` tiles in this segment's prefix band;
+        // each plane adds the previous one, so plane p IS prefix p's raw dot.
         for (u32_t segment = 0; segment != prefix_count; ++segment) {
             u32_t const segment_begin = prefixes_.segment_begin(segment);
             u32_t const segment_width = prefixes_.segment_width(segment);
-            bf16r2_view_t const vertex_view = vertices(nk::all, nk::range(segment_begin, segment_begin + segment_width),
-                                                       nk::slice);
-            bf16r2_view_t const neighbor_view = subgraph.to_vertices(
-                nk::all, nk::range(segment_begin, segment_begin + segment_width), nk::slice);
-            if (expected_t product = plan_for(segment, matmul_family_t::dots_k)
-                                         .matmul(*session_, vertex_view, neighbor_view, running_dot_accumulator_.span(),
-                                                 segment == 0 ? 0.0f : 1.0f, cublaslt_workspace, stream);
-                !product)
-                return product;
-            if (CUresult result = cuMemcpyDtoDAsync(reinterpret_cast<CUdeviceptr>(raw_dot_.row(segment).data()),
-                                                    reinterpret_cast<CUdeviceptr>(running_dot_accumulator_.data()),
-                                                    cells_per_prefix * sizeof(f32_t), stream.get());
-                result != CUDA_SUCCESS)
-                return expected_t::fail(result, "prefix dot copy failed (segment={})", segment);
+            auto const band = nk::range(segment_begin, segment_begin + segment_width);
+            f32r2_span_t const raw_dot_plane {raw_dot_.row(segment).data(), rows, num_neighbors};
+            expected_t product = multiply(vertices(nk::all, band, nk::slice),
+                                          subgraph.to_vertices(nk::all, band, nk::slice), raw_dot_plane);
+            if (product && segment != 0)
+                product = numkong_result(
+                    nk_each_sum_f32_best(raw_dot_plane.data(), raw_dot_.row(segment - 1).data(), cells_per_prefix,
+                                         raw_dot_plane.data(), capabilities_, stream.numkong()),
+                    "prefix dot nesting");
+            if (!product) return product;
         }
 
         launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_scaled_cosine_kernel_), block_grid,
@@ -680,46 +669,42 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
                                      dim3 {grid_size_for(cells_per_prefix), 1u, 1u}, block_shape, stream,
                                      raw_dot_grad_.span());
         if (launched)
-            launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_cast_f32_to_bf16_kernel_), block_grid,
-                                     block_shape, stream, raw_dot_grad_view.flatten<1>(),
-                                     raw_dot_grad_bf16_.span().flatten<1>());
+            launched = launch_kernel(
+                reinterpret_cast<void const *>(&contrastive_cast_f32_to_bf16_kernel_), block_grid, block_shape, stream,
+                f32r2_view_t {raw_dot_grad_.data(), prefix_count * rows, num_neighbors}, raw_dot_grad_bf16);
         if (!launched) return launched;
 
-        // Zero the subgraph's whole force so the segment matmuls can accumulate (beta=1) and the
-        // channels beyond the last prefix stay exactly zero.
+        // Zero the subgraph's whole force so the segment products fill disjoint bands and the channels beyond
+        // the last prefix stay exactly zero.
         if (CUresult result = cuMemsetD8Async(
                 reinterpret_cast<CUdeviceptr>(subgraph.to_vertices_grad.data()), 0,
                 static_cast<std::size_t>(config_.to_vertices_per_gpu) * config_.hidden * sizeof(f32_t), stream.get());
             result != CUDA_SUCCESS)
             return expected_t::fail(result, "subgraph force reset failed (subgraph={})", subgraph_index);
 
-        // Tensor-core gradients per segment: G_seg lives at the suffix-accumulated plane s — a whole
-        // prefix row of the accumulator arena. The vertex / neighbor operands and the gradient
-        // destinations are honest column slices of their @c [·,hidden] tiles over this segment's prefix
-        // band, their row stride the parent width, which @ref cublaslt_plan_t::matmul forwards as the
-        // layout's leading dimension.
+        // Gradients per segment: G_seg lives at the suffix-accumulated plane s, and each force fills its band of a
+        // `[·,hidden]` tile — the owned one in the products scratch, added onto the accumulator below.
+        f32r2_span_t const from_vertices_grad_products = from_vertices_grad_products_.span();
         for (u32_t segment = 0; segment != prefix_count; ++segment) {
             u32_t const segment_begin = prefixes_.segment_begin(segment);
             u32_t const segment_width = prefixes_.segment_width(segment);
             auto const band = nk::range(segment_begin, segment_begin + segment_width);
-            auto const gradient_plane = raw_dot_grad_bf16_.view().row(segment); // [rows,neighbors] at plane `segment`
-            bf16r2_view_t const gradient_view {gradient_plane.data(), gradient_plane.extent(0),
-                                               gradient_plane.extent(1)};
-            bf16r2_view_t const neighbor_view = subgraph.to_vertices(nk::all, band, nk::slice);
-            bf16r2_view_t const vertex_view = vertices(nk::all, band, nk::slice);
-            f32r2_span_t const from_vertices_grad_segment = from_vertices_grad_f32_.span()(nk::all, band, nk::slice);
-            f32r2_span_t const neighbor_grad_segment = subgraph.to_vertices_grad(nk::all, band, nk::slice);
-            if (expected_t product = plan_for(segment, matmul_family_t::from_vertex_grad_k)
-                                         .matmul(*session_, gradient_view, neighbor_view, from_vertices_grad_segment,
-                                                 1.0f, cublaslt_workspace, stream);
-                !product)
-                return product;
-            if (expected_t product = plan_for(segment, matmul_family_t::to_vertex_grad_k)
-                                         .matmul(*session_, gradient_view, vertex_view, neighbor_grad_segment, 1.0f,
-                                                 cublaslt_workspace, stream);
-                !product)
-                return product;
+            bf16r2_view_t const gradient = raw_dot_grad_bf16(nk::range(segment * rows, (segment + 1) * rows),
+                                                             nk::slice);
+            expected_t product = transpose_bf16(gradient, gradient_transposed, stream);
+            if (product)
+                product = multiply(gradient, to_vertices_transposed(band, nk::slice),
+                                   from_vertices_grad_products(nk::all, band, nk::slice));
+            if (product)
+                product = multiply(gradient_transposed, vertices_transposed(band, nk::slice),
+                                   subgraph.to_vertices_grad(nk::all, band, nk::slice));
+            if (!product) return product;
         }
+        launched = numkong_result(
+            nk_each_sum_f32_best(from_vertices_grad_f32_.data(), from_vertices_grad_products_.data(), rows * hidden,
+                                 from_vertices_grad_f32_.data(), capabilities_, stream.numkong()),
+            "vertex force addition");
+        if (!launched) return launched;
 
         launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_from_vertex_self_fold_kernel_),
                                  vertex_grid, block_shape, stream, vertices, from_vertex_norms_view,
@@ -739,13 +724,9 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
     if (!launched) return launched;
 
     // Cast the owned-vertex force to BFloat16 — every vertex is owned by exactly one rank.
-
-    std::size_t const from_vertices_grad_scalars = from_vertices_grad.numel();
-    f32r1_view_t const from_vertices_grad_flat = from_vertices_grad_f32_.view().flatten<1>();
-    bf16r1_span_t const from_vertices_grad_out = from_vertices_grad.flatten<1>();
     return launch_kernel(reinterpret_cast<void const *>(&contrastive_cast_f32_to_bf16_kernel_),
-                         dim3 {grid_size_for(from_vertices_grad_scalars), 1u, 1u}, block_shape, stream,
-                         from_vertices_grad_flat, from_vertices_grad_out);
+                         dim3 {grid_size_for(rows * hidden), 1u, 1u}, block_shape, stream,
+                         from_vertices_grad_f32_.view(), from_vertices_grad);
 }
 
 /**
@@ -764,16 +745,16 @@ static __global__ void contrastive_column_fold_kernel_(bf16r1_span_t destination
 
 expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t::make(
     multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
-    std::span<gpu_stream_t> streams, std::span<cublaslt_session_t> sessions, std::span<bf16r2_view_t const> towers,
+    std::span<gpu_stream_t> streams, std::span<bf16r2_view_t const> towers,
     std::span<contrastive_relations_view_t const> relations, std::span<bf16r2_span_t const> from_vertices_grads,
     contrastive_segments_config_t config, u32r1_view_t prefix_dims, f64_t timeout_seconds) noexcept {
     using result_t = expected<distributed_contrastive_segments_t>;
     std::size_t const gpus = arenas.size();
     u32_t const domains = colocated.multimem_domain_count();
-    if (gpus == 0 || streams.size() != gpus || domain.member_count() != gpus || sessions.size() != gpus ||
-        towers.size() != gpus || relations.size() != gpus || from_vertices_grads.size() != gpus)
+    if (gpus == 0 || streams.size() != gpus || domain.member_count() != gpus || towers.size() != gpus ||
+        relations.size() != gpus || from_vertices_grads.size() != gpus)
         return result_t::fail(status_t::invalid_input_k,
-                              "every rank needs an arena, stream, session, tower, relations, gradient, " //
+                              "every rank needs an arena, stream, tower, relations, gradient, " //
                               "and domain member ({} ranks, {} members)",
                               gpus, domain.member_count());
     if (config.gpu_subgraphs_per_step != gpus * domains || config.to_vertices_per_gpu != config.from_vertices_per_gpu)
@@ -831,8 +812,7 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     for (std::size_t rank = 0; rank != gpus; ++rank) {
         switch_to_gpu_t gpu_scope {streams[rank]};
         if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (rank={})", rank);
-        expected<contrastive_segments_t> loss = contrastive_segments_t::make(arenas[rank], sessions[rank], config,
-                                                                             prefix_dims);
+        expected<contrastive_segments_t> loss = contrastive_segments_t::make(arenas[rank], config, prefix_dims);
         if (!loss) return result_t::fail(std::move(loss));
         distributed.losses_[rank] = std::move(loss.value_);
         expected<infiniband_all_reduce<f32_t>> reduce_buffer = infiniband_all_reduce<f32_t>::make(

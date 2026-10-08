@@ -27,14 +27,12 @@
 
 #include <cstddef> // `std::size_t`
 
-#include <array> // `std::array` — the pinned matmul plans
-
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
 #include "cuda_core/types.hpp"            // `expected`, `expected_t`, `status_t`, the scalar aliases
 #include "cuda_core/array.hpp"            // `array` — the parameter-table append
 #include "cuda_core/gpu_allocators.hpp"   // `gpu_arena_t`, `gpu_arena_alloc`
-#include "cuda_core/schedule.cuh"         // `gpu_stream_t`, `cublaslt_session_t`, `cublaslt_plan_t`, the view aliases
+#include "cuda_core/schedule.cuh"         // `gpu_stream_t`, the NumKong products, the view aliases
 #include "cuda_core/multimodal_batch.hpp" // `modality_t`, `modality_view_t` — the per-segment routing tag
 
 namespace unum::uform::core {
@@ -133,18 +131,6 @@ struct masked_frames_config_t {
     f32_t weight = 1.0f;
 };
 
-/** @brief The three tensor-core matmul families pinned per reconstruction head — the roles line up across
- *      both the byte-token and the patch head: @c forward_k is the decode (logits / predicted),
- *      @c data_grad_k is @c d(normalized) handed back to the tower, and @c weight_grad_k is the head's own
- *      weight gradient (@c d(decoder) / @c d(recon) ). */
-enum class linear_matmul_family_t : u32_t {
-    forward_k = 0,
-    data_grad_k = 1,
-    weight_grad_k = 2,
-};
-/** @brief How many matmul families exist per head — the length of the pinned-plan table. */
-inline constexpr u32_t linear_matmul_family_count_k = 3u;
-
 #if defined(__CUDACC__)
 
 /**
@@ -160,10 +146,12 @@ inline constexpr u32_t linear_matmul_family_count_k = 3u;
  */
 struct masked_tokens_t {
 
-    /** @brief Allocate the decoder, every scratch, and pin the three matmul plans — once, at setup.
-     *  @param[in] blas The device's one tensor-core session, main-owned and borrowed. */
-    [[nodiscard]] static expected<masked_tokens_t> make(gpu_arena_t &arena, cublaslt_session_t &blas,
-                                                        masked_tokens_config_t config) noexcept;
+    /** @brief Allocate the decoder, its NumKong packs, and every scratch — once, at setup. */
+    [[nodiscard]] static expected<masked_tokens_t> make(gpu_arena_t &arena, masked_tokens_config_t config) noexcept;
+
+    /** @brief Pack the decoder for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
+     *      step, after the weights change and before the first @ref operator() . */
+    [[nodiscard]] expected_t pack_weights(gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief Corrupt @p clean into @p distorted and emit the per-position @p loss_weights — pure enqueue.
@@ -209,27 +197,26 @@ struct masked_tokens_t {
 
   private:
     masked_tokens_config_t config_ {};
-    /** @brief The device's one main-owned tensor-core session — borrowed, never created here. */
-    cublaslt_session_t *session_ = nullptr;
+    /** @brief The NumKong capabilities of the arena's device, picking every product and cast. */
+    nk_capability_t capabilities_ = 0;
     /** @brief The untied decoder @b [vocabulary,hidden] and its gradient buffer. */
     bf16r2_tensor_arena_t decoder_weight_ {}, decoder_weight_grad_ {};
+    /** @brief The decoder packed as the logits' B operand and, transposed, as @c d(normalized) 's. */
+    b8r1_tensor_arena_t packed_decoder_ {}, packed_decoder_transposed_ {};
     /** @brief @b [max_tokens,vocabulary] Float32 logits — the cross-entropy's stable surface. */
     f32r2_tensor_arena_t logits_ {};
-    /** @brief @b [max_tokens,vocabulary] BFloat16 @c d(logits) — the backward matmuls' operand. */
+    /** @brief @b [max_tokens,vocabulary] BFloat16 @c d(logits) — the backward products' operand, its rows padded
+     *      to 8 for NumKong's 16-byte stride rule, since the byte vocabulary is 258 wide. */
     bf16r2_tensor_arena_t logit_grad_ {};
     /** @brief @b [max_tokens] per-position cross-entropy summands. */
     f32r1_tensor_arena_t position_loss_ {};
     /** @brief @b [2] @c {λ/max(count,1), count} — device-computed, so the count never visits the host. */
     f32r1_tensor_arena_t gradient_scale_ {};
-    /** @brief The shared tensor-core workspace of the three pinned plans. */
-    b8r1_tensor_arena_t workspace_ {};
-    /** @brief @ref linear_matmul_family_count_k pinned plans: logits, @c d(normalized) , @c d(decoder) . */
-    std::array<cublaslt_plan_t, linear_matmul_family_count_k> plans_ {};
-
-    /** @brief The one home of the plan-table indexing: this head's plan for @p family . */
-    [[nodiscard]] cublaslt_plan_t &plan_for(linear_matmul_family_t family) noexcept {
-        return plans_[static_cast<u32_t>(family)];
-    }
+    /** @brief The weight gradient's transposes, the latter also staging the decoder's for @ref pack_weights ,
+     *      the pack of @c normalizedᵀ , and the Float32 products before their casts. */
+    bf16r1_tensor_arena_t transposed_grad_ {}, transposed_input_ {};
+    b8r1_tensor_arena_t packed_input_ {};
+    f32r1_tensor_arena_t products_ {};
 };
 
 /**
@@ -255,9 +242,12 @@ struct masked_tokens_t {
  */
 struct masked_patches_t {
 
-    /** @brief Allocate the recon head, every scratch, and pin the three matmul plans — once, at setup. */
-    [[nodiscard]] static expected<masked_patches_t> make(gpu_arena_t &arena, cublaslt_session_t &blas,
-                                                         masked_patches_config_t config) noexcept;
+    /** @brief Allocate the recon head, its NumKong packs, and every scratch — once, at setup. */
+    [[nodiscard]] static expected<masked_patches_t> make(gpu_arena_t &arena, masked_patches_config_t config) noexcept;
+
+    /** @brief Pack the recon head for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
+     *      step, after the weights change and before the first @ref operator() . */
+    [[nodiscard]] expected_t pack_weights(gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief Sample the patch mask into @c mask_ — pure enqueue, nothing else. A patch is masked with
@@ -297,8 +287,8 @@ struct masked_patches_t {
 
   private:
     masked_patches_config_t config_ {};
-    /** @brief The device's one main-owned tensor-core session — borrowed, never created here. */
-    cublaslt_session_t *session_ = nullptr;
+    /** @brief The NumKong capabilities of the arena's device, picking every product and cast. */
+    nk_capability_t capabilities_ = 0;
     /** @brief The linear reconstruction head @b [patch_pixels,hidden] and its gradient buffer. */
     bf16r2_tensor_arena_t recon_weight_ {}, recon_weight_grad_ {};
     /** @brief @b [max_patches,patch_pixels] reconstructed patches and their loss gradient. */
@@ -309,15 +299,14 @@ struct masked_patches_t {
     f32r1_tensor_arena_t position_loss_ {};
     /** @brief @b [2] @c {λ·2/(patch_pixels·max(count,1)), count} — device-computed. */
     f32r1_tensor_arena_t gradient_scale_ {};
-    /** @brief The shared tensor-core workspace of the three pinned plans. */
-    b8r1_tensor_arena_t workspace_ {};
-    /** @brief @ref linear_matmul_family_count_k pinned plans: predicted, @c d(normalized) , @c d(recon) . */
-    std::array<cublaslt_plan_t, linear_matmul_family_count_k> plans_ {};
-
-    /** @brief The one home of the plan-table indexing: this head's plan for @p family . */
-    [[nodiscard]] cublaslt_plan_t &plan_for(linear_matmul_family_t family) noexcept {
-        return plans_[static_cast<u32_t>(family)];
-    }
+    /** @brief The recon head packed as the prediction's B operand and, transposed, as @c d(normalized) 's. */
+    b8r1_tensor_arena_t packed_recon_ {}, packed_recon_transposed_ {};
+    /** @brief The weight gradient's transposes, the latter also staging the head's for @ref pack_weights , the
+     *      pack of @c normalizedᵀ , the Float32 products before their casts, and the widened @c d(normalized)
+     *      this head adds onto. */
+    bf16r1_tensor_arena_t transposed_grad_ {}, transposed_input_ {};
+    b8r1_tensor_arena_t packed_input_ {};
+    f32r1_tensor_arena_t products_ {}, widened_grad_ {};
 };
 
 /**
@@ -344,9 +333,12 @@ struct masked_patches_t {
  */
 struct masked_frames_t {
 
-    /** @brief Allocate the recon head, every scratch, and pin the three matmul plans — once, at setup. */
-    [[nodiscard]] static expected<masked_frames_t> make(gpu_arena_t &arena, cublaslt_session_t &blas,
-                                                        masked_frames_config_t config) noexcept;
+    /** @brief Allocate the recon head, its NumKong packs, and every scratch — once, at setup. */
+    [[nodiscard]] static expected<masked_frames_t> make(gpu_arena_t &arena, masked_frames_config_t config) noexcept;
+
+    /** @brief Pack the recon head for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
+     *      step, after the weights change and before the first @ref operator() . */
+    [[nodiscard]] expected_t pack_weights(gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief Sample the frame mask into @c mask_ — pure enqueue, nothing else. A frame is masked with
@@ -384,8 +376,8 @@ struct masked_frames_t {
 
   private:
     masked_frames_config_t config_ {};
-    /** @brief The device's one main-owned tensor-core session — borrowed, never created here. */
-    cublaslt_session_t *session_ = nullptr;
+    /** @brief The NumKong capabilities of the arena's device, picking every product and cast. */
+    nk_capability_t capabilities_ = 0;
     /** @brief The linear reconstruction head @b [chunk_samples,hidden] and its gradient buffer. */
     bf16r2_tensor_arena_t recon_weight_ {}, recon_weight_grad_ {};
     /** @brief @b [max_frames,chunk_samples] reconstructed frames and their loss gradient. */
@@ -396,15 +388,14 @@ struct masked_frames_t {
     f32r1_tensor_arena_t position_loss_ {};
     /** @brief @b [2] @c {λ·2/(chunk_samples·max(count,1)), count} — device-computed. */
     f32r1_tensor_arena_t gradient_scale_ {};
-    /** @brief The shared tensor-core workspace of the three pinned plans. */
-    b8r1_tensor_arena_t workspace_ {};
-    /** @brief @ref linear_matmul_family_count_k pinned plans: predicted, @c d(normalized) , @c d(recon) . */
-    std::array<cublaslt_plan_t, linear_matmul_family_count_k> plans_ {};
-
-    /** @brief The one home of the plan-table indexing: this head's plan for @p family . */
-    [[nodiscard]] cublaslt_plan_t &plan_for(linear_matmul_family_t family) noexcept {
-        return plans_[static_cast<u32_t>(family)];
-    }
+    /** @brief The recon head packed as the prediction's B operand and, transposed, as @c d(normalized) 's. */
+    b8r1_tensor_arena_t packed_recon_ {}, packed_recon_transposed_ {};
+    /** @brief The weight gradient's transposes, the latter also staging the head's for @ref pack_weights , the
+     *      pack of @c normalizedᵀ , the Float32 products before their casts, and the widened @c d(normalized)
+     *      this head adds onto. */
+    bf16r1_tensor_arena_t transposed_grad_ {}, transposed_input_ {};
+    b8r1_tensor_arena_t packed_input_ {};
+    f32r1_tensor_arena_t products_ {}, widened_grad_ {};
 };
 
 #endif // defined(__CUDACC__)

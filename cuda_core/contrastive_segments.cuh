@@ -19,22 +19,21 @@
  *  @section gemms The heavy passes are tensor-core matmuls
  *
  *  The nested prefixes decompose into disjoint @b segments @c [D_{p-1},D_p) , and every O(R²·H) pass is a
- *  BFloat16→Float32 product over segments through @ref cublaslt_plan_t — pinned at construction, enqueued
- *  at call time:
+ *  BFloat16 → Float32 NumKong product over segments, its B operand packed at call time:
  *
- *      - scores: @c running += V_seg·N_segᵀ per segment (owned vertices × subgraph vertices); after
- *        segment @c p the running block @b is prefix @c p 's raw dot, copied out — the nesting costs one
- *        full-width product, not @c K ;
+ *      - scores: @c raw_p = V_seg·N_segᵀ + raw_{p-1} per segment (owned vertices × subgraph vertices), so
+ *        prefix @c p 's raw dot builds on prefix @c p-1 's — the nesting costs one full-width product, not
+ *        @c K ;
  *      - from-vertex forces: @c from_vertices_grad[:,seg] += G_seg·N_seg , with @c G_seg the suffix sum of
  *        the per-prefix @c d(raw) blocks over the prefixes containing the segment;
  *      - to-vertex forces: @c subgraph.to_vertices_grad[:,seg] += G_segᵀ·V_seg .
  *
  *  Hand-rolled kernels keep only the O(R²·K) and O(R·H·K) epilogues: norms, the scaled-cosine scaling, the
  *  balanced BCE with the relation resolution, the @c d(raw) build and its suffix accumulation, the cosine
- *  self-coefficient folds, the finalise, and the casts. Determinism holds through the vendor path: the
- *  algorithm is heuristic-chosen @b once and pinned, so every run and every replay executes the same
- *  kernel; the workspace is an owned arena tensor, so no allocation hides inside a call — the capture
- *  guard of @ref gpu_replay_graph_t::make would name it if it did.
+ *  self-coefficient folds, the finalise, and the casts. Determinism holds through the products: NumKong has
+ *  no split-K, so every run and every replay sums in the same order; the packs and transposes are owned
+ *  arena tensors, so no allocation hides inside a call — the capture guard of @ref gpu_replay_graph_t::make
+ *  would name it if it did.
  *
  *  @section gpu_subgraphs The force grid as a per-GPU subgraph loop
  *
@@ -89,8 +88,8 @@
  *  @section ownership Owned scratch, baked shapes
  *
  *  @ref contrastive_segments_t owns every scratch tensor (arena-backed NumKong tensors, like
- *  @ref contrastive_relations_t owns its columns) and every matmul plan. Construction is the validation
- *  and the planning; a call is a pure enqueue. A different shape is a different object — exactly the
+ *  @ref contrastive_relations_t owns its columns) and every product's packing buffer. Construction is the
+ *  validation and the sizing; a call is a pure enqueue. A different shape is a different object — exactly the
  *  capture contract of @ref multimodal_batch_shape_t .
  */
 #pragma once
@@ -98,8 +97,7 @@
 #include <cstddef> // `std::size_t`, `std::byte`
 #include <cmath>   // `sqrtf`, `expf`, `log1pf`, `fabsf`, `fmaxf`, `isfinite`
 
-#include <array> // `std::array` — the fixed-capacity pinned-plan table
-#include <span>  // `std::span` — per-rank object lists
+#include <span> // `std::span` — per-rank object lists
 
 #include <cuda.h>      // `cuMemsetD8Async`, `cuMemcpyDtoDAsync`
 #include <cuda_bf16.h> // `__nv_bfloat16`
@@ -107,7 +105,7 @@
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
 #include "cuda_core/types.hpp"    // `expected_t`, `status_t`, `warp_size_k`, `kernel_block_size_default_k`
-#include "cuda_core/schedule.cuh" // `gpu_stream_t`, `launch_kernel`, `cublaslt_session_t`, `cublaslt_plan_t`
+#include "cuda_core/schedule.cuh" // `gpu_stream_t`, `launch_kernel`, the NumKong products
 #include "cuda_core/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 force surface
 #include "cuda_core/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_all_reduce/all_gather` — level-2
 #include "cuda_core/contrastive_relations.cuh"  // `contrastive_relations_view_t`, `contrastive_recipe_t`
@@ -131,16 +129,6 @@ inline constexpr f32_t cosine_denominator_floor_k = 1.0e-2f;
 /** @brief Floor on a per-vertex @c Σw denominator so a fully-masked row yields a finite zero loss and
  *      zero gradient instead of a divide-by-zero. */
 inline constexpr f32_t weight_sum_floor_k = 1.0e-12f;
-
-/** @brief The three tensor-core matmul families pinned per Matryoshka segment: the raw dots, the
- *      from-vertex (owned-row) gradient, and the to-vertex (subgraph-column) gradient. */
-enum class matmul_family_t : u32_t {
-    dots_k = 0,
-    from_vertex_grad_k = 1,
-    to_vertex_grad_k = 2,
-};
-/** @brief How many matmul families exist per segment — the stride of the pinned-plan table. */
-inline constexpr u32_t matmul_family_count_k = 3u;
 
 /** @brief The six rows of the packed @b [6,rows] per-from-vertex accumulator, in storage order — the one
  *      naming of the row indices the balanced-BCE epilogue reads and writes. */
@@ -238,24 +226,21 @@ struct contrastive_segments_config_t {
 };
 
 /**
- *  @brief The segments contrastive loss as a function object: shapes, Matryoshka prefixes, tensor-core
- *      matmul plans, and every scratch tensor are baked at @ref make — a call is a pure enqueue,
- *      capture-safe and bit-reproducible (see the file header).
+ *  @brief The segments contrastive loss as a function object: shapes, Matryoshka prefixes, and every
+ *      scratch tensor are baked at @ref make — a call is a pure enqueue, capture-safe and bit-reproducible
+ *      (see the file header).
  */
 struct contrastive_segments_t {
 
     /**
-     *  @brief Bake everything static: validate the prefix ladder, allocate every scratch tensor off
-     *      @p arena , and pin one algorithm per segment matmul family against the caller's tensor-core
-     *      session — so a constructed loss never plans and never allocates.
+     *  @brief Bake everything static: validate the prefix ladder, and allocate every scratch tensor and the
+     *      products' packing buffer off @p arena — so a constructed loss never sizes and never allocates.
      *
-     *  @param[in] blas The device's one cuBLASLt session, main-owned and borrowed for this object's
-     *      lifetime — one handle per device, never per consumer.
-     *  @param[in] config The baked geometry (see @ref contrastive_segments_config_t ).
-     *  @param[in] prefix_dims Matryoshka prefix widths, validated through @ref matryoshka_prefixes_t .
+     *  @param[in] config The baked geometry (see @ref contrastive_segments_config_t ); @c hidden a multiple of 8.
+     *  @param[in] prefix_dims Matryoshka prefix widths, validated through @ref matryoshka_prefixes_t , each
+     *      a multiple of 8 so every segment's column band starts on NumKong's 16-byte boundary.
      */
-    [[nodiscard]] static expected<contrastive_segments_t> make(gpu_arena_t &arena, cublaslt_session_t &blas,
-                                                               contrastive_segments_config_t config,
+    [[nodiscard]] static expected<contrastive_segments_t> make(gpu_arena_t &arena, contrastive_segments_config_t config,
                                                                u32r1_view_t prefix_dims) noexcept;
 
     /**
@@ -292,36 +277,30 @@ struct contrastive_segments_t {
     /** @brief @b [prefixes,rows] / @b [prefixes,neighbors] per-row L2 norms of the from-vertex and
      *      to-vertex towers. */
     f32r2_tensor_arena_t from_vertex_norms_ {}, to_vertex_norms_ {};
-    /** @brief @b [rows,neighbors] running tensor-core dot accumulator — one segment's raw product,
-     *      reused every segment and copied out into @ref raw_dot_ 's plane. */
-    f32r2_tensor_arena_t running_dot_accumulator_ {};
     /** @brief @b [prefixes,rows,neighbors] per-prefix raw dot products, scaled cosine (β·cos, no bias),
      *      logit gradient, and raw-dot gradient of one subgraph block. */
     f32r3_tensor_arena_t raw_dot_ {}, scaled_cosine_ {}, logit_grad_ {}, raw_dot_grad_ {};
-    /** @brief @b [prefixes,rows,neighbors] BFloat16 cast of @ref raw_dot_grad_ — the tensor-core gradient
-     *      matmul operand. */
-    bf16r3_tensor_arena_t raw_dot_grad_bf16_ {};
+    /** @brief @b [prefixes·rows,neighbors] BFloat16 cast of @ref raw_dot_grad_ — the gradient products'
+     *      operand, its rows padded to 8 for NumKong's 16-byte stride rule. */
+    bf16r2_tensor_arena_t raw_dot_grad_bf16_ {};
     /** @brief The six @b [rows] accumulator rows indexed by @ref from_vertex_accumulator_t : Σw⁺, Σw⁻,
      *      positive and negative softplus mass, bias and log-β gradient summands — one @b [6,rows] tensor,
      *      one memset covers them all. */
     f32r2_tensor_arena_t from_vertex_accumulator_ {};
     /** @brief @b [prefixes,rows] / @b [prefixes,neighbors] deterministic cosine self-coefficients. */
     f32r2_tensor_arena_t from_vertex_self_coefficients_ {}, to_vertex_self_coefficients_ {};
-    /** @brief @b [rows,hidden] Float32 owned-vertex force accumulator, cast to BFloat16 at the end. */
-    f32r2_tensor_arena_t from_vertices_grad_f32_ {};
-    b8r1_tensor_arena_t cublaslt_workspace_ {};
-
-    /** @brief The device's one main-owned tensor-core session — borrowed, never created here. */
-    cublaslt_session_t *session_ = nullptr;
-    /** @brief @ref matmul_family_count_k pinned plans per segment — dots, from-vertex force, to-vertex
-     *      force — laid out family-minor; capacity is the prefix bound, the live count is
-     *      @c matmul_family_count_k·prefixes_.size() . */
-    std::array<cublaslt_plan_t, matmul_family_count_k * max_matryoshka_prefixes_k> plans_ {};
-
-    /** @brief The one home of the plan-table arithmetic: segment @p segment 's plan for @p family . */
-    [[nodiscard]] cublaslt_plan_t &plan_for(u32_t segment, matmul_family_t family) noexcept {
-        return plans_[matmul_family_count_k * segment + static_cast<u32_t>(family)];
-    }
+    /** @brief @b [rows,hidden] Float32 owned-vertex force accumulator, cast to BFloat16 at the end, and one
+     *      subgraph's segment products before they add onto it — zeroed every call, since no prefix writes the
+     *      channels past the last one. */
+    f32r2_tensor_arena_t from_vertices_grad_f32_ {}, from_vertices_grad_products_ {};
+    /** @brief @b [hidden,rows] , @b [hidden,neighbors] and @b [neighbors,rows] BFloat16 transposes of the owned
+     *      vertices, a subgraph's vertices and one segment's gradient, their rows padded to 8 — the products' B
+     *      operands come from the first two, the to-vertex force's A operand is the third. */
+    bf16r1_tensor_arena_t vertices_transposed_ {}, to_vertices_transposed_ {}, gradient_transposed_ {};
+    /** @brief The one NumKong pack every product's B operand passes through, sized for the largest. */
+    b8r1_tensor_arena_t packed_ {};
+    /** @brief The NumKong capabilities of the arena's device, picking every product. */
+    nk_capability_t capabilities_ = 0;
 
     /** @brief The @p which row of the packed @ref from_vertex_accumulator_ as a mutable span. */
     [[nodiscard]] f32r1_span_t accumulator_row(from_vertex_accumulator_t which) noexcept {
@@ -363,8 +342,6 @@ struct distributed_contrastive_segments_t {
      *  @param[in] arenas @b [gpus] per-rank arenas; loss scratch and member heaps allocate from each
      *      rank's own.
      *  @param[in] streams @b [gpus] per-rank streams; their contexts scope every per-device setup.
-     *  @param[in] sessions @b [gpus] per-device tensor-core sessions — main-owned, borrowed by every
-     *      rank's loss object.
      *  @param[in] towers @b [gpus] per-rank pooled towers — capture-stable device views, baked here so
      *      the per-step slices carry no host arguments.
      *  @param[in] relations @b [gpus] per-rank relation views — addresses baked, contents restaged by
@@ -376,7 +353,7 @@ struct distributed_contrastive_segments_t {
      */
     [[nodiscard]] static expected<distributed_contrastive_segments_t> make(
         multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
-        std::span<gpu_stream_t> streams, std::span<cublaslt_session_t> sessions, std::span<bf16r2_view_t const> towers,
+        std::span<gpu_stream_t> streams, std::span<bf16r2_view_t const> towers,
         std::span<contrastive_relations_view_t const> relations, std::span<bf16r2_span_t const> from_vertices_grads,
         contrastive_segments_config_t config, u32r1_view_t prefix_dims, f64_t timeout_seconds = 120.0) noexcept;
 

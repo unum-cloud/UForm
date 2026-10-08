@@ -28,7 +28,7 @@
  *
  *  @section base_ownership Sessions placed, trainer built in place, domains threaded by reference
  *
- *  The tower and heads borrow their vendor sessions by pointer, so the sessions live in address-stable
+ *  The tower borrows its cuDNN session by pointer, so the sessions live in address-stable
  *  @ref per_gpu_array tables and the trainer is built where it lives ( @ref base_trainer_t::make fills a
  *  caller-placed reference) and never moved. The one @ref multimem_domain_t, the one @c colocated_domain_t, and
  *  the @ref distributed_adafactor_t are made in @c main and threaded by reference — the trainer owns none
@@ -40,7 +40,7 @@
 
 #include "cuda_core/array.hpp"          // `array`, `per_gpu_array`
 #include "cuda_core/gpu_allocators.hpp" // `gpu_arena_t`
-#include "cuda_core/schedule.cuh"       // `gpu_stream_t`, `cublaslt_session_t`, `cudnn_session_t`, replay graphs
+#include "cuda_core/schedule.cuh"       // `gpu_stream_t`, `cudnn_session_t`, replay graphs
 #include "cuda_core/mesh.hpp"           // `mesh_topology_t`
 #include "cuda_core/introspect.cuh"     // `telemetry_ledger_t`, `telemetry_probe_t` — the run's one ledger
 #include "cuda_core/multimem_collectives.cuh"
@@ -87,9 +87,8 @@ struct base_config_t {
     /** @brief The run's model-region mode — @ref replayed_k in production, @ref eager_k under @c --eager ; the
      *      parity test drives both over identical seeds. */
     capture_t capture = replayed_k;
-    /** @brief The vendor sessions' algorithm policy — the library's own heuristic pick by default,
-     *      @ref algo_pick_t::benchmarked_k under @c --tune (each shape's candidates measured once at
-     *      construction and the fastest pinned). */
+    /** @brief The cuDNN sessions' engine policy — the library's own heuristic pick by default,
+     *      @ref algo_pick_t::benchmarked_k under @c --tune . */
     algo_pick_t algo_pick = algo_pick_t::heuristic_k;
     /** @brief Checkpoint path; empty writes none. Borrows the argv storage it was parsed from. */
     sz::string_view checkpoint {};
@@ -157,12 +156,12 @@ struct base_replica_t {
      *      so the concatenated table is a construction-time transient. */
     array<differentiable_weights_t> weights {};
 
-    /** @brief Build the replica over the world-owned @p arena and the placed @p blas / @p dnn sessions (borrowed
-     *      by pointer for the replica's lifetime), publishing its parameter matrices into @ref weights — the
-     *      identical order on every replica. Constructs no stream, arena, or session, and seeds nothing:
-     *      @ref base_trainer_t::make seeds all replicas together. */
-    [[nodiscard]] static expected<base_replica_t> make(gpu_arena_t &arena, cublaslt_session_t &blas,
-                                                       cudnn_session_t &dnn, base_config_t const &config) noexcept;
+    /** @brief Build the replica over the world-owned @p arena and the placed @p dnn session (borrowed by pointer
+     *      for the replica's lifetime), publishing its parameter matrices into @ref weights — the identical order
+     *      on every replica. Constructs no stream, arena, or session, and seeds nothing: @ref base_trainer_t::make
+     *      seeds all replicas together. */
+    [[nodiscard]] static expected<base_replica_t> make(gpu_arena_t &arena, cudnn_session_t &dnn,
+                                                       base_config_t const &config) noexcept;
 
     /** @brief The eager per-step preamble: draw the keyed synthetic mixture (row partition, contents, and
      *      corruption all pure functions of @c config.seed , @p data_epoch , and
@@ -196,13 +195,7 @@ struct base_trainer_t {
     per_gpu_array<gpu_stream_t> streams {};
     /** @brief One owning arena per GPU — the allocation budget its replica draws from. */
     per_gpu_array<gpu_arena_t> arenas {};
-    /** @brief The run's shared per-shape algorithm picks, filled under @ref algo_pick_t::benchmarked_k —
-     *      declared before the sessions that borrow its address, so identical shapes across replicas
-     *      measure once. */
-    cublaslt_algo_picks_t algo_picks {};
-    /** @brief One tensor-core session per GPU, placed address-stable so the towers may point into it. */
-    per_gpu_array<cublaslt_session_t> blas {};
-    /** @brief One fused-attention session per GPU, placed address-stable beside @ref blas . */
+    /** @brief One fused-attention session per GPU, placed address-stable so the towers may point into it. */
     per_gpu_array<cudnn_session_t> dnn {};
     /** @brief One model replica per GPU, each holding its own @c weights registration list. */
     per_gpu_array<base_replica_t> replicas {};
@@ -236,7 +229,7 @@ struct base_trainer_t {
     };
 
     /** @brief The whole bring-up, filling the caller-placed @p trainer in place (a move would dangle the towers'
-     *      session borrows): per GPU a stream, an arena, the two sessions, and the replica — each publishing its
+     *      session borrows): per GPU a stream, an arena, the cuDNN session, and the replica — each publishing its
      *      own registration list — then every replica seeded identically. Registers the trainer's loss and
      *      round probes on the borrowed @p ledger (inert rows when the channels are dark). Builds no domain,
      *      colocated surface, or optimizer. */

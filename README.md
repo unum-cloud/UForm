@@ -251,7 +251,7 @@ The rule is simple: store and compute in BF16, accumulate and normalize in Float
 
 __Inference is BF16 or E4M3 (FP8), fixed per model at load time.__
 The compute mode is a single flag set at construction — `infer_bf16` or `infer_fp8`, not a per-layer toggle; an FP8 model keeps each weight's BF16 master alongside an E4M3 quantized copy used at runtime, while a BF16 model leaves the E4M3 copy empty.
-cuDNN runs the BF16 graphs for attention, RMSNorm, SwiGLU, and the fused residual epilogues; cuBLASLt drives the E4M3 GEMMs — reaching the FP8 tensor cores cleanly where cuDNN's FP8 matmul showed a per-position magnitude spike on B200 sm\_100 — and [CUB](https://github.com/NVIDIA/cccl) supplies the device-wide scans and reductions inside the custom kernels.
+cuDNN runs the BF16 attention graphs, [NumKong](https://github.com/ashvardanian/NumKong) runs every matrix product — BF16 and E4M3 alike, against weights packed once per step — and [CUB](https://github.com/NVIDIA/cccl) supplies the device-wide scans and reductions inside the custom kernels.
 
 ### Optimizing via Adafactor (the Sole Optimizer)
 
@@ -345,7 +345,7 @@ cuDNN's fused scale-softmax-matmul makes the expressive route as cheap as the me
 
 ### Why no FlashAttention, xformers, or FA3?
 
-cuDNN on sm\_100 already calls [FlashAttention](https://arxiv.org/abs/2205.14135)-style fused paths internally — UTCQMMA inside cuBLASLt for the GEMM, a fused softmax-matmul for SDPA — so we get the same gates with far less external surface to maintain across driver and architecture bumps.
+cuDNN on sm\_100 already calls a [FlashAttention](https://arxiv.org/abs/2205.14135)-style fused softmax-matmul for SDPA internally, so we get the same gates with far less external surface to maintain across driver and architecture bumps.
 The banned-backends list in STYLE.md — ThunderKittens, FA3, CUTLASS, TransformerEngine — exists for this reason.
 
 ### Why hand-roll PTX instead of NCCL and NVSHMEM?
