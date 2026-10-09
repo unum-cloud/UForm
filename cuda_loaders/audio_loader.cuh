@@ -33,7 +33,7 @@
 #include <cstddef> // `std::size_t`
 #include <span>    // `std::span`
 
-#include <fork_union.hpp> // vendor-boundary: `fu::basic_pool_t` — the borrowed CPU-decode pool
+#include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the borrowed CPU-decode pool
 
 #include "cuda_core/types.hpp"             // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
 #include "cuda_core/array.hpp"             // `array` — the per-fill index scratch
@@ -47,7 +47,7 @@ namespace unum::uform::loaders {
 
 /** @brief The host-side worker pool the media decoders fan their host-CPU work across — one per run, owned at
  *      the composition root (the @b only sanctioned host-thread pool), borrowed here. */
-using cpu_decode_pool_t = ashvardanian::fork_union::basic_pool_t;
+using cpu_decode_pool_t = ashvardanian::forkunion::flat_pool_t;
 
 /**
  *  @brief Decode a batch's drawn clip rows into its @c audio_samples frame grid — the audio decode every audio
@@ -83,7 +83,7 @@ struct audio_loader_parquet_config_t {
     /** @brief The Parquet column holding the encoded clips. Audio datasets store the clip as a struct
      *      @c {bytes,path} , so this is the dotted nested field @c "<column>.bytes" cuDF selects natively — it
      *      arrives as a flat @c list<uint8> , one encoded clip per row. */
-    sz::string_view column = sz::string_view {"audio.bytes", 11};
+    sz::string_view_t column = sz::string_view_t {"audio.bytes", 11};
 };
 
 /**
@@ -104,7 +104,7 @@ struct audio_loader_parquet_t {
      *  @param[in] audio The audio modality's own geometry slice ( @c chunk_samples , @c sample_rate ) — the
      *      single source, and all this loader needs; it never sees the sibling modalities' shapes. */
     [[nodiscard]] static expected<audio_loader_parquet_t> make(gpu_direct_storage_session_t &session,
-                                                               sz::string_view path_or_glob, u64_t seed,
+                                                               sz::string_view_t path_or_glob, u64_t seed,
                                                                cpu_decode_pool_t &pool,
                                                                audio_batch_shape_t audio) noexcept;
 
@@ -133,7 +133,7 @@ struct audio_loader_parquet_t {
      *      never owned, never spawned here. */
     cpu_decode_pool_t *pool_ = nullptr;
     /** @brief The dataset's Parquet shard paths, sorted by the glob — owned. */
-    array<sz::string> absolute_paths_ {};
+    array<sz::string_t> absolute_paths_ {};
     /** @brief The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
     /** @brief @b [shards+1] cumulative footer row counts — the weighted file draw's search table (an

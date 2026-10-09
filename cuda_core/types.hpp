@@ -23,21 +23,21 @@
 #include <cuda_fp8.h>  // `__nv_fp8_e4m3` behind the `e4m3_t` alias
 
 #include <numkong/tensor.hpp>          // `nk::tensor_span`, `nk::tensor_view` — `differentiable_weights_t`
-#include <stringzilla/stringzilla.hpp> // `sz::string` — the exception-free diagnostics carrier
+#include <stringzilla/stringzilla.hpp> // `sz::string_t` — the exception-free diagnostics carrier
 
 /** @brief `std::format` support for StringZilla slices, so diagnostics interpolate them directly —
  *      no conversion shims at call sites. */
 template <>
-struct std::formatter<ashvardanian::stringzilla::string_view> : std::formatter<std::string_view> {
-    auto format(ashvardanian::stringzilla::string_view text, std::format_context &context) const {
+struct std::formatter<ashvardanian::stringzilla::string_view_t> : std::formatter<std::string_view> {
+    auto format(ashvardanian::stringzilla::string_view_t text, std::format_context &context) const {
         return std::formatter<std::string_view>::format(std::string_view {text.data(), text.size()}, context);
     }
 };
 
 /** @brief `std::format` support for owning StringZilla strings — same bridge, by reference. */
 template <>
-struct std::formatter<ashvardanian::stringzilla::string> : std::formatter<std::string_view> {
-    auto format(ashvardanian::stringzilla::string const &text, std::format_context &context) const {
+struct std::formatter<ashvardanian::stringzilla::string_t> : std::formatter<std::string_view> {
+    auto format(ashvardanian::stringzilla::string_t const &text, std::format_context &context) const {
         return std::formatter<std::string_view>::format(std::string_view {text.data(), text.size()}, context);
     }
 };
@@ -252,14 +252,14 @@ enum class status_t : i32_t {
 struct format_into_t {
     using difference_type = std::ptrdiff_t;
 
-    sz::string *text = nullptr;
+    sz::string_t *text = nullptr;
     bool *failed = nullptr;
 
     format_into_t &operator*() noexcept { return *this; }
     format_into_t &operator++() noexcept { return *this; }
     format_into_t operator++(int) noexcept { return *this; }
     format_into_t &operator=(char character) noexcept {
-        if (!text->try_push_back(character) && failed != nullptr) *failed = true;
+        if (sz::failed(text->try_push_back(character)) && failed != nullptr) *failed = true;
         return *this;
     }
 };
@@ -268,7 +268,7 @@ struct format_into_t {
  *      for every payload and path assembly. @c false only on allocation failure (the text is then
  *      truncated); the format string is compile-time checked. */
 template <typename... arg_types_>
-[[nodiscard]] inline bool format_into(sz::string &text, std::format_string<arg_types_...> format_string,
+[[nodiscard]] inline bool format_into(sz::string_t &text, std::format_string<arg_types_...> format_string,
                                       arg_types_ &&...args) noexcept {
     bool failed = false;
     std::vformat_to(format_into_t {&text, &failed}, format_string.get(), std::make_format_args(args...));
@@ -303,7 +303,7 @@ struct expected {
     };
     status_t status_ = status_t::success_k;
     CUresult cu_error_ = CUDA_SUCCESS;
-    sz::string description_ {};
+    sz::string_t description_ {};
     std::source_location location_ {};
 
     expected() noexcept = delete;
@@ -400,7 +400,7 @@ template <>
 struct expected<void> {
     status_t status_ = status_t::success_k;
     CUresult cu_error_ = CUDA_SUCCESS;
-    sz::string description_ {};
+    sz::string_t description_ {};
     std::source_location location_ {};
 
     expected() noexcept = default;
@@ -460,7 +460,7 @@ using expected_t = expected<void>;
  *      describes; the composition root adds only its @c model. prefix. */
 struct differentiable_weights_t {
     /** @brief The owned checkpoint name — short names ride StringZilla's inline buffer. */
-    sz::string name {};
+    sz::string_t name {};
     nk::tensor_span<bf16_t, 2> weights {};
     nk::tensor_view<bf16_t, 2> weights_grad {};
 };

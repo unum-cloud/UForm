@@ -25,7 +25,7 @@
 
 #include <cstddef> // `std::size_t`
 
-#include "cuda_core/types.hpp"          // `expected`, `expected_t`, `status_t`, `sz::string`
+#include "cuda_core/types.hpp"          // `expected`, `expected_t`, `status_t`, `sz::string_t`
 #include "cuda_core/array.hpp"          // `array` — the entry table and the payload
 #include "cuda_core/gpu_allocators.hpp" // `pinned_alloc` — page-locked staging the DMA engines read directly
 #include "cuda_core/schedule.cuh"       // `gpu_stream_t` — orders the snapshot after the training kernels
@@ -36,7 +36,7 @@ namespace unum::uform::core {
  *      are @b [1,cols] ), and where the tensor's scalars start inside the owner's payload. */
 struct checkpoint_entry_t {
     /** @brief The owned name text — short names ride StringZilla's inline buffer. */
-    sz::string name {};
+    sz::string_t name {};
     /** @brief Leading extent; @c 1 for vector parameters. */
     u64_t rows = 0;
     /** @brief Trailing extent. */
@@ -75,14 +75,14 @@ struct checkpoint_to_save_t {
      *      enqueued on @p stream — after every kernel already there — and drained by a bounded
      *      synchronize, so the caller may keep updating the weights the moment this returns.
      *      @p name is copied into owned text; duplicates are rejected loudly. */
-    [[nodiscard]] expected_t try_insert(sz::string_view name, nk::tensor_view<bf16_t, 2> data,
+    [[nodiscard]] expected_t try_insert(sz::string_view_t name, nk::tensor_view<bf16_t, 2> data,
                                         gpu_stream_t &stream) noexcept;
 
     /** @brief Write the accumulated entries to @p path in the safetensors layout, with @c {"step": …}
      *      metadata — the JSON header space-padded to an 8-byte boundary like Hugging Face's own
      *      writer, then the whole contiguous payload in one shot. Pure host work: no stream, no GPU
      *      calls. */
-    [[nodiscard]] expected_t save(sz::string_view path, u64_t step) noexcept;
+    [[nodiscard]] expected_t save(sz::string_view_t path, u64_t step) noexcept;
 
     /** @brief Drop the entries, keep every buffer's backing — the next cadence re-inserts and
      *      re-saves allocation-free. */
@@ -124,12 +124,12 @@ struct checkpoint_to_load_t {
      *      stage the payload into pages from @p allocator , the byte-typed pinned handle it rebinds.
      *      Needs a current context at the call. Synchronous: the file is closed and everything
      *      resident when this returns. */
-    [[nodiscard]] static expected<checkpoint_to_load_t> make(sz::string_view path, pinned_alloc_t allocator) noexcept;
+    [[nodiscard]] static expected<checkpoint_to_load_t> make(sz::string_view_t path, pinned_alloc_t allocator) noexcept;
 
     /** @brief By-name lookup: a read-only rank-2 view into the pinned payload, or an @b empty view
      *      when the file misses @p layer_name (or holds it in a dtype this cell doesn't train in) —
      *      check @c .empty() and decide. */
-    [[nodiscard]] nk::tensor_view<bf16_t, 2> operator[](sz::string_view layer_name) const noexcept;
+    [[nodiscard]] nk::tensor_view<bf16_t, 2> operator[](sz::string_view_t layer_name) const noexcept;
 
     /** @brief The @c {"__metadata__":{"step": …}} value the file was saved at; @c 0 when absent. */
     [[nodiscard]] u64_t step() const noexcept { return step_; }

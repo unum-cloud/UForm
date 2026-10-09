@@ -135,15 +135,15 @@ static __global__ void synthetic_audio_kernel_(f32r2_span_t frames, u64_t seed, 
 }
 
 /** @brief Write one line to STDOUT through POSIX @c ::write , newline-terminated. */
-static void report_(sz::string_view line) noexcept {
+static void report_(sz::string_view_t line) noexcept {
     ::write(STDOUT_FILENO, line.data(), line.size());
     ::write(STDOUT_FILENO, "\n", 1);
 }
 
 /** @brief Tag @p message with the binary name, write it to STDERR, and hand back main's failure code — so
  *      every fallible phase collapses to one line: @c return @c fail_out_(x.description_.view()) . */
-[[nodiscard]] static int fail_out_(sz::string_view message) noexcept {
-    sz::string line;
+[[nodiscard]] static int fail_out_(sz::string_view_t message) noexcept {
+    sz::string_t line;
     if (format_into(line, "uform_base: {}", message)) {
         ::write(STDERR_FILENO, line.data(), line.size());
         ::write(STDERR_FILENO, "\n", 1);
@@ -310,7 +310,7 @@ struct row_partition_t {
                                                  array<differentiable_weights_t> const &weights,
                                                  gpu_stream_t &stream) noexcept {
     std::span<differentiable_weights_t const> const list {weights.view().data(), weights.size()};
-    sz::string name_text;
+    sz::string_t name_text;
     for (differentiable_weights_t const &matrix : list) {
         name_text.clear();
         if (!format_into(name_text, "model.{}", matrix.name))
@@ -329,7 +329,7 @@ struct row_partition_t {
     return {};
 }
 
-[[nodiscard]] static expected_t save_checkpoint_(sz::string_view path, array<differentiable_weights_t> const &weights,
+[[nodiscard]] static expected_t save_checkpoint_(sz::string_view_t path, array<differentiable_weights_t> const &weights,
                                                  u32_t steps, gpu_stream_t &stream) noexcept {
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
@@ -340,7 +340,7 @@ struct row_partition_t {
     if (!made) return expected_t::fail(std::move(made));
     checkpoint_to_save_t checkpoint = std::move(made.value_);
     if (expected_t reserved = checkpoint.try_reserve(total_scalars, list.size()); !reserved) return reserved;
-    sz::string name_text;
+    sz::string_t name_text;
     for (differentiable_weights_t const &matrix : list) {
         name_text.clear();
         if (!format_into(name_text, "model.{}", matrix.name))
@@ -355,7 +355,7 @@ base_config_t base_config_t::parse(int argc, char **argv) noexcept {
     base_config_t config;
     u32_t const count = static_cast<u32_t>(argc);
     for (u32_t arg = 1; arg < count; ++arg) {
-        sz::string_view const flag {argv[arg], std::strlen(argv[arg])};
+        sz::string_view_t const flag {argv[arg], std::strlen(argv[arg])};
         if (flag == "--eager") {
             config.capture = eager_k;
             continue;
@@ -366,7 +366,7 @@ base_config_t base_config_t::parse(int argc, char **argv) noexcept {
         }
         if (arg + 1 >= count) break;
         ++arg;
-        sz::string_view const value {argv[arg], std::strlen(argv[arg])};
+        sz::string_view_t const value {argv[arg], std::strlen(argv[arg])};
         if (flag == "--steps") config.steps = std::atoi(argv[arg]);
         else if (flag == "--hidden") config.hidden = std::atoi(argv[arg]);
         else if (flag == "--depth") config.depth = std::atoi(argv[arg]);
@@ -717,7 +717,7 @@ expected_t base_trainer_t::make(base_trainer_t &trainer, base_config_t const &co
         !probed)
         return probed;
     for (u32_t member_index = 0; member_index != gpus; ++member_index) {
-        sz::string name;
+        sz::string_t name;
         if (!format_into(name, "base/round/{}", member_index))
             return expected_t::fail(status_t::bad_alloc_k, "round probe name formatting failed");
         expected<telemetry_probe_t> registered = ledger.register_probe(name.view(), telemetry_rounds_k,
@@ -827,7 +827,7 @@ base_trainer_t::telemetry_t base_trainer_t::telemetry(multimem_domain_t &domain,
 }
 
 void base_trainer_t::telemetry_t::report() const noexcept {
-    sz::string line;
+    sz::string_t line;
     if (format_into(line, "  step {:>4}  masked CE {:.6f}  round {}", optimizer_step.ordinal + 1u, token_ce,
                     concurrency_round.ordinal))
         report_(line.view());
@@ -853,7 +853,7 @@ int base_trainer_t::run(base_config_t const &config) noexcept {
     u32_t const host_domain_count = host_domain_count_from_environment();
     expected<mesh_topology_t> topology = mesh_topology_t::bootstrap(host_domain_index, host_domain_count);
     if (!topology) return fail_out_(topology.description_.view());
-    sz::string banner;
+    sz::string_t banner;
     if (format_into(banner, "uform_base: tokens{}{}{} mixture, {} GPU(s), host_domain {} of {}",
                     config.batch.contains(modality_t::image_k) ? "+image" : "",
                     config.batch.contains(modality_t::video_k) ? "+video" : "",
@@ -949,7 +949,7 @@ int base_trainer_t::run(base_config_t const &config) noexcept {
                 return fail_out_("warm-start drain failed");
         }
         resumed_step = static_cast<u32_t>(loaded.value_.step());
-        sz::string line;
+        sz::string_t line;
         if (format_into(line, "uform_base: resumed {} tensors from {} at step {}", loaded.value_.size(), config.resume,
                         resumed_step))
             report_(line.view());
@@ -964,7 +964,7 @@ int base_trainer_t::run(base_config_t const &config) noexcept {
     // 6. The steady loop — one whole two-region step per ordinal, telemetry on cadence.
     for (u32_t ordinal = resumed_step; ordinal != resumed_step + config.steps; ++ordinal) {
         if (expected_t stepped = trainer.step(optimizer_step_t {ordinal}, optimizer, graphs); !stepped) {
-            sz::string line;
+            sz::string_t line;
             if (!format_into(line, "step {} failed: {}", ordinal, stepped.description_.view())) return 1;
             return fail_out_(line.view());
         }
@@ -978,7 +978,7 @@ int base_trainer_t::run(base_config_t const &config) noexcept {
                                                 resumed_step + config.steps, trainer.streams[0]);
             !saved)
             return fail_out_(saved.description_.view());
-        sz::string line;
+        sz::string_t line;
         if (format_into(line, "uform_base: checkpoint written to {}", config.checkpoint)) report_(line.view());
     }
     for (u32_t member_index = 0; member_index != gpus; ++member_index) {

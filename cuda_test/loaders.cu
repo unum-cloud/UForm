@@ -69,13 +69,13 @@ struct fabricated_tape_t {
     /** @brief @b [blobs+1] byte offsets on the host — the Arrow offsets @ref view hands to @ref column_view_t . */
     array<u64_t> offsets {};
 
-    /** @brief The Arrow packed view a loader decodes: two @c sz::span s over the device buffer and host
+    /** The Arrow packed view a loader decodes: two @c std::span s over the device buffer and host
      *      offsets, so @c tape[row] is a device slice computed on the host. */
     [[nodiscard]] column_view_t view() const noexcept {
-        // vendor-boundary: the Apache Arrow packed view is inherently two `sz::span`s over the raw device
+        // vendor-boundary: the Apache Arrow packed view is inherently two `std::span`s over the raw device
         // buffer and the host offsets — the one construction that forces a pointer past the tensor handle.
-        return column_view_t {sz::span<b8_t const> {device_bytes.data(), device_bytes.numel()},
-                              sz::span<u64_t const> {offsets.data(), offsets.size()}};
+        return column_view_t {std::span<b8_t const> {device_bytes.data(), device_bytes.numel()},
+                              std::span<u64_t const> {offsets.data(), offsets.size()}};
     }
 
     /** @brief Pack @p blobs into a fresh device tape on @p arena , staging the host accumulator through
@@ -115,13 +115,15 @@ struct fabricated_tape_t {
     }
 };
 
-/** @brief Read a file's bytes into an @ref array , or an empty array if @p path is empty / unreadable. Takes
- *      a @c sz::string_view subspan and null-terminates it (an @c sz::string ) only at the C @c fopen boundary.
- *  @param[in] path The filesystem path to read. */
-[[nodiscard]] static array<b8_t> read_fixture(sz::string_view path) noexcept {
+/**
+ *  @brief Read a file's bytes into an @ref array , or an empty array if @p path is empty / unreadable. Takes
+ *      a @c sz::string_view_t subspan and null-terminates it (an @c sz::string_t ) only at the C @c fopen boundary.
+ *  @param[in] path The filesystem path to read.
+ */
+[[nodiscard]] static array<b8_t> read_fixture(sz::string_view_t path) noexcept {
     array<b8_t> bytes;
     if (path.empty()) return bytes;
-    sz::string const owned {path};
+    sz::string_t const owned {path};
     std::FILE *file = std::fopen(owned.c_str(), "rb");
     if (file == nullptr) return bytes;
     std::fseek(file, 0, SEEK_END);
@@ -139,16 +141,18 @@ struct fabricated_tape_t {
     return bytes;
 }
 
-/** @brief Hand each comma-separated path in environment variable @p name to @p on_path — CI points a modality
+/**
+ *  @brief Hand each comma-separated path in environment variable @p name to @p on_path — CI points a modality
  *      at several real files so one green run proves the loader handles every input shape. Splits with
- *      StringZilla ( @c sz::string_view::split on the @c ',' delimiter ), no per-path allocation for the parse.
+ *      StringZilla ( @c sz::string_view_t::split on the @c ',' delimiter ), no per-path allocation for the parse.
  *  @param[in] name The environment variable holding the comma-separated path list.
- *  @param[in] on_path The callback handed each non-empty path subspan. */
+ *  @param[in] on_path The callback handed each non-empty path subspan.
+ */
 template <typename path_fn_>
 static void for_each_env_input(char const *name, path_fn_ &&on_path) noexcept {
     char const *value = std::getenv(name);
     if (value == nullptr) return;
-    for (sz::string_view path : sz::string_view {value}.split(","))
+    for (sz::string_view_t path : sz::string_view_t {value}.split(","))
         if (!path.empty()) on_path(path);
 }
 
@@ -158,7 +162,7 @@ static void for_each_env_input(char const *name, path_fn_ &&on_path) noexcept {
 [[nodiscard]] static array<b8_t> first_env_fixture(char const *name) noexcept {
     char const *value = std::getenv(name);
     if (value == nullptr) return {};
-    for (sz::string_view path : sz::string_view {value}.split(","))
+    for (sz::string_view_t path : sz::string_view_t {value}.split(","))
         if (!path.empty()) return read_fixture(path);
     return {};
 }
@@ -399,7 +403,7 @@ static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &
  *  @param[inout] arena The device arena.
  *  @param[inout] stream The stream every stage enqueues on.
  *  @param[inout] pool The CPU-decode worker pool. */
-static void run_audio_decode(test_suite_t &suite, sz::string_view label, array<b8_t> const &clip, gpu_arena_t &arena,
+static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, array<b8_t> const &clip, gpu_arena_t &arena,
                              gpu_stream_t &stream, cpu_decode_pool_t &pool) {
     if (clip.empty()) return; // an unset fixture — skip
     u32_t const columns = 24u, chunk = 400u, max_segments = 4u, sample_rate = 16000u;
@@ -527,7 +531,7 @@ static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_s
  *  @param[inout] stream The stream every stage enqueues on.
  *  @param[inout] pool The CPU-decode worker pool.
  *  @param[inout] jpeg This GPU's nvJPEG session. */
-static void run_image_decode(test_suite_t &suite, sz::string_view label, array<b8_t> const &blob, gpu_arena_t &arena,
+static void run_image_decode(test_suite_t &suite, sz::string_view_t label, array<b8_t> const &blob, gpu_arena_t &arena,
                              gpu_stream_t &stream, cpu_decode_pool_t &pool, nvjpeg_session_t &jpeg) {
     if (blob.empty()) return; // an unset fixture — skip
     u32_t const columns = 64u, patch = 16u, channels = 4u, max_segments = 4u;
@@ -601,7 +605,7 @@ static void run_image_decode(test_suite_t &suite, sz::string_view label, array<b
  *  @param[inout] stream The stream every stage enqueues on.
  *  @param[inout] pool The CPU demux pool.
  *  @param[inout] nvdec The multi-engine NVDEC session. */
-static void run_video_decode(test_suite_t &suite, sz::string_view label, array<b8_t> const &clip,
+static void run_video_decode(test_suite_t &suite, sz::string_view_t label, array<b8_t> const &clip,
                              std::span<u32_t const> frame_strides, gpu_arena_t &arena, gpu_stream_t &stream,
                              cpu_decode_pool_t &pool, nvdec_session_t &nvdec) {
     if (clip.empty()) return; // video is external-only — skip without a fixture
@@ -843,15 +847,15 @@ static void cross_rank_sampling(test_suite_t &suite) {
     if (!session_made) return suite.check(false, "the GDS session should make: {}", session_made.description_);
     gpu_direct_storage_session_t session = std::move(session_made.value_);
 
-    auto loader_made = tokens_loader_parquet_t::make(session, sz::string_view {dataset}, 0xC0FFEEull);
+    auto loader_made = tokens_loader_parquet_t::make(session, sz::string_view_t {dataset}, 0xC0FFEEull);
     if (!loader_made) return suite.check(false, "the tokens loader should make: {}", loader_made.description_);
     tokens_loader_parquet_t loader = std::move(loader_made.value_);
 
     // This rank's shard set for step 0 — 64 segments is a generous pool target that draws several shards.
     auto drawn = loader.drawn_shards(index, 0u, 64u);
     if (!drawn) return suite.check(false, "drawn_shards should succeed: {}", drawn.description_);
-    sz::string mine;
-    for (sz::string_view shard : drawn.value_) (void)format_into(mine, "{}\n", shard);
+    sz::string_t mine;
+    for (sz::string_view_t shard : drawn.value_) (void)format_into(mine, "{}\n", shard);
 
     if (expected_t published = topology.publish_text("shards", mine.view()); !published)
         return suite.check(false, "publishing the shard set should succeed: {}", published.description_);
@@ -859,7 +863,7 @@ static void cross_rank_sampling(test_suite_t &suite) {
     bool distinct = true;
     for (u32_t peer = 0; peer != count; ++peer) {
         if (peer == index) continue;
-        sz::string other;
+        sz::string_t other;
         if (expected_t awaited = topology.await_text(peer, "shards", other, 60.0); !awaited) distinct = false;
         else if (other.view() == mine.view()) distinct = false; // a peer drew the byte-identical shard set
     }
@@ -892,13 +896,13 @@ int main() {
     if (!arena_made) return suite.check(false, "gpu arena make: {}", to_string(arena_made.status_)), suite.finish();
     gpu_arena_t arena = std::move(arena_made.value_);
     cpu_decode_pool_t pool;
-    if (!pool.try_spawn(4u)) return suite.check(false, "the CPU decode pool should spawn"), suite.finish();
+    if (failed(pool.spawn(4u))) return suite.check(false, "the CPU decode pool should spawn"), suite.finish();
 
     // Tier C — the coordinate oracle, no external media.
     fill_coords_routes_every_modality(suite, arena, stream);
 
     // Tier D — every UFORM_TEST_AUDIO clip through the audio decode contract.
-    for_each_env_input("UFORM_TEST_AUDIO", [&](sz::string_view path) {
+    for_each_env_input("UFORM_TEST_AUDIO", [&](sz::string_view_t path) {
         run_audio_decode(suite, "env-audio", read_fixture(path), arena, stream, pool);
     });
 
@@ -908,7 +912,7 @@ int main() {
                 to_string(jpeg_made.status_));
     if (jpeg_made) {
         nvjpeg_session_t jpeg = std::move(jpeg_made.value_);
-        for_each_env_input("UFORM_TEST_IMAGE", [&](sz::string_view path) {
+        for_each_env_input("UFORM_TEST_IMAGE", [&](sz::string_view_t path) {
             run_image_decode(suite, "env-image", read_fixture(path), arena, stream, pool, jpeg);
         });
         multimodal_packet_routes(suite, arena, stream, pool, jpeg, first_env_fixture("UFORM_TEST_AUDIO"),
@@ -920,7 +924,7 @@ int main() {
     auto nvdec_made = nvdec_session_t::make(nvdec_config_t {2u, 512u});
     if (nvdec_made) {
         nvdec_session_t nvdec = std::move(nvdec_made.value_);
-        for_each_env_input("UFORM_TEST_VIDEO", [&](sz::string_view path) {
+        for_each_env_input("UFORM_TEST_VIDEO", [&](sz::string_view_t path) {
             array<b8_t> const clip = read_fixture(path);
             stack_array<u32_t, 1> one_stride;
             (void)one_stride.try_push_back(1u);

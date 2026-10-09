@@ -14,7 +14,6 @@ core.*
 *.log
 
 # Local & machine-specific config
-cmake/local.cmake
 .hf_token
 
 # Datasets (keep the directory, not its contents)

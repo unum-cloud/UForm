@@ -1,20 +1,3 @@
-with section("parse"):
-    # Teach cmake-format the project's helper signatures so it groups each keyword with its value
-    # instead of exploding every token onto its own line (which would otherwise force a
-    # `cmake-format: off` guard — itself banned).
-    additional_commands = {
-        "uform_dependency": {
-            "kwargs": {
-                "NAME": 1,
-                "MODE": 1,
-                "ROOT_VAR": 1,
-                "INCLUDE_VAR": 1,
-                "REPO": 1,
-                "TAG": 1,
-            },
-        },
-    }
-
 with section("format"):
     # How wide to allow formatted cmake files
     line_width = 120

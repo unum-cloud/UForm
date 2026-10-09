@@ -25,7 +25,7 @@
 #include <memory>  // `std::unique_ptr` — the pimpl owning the cuDF table
 #include <span>    // `std::span`
 
-#include "cuda_core/types.hpp"    // `expected`, `status_t`, the scalar aliases, `sz::arrow_packed_view`, `sz::string`
+#include "cuda_core/types.hpp"    // `expected`, `status_t`, the scalar aliases, `sz::packed_tape_view`, `sz::string_t`
 #include "cuda_core/array.hpp"    // `array` — the glob expansion result
 #include "cuda_core/schedule.cuh" // `gpu_stream_t`
 #include "cuda_loaders/direct_storage.hpp" // `gpu_direct_storage_session_t` — the reader's GDS precondition
@@ -38,7 +38,7 @@ using namespace unum::uform::core;
  *      terminator-free @c u64_t offsets (byte positions are unsigned sizes) — element @c i is the full
  *      @c [offsets[i], offsets[i+1]) span. Both text ( @c string ) and media ( @c list<uint8> )
  *      columns arrive as this. */
-using column_view_t = sz::arrow_packed_view<b8_t, u64_t>;
+using column_view_t = sz::packed_tape_view<b8_t, u64_t>;
 
 /** @brief One shard's footer facts — the row count and a summed uncompressed byte size (the whole
  *      table, or one column) — read without decoding, to size the loader's file pool. */
@@ -68,26 +68,27 @@ struct parquet_file_t {
      *
      *  @param[in] columns Column names to decode, in the order @ref column indexes them. */
     [[nodiscard]] static expected<parquet_file_t> make(gpu_direct_storage_session_t const &storage,
-                                                       sz::string_view path, std::span<sz::string_view const> columns,
+                                                       sz::string_view_t path,
+                                                       std::span<sz::string_view_t const> columns,
                                                        gpu_stream_t const &stream) noexcept;
 
     /** @brief Decode @p columns of @b several shards at once into @b one concatenated file — cuDF reads
      *      all @p paths and returns a single table whose rows are the shards' rows back to back. The
      *      row draw's reservoir. */
     [[nodiscard]] static expected<parquet_file_t> make(gpu_direct_storage_session_t const &storage,
-                                                       std::span<sz::string_view const> paths,
-                                                       std::span<sz::string_view const> columns,
+                                                       std::span<sz::string_view_t const> paths,
+                                                       std::span<sz::string_view_t const> columns,
                                                        gpu_stream_t const &stream) noexcept;
 
     /** @brief Read only the shard's Parquet footer at @p path — @c num_rows and the @b whole table's
      *      summed column-chunk byte size — never touching the row groups or the GPU. */
     [[nodiscard]] static expected<parquet_length_metadata_t> table_metadata(gpu_direct_storage_session_t const &storage,
-                                                                            sz::string_view path) noexcept;
+                                                                            sz::string_view_t path) noexcept;
 
     /** @brief Read only the shard's Parquet footer at @p path — @c num_rows and @p column 's summed
      *      column-chunk byte size — never touching the row groups or the GPU. */
     [[nodiscard]] static expected<parquet_length_metadata_t> column_metadata(
-        gpu_direct_storage_session_t const &storage, sz::string_view path, sz::string_view column) noexcept;
+        gpu_direct_storage_session_t const &storage, sz::string_view_t path, sz::string_view_t column) noexcept;
 
     /** @brief Rows decoded — the same across every column. */
     [[nodiscard]] std::size_t rows() const noexcept;
@@ -129,8 +130,9 @@ struct jsonl_file_t {
     /** @brief Decode @p field of the JSONL shard at @p path — one JSON object per line — into device
      *      memory on @p stream over KvikIO / GDS. JSONL carries no footer, so a shard is always decoded
      *      to learn its rows; @ref file_size_bytes is the cheap size the loader draws files by instead. */
-    [[nodiscard]] static expected<jsonl_file_t> make(gpu_direct_storage_session_t const &storage, sz::string_view path,
-                                                     sz::string_view field, gpu_stream_t const &stream) noexcept;
+    [[nodiscard]] static expected<jsonl_file_t> make(gpu_direct_storage_session_t const &storage,
+                                                     sz::string_view_t path, sz::string_view_t field,
+                                                     gpu_stream_t const &stream) noexcept;
 
     /** @brief Concatenate several decoded shards' fields into one reservoir — the footerless coverage
      *      loop decodes one file at a time, then merges them here (a cuDF concatenate, one copy). */
@@ -152,6 +154,9 @@ struct jsonl_file_t {
     std::unique_ptr<state_t> state_;
 };
 
+/** Whether a CSV shard's row 0 names its columns, or every row is data and columns are positional. */
+enum class csv_header_t : bool { positional_k, named_k };
+
 /**
  *  @brief One CSV shard's chosen column, decoded and owned on device — the CSV sibling of
  *      @ref parquet_file_t and @ref jsonl_file_t , a @b separate type (no format punning). cuDF's CSV
@@ -168,12 +173,12 @@ struct csv_file_t {
     csv_file_t &operator=(csv_file_t &&) noexcept;
     ~csv_file_t();
 
-    /** @brief Decode @p column of the CSV shard at @p path into device memory on @p stream over KvikIO /
-     *      GDS. @p delimiter is the field separator; @p has_header selects whether row 0 names the columns
-     *      (else they are positional and @p column is a 0-based index string). CSV carries no footer, so a
-     *      shard is always decoded to learn its rows; @ref file_size_bytes is the loader's cheap weight. */
-    [[nodiscard]] static expected<csv_file_t> make(gpu_direct_storage_session_t const &storage, sz::string_view path,
-                                                   sz::string_view column, char delimiter, bool has_header,
+    /** Decode @p column of the CSV shard at @p path into device memory on @p stream over KvikIO / GDS.
+     *  @p delimiter is the field separator; @p header says whether row 0 names the columns, and when
+     *  positional, @p column is a 0-based index string. CSV carries no footer, so a shard is always decoded
+     *  to learn its rows; @ref file_size_bytes is the loader's cheap weight. */
+    [[nodiscard]] static expected<csv_file_t> make(gpu_direct_storage_session_t const &storage, sz::string_view_t path,
+                                                   sz::string_view_t column, char delimiter, csv_header_t header,
                                                    gpu_stream_t const &stream) noexcept;
 
     /** @brief Concatenate several decoded shards' columns into one reservoir — the footerless coverage
@@ -197,11 +202,11 @@ struct csv_file_t {
 
 /** @brief The byte size of @p path via POSIX @c stat — the cheap file-draw weight for the footerless
  *      formats (JSONL, CSV), which cannot know a row count without decoding. */
-[[nodiscard]] expected<std::size_t> file_size_bytes(sz::string_view path) noexcept;
+[[nodiscard]] expected<std::size_t> file_size_bytes(sz::string_view_t path) noexcept;
 
 /** @brief Expand a @c directory/pattern (or a plain path) into the sorted paths it matches, via POSIX
  *      @c opendir / @c readdir + @c fnmatch — no glob library to link — sorted so the shard order is
  *      deterministic across every rank. An empty match is a failure, not an empty list. */
-[[nodiscard]] expected<array<sz::string>> expand_glob(sz::string_view path_or_glob) noexcept;
+[[nodiscard]] expected<array<sz::string_t>> expand_glob(sz::string_view_t path_or_glob) noexcept;
 
 } // namespace unum::uform::loaders

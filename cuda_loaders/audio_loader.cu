@@ -21,7 +21,7 @@ extern "C" {
 #include <libswresample/swresample.h> // vendor-boundary: `swr_*`, `SwrContext`
 }
 
-#include <fork_union.hpp> // vendor-boundary: the host-CPU decode worker pool
+#include <forkunion.hpp> // vendor-boundary: the host-CPU decode worker pool
 
 #include "cuda_loaders/audio_loader.cuh"
 
@@ -30,7 +30,7 @@ namespace ul = unum::uform::loaders;
 using namespace uc;
 using namespace ul;
 
-namespace fu = ashvardanian::fork_union;
+namespace fu = ashvardanian::forkunion;
 
 /**
  *  @brief Write one batch's audio-segment geometry with the serial cursor model (the tokens loader's walk):
@@ -414,8 +414,8 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, std::s
     encoded_offsets[clips] = cursor;
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "clip byte staging synchronization failed");
-    column_view_t const staged_tape {sz::span<b8_t const> {encoded.data(), total_bytes},
-                                     sz::span<u64_t const> {encoded_offsets.data(), clips + 1}};
+    column_view_t const staged_tape {std::span<b8_t const> {encoded.data(), total_bytes},
+                                     std::span<u64_t const> {encoded_offsets.data(), clips + 1}};
 
     // Decode + resample to mono Float32 across the borrowed pool, into a pinned waveform landing already carrying
     // the grid's `[clips,columns,chunk_samples]` layout: clip `c` fills row `c` (a clip is exactly `clip_samples`).
@@ -435,10 +435,9 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, std::s
     std::size_t const reps = reps_count;
     // A job is (clip, representation): job j = (clip j/reps, rep j%reps), resampled to that representation's rate and
     // chunked into row j. A clip is decoded once per representation (one decode for the single-representation case).
-    pool.for_n(job_count, [=](fu::prong_t prong) noexcept {
-        std::size_t const job = prong.task;
+    pool.for_n(job_count, [=](std::size_t job, fu::thread_in_domain_t) noexcept {
         std::size_t const clip = job / reps;
-        sz::span<b8_t const> const encoded_clip = staged_tape[clip];
+        std::span<b8_t const> const encoded_clip = staged_tape[clip];
         std::span<b8_t const> const bytes {encoded_clip.data(), encoded_clip.size()};
         std::span<f32_t> const job_waveform {waveform_base + job * static_cast<std::size_t>(clip_samples),
                                              static_cast<std::size_t>(clip_samples)};
@@ -474,7 +473,7 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, std::s
 }
 
 expected<audio_loader_parquet_t> audio_loader_parquet_t::make(gpu_direct_storage_session_t &session,
-                                                              sz::string_view path_or_glob, u64_t seed,
+                                                              sz::string_view_t path_or_glob, u64_t seed,
                                                               cpu_decode_pool_t &pool,
                                                               audio_batch_shape_t audio) noexcept {
     using result_t = expected<audio_loader_parquet_t>;
@@ -536,7 +535,7 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
 
     // Open distinct files, drawn with probability proportional to their row count, until the pool covers the
     // fill's clips; never fewer than two, unless the whole dataset is one file.
-    array<sz::string_view> picked_paths;
+    array<sz::string_view_t> picked_paths;
     array<std::size_t> picked_shards;
     if (picked_paths.try_resize(shard_count) != status_t::success_k ||
         picked_shards.try_resize(shard_count) != status_t::success_k)
@@ -550,7 +549,7 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
         std::span<std::size_t const> const chosen {picked_shards.data(), picked_count};
         if (std::find(chosen.begin(), chosen.end(), file) != chosen.end()) continue;
         picked_shards[picked_count] = file;
-        picked_paths[picked_count] = absolute_paths_[file];
+        picked_paths[picked_count] = absolute_paths_[file].view();
         pooled_estimate += row_prefix_[file + 1] - row_prefix_[file];
         ++picked_count;
     }
@@ -587,7 +586,7 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
     for (std::size_t segment = 0; segment != total_clips; ++segment)
         record_indices[segment] = epoch_permutation(row_key, data_epoch_t {training_step}, segment, pooled_rows);
 
-    sz::span<u64_t const> const host_offsets {reservoir_offsets.data(), reservoir_offsets.size()};
+    std::span<u64_t const> const host_offsets {reservoir_offsets.data(), reservoir_offsets.size()};
     column_view_t const tape {column.buffer_, host_offsets};
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t &loaded = batches[batch];

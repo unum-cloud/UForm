@@ -58,7 +58,7 @@
 #include <memory>  // `std::unique_ptr` — the pimpl owning the NVDEC engine state
 #include <span>    // `std::span`
 
-#include <fork_union.hpp> // vendor-boundary: `fu::basic_pool_t` — the borrowed CPU demux / decode-drive pool
+#include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the borrowed CPU demux / decode-drive pool
 
 #include "cuda_core/types.hpp"             // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
 #include "cuda_core/array.hpp"             // `array`
@@ -77,7 +77,7 @@ namespace unum::uform::loaders {
 
 /** @brief The host-side worker pool the media decoders fan their host-CPU work across — one per run, owned at the
  *      composition root (the @b only sanctioned host-thread pool), borrowed here. */
-using cpu_decode_pool_t = ashvardanian::fork_union::basic_pool_t;
+using cpu_decode_pool_t = ashvardanian::forkunion::flat_pool_t;
 /** @brief The writable @b [rows,columns,tube_frames,patch_side,patch_side,channels] tube grid of one batch's video
  *      rows — the decode's destination. Each drawn clip emits one segment @b per representation, and every segment
  *      scatters its @c temporal_groups·patch_rows·patch_cols tubes into a contiguous column sub-range of a single
@@ -176,7 +176,7 @@ struct nvdec_session_t {
  *      source of a step's geometry. */
 struct video_loader_parquet_config_t {
     /** @brief The Parquet column holding the encoded clip blobs ( @c list<uint8> , mp4 / webm bytes). */
-    sz::string_view clip_column = sz::string_view {"video", 5};
+    sz::string_view_t clip_column = sz::string_view_t {"video", 5};
 };
 
 /**
@@ -195,7 +195,7 @@ struct video_loader_parquet_t {
      *  @param[in] video The video modality's own geometry slice ( @c tube_frames , @c patch_side , @c frame_stride )
      *      — the single source of a step's video geometry; it never sees the sibling modalities' shapes. */
     [[nodiscard]] static expected<video_loader_parquet_t> make(gpu_direct_storage_session_t &session,
-                                                               sz::string_view path_or_glob, u64_t seed,
+                                                               sz::string_view_t path_or_glob, u64_t seed,
                                                                cpu_decode_pool_t &pool,
                                                                video_batch_shape_t video) noexcept;
 
@@ -221,7 +221,7 @@ struct video_loader_parquet_t {
     /** @brief The run's CPU-decode worker pool — borrowed from the composition root, forwarded to the decode. */
     cpu_decode_pool_t *pool_ = nullptr;
     /** @brief The dataset's Parquet shard paths, sorted by the glob — owned. */
-    array<sz::string> absolute_paths_ {};
+    array<sz::string_t> absolute_paths_ {};
     /** @brief The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
     /** @brief @b [shards+1] cumulative footer row counts — the weighted file draw's search table and, at its back,

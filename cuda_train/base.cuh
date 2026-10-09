@@ -91,12 +91,12 @@ struct base_config_t {
      *      @ref algo_pick_t::benchmarked_k under @c --tune . */
     algo_pick_t algo_pick = algo_pick_t::heuristic_k;
     /** @brief Checkpoint path; empty writes none. Borrows the argv storage it was parsed from. */
-    sz::string_view checkpoint {};
+    sz::string_view_t checkpoint {};
     /** @brief Warm-start path; empty starts from the keyed seed. Every replica loads the same file
      *      (they are bitwise-identical by construction) and the run continues from the file's saved
      *      step — the learning-rate schedule and the keyed data draws pick up where the save left off.
      *      Borrows the argv storage it was parsed from. */
-    sz::string_view resume {};
+    sz::string_view_t resume {};
     /** @brief The ledger channels this run arms — losses and rounds by default; @c --telemetry adds
      *      more (e.g. @c signals for the optimizer's gradient-boundary probes). The entry point may
      *      also arm channels from its launcher contract; the library itself never reads environment. */

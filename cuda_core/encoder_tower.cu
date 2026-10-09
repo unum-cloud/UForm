@@ -142,21 +142,6 @@ static __global__ void tower_pool_query_grad_kernel_(f32r2_view_t query_partials
 }
 
 /**
- *  @brief Elementwise add of the masked force onto the pooled force at the final-norm states — the
- *      co-trained join @c dL_pooled + dL_masked .
- *
- *  __grid_size__ grid-stride; no dynamic shared memory.
- */
-static __global__ void tower_grad_add_kernel_(bf16r1_span_t accumulator, bf16r1_view_t addend) {
-    std::size_t const total = accumulator.extent(0);
-    std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < total;
-         index += stride)
-        accumulator[index] = __float2bfloat16_rn(__bfloat162float(accumulator[index]) +
-                                                 __bfloat162float(addend[index]));
-}
-
-/**
  *  @brief Normalize one @b pixel segment's cells in place into the projection's BFloat16 fan-in. CTA @c s
  *      owns segment @c s , exits unless @p target matches its @ref modality_t , and otherwise walks its
  *      @c length cells at flat grid rows @c [offset,offset+length) — a cell's raw pixels live at the same
@@ -701,15 +686,17 @@ expected_t tower_pool_t::forward(bf16r1_view_t query, bf16r2_view_t states, u32r
     std::size_t const segments = pooled_.extent(0), hidden = pooled_.extent(1);
     std::size_t const heads = hidden / transformer_head_dim_k;
     auto const *const states_data = reinterpret_cast<nk_bf16_t const *>(states.data());
-    nk_status_t status = nk_attention_pack_bf16_best(states_data, states_data, heads, transformer_head_dim_k,
-                                                     segment_offsets.data(), segment_lengths.data(), segments,
-                                                     hidden * sizeof(bf16_t), hidden * sizeof(bf16_t), packed_.data(),
-                                                     0, segments * heads, capabilities_, stream.numkong());
+    nk_status_t status = nk_attention_pack_bf16_best(heads, transformer_head_dim_k, segment_offsets.data(),
+                                                     segment_lengths.data(), segments, states_data,
+                                                     hidden * sizeof(bf16_t), states_data, hidden * sizeof(bf16_t),
+                                                     packed_.data(), 0, segments * heads, capabilities_,
+                                                     stream.numkong());
     if (status == nk_success_k)
         status = nk_attention_packed_bf16_best(
-            reinterpret_cast<nk_bf16_t const *>(query.data()), packed_.data(), pooled_.data(), log_sum_exp_.data(),
-            heads, heads, transformer_head_dim_k, query_offsets_.data(), 0, hidden * sizeof(f32_t), tower_pool_scale_(),
-            NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, 0, NUMKONG_SIZE_MAX, capabilities_, stream.numkong());
+            heads, heads, transformer_head_dim_k, query_offsets_.data(), segments, tower_pool_scale_(),
+            NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, reinterpret_cast<nk_bf16_t const *>(query.data()), 0, packed_.data(),
+            pooled_.data(), hidden * sizeof(f32_t), log_sum_exp_.data(), 0, NUMKONG_SIZE_MAX, capabilities_,
+            stream.numkong());
     if (status == nk_success_k)
         status = nk_cast_best(pooled_.data(), nk_f32_k, pooled.data(), nk_bf16_k, segments * hidden, capabilities_,
                               stream.numkong());
@@ -719,11 +706,10 @@ expected_t tower_pool_t::forward(bf16r1_view_t query, bf16r2_view_t states, u32r
 }
 
 expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad, f32r2_span_t key_grad,
-                                  f32r2_span_t value_grad, bf16r2_span_t states_grad, bf16r1_span_t query_grad,
-                                  gpu_stream_t &stream) noexcept {
+                                  f32r2_span_t value_grad, bf16r1_span_t query_grad, gpu_stream_t &stream) noexcept {
     std::size_t const segments = pooled_.extent(0), hidden = pooled_.extent(1);
     std::size_t const heads = hidden / transformer_head_dim_k;
-    std::size_t const tokens = states_grad.extent(0);
+    std::size_t const tokens = key_grad.extent(0);
     // NumKong never writes rows past a segment's live keys, nor the query rows of key-less PAD segments.
     for (void *const zeroed : {static_cast<void *>(key_grad.data()), static_cast<void *>(value_grad.data())})
         if (CUresult result = cuMemsetD32Async(reinterpret_cast<CUdeviceptr>(zeroed), 0, tokens * hidden, stream.get());
@@ -737,17 +723,14 @@ expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad
                                       capabilities_, stream.numkong());
     if (status == nk_success_k)
         status = nk_attention_packed_gradients_bf16_best(
-            reinterpret_cast<nk_bf16_t const *>(query.data()), packed_.data(), pooled_.data(), pooled_grad_.data(),
-            log_sum_exp_.data(), query_partials_.data(), key_grad.data(), value_grad.data(), heads, heads,
-            transformer_head_dim_k, query_offsets_.data(), 0, hidden * sizeof(f32_t), hidden * sizeof(f32_t),
-            key_grad.stride_bytes(0), tower_pool_scale_(), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, 0, NUMKONG_SIZE_MAX,
+            heads, heads, transformer_head_dim_k, query_offsets_.data(), segments, tower_pool_scale_(),
+            NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, reinterpret_cast<nk_bf16_t const *>(query.data()), 0, packed_.data(),
+            pooled_.data(), pooled_grad_.data(), hidden * sizeof(f32_t), log_sum_exp_.data(), query_partials_.data(),
+            hidden * sizeof(f32_t), key_grad.data(), value_grad.data(), key_grad.stride_bytes(0), 0, NUMKONG_SIZE_MAX,
             capabilities_, stream.numkong());
     if (status == nk_success_k)
-        status = nk_each_sum_f32_best(key_grad.data(), value_grad.data(), tokens * hidden, value_grad.data(),
+        status = nk_each_sum_f32_best(key_grad.data(), value_grad.data(), tokens * hidden, key_grad.data(),
                                       capabilities_, stream.numkong());
-    if (status == nk_success_k)
-        status = nk_cast_best(value_grad.data(), nk_f32_k, states_grad.data(), nk_bf16_k, tokens * hidden,
-                              capabilities_, stream.numkong());
     if (status != nk_success_k)
         return expected_t::fail(status_t::cuda_error_k, "attention pool backward failed: {}", nk_status_name(status));
     dim3 const channel_grid {static_cast<u32_t>(divide_round_up(hidden, kernel_block_size_default_k)), 1u, 1u};
@@ -983,34 +966,28 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
                                    segment_grad_a_.view(), head_norm_scale_grad_.span());
         if (!staged) return staged;
 
-        // The pool backward writes d(normalized) on every live token row, through both token-gradient
-        // buffers, which the final-norm backward overwrites next.
+        // The pool backward leaves the Float32 d(normalized) of every live token row in token_grad_a_.
         staged = pool_.backward(pool_query_.view(), segment_grad_b_.view(), token_grad_a_.span(), token_grad_b_.span(),
-                                normalized_grad_.span(), pool_query_grad_.span(), stream);
+                                pool_query_grad_.span(), stream);
         if (!staged) return staged;
-
-        // The co-trained join: the masked force adds onto the pooled force at the final-norm states.
-        if (masked_present) {
-            dim3 const cell_grid {
-                static_cast<u32_t>(divide_round_up(live_tokens * hidden, kernel_block_size_default_k)), 1u, 1u};
-            staged = launch_kernel(reinterpret_cast<void const *>(&tower_grad_add_kernel_), cell_grid, block_shape,
-                                   stream, normalized_grad_.span().flatten<1>(),
-                                   hidden_grad(nk::range(0, live_tokens), nk::slice).flatten<1>());
-            if (!staged) return staged;
-        }
     }
 
-    // Final-norm backward: the total d(normalized) — the pool's scatter (plus the co-trained add) or the
-    // caller's masked force alone — widens into token_grad_a_, then → the Float32 d(stack output) into
-    // token_grad_b_, plus the scale grad. The caller's hidden_grad may carry a wider capacity than the live
-    // extent, so it is narrowed to match.
-    bf16r2_view_t const normalized_grad_total = pooled_present ? normalized_grad_.view()
-                                                               : hidden_grad(nk::range(0, live_tokens), nk::slice);
-    if (nk_status_t const status = nk_cast_best(normalized_grad_total.data(), nk_bf16_k, token_grad_a_.data(), nk_f32_k,
-                                                live_tokens * hidden, capabilities_, stream.numkong());
-        status != nk_success_k)
-        return expected_t::fail(status_t::cuda_error_k, "final-norm gradient widening failed: {}",
-                                nk_status_name(status));
+    // The caller's BFloat16 masked force widens into token_grad_a_ alone, or beside the pooled force and adds
+    // onto it: the co-trained join. The caller's hidden_grad may carry a wider capacity than the live extent.
+    if (masked_present) {
+        bf16r2_view_t const masked_grad = hidden_grad(nk::range(0, live_tokens), nk::slice);
+        f32_t *const widened = pooled_present ? token_grad_b_.data() : token_grad_a_.data();
+        nk_status_t status = nk_cast_best(masked_grad.data(), nk_bf16_k, widened, nk_f32_k, live_tokens * hidden,
+                                          capabilities_, stream.numkong());
+        if (status == nk_success_k && pooled_present)
+            status = nk_each_sum_f32_best(token_grad_a_.data(), token_grad_b_.data(), live_tokens * hidden,
+                                          token_grad_a_.data(), capabilities_, stream.numkong());
+        if (status != nk_success_k)
+            return expected_t::fail(status_t::cuda_error_k, "masked force join failed: {}", nk_status_name(status));
+    }
+
+    // Final-norm backward: the Float32 d(normalized) in token_grad_a_ → the Float32 d(stack output) into
+    // token_grad_b_, plus the scale grad.
     staged = launch_kernel(reinterpret_cast<void const *>(&rmscast_backward_kernel), row_grid, block_shape, stream,
                            stack_output_, final_norm_scale_.view(), token_grad_a_.view(), f32r2_view_t {},
                            token_grad_b_.span(), final_inverse_rms_.span(), config_.block.rms_eps);
@@ -1112,12 +1089,12 @@ expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) 
     // its `model.` prefix. A block weight arrives as a rank-1 accessor; it joins as its logical [rows,cols]
     // rectangle (a tower matrix is already rank-2 and joins through its own span / view).
 
-    auto push = [&weights](sz::string_view name, bf16r2_span_t weight, bf16r2_view_t grad) noexcept {
+    auto push = [&weights](sz::string_view_t name, bf16r2_span_t weight, bf16r2_view_t grad) noexcept {
         differentiable_weights_t entry {{}, weight, grad};
-        if (!entry.name.try_assign(name)) return status_t::bad_alloc_k;
+        if (sz::failed(entry.name.try_assign(name))) return status_t::bad_alloc_k;
         return weights.try_push_back(std::move(entry));
     };
-    auto push_flat = [&push](sz::string_view name, bf16r1_span_t weight, bf16r1_view_t grad, std::size_t rows,
+    auto push_flat = [&push](sz::string_view_t name, bf16r1_span_t weight, bf16r1_view_t grad, std::size_t rows,
                              std::size_t cols) noexcept {
         return push(name, bf16r2_span_t {weight.data(), rows, cols}, bf16r2_view_t {grad.data(), rows, cols});
     };
@@ -1131,11 +1108,11 @@ expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) 
         pushed = push("video_projection", video_projection_.span(), video_projection_grad_.view());
     if (pushed == status_t::success_k && audio_projection_.data() != nullptr)
         pushed = push("audio_projection", audio_projection_.span(), audio_projection_grad_.view());
-    sz::string name_text;
+    sz::string_t name_text;
     for (u32_t layer_index = 0; pushed == status_t::success_k && layer_index != config_.depth; ++layer_index) {
         transformer_block_bf16_t &layer = blocks_[layer_index];
         struct block_part_t {
-            sz::string_view suffix;
+            sz::string_view_t suffix;
             bf16r1_span_t weight;
             bf16r1_view_t grad;
             std::size_t rows, cols;
@@ -1173,7 +1150,7 @@ expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) 
  *      @p name tags the failure diagnostic with the weight's role. */
 [[nodiscard]] static expected<bf16r2_tensor_arena_t> snapshot_weight_(bf16r2_view_t source, gpu_arena_t &arena,
                                                                       gpu_stream_t &stream,
-                                                                      sz::string_view name) noexcept {
+                                                                      sz::string_view_t name) noexcept {
     using result_t = expected<bf16r2_tensor_arena_t>;
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     bf16r2_tensor_arena_t copy =
@@ -1192,7 +1169,7 @@ expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) 
 /** @brief The rank-1 overload of @ref snapshot_weight_ for the norm scales and the pool query. */
 [[nodiscard]] static expected<bf16r1_tensor_arena_t> snapshot_weight_(bf16r1_view_t source, gpu_arena_t &arena,
                                                                       gpu_stream_t &stream,
-                                                                      sz::string_view name) noexcept {
+                                                                      sz::string_view_t name) noexcept {
     using result_t = expected<bf16r1_tensor_arena_t>;
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     bf16r1_tensor_arena_t copy = bf16r1_tensor_arena_t::uninitialized({source.extent(0)}, bf16_alloc).value;
@@ -1248,7 +1225,7 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
     // Every product's B operand packs once here, since the twin's weights never change: the two head projections,
     // then — per present media modality — the projection snapshot, in modality order.
     auto snapshot_and_pack = [&](bf16r2_view_t weight, bf16r2_tensor_arena_t &copy, b8r1_tensor_arena_t &packed,
-                                 sz::string_view name) noexcept -> expected_t {
+                                 sz::string_view_t name) noexcept -> expected_t {
         expected<bf16r2_tensor_arena_t> snapshot = snapshot_weight_(weight, arena, stream, name);
         if (!snapshot) return expected_t::fail(std::move(snapshot));
         copy = std::move(snapshot.value_);

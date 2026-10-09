@@ -100,22 +100,23 @@ expected<telemetry_ledger_t> telemetry_ledger_t::make(gpu_arena_t &arena, u32_t 
         ledger.loss_stats_.try_reserve(rows) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "ledger host table allocation failed ({})", rows);
     // Row 0's host entries exist so probe handles index all tables uniformly.
-    if (ledger.names_.try_push_back(sz::string {}) != status_t::success_k ||
+    if (ledger.names_.try_push_back(sz::string_t {}) != status_t::success_k ||
         ledger.policies_.try_push_back(telemetry_policy_t::finite_signal_k) != status_t::success_k ||
         ledger.loss_stats_.try_push_back(telemetry_loss_stats_t {}) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "ledger sentinel row allocation failed");
     return result_t {std::move(ledger)};
 }
 
-expected<telemetry_probe_t> telemetry_ledger_t::register_probe(sz::string_view name, telemetry_channel_t channel,
+expected<telemetry_probe_t> telemetry_ledger_t::register_probe(sz::string_view_t name, telemetry_channel_t channel,
                                                                telemetry_policy_t policy) noexcept {
     using result_t = expected<telemetry_probe_t>;
     if (!armed(channel)) return result_t {telemetry_probe_t {}}; // the inert probe — feeding it is a no-op
     if (registered_ + 1u >= rows_.extent(0))
         return result_t::fail(status_t::bad_alloc_k, "ledger probe registration of \"{}\" exceeds the {} rows", name,
                               rows_.extent(0) - 1u);
-    sz::string owned;
-    if (!owned.try_assign(name)) return result_t::fail(status_t::bad_alloc_k, "ledger probe name allocation failed");
+    sz::string_t owned;
+    if (sz::failed(owned.try_assign(name)))
+        return result_t::fail(status_t::bad_alloc_k, "ledger probe name allocation failed");
     if (names_.try_push_back(std::move(owned)) != status_t::success_k ||
         policies_.try_push_back(policy) != status_t::success_k ||
         loss_stats_.try_push_back(telemetry_loss_stats_t {}) != status_t::success_k)
@@ -187,7 +188,7 @@ expected_t telemetry_ledger_t::report(gpu_stream_t &stream) noexcept {
     for (u32_t index = 1; index <= registered_; ++index) {
         telemetry_row_t const &state = states[index];
         telemetry_loss_stats_t const &stats = loss_stats_[index];
-        sz::string line;
+        sz::string_t line;
         if (!format_into(line,
                          "uform-telemetry: {} — updates={} zeros={} nonfinite={} violations={} last={} | " //
                          "scored={} mean={} first={} last_mean={}\n",

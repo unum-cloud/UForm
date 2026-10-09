@@ -36,7 +36,7 @@ using namespace unum::uform::core;
 
 /** @brief Write one already-assembled line to standard error — the host-diagnostic channel (§3), never
  *      `printf`. */
-inline void emit_line(sz::string_view line) noexcept {
+inline void emit_line(sz::string_view_t line) noexcept {
     ssize_t const written = ::write(STDERR_FILENO, line.data(), line.size());
     (void)written;
 }
@@ -48,7 +48,7 @@ inline void emit_line(sz::string_view line) noexcept {
  *      case; a malformed pattern warns once and also accepts every case, because a broken filter must
  *      never silently skip the suite.
  */
-[[nodiscard]] inline bool test_filter_accepts(sz::string_view case_name) noexcept {
+[[nodiscard]] inline bool test_filter_accepts(sz::string_view_t case_name) noexcept {
     static char const *const pattern = std::getenv("UFORM_TEST_FILTER"); // vendor-boundary: launcher contract
     if (pattern == nullptr) return true;
     struct parsed_filter_t {
@@ -62,7 +62,7 @@ inline void emit_line(sz::string_view line) noexcept {
             parsed.valid = true;
         }
         catch (std::regex_error const &) {
-            sz::string line;
+            sz::string_t line;
             (void)format_into(line, "UFORM_TEST_FILTER is not a valid regular expression: {}\n", pattern);
             emit_line(line.view());
         }
@@ -79,7 +79,7 @@ inline void emit_line(sz::string_view line) noexcept {
  */
 struct test_suite_t {
     /** @brief The binary's name, printed in the summary line. */
-    sz::string_view name {};
+    sz::string_view_t name {};
     /** @brief Checks that passed. */
     u32_t passed = 0;
     /** @brief Checks that failed; the process exits non-zero when it is not zero. */
@@ -100,7 +100,7 @@ struct test_suite_t {
             return;
         }
         ++failed;
-        sz::string line;
+        sz::string_t line;
         (void)format_into(line, "  FAIL {}:{}  ", path_basename(message.location.file_name()),
                           static_cast<u32_t>(message.location.line()));
         std::vformat_to(format_into_t {&line}, message.format, std::make_format_args(args...));
@@ -110,7 +110,7 @@ struct test_suite_t {
 
     /** @brief The one summary line and the process exit code. */
     [[nodiscard]] int finish() noexcept {
-        sz::string line;
+        sz::string_t line;
         (void)format_into(line, "{}: {} ({}/{} checks passed)\n", failed == 0 ? "PASS" : "FAIL", name, passed,
                           passed + failed);
         emit_line(line.view());

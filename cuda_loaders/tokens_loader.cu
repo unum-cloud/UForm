@@ -163,7 +163,7 @@ static __global__ void tokens_gather_kernel_(b8r1_view_t reservoir_payload, u64r
 }
 
 expected<tokens_loader_parquet_t> tokens_loader_parquet_t::make(gpu_direct_storage_session_t &session,
-                                                                sz::string_view path_or_glob, u64_t seed) noexcept {
+                                                                sz::string_view_t path_or_glob, u64_t seed) noexcept {
     using result_t = expected<tokens_loader_parquet_t>;
 
     // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths — POSIX glob(3).
@@ -206,7 +206,7 @@ expected_t tokens_loader_parquet_t::fill(gpu_stream_t &gpu_stream, tokens_base_l
     // device reservoir; the true pool size is the decoded row count.
     auto picked = pick_shards_(gpu_rank, training_step, total_segments);
     if (!picked) return expected_t::fail(std::move(picked));
-    array<sz::string_view> const picked_paths = std::move(picked.value_);
+    array<sz::string_view_t> const picked_paths = std::move(picked.value_);
     std::size_t const picked_count = picked_paths.size();
     constexpr splitmix64_hash_t hash {};
 
@@ -224,9 +224,9 @@ expected_t tokens_loader_parquet_t::fill(gpu_stream_t &gpu_stream, tokens_base_l
                            data_epoch_t {training_step}, batches, gpu_stream);
 }
 
-expected<array<sz::string_view>> tokens_loader_parquet_t::pick_shards_(u32_t gpu_rank, u32_t training_step,
-                                                                       std::size_t target_segments) const noexcept {
-    using result_t = expected<array<sz::string_view>>;
+expected<array<sz::string_view_t>> tokens_loader_parquet_t::pick_shards_(u32_t gpu_rank, u32_t training_step,
+                                                                         std::size_t target_segments) const noexcept {
+    using result_t = expected<array<sz::string_view_t>>;
     std::size_t const shard_count = absolute_paths_.size();
     std::size_t const floor_files = std::min<std::size_t>(2, shard_count);
     std::size_t const total_rows = row_prefix_[shard_count];
@@ -234,7 +234,7 @@ expected<array<sz::string_view>> tokens_loader_parquet_t::pick_shards_(u32_t gpu
 
     // A keyed row position over the whole dataset binary-searches the prefix to its owning file; distinct files
     // accumulate until the pool covers the target, never fewer than two unless the dataset is one file.
-    array<sz::string_view> picked_paths;
+    array<sz::string_view_t> picked_paths;
     array<std::size_t> picked_shards;
     if (picked_paths.try_reserve(shard_count) != status_t::success_k ||
         picked_shards.try_reserve(shard_count) != status_t::success_k)
@@ -255,13 +255,13 @@ expected<array<sz::string_view>> tokens_loader_parquet_t::pick_shards_(u32_t gpu
     return result_t {std::move(picked_paths)};
 }
 
-expected<array<sz::string_view>> tokens_loader_parquet_t::drawn_shards(u32_t gpu_rank, u32_t training_step,
-                                                                       std::size_t target_segments) const noexcept {
+expected<array<sz::string_view_t>> tokens_loader_parquet_t::drawn_shards(u32_t gpu_rank, u32_t training_step,
+                                                                         std::size_t target_segments) const noexcept {
     return pick_shards_(gpu_rank, training_step, target_segments);
 }
 
 expected<tokens_loader_jsonl_t> tokens_loader_jsonl_t::make(gpu_direct_storage_session_t &session,
-                                                            sz::string_view path_or_glob, u64_t seed) noexcept {
+                                                            sz::string_view_t path_or_glob, u64_t seed) noexcept {
     using result_t = expected<tokens_loader_jsonl_t>;
 
     // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths — POSIX readdir.
@@ -342,7 +342,7 @@ expected_t tokens_loader_jsonl_t::fill(gpu_stream_t &gpu_stream, tokens_base_loa
 }
 
 expected<tokens_loader_csv_t> tokens_loader_csv_t::make(gpu_direct_storage_session_t &session,
-                                                        sz::string_view path_or_glob, u64_t seed) noexcept {
+                                                        sz::string_view_t path_or_glob, u64_t seed) noexcept {
     using result_t = expected<tokens_loader_csv_t>;
 
     // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths — POSIX readdir.
@@ -401,7 +401,7 @@ expected_t tokens_loader_csv_t::fill(gpu_stream_t &gpu_stream, tokens_base_loade
         if (std::find(chosen.begin(), chosen.end(), file) != chosen.end()) continue;
         // Decode this file to learn its rows (no footer), and keep it alive for the concat.
         auto shard = csv_file_t::make(*storage_, absolute_paths_[file], config.column, config.delimiter,
-                                      config.has_header, gpu_stream);
+                                      config.header, gpu_stream);
         if (!shard) return expected_t::fail(std::move(shard));
         pooled_rows += shard->rows();
         picked_shards[picked_count] = file;

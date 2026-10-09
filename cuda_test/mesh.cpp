@@ -40,9 +40,9 @@ namespace fs = std::filesystem;
 
 /** @brief One host_domain's facts in the exact line-oriented wire format `build_facts_` emits — what a
  *      peer publishes under its `mesh` key for the lead to read. */
-static sz::string facts_payload(sz::string_view job, u32_t index, u32_t count, u32_t multimem, u32_t devices,
-                                sz::string_view hostname, sz::string_view device_name) {
-    sz::string text;
+static sz::string_t facts_payload(sz::string_view_t job, u32_t index, u32_t count, u32_t multimem, u32_t devices,
+                                  sz::string_view_t hostname, sz::string_view_t device_name) {
+    sz::string_t text;
     (void)format_into(text,
                       "schema {}\njob {}\nhost_domain_index {}\nhost_domain_count {}\n" //
                       "multimem {}\nhostname {}\ndevices {}\ndevice_name {}\nuuids",
@@ -56,9 +56,9 @@ static sz::string facts_payload(sz::string_view job, u32_t index, u32_t count, u
 
 /** @brief A merged manifest in the wire format `build_manifest_` emits — what the lead publishes for every
  *      follower to adopt; every row carries @p device_name so a follower's self-row agrees with its probe. */
-static sz::string manifest_payload(sz::string_view job, u32_t multimem, u32_t rows, u32_t devices,
-                                   sz::string_view device_name) {
-    sz::string text;
+static sz::string_t manifest_payload(sz::string_view_t job, u32_t multimem, u32_t rows, u32_t devices,
+                                     sz::string_view_t device_name) {
+    sz::string_t text;
     (void)format_into(text, "schema {}\njob {}\nmultimem {}\n", mesh_schema_k, job, multimem);
     for (u32_t row = 0; row != rows; ++row)
         (void)format_into(text, "host_domain {} hostname faux-{} devices {} device_name {}\n", row, row, devices,
@@ -68,7 +68,7 @@ static sz::string manifest_payload(sz::string_view job, u32_t multimem, u32_t ro
 
 /** @brief Write @p content into @p path — one simulated peer's exchange file, planted before the bootstrap
  *      under test reads it. Uses stdio, never a `std::*stream`. */
-static void plant(fs::path const &path, sz::string const &content) {
+static void plant(fs::path const &path, sz::string_t const &content) {
     std::FILE *file = std::fopen(path.c_str(), "wb");
     if (file == nullptr) return;
     (void)std::fwrite(content.data(), 1, content.size(), file);
@@ -78,7 +78,7 @@ static void plant(fs::path const &path, sz::string const &content) {
 /** @brief The device-0 model name with spaces replaced by underscores — exactly what
  *      `probe_local_host_domain_` records, so a planted peer's `device_name` matches this box's probe and
  *      the uniformity check passes. */
-static bool probe_local_device_name(sz::string &name) {
+static bool probe_local_device_name(sz::string_t &name) {
     CUdevice device = 0;
     if (cuDeviceGet(&device, 0) != CUDA_SUCCESS) return false;
     char raw[64] = {};
@@ -102,17 +102,17 @@ static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
     topology.host_domain_index = 0;
     (void)format_into(topology.exchange_directory, "{}", directory.c_str());
 
-    sz::string_view const payload = "qpn 42\npsn 7\nrkey 3735928559\n";
+    sz::string_view_t const payload = "qpn 42\npsn 7\nrkey 3735928559\n";
     suite.check(static_cast<bool>(topology.publish_text("wiring", payload)), "publish_text should succeed");
     suite.check(!fs::exists(directory / "host_domain0.wiring.tmp"), "publish should leave no temporary file");
-    sz::string received;
+    sz::string_t received;
     expected_t awaited = topology.await_text(0, "wiring", received, 5.0);
     suite.check(static_cast<bool>(awaited), "await_text should find the payload: {}", awaited.description_);
     suite.check(received.view() == payload, "payload should round-trip verbatim: got {}", received);
 
-    sz::string_view const replacement = "qpn 99\n";
+    sz::string_view_t const replacement = "qpn 99\n";
     suite.check(static_cast<bool>(topology.publish_text("wiring", replacement)), "republish_text should succeed");
-    sz::string again;
+    sz::string_t again;
     (void)topology.await_text(0, "wiring", again, 5.0);
     suite.check(again.view() == replacement, "republish should atomically replace: got {}", again);
 }
@@ -120,7 +120,7 @@ static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
 /** @brief The single-host_domain world: `bootstrap(0,1)` assembles the whole topology from the local probe
  *      and never opens the exchange directory — the common one-box case. */
 static void single_box_world(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
-    sz::string const base_str {base.c_str()};
+    sz::string_t const base_str {base.c_str()};
     auto result = mesh_topology_t::bootstrap(0, 1, local_devices, base_str.c_str(), "single_box", 10.0);
     if (!result) return suite.check(false, "single-box bootstrap should succeed: {}", result.description_);
     mesh_topology_t topology = std::move(*result);
@@ -137,9 +137,9 @@ static void single_box_world(test_suite_t &suite, fs::path const &base, u32_t lo
  *      world; a follower adopts the lead's manifest. Both halves run against a matching simulated peer
  *      carrying this box's real GPU identity, and each must arrive at the correct world table. */
 static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
-    sz::string device_name;
+    sz::string_t device_name;
     if (!probe_local_device_name(device_name)) return suite.check(false, "probing the local GPU name");
-    sz::string const base_str {base.c_str()};
+    sz::string_t const base_str {base.c_str()};
     std::error_code error;
 
     // The lead assembles the world by reading a peer's facts, then publishing the merged manifest.
@@ -155,12 +155,13 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
         else {
             mesh_topology_t lead = std::move(*result);
             mesh_host_domain_t const &peer = lead.host_domains[1];
-            sz::string_view const peer_host {peer.hostname};
+            sz::string_view_t const peer_host {peer.hostname};
             suite.check(lead.host_domain_count() == 2, "lead world size: got {} want 2", lead.host_domain_count());
             suite.check(lead.host_domains[0].device_count == local_devices, "lead self row should reflect the probe");
-            suite.check(peer_host == sz::string_view {"faux-peer"}, "peer hostname: got {} want faux-peer", peer_host);
-            suite.check(sz::string_view {peer.device_name} == device_name.view(), "peer device_name: got {} want {}",
-                        sz::string_view {peer.device_name}, device_name);
+            suite.check(peer_host == sz::string_view_t {"faux-peer"}, "peer hostname: got {} want faux-peer",
+                        peer_host);
+            suite.check(sz::string_view_t {peer.device_name} == device_name.view(), "peer device_name: got {} want {}",
+                        sz::string_view_t {peer.device_name}, device_name);
         }
     }
 
@@ -178,8 +179,9 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
             mesh_host_domain_t const &self = follower.self();
             suite.check(follower.host_domain_count() == 2, "follower world size: got {} want 2",
                         follower.host_domain_count());
-            suite.check(self.device_count == local_devices && sz::string_view {self.device_name} == device_name.view(),
-                        "follower self row should agree with its probe: got {}", sz::string_view {self.device_name});
+            suite.check(
+                self.device_count == local_devices && sz::string_view_t {self.device_name} == device_name.view(),
+                "follower self row should agree with its probe: got {}", sz::string_view_t {self.device_name});
         }
     }
 }
@@ -204,17 +206,17 @@ static void run_cluster_exchange(test_suite_t &suite) {
     suite.check(topology.host_domain_count() == count, "world size should match the launch: got {}",
                 topology.host_domain_count());
 
-    sz::string table;
+    sz::string_t table;
     for (u32_t peer = 0; peer != count; ++peer) {
         mesh_host_domain_t const &entry = topology.host_domains[peer];
-        (void)format_into(table, "{} {} {} {}\n", entry.host_domain_index, sz::string_view {entry.hostname},
-                          entry.device_count, sz::string_view {entry.device_name});
+        (void)format_into(table, "{} {} {} {}\n", entry.host_domain_index, sz::string_view_t {entry.hostname},
+                          entry.device_count, sz::string_view_t {entry.device_name});
     }
     (void)topology.publish_text("table", table.view());
     bool identical = true;
     for (u32_t peer = 0; peer != count && identical; ++peer) {
         if (peer == index) continue;
-        sz::string other;
+        sz::string_t other;
         if (expected_t awaited = topology.await_text(peer, "table", other, 60.0); !awaited) identical = false;
         else identical = other.view() == table.view();
     }
@@ -226,7 +228,7 @@ int main() {
     test_suite_t suite {"mesh conformance"};
     bool const cluster = std::getenv("UFORM_HOST_DOMAIN_INDEX") != nullptr;
 
-    sz::string base_name;
+    sz::string_t base_name;
     (void)format_into(base_name, "uform_mesh_test_{}", ::getpid());
     fs::path const base = fs::temp_directory_path() / base_name.c_str();
     std::error_code error;

@@ -124,23 +124,23 @@ struct infiniband_coordinates_t {
     u8_t global_identifier[16] = {};
 
     /** @brief Serialize into the line-oriented exchange payload; @c false only on allocation failure. */
-    [[nodiscard]] bool to_text(sz::string &text) const noexcept {
+    [[nodiscard]] bool to_text(sz::string_t &text) const noexcept {
         bool built = format_into(text, "lid {}\nqpn {}\npsn {}\nrkey {}\naddr {}\ngid ", local_identifier,
                                  queue_pair_number, packet_sequence_number, remote_key, buffer_address);
         for (u8_t byte : global_identifier) built = built && format_into(text, "{:02x}", byte);
-        return built && text.try_push_back('\n');
+        return built && sz::succeeded(text.try_push_back('\n'));
     }
 
     /** @brief Parse the payload @ref to_text produced; @c false when any field is missing or malformed. */
-    [[nodiscard]] static bool from_text(sz::string_view payload, infiniband_coordinates_t &coordinates) noexcept {
-        auto parse_number = [](sz::string_view token, auto &value) noexcept {
+    [[nodiscard]] static bool from_text(sz::string_view_t payload, infiniband_coordinates_t &coordinates) noexcept {
+        auto parse_number = [](sz::string_view_t token, auto &value) noexcept {
             std::from_chars_result const result = std::from_chars(token.data(), token.data() + token.size(), value);
             return result.ec == std::errc {} && result.ptr == token.data() + token.size();
         };
-        sz::byteset const whitespaces = sz::whitespaces_set();
+        sz::byteset_t const whitespaces = sz::whitespaces_set();
         bool lid_parsed = false, qpn_parsed = false, psn_parsed = false, rkey_parsed = false, addr_parsed = false,
              gid_parsed = false;
-        for (sz::string_view line : payload.split(sz::newlines_set())) {
+        for (sz::string_view_t line : payload.split(sz::newlines_set())) {
             auto [key, match, value] = line.partition(' ');
             value = value.strip(whitespaces);
             if (key == "lid") lid_parsed = parse_number(value, coordinates.local_identifier);
@@ -165,15 +165,15 @@ struct infiniband_coordinates_t {
 
 /** @brief Publish this rank's @p local coordinates under @p key and await + parse the @p peer_host_domain 's
  *      payload under the same key — one QP handshake over the mesh's filesystem rendezvous. */
-[[nodiscard]] inline expected_t exchange_infiniband_coordinates(mesh_topology_t const &topology, sz::string_view key,
+[[nodiscard]] inline expected_t exchange_infiniband_coordinates(mesh_topology_t const &topology, sz::string_view_t key,
                                                                 infiniband_coordinates_t const &local,
                                                                 u32_t peer_host_domain, infiniband_coordinates_t &peer,
                                                                 f64_t timeout_seconds) noexcept {
-    sz::string local_text;
+    sz::string_t local_text;
     if (!local.to_text(local_text))
         return expected_t::fail(status_t::bad_alloc_k, "coordinate payload assembly failed (key={})", key);
     if (expected_t published = topology.publish_text(key, local_text.view()); !published) return published;
-    sz::string peer_text;
+    sz::string_t peer_text;
     if (expected_t awaited = topology.await_text(peer_host_domain, key, peer_text, timeout_seconds); !awaited)
         return awaited;
     if (!infiniband_coordinates_t::from_text(peer_text.view(), peer))
@@ -1020,7 +1020,8 @@ struct infiniband_reach_t {
     [[nodiscard]] static expected<infiniband_reach_t> make_(mesh_topology_t const &topology, u32_t member_index,
                                                             infiniband_nic_t &nic, gpu_arena_t &arena,
                                                             gpu_stream_t &stream, heap_layout_t layout,
-                                                            sz::string_view key_prefix, f64_t timeout_seconds) noexcept;
+                                                            sz::string_view_t key_prefix,
+                                                            f64_t timeout_seconds) noexcept;
 
   public:
     /** @brief The registered payload region — the shard the all-reduce sums in place, or the

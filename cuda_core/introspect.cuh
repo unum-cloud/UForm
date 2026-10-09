@@ -137,7 +137,7 @@ struct telemetry_ledger_t {
     /** @brief Claim one named row for a probe on @p channel under @p policy — bump-registered with loud
      *      overflow, mirroring the domains' reserve discipline. A disarmed ledger or a dark channel
      *      returns the inert zero probe without consuming a row. */
-    [[nodiscard]] expected<telemetry_probe_t> register_probe(sz::string_view name, telemetry_channel_t channel,
+    [[nodiscard]] expected<telemetry_probe_t> register_probe(sz::string_view_t name, telemetry_channel_t channel,
                                                              telemetry_policy_t policy) noexcept;
 
     /** @brief Enqueue one signal probe over @p values on @p stream : one warp stride-samples the span,
@@ -174,7 +174,7 @@ struct telemetry_ledger_t {
     /** @brief The device row table, @b [max_probes+1] , zeroed at make. */
     nk::tensor<telemetry_row_t, gpu_arena_alloc<telemetry_row_t>, 1> rows_ {};
     /** @brief Owned per-probe labels, row order. */
-    array<sz::string> names_ {};
+    array<sz::string_t> names_ {};
     /** @brief Per-probe policies, baked into every enqueue. */
     array<telemetry_policy_t> policies_ {};
     /** @brief Per-probe host loss statistics, row order. */

@@ -40,7 +40,7 @@ namespace unum::uform::loaders {
 /** @brief The Parquet tokens loader's baked knobs — a different config is a different loader. */
 struct tokens_base_loader_parquet_config_t {
     /** @brief The Parquet's column name holding the UTF-8 documents. */
-    sz::string_view column = sz::string_view {"text", 4};
+    sz::string_view_t column = sz::string_view_t {"text", 4};
 };
 
 /**
@@ -61,7 +61,7 @@ struct tokens_loader_parquet_t {
      *  @param[inout] session GPU Direct Storage session for IO.
      */
     [[nodiscard]] static expected<tokens_loader_parquet_t> make( //
-        gpu_direct_storage_session_t &session, sz::string_view path_or_glob, u64_t seed) noexcept;
+        gpu_direct_storage_session_t &session, sz::string_view_t path_or_glob, u64_t seed) noexcept;
 
     /** 
      *  @brief Fills the next few @p batches of training data for the MLM objective on one GPU rank.
@@ -88,19 +88,19 @@ struct tokens_loader_parquet_t {
      *  @param[in] gpu_rank The GPU rank the draw is keyed by — different ranks draw different shard sets.
      *  @param[in] training_step The step the draw is keyed by.
      *  @param[in] target_segments The number of rows the pooled shards must cover. */
-    [[nodiscard]] expected<array<sz::string_view>> drawn_shards(u32_t gpu_rank, u32_t training_step,
-                                                                std::size_t target_segments) const noexcept;
+    [[nodiscard]] expected<array<sz::string_view_t>> drawn_shards(u32_t gpu_rank, u32_t training_step,
+                                                                  std::size_t target_segments) const noexcept;
 
   private:
     /** @brief The keyed weighted file pick shared by @ref fill and @ref drawn_shards : draw distinct shards
      *      with probability proportional to their row count, keyed by @c (seed,step,rank) , until the pool
      *      covers @p target_segments rows (≥2 shards unless the dataset is one). Pure over the footer table. */
-    [[nodiscard]] expected<array<sz::string_view>> pick_shards_(u32_t gpu_rank, u32_t training_step,
-                                                                std::size_t target_segments) const noexcept;
+    [[nodiscard]] expected<array<sz::string_view_t>> pick_shards_(u32_t gpu_rank, u32_t training_step,
+                                                                  std::size_t target_segments) const noexcept;
     /** @brief The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
     gpu_direct_storage_session_t *storage_ = nullptr;
     /** @brief The dataset's Parquet shard paths — borrowed from the composition root. */
-    array<sz::string> absolute_paths_ {};
+    array<sz::string_t> absolute_paths_ {};
     /** @brief The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
     /** @brief @b [shards+1] cumulative footer row counts — the weighted file draw's search table (an
@@ -112,7 +112,7 @@ struct tokens_loader_parquet_t {
 /** @brief The JSONL tokens loader's baked knobs — a different config is a different loader. */
 struct tokens_base_loader_jsonl_config_t {
     /** @brief The JSON field (one object per line) holding the UTF-8 documents. */
-    sz::string_view field = sz::string_view {"text", 4};
+    sz::string_view_t field = sz::string_view_t {"text", 4};
 };
 
 /**
@@ -131,7 +131,7 @@ struct tokens_loader_jsonl_t {
      *  @param[in] path_or_glob Dataset's JSONL paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed. */
     [[nodiscard]] static expected<tokens_loader_jsonl_t> make( //
-        gpu_direct_storage_session_t &session, sz::string_view path_or_glob, u64_t seed) noexcept;
+        gpu_direct_storage_session_t &session, sz::string_view_t path_or_glob, u64_t seed) noexcept;
 
     /** @brief Fill the next few @p batches for the MLM objective on one GPU rank — @sa
      *      multimodal_batch_mixer_t for the cross-GPU mixing. Draws files weighted by byte size and keyed
@@ -150,7 +150,7 @@ struct tokens_loader_jsonl_t {
     /** @brief The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
     gpu_direct_storage_session_t *storage_ = nullptr;
     /** @brief The dataset's JSONL shard paths — owned, expanded from the glob at @ref make . */
-    array<sz::string> absolute_paths_ {};
+    array<sz::string_t> absolute_paths_ {};
     /** @brief The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
     /** @brief @b [shards+1] cumulative @b byte sizes — the weighted file draw's search table. JSONL has
@@ -160,13 +160,16 @@ struct tokens_loader_jsonl_t {
 
 /** @brief The CSV tokens loader's baked knobs — a different config is a different loader. */
 struct tokens_base_loader_csv_config_t {
-    /** @brief The CSV column holding the UTF-8 documents — a header name, or a 0-based index string when
-     *      @ref has_header is false. */
-    sz::string_view column = sz::string_view {"text", 4};
-    /** @brief The field separator. */
+
+    /** The CSV column holding the UTF-8 documents: a header name, or a 0-based index string when
+     *  @ref header is positional. */
+    sz::string_view_t column = sz::string_view_t {"text", 4};
+
+    /** The field separator. */
     char delimiter = ',';
-    /** @brief Whether row 0 names the columns (else they are positional). */
-    bool has_header = true;
+
+    /** Whether row 0 names the columns. */
+    csv_header_t header = csv_header_t::named_k;
 };
 
 /**
@@ -185,7 +188,7 @@ struct tokens_loader_csv_t {
      *  @param[in] path_or_glob Dataset's CSV paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed. */
     [[nodiscard]] static expected<tokens_loader_csv_t> make( //
-        gpu_direct_storage_session_t &session, sz::string_view path_or_glob, u64_t seed) noexcept;
+        gpu_direct_storage_session_t &session, sz::string_view_t path_or_glob, u64_t seed) noexcept;
 
     /** @brief Fill the next few @p batches for the MLM objective on one GPU rank — @sa
      *      multimodal_batch_mixer_t for the cross-GPU mixing. Draws files weighted by byte size and keyed
@@ -204,7 +207,7 @@ struct tokens_loader_csv_t {
     /** @brief The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
     gpu_direct_storage_session_t *storage_ = nullptr;
     /** @brief The dataset's CSV shard paths — owned, expanded from the glob at @ref make . */
-    array<sz::string> absolute_paths_ {};
+    array<sz::string_t> absolute_paths_ {};
     /** @brief The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
     /** @brief @b [shards+1] cumulative @b byte sizes — the weighted file draw's search table. CSV has no

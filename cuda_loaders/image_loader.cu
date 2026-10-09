@@ -22,7 +22,7 @@
 #include <png.h>                      // vendor-boundary: CPU PNG decode
 #include <webp/decode.h>              // vendor-boundary: CPU WebP decode
 
-#include <fork_union.hpp> // vendor-boundary: the host-CPU decode worker pool
+#include <forkunion.hpp> // vendor-boundary: the host-CPU decode worker pool
 
 #include "cuda_loaders/image_loader.cuh"
 
@@ -31,7 +31,7 @@ namespace ul = unum::uform::loaders;
 using namespace uc;
 using namespace ul;
 
-namespace fu = ashvardanian::fork_union;
+namespace fu = ashvardanian::forkunion;
 
 /** @brief Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
  *      decorrelated under one @c (seed,step,rank) — the same salts the tokens loader uses. */
@@ -162,7 +162,7 @@ template <typename integer_type_>
 
 /** @brief Sniff a blob's compressed format from its leading bytes — JPEG @c FFD8FF , PNG @c 89504E47 ,
  *      WebP @c "RIFF"…"WEBP" ; anything else is unknown and fails the fill loudly. */
-[[nodiscard]] static image_format_t sniff_format_(sz::string_view encoded) noexcept {
+[[nodiscard]] static image_format_t sniff_format_(sz::string_view_t encoded) noexcept {
     u8_t const *const bytes = reinterpret_cast<u8_t const *>(encoded.data());
     std::size_t const size = encoded.size();
     if (size >= 3 && bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) return format_jpeg_k;
@@ -176,7 +176,7 @@ template <typename integer_type_>
 /** @brief A JPEG's pixel extent, scanned from its markers for a start-of-frame (SOFn): after the 2-byte
  *      segment length come precision, then height and width as big-endian UInt16. Only the frame headers
  *      (@c C0..CF except DHT @c C4 , JPG @c C8 , DAC @c CC ) carry them. */
-[[nodiscard]] static expected<image_extent_t> jpeg_dimensions_(sz::string_view encoded) noexcept {
+[[nodiscard]] static expected<image_extent_t> jpeg_dimensions_(sz::string_view_t encoded) noexcept {
     u8_t const *const bytes = reinterpret_cast<u8_t const *>(encoded.data());
     std::size_t const size = encoded.size();
     for (std::size_t offset = 2; offset + 9 < size;) { // start past the SOI marker (FFD8)
@@ -199,7 +199,7 @@ template <typename integer_type_>
 
 /** @brief A PNG's pixel extent from its IHDR — width and height are big-endian UInt32 at byte offsets 16 and
  *      20 of the signature+IHDR prologue. */
-[[nodiscard]] static expected<image_extent_t> png_dimensions_(sz::string_view encoded) noexcept {
+[[nodiscard]] static expected<image_extent_t> png_dimensions_(sz::string_view_t encoded) noexcept {
     u8_t const *const bytes = reinterpret_cast<u8_t const *>(encoded.data());
     if (encoded.size() < 24)
         return expected<image_extent_t>::fail(status_t::invalid_input_k, "PNG header prefix too short");
@@ -211,7 +211,7 @@ template <typename integer_type_>
 
 /** @brief A WebP's pixel extent — the container's canvas size via libwebp's header parser (a device-side
  *      parse is a follow-up once the whole sniff moves onto the GPU). */
-[[nodiscard]] static expected<image_extent_t> webp_dimensions_(sz::string_view encoded) noexcept {
+[[nodiscard]] static expected<image_extent_t> webp_dimensions_(sz::string_view_t encoded) noexcept {
     int width = 0, height = 0;
     if (WebPGetInfo(reinterpret_cast<u8_t const *>(encoded.data()), encoded.size(), &width, &height) == 0)
         return expected<image_extent_t>::fail(status_t::invalid_input_k, "malformed WebP header");
@@ -220,7 +220,7 @@ template <typename integer_type_>
 
 /** @brief Triage one compressed blob — its format (magic bytes) and native extent (format-specific header
  *      parse). The one call the loader's triage and, later, the GPU sniff kernel share. */
-[[nodiscard]] static expected<image_probe_t> probe_image_(sz::string_view encoded) noexcept {
+[[nodiscard]] static expected<image_probe_t> probe_image_(sz::string_view_t encoded) noexcept {
     image_format_t const format = sniff_format_(encoded);
     if (format == format_unknown_k)
         return expected<image_probe_t>::fail(status_t::invalid_input_k, "unrecognized image format");
@@ -299,14 +299,14 @@ template <typename integer_type_>
     return rect;
 }
 
-/** @brief Decode one CPU-routed blob (PNG / WebP / progressive-or-rejected JPEG) into @p destination as
+/** Decode one CPU-routed blob (PNG / WebP / progressive-or-rejected JPEG) into @p destination as
  *      interleaved RGBA at its @b [height,width,channels(4)] extent — PNG / WebP carry a real alpha, a JPEG
  *      (no alpha) fills a constant @c 255 via libjpeg-turbo's @c JCS_EXT_RGBA . When a rejected JPEG's
  *      destination is smaller than its native size (a hardware plan that scaled it), libjpeg's 1/2ᵏ DCT scaling
  *      lands the decode exactly on @p destination , so it still fits its @c decoded -sized scratch region. Runs
- *      in a @c fork_union worker, so it hands back a bare @ref status_t ( @c invalid_input_k on a corrupt
+ *      in a @c forkunion worker, so it hands back a bare @ref status_t ( @c invalid_input_k on a corrupt
  *      bitstream) — no diagnostic to carry there. */
-[[nodiscard]] static status_t cpu_decode_(image_format_t format, sz::string_view encoded,
+[[nodiscard]] static status_t cpu_decode_(image_format_t format, sz::string_view_t encoded,
                                           pixel_image_span_t destination) noexcept {
     u8_t const *const bytes = reinterpret_cast<u8_t const *>(encoded.data());
     std::size_t const size = encoded.size();
@@ -555,17 +555,17 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
 
     std::size_t scratch_bytes = 0;
     for (std::size_t index = 0; index != images; ++index) {
-        sz::string_view const header {reinterpret_cast<char const *>(probe.data() + index * header_probe_bytes_k),
-                                      host_entries[index].length};
+        sz::string_view_t const header {reinterpret_cast<char const *>(probe.data() + index * header_probe_bytes_k),
+                                        host_entries[index].length};
         auto probed = probe_image_(header);
         image_plan_t &plan = plans[index];
         if (!probed) {
             // Web-scale shards carry the occasional unprobeable blob — one bad row PADs its segment
             // loudly instead of failing the whole fill, the same containment the overflow drop has.
-            sz::string warning;
+            sz::string_t warning;
             if (format_into(warning, "uform: image row {} dropped at triage: {}\n", drawn_rows[index],
                             probed.description_.view())) {
-                sz::string_view const text = warning.view();
+                sz::string_view_t const text = warning.view();
                 ssize_t const written = ::write(STDERR_FILENO, text.data(), text.size());
                 (void)written;
             }
@@ -750,13 +750,14 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
     u8_t *const blob_base = blobs.data();
     u8_t *const pixel_base = decoded.data();
     u8_t *const result_base = results.data();
-    pool.for_n(tasks.size(), [=](fu::prong_t prong) noexcept {
-        cpu_task_t const &task = task_base[prong.task];
+    pool.for_n(tasks.size(), [=](std::size_t index, fu::thread_in_domain_t) noexcept {
+        cpu_task_t const &task = task_base[index];
         image_plan_t const &plan = plan_base[task.plan_index];
-        sz::string_view const encoded {reinterpret_cast<char const *>(blob_base + task.blob_offset), task.blob_length};
+        sz::string_view_t const encoded {reinterpret_cast<char const *>(blob_base + task.blob_offset),
+                                         task.blob_length};
         pixel_image_span_t const destination {reinterpret_cast<pixel_t *>(pixel_base + task.pixel_offset),
                                               {plan.decoded.height, plan.decoded.width, image_channels_k}};
-        result_base[prong.task] = cpu_decode_(plan.format, encoded, destination) == status_t::success_k ? 1u : 0u;
+        result_base[index] = cpu_decode_(plan.format, encoded, destination) == status_t::success_k ? 1u : 0u;
     });
     for (std::size_t index = 0; index != tasks.size(); ++index) {
         cpu_task_t const &task = tasks[index];
@@ -968,7 +969,7 @@ expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, co
 }
 
 expected<image_loader_parquet_t> image_loader_parquet_t::make(gpu_direct_storage_session_t &session,
-                                                              sz::string_view path_or_glob, u64_t seed,
+                                                              sz::string_view_t path_or_glob, u64_t seed,
                                                               cpu_decode_pool_t &pool,
                                                               image_batch_shape_t image) noexcept {
     using result_t = expected<image_loader_parquet_t>;
@@ -1020,7 +1021,7 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
     // Open distinct files, drawn with probability proportional to their row count — a keyed row position over
     // the whole dataset binary-searches the prefix to its owning file — until the pool covers the fill's
     // images; never fewer than two, unless the whole dataset is one file.
-    array<sz::string_view> picked_paths;
+    array<sz::string_view_t> picked_paths;
     array<std::size_t> picked_shards;
     if (picked_paths.try_resize(shard_count) != status_t::success_k ||
         picked_shards.try_resize(shard_count) != status_t::success_k)
@@ -1034,7 +1035,7 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
         std::span<std::size_t const> const chosen {picked_shards.data(), picked_count};
         if (std::find(chosen.begin(), chosen.end(), file) != chosen.end()) continue;
         picked_shards[picked_count] = file;
-        picked_paths[picked_count] = absolute_paths_[file];
+        picked_paths[picked_count] = absolute_paths_[file].view();
         pooled_estimate += row_prefix_[file + 1] - row_prefix_[file];
         ++picked_count;
     }
@@ -1073,7 +1074,7 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
         record_indices[index] = epoch_permutation(row_key, data_epoch_t {training_step}, index, pooled_rows);
 
     // The blob column re-viewed with its offsets on host: device bytes, host-indexable via @c tape[row] .
-    sz::span<u64_t const> const host_offsets {reservoir_offsets.data(), reservoir_offsets.size()};
+    std::span<u64_t const> const host_offsets {reservoir_offsets.data(), reservoir_offsets.size()};
     column_view_t const tape {column.buffer_, host_offsets};
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t &loaded = batches[batch];

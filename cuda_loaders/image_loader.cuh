@@ -16,7 +16,7 @@
  *  @b device-native: nvJPEG's hardware backend takes the compressed bitstream straight from the GDS-resident
  *  reservoir tape (device pointers into @c buffer_ , no host hop) and writes interleaved RGB to device.
  *  @b PNG / @b WebP have no device decoder, so those rows take the audio loader's road — the compressed blob
- *  hops to a pinned tape, a @c fork_union pool decodes it on the CPU (libjpeg-turbo / libpng / libwebp) into
+ *  hops to a pinned tape, a @c forkunion pool decodes it on the CPU (libjpeg-turbo / libpng / libwebp) into
  *  a pinned pixel tape, and one bulk copy lands it on device. Both roads meet at the resize.
  *
  *  @section image_aspect Sub-row segments, per-image budget and aspect on the side
@@ -38,7 +38,7 @@
 
 #include <nvjpeg.h> // vendor-boundary: `nvjpegHandle_t` / `nvjpegJpegState_t` — the session's device state
 
-#include <fork_union.hpp> // vendor-boundary: `fu::basic_pool_t` — the borrowed CPU-decode pool
+#include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the borrowed CPU-decode pool
 
 #include "cuda_core/types.hpp"             // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
 #include "cuda_core/array.hpp"             // `array` — the per-fill index scratch
@@ -58,7 +58,7 @@ namespace unum::uform::loaders {
 using pixel_patches_span_t = nk::tensor_span<pixel_t, 5>;
 /** @brief The host-side worker pool the CPU fallback fans PNG / WebP / progressive-JPEG decodes across —
  *      one per run, owned at the composition root (the @b only sanctioned host-thread pool), borrowed here. */
-using cpu_decode_pool_t = ashvardanian::fork_union::basic_pool_t;
+using cpu_decode_pool_t = ashvardanian::forkunion::flat_pool_t;
 
 /** @brief Which nvJPEG device backend @ref nvjpeg_session_t::make landed. Only the hardware engine honors the
  *      decode-time scale factor, so @ref decode_images gates scaling on it — a named tier, never a bool. */
@@ -169,7 +169,7 @@ struct nvjpeg_session_t {
 /** @brief The Parquet image loader's baked knobs — a different config is a different loader. */
 struct image_loader_parquet_config_t {
     /** @brief The Parquet column holding the encoded image blobs ( @c list<uint8> ). */
-    sz::string_view column = sz::string_view {"image", 5};
+    sz::string_view_t column = sz::string_view_t {"image", 5};
 };
 
 /**
@@ -190,7 +190,7 @@ struct image_loader_parquet_t {
      *  @param[in] image The image modality's own geometry slice ( @c patch_side , @c channels ) — the single source
      *      of a step's image geometry; it never sees the sibling modalities' shapes. */
     [[nodiscard]] static expected<image_loader_parquet_t> make(gpu_direct_storage_session_t &session,
-                                                               sz::string_view path_or_glob, u64_t seed,
+                                                               sz::string_view_t path_or_glob, u64_t seed,
                                                                cpu_decode_pool_t &pool,
                                                                image_batch_shape_t image) noexcept;
 
@@ -223,7 +223,7 @@ struct image_loader_parquet_t {
      *      PNG / WebP / progressive-JPEG fallback; never owned, never spawned here. */
     cpu_decode_pool_t *pool_ = nullptr;
     /** @brief The dataset's Parquet shard paths, sorted by the glob — owned. */
-    array<sz::string> absolute_paths_ {};
+    array<sz::string_t> absolute_paths_ {};
     /** @brief The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
     /** @brief @b [shards+1] cumulative footer row counts — the weighted file draw's search table (an

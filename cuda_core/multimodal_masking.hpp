@@ -191,7 +191,7 @@ struct masked_tokens_t {
 
     /** @brief Append the decoder weight to @p weights under the checkpoint name @p name — the owning
      *      replica spells the instance name, since one head class may serve several modalities. */
-    [[nodiscard]] expected_t fill(sz::string_view name, array<differentiable_weights_t> &weights) noexcept;
+    [[nodiscard]] expected_t fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept;
     /** @brief The decoder weights @b [vocabulary·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> decoder_weights() noexcept { return decoder_weight_.span().flatten<1>(); }
 
@@ -281,7 +281,7 @@ struct masked_patches_t {
 
     /** @brief Append the recon weight to @p weights under the checkpoint name @p name — the owning
      *      replica spells the instance name, since one head class may serve several modalities. */
-    [[nodiscard]] expected_t fill(sz::string_view name, array<differentiable_weights_t> &weights) noexcept;
+    [[nodiscard]] expected_t fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept;
     /** @brief The recon weights @b [patch_pixels·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> recon_weights() noexcept { return recon_weight_.span().flatten<1>(); }
 
@@ -370,7 +370,7 @@ struct masked_frames_t {
 
     /** @brief Append the recon weight to @p weights under the checkpoint name @p name — the owning
      *      replica spells the instance name, since one head class may serve several modalities. */
-    [[nodiscard]] expected_t fill(sz::string_view name, array<differentiable_weights_t> &weights) noexcept;
+    [[nodiscard]] expected_t fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept;
     /** @brief The recon weights @b [chunk_samples·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> recon_weights() noexcept { return recon_weight_.span().flatten<1>(); }
 

@@ -35,9 +35,9 @@ struct checkpoint_file_t {
     }
 
     /** @brief Open @p path for reading, or create-truncate it for writing. */
-    [[nodiscard]] static expected<checkpoint_file_t> make(sz::string_view path, bool writable) noexcept {
-        sz::string path_text; // `open` needs a NUL-terminated `c_str`; short paths stay inline
-        if (!path_text.try_assign({path.data(), path.size()}))
+    [[nodiscard]] static expected<checkpoint_file_t> make(sz::string_view_t path, bool writable) noexcept {
+        sz::string_t path_text; // `open` needs a NUL-terminated `c_str`; short paths stay inline
+        if (sz::failed(path_text.try_assign({path.data(), path.size()})))
             return expected<checkpoint_file_t>::fail(status_t::bad_alloc_k, "path staging failed");
         checkpoint_file_t file;
         file.descriptor_ = writable ? ::open(path_text.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644)
@@ -93,15 +93,15 @@ struct checkpoint_file_t {
  *      then a `name: {dtype, shape, data_offsets}` record per tensor, offsets as byte prefix sums in
  *      insertion order. The returned view points into the pool's backing.
  *  @retval status_t::bad_alloc_k The pool ran dry — the caller grows it and retries. */
-[[nodiscard]] static expected<sz::string_view> write_header_(std::span<checkpoint_entry_t const> entries, u64_t step,
-                                                             yyjson_alc *pool) noexcept {
-    using serialized_t = expected<sz::string_view>;
+[[nodiscard]] static expected<sz::string_view_t> write_header_(std::span<checkpoint_entry_t const> entries, u64_t step,
+                                                               yyjson_alc *pool) noexcept {
+    using serialized_t = expected<sz::string_view_t>;
     yyjson_mut_doc *document = yyjson_mut_doc_new(pool);
     if (document == nullptr) return serialized_t::fail(status_t::bad_alloc_k, "header pool ran dry");
     yyjson_mut_val *root = yyjson_mut_obj(document);
     yyjson_mut_doc_set_root(document, root);
     yyjson_mut_val *metadata = yyjson_mut_obj(document);
-    sz::string step_text; // referenced by the DOM until serialization below; fits the inline buffer
+    sz::string_t step_text; // referenced by the DOM until serialization below; fits the inline buffer
     bool built = root != nullptr && metadata != nullptr && format_into(step_text, "{}", step) &&
                  yyjson_mut_obj_add_strn(document, metadata, "step", step_text.data(), step_text.size()) &&
                  yyjson_mut_obj_add_val(document, root, "__metadata__", metadata);
@@ -127,7 +127,7 @@ struct checkpoint_file_t {
     std::size_t header_bytes = 0;
     char *header = built ? yyjson_mut_write_opts(document, 0, pool, &header_bytes, nullptr) : nullptr;
     if (header == nullptr) return serialized_t::fail(status_t::bad_alloc_k, "header pool ran dry");
-    return serialized_t {sz::string_view {header, header_bytes}};
+    return serialized_t {sz::string_view_t {header, header_bytes}};
 }
 
 /** @brief The mirror of @ref write_header_ : parse the @p header text inside @p pool , index every
@@ -147,7 +147,7 @@ struct checkpoint_file_t {
     yyjson_val *key = nullptr;
     while ((key = yyjson_obj_iter_next(&iterator)) != nullptr) {
         yyjson_val *value = yyjson_obj_iter_get_val(key);
-        sz::string_view const key_text {yyjson_get_str(key), yyjson_get_len(key)};
+        sz::string_view_t const key_text {yyjson_get_str(key), yyjson_get_len(key)};
         if (key_text == "__metadata__") {
             yyjson_val *step_value = yyjson_obj_get(value, "step");
             char const *step_chars = yyjson_get_str(step_value); // null for absent or non-string
@@ -157,7 +157,7 @@ struct checkpoint_file_t {
         yyjson_val *dtype = yyjson_obj_get(value, "dtype");
         char const *dtype_chars = yyjson_get_str(dtype);
         if (dtype_chars == nullptr) return expected_t::fail(status_t::invalid_input_k, "{} misses its dtype", key_text);
-        if (sz::string_view {dtype_chars, yyjson_get_len(dtype)} != "BF16") continue;
+        if (sz::string_view_t {dtype_chars, yyjson_get_len(dtype)} != "BF16") continue;
 
         yyjson_val *shape = yyjson_obj_get(value, "shape");
         std::size_t const rank = yyjson_arr_size(shape);
@@ -176,7 +176,7 @@ struct checkpoint_file_t {
                                     key_text, begin, end, rows, cols);
 
         checkpoint_entry_t entry;
-        if (!entry.name.try_assign({key_text.data(), key_text.size()}))
+        if (sz::failed(entry.name.try_assign({key_text.data(), key_text.size()})))
             return expected_t::fail(status_t::bad_alloc_k, "name staging failed: {}", key_text);
         entry.rows = rows;
         entry.cols = cols;
@@ -201,7 +201,7 @@ expected_t checkpoint_to_save_t::try_reserve(u64_t total_scalars, u64_t tensor_c
     return {};
 }
 
-expected_t checkpoint_to_save_t::try_insert(sz::string_view name, nk::tensor_view<bf16_t, 2> data,
+expected_t checkpoint_to_save_t::try_insert(sz::string_view_t name, nk::tensor_view<bf16_t, 2> data,
                                             gpu_stream_t &stream) noexcept {
     if (name.empty() || data.empty())
         return expected_t::fail(status_t::invalid_input_k, "an entry needs a name and data");
@@ -212,7 +212,7 @@ expected_t checkpoint_to_save_t::try_insert(sz::string_view name, nk::tensor_vie
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
 
     checkpoint_entry_t entry;
-    if (!entry.name.try_assign({name.data(), name.size()}))
+    if (sz::failed(entry.name.try_assign({name.data(), name.size()})))
         return expected_t::fail(status_t::bad_alloc_k, "name staging failed: {}", name);
     entry.rows = data.extent(0);
     entry.cols = data.extent(1);
@@ -241,13 +241,13 @@ expected_t checkpoint_to_save_t::try_insert(sz::string_view name, nk::tensor_vie
     return copied;
 }
 
-expected_t checkpoint_to_save_t::save(sz::string_view path, u64_t step) noexcept {
+expected_t checkpoint_to_save_t::save(sz::string_view_t path, u64_t step) noexcept {
     if (entries_.empty()) return expected_t::fail(status_t::invalid_input_k, "a checkpoint needs tensors");
 
     // The header builds in the hoisted scratch through a pool allocator spanning its whole backing —
     // grown lazily, doubling when the pool runs dry, so the buffer settles after the first save and a
     // `clear`ed container re-inflates it without allocating.
-    sz::string_view header {};
+    sz::string_view_t header {};
     for (;;) {
         std::size_t const pool_bytes = scratch_.capacity() != 0 ? scratch_.capacity() : 4096;
         if (scratch_.try_resize_uninitialized(pool_bytes) != status_t::success_k)
@@ -255,7 +255,7 @@ expected_t checkpoint_to_save_t::save(sz::string_view path, u64_t step) noexcept
         yyjson_alc pool;
         if (!yyjson_alc_pool_init(&pool, scratch_.data(), scratch_.size()))
             return expected_t::fail(status_t::bad_alloc_k, "header pool setup failed ({} bytes)", scratch_.size());
-        expected<sz::string_view> serialized = write_header_(entries_.view(), step, &pool);
+        expected<sz::string_view_t> serialized = write_header_(entries_.view(), step, &pool);
         if (serialized) {
             header = serialized.value_;
             break;
@@ -288,7 +288,7 @@ void checkpoint_to_save_t::clear() noexcept {
     scratch_.clear();
 }
 
-expected<checkpoint_to_load_t> checkpoint_to_load_t::make(sz::string_view path, pinned_alloc_t allocator) noexcept {
+expected<checkpoint_to_load_t> checkpoint_to_load_t::make(sz::string_view_t path, pinned_alloc_t allocator) noexcept {
     using loaded_t = expected<checkpoint_to_load_t>;
     expected<checkpoint_file_t> file = checkpoint_file_t::make(path, false);
     if (!file) return loaded_t::fail(std::move(file));
@@ -337,7 +337,7 @@ expected<checkpoint_to_load_t> checkpoint_to_load_t::make(sz::string_view path, 
     return loaded_t {std::move(loaded)};
 }
 
-nk::tensor_view<bf16_t, 2> checkpoint_to_load_t::operator[](sz::string_view layer_name) const noexcept {
+nk::tensor_view<bf16_t, 2> checkpoint_to_load_t::operator[](sz::string_view_t layer_name) const noexcept {
     for (checkpoint_entry_t const &entry : entries_)
         if (entry.name.view() == layer_name)
             return nk::tensor_view<bf16_t, 2> {payload_.data() + entry.scalar_offset, entry.rows, entry.cols};

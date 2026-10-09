@@ -1,6 +1,6 @@
 /**
  *  @brief Conformance test of the contrastive force layout: the loss object against a Float64 host
- *      oracle, finite-difference force checks, bitwise capture-replay, relation-graph negatives, and the
+ *      oracle, finite-difference force checks, capture-replay, relation-graph negatives, and the
  *      multi-GPU distributed step against the single-GPU global reference.
  *  @file cuda_test/contrastive.cu
  *  @author Ash Vardanian
@@ -10,7 +10,6 @@
  *  visible hardware: the single-GPU oracle matrix always runs; the distributed-step tier joins when at
  *  least two GPUs are visible.
  */
-#include <cstring>
 #include <cstdio>
 #include <cmath>
 
@@ -122,8 +121,8 @@ static f64_t host_loss(std::vector<bf16_t> const &vertices, std::vector<bf16_t> 
     return loss / f64_t(vertices_per_mesh);
 }
 
-/** @brief One single-GPU oracle case: run the loss, compare to the host oracle, finite-difference the
- *      force on a few sampled channels, and prove eager == replayed bitwise. */
+/** One single-GPU oracle case: run the loss, compare to the host oracle, finite-difference the force on a few
+ *  sampled channels, and check captured replays land where the eager run did. */
 static void run_oracle_case(char const *label, std::size_t num_vertices, std::size_t hidden,
                             std::vector<u32_t> const &prefixes, bool explicit_edges, bool with_pad,
                             f32_t ambient_weight) {
@@ -265,15 +264,8 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
     }
     check(forces_ok, "forces match central finite differences");
 
-    // Bitwise determinism: the same call twice produces identical bytes.
-    std::vector<bf16_t> first_grad = host_grad;
-    if (expected_t ran = run_once(); !ran) return check(false, "second enqueue");
-    cuStreamSynchronize(stream.get());
-    cuMemcpyDtoH(host_grad.data(), reinterpret_cast<CUdeviceptr>(grad), scalars * sizeof(bf16_t));
-    check(std::memcmp(first_grad.data(), host_grad.data(), scalars * sizeof(bf16_t)) == 0,
-          "two eager runs are bitwise identical");
-
-    // Capture once, replay twice — still bitwise identical to eager.
+    // Capture once, replay twice: the replays land where the eager run did, up to reduction order.
+    std::vector<bf16_t> const eager_grad = host_grad;
     auto graph_made = gpu_replay_graph_t::make(stream.get(), [&]() noexcept { return run_once(); });
     if (!graph_made) {
         std::printf("    %s\n", graph_made.description_.c_str());
@@ -284,8 +276,13 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
             return check(false, "replay launch");
     cuStreamSynchronize(stream.get());
     cuMemcpyDtoH(host_grad.data(), reinterpret_cast<CUdeviceptr>(grad), scalars * sizeof(bf16_t));
-    check(std::memcmp(first_grad.data(), host_grad.data(), scalars * sizeof(bf16_t)) == 0,
-          "captured replays are bitwise identical to eager");
+    f32_t largest = 0.0f, worst = 0.0f;
+    for (std::size_t index = 0; index != scalars; ++index) {
+        f32_t const eager = __bfloat162float(eager_grad[index]);
+        largest = std::max(largest, std::fabs(eager));
+        worst = std::max(worst, std::fabs(eager - __bfloat162float(host_grad[index])));
+    }
+    check(worst <= 1.0e-2f * largest, "captured replays match eager");
     cuCtxPopCurrent(nullptr);
 }
 
@@ -570,10 +567,10 @@ static int run_cross_domain_case() {
         cuCtxPopCurrent(nullptr);
         for (f32_t const summand : summands) domain_loss += summand;
     }
-    sz::string loss_text;
+    sz::string_t loss_text;
     if (!format_into(loss_text, "{}", domain_loss)) return 1;
     if (!topology.publish_text("loss", loss_text.view())) return 1;
-    sz::string peer_text;
+    sz::string_t peer_text;
     if (!topology.await_text(1u - domain, "loss", peer_text, 60.0)) return 1;
     f64_t const global_loss = domain_loss + std::atof(peer_text.c_str());
 

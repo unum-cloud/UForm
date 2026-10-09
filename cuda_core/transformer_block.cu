@@ -1140,14 +1140,14 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
     auto const *const qkv_e4m3 = reinterpret_cast<nk_e4m3_t const *>(qkv_e4m3_.data());
     std::size_t const qkv_bytes = 3 * hidden * sizeof(e4m3_t);
     nk_status_t status = nk_attention_pack_e4m3_best(
-        qkv_e4m3 + hidden, qkv_e4m3 + 2 * hidden, heads, transformer_head_dim_k, segment_offsets.data(),
-        segment_lengths.data(), segments, qkv_bytes, qkv_bytes, packed_keys_values_.data(), 0, segments * heads,
-        capabilities_, stream.numkong());
+        heads, transformer_head_dim_k, segment_offsets.data(), segment_lengths.data(), segments, qkv_e4m3 + hidden,
+        qkv_bytes, qkv_e4m3 + 2 * hidden, qkv_bytes, packed_keys_values_.data(), 0, segments * heads, capabilities_,
+        stream.numkong());
     if (status == nk_success_k)
         status = nk_attention_packed_e4m3_best(
-            qkv_e4m3, packed_keys_values_.data(), products_.data(), NUMKONG_NULL, heads, heads, transformer_head_dim_k,
-            segment_offsets.data(), qkv_bytes, hidden * sizeof(f32_t),
-            1.0f / sqrtf(static_cast<f32_t>(transformer_head_dim_k)), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, 0,
+            heads, heads, transformer_head_dim_k, segment_offsets.data(), tokens,
+            1.0f / sqrtf(static_cast<f32_t>(transformer_head_dim_k)), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, qkv_e4m3,
+            qkv_bytes, packed_keys_values_.data(), products_.data(), hidden * sizeof(f32_t), NUMKONG_NULL, 0,
             NUMKONG_SIZE_MAX, capabilities_, stream.numkong());
     if (status != nk_success_k)
         return expected_t::fail(status_t::cuda_error_k, "E4M3 attention failed: {}", nk_status_name(status));

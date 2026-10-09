@@ -31,7 +31,8 @@ extern "C" {
 }
 #include <ffnvcodec/dynlink_nvcuvid.h> // vendor-boundary: NVDEC parser / decoder structs + typedefs
 #include <ffnvcodec/dynlink_loader.h>  // vendor-boundary: `CuvidFunctions`, `cuvid_load_functions`
-#include <fork_union.hpp>              // vendor-boundary: `fu::basic_pool_t` — the host demux / decode-drive pool
+
+#include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the host demux / decode-drive pool
 
 #include "cuda_loaders/video_loader.cuh"
 
@@ -40,7 +41,7 @@ namespace ul = unum::uform::loaders;
 using namespace uc;
 using namespace ul;
 
-namespace fu = ashvardanian::fork_union;
+namespace fu = ashvardanian::forkunion;
 
 /** @brief Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
  *      decorrelated under one @c (seed,step,rank) — the same salts the tokens / image / audio loaders use. */
@@ -967,7 +968,7 @@ struct cursor_plan_t {
             u32_t const room_in_row = columns - cursor % columns;
             if (length > room_in_row) cursor += room_in_row;
             if (cursor + length > capacity) {
-                sz::string line;
+                sz::string_t line;
                 if (format_into(line, "uform: loaded video batch full at segment {} — dropped\n", segment)) {
                     ssize_t const written = ::write(STDERR_FILENO, line.data(), line.size());
                     (void)written;
@@ -1313,10 +1314,10 @@ expected_t nvdec_session_t::decode_into(cpu_decode_pool_t &pool, column_view_t c
     demuxed_clip_t *const demuxed_data = demuxed.data();
     column_view_t const clips_tape = clips;
     {
-        auto join = pool.for_n(clip_count, [demuxed_data, clips_tape](std::size_t clip_index) noexcept {
-            auto const bytes = clips_tape[clip_index]; // host-pinned tape slice, sz::span -> std::span for libav
-            demux_container(std::span<b8_t const> {bytes.data(), bytes.size()}, demuxed_data[clip_index]);
-        });
+        auto join = pool.for_n(clip_count,
+                               [demuxed_data, clips_tape](std::size_t clip_index, fu::thread_in_domain_t) noexcept {
+                                   demux_container(clips_tape[clip_index], demuxed_data[clip_index]);
+                               });
         (void)join; // The join's destructor blocks until every worker finishes.
     }
     std::span<demuxed_clip_t const> const demuxed_view {demuxed.data(), clip_count};
@@ -1402,14 +1403,14 @@ expected_t ul::decode_videos(nvdec_session_t &nvdec, cpu_decode_pool_t &pool, co
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "clip byte staging synchronization failed");
 
-    column_view_t const pinned {sz::span<b8_t const> {encoded.data(), cursor},
-                                sz::span<u64_t const> {offsets.data(), offsets.size()}};
+    column_view_t const pinned {std::span<b8_t const> {encoded.data(), cursor},
+                                std::span<u64_t const> {offsets.data(), offsets.size()}};
     return nvdec.decode_into(pool, pinned, representations, videos, video_shapes, segment_offsets, segment_lengths,
                              segment_modality, stream);
 }
 
 expected<video_loader_parquet_t> video_loader_parquet_t::make(gpu_direct_storage_session_t &session,
-                                                              sz::string_view path_or_glob, u64_t seed,
+                                                              sz::string_view_t path_or_glob, u64_t seed,
                                                               cpu_decode_pool_t &pool,
                                                               video_batch_shape_t video) noexcept {
     using result_t = expected<video_loader_parquet_t>;
@@ -1468,7 +1469,7 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
     std::size_t const total_rows = row_prefix_[shard_count];
     constexpr splitmix64_hash_t hash {};
 
-    array<sz::string_view> picked_paths;
+    array<sz::string_view_t> picked_paths;
     array<std::size_t> picked_shards;
     if (picked_paths.try_resize(shard_count) != status_t::success_k ||
         picked_shards.try_resize(shard_count) != status_t::success_k)
@@ -1482,7 +1483,7 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
         std::span<std::size_t const> const chosen {picked_shards.data(), picked_count};
         if (std::find(chosen.begin(), chosen.end(), file) != chosen.end()) continue;
         picked_shards[picked_count] = file;
-        picked_paths[picked_count] = absolute_paths_[file];
+        picked_paths[picked_count] = absolute_paths_[file].view();
         pooled_estimate += row_prefix_[file + 1] - row_prefix_[file];
         ++picked_count;
     }
@@ -1516,7 +1517,7 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
     for (std::size_t index = 0; index != total_clips; ++index)
         record_indices[index] = epoch_permutation(row_key, data_epoch_t {training_step}, index, pooled_rows);
 
-    sz::span<u64_t const> const host_offsets {reservoir_offsets.data(), reservoir_offsets.size()};
+    std::span<u64_t const> const host_offsets {reservoir_offsets.data(), reservoir_offsets.size()};
     column_view_t const tape {column.buffer_, host_offsets};
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t &loaded = batches[batch];

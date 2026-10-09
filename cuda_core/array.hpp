@@ -7,7 +7,7 @@
  *  @ref array grows like `std::vector` but can never throw: every fallible operation is a @c try_*
  *  method returning a @ref status_t , copies are deleted (an accidental deep copy is an allocation the
  *  caller never sees fail), and moves are @c noexcept by construction. Same contract as StringZilla's
- *  @c sz::safe_vector , restated on this cell's status vocabulary.
+ *  @c sz::vector , restated on this cell's status vocabulary.
  *
  *  Unlike `std::vector`, sizing doesn't imply filling: the explicit @c try_resize_uninitialized commits a
  *  new tail without a memset or a constructor loop, so a buffer can be sized on the host and written first

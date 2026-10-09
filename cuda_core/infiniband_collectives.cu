@@ -152,7 +152,7 @@ expected<infiniband_nic_t> infiniband_nic_t::make(u32_t local_gpu_index, u8_t in
     if (CUresult retained = cuDevicePrimaryCtxRetain(&nic.primary_context_, paired_gpu); retained != CUDA_SUCCESS)
         return expected<infiniband_nic_t>::fail(retained, "primary-context retain failed (gpu={})", local_gpu_index);
     nic.paired_gpu_ = paired_gpu;
-    sz::string nic_name;
+    sz::string_t nic_name;
     if (!format_into(nic_name, "mlx5_{}", local_gpu_index))
         return expected<infiniband_nic_t>::fail(status_t::bad_alloc_k, "nic name formatting failed");
 
@@ -420,7 +420,7 @@ expected<infiniband_completion_mapping_t> infiniband_completion_mapping_t::make(
 
 expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &topology, u32_t member_index,
                                                        infiniband_nic_t &nic, gpu_arena_t &arena, gpu_stream_t &stream,
-                                                       heap_layout_t layout, sz::string_view key_prefix,
+                                                       heap_layout_t layout, sz::string_view_t key_prefix,
                                                        f64_t timeout_seconds) noexcept {
     using result_t = expected<infiniband_reach_t>;
     mesh_shape_t const &shape = topology.shape;
@@ -468,7 +468,7 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
         expected<infiniband_endpoint_t> endpoint = infiniband_endpoint_t::make(nic, heap_span);
         if (!endpoint) return result_t::fail(std::move(endpoint));
         member.endpoints_[round] = std::move(endpoint.value_);
-        sz::string key;
+        sz::string_t key;
         if (!format_into(key, "{}.{}", key_prefix, round))
             return result_t::fail(status_t::bad_alloc_k, "exchange key formatting failed");
         u32_t const partner_host = shape.host_domain_of(partner_domain * gpus + member_index);
@@ -484,12 +484,12 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
         // Ready-to-Receive too, or the responder NIC silently drops until the ~0.5s retry budget dies
         // (transport-retry-exceeded on the wire — loopback's lockstep pacing never exposes it). One more
         // tiny rendezvous proves both ends armed before either member returns wired.
-        sz::string wired_key;
+        sz::string_t wired_key;
         if (!format_into(wired_key, "{}.{}.wired", key_prefix, round))
             return result_t::fail(status_t::bad_alloc_k, "wired key formatting failed");
         if (expected_t published = topology.publish_text(wired_key.view(), "1\n"); !published)
             return result_t::fail(std::move(published));
-        sz::string wired_ack;
+        sz::string_t wired_ack;
         if (expected_t armed = topology.await_text(partner_host, wired_key.view(), wired_ack, timeout_seconds); !armed)
             return result_t::fail(std::move(armed));
         expected<infiniband_queue_mapping_t> queue = infiniband_queue_mapping_t::make(
@@ -626,7 +626,7 @@ expected<infiniband_reach_t> colocated_domain_t::reach_(u32_t member_index, gpu_
     // still advances, so every rank's key sequence stays aligned whatever the world's shape.
     u32_t const collective_id = next_collective_id_++;
     if (multimem_domain_count() == 1) return expected<infiniband_reach_t> {infiniband_reach_t {}};
-    sz::string key;
+    sz::string_t key;
     if (!format_into(key, "collective.{}", collective_id))
         return expected<infiniband_reach_t>::fail(status_t::bad_alloc_k, "rendezvous key formatting failed");
     layout.rounds = ceil_log2(topology_->shape.multimem_domain_count());

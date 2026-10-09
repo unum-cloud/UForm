@@ -297,8 +297,8 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
         }
         // The rank's gradient-boundary probes — inert zero handles when the signals channel is dark. A
         // zero gradient is a legal clean no-op, so every boundary registers as finite-only.
-        auto signal_probe = [&](sz::string_view stage, telemetry_probe_t &into) -> expected_t {
-            sz::string name;
+        auto signal_probe = [&](sz::string_view_t stage, telemetry_probe_t &into) -> expected_t {
+            sz::string_t name;
             if (!format_into(name, "adafactor/{}/{}", stage, rank))
                 return expected_t::fail(status_t::bad_alloc_k, "probe name formatting failed");
             expected<telemetry_probe_t> registered = ledger.register_probe(name.view(), telemetry_signals_k,

@@ -12,14 +12,14 @@
 namespace unum::uform::core {
 
 /** @brief A fabric handle is 64 opaque bytes; the mesh rendezvous carries text, so it travels 128-hex. */
-static bool format_fabric_handle_(sz::string &text, CUmemFabricHandle const &handle) noexcept {
+static bool format_fabric_handle_(sz::string_t &text, CUmemFabricHandle const &handle) noexcept {
     bool built = true;
     for (unsigned char const byte : handle.data) built = built && format_into(text, "{:02x}", static_cast<u32_t>(byte));
     return built;
 }
 
 /** @brief Parse a 128-hex fabric-handle token back into its 64 bytes; @c false on any non-hex or short token. */
-static bool parse_fabric_handle_(sz::string_view token, CUmemFabricHandle &handle) noexcept {
+static bool parse_fabric_handle_(sz::string_view_t token, CUmemFabricHandle &handle) noexcept {
     if (token.size() != 2u * sizeof(handle.data)) return false;
     for (std::size_t index = 0; index != sizeof(handle.data); ++index) {
         char const *pair = token.data() + 2u * index;
@@ -274,7 +274,7 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
     // 2. Exchange slice fabric handles across the domain's processes and adopt every peer's slices, so the
     //    whole symmetric range is mapped in every process. A single-process island skips it.
     if (host_domains_per_domain > 1) {
-        sz::string slices_text;
+        sz::string_t slices_text;
         for (std::size_t local = 0; local != local_count; ++local) {
             expected<CUmemFabricHandle> exported = domain.replicas_.export_fabric_handle(member_offset +
                                                                                          static_cast<u32_t>(local));
@@ -287,13 +287,13 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
         for (u32_t peer_host = domain_first_host; peer_host != domain_first_host + host_domains_per_domain;
              ++peer_host) {
             if (peer_host == topology.host_domain_index) continue;
-            sz::string peer_text;
+            sz::string_t peer_text;
             if (expected_t awaited = topology.await_text(peer_host, "multimem.slice", peer_text, timeout_seconds);
                 !awaited)
                 return result_t::fail(std::move(awaited));
             u32_t const peer_member_base = (peer_host - domain_first_host) * gpus_per_host;
             u32_t adopted_count = 0;
-            for (sz::string_view token : peer_text.view().split(sz::whitespaces_set())) {
+            for (sz::string_view_t token : peer_text.view().split(sz::whitespaces_set())) {
                 if (token.empty()) continue;
                 if (adopted_count >= gpus_per_host)
                     return result_t::fail(status_t::io_error_k, "host_domain {} published too many slice handles",
@@ -329,7 +329,7 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
                                                                    CU_MEM_HANDLE_TYPE_FABRIC, 0);
                     result != CUDA_SUCCESS)
                     return result_t::fail(result, "multicast fabric-handle export failed");
-                sz::string mc_text;
+                sz::string_t mc_text;
                 if (!format_fabric_handle_(mc_text, fabric))
                     return result_t::fail(status_t::bad_alloc_k, "multicast handle payload assembly failed");
                 if (expected_t published = topology.publish_text("multimem.mc", mc_text.view()); !published)
@@ -337,13 +337,13 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
             }
         }
         else {
-            sz::string mc_text;
+            sz::string_t mc_text;
             if (expected_t awaited = topology.await_text(domain_first_host, "multimem.mc", mc_text, timeout_seconds);
                 !awaited)
                 return result_t::fail(std::move(awaited));
             CUmemFabricHandle fabric {};
             bool parsed = false;
-            for (sz::string_view token : mc_text.view().split(sz::whitespaces_set())) {
+            for (sz::string_view_t token : mc_text.view().split(sz::whitespaces_set())) {
                 if (token.empty()) continue;
                 parsed = parse_fabric_handle_(token, fabric);
                 break;

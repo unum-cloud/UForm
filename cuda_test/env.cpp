@@ -97,7 +97,7 @@ static void probe_exchange_directory_(test_suite_t &suite) noexcept {
     if (host_domain_count_from_environment() == 1u) return; // Single-node runs never rendezvous.
     suite.check(exchange_directory != nullptr, "UFORM_EXCHANGE_DIR unset in a multi-node world");
     if (exchange_directory == nullptr) return;
-    sz::string probe_path;
+    sz::string_t probe_path;
     if (!format_into(probe_path, "{}/env-probe", exchange_directory)) {
         suite.check(false, "probe path formatting failed");
         return;

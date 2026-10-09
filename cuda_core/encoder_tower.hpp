@@ -145,14 +145,13 @@ struct tower_pool_t {
      *      gradients sum in a fixed order.
      *  @param[in] query @b [hidden] the learned pool query the forward read.
      *  @param[in] pooled_grad @b [segments,hidden] the gradient of the pooled rows.
-     *  @param[in] key_grad,value_grad @b [tokens,hidden] Float32 scratch, overwritten.
-     *  @param[out] states_grad @b [tokens,hidden] the gradient of the states, zero on rows no segment covers.
+     *  @param[out] key_grad @b [tokens,hidden] the Float32 gradient of the states, zero on rows no segment covers.
+     *  @param[out] value_grad @b [tokens,hidden] Float32 scratch, overwritten.
      *  @param[out] query_grad @b [hidden] the gradient of @p query .
      *  @param[inout] stream The stream every launch enqueues on.
      */
     [[nodiscard]] expected_t backward(bf16r1_view_t query, bf16r2_view_t pooled_grad, f32r2_span_t key_grad,
-                                      f32r2_span_t value_grad, bf16r2_span_t states_grad, bf16r1_span_t query_grad,
-                                      gpu_stream_t &stream) noexcept;
+                                      f32r2_span_t value_grad, bf16r1_span_t query_grad, gpu_stream_t &stream) noexcept;
 
   private:
     /** @brief The NumKong capabilities of the arena's device, picking every launch. */

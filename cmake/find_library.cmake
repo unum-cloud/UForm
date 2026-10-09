@@ -1,5 +1,5 @@
 # Resolve a vendor library for the loader tier (libcudf, cuFile, NVDEC, libav*, ...). One layered search:
-# an explicit `UFORM_*_ROOT` from `cmake/local.cmake` wins, then the RAPIDS / NVIDIA cu13 Python-wheel layouts
+# the RAPIDS / NVIDIA cu13 Python-wheel layouts
 # (`site-packages/<wheel>/lib64`, `site-packages/nvidia/cu13/lib`), then the system CUDA toolkit and the Debian
 # multiarch directories. `UFORM_LIBRARY_HINTS` holds the shared defaults; a call's `EXTRA_HINTS` are searched
 # before them so a site-specific install wins.

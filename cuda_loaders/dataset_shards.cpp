@@ -96,7 +96,7 @@ struct flat_column_t {
 /** @brief Flatten the @p name column @p decoded to its payload and offset levels, or a
  *      @c shape_unsupported_k failure naming it when it is not one of @c string , @c list<uint8> , or
  *      @c list<string> . */
-[[nodiscard]] static expected<flat_column_t> flatten_column_(cudf::column_view const &decoded, sz::string_view name,
+[[nodiscard]] static expected<flat_column_t> flatten_column_(cudf::column_view const &decoded, sz::string_view_t name,
                                                              rmm::cuda_stream_view stream) noexcept {
     using result_t = expected<flat_column_t>;
     if (decoded.type().id() == cudf::type_id::STRING) {
@@ -140,15 +140,15 @@ static void widen_offsets_(cudf::column_view const &offsets, rmm::cuda_stream_vi
     span = {owner->view().data<u64_t>(), static_cast<std::size_t>(offsets.size())};
 }
 
-expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &storage, sz::string_view path,
-                                              std::span<sz::string_view const> columns,
+expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &storage, sz::string_view_t path,
+                                              std::span<sz::string_view_t const> columns,
                                               gpu_stream_t const &stream) noexcept {
     return make(storage, {&path, 1}, columns, stream); // The single-shard convenience over the concatenating read.
 }
 
 expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &,
-                                              std::span<sz::string_view const> paths,
-                                              std::span<sz::string_view const> columns,
+                                              std::span<sz::string_view_t const> paths,
+                                              std::span<sz::string_view_t const> columns,
                                               gpu_stream_t const &stream) noexcept {
     using result_t = expected<parquet_file_t>;
     if (paths.empty() || columns.empty())
@@ -158,8 +158,8 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
         std::vector<std::string> names;      // vendor-boundary: cuDF's column selector takes std::strings
         path_texts.reserve(paths.size());
         names.reserve(columns.size());
-        for (sz::string_view path : paths) path_texts.emplace_back(path.data(), path.size());
-        for (sz::string_view column : columns) names.emplace_back(column.data(), column.size());
+        for (sz::string_view_t path : paths) path_texts.emplace_back(path.data(), path.size());
+        for (sz::string_view_t column : columns) names.emplace_back(column.data(), column.size());
         rmm::cuda_stream_view const cudf_stream {reinterpret_cast<cudaStream_t>(stream.get())};
 
         // KvikIO / GDS reads only the named columns' chunks straight to device; multiple shards decode
@@ -202,7 +202,7 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
 }
 
 expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_storage_session_t const &,
-                                                                   sz::string_view path) noexcept {
+                                                                   sz::string_view_t path) noexcept {
     using result_t = expected<parquet_length_metadata_t>;
     try {
         // Footer only — no row-group decode: the row count and the whole table's uncompressed byte size.
@@ -222,8 +222,8 @@ expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_st
 }
 
 expected<parquet_length_metadata_t> parquet_file_t::column_metadata(gpu_direct_storage_session_t const &,
-                                                                    sz::string_view path,
-                                                                    sz::string_view column) noexcept {
+                                                                    sz::string_view_t path,
+                                                                    sz::string_view_t column) noexcept {
     using result_t = expected<parquet_length_metadata_t>;
     try {
         // Footer only — no row-group decode: the row count and the column's total uncompressed byte size.
@@ -283,8 +283,8 @@ std::span<u64_t const> jsonl_file_t::groups() const noexcept {
     return state_ ? state_->span.groups : std::span<u64_t const> {};
 }
 
-expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, sz::string_view path,
-                                          sz::string_view field, gpu_stream_t const &stream) noexcept {
+expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, sz::string_view_t path,
+                                          sz::string_view_t field, gpu_stream_t const &stream) noexcept {
     using result_t = expected<jsonl_file_t>;
     try {
         rmm::cuda_stream_view const cudf_stream {reinterpret_cast<cudaStream_t>(stream.get())};
@@ -335,7 +335,7 @@ expected<jsonl_file_t> jsonl_file_t::concat(std::span<jsonl_file_t const> parts,
         for (jsonl_file_t const &part : parts) fields.push_back(part.state_->field->view());
         auto state = std::make_unique<state_t>();
         state->field = cudf::concatenate(fields, cudf_stream); // one copy into a single owned field column
-        auto flat = flatten_column_(state->field->view(), sz::string_view {"jsonl", 5}, cudf_stream);
+        auto flat = flatten_column_(state->field->view(), sz::string_view_t {"jsonl", 5}, cudf_stream);
         if (!flat) return result_t::fail(std::move(flat));
         state->span = adopt_flat_(*flat, cudf_stream);
         return result_t {jsonl_file_t {std::move(state)}};
@@ -371,8 +371,8 @@ std::span<u64_t const> csv_file_t::groups() const noexcept {
     return state_ ? state_->span.groups : std::span<u64_t const> {};
 }
 
-expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::string_view path,
-                                      sz::string_view column, char delimiter, bool has_header,
+expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::string_view_t path,
+                                      sz::string_view_t column, char delimiter, csv_header_t header,
                                       gpu_stream_t const &stream) noexcept {
     using result_t = expected<csv_file_t>;
     try {
@@ -384,7 +384,7 @@ expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::
             cudf::io::csv_reader_options::builder(
                 cudf::io::source_info {std::string {path.data(), path.size()}}) // vendor-boundary
                 .delimiter(delimiter)
-                .header(has_header ? 0 : -1)
+                .header(header == csv_header_t::named_k ? 0 : -1)
                 .use_cols_names({name})                                                         // vendor-boundary
                 .dtypes(std::vector<cudf::data_type> {cudf::data_type {cudf::type_id::STRING}}) // vendor-boundary
                 .build();
@@ -419,7 +419,7 @@ expected<csv_file_t> csv_file_t::concat(std::span<csv_file_t const> parts, gpu_s
         for (csv_file_t const &part : parts) columns.push_back(part.state_->field->view());
         auto state = std::make_unique<state_t>();
         state->field = cudf::concatenate(columns, cudf_stream); // one copy into a single owned column
-        auto flat = flatten_column_(state->field->view(), sz::string_view {"csv", 3}, cudf_stream);
+        auto flat = flatten_column_(state->field->view(), sz::string_view_t {"csv", 3}, cudf_stream);
         if (!flat) return result_t::fail(std::move(flat));
         state->span = adopt_flat_(*flat, cudf_stream);
         return result_t {csv_file_t {std::move(state)}};
@@ -432,57 +432,58 @@ expected<csv_file_t> csv_file_t::concat(std::span<csv_file_t const> parts, gpu_s
     }
 }
 
-expected<std::size_t> ul::file_size_bytes(sz::string_view path) noexcept {
+expected<std::size_t> ul::file_size_bytes(sz::string_view_t path) noexcept {
     using result_t = expected<std::size_t>;
-    sz::string text; // null-terminated for the C stat call
-    if (!text.try_assign(path)) return result_t::fail(status_t::bad_alloc_k, "path allocation failed");
+    sz::string_t text; // null-terminated for the C stat call
+    if (sz::failed(text.try_assign(path))) return result_t::fail(status_t::bad_alloc_k, "path allocation failed");
     struct ::stat info {}; // vendor-boundary: POSIX stat
     if (::stat(text.c_str(), &info) != 0) return result_t::fail(status_t::io_error_k, "stat failed for {}", path);
     return result_t {static_cast<std::size_t>(info.st_size)};
 }
 
-expected<array<sz::string>> ul::expand_glob(sz::string_view path_or_glob) noexcept {
-    using result_t = expected<array<sz::string>>;
+expected<array<sz::string_t>> ul::expand_glob(sz::string_view_t path_or_glob) noexcept {
+    using result_t = expected<array<sz::string_t>>;
 
     // Wildcards may sit in ANY component — the mixture manifests spell mid-path patterns like
     // `data/*/train/*.parquet` — so the expansion walks the path left to right, forking the running
     // directory prefixes at every patterned component and matching files at the last one. A forked
     // branch that lacks a later component simply contributes nothing; only a wholly empty match fails.
-    array<sz::string_view> components;
-    for (sz::string_view component : path_or_glob.split(sz::byteset {"/", 1}))
+    array<sz::string_view_t> components;
+    for (sz::string_view_t component : path_or_glob.split(sz::byteset_t {"/", 1}))
         if (!component.empty() && components.try_push_back(component) != status_t::success_k)
             return result_t::fail(status_t::bad_alloc_k, "glob component table allocation failed");
     if (components.size() == 0) return result_t::fail(status_t::invalid_input_k, "no files match {}", path_or_glob);
 
-    bool const absolute = path_or_glob.starts_with(sz::string_view {"/", 1});
-    array<sz::string> prefixes;
+    bool const absolute = path_or_glob.starts_with(sz::string_view_t {"/", 1});
+    array<sz::string_t> prefixes;
     {
-        sz::string seed_prefix;
-        if (!seed_prefix.try_assign(absolute ? sz::string_view {"/", 1} : sz::string_view {".", 1}) ||
+        sz::string_t seed_prefix;
+        if (sz::failed(seed_prefix.try_assign(absolute ? sz::string_view_t {"/", 1} : sz::string_view_t {".", 1})) ||
             prefixes.try_push_back(std::move(seed_prefix)) != status_t::success_k)
             return result_t::fail(status_t::bad_alloc_k, "glob prefix allocation failed");
     }
 
-    array<sz::string> paths;
-    sz::byteset const wildcards {"*?[", 3};
+    array<sz::string_t> paths;
+    sz::byteset_t const wildcards {"*?[", 3};
     for (std::size_t level = 0; level != components.size(); ++level) {
-        sz::string_view const component = components[level];
+        sz::string_view_t const component = components[level];
         bool const last = level + 1 == components.size();
-        bool const patterned = component.find_first_of(wildcards) != sz::string_view::npos;
+        bool const patterned = component.find_first_of(wildcards) != sz::string_view_t::npos;
 
         // A literal directory component descends every prefix without touching the filesystem — the
         // next level's opendir discovers a missing branch and drops it.
         if (!patterned && !last) {
             for (std::size_t index = 0; index != prefixes.size(); ++index)
-                if (!prefixes[index].try_append(sz::string_view {"/", 1}) || !prefixes[index].try_append(component))
+                if (sz::failed(prefixes[index].try_append(sz::string_view_t {"/", 1})) ||
+                    sz::failed(prefixes[index].try_append(component)))
                     return result_t::fail(status_t::bad_alloc_k, "glob prefix growth failed");
             continue;
         }
 
-        sz::string pattern_text; // null-terminated for fnmatch
-        if (!pattern_text.try_assign(component))
+        sz::string_t pattern_text; // null-terminated for fnmatch
+        if (sz::failed(pattern_text.try_assign(component)))
             return result_t::fail(status_t::bad_alloc_k, "glob pattern allocation failed");
-        array<sz::string> next_prefixes;
+        array<sz::string_t> next_prefixes;
         for (std::size_t index = 0; index != prefixes.size(); ++index) {
             ::DIR *const handle = ::opendir(prefixes[index].c_str());
             if (handle == nullptr) continue; // a forked branch without this component matches nothing
@@ -492,9 +493,10 @@ expected<array<sz::string>> ul::expand_glob(sz::string_view path_or_glob) noexce
                 if (is_directory && (std::strcmp(entry->d_name, ".") == 0 || std::strcmp(entry->d_name, "..") == 0))
                     continue;
                 if (::fnmatch(pattern_text.c_str(), entry->d_name, 0) != 0) continue;
-                sz::string full;
-                if (!full.try_assign(prefixes[index].view()) || !full.try_append(sz::string_view {"/", 1}) ||
-                    !full.try_append(sz::string_view {entry->d_name}) ||
+                sz::string_t full;
+                if (sz::failed(full.try_assign(prefixes[index].view())) ||
+                    sz::failed(full.try_append(sz::string_view_t {"/", 1})) ||
+                    sz::failed(full.try_append(sz::string_view_t {entry->d_name})) ||
                     (last ? paths.try_push_back(std::move(full)) : next_prefixes.try_push_back(std::move(full))) !=
                         status_t::success_k) {
                     ::closedir(handle);

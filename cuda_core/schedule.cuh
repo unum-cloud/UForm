@@ -281,7 +281,7 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
 }
 
 /** @brief Lift a NumKong status into the cell's diagnostics, naming the @p step that returned it. */
-[[nodiscard]] inline expected_t numkong_result(nk_status_t status, sz::string_view step) noexcept {
+[[nodiscard]] inline expected_t numkong_result(nk_status_t status, sz::string_view_t step) noexcept {
     if (status == nk_success_k) return {};
     return expected_t::fail(status_t::cuda_error_k, "{} failed: {}", step, nk_status_name(status));
 }

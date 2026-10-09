@@ -30,9 +30,9 @@
 #   cmake --build build --parallel
 #   ctest --test-dir build --output-on-failure
 #
-# Local dependency forks (optional).
+# Local dependency checkouts (optional).
 #
-#   cp cmake/local.cmake.example cmake/local.cmake   # then point the UFORM_*_ROOT variables at working checkouts
+#   cmake -S . -B build -DFETCHCONTENT_SOURCE_DIR_NUMKONG="$PWD/../NumKong"   # likewise any other dependency
 #
 # Feature gates.
 #
@@ -102,57 +102,50 @@ endif ()
 
 find_package(CUDAToolkit REQUIRED)
 include(FetchContent)
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/dependency.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/find_library.cmake")
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/probe_infiniband.cmake")
 
-# Per-checkout dependency overrides live in `cmake/local.cmake` — the analog of a Rust `.cargo/config.toml`: explicit,
-# git-ignored, never inferred from sibling directories. Copy `cmake/local.cmake.example` and point the `UFORM_*_ROOT`
-# variables at your working checkouts; without the file every dependency is fetched pinned from its upstream. Included
-# before any resolution, so a `set(... CACHE ... FORCE)` there wins over stale caches.
-include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/local.cmake" OPTIONAL)
+# Source dependencies. NumKong spans the tensor substrate, StringZilla parses exchange payloads, ForkUnion is the
+# host-side demux and decode thread pool, yyjson reads checkpoint headers, cudnn-frontend is the fused-attention graph
+# DSL. The first three are submodules: a recursive clone builds them in place, any other clone fetches the pins below,
+# which match the submodule commits. `FETCHCONTENT_SOURCE_DIR_<NAME>` points any of them at a local checkout.
+function (uform_sibling NAME REPOSITORY TAG)
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${NAME}/CMakeLists.txt")
+        add_subdirectory(${NAME})
+    else ()
+        message(STATUS "uform: ${NAME} submodule absent, fetching ${TAG}")
+        FetchContent_Declare(
+            ${NAME}
+            GIT_REPOSITORY ${REPOSITORY}
+            GIT_TAG ${TAG}
+        )
+        FetchContent_MakeAvailable(${NAME})
+    endif ()
+endfunction ()
 
-# Source dependencies — a local checkout wins, otherwise a pinned download (see `cmake/dependency.cmake`). Lean by
-# design: NumKong spans the tensor substrate, StringZilla parses exchange payloads, yyjson reads checkpoint headers,
-# cudnn-frontend is the fused-attention graph DSL, fork_union is the host-side demux/decode thread pool.
-# NumKong links as its compiled CUDA library, since the header-only target stubs out the `_best` dispatch the inference
-# products and attention run through: an install prefix built with `NUMKONG_BUILD_CUDA`, found under
-# `UFORM_NUMKONG_ROOT` or `CMAKE_PREFIX_PATH`, and the configure fails without one.
-set(UFORM_NUMKONG_ROOT
-    ""
-    CACHE PATH "Install prefix of a NumKong build with CUDA"
+# The header-only NumKong target stubs out the `_best` dispatch the inference products and attention run through, so
+# UForm builds the compiled library with CUDA for its own architectures.
+set(NUMKONG_BUILD_CUDA ON)
+set(NUMKONG_CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+set(NUMKONG_BUILD_TEST OFF)
+set(NUMKONG_BUILD_BENCH OFF)
+uform_sibling(numkong https://github.com/ashvardanian/NumKong c450acffcc001cbd10169516b79fe33f6f8ed154)
+uform_sibling(stringzilla https://github.com/ashvardanian/StringZilla 7826f358a51df3871fba5cc825ebab3e1163174a)
+uform_sibling(forkunion https://github.com/ashvardanian/ForkUnion 075d14137420f204ff175acd2d29c22e163e241c)
+
+FetchContent_Declare(
+    yyjson
+    GIT_REPOSITORY https://github.com/ibireme/yyjson.git
+    GIT_TAG 0.12.0
 )
-find_package(numkong CONFIG REQUIRED COMPONENTS shared cuda HINTS "${UFORM_NUMKONG_ROOT}")
-uform_dependency(
-    NAME stringzilla
-    MODE SUBDIR
-    ROOT_VAR UFORM_STRINGZILLA_ROOT
-    REPO https://github.com/ashvardanian/StringZilla.git
-    TAG main-dev
+# Header-only: a `SOURCE_SUBDIR` without a `CMakeLists.txt` populates the sources without configuring them.
+FetchContent_Declare(
+    cudnn_frontend
+    GIT_REPOSITORY https://github.com/NVIDIA/cudnn-frontend.git
+    GIT_TAG v1.19.1
+    SOURCE_SUBDIR include
 )
-uform_dependency(
-    NAME yyjson
-    MODE SUBDIR
-    ROOT_VAR UFORM_YYJSON_ROOT
-    REPO https://github.com/ibireme/yyjson.git
-    TAG 0.12.0
-)
-uform_dependency(
-    NAME cudnn_frontend
-    MODE HEADER
-    ROOT_VAR UFORM_CUDNN_FRONTEND_ROOT
-    INCLUDE_VAR UFORM_CUDNN_FRONTEND_INCLUDE
-    REPO https://github.com/NVIDIA/cudnn-frontend.git
-    TAG v1.19.1
-)
-uform_dependency(
-    NAME fork_union
-    MODE HEADER
-    ROOT_VAR UFORM_FORKUNION_ROOT
-    INCLUDE_VAR UFORM_FORKUNION_INCLUDE
-    REPO https://github.com/ashvardanian/fork_union.git
-    TAG v2.3.1
-)
+FetchContent_MakeAvailable(yyjson cudnn_frontend)
 
 # cuDNN powers the fused scaled-dot-product-attention graphs of the transformer blocks — available on every NVIDIA GPU,
 # so hard-required alongside the frontend header DSL fetched above.
@@ -184,9 +177,9 @@ add_library(
     cuda_core/transformer_block.cu
     cuda_core/encoder_tower.cu
 )
-target_include_directories(uform PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${UFORM_CUDNN_FRONTEND_INCLUDE}")
+target_include_directories(uform PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${cudnn_frontend_SOURCE_DIR}/include")
 target_link_libraries(
-    uform PUBLIC numkong::shared stringzilla_header yyjson CUDA::cuda_driver CUDA::nvrtc "${UFORM_CUDNN_LIBRARY}"
+    uform PUBLIC numkong::static stringzilla::static yyjson CUDA::cuda_driver CUDA::nvrtc "${UFORM_CUDNN_LIBRARY}"
 )
 target_compile_features(uform PUBLIC cxx_std_23)
 # NumKong accessors are `constexpr` for device-callability; `nvcc` needs the (long-stable) flag to allow it.
@@ -255,8 +248,8 @@ add_custom_target(
 
 # `cuda_loaders` → `uform_loaders`: GPU-native data ingestion, one translation unit per format / modality cell. Every
 # vendor dependency below is available on every target and is hard-required, discovered through the layered
-# `uform_find_library` search (`UFORM_*_ROOT` from `cmake/local.cmake`, then the RAPIDS / NVIDIA cu13 Python wheels,
-# then system paths). A missing dependency fails the configure loudly naming the install.
+# `uform_find_library` search (the RAPIDS / NVIDIA cu13 Python wheels, then system paths). A missing dependency fails
+# the configure loudly naming the install.
 
 # libcudf: GPU-side Parquet reads on explicit per-loader streams. Deliberately not `find_package(cudf)` — its config
 # drags a CCCL that conflicts with the CUDA toolkit's; the wheels ship self-contained `.so`s and headers.
@@ -311,13 +304,13 @@ if (NOT UFORM_NVCUVID_LIBRARY)
         FATAL_ERROR "uform: libnvcuvid not found — it is part of the NVIDIA driver; ensure the driver is installed."
     )
 endif ()
-uform_dependency(
-    NAME ffnvcodec
-    MODE HEADER
-    INCLUDE_VAR UFORM_FFNVCODEC_INCLUDE
-    REPO https://github.com/FFmpeg/nv-codec-headers.git
-    TAG n13.0.19.0
+FetchContent_Declare(
+    ffnvcodec
+    GIT_REPOSITORY https://github.com/FFmpeg/nv-codec-headers.git
+    GIT_TAG n13.0.19.0
+    SOURCE_SUBDIR include
 )
+FetchContent_MakeAvailable(ffnvcodec)
 
 # libav*: host-side demux for video, decode for audio (no GPU audio codec exists). Wired now, consumed later.
 uform_find_library(UFORM_AVFORMAT_LIBRARY avformat)
@@ -369,7 +362,7 @@ target_link_libraries(
 
 # Video: NVDEC decode + libavformat/avcodec host demux to Annex-B (the nv-codec-headers carry the `cuvid*` decls). The
 # libav headers live under the multiarch `/usr/include/<triple>` prefix.
-target_include_directories(uform_loaders SYSTEM PRIVATE "${UFORM_FFNVCODEC_INCLUDE}")
+target_include_directories(uform_loaders SYSTEM PRIVATE "${ffnvcodec_SOURCE_DIR}/include")
 target_link_libraries(
     uform_loaders PRIVATE "${UFORM_NVCUVID_LIBRARY}" "${UFORM_AVFORMAT_LIBRARY}" "${UFORM_AVCODEC_LIBRARY}"
                           "${UFORM_AVUTIL_LIBRARY}"
@@ -379,16 +372,13 @@ target_link_libraries(
 # targets already linked above for video; adds the resampler.
 target_link_libraries(uform_loaders PRIVATE "${UFORM_SWRESAMPLE_LIBRARY}")
 
-# The host-side media demux / decode thread pool — header-only, used by the video and audio cells.
-target_include_directories(uform_loaders SYSTEM PRIVATE "${UFORM_FORKUNION_INCLUDE}")
+# The host-side media demux and decode thread pool, public because the loader headers expose `cpu_decode_pool_t`.
+target_link_libraries(uform_loaders PUBLIC forkunion::header)
 
 # Arrow CPU Parquet fallback, behind the exception firewall.
 target_link_libraries(uform_loaders PRIVATE Arrow::arrow_shared Parquet::parquet_shared)
 
 # Loader conformance binaries. A datasets suite rejoins when the loader tier stabilizes.
-# `loaders` includes the media loader headers, which expose `cpu_decode_pool_t` (= `fu::basic_pool_t`), so it needs
-# fork_union on its own include path — `uform_loaders` keeps that dependency PRIVATE.
 add_executable(cuda_test_loaders cuda_test/loaders.cu)
 target_link_libraries(cuda_test_loaders PRIVATE uform_loaders)
-target_include_directories(cuda_test_loaders SYSTEM PRIVATE "${UFORM_FORKUNION_INCLUDE}")
 add_test(NAME loaders COMMAND cuda_test_loaders)
