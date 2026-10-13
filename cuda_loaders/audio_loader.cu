@@ -1,7 +1,7 @@
 /**
  *  @brief The audio loader's bodies: the libav + ForkUnion decoder session and the draw → stage → decode →
  *      chunk batch path — see the header for the contract. Host decode is a firewall over the libav C API
- *      (like @c parquet.cpp firewalls cuDF): every libav / libswresample error is wrapped and can leave only
+ *      (like @c dataset_shards.cpp firewalls cuDF): every libav / libswresample error is wrapped and can leave only
  *      as an @ref expected_t . The decode lands one mono Float32 clip; the GPU then chunks it into frames of
  *      @c chunk_samples raw samples and scatters each clip into the batch's @c audio_samples as one sub-row
  *      segment. No cuFFT, no mel — the spectral frontend is a learnable layer of the encoder.

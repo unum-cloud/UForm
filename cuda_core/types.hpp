@@ -64,12 +64,10 @@ using bf16_t = __nv_bfloat16;
 using f32_t = float;
 using f64_t = double;
 
-/**
- *  The rank-tagged borrow vocabulary over the scalar dtypes — @c <dtype><rank>_view_t reads,
- *  @c <dtype><rank>_span_t writes, each a borrow into memory owned elsewhere. The owning
- *  @c *_tensor_arena_t / @c *_tensor_pinned_t counterparts live in @c gpu_allocators.cuh , beside the
- *  allocator they bind. Concept-named views (a token rectangle, a pixel image) stay with their cell.
- */
+/** The rank-tagged borrow vocabulary over the scalar dtypes — @c <dtype><rank>_view_t reads,
+ *      @c <dtype><rank>_span_t writes, each a borrow into memory owned elsewhere. The owning
+ *      @c *_tensor_arena_t / @c *_tensor_pinned_t counterparts live in @c gpu_allocators.hpp , beside the
+ *      allocator they bind. Concept-named views (a token rectangle, a pixel image) stay with their cell. */
 using b8r1_view_t = nk::tensor_view<b8_t, 1>;
 using b8r1_span_t = nk::tensor_span<b8_t, 1>;
 using i16r2_view_t = nk::tensor_view<i16_t, 2>;

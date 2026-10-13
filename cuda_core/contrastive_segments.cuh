@@ -1,8 +1,6 @@
 /**
  *  @brief Sharded sigmoid-pairwise (SigLIP-BCE) contrastive loss over pooled @b segment embeddings — the
- *      Embedder objective, as a function object with owned scratch and tensor-core matmuls. The
- *      token-level (late-interaction / Reranker) sibling lives in @c contrastive_tokens.cuh ; the two
- *      share the relation-graph label boundary of @c contrastive_relations.cuh and the balanced-BCE epilogue.
+ *      Embedder objective, as a function object with owned scratch and tensor-core matmuls.
  *  @file cuda_core/contrastive_segments.cuh
  *  @author Ash Vardanian
  *  @date July 2, 2026

@@ -539,11 +539,9 @@ struct gpu_alloc {
 /** @brief The canonical byte-typed stream-ordered-allocator handle — what APIs receive and rebind. */
 using gpu_alloc_t = gpu_alloc<b8_t>;
 
-/**
- *  The rank-tagged owning-tensor vocabulary — @c *_tensor_arena_t owns device memory off a
- *  @ref gpu_arena_t , @c *_tensor_pinned_t owns page-locked host memory; the borrowing @c *_view_t /
- *  @c *_span_t counterparts live in @c types.cuh .
- */
+/** The rank-tagged owning-tensor vocabulary — @c *_tensor_arena_t owns device memory off a
+ *      @ref gpu_arena_t , @c *_tensor_pinned_t owns page-locked host memory; the borrowing @c *_view_t /
+ *      @c *_span_t counterparts live in @c types.hpp . */
 using b8r1_tensor_arena_t = nk::tensor<b8_t, gpu_arena_alloc<b8_t>, 1>;
 using b8r1_tensor_registrable_t = nk::tensor<b8_t, gpu_registrable_alloc<b8_t>, 1>;
 using i16r2_tensor_arena_t = nk::tensor<i16_t, gpu_arena_alloc<i16_t>, 2>;

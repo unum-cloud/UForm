@@ -49,9 +49,6 @@ readme = "README.md"
 requires-python = ">=3.12"
 version = "4.0.0"
 
-[project.scripts]
-uform-chat = "uform.chat:main"
-
 [project.optional-dependencies]
 # GPU inference backends
 torch = ["torch>=2.7.0", "torchvision", "transformers>=4.50.0"]

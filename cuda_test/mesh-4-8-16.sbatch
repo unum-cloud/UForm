@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Mesh rendezvous conformance at shape {host_domain, multimem_domain, colocated_domain} = {4,8,16}
 #
-# The cluster tier of cuda_test/mesh.cu, at the shape where the host_domain (4 GPUs, one process) is
+# The cluster tier of cuda_test/mesh.cpp, at the shape where the host_domain (4 GPUs, one process) is
 # strictly smaller than the multimem_domain (8 GPUs, a whole NVLink island): a node runs TWO host_domains
 # that share one multimem_domain, and the two nodes form the colocated_domain over 4 host_domains. This is
 # the shape that exercises the distinctions {8,8,16} collapses away — per-task GPU masking, the

@@ -1,6 +1,6 @@
 /**
  *  @brief The storage session's one firewalled body: configure cuDF's KvikIO layer. See the header for
- *      the contract. cuDF lives only in this translation unit and the sibling @c parquet.cpp .
+ *      the contract. cuDF lives only in this translation unit and the sibling @c dataset_shards.cpp .
  *  @file cuda_loaders/direct_storage.cpp
  */
 
@@ -11,7 +11,8 @@
 
 #include "cuda_loaders/direct_storage.hpp"
 
-namespace unum::uform::loaders {
+namespace ul = unum::uform::loaders;
+using namespace ul;
 
 expected<gpu_direct_storage_session_t> gpu_direct_storage_session_t::make() noexcept {
     using result_t = expected<gpu_direct_storage_session_t>;
@@ -32,5 +33,3 @@ expected<gpu_direct_storage_session_t> gpu_direct_storage_session_t::make() noex
                                                                                 : storage_read_path_t::compatibility_k;
     return result_t {std::move(session)};
 }
-
-} // namespace unum::uform::loaders

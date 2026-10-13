@@ -1,18 +1,18 @@
 /**
- *  @brief Device kernels and heavy method bodies of the two transformer blocks declared in
- *      @ref transformer_block.cuh — the one translation unit behind the `uform_attention` target.
+ *  @brief Device kernels and heavy method bodies of the two transformer blocks declared in @ref transformer_block.cuh .
  *  @file cuda_core/transformer_block.cu
  *  @author Ash Vardanian
  *  @date July 3, 2026
  */
 #include "cuda_core/transformer_block.cuh"
 
-namespace unum::uform::core {
+namespace uc = unum::uform::core;
+using namespace uc;
 
 /** @brief Learnable RMSNorm forward — declared in @ref transformer_block.cuh with external linkage so the
  *      encoder tower launches the same kernel. */
-__global__ void rmsnorm_forward_kernel(bf16r2_view_t input, bf16r1_view_t scale, bf16r2_span_t output,
-                                       f32r1_span_t inverse_rms, f32_t epsilon) {
+__global__ void uc::rmsnorm_forward_kernel(bf16r2_view_t input, bf16r1_view_t scale, bf16r2_span_t output,
+                                           f32r1_span_t inverse_rms, f32_t epsilon) {
     std::size_t const rows = input.extent(0);
     u32_t const width = static_cast<u32_t>(input.extent(1));
     std::size_t const row = blockIdx.x;
@@ -31,8 +31,8 @@ __global__ void rmsnorm_forward_kernel(bf16r2_view_t input, bf16r1_view_t scale,
 }
 
 /** @brief Learnable RMSNorm backward for the row gradient — external linkage; see the header. */
-__global__ void rmsnorm_backward_kernel(bf16r2_view_t input, bf16r1_view_t scale, f32r1_view_t inverse_rms,
-                                        bf16r2_view_t output_grad, bf16r2_span_t input_grad, bool accumulate) {
+__global__ void uc::rmsnorm_backward_kernel(bf16r2_view_t input, bf16r1_view_t scale, f32r1_view_t inverse_rms,
+                                            bf16r2_view_t output_grad, bf16r2_span_t input_grad, bool accumulate) {
     std::size_t const rows = input.extent(0);
     u32_t const width = static_cast<u32_t>(input.extent(1));
     std::size_t const row = blockIdx.x;
@@ -56,8 +56,8 @@ __global__ void rmsnorm_backward_kernel(bf16r2_view_t input, bf16r1_view_t scale
 }
 
 /** @brief Learnable RMSNorm backward for the scale gradient — external linkage; see the header. */
-__global__ void rmsnorm_scale_grad_kernel(bf16r2_view_t input, f32r1_view_t inverse_rms, bf16r2_view_t output_grad,
-                                          bf16r1_span_t scale_grad) {
+__global__ void uc::rmsnorm_scale_grad_kernel(bf16r2_view_t input, f32r1_view_t inverse_rms, bf16r2_view_t output_grad,
+                                              bf16r1_span_t scale_grad) {
     std::size_t const rows = input.extent(0);
     u32_t const width = static_cast<u32_t>(input.extent(1));
     u32_t const channel = blockIdx.x * blockDim.x + threadIdx.x;
@@ -70,9 +70,9 @@ __global__ void rmsnorm_scale_grad_kernel(bf16r2_view_t input, f32r1_view_t inve
 }
 
 /** @brief The row-gradient backward of rmscast — external linkage; see the header. */
-__global__ void rmscast_backward_kernel(f32r2_view_t input, bf16r1_view_t scale, f32r2_view_t output_grad,
-                                        f32r2_view_t residual_grad, f32r2_span_t input_grad, f32r1_span_t inverse_rms,
-                                        f32_t epsilon) {
+__global__ void uc::rmscast_backward_kernel(f32r2_view_t input, bf16r1_view_t scale, f32r2_view_t output_grad,
+                                            f32r2_view_t residual_grad, f32r2_span_t input_grad,
+                                            f32r1_span_t inverse_rms, f32_t epsilon) {
     std::size_t const rows = input.extent(0);
     u32_t const width = static_cast<u32_t>(input.extent(1));
     std::size_t const row = blockIdx.x;
@@ -102,8 +102,8 @@ __global__ void rmscast_backward_kernel(f32r2_view_t input, bf16r1_view_t scale,
 }
 
 /** @brief The scale-gradient backward of rmscast — external linkage; see the header. */
-__global__ void rmscast_scale_grad_kernel(f32r2_view_t input, f32r1_view_t inverse_rms, f32r2_view_t output_grad,
-                                          bf16r1_span_t scale_grad) {
+__global__ void uc::rmscast_scale_grad_kernel(f32r2_view_t input, f32r1_view_t inverse_rms, f32r2_view_t output_grad,
+                                              bf16r1_span_t scale_grad) {
     std::size_t const rows = input.extent(0);
     u32_t const width = static_cast<u32_t>(input.extent(1));
     u32_t const channel = blockIdx.x * blockDim.x + threadIdx.x;
@@ -117,7 +117,7 @@ __global__ void rmscast_scale_grad_kernel(f32r2_view_t input, f32r1_view_t inver
 /** @brief Inverted keyed dropout, in place — external linkage; see the header. The @p salt selects the
  *      site (per layer, per residual join) and @p data_epoch , read from device memory, advances the mask per
  *      step; @ref splitmix64_hash_t re-derives the identical keep decision wherever this runs. */
-__global__ void dropout_kernel(bf16r1_span_t values, u32r1_view_t data_epoch, u32_t salt, f32_t drop_probability) {
+__global__ void uc::dropout_kernel(bf16r1_span_t values, u32r1_view_t data_epoch, u32_t salt, f32_t drop_probability) {
     u32_t const key = salt ^ (data_epoch[0] * 2654435761u);
     f32_t const keep_scale = 1.0f / (1.0f - drop_probability);
     std::size_t const total = values.extent(0);
@@ -203,7 +203,7 @@ static __global__ void transformer_qk_norm_backward_kernel_(bf16r2_span_t grads,
 }
 
 /** @brief Pick the axis table and angle for one within-head channel pair — the rotary storage invariant. */
-[[nodiscard]] __device__ inline f32_t transformer_rope_angle_(u32_t head_pair, i16r2_view_t coords, std::size_t token,
+[[nodiscard]] static __device__ f32_t transformer_rope_angle_(u32_t head_pair, i16r2_view_t coords, std::size_t token,
                                                               rope_angles_view_t const &angles) noexcept {
     u32_t const temporal_pairs = static_cast<u32_t>(angles.temporal.extent(1));
     u32_t const height_pairs = static_cast<u32_t>(angles.height.extent(1));
@@ -407,7 +407,7 @@ static __global__ void transformer_ragged_offsets_kernel_(u32r1_view_t segment_o
 
 /** @brief Mark one SDPA-backward gradient output ( @c dQ / @c dK / @c dV ): the packed-QKV THD @p dims
  *      and @p strides of its operand, plus the ragged offset under @p ragged_uid . */
-inline void configure_sdpa_grad_output(std::shared_ptr<fe::graph::Tensor_attributes> const &node, // vendor-boundary
+static void configure_sdpa_grad_output(std::shared_ptr<fe::graph::Tensor_attributes> const &node, // vendor-boundary
                                        fe::graph::Graph &graph, i64_t uid, i64_t ragged_uid,
                                        std::vector<i64_t> const &dims,    // vendor-boundary
                                        std::vector<i64_t> const &strides, // vendor-boundary
@@ -1326,5 +1326,3 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
     }
     return result_t {std::move(block)};
 }
-
-} // namespace unum::uform::core

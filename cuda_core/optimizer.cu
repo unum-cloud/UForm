@@ -1,5 +1,5 @@
 /**
- *  @brief Device kernels and heavy method bodies of the Adafactor optimizer declared in @ref optimizer.cuh
+ *  @brief Device kernels and heavy method bodies of the Adafactor optimizer declared in @ref optimizer.hpp
  *      — the translation unit compiled into the `uform` static library beside @ref multimodal_batch.cu and
  *      @ref contrastive_segments.cu .
  *  @file cuda_core/optimizer.cu

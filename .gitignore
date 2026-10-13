@@ -1,7 +1,6 @@
 # Build outputs
 /build*/
 /dist/
-/test
 .build
 
 # CUDA / profiling / crashes
@@ -9,8 +8,8 @@
 *.ncu-rep
 *.qdrep
 *.sqlite
-core
-core.*
+/core
+/core.[0-9]*
 *.log
 
 # Local & machine-specific config
@@ -26,8 +25,8 @@ data/*
 *.pt
 *.safetensors
 *.mlpackage
-dictionary*
-vocab*
+/dictionary*
+/vocab*
 
 # Python
 /requirements.txt
@@ -46,9 +45,11 @@ node_modules
 node_build
 yarn.lock
 yarn-error.log
+package-lock.json
 
 # Swift
 .swiftpm
+Package.resolved
 
 # macOS
 .DS_Store

@@ -15,7 +15,8 @@
 
 #include "cuda_core/checkpoint.hpp"
 
-namespace unum::uform::core {
+namespace uc = unum::uform::core;
+using namespace uc;
 
 /** @brief A move-only owning wrapper over a POSIX file descriptor. */
 struct checkpoint_file_t {
@@ -343,5 +344,3 @@ nk::tensor_view<bf16_t, 2> checkpoint_to_load_t::operator[](sz::string_view_t la
             return nk::tensor_view<bf16_t, 2> {payload_.data() + entry.scalar_offset, entry.rows, entry.cols};
     return {};
 }
-
-} // namespace unum::uform::core

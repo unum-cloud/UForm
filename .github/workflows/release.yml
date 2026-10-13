@@ -30,7 +30,6 @@ jobs:
           version-file: "VERSION"
           update-version-in: |
             package.json:"version": "(\d+\.\d+\.\d+)"
-            package-lock.json:"uform",\n\s+"version": "(\d+\.\d+\.\d+)"
             CITATION.cff:^version: (\d+\.\d+\.\d+)
             pyproject.toml:^version = "(\d+\.\d+\.\d+)"
           dry-run: "false"

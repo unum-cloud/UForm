@@ -1,7 +1,5 @@
 /**
- *  @brief Device kernels and heavy method bodies of the encoder tower declared in
- *      @ref encoder_tower.cuh — the translation unit that joins the `uform_attention` target beside
- *      @ref transformer_block.cu .
+ *  @brief Device kernels and heavy method bodies of the encoder tower declared in @ref encoder_tower.hpp .
  *  @file cuda_core/encoder_tower.cu
  *  @author Ash Vardanian
  *  @date July 4, 2026

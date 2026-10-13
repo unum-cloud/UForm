@@ -31,8 +31,8 @@
  *  The tower borrows its cuDNN session by pointer, so the sessions live in address-stable
  *  @ref per_gpu_array tables and the trainer is built where it lives ( @ref base_trainer_t::make fills a
  *  caller-placed reference) and never moved. The one @ref multimem_domain_t, the one @c colocated_domain_t, and
- *  the @ref distributed_adafactor_t are made in @c main and threaded by reference — the trainer owns none
- *  of them.
+ *  the @ref distributed_adafactor_t are made in @ref base_trainer_t::run and threaded by reference — the trainer
+ *  owns none of them.
  */
 #pragma once
 

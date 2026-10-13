@@ -9,7 +9,8 @@
 
 #include "cuda_core/multimem_collectives.cuh"
 
-namespace unum::uform::core {
+namespace uc = unum::uform::core;
+using namespace uc;
 
 /** @brief A fabric handle is 64 opaque bytes; the mesh rendezvous carries text, so it travels 128-hex. */
 static bool format_fabric_handle_(sz::string_t &text, CUmemFabricHandle const &handle) noexcept {
@@ -424,5 +425,3 @@ expected_t multimem_domain_t::reduce_scatter(std::size_t member_index, f32r1_spa
     return launch_kernel(reinterpret_cast<void const *>(&multimem_reduce_scatter_peer_kernel_), grid_shape, block_shape,
                          stream, member(member_index), destination, shard_begin);
 }
-
-} // namespace unum::uform::core

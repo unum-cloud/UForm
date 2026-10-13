@@ -11,10 +11,8 @@
 #   sudo apt install -y \
 #     libcudnn9-dev-cuda-13 libnpp-dev-13-3 libnvjpeg-dev-13-3 libcufile-dev-13-3 \
 #     libavformat-dev libavcodec-dev libavutil-dev libswresample-dev \
-#     libjpeg-turbo8-dev libpng-dev libwebp-dev libarrow-dev libparquet-dev \
+#     libjpeg-turbo8-dev libpng-dev libwebp-dev \
 #     libibverbs-dev ccache
-#
-# The Arrow dev packages come from the Apache Arrow apt repository (apache-arrow-apt-source), not the base archive.
 #
 # Prerequisites — RAPIDS cuDF (pip wheel into a repo-local venv).
 # libcudf ships as a self-contained cu13 wheel (deliberately not `find_package(cudf)` — see the discovery block):
@@ -328,11 +326,6 @@ if (NOT
     )
 endif ()
 
-# The CPU Arrow fallback inside `parquet.cpp` — the one cell where Apache Arrow lives, behind an exception firewall.
-find_package(Arrow REQUIRED)
-find_package(Parquet REQUIRED)
-message(STATUS "uform: Arrow fallback (Arrow ${Arrow_VERSION})")
-
 add_library(
     uform_loaders STATIC cuda_loaders/dataset_shards.cpp cuda_loaders/direct_storage.cpp cuda_loaders/tokens_loader.cu
                          cuda_loaders/image_loader.cu cuda_loaders/video_loader.cu cuda_loaders/audio_loader.cu
@@ -354,8 +347,7 @@ target_include_directories(
 # cuFile GPU Direct Storage.
 target_link_libraries(uform_loaders PRIVATE "${UFORM_CUFILE_LIBRARY}")
 
-# Image decode: nvJPEG + NPP on the GPU, the three CPU codecs for the fallback. cuFFT drives the audio loader's
-# GPU STFT (the log-mel frontend), so it links on the same GPU-vendor line.
+# Image decode: nvJPEG + NPP on the GPU, the three CPU codecs for the fallback.
 target_link_libraries(
     uform_loaders PRIVATE CUDA::nvjpeg CUDA::nppig CUDA::nppc JPEG::JPEG PNG::PNG "${UFORM_WEBP_LIBRARY}"
 )
@@ -374,9 +366,6 @@ target_link_libraries(uform_loaders PRIVATE "${UFORM_SWRESAMPLE_LIBRARY}")
 
 # The host-side media demux and decode thread pool, public because the loader headers expose `cpu_decode_pool_t`.
 target_link_libraries(uform_loaders PUBLIC forkunion::header)
-
-# Arrow CPU Parquet fallback, behind the exception firewall.
-target_link_libraries(uform_loaders PRIVATE Arrow::arrow_shared Parquet::parquet_shared)
 
 # Loader conformance binaries. A datasets suite rejoins when the loader tier stabilizes.
 add_executable(cuda_test_loaders cuda_test/loaders.cu)
