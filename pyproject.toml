@@ -47,7 +47,7 @@ readme = "README.md"
 # The floor is 3.12: the GPU training + data path (torch 2.12, RAPIDS cu13, the PEP 723 `scripts/data/`
 # scripts) requires it.
 requires-python = ">=3.12"
-version = "4.0.0"
+version = "4.0.0-rc.1"
 
 [project.optional-dependencies]
 # GPU inference backends

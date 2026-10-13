@@ -1,7 +1,7 @@
 {
   "name": "@unum-cloud/uform",
   "type": "module",
-  "version": "3.1.4",
+  "version": "4.0.0-rc.1",
   "description": "Pocket-Sized Multimodal AI for Content Understanding and Generation",
   "dependencies": {
     "@huggingface/hub": "^0.14.8",

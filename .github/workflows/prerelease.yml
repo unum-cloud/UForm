@@ -26,7 +26,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Run TinySemVer
-        uses: ashvardanian/tinysemver@v3.0.0
+        uses: ashvardanian/tinysemver@v3
         with:
           verbose: "true"
           version-file: "VERSION"
@@ -34,10 +34,34 @@ jobs:
             package.json:"version": "(\d+\.\d+\.\d+)"
             CITATION.cff:^version: (\d+\.\d+\.\d+)
             pyproject.toml:^version = "(\d+\.\d+\.\d+)"
+            Cargo.toml:^version = "(\d+\.\d+\.\d+)"
           dry-run: "true"
-          
-  test_python:
-    name: Test Python
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Set Up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install Linters
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --group lint
+
+      # The same checks a commit runs locally, over everything this branch adds.
+      - name: Check
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: .githooks/lint-range "$BASE_SHA"
+
+  test_data_scripts:
+    name: Test Data Scripts
     runs-on: ubuntu-latest
 
     steps:
@@ -56,8 +80,10 @@ jobs:
       - name: Test with PyTest
         run: python -X faulthandler -m pytest -x
 
+  # Returns once the binding sits on the C ABI in c/uform/.
   test_javascript:
     name: Test JavaScript
+    if: ${{ false }}
     runs-on: ubuntu-latest
 
     steps:
@@ -67,12 +93,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-
-      # TODO: JavaScript tests pass, but ONNX throws a memory error on exit
-      # - name: Build JavaScript
-      #   run: npm ci
-      # - name: Test JavaScript
-      #   run: npm test
+      - name: Install Dependencies
+        run: npm install
+      - name: Test JavaScript
+        run: npm test
 
   test_swift:
     name: Test Swift
