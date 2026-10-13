@@ -2,13 +2,13 @@
   "version": "0.2.0",
   "configurations": [
     {
-      // Debug a CUDA test binary with cuda-gdb (needs the Nsight extension + a Debug/RelWithDebInfo
-      // build so device symbols exist: cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo). Duplicate the
-      // config and change `program` for the other cuda_test_* / uform_train binaries.
-      "name": "CUDA: cuda_test_mesh",
+      // Debug a CUDA test binary with cuda-gdb (needs the Nsight extension + a build with device line
+      // tables: cmake --preset relwithdebinfo && cmake --build --preset relwithdebinfo). Duplicate the
+      // config and change `program` for the other uform_test_* / uform_base binaries.
+      "name": "CUDA: uform_test_mesh",
       "type": "cuda-gdb",
       "request": "launch",
-      "program": "${workspaceFolder}/build/cuda_test_mesh"
+      "program": "${workspaceFolder}/build_relwithdebinfo/uform_test_mesh"
     },
     {
       "name": "Python: current file",

@@ -4,13 +4,13 @@
     {
       "label": "CMake: Configure",
       "type": "shell",
-      "command": "cmake -S . -B build -DCMAKE_BUILD_TYPE=Release",
+      "command": "cmake --preset relwithdebinfo",
       "problemMatcher": []
     },
     {
       "label": "CMake: Build",
       "type": "shell",
-      "command": "cmake --build build --parallel",
+      "command": "cmake --build --preset relwithdebinfo",
       "dependsOn": "CMake: Configure",
       "group": {
         "kind": "build",
@@ -35,7 +35,7 @@
     {
       "label": "CTest",
       "type": "shell",
-      "command": "ctest --test-dir build --output-on-failure",
+      "command": "ctest --preset relwithdebinfo",
       "group": {
         "kind": "test",
         "isDefault": true

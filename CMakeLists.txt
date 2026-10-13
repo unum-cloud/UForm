@@ -1,7 +1,7 @@
 # UForm — CUDA-first multimodal training stack.
 #
 # The core cell is a static library of `.cuh` interfaces + `.cu` kernel translation units; this file wires its source
-# dependencies and exposes the `uform` / `uform_loaders` targets every consumer, test, and bench links.
+# dependencies and exposes the `uform::core` / `uform::loaders` / `uform::train` targets every tool and test links.
 #
 # Prerequisites — native libraries (apt).
 # The CUDA toolkit must be 13.3+ on `PATH`: `nvcc` needs to be >= 13.1 for `-std=c++23` (see the standard block below).
@@ -22,21 +22,23 @@
 # CMake auto-discovers `$VIRTUAL_ENV`, then the repo `.venv`, then the interpreter's site-packages; override the search
 # root with `-DUFORM_SITE_PACKAGES=<dir>`, or point straight at the libraries with `-DUFORM_CUDF_ROOT=<prefix>`.
 #
-# Configure, build, test.
+# Configure, build, test. `CMakePresets.json` also holds `debug`, `check` and `relwithdebinfo`, each building into
+# `build_<preset>`; machine specifics such as the compiler path go into a gitignored `CMakeUserPresets.json`.
 #
-#   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-#   cmake --build build --parallel
-#   ctest --test-dir build --output-on-failure
+#   cmake --preset release
+#   cmake --build --preset release
+#   ctest --preset release
 #
 # Local dependency checkouts (optional).
 #
-#   cmake -S . -B build -DFETCHCONTENT_SOURCE_DIR_NUMKONG="$PWD/../NumKong"   # likewise any other dependency
+#   cmake --preset release -DFETCHCONTENT_SOURCE_DIR_NUMKONG="$PWD/../NumKong"   # likewise any other dependency
 #
 # Feature gates.
 #
 # Every native dependency above is required and fails the configure loudly if absent — each is available on every
 # target, including consumer / workstation GPUs. InfiniBand is the sole optional path (absent on those cards):
-# `-DUFORM_WITH_INFINIBAND=AUTO|ON|OFF` (default `AUTO` — probe and enable when present).
+# `-DUFORM_WITH_INFINIBAND=AUTO|ON|OFF` (default `AUTO` — probe and enable when present). `-DUFORM_BUILD_TEST=OFF` and
+# `-DUFORM_BUILD_TOOLS=OFF` skip `test/` and `tools/`, which only a top-level build compiles by default.
 cmake_minimum_required(VERSION 3.27)
 
 # Must precede `project()` so `enable_language(CUDA)` uses our value instead of CMake's minimum-supported fallback.
@@ -70,13 +72,19 @@ if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     endif ()
 endif ()
 
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" _uform_version)
+# CMake versions are numeric, so the pre-release suffix of VERSION stays out of PROJECT_VERSION.
+string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" _uform_version_number "${_uform_version}")
 project(
     uform
-    VERSION 4.0.0
+    VERSION ${_uform_version_number}
     LANGUAGES C CXX CUDA
     DESCRIPTION "Pocket-sized multimodal AI for content understanding and generation"
     HOMEPAGE_URL "https://github.com/unum-cloud/UForm"
 )
+
+option(UFORM_BUILD_TEST "Compile the conformance suites in test/" ${PROJECT_IS_TOP_LEVEL})
+option(UFORM_BUILD_TOOLS "Compile the trainer in tools/" ${PROJECT_IS_TOP_LEVEL})
 
 # C++23: the multidimensional subscript `tensor[row, column]` is the project's indexing default — device code included,
 # which needs `nvcc` >= 13.1 (`-std=c++23` first shipped there; 13.0 rejects it). CMake's own `nvcc` dialect table still
@@ -157,94 +165,45 @@ set(UFORM_WITH_INFINIBAND
 set_property(CACHE UFORM_WITH_INFINIBAND PROPERTY STRINGS ON OFF AUTO)
 uform_probe_infiniband()
 
-# `cuda_core` → `uform`: one static library for the whole core cell, compiled once, never per consumer.
+# `src/core` → `uform::core`: one static library for the whole core cell, compiled once, never per consumer.
 # Dependencies stay lean: NumKong, StringZilla, yyjson, the CUDA Driver API (no NCCL, no NVSHMEM; the runtime arrives
 # only through NumKong's kernel units), plus the fused-attention tier (nvrtc + cuDNN + cudnn-frontend) the transformer /
-# tower cells need.
+# tower cells need. `src/` is the one include root of all three libraries, so sources include `"core/types.hpp"`.
 add_library(
-    uform STATIC
-    cuda_core/schedule.cu
-    cuda_core/introspect.cu
-    cuda_core/multimem_collectives.cu
-    cuda_core/infiniband_collectives.cu
-    cuda_core/multimodal_masking.cu
-    cuda_core/checkpoint.cpp
-    cuda_core/multimodal_batch.cu
-    cuda_core/contrastive_segments.cu
-    cuda_core/optimizer.cu
-    cuda_core/transformer_block.cu
-    cuda_core/encoder_tower.cu
+    uform_core STATIC
+    src/core/schedule.cu
+    src/core/introspect.cu
+    src/core/multimem_collectives.cu
+    src/core/infiniband_collectives.cu
+    src/core/multimodal_masking.cu
+    src/core/checkpoint.cpp
+    src/core/multimodal_batch.cu
+    src/core/contrastive_segments.cu
+    src/core/optimizer.cu
+    src/core/transformer_block.cu
+    src/core/encoder_tower.cu
 )
-target_include_directories(uform PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${cudnn_frontend_SOURCE_DIR}/include")
+add_library(uform::core ALIAS uform_core)
+target_include_directories(uform_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src" "${cudnn_frontend_SOURCE_DIR}/include")
 target_link_libraries(
-    uform PUBLIC numkong::static stringzilla::static yyjson CUDA::cuda_driver CUDA::nvrtc "${UFORM_CUDNN_LIBRARY}"
+    uform_core PUBLIC numkong::static stringzilla::static yyjson CUDA::cuda_driver CUDA::nvrtc "${UFORM_CUDNN_LIBRARY}"
 )
-target_compile_features(uform PUBLIC cxx_std_23)
+target_compile_features(uform_core PUBLIC cxx_std_23)
 # NumKong accessors are `constexpr` for device-callability; `nvcc` needs the (long-stable) flag to allow it.
-target_compile_options(uform PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+target_compile_options(uform_core PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
 if (UFORM_INFINIBAND_ENABLED)
-    target_compile_definitions(uform PUBLIC UFORM_WITH_INFINIBAND=1)
-    target_include_directories(uform PUBLIC "${UFORM_IBVERBS_INCLUDE_DIR}")
-    target_link_libraries(uform PUBLIC "${UFORM_IBVERBS_LIBRARY}" "${UFORM_MLX5_LIBRARY}")
+    target_compile_definitions(uform_core PUBLIC UFORM_WITH_INFINIBAND=1)
+    target_include_directories(uform_core PUBLIC "${UFORM_IBVERBS_INCLUDE_DIR}")
+    target_link_libraries(uform_core PUBLIC "${UFORM_IBVERBS_LIBRARY}" "${UFORM_MLX5_LIBRARY}")
 endif ()
 
-# `cuda_train` → `uform_train`: the training stack compiled once, linked by the `uform_base` binary and the
-# conformance test alike.
-add_library(uform_train STATIC cuda_train/base.cu)
-target_link_libraries(uform_train PUBLIC uform)
-add_executable(uform_base cuda_train/base_main.cu)
-target_link_libraries(uform_base PRIVATE uform_train)
+# `src/train` → `uform::train`: the training stack compiled once, linked by the `uform_base` tool and the
+# conformance suites alike.
+add_library(uform_train STATIC src/train/base.cu)
+add_library(uform::train ALIAS uform_train)
+target_link_libraries(uform_train PUBLIC uform::core)
 
-# `cuda_test` → conformance binaries, one per cell; the contrastive and transformer suites rejoin with the
-# contrastive rework.
-enable_testing()
-add_executable(cuda_test_mesh cuda_test/mesh.cpp)
-target_link_libraries(cuda_test_mesh PRIVATE uform)
-add_test(NAME mesh COMMAND cuda_test_mesh)
-
-# The preflight probe every multi-node sbatch runs first: links the full training stack so merely starting
-# on a node proves the runtime closure resolves there, then checks GPUDirect registration per GPU-NIC pair
-# and the rendezvous directory — one named line per environment gap, before the real job spends a minute
-# discovering it mid-suite.
-add_executable(cuda_test_env cuda_test/env.cpp)
-target_link_libraries(cuda_test_env PRIVATE uform_train)
-add_test(NAME env COMMAND cuda_test_env)
-
-add_executable(cuda_test_base cuda_test/base.cu)
-target_link_libraries(cuda_test_base PRIVATE uform_train)
-add_test(NAME base COMMAND cuda_test_base)
-
-add_executable(cuda_test_mixer cuda_test/mixer.cu)
-target_link_libraries(cuda_test_mixer PRIVATE uform)
-add_test(NAME mixer COMMAND cuda_test_mixer)
-
-add_executable(cuda_test_contrastive cuda_test/contrastive.cu)
-target_link_libraries(cuda_test_contrastive PRIVATE uform)
-add_test(NAME contrastive COMMAND cuda_test_contrastive)
-
-# Every runnable resolves shared libraries beside itself first (`$ORIGIN`), so a `uform_bundle` tree on a
-# shared filesystem runs on nodes whose native installs diverge from the build node's.
-set_target_properties(
-    uform_base cuda_test_env cuda_test_mesh cuda_test_base cuda_test_mixer cuda_test_contrastive PROPERTIES BUILD_RPATH
-                                                                                                            "$ORIGIN"
-)
-
-# `uform_bundle` → a self-contained runtime tree (executables + their shared-library closure, glibc
-# excepted) under `runtime-bundle/`, for Slurm or K8s clusters where nodes are not package-identical:
-# deploy the tree to the shared filesystem and every node runs it, whatever it has installed natively.
-# The executable list travels |-separated — a raw `;` cannot survive the custom-command argument path.
-add_custom_target(
-    uform_bundle
-    COMMAND
-        ${CMAKE_COMMAND}
-        "-DBUNDLE_EXECUTABLES=$<TARGET_FILE:uform_base>|$<TARGET_FILE:cuda_test_env>|$<TARGET_FILE:cuda_test_mesh>|$<TARGET_FILE:cuda_test_base>|$<TARGET_FILE:cuda_test_mixer>|$<TARGET_FILE:cuda_test_contrastive>"
-        "-DBUNDLE_DIR=${CMAKE_BINARY_DIR}/runtime-bundle" -P "${CMAKE_SOURCE_DIR}/cmake/bundle_runtime.cmake"
-    DEPENDS uform_base cuda_test_env cuda_test_mesh cuda_test_base cuda_test_mixer cuda_test_contrastive
-    COMMENT "Bundling executables with their runtime closure into runtime-bundle/"
-    VERBATIM
-)
-
-# `cuda_loaders` → `uform_loaders`: GPU-native data ingestion, one translation unit per format / modality cell. Every
+# `src/loaders` → `uform::loaders`: GPU-native data ingestion, one translation unit per format / modality cell. Every
 # vendor dependency below is available on every target and is hard-required, discovered through the layered
 # `uform_find_library` search (the RAPIDS / NVIDIA cu13 Python wheels, then system paths). A missing dependency fails
 # the configure loudly naming the install.
@@ -327,11 +286,11 @@ if (NOT
 endif ()
 
 add_library(
-    uform_loaders STATIC cuda_loaders/dataset_shards.cpp cuda_loaders/direct_storage.cpp cuda_loaders/tokens_loader.cu
-                         cuda_loaders/image_loader.cu cuda_loaders/video_loader.cu cuda_loaders/audio_loader.cu
+    uform_loaders STATIC src/loaders/dataset_shards.cpp src/loaders/direct_storage.cpp src/loaders/tokens_loader.cu
+                         src/loaders/image_loader.cu src/loaders/video_loader.cu src/loaders/audio_loader.cu
 )
-target_include_directories(uform_loaders PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(uform_loaders PUBLIC uform)
+add_library(uform::loaders ALIAS uform_loaders)
+target_link_libraries(uform_loaders PUBLIC uform::core)
 
 # libcudf: `BEFORE`, and on the consumer directly — the wheels bundle their own CCCL 3.3 under `include/rapids`, which
 # must precede the CUDA toolkit's older copy (propagated via the `CUDA::` imported targets) or every RMM header fails
@@ -367,7 +326,55 @@ target_link_libraries(uform_loaders PRIVATE "${UFORM_SWRESAMPLE_LIBRARY}")
 # The host-side media demux and decode thread pool, public because the loader headers expose `cpu_decode_pool_t`.
 target_link_libraries(uform_loaders PUBLIC forkunion::header)
 
-# Loader conformance binaries. A datasets suite rejoins when the loader tier stabilizes.
-add_executable(cuda_test_loaders cuda_test/loaders.cu)
-target_link_libraries(cuda_test_loaders PRIVATE uform_loaders)
-add_test(NAME loaders COMMAND cuda_test_loaders)
+# `tools/` → `uform_base`, the trainer binary.
+if (UFORM_BUILD_TOOLS)
+    add_executable(uform_base tools/base.cu)
+    target_link_libraries(uform_base PRIVATE uform::train)
+    list(APPEND _uform_executables uform_base)
+endif ()
+
+# `test/` → conformance binaries, one per cell.
+if (UFORM_BUILD_TEST)
+    enable_testing()
+    add_executable(uform_test_mesh test/mesh.cpp)
+    target_link_libraries(uform_test_mesh PRIVATE uform::core)
+    add_executable(uform_test_mixer test/mixer.cu)
+    target_link_libraries(uform_test_mixer PRIVATE uform::core)
+    add_executable(uform_test_contrastive test/contrastive.cu)
+    target_link_libraries(uform_test_contrastive PRIVATE uform::core)
+    add_executable(uform_test_loaders test/loaders.cu)
+    target_link_libraries(uform_test_loaders PRIVATE uform::loaders)
+    add_executable(uform_test_base test/base.cu)
+    target_link_libraries(uform_test_base PRIVATE uform::train)
+    # The preflight probe every multi-node sbatch runs first: links the full training stack so merely starting
+    # on a node proves the runtime closure resolves there, then checks GPUDirect registration per GPU-NIC pair
+    # and the rendezvous directory — one named line per environment gap, before the real job spends a minute
+    # discovering it mid-suite.
+    add_executable(uform_test_env test/env.cpp)
+    target_link_libraries(uform_test_env PRIVATE uform::train)
+    foreach (test_name IN ITEMS mesh mixer contrastive loaders base env)
+        add_test(NAME uform_test_${test_name} COMMAND uform_test_${test_name})
+        list(APPEND _uform_executables uform_test_${test_name})
+    endforeach ()
+endif ()
+
+if (_uform_executables)
+    # Every runnable resolves shared libraries beside itself first (`$ORIGIN`), so a `uform_bundle` tree on a
+    # shared filesystem runs on nodes whose native installs diverge from the build node's.
+    set_target_properties(${_uform_executables} PROPERTIES BUILD_RPATH "$ORIGIN")
+
+    # `uform_bundle` → a self-contained runtime tree (executables + their shared-library closure, glibc
+    # excepted) under `runtime-bundle/`, for Slurm or K8s clusters where nodes are not package-identical:
+    # deploy the tree to the shared filesystem and every node runs it, whatever it has installed natively.
+    # The executable list travels |-separated — a raw `;` cannot survive the custom-command argument path.
+    list(TRANSFORM _uform_executables REPLACE "^(.+)$" "$<TARGET_FILE:\\1>" OUTPUT_VARIABLE _uform_bundle_files)
+    list(JOIN _uform_bundle_files "|" _uform_bundle_files)
+    add_custom_target(
+        uform_bundle
+        COMMAND ${CMAKE_COMMAND} "-DBUNDLE_EXECUTABLES=${_uform_bundle_files}"
+                "-DBUNDLE_DIR=${CMAKE_BINARY_DIR}/runtime-bundle" -P "${CMAKE_SOURCE_DIR}/cmake/bundle_runtime.cmake"
+        DEPENDS ${_uform_executables}
+        COMMENT "Bundling executables with their runtime closure into runtime-bundle/"
+        VERBATIM
+    )
+endif ()

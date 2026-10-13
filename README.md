@@ -255,8 +255,8 @@ cuDNN runs the BF16 attention graphs, [NumKong](https://github.com/ashvardanian/
 
 ### Optimizing via Adafactor (the Sole Optimizer)
 
-UForm trains exclusively with a custom CUDA [Adafactor](https://arxiv.org/abs/1804.04235) implementation in [`optimizer.hpp`](cuda_layers/optimizer.hpp).
-[Lion](https://arxiv.org/abs/2302.06675) is banned from the stack; [AdamW](https://arxiv.org/abs/1711.05101) appears only in `python_torch/` as an offline parity-oracle reference.
+UForm trains exclusively with a custom CUDA [Adafactor](https://arxiv.org/abs/1804.04235) implementation in [`optimizer.hpp`](src/core/optimizer.hpp).
+Neither [Lion](https://arxiv.org/abs/2302.06675) nor [AdamW](https://arxiv.org/abs/1711.05101) ships in the stack; both appear below only as ablation baselines.
 Lion is hyperparameter-economical — two betas, no second-moment state — but its sign-only update $\mathrm{sign}(\mathrm{EMA}(g))$ discards gradient _magnitude_ and steps every parameter by the same amount.
 On a unit-RMSNorm encoder that is fatal: the variance-destroying low-rank direction costs the optimizer no more than an informative one, so the pooled embedding slides into rank collapse.
 A controlled ablation reproduced exactly that — Lion drove the pooled embedding to effective rank ≈1 and pooled-embedding cosine ≈0.99 across two seeds and stalled at the unigram floor, while AdamW on identical data and init grew the rank and converged; a from-identical-init lockstep ruled out a kernel bug.
@@ -326,6 +326,30 @@ Each frontend is a thin adapter (patch / tube / waveform-frame projection or byt
 This is how the `omni-*` configs achieve cross-modal retrieval: image↔text, video↔text, and audio↔text pairs are scored using the same pooled-embedding space, so emergent cross-modal transfer (image↔video, audio↔text at zero-shot) follows from the shared encoder geometry.
 
 Cross-modal retrieval and the structured-output tasks — de-identification, segmentation, log normalization, document extraction — all run over the same backbone and the same GPU-accelerated scaffolding, at encoder throughput.
+
+## Repository Layout
+
+```bash
+uform/
+├── c/                the C ABI in uform/*.h, shared by every binding
+├── src/              the CUDA training and inference stack, one namespace per folder
+│   ├── core/         device memory, batches, streams, mesh, transports, model cells, checkpoints
+│   ├── loaders/      storage sessions, shard readers, image, video and audio decode
+│   └── train/        the composition root of a training run
+├── tools/            the trainer binary
+├── test/             conformance suites, one file per cell
+├── scripts/
+│   ├── data/         dataset acquisition, repacking and mining, with the mixture JSONs
+│   └── slurm/        cluster runners for training, tests and acquisition
+├── python/           the Python package
+├── javascript/       the JavaScript package
+├── swift/            the Swift package
+├── rust/             the Rust crate
+└── docs/             the documentation site
+```
+
+The bindings date from UForm 3 and move onto the C ABI in `c/uform/`.
+Conventions, hooks and the commit format are described in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## FAQ
 

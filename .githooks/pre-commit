@@ -26,7 +26,7 @@ fail() { # fail <matches> <message-line>...
 # Includes form groups in a fixed order with a blank line between them: the C library, the platform's own
 # headers, the C++ standard library, external libraries, sibling projects, then this project's own headers.
 # Only headers in this repository are quoted, found beside the including file or anywhere in the index, and
-# public ones under `include/` always with the `project_include_prefix`. Includes under an `#if` keep their
+# public ones under `c/` always with the `project_include_prefix`. Includes under an `#if` keep their
 # quoting but sit outside the grouping; an include guard is not such an `#if`.
 check_include_groups() {
     local misgrouped
@@ -69,8 +69,8 @@ check_include_groups() {
                     else if (touched) { search | getline found; close(search) }
                     if (touched && found == "")
                         printf "line %d: \"%s\" is not in this repository - write <%s>\n", FNR, header, header
-                    if (index(found, "include/" project "/") == 1)
-                        printf "line %d: \"%s\" is a public header - write \"%s\"\n", FNR, header, substr(found, 9)
+                    if (index(found, "c/" project "/") == 1)
+                        printf "line %d: \"%s\" is a public header - write \"%s\"\n", FNR, header, substr(found, 3)
                     rank = 6
                 }
                 if (touched && quoted && rank != 6)
@@ -173,6 +173,92 @@ check_blank_line_runs() {
     ' "$file" || true)
     [ -z "$runs" ] || fail "$runs" \
         "$file separates paragraphs with more than one blank line - Markdown needs exactly one:"
+}
+
+# Markdown tables align every pipe by display width and stay within 120 columns, so they read unwrapped.
+# Width counts a UTF-8 character as one column, and the emoji these docs use as two.
+check_markdown_tables() {
+    local tables
+    tables=$(< "$staged_blob" LC_ALL=C awk -v lines=" $(printf '%s ' $added_lines)" '
+        function width(text,   copy, columns) {
+            copy = text
+            columns = length(text) - gsub(/[\200-\277]/, "", copy)
+            copy = text
+            return columns + gsub(/✅|🔜/, "", copy)
+        }
+        function trim(text) {
+            sub(/^[[:space:]]+/, "", text)
+            sub(/[[:space:]]+$/, "", text)
+            return text
+        }
+        function check(   touched, row, body, count, columns, i, character, cell, code, escaped, cells, separator,
+                          widths, column, formatted, left, right, aligned) {
+            for (row = 1; row <= rows; ++row) if (index(lines, " " (first + row - 1) " ")) touched = 1
+            if (!touched) return
+            for (row = 1; row <= rows; ++row) {
+                body = trim(table[row])
+                sub(/^\|/, "", body)
+                if (body ~ /\|$/ && body !~ /\\\|$/) body = substr(body, 1, length(body) - 1)
+                count = 1
+                cell = ""
+                code = escaped = 0
+                for (i = 1; i <= length(body); ++i) {
+                    character = substr(body, i, 1)
+                    if (escaped) escaped = 0
+                    else if (character == "\\") escaped = 1
+                    else if (character == "`") code = !code
+                    else if (character == "|" && !code) {
+                        cells[row, count++] = trim(cell)
+                        cell = ""
+                        continue
+                    }
+                    cell = cell character
+                }
+                cells[row, count] = trim(cell)
+                if (count > columns) columns = count
+            }
+            separator = rows > 1
+            for (column = 1; column <= columns; ++column) {
+                if (cells[2, column] !~ /^:?-+:?$/) separator = 0
+                widths[column] = 3
+            }
+            for (row = 1; row <= rows; ++row)
+                for (column = 1; column <= columns; ++column)
+                    if (!(separator && row == 2) && width(cells[row, column]) > widths[column])
+                        widths[column] = width(cells[row, column])
+            aligned = 1
+            for (row = 1; row <= rows; ++row) {
+                formatted[row] = "|"
+                for (column = 1; column <= columns; ++column) {
+                    cell = cells[row, column]
+                    if (separator && row == 2) {
+                        left = cell ~ /^:/
+                        right = length(cell) > 1 && cell ~ /:$/
+                        cell = (left ? ":" : "")
+                        for (i = left + right; i < widths[column]; ++i) cell = cell "-"
+                        if (right) cell = cell ":"
+                    } else
+                        for (i = width(cell); i < widths[column]; ++i) cell = cell " "
+                    formatted[row] = formatted[row] " " cell " |"
+                }
+                if (formatted[row] != table[row]) aligned = 0
+            }
+            if (!aligned) printf "line %d: table cells are not aligned\n", first
+            for (row = 1; row <= rows; ++row)
+                if (width(formatted[row]) > 120)
+                    printf "line %d: table row is %d columns, over 120\n", first + row - 1, width(formatted[row])
+        }
+        /^[[:space:]]*```/ { fenced = !fenced }
+        !fenced && /^\|/ {
+            if (!rows) first = NR
+            table[++rows] = $0
+            next
+        }
+        rows { check(); rows = 0 }
+        END { if (rows) check() }' || true)
+    [ -z "$tables" ] || fail "$tables" \
+        "$file has misaligned or overwide tables - pad each cell to its column's widest, emoji counting as two columns," \
+        "            fill the separator row with dashes, and shorten rows past 120 columns:"
 }
 
 # Backward-looking prose in comments - "v2", "v3", "the previous implementation" - rots the moment
@@ -440,6 +526,101 @@ check_qualified_namespace() {
         "            a \`using\` directive, or the enclosing namespace; only a std::formatter<unum::uform::...> earns it:"
 }
 
+# The namespaces a C++ source opens at file scope, as `line:name`, reading past comments, literals, and
+# preprocessor lines; an anonymous namespace prints as `<anonymous>`.
+top_level_namespaces() { # top_level_namespaces < source
+    awk '
+        continued { continued = ($0 ~ /\\$/); next }
+        {
+            code = ""
+            for (i = 1; i <= length($0); ++i) {
+                c = substr($0, i, 1)
+                pair = substr($0, i, 2)
+                if (state == "block") { if (pair == "*/") { state = ""; ++i } continue }
+                if (state != "") {
+                    if (c == "\\") ++i
+                    else if (c == state) state = ""
+                    continue
+                }
+                if (pair == "//") break
+                if (pair == "/*") { state = "block"; ++i; continue }
+                if (c == "\"" || c == "'\''") { state = c; continue }
+                code = code c
+            }
+            if (state != "block") state = ""
+            if (code ~ /^[[:space:]]*#/) { continued = ($0 ~ /\\$/); next }
+            if (depth == 0 && match(code, /(^|[^A-Za-z0-9_])namespace([[:space:]]+[A-Za-z_][A-Za-z0-9_:]*)?[[:space:]]*\{/)) {
+                name = substr(code, RSTART, RLENGTH)
+                sub(/^.*namespace[[:space:]]*/, "", name)
+                sub(/[[:space:]]*\{$/, "", name)
+                print NR ":" (name == "" ? "<anonymous>" : name)
+            }
+            depth += gsub(/\{/, "{", code) - gsub(/\}/, "}", code)
+        }'
+}
+
+# Namespaces mirror directories. A nameless `namespace {` hides helpers in a scope no path names, and a
+# namespace no directory backs, like `loaders` in `src/core/types.hpp`, invents structure the tree does not have.
+# Allowed names: `unum`, `uform`, the sibling libraries' roots, and a directory on the file's path. The `c/` and
+# `src/` include roots name none, so `src/core/` opens `unum::uform::core` and `test/` opens `unum::uform::test`.
+# The whole staged file, since the namespace is context.
+check_namespace_directories() {
+    local directory=${file%/*} allowed name misplaced=""
+    [ "$directory" = "$file" ] && directory=.
+    allowed=" unum uform ashvardanian numkong stringzilla forkunion "
+    for name in $(printf '%s\n' "$directory" | sed -E 's#^(c|src)/##' | tr '/' '\n'); do
+        allowed="$allowed$name "
+    done
+    while IFS=: read -r line opened; do
+        if [ -z "$opened" ]; then
+            misplaced="${misplaced}line $line: a nameless namespace
+"
+            continue
+        fi
+        for name in $(printf '%s\n' "$opened" | tr ':' '\n'); do
+            [ -z "$name" ] && continue
+            case "$allowed" in
+            *" $name "*) ;;
+            *) misplaced="${misplaced}line $line: namespace $name
+" ;;
+            esac
+        done
+    done < <(awk '/^[[:space:]]*namespace([[:space:]]+[A-Za-z_][A-Za-z0-9_:]*)?[[:space:]]*\{/ {
+            opened = $0; sub(/^[[:space:]]*namespace[[:space:]]*/, "", opened); sub(/[[:space:]]*\{.*/, "", opened)
+            print NR ":" opened }' "$staged_blob")
+    [ -z "$misplaced" ] || fail "${misplaced%$'\n'}" \
+        "$file opens a namespace no directory backs - use the directory's namespace, and \`static\` for file-local helpers:"
+}
+
+# A namespace opens once per file: closing it only to reopen it splits its body around whatever sits between,
+# usually an include that belongs in the preamble or a handle completed between two halves. The one gap allowed
+# holds a `fmt::` or `std::` specialization, which has to follow the type it formats or hashes and precede the
+# first use, all outside the namespace. The whole staged file, since the namespace is context.
+check_namespace_reopened() {
+    local namespaces reopened
+    namespaces=$(top_level_namespaces < "$staged_blob")
+    [ -n "$namespaces" ] || return 0
+    reopened=$(printf '%s\n' "$namespaces" |
+        awk -F: -v path="$file" '
+            NR == FNR {
+                name = substr($0, index($0, ":") + 1)
+                if (name in opened) reopening[$1 + 0] = name
+                opened[name]
+                next
+            }
+            { lines[FNR] = $0 }
+            END {
+                for (line in reopening) {
+                    foreign = 0
+                    for (gap = line - 1; gap > 0 && lines[gap] !~ ("^\\} // namespace " reopening[line] "$"); --gap)
+                        if (lines[gap] ~ /^struct (fmt|std)::[a-z_]+</) foreign = 1
+                    if (!foreign) printf "%s:%d: reopens namespace %s\n", path, line, reopening[line]
+                }
+            }' - "$staged_blob")
+    [ -z "$reopened" ] || fail "$reopened" \
+        "$file reopens namespace ${reopened##*namespace } - keep includes in the preamble and open each namespace once:"
+}
+
 # A class template never takes the `_t` suffix, nor a variable template `_k`: `_t` marks a concrete type or the alias a
 # template materializes, and `_k` a concrete constant, so `template <...> struct fold_run_t` reads as a type the reader
 # could name without arguments. Name the template bare - `humanized<value_type_>`, `device_resident<index_type_>` - and
@@ -523,13 +704,13 @@ check_trailing_returns() {
 }
 
 # A hand-rolled ceiling division - `(value + divisor - 1) / divisor` - re-derives what the shared
-# vocabulary already names. Use `divide_round_up` from cuda_core/types.hpp.
+# vocabulary already names. Use `divide_round_up` from src/core/types.hpp.
 check_hand_ceils() {
     local ceils
     ceils=$(printf '%s\n' "$added" | grep -vE 'divide_round_up|round_up_to_multiple' |
         grep -E '\([^()]+\+[^()]+-[[:space:]]*1[[:space:]]*\)[[:space:]]*/' || true)
     [ -z "$ceils" ] || fail "$ceils" \
-        "$file hand-rolls a ceiling division - write divide_round_up(value, divisor) from cuda_core/types.hpp:"
+        "$file hand-rolls a ceiling division - write divide_round_up(value, divisor) from src/core/types.hpp:"
 }
 
 # C's limit macros - `INFINITY`, `NAN`, `SIZE_MAX`, `PTRDIFF_MAX`, `FLT_MAX` and kin - name what
@@ -636,9 +817,85 @@ check_host_threads() {
 
 # endregion C++ Surface and Containers
 
-# Judges a source of the CUDA cells, whose added text it reads from `added_lines`.
+# region Build CI and Packaging
+
+# CI workflows - every job and every step carries a `name:`. An unnamed step renders as its raw
+# command in the Actions UI, and job names are what branch protection's required checks reference,
+# so an anonymous one can't be pinned. A name reads as a plain phrase, never `Name (qualifier)`, and a
+# matrix job's name spells every list-valued axis, since GitHub appends `(values)` to one naming none.
+# Names are structure, not lines, so unlike the checks above this validates the whole staged file.
+check_workflow_names() {
+    local misnamed
+    misnamed=$(
+        < "$staged_blob" awk '
+            # A name is plain when no parenthesis is left once its ${{ }} expressions are dropped.
+            function check_plain(line,    name) {
+                name = line; sub(/^[^:]*:[[:space:]]*/, "", name)
+                line = name; gsub(/\$\{\{([^}]|\}[^}])*\}\}/, "", line)
+                if (line ~ /[()]/) printf "line %d: `%s` is parenthesized\n", NR, name
+            }
+            # A matrix job names every list-valued axis, and at least one matrix value when it has none.
+            function settle(    axis, count, i) {
+                if (job == "" || !job_named || !matrix) return
+                count = split(axes, axis, " ")
+                for (i = 1; i <= count; ++i)
+                    if (job_name !~ ("matrix\\." axis[i] "([^A-Za-z0-9_-]|$)"))
+                        printf "line %d: job `%s` leaves the matrix axis `%s` out of its name\n", job_line, job, axis[i]
+                if (!count && job_name !~ /matrix\./) printf "line %d: job `%s` names no matrix value\n", job_line, job
+            }
+            /^name:/ { check_plain($0) }
+            # Jobs: two-space keys under the top-level `jobs:` section, named by a four-space `name:`.
+            /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
+            in_jobs && /^[^ #]/ { in_jobs = 0 }
+            in_jobs && /^  [A-Za-z_][A-Za-z0-9_-]*:[[:space:]]*$/ {
+                if (job != "" && !job_named) printf "line %d: job `%s` has no name\n", job_line, job
+                settle()
+                job = substr($1, 1, length($1) - 1); job_line = NR; job_named = 0
+                job_name = ""; in_strategy = 0; matrix = 0; axes = ""
+            }
+            in_jobs && /^    name:/ { job_named = 1; job_name = $0; check_plain($0) }
+            # Matrix axes: keys two deeper than `strategy.matrix:` holding a `[a, b]` or `- a` list, never
+            # the keys that appear only inside its `include` and `exclude` entries.
+            matrix_at && !/^[[:space:]]*(#|$)/ {
+                indent = match($0, /[^ ]/) - 1
+                if (indent <= matrix_at) matrix_at = 0
+                else if (indent == matrix_at + 2 && match($0, /^ *[A-Za-z_][A-Za-z0-9_-]*:/)) {
+                    key = substr($0, indent + 1, RLENGTH - indent - 1); value = substr($0, RLENGTH + 1); listed = ""
+                    if (key == "include" || key == "exclude") next
+                    if (value ~ /^[[:space:]]*\[/) axes = axes " " key
+                    else if (value ~ /^[[:space:]]*(#.*)?$/) listed = key
+                } else if (listed != "" && $0 ~ /^[[:space:]]*- /) { axes = axes " " listed; listed = "" }
+            }
+            in_jobs && /^    [^ #]/ { in_strategy = ($0 ~ /^    strategy:/) }
+            in_strategy && /^      matrix:/ { matrix = 1; matrix_at = 6; listed = "" }
+            # Steps: list items two deeper than their `steps:`, named inline or by a key two deeper.
+            /^[[:space:]]*steps:[[:space:]]*$/ { steps_at = index($0, "steps:") - 1; item_at = steps_at + 2; pending = 0; next }
+            steps_at {
+                indent = match($0, /[^ ]/) - 1
+                if ($0 ~ /^[[:space:]]*(#|$)/) next
+                if (indent <= steps_at) { if (pending) printf "line %d: unnamed step\n", pending; steps_at = 0; next }
+                if (indent == item_at && substr($0, item_at + 1, 2) == "- ") {
+                    if (pending) printf "line %d: unnamed step\n", pending
+                    pending = ($0 ~ /^[[:space:]]*- name:/) ? 0 : NR
+                    if (!pending) check_plain($0)
+                } else if (indent == item_at + 2 && $0 ~ /^[[:space:]]*name:/) { pending = 0; check_plain($0) }
+            }
+            END {
+                if (job != "" && !job_named) printf "line %d: job `%s` has no name\n", job_line, job
+                settle()
+                if (pending) printf "line %d: unnamed step\n", pending
+            }
+        '
+    )
+    [ -z "$misnamed" ] || fail "$misnamed" \
+        "$file misnames a CI workflow, job or step - each carries a \`name:\` the Actions UI and branch protection" \
+        "            reference, a plain phrase like \`Test \${{ matrix.os }} on QEMU\` that spells every list-valued matrix axis:"
+}
+
+# endregion Build CI and Packaging
+
+# Judges a source under src/, test/ or tools/.
 judge_cuda_path() {
-    local added_lines=$added
     # Translation units (.cu / .cpp) never OPEN a namespace block — named or anonymous. They define
     # entities already declared in the headers, so they reach the namespace with `using namespace ...;`
     # or a `namespace alias = ...;` and qualify their definitions; the `namespace X { }` body lives only
@@ -646,7 +903,7 @@ judge_cuda_path() {
     # the closing `} // namespace` all lack the opening brace and pass.
     case "$file" in
     *.cu | *.cpp)
-        namespace_blocks=$(printf '%s\n' "$added_lines" |
+        namespace_blocks=$(printf '%s\n' "$added" |
             grep -nE 'namespace[[:space:]]+[A-Za-z_][A-Za-z0-9_:]*[[:space:]]*\{|namespace[[:space:]]*\{' || true)
         if [ -n "$namespace_blocks" ]; then
             echo "pre-commit: $file opens a namespace block — a .cu/.cpp reaches its namespace with"
@@ -659,21 +916,17 @@ judge_cuda_path() {
     case "$file" in
     *.cu | *.cuh | *.cpp | *.hpp) check_include_groups ;;
     esac
-    chevrons=$(printf '%s\n' "$added_lines" | grep -nE '<<<.*>>>' || true)
-    runtime_includes=$(printf '%s\n' "$added_lines" | grep -nE '#include\s*<cuda_runtime(_api)?\.h>' || true)
-    # Detail namespaces fragment the cell's one namespace and hide symbols behind noise-qualifiers:
-    # use the project namespace or an unnamed namespace, never a named nested one.
-    detail_namespaces=$(printf '%s\n' "$added_lines" |
-        grep -nE 'namespace[[:space:]]+[A-Za-z_]*(detail|impl|internal)' || true)
+    chevrons=$(printf '%s\n' "$added" | grep -nE '<<<.*>>>' || true)
+    runtime_includes=$(printf '%s\n' "$added" | grep -nE '#include\s*<cuda_runtime(_api)?\.h>' || true)
     # A split string literal whose fragment lacks the trailing `//` pin gets restitched by clang-format
     # into unreadable staircases; every fragment except the last must end with `" //`.
-    unpinned_splits=$(printf '%s\n' "$added_lines" | awk '
+    unpinned_splits=$(printf '%s\n' "$added" | awk '
         prev ~ /"[[:space:]]*$/ && prev !~ /\/\/[[:space:]]*$/ && $0 ~ /^\+[[:space:]]*"/ { print NR": "prev }
         { prev = $0 }' || true)
     # Banned vocabulary: one word per concept — byte-granting is `allocate`, window-granting is
     # `reserve`, contiguous regions are `buffer` / `chunk` / `plane`, and the optimizer's per-weight
-    # state is not a `slot`. See uform-style-guide.
-    banned_words=$(printf '%s\n' "$added_lines" | grep -inE 'carve|slab|seam|slot' || true)
+    # state is not a `slot`.
+    banned_words=$(printf '%s\n' "$added" | grep -inE 'carve|slab|seam|slot' || true)
     if [ -n "$banned_words" ]; then
         echo "pre-commit: $file adds banned vocabulary (carve/slab/seam/slot) — allocate/reserve/buffer/chunk/plane/boundary:"
         printf '%s\n' "$banned_words" | head -5
@@ -681,7 +934,7 @@ judge_cuda_path() {
     fi
     # Standalone repo: the internal predecessor "UFormTrain" is never named — describe behaviour directly,
     # not by lineage. Applies to every file, docs included.
-    uformtrain_refs=$(printf '%s\n' "$added_lines" | grep -in 'UFormTrain' || true)
+    uformtrain_refs=$(printf '%s\n' "$added" | grep -in 'UFormTrain' || true)
     if [ -n "$uformtrain_refs" ]; then
         echo "pre-commit: $file references UFormTrain — the predecessor stack is not named anywhere in this repo:"
         printf '%s\n' "$uformtrain_refs" | head -5
@@ -690,7 +943,7 @@ judge_cuda_path() {
     # cstdio formatting is exception-blind and bypasses the cell's one diagnostics spelling: host text
     # goes through `format_into` + POSIX `::write`. Device-side `printf` (the only device formatter)
     # stays legal — this bans only `fprintf`.
-    fprintf_calls=$(printf '%s\n' "$added_lines" | grep -inE 'fprintf' || true)
+    fprintf_calls=$(printf '%s\n' "$added" | grep -inE 'fprintf' || true)
     if [ -n "$fprintf_calls" ]; then
         echo "pre-commit: $file adds fprintf — host diagnostics are format_into + ::write(STDERR_FILENO, ...):"
         printf '%s\n' "$fprintf_calls" | head -5
@@ -703,7 +956,7 @@ judge_cuda_path() {
     # ownership; `std::pair` / `std::tuple` are anonymous aggregates that hide a named type (return a
     # struct, or a StringZilla slice / NumKong view for a span); `std::optional` is subsumed by `expected<T>`,
     # which carries a typed error alongside the value-or-absence. Mark a genuine vendor boundary explicitly.
-    stl_smells=$(printf '%s\n' "$added_lines" | grep -v 'vendor-boundary' |
+    stl_smells=$(printf '%s\n' "$added" | grep -v 'vendor-boundary' |
         grep -nE 'std::ranges|std::async|std::function|std::mutex|std::shared_ptr|std::pair|std::tuple|std::optional|#include <coroutine>|\bco_(await|yield|return)\b' || true)
     if [ -n "$stl_smells" ]; then
         echo "pre-commit: $file uses a banned STL smell — std::ranges / std::async / std::mutex / coroutines /"
@@ -715,7 +968,7 @@ judge_cuda_path() {
     # call form (device is C++23 now, so the subscript is uniform with the host). The write form
     # `name(i, j) = …` is the unambiguous tell — assigning into a parenthesised multi-index — so that is
     # what we reject; defaulted / deleted members are exempt, comment lines are exempt.
-    paren_index=$(printf '%s\n' "$added_lines" | grep -vE '^\+\s*(\*|//)' | grep -vE '= *(default|delete)' |
+    paren_index=$(printf '%s\n' "$added" | grep -vE '^\+\s*(\*|//)' | grep -vE '= *(default|delete)' |
         grep -nE '[A-Za-z_][A-Za-z0-9_]*\([^()]*,[^()]*\)[[:space:]]*=[^=]' || true)
     if [ -n "$paren_index" ]; then
         echo "pre-commit: $file writes a tensor through the \`(row, column)\` call form — C++23 multidim"
@@ -725,7 +978,7 @@ judge_cuda_path() {
     fi
     # Indexing a call result — `f(x)[i]`, `.data()[i]`, `.u32s()[0]` — hides the object being indexed;
     # bind the returned view/span to a named local and index that. Comment lines are exempt.
-    call_indexing=$(printf '%s\n' "$added_lines" | grep -vE '^\+\s*(\*|//)' | grep -nE '\)\[' || true)
+    call_indexing=$(printf '%s\n' "$added" | grep -vE '^\+\s*(\*|//)' | grep -nE '\)\[' || true)
     if [ -n "$call_indexing" ]; then
         echo "pre-commit: $file indexes a function-call result (\`()[...]\`) — bind the returned span to"
         echo "            a named local first:"
@@ -739,14 +992,8 @@ judge_cuda_path() {
         rejection_count=$((rejection_count + 1))
     fi
     if [ -n "$runtime_includes" ]; then
-        echo "pre-commit: $file adds a CUDA Runtime API include — the primitives cell is Driver-API only:"
+        echo "pre-commit: $file adds a CUDA Runtime API include — the CUDA sources are Driver-API only:"
         printf '%s\n' "$runtime_includes" | head -5
-        rejection_count=$((rejection_count + 1))
-    fi
-    if [ -n "$detail_namespaces" ]; then
-        echo "pre-commit: $file adds a detail/impl/internal namespace — use the project namespace or an"
-        echo "            unnamed namespace; named nested namespaces are banned:"
-        printf '%s\n' "$detail_namespaces" | head -5
         rejection_count=$((rejection_count + 1))
     fi
     if [ -n "$unpinned_splits" ]; then
@@ -759,22 +1006,22 @@ judge_cuda_path() {
     # built noexcept end-to-end — a bad_alloc anywhere would terminate. Outside tests, strings are
     # sz::string_t (try_append / try_push_back) and dynamic arrays are the cell's own array<T> (try_resize).
     case "$file" in
-    cuda_test/*) ;;
+    test/*) ;;
     *)
         # Lines marked `vendor-boundary` are exempt: some vendor APIs (cudnn-frontend's set_stride,
         # execute's variant pack) force std containers in their signatures; the marker keeps those
         # exemptions explicit and greppable.
-        std_containers=$(printf '%s\n' "$added_lines" | grep -v 'vendor-boundary' |
+        std_containers=$(printf '%s\n' "$added" | grep -v 'vendor-boundary' |
             grep -nE 'std::(string|vector)\b' || true)
         if [ -n "$std_containers" ]; then
             echo "pre-commit: $file adds std::string / std::vector — throwing containers violate the"
-            echo "            strict no-exceptions policy; use sz::string_t / primitives::array<T> instead:"
+            echo "            strict no-exceptions policy; use sz::string_t / core::array<T> instead:"
             printf '%s\n' "$std_containers" | head -5
             rejection_count=$((rejection_count + 1))
         fi
         # API boundaries take sz::string_view_t (or typed views/spans), never raw C strings; only true
         # vendor boundaries touch `char const *` internally, and they carry the marker.
-        c_string_parameters=$(printf '%s\n' "$added_lines" | grep -v 'vendor-boundary' |
+        c_string_parameters=$(printf '%s\n' "$added" | grep -v 'vendor-boundary' |
             grep -nE '[(,] *char const \*' || true)
         case "$file" in
         *.cuh | *.hpp)
@@ -788,9 +1035,9 @@ judge_cuda_path() {
             # a type) is the banned doc style — those entities get `/** @brief ... */`. Scoped to headers
             # on purpose: members and types are declared here, whereas the same `Type name = …;` shape in a
             # `.cu` is a local variable inside a function body, and a `//` note above it is a legal
-            # implementation note (STYLE.md: "`//` is for implementation notes inside bodies"). The `\+?`
-            # prefix in each pattern matches the `+` that `git diff` prepends to every added line.
-            member_doc_comments=$(printf '%s\n' "$added_lines" |
+            # implementation note. The `\+?` prefix in each pattern matches the `+` that `git diff`
+            # prepends to every added line.
+            member_doc_comments=$(printf '%s\n' "$added" |
                 awk '/^\+?[[:space:]]*\/\/[^\/]/ { pending=$0; next } \
                      /^\+?[[:space:]]*[A-Za-z_][A-Za-z0-9_:<>,* ]* [A-Za-z_][A-Za-z0-9_]* *([={;]|$)/ && pending { print pending; pending="" ; next } \
                      { pending="" }' || true)
@@ -810,7 +1057,6 @@ judge_cuda_path() {
 # ALL-CAPS-emphasis ban, on their CHANGED lines only — the same added-lines discipline as the C++ checks
 # (legacy migrates on its own schedule). Ruff is tool-guarded like the cmake / clang gates: a missing ruff
 # (not synced into the uv env) skips rather than blocks. The emphasis grep is pure shell and always runs.
-# See STYLE.md §6 and §14.
 ruff_cmd=""
 if command -v ruff > /dev/null 2>&1; then
     ruff_cmd="ruff"
@@ -820,26 +1066,38 @@ fi
 
 # Judges a Python source on its changed lines.
 judge_python_path() {
-    local added_lines=$added added_nums
-    added_nums=$(< "$staged_lines_path")
-    # STYLE.md §6: no ALL-CAPS-for-emphasis in docstrings / comments (protocol / token names excepted).
-    emphasis=$(printf '%s\n' "$added_lines" |
+    # No ALL-CAPS-for-emphasis in docstrings and comments, protocol and token names excepted.
+    emphasis=$(printf '%s\n' "$added" |
         grep -nE '\b(ONLY|NEVER|ALWAYS|EVERY|WHOLE|SHARDABLE|DISTINCT|STREAMS|MATERIALISES?)\b' || true)
     if [ -n "$emphasis" ]; then
-        echo "pre-commit: $file uses ALL-CAPS emphasis on a changed line (STYLE.md §6) — lowercase it:"
+        echo "pre-commit: $file uses ALL-CAPS emphasis on a changed line — lowercase it:"
         printf '%s\n' "$emphasis" | head -5
         rejection_count=$((rejection_count + 1))
     fi
     # ruff findings intersected with the changed line numbers (docstring D / nested-import PLC0415 / imports I).
-    if [ -n "$ruff_cmd" ] && [ -n "$added_nums" ]; then
+    if [ -n "$ruff_cmd" ] && [ -n "$added_lines" ]; then
         new_findings=$($ruff_cmd check --quiet --output-format=concise "$file" 2> /dev/null |
             awk -F: 'NR == FNR { keep[$1 + 0]; next } ($2 + 0) in keep' "$staged_lines_path" -)
         if [ -n "$new_findings" ]; then
-            echo "pre-commit: $file has ruff findings on its changed lines (STYLE.md §14 — docstring / import):"
+            echo "pre-commit: $file has ruff docstring or import findings on its changed lines:"
             printf '%s\n' "$new_findings" | head -8
             rejection_count=$((rejection_count + 1))
         fi
     fi
+}
+
+# C++ sources must satisfy the checked-in .clang-format on their changed lines, so legacy formatting migrates on its
+# own schedule. The hunks come from the rename-aware diff, so a moved file is judged only on the lines it changed. Needs
+# clang-format 22 for the profile's BinPackLongBracedList and BreakAdjacentStringLiterals options.
+check_clang_format_on_changed_lines() {
+    local ranges drift
+    command -v clang-format > /dev/null 2>&1 && [ -f .clang-format ] || return 0
+    # A hunk deleting the first lines starts at 0, a line clang-format refuses and that has nothing to format.
+    ranges=$(grep -vx -e '--lines=0:0' "$results_directory/$ordinal.ranges" 2> /dev/null) || return 0
+    drift=$(clang-format --dry-run -Werror --assume-filename="$file" $ranges < "$staged_blob" 2>&1 | grep -F ': error:') ||
+        return 0
+    fail "$drift" "$file is not clang-format clean on its changed lines - run \`git clang-format --staged\`," \
+        "            or \`clang-format -i $file\` for the whole file, then restage:"
 }
 
 judge_path() {
@@ -848,17 +1106,11 @@ judge_path() {
     added=
     [ ! -f "$results_directory/$ordinal.added" ] || added=$(< "$results_directory/$ordinal.added")
     [ -s "$staged_lines_path" ] || echo > "$staged_lines_path"
+    added_lines=$(< "$staged_lines_path")
     case "$file" in
-    cuda_core/* | cuda_loaders/* | cuda_test/* | cuda_train/*) judge_cuda_path ;;
+    src/* | test/* | tools/*) judge_cuda_path ;;
     esac
     case "$file" in
-    # CMake sources must satisfy the checked-in .cmake-format.py profile when the formatter is available.
-    CMakeLists.txt | *.cmake)
-        if command -v cmake-format > /dev/null 2>&1 && ! cmake-format --check "$file" > /dev/null 2>&1; then
-            echo "pre-commit: $file is not cmake-format clean — run: cmake-format -i $file"
-            rejection_count=$((rejection_count + 1))
-        fi
-        ;;
     *.py) judge_python_path ;;
     esac
     case "$file" in
@@ -879,6 +1131,8 @@ judge_path() {
         check_hand_ceils
         check_trailing_returns
         check_iterator_laundering
+        check_namespace_directories
+        check_namespace_reopened
         ;;&
     # Declarations in headers are already judged by the bare-comment check of the CUDA cells.
     *.hpp | *.cuh) ;;
@@ -898,22 +1152,24 @@ judge_path() {
         check_data_null_probe
         check_call_chained_call
         check_gcc_atomics
+        check_clang_format_on_changed_lines
         ;;&
     *.cu | *.cuh) check_host_threads ;;&
-    # The shipped library: the public header and the headers the cells ship, never the tests.
-    include/*.h | include/*.hpp | cuda_core/*.cuh | cuda_core/*.hpp | cuda_loaders/*.cuh | cuda_loaders/*.hpp | \
-        cuda_train/*.cuh | cuda_train/*.hpp)
+    # The shipped library: the C ABI under c/uform/ and the headers under src/, never the tests.
+    c/*.h | src/*.cuh | src/*.hpp)
         check_boolean_parameters
         ;;
     esac
     case "$file" in
     *.md)
         check_ascii_arrows_prose
+        check_markdown_tables
         check_blank_line_runs
         check_glued_arrows
         check_sibling_justification
         ;;
     *.py | *.pyi) check_sibling_justification ;;
+    .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
     esac
     check_banners "$file" <<< "$added" || rejection_count=$((rejection_count + 1))
     # Turning a formatter off in-band is banned: the checked-in .clang-format and .cmake-format.py profiles are
@@ -934,29 +1190,92 @@ judge_path() {
     esac
 }
 
-# C++ sources must satisfy the checked-in .clang-format on their CHANGED lines — the same added-lines-only
-# discipline as the checks above (legacy formatting migrates on its own schedule; no new drift sneaks in),
-# so this uses `git clang-format --staged --diff` rather than a whole-file `clang-format --check`. Requires
-# clang-format >= 22 for the profile's BinPackLongBracedList / BreakAdjacentStringLiterals options; skipped
-# where the tooling is absent, mirroring the cmake-format gate.
-run_tree_checks() {
-    if command -v git-clang-format > /dev/null 2>&1 && command -v clang-format > /dev/null 2>&1; then
-        cpp_staged=$(git diff --cached --name-only --diff-filter=ACM -- '*.cu' '*.cuh' '*.cpp' '*.hpp')
-        if [ -n "$cpp_staged" ]; then
-            clang_diff=$(git clang-format --staged --diff --extensions cu,cuh,cpp,hpp -- $cpp_staged 2> /dev/null)
-            case "$clang_diff" in
-            "" | "no modified files to format" | "clang-format did not modify any files"*) ;;
-            *)
-                echo "pre-commit: staged C++ changes are not clang-format clean on their changed lines — restage after:"
-                echo "            git clang-format --staged   (or clang-format -i <file> for the whole file)"
-                rejection_count=$((rejection_count + 1))
+# The staged paths matching any of the given globs, NUL-delimited for the readers below.
+staged_matching() { # staged_matching <glob>...
+    local path pattern
+    for path in "${staged_paths[@]}"; do
+        for pattern in "$@"; do
+            case "$path" in
+            $pattern)
+                printf '%s\0' "$path"
+                break
                 ;;
             esac
+        done
+    done
+}
+
+# Whether at least one staged path matches one of the given globs.
+staged_any() { # staged_any <glob>...
+    local path pattern
+    for path in "${staged_paths[@]}"; do
+        for pattern in "$@"; do
+            case "$path" in
+            $pattern) return 0 ;;
+            esac
+        done
+    done
+    return 1
+}
+
+# Runs the gates that judge the commit as a whole, or one formatter over a batch of paths.
+run_tree_checks() {
+    if command -v cmake-format > /dev/null 2>&1 && [ -f .cmake-format.py ]; then
+        while IFS= read -r -d '' file; do
+            if ! cmake-format --check "$file" > /dev/null 2>&1; then
+                echo "pre-commit: $file is not cmake-format clean - run \`cmake-format -i $file\` with the repo profile"
+                rejection_count=$((rejection_count + 1))
+            fi
+            # A bare `CMakeLists.txt` pattern matches the whole path, so a nested list needs the `*/` prefix.
+        done < <(staged_matching 'CMakeLists.txt' '*/CMakeLists.txt' '*.cmake')
+    fi
+
+    # Editor settings and extension lists stay sorted case-insensitively, so every addition has one place to go.
+    editor_lists=$(staged_matching '.vscode/settings.json' '.vscode/extensions.json' | tr '\0' '\n')
+    if [ -n "$editor_lists" ]; then
+        unsorted=$(for path in $editor_lists; do
+            git show ":$path" | LC_ALL=C awk -v path="$path" '
+                { text = text $0 "\n" }
+                END {
+                    while (text != "") {
+                        if (match(text, /^"([^"\\]|\\.)*"/)) {
+                            string = substr(text, 2, RLENGTH - 2)
+                            if (list && depth == 2 && tolower(string) < previous) unsorted = 1
+                            if (list && depth == 2) previous = tolower(string)
+                        } else if (!match(text, /^\/\/[^\n]*/) && !match(text, /^\/\*([^*]|\*+[^*\/])*\*+\//) &&
+                                   !match(text, /^[^"\/{}\[\]:,]+/)) {
+                            RLENGTH = 1
+                            token = substr(text, 1, 1)
+                            if (token == ":" && depth == 1) {
+                                key = string
+                                if (path ~ /settings\.json$/ && !(key in seen) && tolower(key) < last_key) unsorted = 1
+                                if (!(key in seen)) last_key = tolower(key)
+                                seen[key]
+                            }
+                            if (token == "{" || token == "[") ++depth
+                            if (token == "[" && depth == 2 &&
+                                key ~ /^(cSpell\.words|recommendations|unwantedRecommendations)$/) {
+                                list = 1
+                                previous = ""
+                            }
+                            if (token == "}" || token == "]") --depth
+                            if (depth < 2) list = 0
+                        }
+                        text = substr(text, RLENGTH + 1)
+                    }
+                    if (unsorted) print path
+                }'
+        done)
+        if [ -n "$unsorted" ]; then
+            echo "pre-commit: sort top-level settings keys, cSpell.words and extension recommendations case-insensitively in:"
+            printf '    %s\n' $unsorted
+            rejection_count=$((rejection_count + 1))
         fi
     fi
+
     # A `uform_sibling` pin and the submodule's gitlink name the same commit, or a recursive clone and a plain one
     # build different code. Both sides are read from the index, so the comparison is against what this commit records.
-    if ! git diff --cached --quiet -- CMakeLists.txt numkong stringzilla forkunion 2> /dev/null; then
+    if staged_any CMakeLists.txt numkong stringzilla forkunion; then
         while read -r sibling pinned; do
             recorded=$(git ls-files --stage -- "$sibling" | awk '$1 == "160000" { print $2 }')
             [ -n "$recorded" ] || continue
@@ -1012,14 +1331,15 @@ split_diff_by_path='
     hunk && /^\+/ { print > added }'
 
 # Lists the staged paths, writes their blobs under `index/` and splits their diff, one git process each, so
-# no check asks git again; `git diff` lists paths in the same order whether it prints names or hunks.
+# no check asks git again; `git diff` lists paths in the same order whether it prints names or hunks. A renamed
+# path diffs against its source, so only the lines it changed count as added.
 read_staged_paths() {
     staged_paths=()
     while IFS= read -r -d '' staged_path; do staged_paths+=("$staged_path"); done \
-        < <(git diff --cached --name-only -z --diff-filter=ACM)
+        < <(git diff --cached --name-only -z --find-renames --diff-filter=ACMR)
     [ ${#staged_paths[@]} -eq 0 ] || printf '%s\0' "${staged_paths[@]}" |
         git checkout-index --prefix="$results_directory/index/" -z --stdin
-    git diff --cached --unified=0 --diff-filter=ACM | awk -v directory="$results_directory/" "$split_diff_by_path"
+    git diff --cached --unified=0 --find-renames --diff-filter=ACMR | awk -v directory="$results_directory/" "$split_diff_by_path"
 }
 
 # Deals the paths round-robin to one worker per core, each running `judge_path` into a numbered report, then

@@ -98,7 +98,7 @@
     "**/.venv/**": true,
     "**/__pycache__": true,
     "**/build*/**": true,
-    "**/data/**": true
+    "data/**": true
   },
   "search.exclude": {
     "**/__pycache__": true,

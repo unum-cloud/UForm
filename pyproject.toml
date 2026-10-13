@@ -44,7 +44,7 @@ maintainers = [
 ]
 name = "uform"
 readme = "README.md"
-# The floor is 3.12: the GPU training + data path (torch 2.12, RAPIDS cu13, the PEP 723 `python_data/`
+# The floor is 3.12: the GPU training + data path (torch 2.12, RAPIDS cu13, the PEP 723 `scripts/data/`
 # scripts) requires it.
 requires-python = ">=3.12"
 version = "4.0.0"
@@ -56,7 +56,7 @@ onnx = ["onnx>=1.16.0", "onnxruntime>=1.20.0"]
 onnx-gpu = ["onnx>=1.16.0", "onnxruntime-gpu>=1.20.0", "tensorrt-cu12>=10.0.0; platform_system=='Linux'"]
 
 # GPU training + data tooling
-# Everything a training run and the `python_data/` loaders / repack scripts need. The `cuda-toolkit`
+# Everything a training run and the `scripts/data/` loaders / repack scripts need. The `cuda-toolkit`
 # extras ship cudart / cublas / cufft / cufile / curand / cusparse / nvrtc / nvjitlink / nvcc / nvvm
 # as wheels so the native extension resolves them from inside `.venv` (via $ORIGIN RPATH) with no
 # system CUDA install; RAPIDS cuDF / RMM come from the [[tool.uv.index]] NVIDIA index below.
@@ -76,7 +76,7 @@ train = [
     "pytest>=8.0",
 ]
 
-# Offline dataset download / pre-processing extras — pulled in only when running the `python_data/`
+# Offline dataset download / pre-processing extras — pulled in only when running the `scripts/data/`
 # mining and repack scripts (video first-frame decode, tar -> parquet sweeps, hard-negative mining).
 mining = [
     "av>=17.0",
@@ -106,8 +106,8 @@ dev = [
 
 # Groups rather than extras, so none of this reaches the published wheel's metadata.
 [dependency-groups]
-lint = ["ruff>=0.15.8"]
-# The `python_data/test_*.py` suites import only the standard library and their sibling modules.
+lint = ["clang-format==22.*", "cmakelang", "ruff>=0.15.8"]
+# The `scripts/data/test_*.py` suites import only the standard library and their sibling modules.
 test = ["pytest>=8"]
 
 [tool.pytest.ini_options]
@@ -116,7 +116,7 @@ addopts = ["-ra", "--showlocals", "--strict-markers", "--strict-config", "-p", "
 filterwarnings = ["error"]
 minversion = "8.0"
 python_files = ["test_*.py"]
-testpaths = ["python_data"]
+testpaths = ["scripts/data"]
 xfail_strict = true
 
 # RAPIDS cuDF / RMM and the versioned NVIDIA CUDA wheels live on NVIDIA's index alongside PyPI.
@@ -124,7 +124,7 @@ xfail_strict = true
 name = "nvidia"
 url = "https://pypi.nvidia.com"
 
-# The pip wheel ships the `uform` inference package only; `python_data/` is repo-resident tooling run
+# The pip wheel ships the `uform` inference package only; `scripts/data/` is repo-resident tooling run
 # via `uv run` from the root, not published in the wheel.
 [tool.setuptools.packages.find]
 where = ["python"]
@@ -133,22 +133,23 @@ namespaces = false
 
 [tool.ruff]
 line-length = 120
+
+[tool.ruff.lint]
 ignore = ["C408", "C901", "E501", "E741"]
-ignore-init-module-imports = true
 select = ["C", "D", "E", "F", "I", "PLC0415", "TID", "UP", "W"]
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
-known-first-party = ["python_data", "uform"]
+known-first-party = ["uform"]
 combine-as-imports = true
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E401"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
-
-[tool.ruff.per-file-ignores]
-"__init__.py" = ["E401"]
 
 [tool.tomlsort]
 all = true
