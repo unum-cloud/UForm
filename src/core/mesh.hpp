@@ -82,14 +82,14 @@
 #include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fread`
 #include <cstdlib> // `std::getenv`
 
+#include <unistd.h> // `::gethostname`, `::fsync`
+
 #include <charconv>   // `std::from_chars`
 #include <chrono>     // `std::chrono::steady_clock` — the exchange timeout clock
 #include <span>       // `std::span` — the probed GPU-uuid list handed to `build_facts_`
 #include <algorithm>  // `std::sort` — the world-GPU-uniqueness check
 #include <filesystem> // `std::filesystem::create_directories` / `rename` — the `std::error_code` overloads
 #include <thread>     // `std::this_thread::sleep_for` — sleeping only; the process stays single-threaded
-
-#include <unistd.h> // `::gethostname`, `::fsync`
 
 #include <cuda.h> // `CUdevice`, `cuDeviceGetAttribute`, `cuDeviceCanAccessPeer`
 
@@ -125,37 +125,46 @@ namespace sz = ashvardanian::stringzilla;
  *  @c u32_t @c gpu_index in @c [0,gpus_per_colocated_domain) ; there are no rank/index aliases.
  */
 struct mesh_shape_t {
-    /** @brief GPUs one process drives — a whole HGX box, or one NVL72 / NVL144 compute tray. */
+
+    /** GPUs one process drives — a whole HGX box, or one NVL72 / NVL144 compute tray. */
     u32_t gpus_per_host_domain = 1u;
-    /** @brief GPUs in one NVLink domain reachable by @c multimem.* (8 on HGX, 72 / 144 on NVL racks). */
+
+    /** GPUs in one NVLink domain reachable by @c multimem.* (8 on HGX, 72 / 144 on NVL racks). */
     u32_t gpus_per_multimem_domain = 1u;
-    /** @brief Total data-parallel GPUs sharing @b one global batch — the whole InfiniBand world (~10^5). */
+
+    /** Total data-parallel GPUs sharing @b one global batch — the whole InfiniBand world (~10^5). */
     u32_t gpus_per_colocated_domain = 1u;
 
-    /** @brief Which host_domain a global @p gpu_index belongs to. */
+    /** Which host_domain a global @p gpu_index belongs to. */
     [[nodiscard]] u32_t host_domain_of(u32_t gpu_index) const noexcept { return gpu_index / gpus_per_host_domain; }
-    /** @brief Which multimem_domain a global @p gpu_index belongs to. */
+
+    /** Which multimem_domain a global @p gpu_index belongs to. */
     [[nodiscard]] u32_t multimem_domain_of(u32_t gpu_index) const noexcept {
         return gpu_index / gpus_per_multimem_domain;
     }
-    /** @brief A global @p gpu_index 's position @b within its multimem_domain — the intra-domain collective rank. */
+
+    /** A global @p gpu_index 's position @b within its multimem_domain — the intra-domain collective rank. */
     [[nodiscard]] u32_t index_in_multimem_domain(u32_t gpu_index) const noexcept {
         return gpu_index % gpus_per_multimem_domain;
     }
-    /** @brief The colocated_domain (world) coordinate of host_domain @p host_domain_index 's member
-     *      @p member_index — the inverse of @ref host_domain_of , so a process turns its local member
-     *      indexes into world coordinates. */
+
+    /** The colocated_domain (world) coordinate of host_domain @p host_domain_index 's member
+     *  @p member_index — the inverse of @ref host_domain_of , so a process turns its local member
+     *  indexes into world coordinates. */
     [[nodiscard]] u32_t gpu_index_of_host_member(u32_t host_domain_index, u32_t member_index) const noexcept {
         return host_domain_index * gpus_per_host_domain + member_index;
     }
-    /** @brief The colocated_domain (world) coordinate of multimem_domain @p multimem_domain_index 's
-     *      member @p member_index — the inverse of @ref multimem_domain_of + @ref index_in_multimem_domain . */
+
+    /** The colocated_domain (world) coordinate of multimem_domain @p multimem_domain_index 's
+     *  member @p member_index — the inverse of @ref multimem_domain_of + @ref index_in_multimem_domain . */
     [[nodiscard]] u32_t gpu_index_of_multimem_member(u32_t multimem_domain_index, u32_t member_index) const noexcept {
         return multimem_domain_index * gpus_per_multimem_domain + member_index;
     }
-    /** @brief Number of host_domains (processes) in the colocated_domain. */
+
+    /** Number of host_domains (processes) in the colocated_domain. */
     [[nodiscard]] u32_t host_domain_count() const noexcept { return gpus_per_colocated_domain / gpus_per_host_domain; }
-    /** @brief Number of multimem_domains in the colocated_domain — the inter-domain collective width. */
+
+    /** Number of multimem_domains in the colocated_domain — the inter-domain collective width. */
     [[nodiscard]] u32_t multimem_domain_count() const noexcept {
         return gpus_per_colocated_domain / gpus_per_multimem_domain;
     }
@@ -172,13 +181,16 @@ struct mesh_shape_t {
  *  until then a single multimem_domain is the whole reachable world.
  */
 struct mesh_location_t {
-    /** @brief The three nested-domain sizes (by value) — domains derived from @c gpu_index . */
+
+    /** The three nested-domain sizes (by value) — domains derived from @c gpu_index . */
     mesh_shape_t topology {};
-    /** @brief This rank's global coordinate in @c [0,gpus_per_colocated_domain) — the only coordinate stored. */
+
+    /** This rank's global coordinate in @c [0,gpus_per_colocated_domain) — the only coordinate stored. */
     u32_t gpu_index = 0u;
-    /** @brief Multicast VA of this rank's multimem_domain; a @c multimem.* op against @c +offset fans
-     *      across the whole domain, so there is no per-peer pointer list for intra-domain peers. Null
-     *      until the symmetric heap binds it; null at @c gpus_per_multimem_domain==1 forever. */
+
+    /** Multicast VA of this rank's multimem_domain; a @c multimem.* op against @c +offset fans
+     *  across the whole domain, so there is no per-peer pointer list for intra-domain peers. Null
+     *  until the symmetric heap binds it; null at @c gpus_per_multimem_domain==1 forever. */
     void *multimem_domain_base = nullptr;
 };
 
@@ -252,25 +264,31 @@ struct mesh_location_t {
     return mesh_shape_t {gpus, gpus, gpus};
 }
 
-/** @brief Longest hostname (including the terminator) a @ref mesh_host_domain_t records. */
+/** Longest hostname (including the terminator) a @ref mesh_host_domain_t records. */
 inline constexpr std::size_t hostname_capacity_k = 64u;
-/** @brief Longest GPU model name (including the terminator) a @ref mesh_host_domain_t records. */
+
+/** Longest GPU model name (including the terminator) a @ref mesh_host_domain_t records. */
 inline constexpr std::size_t device_name_capacity_k = 64u;
-/** @brief Version tag heading every exchange payload, so a foreign or future-format file in the exchange
- *      directory fails loudly on its first line instead of misparsing. */
+
+/** Version tag heading every exchange payload, so a foreign or future-format file in the exchange
+ *  directory fails loudly on its first line instead of misparsing. */
 inline constexpr char mesh_schema_k[] = "uform.mesh.1";
 
-/** @brief One host_domain's published facts — the payload of the bootstrap exchange, one entry per
- *      host_domain in @ref mesh_topology_t::host_domains . POD so the table is @ref array -friendly. */
+/** One host_domain's published facts — the payload of the bootstrap exchange, one entry per
+ *  host_domain in @ref mesh_topology_t::host_domains . POD so the table is @ref array -friendly. */
 struct mesh_host_domain_t {
-    /** @brief The host_domain's index in @c [0,host_domain_count) — identity from the launcher, never derived. */
+
+    /** The host_domain's index in @c [0,host_domain_count) — identity from the launcher, never derived. */
     u32_t host_domain_index = 0;
-    /** @brief GPUs the host_domain probed locally; the bootstrap validates this is uniform across the world. */
+
+    /** GPUs the host_domain probed locally; the bootstrap validates this is uniform across the world. */
     u32_t device_count = 0;
-    /** @brief The host_domain's hostname — for diagnostics and for the transport wiring to name its peers. */
+
+    /** The host_domain's hostname — for diagnostics and for the transport wiring to name its peers. */
     char hostname[hostname_capacity_k] = {};
-    /** @brief The GPU model, spaces replaced with underscores; the bootstrap validates the world runs
-     *      identical GPUs, not just identical counts. */
+
+    /** The GPU model, spaces replaced with underscores; the bootstrap validates the world runs
+     *  identical GPUs, not just identical counts. */
     char device_name[device_name_capacity_k] = {};
 };
 
@@ -329,32 +347,41 @@ struct mesh_host_domain_t {
  *  immutable after @ref bootstrap returns — the topology is identity, not state.
  */
 struct mesh_topology_t {
-    /** @brief The validated three-domain shape — see the concrete worlds in the file header. */
+
+    /** The validated three-domain shape — see the concrete worlds in the file header. */
     mesh_shape_t shape {};
-    /** @brief This host_domain's index in @c [0,host_domain_count) — identity from the launcher. */
+
+    /** This host_domain's index in @c [0,host_domain_count) — identity from the launcher. */
     u32_t host_domain_index = 0;
-    /** @brief Every host_domain's published facts, indexed by host_domain index. */
+
+    /** Every host_domain's published facts, indexed by host_domain index. */
     array<mesh_host_domain_t> host_domains {};
-    /** @brief The resolved @c <directory>/<job_id> exchange root; empty in a single-host_domain world. */
+
+    /** The resolved @c <directory>/<job_id> exchange root; empty in a single-host_domain world. */
     sz::string_t exchange_directory {};
 
-    /** @brief Number of host_domains in the world — the table's extent, agreeing with
-     *      @c shape.host_domain_count() by construction: @ref bootstrap sizes both from the same argument
-     *      and never resizes either. */
+    /** Number of host_domains in the world — the table's extent, agreeing with
+     *  @c shape.host_domain_count() by construction: @ref bootstrap sizes both from the same argument
+     *  and never resizes either. */
     [[nodiscard]] u32_t host_domain_count() const noexcept { return static_cast<u32_t>(host_domains.size()); }
-    /** @brief This host_domain's own published facts. */
+
+    /** This host_domain's own published facts. */
     [[nodiscard]] mesh_host_domain_t const &self() const noexcept { return host_domains[host_domain_index]; }
-    /** @brief Whether this host_domain owns @c gpu_index 0 — the one that aggregates the exchange and
-     *      writes checkpoints and metrics. */
+
+    /** Whether this host_domain owns @c gpu_index 0 — the one that aggregates the exchange and
+     *  writes checkpoints and metrics. */
     [[nodiscard]] bool is_lead() const noexcept { return host_domain_index == 0; }
-    /** @brief The global @c gpu_index of this host_domain's local CUDA device ordinal 0 —
-     *      @c host_domain_index·gpus_per_host_domain . This is the local↔global mapping every wiring
-     *      phase relies on: local ordinal @c d is global @c gpu_index @c first_gpu_index()+d . */
+
+    /** The global @c gpu_index of this host_domain's local CUDA device ordinal 0 —
+     *  @c host_domain_index·gpus_per_host_domain . This is the local↔global mapping every wiring
+     *  phase relies on: local ordinal @c d is global @c gpu_index @c first_gpu_index()+d . */
     [[nodiscard]] u32_t first_gpu_index() const noexcept { return host_domain_index * shape.gpus_per_host_domain; }
-    /** @brief Which multimem_domain this host_domain belongs to — on an NVL72 tray, which rack. */
+
+    /** Which multimem_domain this host_domain belongs to — on an NVL72 tray, which rack. */
     [[nodiscard]] u32_t multimem_domain_index() const noexcept { return shape.multimem_domain_of(first_gpu_index()); }
-    /** @brief Whether this host_domain leads its multimem_domain — the process that creates the multicast
-     *      object, exports its fabric handle, and publishes the per-domain wiring digest. */
+
+    /** Whether this host_domain leads its multimem_domain — the process that creates the multicast
+     *  object, exports its fabric handle, and publishes the per-domain wiring digest. */
     [[nodiscard]] bool is_multimem_domain_lead() const noexcept {
         return shape.index_in_multimem_domain(first_gpu_index()) == 0;
     }
@@ -395,7 +422,7 @@ struct mesh_topology_t {
         // The multimem extent is explicit configuration (see the parameter docs); the nesting invariants
         // are enforced by the same make_mesh_shape every hand-configured world goes through.
         if (gpus_per_multimem_domain == 0)
-            if (char const *value = std::getenv("UFORM_GPUS_PER_MULTIMEM_DOMAIN"); value != nullptr)
+            if (char const *value = std::getenv("UFORM_GPUS_PER_MULTIMEM_DOMAIN"); value != nullptr) // vendor-boundary
                 if (!parse_u32_(sz::string_view_t {value}, gpus_per_multimem_domain))
                     return expected<mesh_topology_t>::fail(
                         status_t::invalid_input_k, "$UFORM_GPUS_PER_MULTIMEM_DOMAIN is not a number: \"{}\"", value);
@@ -458,11 +485,9 @@ struct mesh_topology_t {
         return expected<mesh_topology_t> {std::move(topology)};
     }
 
-    /**
-     *  @brief Durably publish this host_domain's @p text under the exchange @p key : written to a
-     *      temporary file, @c fsync -ed, then atomically @c rename -d into place, so a peer never reads a
-     *      half-written payload. The primitive every wiring phase reuses to add payloads, not machinery.
-     */
+    /** Durably publish this host_domain's @p text under the exchange @p key : written to a
+     *  temporary file, @c fsync -ed, then atomically @c rename -d into place, so a peer never reads a
+     *  half-written payload. The primitive every wiring phase reuses to add payloads, not machinery. */
     [[nodiscard]] expected_t publish_text(sz::string_view_t key, sz::string_view_t text) const noexcept {
         if (host_domain_count() <= 1) return {};
         expected<sz::string_t> final_path = host_domain_file_path_(host_domain_index, key);
@@ -487,8 +512,8 @@ struct mesh_topology_t {
         return {};
     }
 
-    /** @brief Spin-wait (50 ms polls) until @p peer_host_domain 's payload under @p key exists, then read
-     *      it whole into @p out ; fails with the full path when @p timeout_seconds elapses first. */
+    /** Spin-wait (50 ms polls) until @p peer_host_domain 's payload under @p key exists, then read
+     *  it whole into @p out ; fails with the full path when @p timeout_seconds elapses first. */
     [[nodiscard]] expected_t await_text(u32_t peer_host_domain, sz::string_view_t key, sz::string_t &out,
                                         f64_t timeout_seconds) const noexcept {
         expected<sz::string_t> path = host_domain_file_path_(peer_host_domain, key);
@@ -514,11 +539,11 @@ struct mesh_topology_t {
         }
     }
 
-    /** @brief A filesystem barrier across every host_domain, named by @p tag , in O(host_domain_count)
-     *      file operations: a follower drops its @c <tag>.arrive marker and waits for the lead's
-     *      @c <tag>.release ; the lead collects every arrival, then publishes the release. Distinct tags
-     *      give independent barriers within one job ( @c "mesh" , @c "connected" , @c "heap" ). A
-     *      single-host_domain world returns immediately. */
+    /** A filesystem barrier across every host_domain, named by @p tag , in O(host_domain_count)
+     *  file operations: a follower drops its @c <tag>.arrive marker and waits for the lead's
+     *  @c <tag>.release ; the lead collects every arrival, then publishes the release. Distinct tags
+     *  give independent barriers within one job ( @c "mesh" , @c "connected" , @c "heap" ). A
+     *  single-host_domain world returns immediately. */
     [[nodiscard]] expected_t barrier(sz::string_view_t tag, f64_t timeout_seconds) const noexcept {
         if (host_domain_count() <= 1) return {};
         sz::string_t arrive_key, release_key;
@@ -536,14 +561,16 @@ struct mesh_topology_t {
     }
 
   private:
-    /** @brief One parsed facts payload: the decimal fields plus views @b borrowing from the payload text. */
+
+    /** One parsed facts payload: the decimal fields plus views @b borrowing from the payload text. */
     struct facts_t {
         sz::string_view_t schema {};
         sz::string_view_t job {};
         sz::string_view_t hostname {};
         sz::string_view_t device_name {};
-        /** @brief The space-separated 32-hex GPU UUIDs (one per device), borrowing from the payload text —
-         *      the physical GPU identities the lead proves disjoint across host_domains. */
+
+        /** The space-separated 32-hex GPU UUIDs (one per device), borrowing from the payload text —
+         *  the physical GPU identities the lead proves disjoint across host_domains. */
         sz::string_view_t uuids {};
         u32_t host_domain_index = 0;
         u32_t host_domain_count = 0;
@@ -551,42 +578,42 @@ struct mesh_topology_t {
         u32_t devices = 0;
     };
 
-    /** @brief One probed physical GPU identity paired with the host_domain that claims it — the flat table
-     *      the lead sorts once to prove no GPU is owned twice (an unpartitioned @c CUDA_VISIBLE_DEVICES ). */
+    /** One probed physical GPU identity paired with the host_domain that claims it — the flat table
+     *  the lead sorts once to prove no GPU is owned twice (an unpartitioned @c CUDA_VISIBLE_DEVICES ). */
     struct claimed_gpu_t {
         CUuuid uuid {};
         u32_t owner = 0;
     };
 
-    /** @brief The local hardware probe: this host_domain's published facts plus the CUDA UUIDs of its
-     *      visible GPUs — kept @b probe-local (the world table stores identity, not per-GPU uuids), fed to
-     *      @ref build_facts_ on publish and to @ref collect_world_as_lead_ for the uniqueness proof. */
+    /** The local hardware probe: this host_domain's published facts plus the CUDA UUIDs of its
+     *  visible GPUs — kept @b probe-local (the world table stores identity, not per-GPU uuids), fed to
+     *  @ref build_facts_ on publish and to @ref collect_world_as_lead_ for the uniqueness proof. */
     struct local_probe_t {
         mesh_host_domain_t facts {};
         per_gpu_array<CUuuid> uuids {};
     };
 
-    /** @brief Parse a whole decimal token; @c false on anything but a clean number. */
+    /** Parse a whole decimal token; @c false on anything but a clean number. */
     [[nodiscard]] static bool parse_u32_(sz::string_view_t token, u32_t &value) noexcept {
         std::from_chars_result const result = std::from_chars(token.data(), token.data() + token.size(), value);
         return result.ec == std::errc {} && result.ptr == token.data() + token.size();
     }
 
-    /** @brief Bounded copy of a token into a fixed char field, always NUL-terminated. */
+    /** Bounded copy of a token into a fixed char field, always NUL-terminated. */
     static void copy_token_(sz::string_view_t token, char *destination, std::size_t capacity) noexcept {
         std::size_t const count = token.size() < capacity - 1u ? token.size() : capacity - 1u;
         std::memcpy(destination, token.data(), count);
         destination[count] = '\0';
     }
 
-    /** @brief Append one GPU UUID as 32 lowercase hex characters — the wire form of a @c CUuuid . */
+    /** Append one GPU UUID as 32 lowercase hex characters — the wire form of a @c CUuuid . */
     [[nodiscard]] static bool format_uuid_(sz::string_t &text, CUuuid const &uuid) noexcept {
         bool built = true;
         for (char const byte : uuid.bytes) built = built && format_into(text, "{:02x}", static_cast<u8_t>(byte));
         return built;
     }
 
-    /** @brief Parse a 32-hex GPU UUID token back into a @c CUuuid ; @c false on any non-hex or short token. */
+    /** Parse a 32-hex GPU UUID token back into a @c CUuuid ; @c false on any non-hex or short token. */
     [[nodiscard]] static bool parse_uuid_(sz::string_view_t token, CUuuid &uuid) noexcept {
         if (token.size() != 2u * sizeof(uuid.bytes)) return false;
         for (std::size_t byte_index = 0; byte_index != sizeof(uuid.bytes); ++byte_index) {
@@ -599,9 +626,9 @@ struct mesh_topology_t {
         return true;
     }
 
-    /** @brief Probe this host_domain's own facts: hostname plus the GPU model, verified uniform across
-     *      the local devices too — the shape describes identical GPUs, and a box with mixed cards would
-     *      break every "three integers describe the world" derivation downstream. */
+    /** Probe this host_domain's own facts: hostname plus the GPU model, verified uniform across
+     *  the local devices too — the shape describes identical GPUs, and a box with mixed cards would
+     *  break every "three integers describe the world" derivation downstream. */
     [[nodiscard]] static expected<local_probe_t> probe_local_host_domain_(u32_t host_domain_index,
                                                                           u32_t device_count) noexcept {
         local_probe_t probe;
@@ -635,8 +662,8 @@ struct mesh_topology_t {
         return probe;
     }
 
-    /** @brief Assemble the line-oriented facts payload — the exact inverse of @ref parse_facts_ .
-     *      @c false only on allocation failure. */
+    /** Assemble the line-oriented facts payload — the exact inverse of @ref parse_facts_ .
+     *  @c false only on allocation failure. */
     [[nodiscard]] static bool build_facts_(sz::string_t &text, mesh_host_domain_t const &self,
                                            mesh_shape_t const &shape, sz::string_view_t job,
                                            std::span<CUuuid const> uuids) noexcept {
@@ -656,9 +683,9 @@ struct mesh_topology_t {
         return built;
     }
 
-    /** @brief Parse a line-oriented @c <key> @c <value> facts payload with the partition API — SIMD
-     *      scans, zero allocations, zero exceptions. @c false when any field is missing or malformed;
-     *      field-level agreement stays with the caller, which owns the diagnostics. */
+    /** Parse a line-oriented @c <key> @c <value> facts payload with the partition API — SIMD
+     *  scans, zero allocations, zero exceptions. @c false when any field is missing or malformed;
+     *  field-level agreement stays with the caller, which owns the diagnostics. */
     [[nodiscard]] static bool parse_facts_(sz::string_view_t payload, facts_t &facts) noexcept {
         sz::byteset_t const whitespaces = sz::whitespaces_set();
         bool index_parsed = false, count_parsed = false, multimem_parsed = false, devices_parsed = false;
@@ -679,8 +706,8 @@ struct mesh_topology_t {
                !facts.job.empty() && !facts.hostname.empty() && !facts.device_name.empty() && !facts.uuids.empty();
     }
 
-    /** @brief Assemble the manifest payload from a complete table — the exact inverse of
-     *      @ref parse_manifest_ . @c false only on allocation failure. */
+    /** Assemble the manifest payload from a complete table — the exact inverse of
+     *  @ref parse_manifest_ . @c false only on allocation failure. */
     [[nodiscard]] static bool build_manifest_(sz::string_t &text, array<mesh_host_domain_t> const &table,
                                               mesh_shape_t const &shape, sz::string_view_t job) noexcept {
         bool built = format_into(text, "schema {}\njob {}\nmultimem {}\n", mesh_schema_k, job,
@@ -692,15 +719,15 @@ struct mesh_topology_t {
         return built;
     }
 
-    /** @brief Parse and validate a whole manifest into @p table : the schema, job, and multimem header
-     *      lines must match, every row @c host_domain @c <i> @c hostname @c <h> @c devices @c <d>
-     *      @c device_name @c <m> must be well-formed and in range, and exactly @c table.size() rows must
-     *      be present. Emits no diagnostics — the caller owns the message, with the whole payload in it. */
+    /** Parse and validate a whole manifest into @p table : the schema, job, and multimem header
+     *  lines must match, every row @c host_domain @c <i> @c hostname @c <h> @c devices @c <d>
+     *  @c device_name @c <m> must be well-formed and in range, and exactly @c table.size() rows must
+     *  be present. Emits no diagnostics — the caller owns the message, with the whole payload in it. */
     [[nodiscard]] static bool parse_manifest_(sz::string_view_t payload, sz::string_view_t job,
                                               u32_t gpus_per_multimem_domain,
                                               array<mesh_host_domain_t> &table) noexcept {
-        // The partition API as a tokenizer: pop the leading space-separated token off the row.
         auto take_token = [](sz::string_view_t &row) noexcept {
+            // Pop the leading space-separated token off the row with the partition API.
             auto [token, match, rest] = row.partition(' ');
             row = rest;
             return token;
@@ -736,9 +763,9 @@ struct mesh_topology_t {
         return schema_matched && job_matched && multimem_matched && parsed_rows == table.size();
     }
 
-    /** @brief The lead's half of the exchange: read every peer's facts, validate agreement against this
-     *      host_domain's own @p probed facts and the world @ref shape , fill @ref host_domains , and
-     *      publish the merged manifest. */
+    /** The lead's half of the exchange: read every peer's facts, validate agreement against this
+     *  host_domain's own @p probed facts and the world @ref shape , fill @ref host_domains , and
+     *  publish the merged manifest. */
     [[nodiscard]] expected_t collect_world_as_lead_(sz::string_view_t job, local_probe_t const &probed,
                                                     f64_t timeout_seconds) noexcept {
         mesh_host_domain_t const &self = probed.facts;
@@ -831,8 +858,8 @@ struct mesh_topology_t {
         return publish_text("manifest", manifest.view());
     }
 
-    /** @brief A follower's half of the exchange: read the lead's manifest, adopt the world table, and
-     *      verify the row describing this host_domain agrees with the local @p probed facts. */
+    /** A follower's half of the exchange: read the lead's manifest, adopt the world table, and
+     *  verify the row describing this host_domain agrees with the local @p probed facts. */
     [[nodiscard]] expected_t adopt_manifest_(sz::string_view_t job, mesh_host_domain_t const &probed,
                                              f64_t timeout_seconds) noexcept {
         sz::string_t manifest;
@@ -848,7 +875,7 @@ struct mesh_topology_t {
         return {};
     }
 
-    /** @brief The @c <exchange_directory>/host_domain<N>.<key> path of one host_domain's payload. */
+    /** The @c <exchange_directory>/host_domain<N>.<key> path of one host_domain's payload. */
     [[nodiscard]] expected<sz::string_t> host_domain_file_path_(u32_t host_domain,
                                                                 sz::string_view_t key) const noexcept {
         sz::string_t path;
@@ -857,17 +884,17 @@ struct mesh_topology_t {
         return expected<sz::string_t> {std::move(path)};
     }
 
-    /** @brief The 50 ms exchange poll interval — long enough to spare the shared filesystem, short enough
-     *      that a once-per-job wait never registers. */
+    /** The 50 ms exchange poll interval — long enough to spare the shared filesystem, short enough
+     *  that a once-per-job wait never registers. */
     static void sleep_briefly_() noexcept { std::this_thread::sleep_for(std::chrono::milliseconds {50}); }
 };
 
-/** @brief This host_domain's index in the world, read from whichever launcher spawned the process —
- *      @c $UFORM_HOST_DOMAIN_INDEX , then Slurm's @c $SLURM_NODEID , then Open MPI's
- *      @c $OMPI_COMM_WORLD_RANK ; 0 if none is set. Reading the launcher's environment costs nothing and
- *      links nothing — no MPI library enters the build. Identity only: it selects @b which host_domain,
- *      never a count — the counts are explicit @ref mesh_topology_t::bootstrap arguments, so a
- *      misconfigured launcher cannot change the math. */
+/** This host_domain's index in the world, read from whichever launcher spawned the process —
+ *  @c $UFORM_HOST_DOMAIN_INDEX , then Slurm's @c $SLURM_NODEID , then Open MPI's
+ *  @c $OMPI_COMM_WORLD_RANK ; 0 if none is set. Reading the launcher's environment costs nothing and
+ *  links nothing — no MPI library enters the build. Identity only: it selects @b which host_domain,
+ *  never a count — the counts are explicit @ref mesh_topology_t::bootstrap arguments, so a
+ *  misconfigured launcher cannot change the math. */
 [[nodiscard]] inline u32_t host_domain_index_from_environment() noexcept {
     // `std::getenv` speaks C strings; the names never escape this loop.
     char const *const variables[] = {"UFORM_HOST_DOMAIN_INDEX", "SLURM_NODEID", // vendor-boundary
@@ -878,11 +905,11 @@ struct mesh_topology_t {
     return 0u;
 }
 
-/** @brief The world's host_domain count, read at the @b launcher boundary — @c $UFORM_HOST_DOMAIN_COUNT ,
- *      then Slurm's @c $SLURM_JOB_NUM_NODES , then Open MPI's @c $OMPI_COMM_WORLD_SIZE ; 1 if none is
- *      set. For the mains alone, which pass the count on as @ref mesh_topology_t::bootstrap 's explicit
- *      argument — bootstrap itself never reads it, so a misconfigured launcher cannot change the math
- *      behind an already-constructed world. The whole contract is tabled in @c ENVIRONMENT.md . */
+/** The world's host_domain count, read at the @b launcher boundary — @c $UFORM_HOST_DOMAIN_COUNT ,
+ *  then Slurm's @c $SLURM_JOB_NUM_NODES , then Open MPI's @c $OMPI_COMM_WORLD_SIZE ; 1 if none is
+ *  set. For the mains alone, which pass the count on as @ref mesh_topology_t::bootstrap 's explicit
+ *  argument — bootstrap itself never reads it, so a misconfigured launcher cannot change the math
+ *  behind an already-constructed world. The whole contract is tabled in @c ENVIRONMENT.md . */
 [[nodiscard]] inline u32_t host_domain_count_from_environment() noexcept {
     // `std::getenv` speaks C strings; the names never escape this loop.
     char const *const variables[] = {"UFORM_HOST_DOMAIN_COUNT", "SLURM_JOB_NUM_NODES", // vendor-boundary

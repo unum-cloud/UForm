@@ -55,10 +55,10 @@ Sadly, Apple's scheduler is not always optimal, and it might be beneficial to sp
 
 | Model               | GPU Text E. | ANE Text E. | GPU Image E. | ANE Image E. |
 | :------------------ | ----------: | ----------: | -----------: | -----------: |
-| `english-small`     |     2.53 ms |     0.53 ms |      6.57 ms |      1.23 ms |
-| `english-base`      |     2.54 ms |     0.61 ms |     18.90 ms |      3.79 ms |
-| `english-large`     |     2.30 ms |     0.61 ms |     79.68 ms |     20.94 ms |
-| `multilingual-base` |     2.34 ms |     0.50 ms |     18.98 ms |      3.77 ms |
+| `english-small`     | 2.53 ms     | 0.53 ms     | 6.57 ms      | 1.23 ms      |
+| `english-base`      | 2.54 ms     | 0.61 ms     | 18.90 ms     | 3.79 ms      |
+| `english-large`     | 2.30 ms     | 0.61 ms     | 79.68 ms     | 20.94 ms     |
+| `multilingual-base` | 2.34 ms     | 0.50 ms     | 18.98 ms     | 3.77 ms      |
 
 > On Apple M4 iPad, running iOS 18.2.
 > Batch size is 1, and the model is pre-loaded into memory.

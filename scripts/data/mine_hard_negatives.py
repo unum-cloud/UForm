@@ -249,7 +249,9 @@ def mine_one_shard(
         key_column: Stable per-row identifier column (cocoid / video_id).
         is_video: When `True`, decode the first frame of each MP4 instead of as image.
         k: Number of hard negatives per row.
-        model / processor / decode_pool: Pre-loaded CLIP encoder and decode pool.
+        model: Pre-loaded CLIP encoder.
+        processor: Pre-loaded CLIP processor.
+        decode_pool: Pre-loaded media decode pool.
         overwrite: When `False`, skip shards that already have a `negative_indices` column.
     """
     decode_fn = _decode_video_first_frame if is_video else _decode_image
@@ -305,7 +307,8 @@ def mine_one_shard(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Mine K hard negatives per row via CLIP within-shard kNN.")
+    """Mine hard negatives for every shard of the selected corpus."""
+    parser =argparse.ArgumentParser(description="Mine K hard negatives per row via CLIP within-shard kNN.")
     parser.add_argument(
         "--corpus", required=True, choices=("coco_captions", "msrvtt_captions"), help="Registered corpus name to mine."
     )

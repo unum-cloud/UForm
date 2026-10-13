@@ -288,7 +288,8 @@ def download(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
+    """Download DiDeMo and repack it, or repack the single shard named by the hidden worker flags."""
+    parser =argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
     parser.add_argument(
         "--data-root",
         default=DEFAULT_DATA_ROOT,

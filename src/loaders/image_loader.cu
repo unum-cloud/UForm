@@ -1,20 +1,21 @@
 /**
- *  @brief The Parquet image loader's bodies and kernels — see the header for the contract. Its shape
- *      mirrors @c tokens_loader.cu : a keyed file pick, one pooled reservoir, a keyed row draw, then a
- *      per-batch decode. The decode is the shared @ref decode_images : JPEG rows through the @ref
- *      nvjpeg_session_t straight off the reservoir tape, PNG/WebP rows on the CPU pool, then one NPP batch
- *      crops each to its factor-pair aspect and resizes it into the batch's shared patch grid.
+ *  @brief The Parquet image loader's bodies and kernels — see the header for the contract.
  *  @file src/loaders/image_loader.cu
  *  @author Ash Vardanian
  *  @date July 4, 2026
+ *
+ *  Its shape mirrors @c tokens_loader.cu : a keyed file pick, one pooled reservoir, a keyed row draw, then a
+ *  per-batch decode. The decode is the shared @ref decode_images : JPEG rows through the
+ *  @ref nvjpeg_session_t straight off the reservoir tape, PNG/WebP rows on the CPU pool, then one NPP batch
+ *  crops each to its factor-pair aspect and resizes it into the batch's shared patch grid.
  */
 #include <cstdio>  // `FILE` — jpeglib.h's `jpeg_stdio_*` declarations need it in scope
 #include <cstring> // `std::memcpy` — the unaligned load behind `load_big_endian_`
 
+#include <unistd.h> // `::write`, `STDERR_FILENO` — the triage-drop diagnostic
+
 #include <bit>       // `std::byteswap`, `std::endian`
 #include <algorithm> // `std::upper_bound`, `std::find`, `std::min`, `std::max`
-
-#include <unistd.h> // `::write`, `STDERR_FILENO` — the triage-drop diagnostic
 
 #include <nvjpeg.h>                   // vendor-boundary: device-native batched JPEG decode
 #include <nppi_geometry_transforms.h> // vendor-boundary: batched crop+resize
@@ -33,42 +34,46 @@ using namespace ul;
 
 namespace fu = ashvardanian::forkunion;
 
-/** @brief Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
- *      decorrelated under one @c (seed,step,rank) — the same salts the tokens loader uses. */
+/** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
+ *  decorrelated under one @c (seed,step,rank) — the same salts the tokens loader uses. */
 inline constexpr u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
 inline constexpr u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
 
-/** @brief Header bytes gathered per drawn blob — enough for the magic sniff and the dimension parse (JPEG
- *      start-of-frame, PNG IHDR, WebP VP8 header) without lifting the whole compressed blob. One device
- *      gather kernel packs these prefixes contiguously so the whole triage reads back in a single D2H. */
+/** Header bytes gathered per drawn blob — enough for the magic sniff and the dimension parse (JPEG
+ *  start-of-frame, PNG IHDR, WebP VP8 header) without lifting the whole compressed blob. One device
+ *  gather kernel packs these prefixes contiguously so the whole triage reads back in a single D2H. */
 inline constexpr std::size_t header_probe_bytes_k = 1u << 12;
-/** @brief The channels every decoded pixel carries — interleaved RGBA. JPEG has no alpha (the hardware
- *      nvJPEG path decodes RGB, then @ref rgb_to_rgba_kernel_ pads a constant @c 255 ; libjpeg-turbo's CPU
- *      fallback emits @c JCS_EXT_RGBA directly), while PNG / WebP carry a real alpha through @ref cpu_decode_ . */
+
+/** The channels every decoded pixel carries — interleaved RGBA. JPEG has no alpha (the hardware
+ *  nvJPEG path decodes RGB, then @ref rgb_to_rgba_kernel_ pads a constant @c 255 ; libjpeg-turbo's CPU
+ *  fallback emits @c JCS_EXT_RGBA directly), while PNG / WebP carry a real alpha through @ref cpu_decode_ . */
 inline constexpr u32_t image_channels_k = 4u;
 
-/** @brief The compressed formats a drawn blob can be, decided by its magic bytes. */
+/** The compressed formats a drawn blob can be, decided by its magic bytes. */
 enum image_format_t : u8_t { format_jpeg_k = 0, format_png_k = 1, format_webp_k = 2, format_unknown_k = 3 };
 
-/** @brief The @c (rows,cols) factorization of the patch budget one image tiles into — the per-image column
- *      sub-budget the segment cursor lays down and the resize/tile scatter read. */
+/** The @c (rows,cols) factorization of the patch budget one image tiles into — the per-image column
+ *  sub-budget the segment cursor lays down and the resize/tile scatter read. */
 struct patch_grid_t {
-    /** @brief The patch rows the image tiles into. */
+
+    /** The patch rows the image tiles into. */
     u16_t rows;
-    /** @brief The patch columns the image tiles into. */
+
+    /** The patch columns the image tiles into. */
     u16_t cols;
 };
 
 /**
  *  @brief Write the batch's segment geometry under the token-cursor model: each drawn image is @b one segment
  *      occupying its own column sub-budget ( @c patch_rows·patch_cols , taken from its host-computed
- *      @p grids factorization), and several images pack into one row. Thread 0 walks the segments serially — a
- *      strict scan — jumping the cursor past a row boundary a segment would cross (never crossing a row),
- *      dropping loudly (zero length) any segment that would overflow the @c rows·columns grid, and tagging
- *      each placed live segment @c image_k (a dropped one PADs to @c text_k , length 0). It also lands each live
- *      segment's @c (patch_rows,patch_cols) into
- *      @p image_shapes on the device — the descriptors are arena (device) memory, so the loader never writes
- *      them from the host. Segments past @p live_images PAD: zero length, repeated offset, @c text_k .
+ *      @p grids factorization), and several images pack into one row.
+ *
+ *  Thread 0 walks the segments serially — a strict scan — jumping the cursor past a row boundary a segment
+ *  would cross (never crossing a row), dropping loudly (zero length) any segment that would overflow the
+ *  @c rows·columns grid, and tagging each placed live segment @c image_k (a dropped one PADs to @c text_k ,
+ *  length 0). It also lands each live segment's @c (patch_rows,patch_cols) into @p image_shapes on the
+ *  device — the descriptors are arena (device) memory, so the loader never writes them from the host.
+ *  Segments past @p live_images PAD: zero length, repeated offset, @c text_k .
  *
  *  __grid_size__ @c [1,1,1] , one thread live; no dynamic shared memory.
  */
@@ -104,12 +109,14 @@ static __global__ void image_segments_kernel_(patch_grid_t const *grids, u32_t l
     segment_offsets[total_segments] = cursor;
 }
 
-/** @brief One image's header-gather descriptor: where its compressed bytes start in the device tape and how
- *      many of them (capped at the probe size) to lift. */
+/** One image's header-gather descriptor: where its compressed bytes start in the device tape and how
+ *  many of them (capped at the probe size) to lift. */
 struct gather_entry_t {
-    /** @brief Where the image's compressed bytes start in the device tape. */
+
+    /** Where the image's compressed bytes start in the device tape. */
     u8_t const *source;
-    /** @brief How many of them (capped at the probe size) to lift. */
+
+    /** How many of them (capped at the probe size) to lift. */
     u32_t length;
 };
 
@@ -129,29 +136,33 @@ static __global__ void gather_headers_kernel_(gather_entry_t const *entries, u8_
     }
 }
 
-/** @brief A decoded image's pixel dimensions — a size travels as one value, not two loose scalars. */
+/** A decoded image's pixel dimensions — a size travels as one value, not two loose scalars. */
 struct image_extent_t {
-    /** @brief The image's pixel width. */
+
+    /** The image's pixel width. */
     u32_t width = 0;
-    /** @brief The image's pixel height. */
+
+    /** The image's pixel height. */
     u32_t height = 0;
 };
 
-/** @brief One compressed blob's triage — its format and native pixel extent. */
+/** One compressed blob's triage — its format and native pixel extent. */
 struct image_probe_t {
-    /** @brief The compressed format decided by the blob's magic bytes. */
+
+    /** The compressed format decided by the blob's magic bytes. */
     image_format_t format = format_unknown_k;
-    /** @brief The native pixel extent parsed from the blob's header. */
+
+    /** The native pixel extent parsed from the blob's header. */
     image_extent_t extent {};
 };
 
-/** @brief A writable @b [height,width,channels] view of one decoded image — the CPU decode's destination,
- *      sliced out of a per-fill pixel heap. */
+/** A writable @b [height,width,channels] view of one decoded image — the CPU decode's destination,
+ *  sliced out of a per-fill pixel heap. */
 using pixel_image_span_t = nk::tensor_span<pixel_t, 3>;
 
-/** @brief Load a big-endian unsigned integer from @p bytes — one unaligned load, then @ref std::byteswap on a
- *      little-endian host. Host-only (the parsers run on the CPU after the header gather); a device sniff
- *      would need a byte-shift twin. */
+/** Load a big-endian unsigned integer from @p bytes — one unaligned load, then @ref std::byteswap on a
+ *  little-endian host. Host-only (the parsers run on the CPU after the header gather); a device sniff
+ *  would need a byte-shift twin. */
 template <typename integer_type_>
 [[nodiscard]] static integer_type_ load_big_endian_(u8_t const *bytes) noexcept {
     integer_type_ value;
@@ -160,8 +171,8 @@ template <typename integer_type_>
     return value;
 }
 
-/** @brief Sniff a blob's compressed format from its leading bytes — JPEG @c FFD8FF , PNG @c 89504E47 ,
- *      WebP @c "RIFF"…"WEBP" ; anything else is unknown and fails the fill loudly. */
+/** Sniff a blob's compressed format from its leading bytes — JPEG @c FFD8FF , PNG @c 89504E47 ,
+ *  WebP @c "RIFF"…"WEBP" ; anything else is unknown and fails the fill loudly. */
 [[nodiscard]] static image_format_t sniff_format_(sz::string_view_t encoded) noexcept {
     u8_t const *const bytes = reinterpret_cast<u8_t const *>(encoded.data());
     std::size_t const size = encoded.size();
@@ -173,9 +184,9 @@ template <typename integer_type_>
     return format_unknown_k;
 }
 
-/** @brief A JPEG's pixel extent, scanned from its markers for a start-of-frame (SOFn): after the 2-byte
- *      segment length come precision, then height and width as big-endian UInt16. Only the frame headers
- *      (@c C0..CF except DHT @c C4 , JPG @c C8 , DAC @c CC ) carry them. */
+/** A JPEG's pixel extent, scanned from its markers for a start-of-frame (SOFn): after the 2-byte
+ *  segment length come precision, then height and width as big-endian UInt16. Only the frame headers
+ *  carry them ( @c C0..CF except DHT @c C4 , JPG @c C8 , DAC @c CC ). */
 [[nodiscard]] static expected<image_extent_t> jpeg_dimensions_(sz::string_view_t encoded) noexcept {
     u8_t const *const bytes = reinterpret_cast<u8_t const *>(encoded.data());
     std::size_t const size = encoded.size();
@@ -197,8 +208,8 @@ template <typename integer_type_>
     return expected<image_extent_t>::fail(status_t::invalid_input_k, "no JPEG start-of-frame in the header prefix");
 }
 
-/** @brief A PNG's pixel extent from its IHDR — width and height are big-endian UInt32 at byte offsets 16 and
- *      20 of the signature+IHDR prologue. */
+/** A PNG's pixel extent from its IHDR — width and height are big-endian UInt32 at byte offsets 16 and
+ *  20 of the signature+IHDR prologue. */
 [[nodiscard]] static expected<image_extent_t> png_dimensions_(sz::string_view_t encoded) noexcept {
     u8_t const *const bytes = reinterpret_cast<u8_t const *>(encoded.data());
     if (encoded.size() < 24)
@@ -209,8 +220,8 @@ template <typename integer_type_>
     return image_extent_t {width, height};
 }
 
-/** @brief A WebP's pixel extent — the container's canvas size via libwebp's header parser (a device-side
- *      parse is a follow-up once the whole sniff moves onto the GPU). */
+/** A WebP's pixel extent — the container's canvas size via libwebp's header parser (a device-side
+ *  parse is a follow-up once the whole sniff moves onto the GPU). */
 [[nodiscard]] static expected<image_extent_t> webp_dimensions_(sz::string_view_t encoded) noexcept {
     int width = 0, height = 0;
     if (WebPGetInfo(reinterpret_cast<u8_t const *>(encoded.data()), encoded.size(), &width, &height) == 0)
@@ -218,8 +229,8 @@ template <typename integer_type_>
     return image_extent_t {static_cast<u32_t>(width), static_cast<u32_t>(height)};
 }
 
-/** @brief Triage one compressed blob — its format (magic bytes) and native extent (format-specific header
- *      parse). The one call the loader's triage and, later, the GPU sniff kernel share. */
+/** Triage one compressed blob — its format (magic bytes) and native extent (format-specific header
+ *  parse). The one call the loader's triage and, later, the GPU sniff kernel share. */
 [[nodiscard]] static expected<image_probe_t> probe_image_(sz::string_view_t encoded) noexcept {
     image_format_t const format = sniff_format_(encoded);
     if (format == format_unknown_k)
@@ -231,9 +242,9 @@ template <typename integer_type_>
     return image_probe_t {format, extent.value_};
 }
 
-/** @brief The factor pair of @p num_patches whose @c cols/rows aspect is nearest @p extent 's, clamped to the
- *      @c [1×num_patches,num_patches×1] the budget allows — every image is exactly @p num_patches patches, so
- *      its rectangle rides the coordinates without a crop toward a square. */
+/** The factor pair of @p num_patches whose @c cols/rows aspect is nearest @p extent 's, clamped to the
+ *  @c [1×num_patches,num_patches×1] the budget allows — every image is exactly @p num_patches patches, so
+ *  its rectangle rides the coordinates without a crop toward a square. */
 [[nodiscard]] static patch_grid_t factor_pair_(image_extent_t extent, u32_t num_patches) noexcept {
     f64_t const target = static_cast<f64_t>(extent.width) / static_cast<f64_t>(std::max<u32_t>(extent.height, 1u));
     u32_t best_rows = 1, best_cols = num_patches;
@@ -248,12 +259,12 @@ template <typename integer_type_>
     return patch_grid_t {static_cast<u16_t>(best_rows), static_cast<u16_t>(best_cols)};
 }
 
-/** @brief One image's column budget — how many grid cells (patches) it earns from its native resolution, so a
- *      bigger image packs more patches and several small images share a row. The native patch count (the
- *      @c patch_size²-tiles that cover the source, ceiled per axis) is rounded @b up to a multiple of the
- *      floor budget for a divisor-friendly @ref factor_pair_ , then clamped to
- *      @c [max_columns/max_segments,max_columns] . Monotonic in resolution and bounded so at most
- *      @c max_segments images fill one row; the whole policy lives here and nowhere else. */
+/** One image's column budget — how many grid cells (patches) it earns from its native resolution, so a
+ *  bigger image packs more patches and several small images share a row. The native patch count (the
+ *  @c patch_size²-tiles that cover the source, ceiled per axis) is rounded @b up to a multiple of the
+ *  floor budget for a divisor-friendly @ref factor_pair_ , then clamped to
+ *  @c [max_columns/max_segments,max_columns] . Monotonic in resolution and bounded so at most
+ *  @c max_segments images fill one row; the whole policy lives here and nowhere else. */
 [[nodiscard]] static u32_t column_budget_(image_extent_t native, u32_t patch_size, u32_t max_columns,
                                           u32_t max_segments) noexcept {
     u32_t const floor_budget = std::max<u32_t>(1u, max_columns / std::max<u32_t>(max_segments, 1u));
@@ -264,8 +275,8 @@ template <typename integer_type_>
     return std::min<u32_t>(std::max<u32_t>(rounded, floor_budget), max_columns);
 }
 
-/** @brief The largest 1/2ᵏ (k≤3) nvJPEG scale whose decoded extent still covers @p target — decode as small
- *      as possible without dropping below the resize target, so the crop-resize only downsamples. */
+/** The largest 1/2ᵏ (k≤3) nvJPEG scale whose decoded extent still covers @p target — decode as small
+ *  as possible without dropping below the resize target, so the crop-resize only downsamples. */
 [[nodiscard]] static nvjpegScaleFactor_t pick_scale_(image_extent_t native, image_extent_t target) noexcept {
     u32_t level = 0;
     while (level < 3 && (native.width >> (level + 1)) >= target.width &&
@@ -274,15 +285,15 @@ template <typename integer_type_>
     return static_cast<nvjpegScaleFactor_t>(level);
 }
 
-/** @brief nvJPEG's decoded extent for a 1/2ᵏ scale — a ceiling division per axis matching the library's
- *      rounding. */
+/** nvJPEG's decoded extent for a 1/2ᵏ scale — a ceiling division per axis matching the library's
+ *  rounding. */
 [[nodiscard]] static image_extent_t scaled_extent_(image_extent_t extent, nvjpegScaleFactor_t scale) noexcept {
     u32_t const factor = 1u << static_cast<u32_t>(scale);
     return image_extent_t {(extent.width + factor - 1u) / factor, (extent.height + factor - 1u) / factor};
 }
 
-/** @brief The centered source crop of @p source matching @p target 's aspect — the largest rectangle of that
- *      aspect that fits, so the resize that follows never stretches. */
+/** The centered source crop of @p source matching @p target 's aspect — the largest rectangle of that
+ *  aspect that fits, so the resize that follows never stretches. */
 [[nodiscard]] static NppiRect center_crop_(image_extent_t source, image_extent_t target) noexcept {
     NppiRect rect {};
     // Compare source aspect to target aspect via cross-multiplication (no division, no rounding drift).
@@ -300,12 +311,12 @@ template <typename integer_type_>
 }
 
 /** Decode one CPU-routed blob (PNG / WebP / progressive-or-rejected JPEG) into @p destination as
- *      interleaved RGBA at its @b [height,width,channels(4)] extent — PNG / WebP carry a real alpha, a JPEG
- *      (no alpha) fills a constant @c 255 via libjpeg-turbo's @c JCS_EXT_RGBA . When a rejected JPEG's
- *      destination is smaller than its native size (a hardware plan that scaled it), libjpeg's 1/2ᵏ DCT scaling
- *      lands the decode exactly on @p destination , so it still fits its @c decoded -sized scratch region. Runs
- *      in a @c forkunion worker, so it hands back a bare @ref status_t ( @c invalid_input_k on a corrupt
- *      bitstream) — no diagnostic to carry there. */
+ *  interleaved RGBA at its @b [height,width,channels(4)] extent — PNG / WebP carry a real alpha, a JPEG
+ *  (no alpha) fills a constant @c 255 via libjpeg-turbo's @c JCS_EXT_RGBA . When a rejected JPEG's
+ *  destination is smaller than its native size (a hardware plan that scaled it), libjpeg's 1/2ᵏ DCT scaling
+ *  lands the decode exactly on @p destination , so it still fits its @c decoded -sized scratch region. Runs
+ *  in a @c forkunion worker, so it hands back a bare @ref status_t ( @c invalid_input_k on a corrupt
+ *  bitstream) — no diagnostic to carry there. */
 [[nodiscard]] static status_t cpu_decode_(image_format_t format, sz::string_view_t encoded,
                                           pixel_image_span_t destination) noexcept {
     u8_t const *const bytes = reinterpret_cast<u8_t const *>(encoded.data());
@@ -339,7 +350,7 @@ template <typename integer_type_>
     }
     info.out_color_space = JCS_EXT_RGBA;
     // The hardware plan may have scaled this JPEG down; pick the 1/2ᵏ DCT scaling that lands exactly on the
-    // destination extent so a rejected-batch fallback still fits its @c decoded -sized scratch region.
+    // destination extent so a rejected-batch fallback still fits its `decoded`-sized scratch region.
     for (unsigned denom = 1; denom <= 8; denom *= 2) {
         info.scale_num = 1;
         info.scale_denom = denom;
@@ -360,44 +371,56 @@ template <typename integer_type_>
 
 /**
  *  @brief Where one plan's pixels are decoded — the single knob that routes the JPEG-device vs CPU-fallback
- *      split. The invariant lives here and nowhere else: a plan is @c jpeg_device_k iff its format is JPEG @b and
- *      the device batch was accepted; every other plan (PNG / WebP from the start, or a JPEG whose batch nvJPEG
- *      rejected) is @c cpu_fallback_k . @ref triage_images_ sets the format-driven default, and a rejected batch
- *      flips its every JPEG entry to @c cpu_fallback_k in @ref decode_jpeg_plans_ — at the @c decoded scale
- *      already chosen, so the CPU decode fills the very same @c decoded -sized scratch region. @ref
- *      decode_cpu_plans_ then decodes exactly the @c cpu_fallback_k plans. A named route, never a bool.
+ *      split.
+ *
+ *  The invariant lives here and nowhere else: a plan is @c jpeg_device_k iff its format is JPEG @b and
+ *  the device batch was accepted; every other plan (PNG / WebP from the start, or a JPEG whose batch nvJPEG
+ *  rejected) is @c cpu_fallback_k . @ref triage_images_ sets the format-driven default, and a rejected batch
+ *  flips its every JPEG entry to @c cpu_fallback_k in @ref decode_jpeg_plans_ — at the @c decoded scale
+ *  already chosen, so the CPU decode fills the very same @c decoded -sized scratch region.
+ *  @ref decode_cpu_plans_ then decodes exactly the @c cpu_fallback_k plans. A named route, never a bool.
  */
 enum class route_t : u8_t {
-    /** @brief Decoded device-native through nvJPEG's batched engine (an accepted JPEG batch). */
+
+    /** Decoded device-native through nvJPEG's batched engine (an accepted JPEG batch). */
     jpeg_device_k = 0,
-    /** @brief Decoded on the CPU pool — PNG / WebP, or a JPEG the device batch rejected. */
+
+    /** Decoded on the CPU pool — PNG / WebP, or a JPEG the device batch rejected. */
     cpu_fallback_k = 1,
-    /** @brief Unprobeable at triage (unrecognized magic, a header prefix swallowed by oversized
-     *      metadata, a truncated blob) — decodes nothing and PADs its segment through the zero grid,
-     *      the same containment the overflow drop has. */
+
+    /** Unprobeable at triage (unrecognized magic, a header prefix swallowed by oversized
+     *  metadata, a truncated blob) — decodes nothing and PADs its segment through the zero grid,
+     *  the same containment the overflow drop has. */
     dropped_k = 2,
 };
 
-/** @brief One drawn image's decode plan: its format and native size, the size it actually decodes to in the
- *      scratch (scaled for a hardware JPEG, native otherwise), that image's byte offset, the target patch
- *      factorization, the nvJPEG scale, and which road it decodes on. */
+/** One drawn image's decode plan: its format and native size, the size it actually decodes to in the
+ *  scratch (scaled for a hardware JPEG, native otherwise), that image's byte offset, the target patch
+ *  factorization, the nvJPEG scale, and which road it decodes on. */
 struct image_plan_t {
-    /** @brief The compressed format decided by the blob's magic bytes. */
+
+    /** The compressed format decided by the blob's magic bytes. */
     image_format_t format = format_unknown_k;
-    /** @brief The image's full encoded resolution, read from its header. */
+
+    /** The image's full encoded resolution, read from its header. */
     image_extent_t native {};
-    /** @brief What actually lands in the scratch and sizes its RGBA region: @c native , or shrunk by the decode
-     *      scale for a JPEG (nvJPEG's hardware scale, or libjpeg's scaled fallback) — the NPP resize's input. */
+
+    /** What actually lands in the scratch and sizes its RGBA region: @c native , or shrunk by the decode
+     *  scale for a JPEG (nvJPEG's hardware scale, or libjpeg's scaled fallback) — the NPP resize's input. */
     image_extent_t decoded {};
-    /** @brief This image's byte offset into the @c decoded -sized RGBA scratch. */
+
+    /** This image's byte offset into the @c decoded -sized RGBA scratch. */
     std::size_t scratch_offset = 0;
-    /** @brief The target patch factorization the resize/tile scatter honors. */
+
+    /** The target patch factorization the resize/tile scatter honors. */
     patch_grid_t grid {};
-    /** @brief The decode scale — NONE unless a JPEG shrinks toward its target (nvJPEG hardware or libjpeg
-     *      fallback); a @c decoded -shrinking scale the CPU fallback honors so its output still fits the region. */
+
+    /** The decode scale — NONE unless a JPEG shrinks toward its target (nvJPEG hardware or libjpeg
+     *  fallback); a @c decoded -shrinking scale the CPU fallback honors so its output still fits the region. */
     nvjpegScaleFactor_t scale = NVJPEG_SCALE_NONE;
-    /** @brief Which road the image decodes on — its format-driven default, flipped to @c cpu_fallback_k for a
-     *      JPEG whose device batch was rejected (see @ref route_t for the invariant). */
+
+    /** Which road the image decodes on — its format-driven default, flipped to @c cpu_fallback_k for a
+     *  JPEG whose device batch was rejected (see @ref route_t for the invariant). */
     route_t route = route_t::cpu_fallback_k;
 };
 
@@ -481,8 +504,8 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
     return outcome;
 }
 
-/** @brief Fill an @c NppStreamContext from the driver — NPP needs the device's launch limits, which come
- *      from @c cuDeviceGetAttribute (no CUDA Runtime), and the driver stream cast to @c cudaStream_t . */
+/** Fill an @c NppStreamContext from the driver — NPP needs the device's launch limits, which come
+ *  from @c cuDeviceGetAttribute (no CUDA Runtime), and the driver stream cast to @c cudaStream_t . */
 [[nodiscard]] static expected<NppStreamContext> npp_context_(gpu_stream_t const &stream) noexcept {
     using result_t = expected<NppStreamContext>;
     NppStreamContext context {};
@@ -509,13 +532,13 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
     return result_t {context};
 }
 
-/** @brief Triage every drawn blob on the host: sniff its format and native size off a header prefix, derive
- *      its column budget (from native resolution, clamped so many images share a row) and its factor pair
- *      (left in @c plan.grid , landed device-side later by @ref image_segments_kernel_ ) and — for a hardware
- *      JPEG — its decode scale, and lay out the @c decoded -sized RGBA scratch regions (a scaled hardware JPEG
- *      needs only its shrunk pixels; a CPU-fallback plan's @c decoded equals its native size). @p tape slices
- *      the reservoir (device bytes, host offsets) via @c tape[row] . Returns the scratch byte total. One
- *      header-prefix hop, one sync. */
+/** Triage every drawn blob on the host: sniff its format and native size off a header prefix, derive
+ *  its column budget (from native resolution, clamped so many images share a row) and its factor pair
+ *  (left in @c plan.grid , landed device-side later by @ref image_segments_kernel_ ) and — for a hardware
+ *  JPEG — its decode scale, and lay out the @c decoded -sized RGBA scratch regions (a scaled hardware JPEG
+ *  needs only its shrunk pixels; a CPU-fallback plan's @c decoded equals its native size). @p tape slices
+ *  the reservoir (device bytes, host offsets) via @c tape[row] . Returns the scratch byte total. One
+ *  header-prefix hop, one sync. */
 [[nodiscard]] static expected<std::size_t> triage_images_(bool hardware, column_view_t tape,
                                                           std::span<u64_t const> drawn_rows, u32_t patch_size,
                                                           u32_t max_columns, u32_t max_segments,
@@ -577,12 +600,12 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
         plan.format = probed.value_.format;
         plan.native = probed.value_.extent;
         // The image's column budget is native-resolution driven, then factored toward its aspect. The grid
-        // lands in @c image_shapes on the device (via the segment kernel), never host-written to arena memory.
+        // lands in `image_shapes` on the device (via the segment kernel), never host-written to arena memory.
         u32_t const budget = column_budget_(plan.native, patch_size, max_columns, max_segments);
         plan.grid = factor_pair_(plan.native, budget);
-        // The RGBA scratch region is sized by @c decoded , not @c native : a hardware JPEG shrinks toward its
+        // The RGBA scratch region is sized by `decoded`, not `native`: a hardware JPEG shrinks toward its
         // target at decode (down to ~1/64 the pixels), so a native region would over-allocate up to 64x. A CPU
-        // fallback plan (PNG / WebP, or a rejected JPEG) keeps @c decoded == @c native , so it still fits.
+        // fallback plan (PNG / WebP, or a rejected JPEG) keeps `decoded == native`, so it still fits.
         image_extent_t const target {u32_t(plan.grid.cols) * patch_size, u32_t(plan.grid.rows) * patch_size};
         bool const jpeg = plan.format == format_jpeg_k;
         plan.route = jpeg ? route_t::jpeg_device_k : route_t::cpu_fallback_k;
@@ -594,14 +617,17 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
     return result_t {scratch_bytes};
 }
 
-/** @brief One JPEG entry's RGB→RGBA expansion: the packed @b [pixels,3] nvJPEG output and its @b [pixels,4]
- *      destination in the RGBA scratch, both contiguous (packed per row), so pixel @c p maps @c 3p→4p . */
+/** One JPEG entry's RGB → RGBA expansion: the packed @b [pixels,3] nvJPEG output and its @b [pixels,4]
+ *  destination in the RGBA scratch, both contiguous (packed per row), so pixel @c p maps @c 3p → 4p . */
 struct rgba_expand_entry_t {
-    /** @brief The packed @b [pixels,3] nvJPEG RGB output to widen. */
+
+    /** The packed @b [pixels,3] nvJPEG RGB output to widen. */
     u8_t const *rgb;
-    /** @brief The packed @b [pixels,4] RGBA scratch destination. */
+
+    /** The packed @b [pixels,4] RGBA scratch destination. */
     u8_t *rgba;
-    /** @brief The pixel count shared by both, so pixel @c p maps @c 3p→4p . */
+
+    /** The pixel count shared by both, so pixel @c p maps @c 3p → 4p . */
     u32_t pixels;
 };
 
@@ -624,10 +650,10 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
     }
 }
 
-/** @brief Decode the plan's JPEG rows through @p jpeg into a packed RGB scratch, then widen each into its RGBA
- *      scratch region ( @ref rgb_to_rgba_kernel_ , alpha @c=255 ) — nvJPEG emits no alpha. A rejected batch is
- *      not fatal: every JPEG entry flips to @c route_t::cpu_fallback_k keeping its scaled @c decoded extent, so
- *      the CPU fallback shrinks to the same @c decoded -sized scratch region it would have filled. */
+/** Decode the plan's JPEG rows through @p jpeg into a packed RGB scratch, then widen each into its RGBA
+ *  scratch region ( @ref rgb_to_rgba_kernel_ , alpha @c=255 ) — nvJPEG emits no alpha. A rejected batch is
+ *  not fatal: every JPEG entry flips to @c route_t::cpu_fallback_k keeping its scaled @c decoded extent, so
+ *  the CPU fallback shrinks to the same @c decoded -sized scratch region it would have filled. */
 [[nodiscard]] static expected_t decode_jpeg_plans_(nvjpeg_session_t &jpeg, std::span<image_plan_t> plans, u8_t *scratch,
                                                    column_view_t tape, std::span<u64_t const> drawn_rows,
                                                    gpu_stream_t &stream) noexcept {
@@ -652,7 +678,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
         return expected_t::fail(status_t::bad_alloc_k, "JPEG RGB scratch allocation failed ({} bytes)", rgb_bytes);
     u8_t *const rgb_base = rgb_scratch.data();
     // Wire each entry's RGB destination into the fresh scratch; the owning entry table then feeds nvJPEG's
-    // parallel arrays straight from itself, so the split lives only inside @ref decode_jpeg_batch .
+    // parallel arrays straight from itself, so the split lives only inside `decode_jpeg_batch`.
     for (std::size_t index = 0; index != entries.size(); ++index) {
         jpeg_entry_t &entry = entries[index];
         image_plan_t const &plan = plans[entry.plan_index];
@@ -660,8 +686,8 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
         entry.destination.pitch[0] = static_cast<std::size_t>(plan.decoded.width) * rgb_channels_k;
     }
     if (expected_t decoded = jpeg.decode_jpeg_batch({entries.data(), entries.size()}, stream); !decoded) {
-        // Route every JPEG to the CPU pool but keep its scaled @c decoded extent and @c scale , so the CPU
-        // decode shrinks to fit the @c decoded -sized scratch region triage laid out for it.
+        // Route every JPEG to the CPU pool but keep its scaled `decoded` extent and `scale`, so the CPU
+        // decode shrinks to fit the `decoded`-sized scratch region triage laid out for it.
         for (std::size_t index = 0; index != entries.size(); ++index)
             plans[entries[index].plan_index].route = route_t::cpu_fallback_k;
         return {};
@@ -696,22 +722,27 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
     return {};
 }
 
-/** @brief Decode the plan's @c cpu_fallback_k rows (PNG, WebP, and any rejected JPEG) on @p pool : one pinned blob
- *      hop in, an RGBA decode per worker at the plan's @c decoded extent (native for PNG / WebP, the scaled
- *      size for a rejected hardware JPEG), then one bulk host-to-device copy into each scratch region. */
+/** Decode the plan's @c cpu_fallback_k rows (PNG, WebP, and any rejected JPEG) on @p pool : one pinned blob
+ *  hop in, an RGBA decode per worker at the plan's @c decoded extent (native for PNG / WebP, the scaled
+ *  size for a rejected hardware JPEG), then one bulk host-to-device copy into each scratch region. */
 [[nodiscard]] static expected_t decode_cpu_plans_(cpu_decode_pool_t &pool, std::span<image_plan_t> plans, u8_t *scratch,
                                                   column_view_t tape, std::span<u64_t const> drawn_rows,
                                                   gpu_stream_t &stream) noexcept {
     struct cpu_task_t {
-        /** @brief The plan this task decodes. */
+
+        /** The plan this task decodes. */
         std::size_t plan_index;
-        /** @brief The task's byte offset into the pinned blob tape. */
+
+        /** The task's byte offset into the pinned blob tape. */
         std::size_t blob_offset;
-        /** @brief The compressed blob's byte count. */
+
+        /** The compressed blob's byte count. */
         std::size_t blob_length;
-        /** @brief The task's byte offset into the pinned decoded-pixel tape. */
+
+        /** The task's byte offset into the pinned decoded-pixel tape. */
         std::size_t pixel_offset;
-        /** @brief The decoded RGBA pixel byte count. */
+
+        /** The decoded RGBA pixel byte count. */
         std::size_t pixel_length;
     };
     array<cpu_task_t> tasks;
@@ -767,21 +798,25 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
                               pixel_base + task.pixel_offset, task.pixel_length, stream.get()) != CUDA_SUCCESS)
             return expected_t::fail(status_t::cuda_error_k, "CPU pixel upload failed at image {}", task.plan_index);
     }
-    // Hold for the uploads: the pinned decode tape ( @c blobs / @c decoded ) frees synchronously on return,
-    // so it must outlive its in-flight @c cuMemcpyHtoDAsync into the device scratch (a use-after-free otherwise).
+    // Hold for the uploads: the pinned decode tape (`blobs` / `decoded`) frees synchronously on return,
+    // so it must outlive its in-flight `cuMemcpyHtoDAsync` into the device scratch (a use-after-free otherwise).
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "CPU pixel upload synchronization failed");
     return {};
 }
 
-/** @brief Scatter one image-segment's resized contiguous @b [gr·P,gc·P,C] frame into the batch's shared patch
- *      grid @b [rows,columns,P,P,C] — patch @c (pr,pc) lands at the flat cell @c offset+pr·gc+pc , i.e.
- *      @c images[row,column_begin+local,:,:,:] where @c row=offset/columns and @c column_begin=offset%columns .
- *      Reads the segment's placement from @p segment_offsets / @p segment_lengths and its resized source base
- *      from @p resized_offsets , so several images share a row and each rides its own column sub-range.
+/**
+ *  @brief Scatter one image-segment's resized contiguous @b [gr·P,gc·P,C] frame into the batch's shared patch
+ *      grid @b [rows,columns,P,P,C].
+ *
+ *  Patch @c (pr,pc) lands at the flat cell @c offset+pr·gc+pc , i.e.
+ *  @c images[row,column_begin+local,:,:,:] where @c row=offset/columns and @c column_begin=offset%columns .
+ *  Reads the segment's placement from @p segment_offsets / @p segment_lengths and its resized source base
+ *  from @p resized_offsets , so several images share a row and each rides its own column sub-range.
  *
  *  __grid_size__ @c [images,1,1] , one block per segment (a PAD / overflow-dropped segment, length 0, exits
- *      immediately); threads stride the segment's @c budget·P²·C elements. No dynamic shared memory. */
+ *  immediately); threads stride the segment's @c budget·P²·C elements. No dynamic shared memory.
+ */
 static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t const *resized,
                                             u32_t const *resized_offsets, image_shape_view_t image_shapes,
                                             u32r1_view_t segment_offsets, u32r1_view_t segment_lengths) {
@@ -816,13 +851,13 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
     }
 }
 
-/** @brief Crop each decoded RGBA scratch image to its factor-pair aspect, Lanczos-resize it into a contiguous
- *      scratch tape (one @c nppiResize per image — NPP's batched variant takes neither single-image batches
- *      nor Lanczos), then scatter each into its column sub-range of the batch's shared patch
- *      grid — the scratch and device-resident offsets are held alive until the whole stream-ordered chain
- *      retires. Budgets vary per image now, so each resized frame's byte size (and its base in the tape) is a
- *      running prefix, not a fixed stride. @p segment_offsets / @p segment_lengths carry the placement the
- *      segment kernel laid down. */
+/** Crop each decoded RGBA scratch image to its factor-pair aspect, Lanczos-resize it into a contiguous
+ *  scratch tape (one @c nppiResize per image — NPP's batched variant takes neither single-image batches
+ *  nor Lanczos), then scatter each into its column sub-range of the batch's shared patch
+ *  grid — the scratch and device-resident offsets are held alive until the whole stream-ordered chain
+ *  retires. Budgets vary per image now, so each resized frame's byte size (and its base in the tape) is a
+ *  running prefix, not a fixed stride. @p segment_offsets / @p segment_lengths carry the placement the
+ *  segment kernel laid down. */
 [[nodiscard]] static expected_t resize_plans_(std::span<image_plan_t const> plans, u8_t *scratch,
                                               pixel_patches_span_t pixels, image_shape_view_t image_shapes,
                                               u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
@@ -852,8 +887,8 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
                                 resized_elements);
     pixel_t *const resized_base = resized.data();
 
-    // NPP's batched resize rejects single-image batches (its @c nBatchSize contract demands more than one)
-    // and rejects Lanczos outright ( @c NPP_INTERPOLATION_ERROR ) — per-image @c nppiResize keeps the
+    // NPP's batched resize rejects single-image batches (its `nBatchSize` contract demands more than one)
+    // and rejects Lanczos outright (`NPP_INTERPOLATION_ERROR`) — per-image `nppiResize` keeps the
     // Lanczos quality the training data wants, needs no device-resident descriptor tables, and the calls
     // serialize on the one stream exactly like a batched launch would.
     for (std::size_t index = 0; index != images; ++index) {
@@ -874,7 +909,7 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
                                     static_cast<int>(resized_one), index);
     }
     // The per-image resized bases must be device-resident for the tile kernel — owning. It reads each
-    // segment's column count straight from the device-side @c image_shapes , no second copy here.
+    // segment's column count straight from the device-side `image_shapes`, no second copy here.
     array<u32_t, gpu_alloc<u32_t>> device_resized_offsets {gpu_alloc<u32_t> {stream.get()}};
     if (device_resized_offsets.try_resize_uninitialized(images) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "resize offset device allocation failed");
@@ -1073,7 +1108,7 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
     for (std::size_t index = 0; index != total_images; ++index)
         record_indices[index] = epoch_permutation(row_key, data_epoch_t {training_step}, index, pooled_rows);
 
-    // The blob column re-viewed with its offsets on host: device bytes, host-indexable via @c tape[row] .
+    // The blob column re-viewed with its offsets on host: device bytes, host-indexable via `tape[row]`.
     std::span<u64_t const> const host_offsets {reservoir_offsets.data(), reservoir_offsets.size()};
     column_view_t const tape {column.buffer_, host_offsets};
     for (std::size_t batch = 0; batch != unroll; ++batch) {

@@ -1,14 +1,16 @@
 /**
  *  @brief The Parquet audio loader: tied to a @b dataset, not a GPU — the same shape as
- *      @ref tokens_loader_parquet_t and @ref image_loader_parquet_t . @ref make reads only each shard's
- *      Parquet footer once, and every @ref fill takes the caller's stream, rank, and step, so one loader
- *      serves every GPU on every step. Each @ref fill opens @b as many randomly chosen shards as it takes to
- *      pool the clips it needs — at least two unless the dataset is one file — decodes their blob column into
- *      one device reservoir over GDS, draws rows by a keyed bijection over the whole pool, and decodes the
- *      drawn clips into the batch's @c audio_samples frame grid with @ref decode_audios .
+ *      @ref tokens_loader_parquet_t and @ref image_loader_parquet_t .
  *  @file src/loaders/audio_loader.cuh
  *  @author Ash Vardanian
  *  @date July 5, 2026
+ *
+ *  @ref make reads only each shard's Parquet footer once, and every @ref fill takes the caller's stream,
+ *  rank, and step, so one loader serves every GPU on every step. Each @ref fill opens @b as many randomly
+ *  chosen shards as it takes to pool the clips it needs — at least two unless the dataset is one file —
+ *  decodes their blob column into one device reservoir over GDS, draws rows by a keyed bijection over the
+ *  whole pool, and decodes the drawn clips into the batch's @c audio_samples frame grid with
+ *  @ref decode_audios .
  *
  *  @section audio_raw The loader delivers raw waveform frames — the spectral frontend is learned
  *
@@ -31,7 +33,8 @@
 #pragma once
 
 #include <cstddef> // `std::size_t`
-#include <span>    // `std::span`
+
+#include <span> // `std::span`
 
 #include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the borrowed CPU-decode pool
 
@@ -45,19 +48,21 @@
 
 namespace unum::uform::loaders {
 
-/** @brief The host-side worker pool the media decoders fan their host-CPU work across — one per run, owned at
- *      the composition root (the @b only sanctioned host-thread pool), borrowed here. */
+/** The host-side worker pool the media decoders fan their host-CPU work across — one per run, owned at
+ *  the composition root (the @b only sanctioned host-thread pool), borrowed here. */
 using cpu_decode_pool_t = ashvardanian::forkunion::flat_pool_t;
 
 /**
  *  @brief Decode a batch's drawn clip rows into its @c audio_samples frame grid — the audio decode every audio
- *      loader shares (Parquet today, tarball next). Hops each drawn clip's encoded bytes off the device @p tape
- *      to a pinned tape, then for every @c (clip,representation) pair fans a libav decode + resample to mono
- *      Float32 at that representation's @c sample_rate across @p pool , climbs onto the GPU, and chunks the
- *      waveform into frames of @c chunk_samples raw samples (the grid's @c extent(2) , which every representation
- *      must match), scattering each into its own whole-row sub-row segment. Writes the segment geometry
- *      ( @p segment_offsets / @p segment_lengths ) and @p segment_modality — @c audio_k , 1-D, so no shape
- *      descriptor.
+ *      loader shares (Parquet today, tarball next).
+ *
+ *  Hops each drawn clip's encoded bytes off the device @p tape to a pinned tape, then for every
+ *  @c (clip,representation) pair fans a libav decode + resample to mono Float32 at that representation's
+ *  @c sample_rate across @p pool , climbs onto the GPU, and chunks the waveform into frames of
+ *  @c chunk_samples raw samples (the grid's @c extent(2) , which every representation must match),
+ *  scattering each into its own whole-row sub-row segment. Writes the segment geometry
+ *  ( @p segment_offsets / @p segment_lengths ) and @p segment_modality — @c audio_k , 1-D, so no shape
+ *  descriptor.
  *
  *  @param[inout] pool The run's CPU-decode worker pool, borrowed for the per-clip libav decode.
  *  @param[in] tape The pooled clip column with its offsets on host — device bytes, host-indexable via
@@ -77,12 +82,13 @@ using cpu_decode_pool_t = ashvardanian::forkunion::flat_pool_t;
                                        u32r1_span_t segment_lengths, modality_span_t segment_modality,
                                        gpu_stream_t &stream) noexcept;
 
-/** @brief The Parquet audio loader's baked knob — just which column; the audio geometry travels on the loader's
- *      @c audio_batch_shape_t (fixed at @ref audio_loader_parquet_t::make ), not here. */
+/** The Parquet audio loader's baked knob — just which column; the audio geometry travels on the loader's
+ *  @c audio_batch_shape_t (fixed at @ref audio_loader_parquet_t::make ), not here. */
 struct audio_loader_parquet_config_t {
-    /** @brief The Parquet column holding the encoded clips. Audio datasets store the clip as a struct
-     *      @c {bytes,path} , so this is the dotted nested field @c "<column>.bytes" cuDF selects natively — it
-     *      arrives as a flat @c list<uint8> , one encoded clip per row. */
+
+    /** The Parquet column holding the encoded clips. Audio datasets store the clip as a struct
+     *  @c {bytes,path} , so this is the dotted nested field @c "<column>.bytes" cuDF selects natively — it
+     *  arrives as a flat @c list<uint8> , one encoded clip per row. */
     sz::string_view_t column = sz::string_view_t {"audio.bytes", 11};
 };
 
@@ -95,14 +101,16 @@ struct audio_loader_parquet_config_t {
  */
 struct audio_loader_parquet_t {
 
-    /** @brief Failure-safe exception-free constructor that indexes all the shards' footers (host, once).
+    /**
+     *  @brief Failure-safe exception-free constructor that indexes all the shards' footers (host, once).
      *  @param[inout] session GPU Direct Storage session for IO.
      *  @param[in] path_or_glob Dataset's Parquet paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
      *  @param[inout] pool The run's CPU-decode worker pool, owned at the composition root and borrowed here;
      *      the loader never spawns threads of its own.
      *  @param[in] audio The audio modality's own geometry slice ( @c chunk_samples , @c sample_rate ) — the
-     *      single source, and all this loader needs; it never sees the sibling modalities' shapes. */
+     *      single source, and all this loader needs; it never sees the sibling modalities' shapes.
+     */
     [[nodiscard]] static expected<audio_loader_parquet_t> make(gpu_direct_storage_session_t &session,
                                                                sz::string_view_t path_or_glob, u64_t seed,
                                                                cpu_decode_pool_t &pool,
@@ -127,21 +135,27 @@ struct audio_loader_parquet_t {
                                   u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
   private:
-    /** @brief The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
+
+    /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
     gpu_direct_storage_session_t *storage_ = nullptr;
-    /** @brief The run's CPU-decode worker pool — borrowed from the composition root, handed to the decode;
-     *      never owned, never spawned here. */
+
+    /** The run's CPU-decode worker pool — borrowed from the composition root, handed to the decode;
+     *  never owned, never spawned here. */
     cpu_decode_pool_t *pool_ = nullptr;
-    /** @brief The dataset's Parquet shard paths, sorted by the glob — owned. */
+
+    /** The dataset's Parquet shard paths, sorted by the glob — owned. */
     array<sz::string_t> absolute_paths_ {};
-    /** @brief The run seed keying the random file and row draws. */
+
+    /** The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
-    /** @brief @b [shards+1] cumulative footer row counts — the weighted file draw's search table (an
-     *      @c upper_bound maps a keyed row position to its owning file) and, at its back, the dataset's total
-     *      rows. Read once per dataset; shared across every GPU the loader serves. */
+
+    /** @b [shards+1] cumulative footer row counts — the weighted file draw's search table (an
+     *  @c upper_bound maps a keyed row position to its owning file) and, at its back, the dataset's total
+     *  rows. Read once per dataset; shared across every GPU the loader serves. */
     array<std::size_t> row_prefix_ {};
-    /** @brief The audio modality's geometry ( @c chunk_samples , @c sample_rate ) every @ref fill hands the
-     *      decode — fixed at @ref make . */
+
+    /** The audio modality's geometry ( @c chunk_samples , @c sample_rate ) every @ref fill hands the
+     *  decode — fixed at @ref make . */
     audio_batch_shape_t audio_ {};
 };
 

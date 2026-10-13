@@ -27,7 +27,7 @@ TWO decoders, picked with `--decoder` (default `gpu` for images):
     over a batch; on a `RuntimeError` it falls back to per-row sub-tapes to identify the offenders),
     NOT via CPU processes. A row that raises `codec_rejected` / `shape_mismatch` is DROPPED.
 
-    GPU-CONTENTION GUARD: this mode runs a kernel on a training GPU. Run it ONLY in an idle-GPU
+    GPU-CONTENTION GUARD: this mode runs a kernel on a training GPU. Run it only in an idle-GPU
     window — do NOT run it blindly while the two W=8 training runs own all eight GPUs. `--device`
     is required in `gpu` mode (no implicit pick) and the batch is kept modest; check `nvidia-smi`
     before launch and confirm the chosen device is idle.
@@ -786,6 +786,7 @@ def _parse_cli_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Parse the CLI, cleanse the selected modalities shard by shard, and print a summary per modality."""
     args = _parse_cli_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 

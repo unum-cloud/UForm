@@ -145,10 +145,13 @@ check_ascii_arrows() {
         "$file uses the ASCII '->' arrow in a comment - prose arrows are the Unicode →:"
 }
 
-# The same arrow rule for Markdown prose, where every added line is prose.
+# The same arrow rule for Markdown prose, which is every added line outside a code fence.
 check_ascii_arrows_prose() {
     local arrows
-    arrows=$(printf '%s\n' "$added" | grep -E ' -> ' || true)
+    # Fenced code keeps its language's own `->`, so only lines outside ``` and ~~~ fences are prose.
+    arrows=$(< "$staged_blob" LC_ALL=C awk -v lines=" $(printf '%s ' $added_lines)" '
+        /^[[:space:]]*(```|~~~)/ { fenced = !fenced; next }
+        !fenced && / -> / && index(lines, " " FNR " ") { print }')
     [ -z "$arrows" ] || fail "$arrows" \
         "$file uses the ASCII '->' arrow - prose arrows are the Unicode →:"
 }

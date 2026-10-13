@@ -49,34 +49,38 @@
 
 namespace unum::uform::core {
 
-/** @brief Byte alignment of every arena allocation; matches the 256-byte guarantee of the CUDA allocators, so
- *      an allocation base is always vector-load aligned. */
+/** Byte alignment of every arena allocation; matches the 256-byte guarantee of the CUDA allocators, so
+ *  an allocation base is always vector-load aligned. */
 inline constexpr std::size_t arena_alignment_k = 256u;
 
-/** @brief Cache-line byte count — the region-isolation alignment of symmetric-heap layouts, so flags,
- *      landings, and payloads never false-share a line. */
+/** Cache-line byte count — the region-isolation alignment of symmetric-heap layouts, so flags,
+ *  landings, and payloads never false-share a line. */
 inline constexpr std::size_t cache_line_bytes_k = 128u;
 
-/** @brief Round @p bytes up to the next multiple of @p granularity (any positive step). */
+/** Round @p bytes up to the next multiple of @p granularity (any positive step). */
 [[nodiscard]] inline constexpr std::size_t round_up_to_multiple(std::size_t bytes, std::size_t granularity) noexcept {
     return (bytes + granularity - 1u) / granularity * granularity;
 }
 
-/** @brief One device's memory picture, straight from the driver — see @ref gpu_memory_report . */
+/** One device's memory picture, straight from the driver — see @ref gpu_memory_report . */
 struct gpu_memory_report_t {
-    /** @brief HBM not yet allocated by anyone in any process, per @c cuMemGetInfo . */
+
+    /** HBM not yet allocated by anyone in any process, per @c cuMemGetInfo . */
     std::size_t free_bytes = 0;
-    /** @brief The device's total HBM. */
+
+    /** The device's total HBM. */
     std::size_t total_bytes = 0;
-    /** @brief Bytes currently allocated from the device's default stream-ordered pool. */
+
+    /** Bytes currently allocated from the device's default stream-ordered pool. */
     std::size_t pool_used_bytes = 0;
-    /** @brief The pool's high-water mark since its last reset. */
+
+    /** The pool's high-water mark since its last reset. */
     std::size_t pool_peak_bytes = 0;
 };
 
-/** @brief Poll the driver for @p device 's memory picture — the diagnostics counterpart of the owners'
- *      own accessors ( @c arena.used()/mapped() ); there is no in-house ledger to keep in sync. The
- *      calling thread must hold a context on @p device (the @c cuMemGetInfo scope). */
+/** Poll the driver for @p device 's memory picture — the diagnostics counterpart of the owners'
+ *  own accessors ( @c arena.used()/mapped() ); there is no in-house ledger to keep in sync. The
+ *  calling thread must hold a context on @p device (the @c cuMemGetInfo scope). */
 [[nodiscard]] inline expected<gpu_memory_report_t> gpu_memory_report(i32_t device) noexcept {
     gpu_memory_report_t report;
     if (CUresult result = cuMemGetInfo(&report.free_bytes, &report.total_bytes); result != CUDA_SUCCESS)
@@ -118,34 +122,41 @@ struct gpu_memory_report_t {
  */
 struct gpu_arena_t {
 
-    /** @brief One physical backing chunk mapped into the reserved range; kept only for teardown. */
+    /** One physical backing chunk mapped into the reserved range; kept only for teardown. */
     struct physical_chunk_t {
         CUmemGenericAllocationHandle handle = 0;
         std::size_t bytes = 0;
     };
 
-    /** @brief A cursor position taken with @ref snapshot and rewound to with @ref rewind — a strong type
-     *      so a snapshot can't be confused with any other byte count in flight. */
+    /** A cursor position taken with @ref snapshot and rewound to with @ref rewind — a strong type
+     *  so a snapshot can't be confused with any other byte count in flight. */
     struct snapshot_t {
         std::size_t bytes = 0;
     };
 
-    /** @brief Start of the reserved VA range. */
+    /** Start of the reserved VA range. */
     CUdeviceptr base_ = 0;
-    /** @brief VA reservation — the growth ceiling. */
+
+    /** VA reservation — the growth ceiling. */
     std::size_t reserved_bytes_ = 0;
-    /** @brief Physically backed prefix of the reservation. */
+
+    /** Physically backed prefix of the reservation. */
     std::size_t mapped_bytes_ = 0;
-    /** @brief Bump cursor within the mapped prefix. */
+
+    /** Bump cursor within the mapped prefix. */
     std::size_t used_bytes_ = 0;
-    /** @brief Physical allocation granularity of @ref device_ . */
+
+    /** Physical allocation granularity of @ref device_ . */
     std::size_t granularity_ = 0;
-    /** @brief Device ordinal the physical chunks live on. */
+
+    /** Device ordinal the physical chunks live on. */
     int device_ = 0;
-    /** @brief Mapped chunks, in mapping order, for teardown. */
+
+    /** Mapped chunks, in mapping order, for teardown. */
     array<physical_chunk_t> chunks_ {};
-    /** @brief Peer devices named in @c visible_to at @ref make — baked configuration every chunk
-     *      (present and future) is granted to; nothing appends to it after construction. */
+
+    /** Peer devices named in @c visible_to at @ref make — baked configuration every chunk
+     *  (present and future) is granted to; nothing appends to it after construction. */
     array<i32_t> visible_to_ {};
 
   private:
@@ -212,18 +223,21 @@ struct gpu_arena_t {
         return expected<gpu_arena_t> {std::move(arena)};
     }
 
-    /** @brief Bytes allocated so far. */
+    /** Bytes allocated so far. */
     [[nodiscard]] std::size_t used() const noexcept { return used_bytes_; }
-    /** @brief The device ordinal the arena's memory lives on. */
+
+    /** The device ordinal the arena's memory lives on. */
     [[nodiscard]] int device() const noexcept { return device_; }
-    /** @brief Physically committed bytes; grows monotonically, never shrinks before destruction. */
+
+    /** Physically committed bytes; grows monotonically, never shrinks before destruction. */
     [[nodiscard]] std::size_t mapped() const noexcept { return mapped_bytes_; }
-    /** @brief The current cursor position, to be rewound to with @ref rewind . */
+
+    /** The current cursor position, to be rewound to with @ref rewind . */
     [[nodiscard]] snapshot_t snapshot() const noexcept { return {used_bytes_}; }
 
-    /** @brief Whether @p device can read this arena: the home device, or a peer named in the
-     *      @c visible_to set at @ref make . Consumers needing cross-device reads validate with this
-     *      and fail loudly — visibility is never granted after construction. */
+    /** Whether @p device can read this arena: the home device, or a peer named in the
+     *  @c visible_to set at @ref make . Consumers needing cross-device reads validate with this
+     *  and fail loudly — visibility is never granted after construction. */
     [[nodiscard]] bool is_visible_to(int device) const noexcept {
         if (device == device_) return true;
         for (i32_t const peer : visible_to_.view())
@@ -231,11 +245,9 @@ struct gpu_arena_t {
         return false;
     }
 
-    /**
-     *  @brief Allocate @p bytes at @p alignment off the bump cursor, growing the physical backing when the
-     *      mapped prefix is exhausted. Returns @c nullptr when the reservation ceiling is hit or growth
-     *      fails — on a bump arena a null can mean nothing else.
-     */
+    /** Allocate @p bytes at @p alignment off the bump cursor, growing the physical backing when the
+     *  mapped prefix is exhausted. Returns @c nullptr when the reservation ceiling is hit or growth
+     *  fails — on a bump arena a null can mean nothing else. */
     [[nodiscard]] std::byte *allocate_bytes(std::size_t bytes, std::size_t alignment = arena_alignment_k) noexcept {
         std::size_t const aligned_cursor = round_up_to_multiple(used_bytes_, alignment);
         if (aligned_cursor + bytes > reserved_bytes_) return nullptr;
@@ -245,8 +257,8 @@ struct gpu_arena_t {
         return reinterpret_cast<std::byte *>(base_ + aligned_cursor);
     }
 
-    /** @brief Allocate @p count elements of @c value_type_ off the bump cursor — the typed sibling of
-     *      @ref allocate_bytes , mirroring `std::pmr::polymorphic_allocator::allocate_object` . */
+    /** Allocate @p count elements of @c value_type_ off the bump cursor — the typed sibling of
+     *  @ref allocate_bytes , mirroring `std::pmr::polymorphic_allocator::allocate_object` . */
     template <typename value_type_>
     [[nodiscard]] value_type_ *allocate_object(std::size_t count = 1) noexcept {
         return reinterpret_cast<value_type_ *>(allocate_bytes(count * sizeof(value_type_)));
@@ -270,16 +282,18 @@ struct gpu_arena_t {
         return reinterpret_cast<std::byte *>(base_ + chunk_start);
     }
 
-    /** @brief Rewind the cursor to a @ref snapshot ; the physical backing stays mapped. The caller owns the
-     *      hazard of rewinding under allocations still referenced by enqueued work. */
+    /** Rewind the cursor to a @ref snapshot ; the physical backing stays mapped. The caller owns the
+     *  hazard of rewinding under allocations still referenced by enqueued work. */
     void rewind(snapshot_t snapshot) noexcept { used_bytes_ = snapshot.bytes; }
-    /** @brief Rewind the cursor to zero, reclaiming every allocation at once — the
-     *      `std::pmr::monotonic_buffer_resource::release` semantic, strengthened: the physical backing stays
-     *      mapped for reuse. */
+
+    /** Rewind the cursor to zero, reclaiming every allocation at once — the
+     *  `std::pmr::monotonic_buffer_resource::release` semantic, strengthened: the physical backing stays
+     *  mapped for reuse. */
     void release() noexcept { used_bytes_ = 0; }
 
   private:
-    /** @brief The one chunk-creation property set: device-resident, pinned, RDMA-capable. */
+
+    /** The one chunk-creation property set: device-resident, pinned, RDMA-capable. */
     [[nodiscard]] static CUmemAllocationProp allocation_properties_(int device) noexcept {
         CUmemAllocationProp properties {};
         properties.type = CU_MEM_ALLOCATION_TYPE_PINNED;
@@ -289,7 +303,7 @@ struct gpu_arena_t {
         return properties;
     }
 
-    /** @brief Map new granularity-rounded physical chunks until @p target_bytes of the reservation is backed. */
+    /** Map new granularity-rounded physical chunks until @p target_bytes of the reservation is backed. */
     [[nodiscard]] CUresult grow_to_(std::size_t target_bytes) noexcept {
         CUmemAllocationProp properties = allocation_properties_(device_);
         CUmemAccessDesc access {};
@@ -333,7 +347,7 @@ struct gpu_arena_t {
         return CUDA_SUCCESS;
     }
 
-    /** @brief Unmap the whole mapped prefix, release every physical handle, and free the VA reservation. */
+    /** Unmap the whole mapped prefix, release every physical handle, and free the VA reservation. */
     void destroy_() noexcept {
         if (base_ == 0) return;
         if (mapped_bytes_ != 0) cuMemUnmap(base_, mapped_bytes_);
@@ -347,9 +361,10 @@ struct gpu_arena_t {
 
 /**
  *  @brief Standard-allocator facade over a borrowed @ref gpu_arena_t , so owning containers size
- *      arena allocations without the bespoke allocation spelling:
- *      @c nk::tensor<f32_t,gpu_arena_alloc<f32_t>,2>::uninitialized({rows,cols},gpu_arena_alloc<f32_t>{arena})
- *      allocates — and grows the arena — automatically; @ref array composes the same way.
+ *      arena allocations without the bespoke allocation spelling.
+ *
+ *  @c nk::tensor<f32_t,gpu_arena_alloc<f32_t>,2>::uninitialized({rows,cols},gpu_arena_alloc<f32_t>{arena})
+ *  allocates — and grows the arena — automatically; @ref array composes the same way.
  *
  *  Deallocation is deliberately a no-op: a bump arena reclaims through @ref gpu_arena_t::rewind /
  *  @ref gpu_arena_t::release , never per buffer — so a container backed by this allocator must not outlive
@@ -361,7 +376,8 @@ struct gpu_arena_alloc {
     using value_type = value_type_;
     using size_type = std::size_t;
     using difference_type = std::ptrdiff_t;
-    /** @brief The handle is just an arena pointer — move it with the container so moves stay @c noexcept . */
+
+    /** The handle is just an arena pointer — move it with the container so moves stay @c noexcept . */
     using propagate_on_container_move_assignment = std::true_type;
 
     template <typename other_type_>
@@ -369,7 +385,7 @@ struct gpu_arena_alloc {
         using other = gpu_arena_alloc<other_type_>;
     };
 
-    /** @brief The borrowed arena every allocation comes from. */
+    /** The borrowed arena every allocation comes from. */
     gpu_arena_t *arena_ = nullptr;
 
     constexpr gpu_arena_alloc() noexcept = default;
@@ -377,13 +393,13 @@ struct gpu_arena_alloc {
     template <typename other_type_>
     constexpr gpu_arena_alloc(gpu_arena_alloc<other_type_> const &other) noexcept : arena_(other.arena_) {}
 
-    /** @brief Allocate @p count elements off the arena, growing its physical backing if needed; @c nullptr
-     *      on exhaustion or when unbound. */
+    /** Allocate @p count elements off the arena, growing its physical backing if needed; @c nullptr
+     *  on exhaustion or when unbound. */
     [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
         return arena_ != nullptr ? arena_->allocate_object<value_type>(count) : nullptr;
     }
 
-    /** @brief A no-op: bump-arena memory is reclaimed by @ref gpu_arena_t::rewind , never per buffer. */
+    /** A no-op: bump-arena memory is reclaimed by @ref gpu_arena_t::rewind , never per buffer. */
     void deallocate(value_type *, std::size_t) noexcept {}
 
     [[nodiscard]] constexpr bool operator==(gpu_arena_alloc const &other) const noexcept {
@@ -391,14 +407,16 @@ struct gpu_arena_alloc {
     }
 };
 
-/** @brief The canonical byte-typed arena-allocator handle — what APIs receive and rebind. */
+/** The canonical byte-typed arena-allocator handle — what APIs receive and rebind. */
 using gpu_arena_alloc_t = gpu_arena_alloc<b8_t>;
 
 /**
  *  @brief The RDMA-registrable sibling of @ref gpu_arena_alloc : every allocation lies within one
  *      physical chunk of the arena — the precondition @c nvidia_peermem places on @c ibv_reg_mr — via
- *      @ref gpu_arena_t::allocate_registrable_bytes . For the symmetric heaps the InfiniBand collectives
- *      register with their NICs; everything else stays on the ordinary arena allocator.
+ *      @ref gpu_arena_t::allocate_registrable_bytes .
+ *
+ *  For the symmetric heaps the InfiniBand collectives register with their NICs; everything else stays
+ *  on the ordinary arena allocator.
  *
  *  Same contract as @ref gpu_arena_alloc otherwise: borrowed arena, no-op deallocate, free rebind.
  */
@@ -407,7 +425,8 @@ struct gpu_registrable_alloc {
     using value_type = value_type_;
     using size_type = std::size_t;
     using difference_type = std::ptrdiff_t;
-    /** @brief The handle is just an arena pointer — move it with the container so moves stay @c noexcept . */
+
+    /** The handle is just an arena pointer — move it with the container so moves stay @c noexcept . */
     using propagate_on_container_move_assignment = std::true_type;
 
     template <typename other_type_>
@@ -415,7 +434,7 @@ struct gpu_registrable_alloc {
         using other = gpu_registrable_alloc<other_type_>;
     };
 
-    /** @brief The borrowed arena every allocation comes from. */
+    /** The borrowed arena every allocation comes from. */
     gpu_arena_t *arena_ = nullptr;
 
     constexpr gpu_registrable_alloc() noexcept = default;
@@ -423,15 +442,15 @@ struct gpu_registrable_alloc {
     template <typename other_type_>
     constexpr gpu_registrable_alloc(gpu_registrable_alloc<other_type_> const &other) noexcept : arena_(other.arena_) {}
 
-    /** @brief Allocate @p count elements inside one fresh physical chunk; @c nullptr on exhaustion or
-     *      when unbound. */
+    /** Allocate @p count elements inside one fresh physical chunk; @c nullptr on exhaustion or
+     *  when unbound. */
     [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
         return arena_ != nullptr
                    ? reinterpret_cast<value_type *>(arena_->allocate_registrable_bytes(count * sizeof(value_type)))
                    : nullptr;
     }
 
-    /** @brief A no-op: bump-arena memory is reclaimed by @ref gpu_arena_t::rewind , never per buffer. */
+    /** A no-op: bump-arena memory is reclaimed by @ref gpu_arena_t::rewind , never per buffer. */
     void deallocate(value_type *, std::size_t) noexcept {}
 
     [[nodiscard]] constexpr bool operator==(gpu_registrable_alloc const &other) const noexcept {
@@ -439,15 +458,16 @@ struct gpu_registrable_alloc {
     }
 };
 
-/** @brief The canonical byte-typed registrable-allocator handle — what the collective heaps receive. */
+/** The canonical byte-typed registrable-allocator handle — what the collective heaps receive. */
 using gpu_registrable_alloc_t = gpu_registrable_alloc<b8_t>;
 
 /**
  *  @brief Pinned host-memory allocator — page-locked pages the DMA engines read directly, for the two
  *      host-side surfaces of a replayed step: generation staging cells that captured copy nodes re-read
- *      at every launch, and loss landings polled without a stream synchronize. Stateless; needs a current
- *      context at the call, like every driver allocation here. Satisfies @c std::alloc_traits , so
- *      NumKong's owning tensor composes directly:
+ *      at every launch, and loss landings polled without a stream synchronize.
+ *
+ *  Stateless; needs a current context at the call, like every driver allocation here. Satisfies
+ *  @c std::alloc_traits , so NumKong's owning tensor composes directly:
  *
  *      nk::tensor<f32_t, pinned_alloc<f32_t>, 1> landings;
  */
@@ -467,7 +487,7 @@ struct pinned_alloc {
     template <typename other_type_>
     constexpr pinned_alloc(pinned_alloc<other_type_> const &) noexcept {}
 
-    /** @brief Pin @p count elements of portable host memory; @c nullptr on failure. */
+    /** Pin @p count elements of portable host memory; @c nullptr on failure. */
     [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
         void *base = nullptr;
         if (cuMemHostAlloc(&base, count * sizeof(value_type), CU_MEMHOSTALLOC_PORTABLE) != CUDA_SUCCESS) return nullptr;
@@ -481,14 +501,16 @@ struct pinned_alloc {
     [[nodiscard]] constexpr bool operator==(pinned_alloc const &) const noexcept { return true; }
 };
 
-/** @brief The canonical byte-typed pinned-allocator handle —å what APIs receive and rebind. */
+/** The canonical byte-typed pinned-allocator handle — what APIs receive and rebind. */
 using pinned_alloc_t = pinned_alloc<b8_t>;
 
 /**
  *  @brief Stream-ordered device allocator for @b heterogeneous shape-varying workloads — the exact opposite
  *      of @ref gpu_arena_t : every call may bring a different size, so buffers are individually allocated
- *      and freed. The data loaders' tier — variable-length blobs and decode scratch that live @b outside
- *      captured graphs, where @c cuMemAllocAsync is legal.
+ *      and freed.
+ *
+ *  The data loaders' tier — variable-length blobs and decode scratch that live @b outside captured
+ *  graphs, where @c cuMemAllocAsync is legal.
  *
  *  Allocation and deallocation enqueue on the bound stream, so a loader's alloc → decode → consume → free
  *  chain needs no host fences; the memory is valid only in that stream's order (host access requires a
@@ -503,7 +525,8 @@ struct gpu_alloc {
     using value_type = value_type_;
     using size_type = std::size_t;
     using difference_type = std::ptrdiff_t;
-    /** @brief The handle is just a stream — move it with the container so moves stay @c noexcept . */
+
+    /** The handle is just a stream — move it with the container so moves stay @c noexcept . */
     using propagate_on_container_move_assignment = std::true_type;
 
     template <typename other_type_>
@@ -511,7 +534,7 @@ struct gpu_alloc {
         using other = gpu_alloc<other_type_>;
     };
 
-    /** @brief Stream every allocation and deallocation is ordered on; the default stream when unset. */
+    /** Stream every allocation and deallocation is ordered on; the default stream when unset. */
     CUstream stream = nullptr;
 
     constexpr gpu_alloc() noexcept = default;
@@ -519,16 +542,16 @@ struct gpu_alloc {
     template <typename other_type_>
     constexpr gpu_alloc(gpu_alloc<other_type_> const &other) noexcept : stream(other.stream) {}
 
-    /** @brief Stream-ordered allocation from the device's default memory pool; @c nullptr on failure —
-     *      matching NumKong's non-throwing allocator contract. The pool's own attributes carry the
-     *      usage and high-water marks (see @ref gpu_memory_report ). */
+    /** Stream-ordered allocation from the device's default memory pool; @c nullptr on failure —
+     *  matching NumKong's non-throwing allocator contract. The pool's own attributes carry the
+     *  usage and high-water marks (see @ref gpu_memory_report ). */
     [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
         CUdeviceptr pointer = 0;
         if (cuMemAllocAsync(&pointer, count * sizeof(value_type), stream) != CUDA_SUCCESS) return nullptr;
         return reinterpret_cast<value_type *>(pointer);
     }
 
-    /** @brief Stream-ordered release back to the pool; safe after every enqueued consumer on @ref stream . */
+    /** Stream-ordered release back to the pool; safe after every enqueued consumer on @ref stream . */
     void deallocate(value_type *pointer, std::size_t) noexcept {
         if (pointer != nullptr) cuMemFreeAsync(reinterpret_cast<CUdeviceptr>(pointer), stream);
     }
@@ -536,12 +559,12 @@ struct gpu_alloc {
     [[nodiscard]] constexpr bool operator==(gpu_alloc const &other) const noexcept { return stream == other.stream; }
 };
 
-/** @brief The canonical byte-typed stream-ordered-allocator handle — what APIs receive and rebind. */
+/** The canonical byte-typed stream-ordered-allocator handle — what APIs receive and rebind. */
 using gpu_alloc_t = gpu_alloc<b8_t>;
 
 /** The rank-tagged owning-tensor vocabulary — @c *_tensor_arena_t owns device memory off a
- *      @ref gpu_arena_t , @c *_tensor_pinned_t owns page-locked host memory; the borrowing @c *_view_t /
- *      @c *_span_t counterparts live in @c types.hpp . */
+ *  @ref gpu_arena_t , @c *_tensor_pinned_t owns page-locked host memory; the borrowing @c *_view_t /
+ *  @c *_span_t counterparts live in @c types.hpp . */
 using b8r1_tensor_arena_t = nk::tensor<b8_t, gpu_arena_alloc<b8_t>, 1>;
 using b8r1_tensor_registrable_t = nk::tensor<b8_t, gpu_registrable_alloc<b8_t>, 1>;
 using i16r2_tensor_arena_t = nk::tensor<i16_t, gpu_arena_alloc<i16_t>, 2>;

@@ -1,12 +1,14 @@
 /**
  *  @brief The batch's implementation: the single segment-driven coordinate adapter ( @ref fill_coords )
- *      and the batch mixer's routing bijection and two exchange kernels — compiled once into the `uform_core`
- *      library. Everything stays on the GPU: peer addresses travel as kernel arguments, and every kernel
- *      re-derives its routes in-register from the keyed bijection, so the mixer owns no memory at all; the
- *      coordinate adapter is equally a pure enqueue.
+ *      and the batch mixer's routing bijection and two exchange kernels — compiled once into the
+ *      `uform_core` library.
  *  @file src/core/multimodal_batch.cu
  *  @author Ash Vardanian
  *  @date July 3, 2026
+ *
+ *  Everything stays on the GPU: peer addresses travel as kernel arguments, and every kernel re-derives its
+ *  routes in-register from the keyed bijection, so the mixer owns no memory at all; the coordinate adapter
+ *  is equally a pure enqueue.
  */
 #include "core/multimodal_batch.hpp"
 
@@ -15,12 +17,13 @@ using namespace uc;
 
 /**
  *  @brief Write one segment's shared coordinate @c (t,h,w) : CTA @c s owns segment @c s , reads its
- *      @c (offset,length,modality) , and threads stripe @c [0,length) . The @c (t,h,w) each cell gets is a
- *      pure function of its in-segment index @c k and, for the 2-D / 3-D modalities, the segment's shape
- *      descriptor — text and audio are both 1-D @c (k,0,0) (a raw audio frame walks the same position axis as
- *      a token), image the 2-D @c (0,row,col) , video the 3-D absolute-frame @c (tg·tube_frames,r,c) . PAD
- *      segments ( @c length==0 ) and a zero-width descriptor write nothing, so uncovered positions stay
- *      whatever the caller pre-zeroed.
+ *      @c (offset,length,modality) , and threads stripe @c [0,length) .
+ *
+ *  The @c (t,h,w) each cell gets is a pure function of its in-segment index @c k and, for the 2-D / 3-D
+ *  modalities, the segment's shape descriptor — text and audio are both 1-D @c (k,0,0) (a raw audio frame
+ *  walks the same position axis as a token), image the 2-D @c (0,row,col) , video the 3-D absolute-frame
+ *  @c (tg·tube_frames,r,c) . PAD segments ( @c length==0 ) and a zero-width descriptor write nothing, so
+ *  uncovered positions stay whatever the caller pre-zeroed.
  *
  *  __grid_size__ @c [segments,1,1] , threads stripe the segment's length; no dynamic shared memory.
  */
@@ -86,9 +89,9 @@ expected_t uc::fill_coords(u32r1_span_t segment_offsets, u32r1_span_t segment_le
                          video_shapes, tube_frames, coords);
 }
 
-/** @brief One member's batch addresses — the gather kernels' read view of a peer. Carries every
- *      per-segment descriptor and every modality's content, so a routed segment's media survives the
- *      cross-GPU shuffle, not just its tokens. A modality absent from the batch leaves its pointer null. */
+/** One member's batch addresses — the gather kernels' read view of a peer. Carries every
+ *  per-segment descriptor and every modality's content, so a routed segment's media survives the
+ *  cross-GPU shuffle, not just its tokens. A modality absent from the batch leaves its pointer null. */
 struct batch_source_t_ {
     token_id_t const *tokens = nullptr;
     u32_t const *segment_offsets = nullptr;
@@ -102,9 +105,9 @@ struct batch_source_t_ {
     f32_t const *audio_samples = nullptr;
 };
 
-/** @brief This member's mixed-batch write addresses — the gather kernel's scatter target. Mirrors the
- *      routed descriptors and content from @ref batch_source_t_ ; a modality absent here leaves its pointer
- *      null and its copy is skipped. */
+/** This member's mixed-batch write addresses — the gather kernel's scatter target. Mirrors the
+ *  routed descriptors and content from @ref batch_source_t_ ; a modality absent here leaves its pointer
+ *  null and its copy is skipped. */
 struct batch_dest_t_ {
     token_id_t *tokens = nullptr;
     modality_t *segment_modality = nullptr;
@@ -115,36 +118,38 @@ struct batch_dest_t_ {
     f32_t *audio_samples = nullptr;
 };
 
-/** @brief The sentinel the mixer's routing scratch carries for a mixed PAD segment that has no world
- *      source — a dropped bag's segments and the unclaimed tail both read as this. */
+/** The sentinel the mixer's routing scratch carries for a mixed PAD segment that has no world
+ *  source — a dropped bag's segments and the unclaimed tail both read as this. */
 static constexpr u32_t mixed_source_absent_k = ~u32_t {0};
 
-/** @brief The cursor a run of @p columns starts at, jumped to the next row when it would otherwise cross
- *      a row boundary — a segment never spans two rows. */
+/** The cursor a run of @p columns starts at, jumped to the next row when it would otherwise cross
+ *  a row boundary — a segment never spans two rows. */
 [[nodiscard]] static __device__ u32_t row_aligned_cursor_(u32_t cursor, u32_t columns, u32_t columns_per_row) noexcept {
     u32_t const room_in_row = columns_per_row - cursor % columns_per_row;
     return columns > room_in_row ? cursor + room_in_row : cursor;
 }
 
-/** @brief Every member's addresses, passed by value as a kernel argument — @ref max_gpus_per_host_k
- *      bounds the table, so no device-resident copy and no staging exist. */
+/** Every member's addresses, passed by value as a kernel argument — @ref max_gpus_per_host_k
+ *  bounds the table, so no device-resident copy and no staging exist. */
 struct batch_sources_t_ {
     batch_source_t_ entries[max_gpus_per_host_k] {};
     u32_t count = 0;
 };
 
 /**
- *  @brief Write the mixed batch's geometry: thread 0 walks the destinations serially — the repack cursor
- *      is a strict scan — deriving each one's world source through the shared @ref epoch_permutation
- *      (read gather-wise: a destination looks up its source, equivalent to scattering by the inverse
- *      permutation, and identical on every GPU so routing needs no exchange), recording every mixed
- *      segment's world source into @p mixed_sources for the gather pass, and jumping the cursor past any
- *      row boundary a segment would cross. The routing granularity is the segment when
- *      @p max_bags_per_gpu is zero and the @b bag otherwise — the world axis becomes @c max_bags·world ,
- *      a source bag's live segments (the contiguous run tagged with its index) land together in order,
- *      and @p mixed_bags renumbers them to the destination-local bag. A bag that would overflow the
- *      destination rectangle or the segment table is dropped loudly and @b whole — never split — so a
- *      surviving bag is always intact; the packer's budgets make any drop a bug, not a case.
+ *  @brief Write the mixed batch's geometry: thread 0 walks the destinations serially, as the repack
+ *      cursor is a strict scan.
+ *
+ *  It derives each destination's world source through the shared @ref epoch_permutation
+ *  (read gather-wise: a destination looks up its source, equivalent to scattering by the inverse
+ *  permutation, and identical on every GPU so routing needs no exchange), records every mixed
+ *  segment's world source into @p mixed_sources for the gather pass, and jumps the cursor past any
+ *  row boundary a segment would cross. The routing granularity is the segment when
+ *  @p max_bags_per_gpu is zero and the @b bag otherwise — the world axis becomes @c max_bags·world ,
+ *  a source bag's live segments (the contiguous run tagged with its index) land together in order,
+ *  and @p mixed_bags renumbers them to the destination-local bag. A bag that would overflow the
+ *  destination rectangle or the segment table is dropped loudly and @b whole — never split — so a
+ *  surviving bag is always intact; the packer's budgets make any drop a bug, not a case.
  *
  *  __grid_size__ @c [1,1,1] , one thread live; no dynamic shared memory.
  */
@@ -240,13 +245,15 @@ static __global__ void batch_geometry_kernel_(batch_sources_t_ sources, u32r1_sp
 /**
  *  @brief Gather one routed segment: CTA @c s reads route @c s 's world source from the geometry pass's
  *      @p mixed_sources table (with variable-degree bags a destination's source is not derivable per
- *      segment), copies the peer's per-segment descriptors ( @ref batch_source_t_::segment_modality and
- *      the image / video @c *_shapes rows — thread 0, so the mixed batch is fully typed) and then,
- *      dispatching on the segment's modality, copies its content ( @c tokens , or the flat
- *      @c [begin,begin+columns) patch/tube/frame run, scaled by the modality's per-cell scalar count)
- *      from the peer's loaded batch into this member's mixed batch, threads striding the run. A sourceless
- *      PAD (a dropped bag or the unclaimed tail) is typed @c text_k and carries nothing. The destination
- *      geometry is what @ref batch_geometry_kernel_ wrote.
+ *      segment).
+ *
+ *  It copies the peer's per-segment descriptors ( @ref batch_source_t_::segment_modality and
+ *  the image / video @c *_shapes rows — thread 0, so the mixed batch is fully typed) and then,
+ *  dispatching on the segment's modality, copies its content ( @c tokens , or the flat
+ *  @c [begin,begin+columns) patch/tube/frame run, scaled by the modality's per-cell scalar count)
+ *  from the peer's loaded batch into this member's mixed batch, threads striding the run. A sourceless
+ *  PAD (a dropped bag or the unclaimed tail) is typed @c text_k and carries nothing. The destination
+ *  geometry is what @ref batch_geometry_kernel_ wrote.
  *
  *  __grid_size__ @c [segments_per_gpu,1,1] , threads stripe the content run; no dynamic shared memory.
  */
@@ -313,10 +320,10 @@ static __global__ void batch_gather_kernel_(batch_sources_t_ sources, batch_dest
     }
 }
 
-/** @brief The ten batch tensors, in their fixed block-serialization order — the index into a
- *      @ref batch_block_layout_t_ . A fixed family, so it is an enum, not a run of constants; every GPU
- *      shares one shape, so the order (and thus every landing's byte layout) is identical across
- *      multimem_domains. */
+/** The ten batch tensors, in their fixed block-serialization order — the index into a
+ *  @ref batch_block_layout_t_ . A fixed family, so it is an enum, not a run of constants; every GPU
+ *  shares one shape, so the order (and thus every landing's byte layout) is identical across
+ *  multimem_domains. */
 enum batch_block_tensor_t_ : u32_t {
     block_segment_offsets_k = 0,
     block_segment_lengths_k = 1,
@@ -330,38 +337,44 @@ enum batch_block_tensor_t_ : u32_t {
     block_audio_samples_k = 9,
 };
 
-/** @brief How many tensors one exchanged block serializes — the extent of @ref batch_block_tensor_t_ . */
+/** How many tensors one exchanged block serializes — the extent of @ref batch_block_tensor_t_ . */
 static constexpr u32_t block_tensor_count_k = block_audio_samples_k + 1u;
 
 /**
  *  @brief The serialization map of one @ref multimodal_batch_on_gpu_t inside an exchanged block: a
  *      cache-line-aligned byte offset and a byte count per tensor, packed back to back in
- *      @ref batch_block_tensor_t_ order. A dead modality (its content tensor unallocated) still gets an
- *      offset but a zero byte count, so it contributes nothing and its offset is never dereferenced.
- *      @ref total_bytes is the whole block — the @c block_scalars an @c infiniband_all_to_all<b8_t> is
- *      wired with.
+ *      @ref batch_block_tensor_t_ order.
+ *
+ *  A dead modality (its content tensor unallocated) still gets an offset but a zero byte count, so it
+ *  contributes nothing and its offset is never dereferenced. @ref total_bytes is the whole block — the
+ *  @c block_scalars an @c infiniband_all_to_all<b8_t> is wired with.
  */
 struct batch_block_layout_t_ {
-    /** @brief Each tensor's cache-line-aligned byte offset from the block base. */
+
+    /** Each tensor's cache-line-aligned byte offset from the block base. */
     std::size_t offsets[block_tensor_count_k] {};
-    /** @brief Each tensor's serialized byte count; zero for a dead modality's content tensor. */
+
+    /** Each tensor's serialized byte count; zero for a dead modality's content tensor. */
     std::size_t byte_counts[block_tensor_count_k] {};
-    /** @brief The whole block's cache-line-rounded size. */
+
+    /** The whole block's cache-line-rounded size. */
     std::size_t block_bytes = 0;
 
-    /** @brief This tensor's byte offset from the block base. */
+    /** This tensor's byte offset from the block base. */
     [[nodiscard]] constexpr std::size_t offset(batch_block_tensor_t_ tensor) const noexcept { return offsets[tensor]; }
-    /** @brief This tensor's serialized byte count — zero when its modality is out of the composition. */
+
+    /** This tensor's serialized byte count — zero when its modality is out of the composition. */
     [[nodiscard]] constexpr std::size_t byte_count(batch_block_tensor_t_ tensor) const noexcept {
         return byte_counts[tensor];
     }
-    /** @brief The whole block's size — every landing and send block spans exactly this. */
+
+    /** The whole block's size — every landing and send block spans exactly this. */
     [[nodiscard]] constexpr std::size_t total_bytes() const noexcept { return block_bytes; }
 };
 
-/** @brief Compute the layout @p shape implies — pure shape math, so every GPU on every multimem_domain
- *      derives the identical map with no exchanged descriptor, and the mixer re-derives it on demand
- *      instead of storing it. */
+/** Compute the layout @p shape implies — pure shape math, so every GPU on every multimem_domain
+ *  derives the identical map with no exchanged descriptor, and the mixer re-derives it on demand
+ *  instead of storing it. */
 [[nodiscard]] static constexpr batch_block_layout_t_ batch_block_layout_(
     multimodal_batch_shape_t const &shape) noexcept {
     batch_block_layout_t_ layout;
@@ -397,9 +410,9 @@ struct batch_block_layout_t_ {
     return layout;
 }
 
-/** @brief Build the read view of a member's own loaded batch — its eight content and descriptor pointers, a
- *      direct NVLink peer read for a source GPU on this multimem_domain. A modality absent from the batch leaves a null
- *      pointer, exactly as the gather kernels expect. */
+/** Build the read view of a member's own loaded batch — its eight content and descriptor pointers, a
+ *  direct NVLink peer read for a source GPU on this multimem_domain. A modality absent from the batch
+ *  leaves a null pointer, exactly as the gather kernels expect. */
 static batch_source_t_ source_from_loaded_(multimodal_batch_on_gpu_t const &loaded) noexcept {
     batch_source_t_ source;
     source.tokens = loaded.tokens.data();
@@ -415,10 +428,11 @@ static batch_source_t_ source_from_loaded_(multimodal_batch_on_gpu_t const &load
     return source;
 }
 
-/** @brief Build the read view of a same-index landing — the block a cross-domain all-to-all deposited, holding
- *      the other multimem_domain's same-index GPU's loaded batch. Every pointer is the landing base plus this tensor's
- *      shared wire offset, reinterpreted to the field's type; a dead modality's content pointer stays null (its
- *      offset addresses nothing). The descriptor tensors always exist, so their offsets are always valid. */
+/** Build the read view of a same-index landing — the block a cross-domain all-to-all deposited, holding
+ *  the other multimem_domain's same-index GPU's loaded batch. Every pointer is the landing base plus this
+ *  tensor's shared wire offset, reinterpreted to the field's type; a dead modality's content pointer stays
+ *  null (its offset addresses nothing). The descriptor tensors always exist, so their offsets are always
+ *  valid. */
 static batch_source_t_ source_from_landing_(b8r1_span_t landing, batch_block_layout_t_ const &layout,
                                             multimodal_batch_shape_t const &shape) noexcept {
     b8_t const *base = landing.data();
@@ -442,17 +456,17 @@ static batch_source_t_ source_from_landing_(b8r1_span_t landing, batch_block_lay
     return source;
 }
 
-/** @brief One tensor's region in the exchanged block — its identity and its device source pointer, a named
- *      pair so the pack loop is a plain table walk rather than ten hand-spelled copies. */
+/** One tensor's region in the exchanged block — its identity and its device source pointer, a named
+ *  pair so the pack loop is a plain table walk rather than ten hand-spelled copies. */
 struct block_copy_t_ {
     batch_block_tensor_t_ tensor;
     void const *source;
 };
 
-/** @brief Serialize a member's loaded batch into its outgoing block: one device→device copy per live
- *      tensor into that tensor's shared block offset, enqueued on @p stream ahead of the exchange. A dead
- *      modality's zero-byte tensor (and any null source) is skipped; the landing's source view nulls the same
- *      modality, so those bytes are never read. */
+/** Serialize a member's loaded batch into its outgoing block: one device → device copy per live
+ *  tensor into that tensor's shared block offset, enqueued on @p stream ahead of the exchange. A dead
+ *  modality's zero-byte tensor (and any null source) is skipped; the landing's source view nulls the same
+ *  modality, so those bytes are never read. */
 static expected_t pack_batch_into_block_(multimodal_batch_on_gpu_t const &loaded, b8r1_span_t destination,
                                          batch_block_layout_t_ const &layout, gpu_stream_t &stream) noexcept {
     block_copy_t_ const copies[block_tensor_count_k] = {
@@ -470,7 +484,7 @@ static expected_t pack_batch_into_block_(multimodal_batch_on_gpu_t const &loaded
     for (block_copy_t_ const &copy : copies) {
         std::size_t const bytes = layout.byte_count(copy.tensor);
         if (bytes == 0u || copy.source == nullptr) continue;
-        // vendor-boundary: device→device pack of one batch tensor into its block region — the tensors' `data()`
+        // vendor-boundary: device → device pack of one batch tensor into its block region — the tensors' `data()`
         // pointers are raw CUdeviceptr sources, not views, so the driver copy is spelled by hand here.
         if (CUresult packed = cuMemcpyDtoDAsync(
                 reinterpret_cast<CUdeviceptr>(destination.data() + layout.offset(copy.tensor)),

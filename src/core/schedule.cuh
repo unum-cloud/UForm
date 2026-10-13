@@ -70,11 +70,13 @@ namespace unum::uform::core {
 
 namespace nk = ashvardanian::numkong;
 
-/** @brief Rank-1 token-id device / host view — the batch's token currency. */
+/** Rank-1 token-id device / host view — the batch's token currency. */
 using tokens_view_t = nk::tensor_view<token_id_t, 1>;
-/** @brief Rank-1 token-id mutable device / host span — the batch's token currency. */
+
+/** Rank-1 token-id mutable device / host span — the batch's token currency. */
 using tokens_span_t = nk::tensor_span<token_id_t, 1>;
-/** @brief Rank-1 token-id device-only buffer owned through a @ref gpu_arena_t — the token tape. */
+
+/** Rank-1 token-id device-only buffer owned through a @ref gpu_arena_t — the token tape. */
 using tokens_tensor_arena_t = nk::tensor<token_id_t, gpu_arena_alloc<token_id_t>, 1>;
 
 /**
@@ -107,10 +109,12 @@ struct gpu_stream_t {
     }
     ~gpu_stream_t() noexcept { destroy_(); }
 
-    /** @brief Retain @p device 's primary context and create a stream inside it.
+    /**
+     *  @brief Retain @p device 's primary context and create a stream inside it.
      *  @param[in] device The CUDA device ordinal the stream belongs to.
      *  @param[in] flags @c CU_STREAM_NON_BLOCKING by default — no implicit legacy-stream ordering.
-     *  @param[in] priority Stream priority; 0 is the default tier, negative is more urgent. */
+     *  @param[in] priority Stream priority; 0 is the default tier, negative is more urgent.
+     */
     [[nodiscard]] static expected<gpu_stream_t> make(int device, unsigned flags = CU_STREAM_NON_BLOCKING,
                                                      int priority = 0) noexcept {
         CUdevice device_handle = 0;
@@ -130,15 +134,19 @@ struct gpu_stream_t {
         return expected<gpu_stream_t> {std::move(stream)};
     }
 
-    /** @brief The wrapped stream handle. */
+    /** The wrapped stream handle. */
     [[nodiscard]] CUstream get() const noexcept { return stream_; }
-    /** @brief Implicit handle access — the stream passes straight into launchers. */
+
+    /** Implicit handle access — the stream passes straight into launchers. */
     operator CUstream() const noexcept { return stream_; }
-    /** @brief The same handle as NumKong's opaque stream, for its kernels and runtime calls. */
+
+    /** The same handle as NumKong's opaque stream, for its kernels and runtime calls. */
     [[nodiscard]] nk_stream_t numkong() const noexcept { return reinterpret_cast<nk_stream_t>(stream_); }
-    /** @brief The retained primary context the stream lives in. */
+
+    /** The retained primary context the stream lives in. */
     [[nodiscard]] CUcontext context() const noexcept { return context_; }
-    /** @brief The device ordinal the stream belongs to. */
+
+    /** The device ordinal the stream belongs to. */
     [[nodiscard]] int device() const noexcept { return device_; }
 
   private:
@@ -162,11 +170,11 @@ struct gpu_stream_t {
     int device_ = -1;
 };
 
-/** @brief Enqueue a host→device copy of a rank-1 view into a same-typed device span on @p stream — the
- *      typed spelling of @c cuMemcpyHtoDAsync , with the arguments in the order the name reads: host
- *      source, device destination. Extents and element sizes travel with the views, never as
- *      hand-multiplied @c sizeof operands. An empty @p host_source is a no-op; a source longer than the
- *      destination is a loud failure. */
+/** Enqueue a host → device copy of a rank-1 view into a same-typed device span on @p stream — the
+ *  typed spelling of @c cuMemcpyHtoDAsync , with the arguments in the order the name reads: host
+ *  source, device destination. Extents and element sizes travel with the views, never as
+ *  hand-multiplied @c sizeof operands. An empty @p host_source is a no-op; a source longer than the
+ *  destination is a loud failure. */
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_host_to_device(nk::tensor_view<value_type_, 1> host_source,
                                                     nk::tensor_span<value_type_, 1> device_destination,
@@ -184,10 +192,10 @@ template <typename value_type_>
     return {};
 }
 
-/** @brief The mirror of @ref copy_host_to_device : enqueue a device→host copy of a rank-1 view into a
- *      same-typed host span on @p stream — the typed spelling of @c cuMemcpyDtoHAsync , device source
- *      first, host destination second. An empty @p device_source is a no-op; a source longer than the
- *      destination is a loud failure. The host span must stay alive until the stream reaches the copy. */
+/** The mirror of @ref copy_host_to_device : enqueue a device → host copy of a rank-1 view into a
+ *  same-typed host span on @p stream — the typed spelling of @c cuMemcpyDtoHAsync , device source
+ *  first, host destination second. An empty @p device_source is a no-op; a source longer than the
+ *  destination is a loud failure. The host span must stay alive until the stream reaches the copy. */
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_device_to_host(nk::tensor_view<value_type_, 1> device_source,
                                                     nk::tensor_span<value_type_, 1> host_destination,
@@ -207,11 +215,25 @@ template <typename value_type_>
 
 #if defined(__CUDACC__)
 
+/** Grid cap of every grid-strided launch: a bandwidth-bound kernel gains nothing past this, and
+ *  an unbounded grid stalls capture-time instantiation on huge shards. */
+inline constexpr unsigned kernel_grid_cap_k = 4096u;
+
+/** The one grid-size formula for grid-strided kernels over @p scalars elements: at least one
+ *  CTA, at most @ref kernel_grid_cap_k . */
+[[nodiscard]] inline constexpr unsigned grid_size_for(std::size_t scalars,
+                                                      unsigned block = kernel_block_size_default_k) noexcept {
+    std::size_t const grid = divide_round_up(scalars, block);
+    if (grid == 0) return 1u;
+    return grid > kernel_grid_cap_k ? kernel_grid_cap_k : static_cast<unsigned>(grid);
+}
+
 /**
  *  @brief Launch a compiled-in kernel through the Driver API — the checked replacement for the
  *      triple-chevron syntax, which returns no error code, fails silently on impossible configurations,
- *      and drags a hidden CUDA Runtime dependency behind every launch:
- *      https://ashvardanian.com/posts/less-wrong-cuda-hello-world/
+ *      and drags a hidden CUDA Runtime dependency behind every launch.
+ *
+ *  The case against the triple-chevron syntax: https://ashvardanian.com/posts/less-wrong-cuda-hello-world/
  *
  *  The kernel's entry address resolves to a @c CUfunction through @c cudaGetFuncBySymbol — the one
  *  sanctioned interop symbol, declared by nvcc's own implicit headers and serviced by the fatbin
@@ -223,19 +245,6 @@ template <typename value_type_>
  *  copies raw bytes, so the implicit conversions a triple-chevron call would perform do not apply —
  *  convert spans to views at the call site.
  */
-/** @brief Grid cap of every grid-strided launch: a bandwidth-bound kernel gains nothing past this, and
- *      an unbounded grid stalls capture-time instantiation on huge shards. */
-inline constexpr unsigned kernel_grid_cap_k = 4096u;
-
-/** @brief The one grid-size formula for grid-strided kernels over @p scalars elements: at least one
- *      CTA, at most @ref kernel_grid_cap_k . */
-[[nodiscard]] inline constexpr unsigned grid_size_for(std::size_t scalars,
-                                                      unsigned block = kernel_block_size_default_k) noexcept {
-    std::size_t const grid = divide_round_up(scalars, block);
-    if (grid == 0) return 1u;
-    return grid > kernel_grid_cap_k ? kernel_grid_cap_k : static_cast<unsigned>(grid);
-}
-
 template <typename... arg_types_>
 [[nodiscard]] inline expected_t launch_kernel(void const *kernel_symbol, dim3 grid_size, dim3 block_size,
                                               gpu_stream_t &stream, arg_types_ const &...args) noexcept {
@@ -264,10 +273,8 @@ template <typename... arg_types_>
  */
 __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destination);
 
-/**
- *  @brief Enqueue @p destination = @p source ᵀ for BFloat16 matrices: one capture-safe launch of
- *      @ref transpose_bf16_kernel on @p stream .
- */
+/** Enqueue @p destination = @p source ᵀ for BFloat16 matrices: one capture-safe launch of
+ *  @ref transpose_bf16_kernel on @p stream . */
 [[nodiscard]] inline expected_t transpose_bf16(bf16r2_view_t source, bf16r2_span_t destination,
                                                gpu_stream_t &stream) noexcept {
     if (destination.extent(0) != source.extent(1) || destination.extent(1) != source.extent(0))
@@ -280,33 +287,29 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
                          source, destination);
 }
 
-/** @brief Lift a NumKong status into the cell's diagnostics, naming the @p step that returned it. */
+/** Lift a NumKong status into the cell's diagnostics, naming the @p step that returned it. */
 [[nodiscard]] inline expected_t numkong_result(nk_status_t status, sz::string_view_t step) noexcept {
     if (status == nk_success_k) return {};
     return expected_t::fail(status_t::cuda_error_k, "{} failed: {}", step, nk_status_name(status));
 }
 
-/** @brief The bytes NumKong's pack of a @b [columns,depth] BFloat16 B operand takes on @p capabilities . */
+/** The bytes NumKong's pack of a @b [columns,depth] BFloat16 B operand takes on @p capabilities . */
 [[nodiscard]] expected<std::size_t> pack_bytes_bf16(std::size_t columns, std::size_t depth,
                                                     nk_capability_t capabilities) noexcept;
 
-/** @brief Allocate off @p arena a buffer for the NumKong pack of a @b [columns,depth] BFloat16 B operand. */
+/** Allocate off @p arena a buffer for the NumKong pack of a @b [columns,depth] BFloat16 B operand. */
 [[nodiscard]] expected<b8r1_tensor_arena_t> allocate_pack_bf16(std::size_t columns, std::size_t depth,
                                                                nk_capability_t capabilities,
                                                                gpu_arena_t &arena) noexcept;
 
-/**
- *  @brief Enqueue NumKong's pack of @p b , read row-major as the @b [columns,depth] B operand of
- *      @ref multiply_bf16 , into @p packed , sized by @ref pack_bytes_bf16 .
- */
+/** Enqueue NumKong's pack of @p b , read row-major as the @b [columns,depth] B operand of
+ *  @ref multiply_bf16 , into @p packed , sized by @ref pack_bytes_bf16 . */
 [[nodiscard]] expected_t pack_bf16(bf16r2_view_t b, b8r1_span_t packed, nk_capability_t capabilities,
                                    gpu_stream_t &stream) noexcept;
 
-/**
- *  @brief Enqueue the Float32 product @c c=a·Bᵀ against @p packed_b , the pack of a @b [columns,depth] B with
- *      @c columns=c.extent(1) and @c depth=a.extent(1) . NumKong products have no split-K, so they replay
- *      bit-identically.
- */
+/** Enqueue the Float32 product @c c=a·Bᵀ against @p packed_b , the pack of a @b [columns,depth] B with
+ *  @c columns=c.extent(1) and @c depth=a.extent(1) . NumKong products have no split-K, so they replay
+ *  bit-identically. */
 [[nodiscard]] expected_t multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t c,
                                        nk_capability_t capabilities, gpu_stream_t &stream) noexcept;
 
@@ -354,9 +357,9 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
     return value;
 }
 
-/** @brief All-threads-get-the-total CTA sum: per-warp shuffle trees, lane-0 partials staged through
- *      static shared memory, one final warp tree, one broadcast cell — fixed-order, deterministic,
- *      sized for @p block_size_ threads. */
+/** All-threads-get-the-total CTA sum: per-warp shuffle trees, lane-0 partials staged through
+ *  static shared memory, one final warp tree, one broadcast cell — fixed-order, deterministic,
+ *  sized for @p block_size_ threads. */
 template <unsigned block_size_>
 [[nodiscard]] __device__ inline f32_t block_reduce_broadcast(f32_t value) noexcept {
     static_assert(block_size_ % warp_size_k == 0, "the staging array assumes whole warps");
@@ -379,19 +382,19 @@ template <unsigned block_size_>
 
 #endif // defined(__CUDACC__)
 
-/** @brief How a §10 model region runs: captured once into a @ref gpu_replay_graph_t and replayed every step
- *      (the production default), or re-enqueued eagerly each step — the bring-up / debugging path, and the
- *      other half of every capture-vs-eager parity test. A trainer carries it as a run knob; the two modes must
- *      land on bitwise-identical weights over identical seeds. */
-/** @brief How the cuDNN sessions pin their per-shape engines. The default takes the library's own first
- *      heuristic pick — zero construction cost, the production behavior. The benchmarked mode will time the
- *      candidates at construction and pin the fastest; picks measured on this machine at this moment make
- *      tuned multi-host runs a profiling tool, never a bitwise-parity conformance one. */
+/** How the cuDNN sessions pin their per-shape engines. The default takes the library's own first
+ *  heuristic pick — zero construction cost, the production behavior. The benchmarked mode will time the
+ *  candidates at construction and pin the fastest; picks measured on this machine at this moment make
+ *  tuned multi-host runs a profiling tool, never a bitwise-parity conformance one. */
 enum class algo_pick_t : u8_t {
     heuristic_k = 0,
     benchmarked_k = 1,
 };
 
+/** How a §10 model region runs: captured once into a @ref gpu_replay_graph_t and replayed every step
+ *  (the production default), or re-enqueued eagerly each step — the bring-up / debugging path, and the
+ *  other half of every capture-vs-eager parity test. A trainer carries it as a run knob; the two modes must
+ *  land on bitwise-identical weights over identical seeds. */
 enum capture_t : u32_t {
     replayed_k = 0,
     eager_k = 1,
@@ -522,8 +525,8 @@ struct gpu_replay_graph_t {
         return adopt_(graph, trunk);
     }
 
-    /** @brief Replay the executable on @p stream : one @c cuGraphLaunch — staging already happened at
-     *      @ref make . */
+    /** Replay the executable on @p stream : one @c cuGraphLaunch — staging already happened at
+     *  @ref make . */
     [[nodiscard]] expected_t launch(CUstream stream) const noexcept {
         if (exec_ == nullptr)
             return expected_t::fail(status_t::invalid_input_k, "launching an empty (default or moved-from) graph");
@@ -533,8 +536,9 @@ struct gpu_replay_graph_t {
     }
 
   private:
-    /** @brief Enforce the no-allocation contract, instantiate @p graph , and upload the executable on
-     *      @p stream — after this the object is fully replay-ready. */
+
+    /** Enforce the no-allocation contract, instantiate @p graph , and upload the executable on
+     *  @p stream — after this the object is fully replay-ready. */
     [[nodiscard]] static expected<gpu_replay_graph_t> adopt_(CUgraph graph, CUstream stream) noexcept {
         expected_t guarded = guard_alloc_nodes_(graph);
         if (!guarded) {
@@ -553,8 +557,8 @@ struct gpu_replay_graph_t {
         return expected<gpu_replay_graph_t> {std::move(replay)};
     }
 
-    /** @brief The no-allocation contract, enforced: any allocation / free node in the captured graph is a
-     *      loud failure — it escapes the arena budget and deadlocks device-local multi-GPU first launch. */
+    /** The no-allocation contract, enforced: any allocation / free node in the captured graph is a
+     *  loud failure — it escapes the arena budget and deadlocks device-local multi-GPU first launch. */
     [[nodiscard]] static expected_t guard_alloc_nodes_(CUgraph graph) noexcept {
         std::size_t node_count = 0;
         if (CUresult result = cuGraphGetNodes(graph, nullptr, &node_count); result != CUDA_SUCCESS)
@@ -581,7 +585,7 @@ struct gpu_replay_graph_t {
         return {};
     }
 
-    /** @brief Create a timing-free event in @p stream 's own context, so recording it there is legal. */
+    /** Create a timing-free event in @p stream 's own context, so recording it there is legal. */
     [[nodiscard]] static expected_t make_event_for_(CUstream stream, CUevent &event) noexcept {
         CUcontext stream_context = nullptr;
         if (CUresult result = cuStreamGetCtx(stream, &stream_context); result != CUDA_SUCCESS)
@@ -609,10 +613,8 @@ struct gpu_replay_graph_t {
     CUgraphExec exec_ = nullptr;
 };
 
-/**
- *  @brief A move-only owning wrapper over a @c CUevent — the cross-stream ordering token (fork / join
- *      seams, gather-ready signals) with the timing machinery disabled.
- */
+/** A move-only owning wrapper over a @c CUevent — the cross-stream ordering token (fork / join
+ *  boundaries, gather-ready signals) with the timing machinery disabled. */
 struct gpu_event_t {
     gpu_event_t() noexcept = default;
     gpu_event_t(gpu_event_t const &) = delete;
@@ -629,7 +631,7 @@ struct gpu_event_t {
         if (event_ != nullptr) cuEventDestroy(event_);
     }
 
-    /** @brief Create the event — once, at setup. */
+    /** Create the event — once, at setup. */
     [[nodiscard]] static expected<gpu_event_t> make() noexcept {
         gpu_event_t event;
         if (CUresult result = cuEventCreate(&event.event_, CU_EVENT_DISABLE_TIMING); result != CUDA_SUCCESS)
@@ -637,7 +639,7 @@ struct gpu_event_t {
         return expected<gpu_event_t> {std::move(event)};
     }
 
-    /** @brief The wrapped handle for record / wait calls. */
+    /** The wrapped handle for record / wait calls. */
     [[nodiscard]] CUevent get() const noexcept { return event_; }
 
   private:
@@ -646,13 +648,14 @@ struct gpu_event_t {
 
 /**
  *  @brief The monotonic step counter of one collective surface — the device round scalar @b is
- *      the count, and it is the sole source of truth (no host shadow, no pinned cell). One behavior:
- *      @ref advance enqueues a one-thread device increment (@c round += increment , then a
- *      @c __threadfence_system() ), once per step on the surface's lead stream before any barrier.
- *      Because the bump lives on the device, a captured collective region self-advances the round
- *      on every @c cuGraphLaunch replay with no host intervention. The scalar is seeded @c 0u-increment
- *      at @ref make so the first advance yields round 0. Counts never reset; a replayed barrier's
- *      target only grows.
+ *      the count, and it is the sole source of truth (no host shadow, no pinned cell).
+ *
+ *  One behavior: @ref advance enqueues a one-thread device increment, @c round += increment followed by a
+ *  @c __threadfence_system() , once per step on the surface's lead stream before any barrier.
+ *  Because the bump lives on the device, a captured collective region self-advances the round
+ *  on every @c cuGraphLaunch replay with no host intervention. The scalar is seeded @c 0u-increment
+ *  at @ref make so the first advance yields round 0. Counts never reset; a replayed barrier's
+ *  target only grows.
  */
 struct barrier_round_t {
 
@@ -662,10 +665,12 @@ struct barrier_round_t {
     barrier_round_t(barrier_round_t &&) noexcept = default;
     barrier_round_t &operator=(barrier_round_t &&) noexcept = default;
 
-    /** @brief Seed the device round scalar — once, at setup, with a current context.
+    /**
+     *  @brief Seed the device round scalar — once, at setup, with a current context.
      *  @param[in] device_round The one-scalar device destination, borrowed for this object's lifetime.
      *  @param[in] increment How far one step advances the count (a member count, a round count).
-     *  @param[in] stream The lead stream the seed is enqueued on, ordered before the first @ref advance. */
+     *  @param[in] stream The lead stream the seed is enqueued on, ordered before the first @ref advance.
+     */
     [[nodiscard]] static expected<barrier_round_t> make(u32r1_span_t device_round, u32_t increment,
                                                         gpu_stream_t &stream) noexcept {
         barrier_round_t counter;
@@ -679,23 +684,27 @@ struct barrier_round_t {
         return expected<barrier_round_t> {std::move(counter)};
     }
 
-    /** @brief Enqueue the one-thread device increment — once per step, on the surface's lead stream,
-     *      before any barrier. Capture-safe: a captured region re-runs the bump on every replay. */
+    /** Enqueue the one-thread device increment — once per step, on the surface's lead stream,
+     *  before any barrier. Capture-safe: a captured region re-runs the bump on every replay. */
     [[nodiscard]] expected_t advance(gpu_stream_t &stream) noexcept;
 
   private:
-    /** @brief The borrowed one-scalar device destination the barriers spin against and @ref advance bumps. */
+
+    /** The borrowed one-scalar device destination the barriers spin against and @ref advance bumps. */
     u32r1_span_t device_round_ {};
-    /** @brief One step's advance — the arrivals a barrier waits for. */
+
+    /** One step's advance — the arrivals a barrier waits for. */
     u32_t increment_ = 0;
 };
 
 /**
  *  @brief For this scope, the calling thread switches to @p stream 's GPU — and switches back at scope
- *      end. The Driver API needs a current context for every allocation, module load, and launch, and
- *      one process drives many GPUs from one thread, so per-device work must enter that device's
- *      context for its duration; the context comes from the object that already owns it (the stream),
- *      never from a separate retain path. Check @ref ok() before relying on the scope.
+ *      end.
+ *
+ *  The Driver API needs a current context for every allocation, module load, and launch, and
+ *  one process drives many GPUs from one thread, so per-device work must enter that device's
+ *  context for its duration; the context comes from the object that already owns it (the stream),
+ *  never from a separate retain path. Check @ref ok() before relying on the scope.
  */
 struct switch_to_gpu_t {
     explicit switch_to_gpu_t(gpu_stream_t &stream) noexcept : ok_(cuCtxPushCurrent(stream.context()) == CUDA_SUCCESS) {}
@@ -704,7 +713,8 @@ struct switch_to_gpu_t {
     ~switch_to_gpu_t() noexcept {
         if (ok_) cuCtxPopCurrent(nullptr);
     }
-    /** @brief Whether the switch happened — a false scope must fail the caller loudly. */
+
+    /** Whether the switch happened — a false scope must fail the caller loudly. */
     [[nodiscard]] bool ok() const noexcept { return ok_; }
 
   private:
@@ -713,9 +723,10 @@ struct switch_to_gpu_t {
 
 /**
  *  @brief A shared cuDNN session: one handle per device, owned once and borrowed by every fused-graph
- *      consumer — the fused-attention entry point. The graphs themselves live with their consumers
- *      (e.g. the transformer block owns its SDPA plans); this owner carries only the handle, bound to
- *      the caller's stream at execute time.
+ *      consumer — the fused-attention entry point.
+ *
+ *  The graphs themselves live with their consumers (e.g. the transformer block owns its SDPA plans);
+ *  this owner carries only the handle, bound to the caller's stream at execute time.
  */
 struct cudnn_session_t {
 
@@ -737,9 +748,9 @@ struct cudnn_session_t {
     }
     ~cudnn_session_t() noexcept { destroy_(); }
 
-    /** @brief Create the handle — once per device, outside any capture. @p algo_pick carries the run's
-     *      algorithm policy; the SDPA plans keep their heuristic engine under both values today, and
-     *      @ref algo_pick_t::benchmarked_k will iterate the frontend's engine configs in a later wave. */
+    /** Create the handle — once per device, outside any capture. @p algo_pick carries the run's
+     *  algorithm policy; the SDPA plans keep their heuristic engine under both values today, and
+     *  @ref algo_pick_t::benchmarked_k will iterate the frontend's engine configs in a later wave. */
     [[nodiscard]] static expected<cudnn_session_t> make(algo_pick_t algo_pick) noexcept {
         cudnn_session_t session;
         session.algo_pick_ = algo_pick;
@@ -749,8 +760,8 @@ struct cudnn_session_t {
         return expected<cudnn_session_t> {std::move(session)};
     }
 
-    /** @brief Bind the handle to @p stream — cuDNN executes on whatever stream the handle carries, so
-     *      every consumer re-binds before its enqueue. */
+    /** Bind the handle to @p stream — cuDNN executes on whatever stream the handle carries, so
+     *  every consumer re-binds before its enqueue. */
     [[nodiscard]] expected_t bind(gpu_stream_t &stream) noexcept {
         if (cudnnStatus_t status = cudnnSetStream(handle_, reinterpret_cast<cudaStream_t>(stream.get()));
             status != CUDNN_STATUS_SUCCESS)
@@ -759,9 +770,10 @@ struct cudnn_session_t {
         return {};
     }
 
-    /** @brief The wrapped handle, borrowed by graph builders and executes. */
+    /** The wrapped handle, borrowed by graph builders and executes. */
     [[nodiscard]] cudnnHandle_t get() const noexcept { return handle_; }
-    /** @brief The run's algorithm policy — carried for the later engine-config benchmarking wave. */
+
+    /** The run's algorithm policy — carried for the later engine-config benchmarking wave. */
     [[nodiscard]] algo_pick_t algo_pick() const noexcept { return algo_pick_; }
 
   private:
@@ -773,12 +785,12 @@ struct cudnn_session_t {
     algo_pick_t algo_pick_ = algo_pick_t::heuristic_k;
 };
 
-/** @brief The unifying shape across the collective tiers — a typed handle bundling specialized symmetric memory
- *      with an enqueue-only collective op. Every buffer names its element type and is invocable on a stream
- *      (multimem or infiniband); the per-buffer typed memory accessors ( @c payload / @c own_block /
- *      @c send_block / @c recv_block ) expose the specialized memory. Each buffer @c static_assert s it, so a
- *      drifted signature fails at compile time and generic code (mixer, telemetry, tests) can name any collective
- *      uniformly. */
+/** The unifying shape across the collective tiers — a typed handle bundling specialized symmetric memory
+ *  with an enqueue-only collective op. Every buffer names its element type and is invocable on a stream
+ *  (multimem or infiniband); the per-buffer typed memory accessors ( @c payload / @c own_block /
+ *  @c send_block / @c recv_block ) expose the specialized memory. Each buffer @c static_assert s it, so a
+ *  drifted signature fails at compile time and generic code (mixer, telemetry, tests) can name any collective
+ *  uniformly. */
 template <typename buffer_type_>
 concept collective_buffer = requires(buffer_type_ buffer, gpu_stream_t &stream) {
     typename buffer_type_::value_type;

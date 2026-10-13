@@ -83,7 +83,8 @@ def stage_row(row: StagingRow, dry_run: bool, target_gigabytes: float, rank: int
         row: The manifest row to stage.
         dry_run: When True, only print the commands that would run.
         target_gigabytes: The budget allocator's target on-disk GB for this row.
-        rank, world: This worker's Slurm split; a shardable row forwards them so its downloader strides.
+        rank: This worker's Slurm split index; a shardable row forwards it so its downloader strides.
+        world: This worker's Slurm split size, forwarded alongside `rank`.
 
     Returns:
         `(status, gigabytes)` where status is one of "planned" / "staged" / "blocked" / "failed", and

@@ -110,8 +110,8 @@
 
 namespace unum::uform::core {
 
-/** @brief Most Matryoshka prefix widths one loss supports; the dims travel to every kernel by value
- *      inside @ref matryoshka_prefixes_t , so the bound keeps the kernel-argument footprint fixed. */
+/** Most Matryoshka prefix widths one loss supports; the dims travel to every kernel by value
+ *  inside @ref matryoshka_prefixes_t , so the bound keeps the kernel-argument footprint fixed. */
 inline constexpr u32_t max_matryoshka_prefixes_k = 8u;
 
 /**
@@ -124,12 +124,12 @@ inline constexpr u32_t max_matryoshka_prefixes_k = 8u;
  */
 inline constexpr f32_t cosine_denominator_floor_k = 1.0e-2f;
 
-/** @brief Floor on a per-vertex @c Σw denominator so a fully-masked row yields a finite zero loss and
- *      zero gradient instead of a divide-by-zero. */
+/** Floor on a per-vertex @c Σw denominator so a fully-masked row yields a finite zero loss and
+ *  zero gradient instead of a divide-by-zero. */
 inline constexpr f32_t weight_sum_floor_k = 1.0e-12f;
 
-/** @brief The six rows of the packed @b [6,rows] per-from-vertex accumulator, in storage order — the one
- *      naming of the row indices the balanced-BCE epilogue reads and writes. */
+/** The six rows of the packed @b [6,rows] per-from-vertex accumulator, in storage order — the one
+ *  naming of the row indices the balanced-BCE epilogue reads and writes. */
 enum class from_vertex_accumulator_t : u32_t {
     positive_weight_sum_k = 0,
     negative_weight_sum_k = 1,
@@ -139,43 +139,45 @@ enum class from_vertex_accumulator_t : u32_t {
     log_inverse_temperature_grad_k = 5,
 };
 
-/**
- *  @brief One GPU's subgraph of the force layout: its contiguous run of the global vertex axis — always
- *      @b [to_vertices_per_gpu,hidden] , wherever the transport put it (local tile, NVLink peer memory, or
- *      a landed remote copy). Vertex existence (PAD) is state of the relation view, not of the subgraph.
- */
+/** One GPU's subgraph of the force layout: its contiguous run of the global vertex axis — always
+ *  @b [to_vertices_per_gpu,hidden] , wherever the transport put it (local tile, NVLink peer memory, or
+ *  a landed remote copy). Vertex existence (PAD) is state of the relation view, not of the subgraph. */
 struct gpu_subgraph_t {
-    /** @brief @b [to_vertices_per_gpu,hidden] BFloat16 to-vertex (column) tower of this block, row-major. */
+
+    /** @b [to_vertices_per_gpu,hidden] BFloat16 to-vertex (column) tower of this block, row-major. */
     bf16r2_view_t to_vertices {};
-    /** @brief Global vertex id of this subgraph's row 0 — shifts its local rows onto the global vertex
-     *      axis. */
+
+    /** Global vertex id of this subgraph's row 0 — shifts its local rows onto the global vertex
+     *  axis. */
     std::size_t global_offset = 0;
-    /** @brief @b [to_vertices_per_gpu,hidden] Float32 output — this rank's force contribution to the
-     *      subgraph's to-vertices; Float32 so the caller can reduce-scatter-@b sum without per-rank
-     *      rounding. */
+
+    /** @b [to_vertices_per_gpu,hidden] Float32 output — this rank's force contribution to the
+     *  subgraph's to-vertices; Float32 so the caller can reduce-scatter-sum without per-rank
+     *  rounding. */
     f32r2_span_t to_vertices_grad {};
 };
 
-/**
- *  @brief The validated Matryoshka prefix widths — a fixed-capacity value type every kernel takes by
- *      value. Construction is the validation: @ref make rejects an empty, oversized, non-ascending, or
- *      over-wide ladder, so an instance is always well-formed.
- */
+/** The validated Matryoshka prefix widths — a fixed-capacity value type every kernel takes by
+ *  value. Construction is the validation: @ref make rejects an empty, oversized, non-ascending, or
+ *  over-wide ladder, so an instance is always well-formed. */
 struct matryoshka_prefixes_t {
 
-    /** @brief Validate @p prefix_dims (strictly ascending, each @c >=1 and @c <=hidden , at most
-     *      @ref max_matryoshka_prefixes_k entries) and adopt them. */
+    /** Validate @p prefix_dims (strictly ascending, each @c >=1 and @c <=hidden , at most
+     *  @ref max_matryoshka_prefixes_k entries) and adopt them. */
     [[nodiscard]] static expected<matryoshka_prefixes_t> make(u32r1_view_t prefix_dims, std::size_t hidden) noexcept;
 
-    /** @brief Number of nested prefixes. */
+    /** Number of nested prefixes. */
     [[nodiscard]] constexpr u32_t size() const noexcept { return count_; }
-    /** @brief Width of prefix @p index — strictly ascending in @p index . */
+
+    /** Width of prefix @p index — strictly ascending in @p index . */
     [[nodiscard]] constexpr u32_t operator[](u32_t index) const noexcept { return dims_[index]; }
-    /** @brief First channel of segment @p index — the previous prefix's width, 0 for the first. */
+
+    /** First channel of segment @p index — the previous prefix's width, 0 for the first. */
     [[nodiscard]] constexpr u32_t segment_begin(u32_t index) const noexcept {
         return index != 0 ? dims_[index - 1] : 0u;
     }
-    /** @brief Channel count of segment @p index . */
+
+    /** Channel count of segment @p index . */
     [[nodiscard]] constexpr u32_t segment_width(u32_t index) const noexcept {
         return dims_[index] - segment_begin(index);
     }
@@ -187,8 +189,8 @@ struct matryoshka_prefixes_t {
 
 #if defined(__CUDACC__)
 
-/** @brief The per-vertex logit scale β: the device entry selected by the from-vertex's temperature group,
- *      or the host fallback when no device view is bound. */
+/** The per-vertex logit scale β: the device entry selected by the from-vertex's temperature group,
+ *  or the host fallback when no device view is bound. */
 [[nodiscard]] __device__ inline f32_t contrastive_from_vertex_beta_(contrastive_recipe_t const &recipe,
                                                                     u32_t vertex_index) noexcept {
     if (recipe.inverse_temperature_device.empty()) return recipe.inverse_temperature;
@@ -198,7 +200,7 @@ struct matryoshka_prefixes_t {
     return recipe.inverse_temperature_device[static_cast<u32_t>(temperature_group)];
 }
 
-/** @brief The per-vertex additive logit bias — the sibling of @ref contrastive_from_vertex_beta_ . */
+/** The per-vertex additive logit bias — the sibling of @ref contrastive_from_vertex_beta_ . */
 [[nodiscard]] __device__ inline f32_t contrastive_from_vertex_bias_(contrastive_recipe_t const &recipe,
                                                                     u32_t vertex_index) noexcept {
     if (recipe.bias_device.empty()) return recipe.bias;
@@ -208,26 +210,26 @@ struct matryoshka_prefixes_t {
     return recipe.bias_device[static_cast<u32_t>(temperature_group)];
 }
 
-/**
- *  @brief The baked geometry of one segments loss — every capacity a call may not exceed; a different
- *      config is a different object, exactly the capture contract of @ref multimodal_batch_shape_t .
- */
+/** The baked geometry of one segments loss — every capacity a call may not exceed; a different
+ *  config is a different object, exactly the capture contract of @ref multimodal_batch_shape_t . */
 struct contrastive_segments_config_t {
-    /** @brief Owned (pooled) from-vertex rows this rank scores — the force grid's row count. */
+
+    /** Owned (pooled) from-vertex rows this rank scores — the force grid's row count. */
     u32_t from_vertices_per_gpu = 0;
-    /** @brief Embedding width shared by both towers. */
+
+    /** Embedding width shared by both towers. */
     u32_t hidden = 0;
-    /** @brief To-vertex rows in every GPU's subgraph — world-uniform, the homogeneous-mesh guarantee. */
+
+    /** To-vertex rows in every GPU's subgraph — world-uniform, the homogeneous-mesh guarantee. */
     u32_t to_vertices_per_gpu = 0;
-    /** @brief Subgraphs scored per step — the world's GPU count when fully gathered. */
+
+    /** Subgraphs scored per step — the world's GPU count when fully gathered. */
     u32_t gpu_subgraphs_per_step = 0;
 };
 
-/**
- *  @brief The segments contrastive loss as a function object: shapes, Matryoshka prefixes, and every
- *      scratch tensor are baked at @ref make — a call is a pure enqueue, capture-safe and bit-reproducible
- *      (see the file header).
- */
+/** The segments contrastive loss as a function object: shapes, Matryoshka prefixes, and every
+ *  scratch tensor are baked at @ref make — a call is a pure enqueue, capture-safe and bit-reproducible
+ *  (see the file header). */
 struct contrastive_segments_t {
 
     /**
@@ -267,40 +269,49 @@ struct contrastive_segments_t {
                                         f32r1_span_t bias_grad = {}) noexcept;
 
   private:
-    /** @brief The baked geometry and the validated prefix ladder — every capacity a call is checked
-     *      against. */
+
+    /** The baked geometry and the validated prefix ladder — every capacity a call is checked
+     *  against. */
     matryoshka_prefixes_t prefixes_ {};
     contrastive_segments_config_t config_ {};
 
-    /** @brief @b [prefixes,rows] / @b [prefixes,neighbors] per-row L2 norms of the from-vertex and
-     *      to-vertex towers. */
+    /** @b [prefixes,rows] / @b [prefixes,neighbors] per-row L2 norms of the from-vertex and
+     *  to-vertex towers. */
     f32r2_tensor_arena_t from_vertex_norms_ {}, to_vertex_norms_ {};
-    /** @brief @b [prefixes,rows,neighbors] per-prefix raw dot products, scaled cosine (β·cos, no bias),
-     *      logit gradient, and raw-dot gradient of one subgraph block. */
+
+    /** @b [prefixes,rows,neighbors] per-prefix raw dot products, scaled cosine (β·cos, no bias),
+     *  logit gradient, and raw-dot gradient of one subgraph block. */
     f32r3_tensor_arena_t raw_dot_ {}, scaled_cosine_ {}, logit_grad_ {}, raw_dot_grad_ {};
-    /** @brief @b [prefixes·rows,neighbors] BFloat16 cast of @ref raw_dot_grad_ — the gradient products'
-     *      operand, its rows padded to 8 for NumKong's 16-byte stride rule. */
+
+    /** @b [prefixes·rows,neighbors] BFloat16 cast of @ref raw_dot_grad_ — the gradient products'
+     *  operand, its rows padded to 8 for NumKong's 16-byte stride rule. */
     bf16r2_tensor_arena_t raw_dot_grad_bf16_ {};
-    /** @brief The six @b [rows] accumulator rows indexed by @ref from_vertex_accumulator_t : Σw⁺, Σw⁻,
-     *      positive and negative softplus mass, bias and log-β gradient summands — one @b [6,rows] tensor,
-     *      one memset covers them all. */
+
+    /** The six @b [rows] accumulator rows indexed by @ref from_vertex_accumulator_t : Σw⁺, Σw⁻,
+     *  positive and negative softplus mass, bias and log-β gradient summands — one @b [6,rows] tensor,
+     *  one memset covers them all. */
     f32r2_tensor_arena_t from_vertex_accumulator_ {};
-    /** @brief @b [prefixes,rows] / @b [prefixes,neighbors] deterministic cosine self-coefficients. */
+
+    /** @b [prefixes,rows] / @b [prefixes,neighbors] deterministic cosine self-coefficients. */
     f32r2_tensor_arena_t from_vertex_self_coefficients_ {}, to_vertex_self_coefficients_ {};
-    /** @brief @b [rows,hidden] Float32 owned-vertex force accumulator, cast to BFloat16 at the end, and one
-     *      subgraph's segment products before they add onto it — zeroed every call, since no prefix writes the
-     *      channels past the last one. */
+
+    /** @b [rows,hidden] Float32 owned-vertex force accumulator, cast to BFloat16 at the end, and one
+     *  subgraph's segment products before they add onto it — zeroed every call, since no prefix writes the
+     *  channels past the last one. */
     f32r2_tensor_arena_t from_vertices_grad_f32_ {}, from_vertices_grad_products_ {};
-    /** @brief @b [hidden,rows] , @b [hidden,neighbors] and @b [neighbors,rows] BFloat16 transposes of the owned
-     *      vertices, a subgraph's vertices and one segment's gradient, their rows padded to 8 — the products' B
-     *      operands come from the first two, the to-vertex force's A operand is the third. */
+
+    /** @b [hidden,rows] , @b [hidden,neighbors] and @b [neighbors,rows] BFloat16 transposes of the owned
+     *  vertices, a subgraph's vertices and one segment's gradient, their rows padded to 8 — the products' B
+     *  operands come from the first two, the to-vertex force's A operand is the third. */
     bf16r1_tensor_arena_t vertices_transposed_ {}, to_vertices_transposed_ {}, gradient_transposed_ {};
-    /** @brief The one NumKong pack every product's B operand passes through, sized for the largest. */
+
+    /** The one NumKong pack every product's B operand passes through, sized for the largest. */
     b8r1_tensor_arena_t packed_ {};
-    /** @brief The NumKong capabilities of the arena's device, picking every product. */
+
+    /** The NumKong capabilities of the arena's device, picking every product. */
     nk_capability_t capabilities_ = 0;
 
-    /** @brief The @p which row of the packed @ref from_vertex_accumulator_ as a mutable span. */
+    /** The @p which row of the packed @ref from_vertex_accumulator_ as a mutable span. */
     [[nodiscard]] f32r1_span_t accumulator_row(from_vertex_accumulator_t which) noexcept {
         return {from_vertex_accumulator_.row(static_cast<u32_t>(which)).data(), from_vertex_accumulator_.extent(1)};
     }
@@ -308,9 +319,11 @@ struct contrastive_segments_t {
 
 /**
  *  @brief The distributed sibling of @ref contrastive_segments_t : one object owning a whole world's
- *      force evaluation — the per-rank loss objects, a reserved window of the main-owned
- *      @ref multimem_domain_t whose replicas @b are the column-force surfaces, and the cross-domain
- *      members wired through the main-owned @ref colocated_domain_t .
+ *      force evaluation.
+ *
+ *  It holds the per-rank loss objects, a reserved window of the main-owned @ref multimem_domain_t whose
+ *  replicas @b are the column-force surfaces, and the cross-domain members wired through the main-owned
+ *  @ref colocated_domain_t .
  *
  *  This signature expresses the self-scoring configuration: @c towers serves as both the owned rows and
  *  the subgraph columns of one global vertex axis, so the row-side and column-side forces of every
@@ -322,8 +335,8 @@ struct contrastive_segments_t {
  */
 struct distributed_contrastive_segments_t {
 
-    /** @brief How many Float32 payload scalars this consumer will @c reserve from the shared
-     *      @ref multimem_domain_t — for main's domain sizing. */
+    /** How many Float32 payload scalars this consumer will @c reserve from the shared
+     *  @ref multimem_domain_t — for main's domain sizing. */
     [[nodiscard]] static constexpr std::size_t payload_scalars_needed(contrastive_segments_config_t config) noexcept {
         return static_cast<std::size_t>(config.gpu_subgraphs_per_step) * config.from_vertices_per_gpu * config.hidden;
     }
@@ -331,8 +344,9 @@ struct distributed_contrastive_segments_t {
     /**
      *  @brief One construction absorbs the whole world: validates every arena's visibility, builds
      *      every rank's loss object, reserves this consumer's window of the shared @p domain , and wires
-     *      its cross-domain members through @p colocated — the caller (main) owns the infrastructure,
-     *      this object only borrows it.
+     *      its cross-domain members through @p colocated .
+     *
+     *  The caller (main) owns the infrastructure, this object only borrows it.
      *
      *  @param[inout] domain The main-owned level-1 surface; one force window is reserved from it.
      *  @param[inout] colocated The main-owned level-2 surface; reduce members are wired per rank and
@@ -355,74 +369,90 @@ struct distributed_contrastive_segments_t {
         std::span<contrastive_relations_view_t const> relations, std::span<bf16r2_span_t const> from_vertices_grads,
         contrastive_segments_config_t config, u32r1_view_t prefix_dims, f64_t timeout_seconds = 120.0) noexcept;
 
-    /** @brief The @b [gpus] rank-local loss summands of the last call — sum for the global mean. */
+    /** The @b [gpus] rank-local loss summands of the last call — sum for the global mean. */
     [[nodiscard]] f32r1_view_t loss_outs() const noexcept { return loss_outs_.view(); }
-    /** @brief How many multimem_domains this object spans — 1 means the members are identities. Derived
-     *      from the retained @ref colocated_domain_t topology, never a stored copy. */
+
+    /** How many multimem_domains this object spans — 1 means the members are identities. Derived
+     *  from the retained @ref colocated_domain_t topology, never a stored copy. */
     [[nodiscard]] u32_t world_domains() const noexcept { return colocated_->multimem_domain_count(); }
 
     /**
      *  @brief Rank @p rank 's slice of one distributed evaluation — pure enqueue onto @p stream , the
-     *      shape a fork/join capture body composes directly. Rank 0's slice carries the shared phase:
-     *      (across domains) the world-tower gather every other rank's stream waits on. All views were
-     *      baked at @ref make ; the only per-call argument is the recipe. Ranks must be enqueued in
-     *      order @c 0..gpus-1 within a step.
+     *      shape a fork/join capture body composes directly.
+     *
+     *  Rank 0's slice carries the shared phase: (across domains) the world-tower gather every other
+     *  rank's stream waits on. All views were baked at @ref make ; the only per-call argument is the
+     *  recipe. Ranks must be enqueued in order @c 0..gpus-1 within a step.
      */
     [[nodiscard]] expected_t operator()(std::size_t rank, contrastive_recipe_t recipe, gpu_stream_t &stream) noexcept;
 
-    /** @brief The eager convenience: every rank's slice in order over the per-rank streams. */
+    /** The eager convenience: every rank's slice in order over the per-rank streams. */
     [[nodiscard]] expected_t operator()(contrastive_recipe_t recipe, std::span<gpu_stream_t> streams) noexcept;
 
   private:
-    /** @brief Stage this domain's towers into the gather member's own block, all-gather the remote
-     *      domains' blocks, and record the gather event every rank waits on. Gateway stream only,
-     *      caller already inside its context. */
+
+    /** Stage this domain's towers into the gather member's own block, all-gather the remote
+     *  domains' blocks, and record the gather event every rank waits on. Gateway stream only,
+     *  caller already inside its context. */
     [[nodiscard]] expected_t gather_world_tower_(gpu_stream_t &stream) noexcept;
 
-    /** @brief Level-1 reduce of @p rank 's world columns — one switch-reduced window per domain into
-     *      the rank's reduce member — then the level-2 recursive-doubling sum; @p column_force receives
-     *      the rank's own reduced window. Caller holds the rank's context. */
+    /** Level-1 reduce of @p rank 's world columns — one switch-reduced window per domain into
+     *  the rank's reduce member — then the level-2 recursive-doubling sum; @p column_force receives
+     *  the rank's own reduced window. Caller holds the rank's context. */
     [[nodiscard]] expected_t reduce_world_columns_(std::size_t rank, gpu_stream_t &stream,
                                                    f32r1_view_t &column_force) noexcept;
 
-    /** @brief The subgraph at rank-major position (@p rank , @p subgraph ) of the flat
-     *      @b [ranks,subgraphs] @ref subgraph_tables_ concatenation — the one home of the
-     *      @c rank·subgraphs+subgraph arithmetic. */
+    /** The subgraph at rank-major position (@p rank , @p subgraph ) of the flat
+     *  @b [ranks,subgraphs] @ref subgraph_tables_ concatenation — the one home of the
+     *  @c rank·subgraphs+subgraph arithmetic. */
     [[nodiscard]] gpu_subgraph_t &subgraph_at(std::size_t rank, std::size_t subgraph) noexcept {
         return subgraph_tables_[rank * config_.gpu_subgraphs_per_step + subgraph];
     }
 
-    /** @brief The baked world geometry every capacity check keys on. */
+    /** The baked world geometry every capacity check keys on. */
     contrastive_segments_config_t config_ {};
-    /** @brief One loss object per local GPU — per-device by nature. */
+
+    /** One loss object per local GPU — per-device by nature. */
     per_gpu_array<contrastive_segments_t> losses_ {};
-    /** @brief The main-owned level-1 surface — borrowed; its replicas carry the column forces. */
+
+    /** The main-owned level-1 surface — borrowed; its replicas carry the column forces. */
     multimem_domain_t *domain_ = nullptr;
-    /** @brief The main-owned level-2 surface — borrowed; retained so @ref world_domains derives the
-     *      multimem_domain span from its topology rather than caching it as a fact. */
+
+    /** The main-owned level-2 surface — borrowed; retained so @ref world_domains derives the
+     *  multimem_domain span from its topology rather than caching it as a fact. */
     colocated_domain_t *colocated_ = nullptr;
-    /** @brief This consumer's disjoint window of the domain payload, reserved at @ref make . */
+
+    /** This consumer's disjoint window of the domain payload, reserved at @ref make . */
     multimem_window_t window_ {};
-    /** @brief @b [gpus] rank-local loss summands on the lead device, peer-written by each rank. */
+
+    /** @b [gpus] rank-local loss summands on the lead device, peer-written by each rank. */
     f32r1_tensor_arena_t loss_outs_ {};
-    /** @brief This process's own multimem_domain coordinate — the recursive-doubling home index. Genuinely
-     *      baked: not recoverable from the retained topology. */
+
+    /** This process's own multimem_domain coordinate — the recursive-doubling home index. Genuinely
+     *  baked: not recoverable from the retained topology. */
     u32_t home_domain_index_ = 0;
-    /** @brief The gateway's gather-complete ordering token every rank's stream waits on. */
+
+    /** The gateway's gather-complete ordering token every rank's stream waits on. */
     gpu_event_t gather_ready_ {};
-    /** @brief One cross-domain all-reduce buffer per local GPU — its typed payload is the rank's world-column
-     *      shard. */
+
+    /** One cross-domain all-reduce buffer per local GPU — its typed payload is the rank's world-column
+     *  shard. */
     per_gpu_array<infiniband_all_reduce<f32_t>> reduce_buffers_ {};
-    /** @brief The gateway's cross-domain all-gather buffer — its typed payload is the world tower. */
+
+    /** The gateway's cross-domain all-gather buffer — its typed payload is the world tower. */
     infiniband_all_gather<bf16_t> gather_buffer_ {};
-    /** @brief All ranks' subgraph tables in one rank-major table, baked at @ref make . */
+
+    /** All ranks' subgraph tables in one rank-major table, baked at @ref make . */
     array<gpu_subgraph_t> subgraph_tables_ {};
-    /** @brief @b [gpus] tower views the gateway stages into the gather member's own block — populated
-     *      only across domains; the single-domain path reads the same views through the tables. */
+
+    /** @b [gpus] tower views the gateway stages into the gather member's own block — populated
+     *  only across domains; the single-domain path reads the same views through the tables. */
     per_gpu_array<bf16r2_view_t> gather_sources_ {};
-    /** @brief @b [gpus] per-local-GPU relation views — addresses baked, contents restaged per step. */
+
+    /** @b [gpus] per-local-GPU relation views — addresses baked, contents restaged per step. */
     per_gpu_array<contrastive_relations_view_t> relations_ {};
-    /** @brief @b [gpus] per-local-GPU from-vertex-force outputs, baked at @ref make . */
+
+    /** @b [gpus] per-local-GPU from-vertex-force outputs, baked at @ref make . */
     per_gpu_array<bf16r2_span_t> from_vertices_grads_ {};
 };
 

@@ -74,7 +74,7 @@ def _shard_allow_patterns(repo_id: str, max_shards: int | None, fraction: float 
     """Return the explicit caption-shard `allow_patterns`, capped by the tighter of fraction / max-shards.
 
     Unlike the whole-repo downloaders, COCO's convert branch carries several unrelated configs (the
-    exploded `2014/` split, the test split), so the allow-list is ALWAYS the explicit caption shards —
+    exploded `2014/` split, the test split), so the allow-list is always the explicit caption shards —
     never `None` — and the cap simply trims that list.
 
     Args:

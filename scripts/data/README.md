@@ -5,7 +5,8 @@ Every corpus is referenced by name through the mixture JSONs — five per-mixtur
 This page is the modality-organized catalog of what those names point to, including the corpora staged for upcoming tiers.
 
 A checkbox marks whether the repository already has parsing code for the dataset: ✅ a mixture entry with a working downloader and a modality loader, 🔜 planned but not parseable yet — a wishlist row awaiting a downloader or loader, or a corpus not yet added.
-The `Format` column reads `downloaded → stored`; every corpus is converted on download into the same GPU-friendly parquet that cuDF reads zero-copy, so the stored form is always `parquet`.
+The format reads `downloaded → stored`; every corpus is converted on download into the same GPU-friendly parquet that cuDF reads zero-copy, so the stored form is always `parquet`.
+Where a section is a list rather than a table, each entry reads `corpus: role; format; coverage`.
 
 ## Staging the Balanced Corpus
 
@@ -79,24 +80,22 @@ The text stack spans masked-language pretraining (`MLM`), contrastive retrieval 
 
 ### Retrieval & QA Pairs
 
-| Dataset                           | Role            | Format         | Coverage                                            |
-| --------------------------------- | --------------- | -------------- | --------------------------------------------------- |
-| ✅ [MS MARCO][msmarco]            | pairs, triplets | parquet        | Query → passage; 1 or 50 BM25 hard negatives ¹      |
-| 🔜 [mMARCO][mmarco]               | pairs           | parquet        | Multilingual MS MARCO ²                             |
-| ✅ [Mr. TyDi][mrtydi]             | triplets        | parquet        | 11-language retrieval, multiple positives per query |
-| ✅ [Natural Questions][nq]        | pairs           | parquet        | Query → answer                                      |
-| ✅ [HotpotQA][hotpotqa]           | pairs           | parquet        | Multi-hop question → passage                        |
-| ✅ [ELI5][eli5]                   | pairs           | parquet        | Question → long-form answer                         |
-| ✅ [GooAQ][gooaq]                 | pairs           | parquet        | Question → answer                                   |
-| ✅ [PAQ][paq]                     | pairs           | parquet        | 64M synthetic QA pairs                              |
-| ✅ [AllNLI][allnli]               | triplets        | parquet        | NLI anchor / positive / negative                    |
-| ✅ [Quora][quora]                 | triplets        | parquet        | Duplicate-question pairs                            |
-| ✅ [WikiAnswers][wikianswers]     | pairs           | parquet        | 27M paraphrase pairs                                |
-| ✅ [StackExchange][stackexchange] | MLM, pairs      | parquet        | Title → answer; duplicate pairs ³                   |
-| ✅ [HackerNews][hackernews]       | MLM, pairs      | parquet        | Title → body                                        |
-| ✅ [WebInstruct][webinstruct]     | pairs           | parquet        | 481K instruction Q → A ⁴                            |
-| ✅ [OpenHermes 2.5][openhermes]   | pairs           | JSON → parquet | 1M conversational instructions ⁴                    |
-| 🔜 [Infinity-Instruct][infinity]  | pairs           | parquet        | 7M+ instructions ⁵                                  |
+- ✅ [MS MARCO][msmarco]: pairs, triplets; parquet; query → passage; 1 or 50 BM25 hard negatives ¹
+- 🔜 [mMARCO][mmarco]: pairs; parquet; multilingual MS MARCO ²
+- ✅ [Mr. TyDi][mrtydi]: triplets; parquet; 11-language retrieval, multiple positives per query
+- ✅ [Natural Questions][nq]: pairs; parquet; query → answer
+- ✅ [HotpotQA][hotpotqa]: pairs; parquet; multi-hop question → passage
+- ✅ [ELI5][eli5]: pairs; parquet; question → long-form answer
+- ✅ [GooAQ][gooaq]: pairs; parquet; question → answer
+- ✅ [PAQ][paq]: pairs; parquet; 64M synthetic QA pairs
+- ✅ [AllNLI][allnli]: triplets; parquet; NLI anchor / positive / negative
+- ✅ [Quora][quora]: triplets; parquet; duplicate-question pairs
+- ✅ [WikiAnswers][wikianswers]: pairs; parquet; 27M paraphrase pairs
+- ✅ [StackExchange][stackexchange]: MLM, pairs; parquet; title → answer; duplicate pairs ³
+- ✅ [HackerNews][hackernews]: MLM, pairs; parquet; title → body
+- ✅ [WebInstruct][webinstruct]: pairs; parquet; 481K instruction Q → A ⁴
+- ✅ [OpenHermes 2.5][openhermes]: pairs; JSON → parquet; 1M conversational instructions ⁴
+- 🔜 [Infinity-Instruct][infinity]: pairs; parquet; 7M+ instructions ⁵
 
 > ¹ Named `msmarco` (pairs), `msmarco_triplet` (one BM25 hard negative), and `msmarco_triplet50` (fifty negatives reshaped on device via `cudf.melt`).
 > ² Multilingual MS MARCO, staged but still awaiting a mixture entry and downloader.
@@ -127,19 +126,17 @@ The on-device local fuzzy-search use case — a short, typo-laden query against 
 Each entry slots into the mixture JSONs' `(anchor / positive / negative)` field contract; hard negatives are BM25- or ANN-mined at pack time where the source ships none.
 The augmentation family supplies the _multi-positive_ side by construction: each query variant (reformatted date, regrouped digits, mixed case, injected typo) is an additional positive of the same target, which is also what satisfies the multi-positive/multi-negative CSR guard.
 
-| Dataset                      | Role  | Format         | Coverage                                                          |
-| ---------------------------- | ----- | -------------- | ----------------------------------------------------------------- |
-| ✅ [Enron Email][enron]      | pairs | tar → parquet  | subject → body, the only large real email corpus ¹                |
-| ✅ [AESLC][aeslc]            | pairs | parquet        | email body → subject line (Annotated Enron Subject Line) ²        |
-| 🔜 [Ubuntu Dialogue][ubuntu] | pairs | parquet        | multi-turn chat context → next turn, informal register            |
-| 🔜 [Taskmaster][taskmaster]  | pairs | JSON → parquet | task-oriented dialog turn → response across 6 domains             |
-| 🔜 [MultiWOZ][multiwoz]      | pairs | JSON → parquet | multi-domain goal-oriented dialog turn → response                 |
-| 🔜 [WikiHow][wikihow]        | pairs | parquet        | step title → step body, a public proxy for note-like short docs ³ |
+- ✅ [Enron Email][enron]: pairs; tar → parquet; subject → body, the only large real email corpus ¹
+- ✅ [AESLC][aeslc]: pairs; parquet; email body → subject line (Annotated Enron Subject Line) ²
+- 🔜 [Ubuntu Dialogue][ubuntu]: pairs; parquet; multi-turn chat context → next turn, informal register
+- 🔜 [Taskmaster][taskmaster]: pairs; JSON → parquet; task-oriented dialog turn → response across 6 domains
+- 🔜 [MultiWOZ][multiwoz]: pairs; JSON → parquet; multi-domain goal-oriented dialog turn → response
+- 🔜 [WikiHow][wikihow]: pairs; parquet; step title → step body, a public proxy for note-like short docs ³
 
 > ¹ Public (FERC release); named `enron_email` and acquired via `uv run scripts/data/download_enron.py`, whose `webdataset` source kind muxes the tarball into `(subject, body)` pairs (quoted / forwarded thread history stripped).
 > Thread → reply pairs and cross-thread hard-negative mining remain future work.
 > ² Named `aeslc` and acquired via `uv run scripts/data/download_aeslc.py` (the `hf_snapshot` source kind); ~14K body → subject pairs where the subject is a terse, abbreviation-heavy "query" over the body, matching the short-query regime.
-> ³ Notes are private by nature, so no public corpus exists; WikiHow's title→body and the synthetic augmentation variants stand in until any opt-in on-device personalization is added.
+> ³ Notes are private by nature, so no public corpus exists; WikiHow's title → body and the synthetic augmentation variants stand in until any opt-in on-device personalization is added.
 
 [enron]: https://www.cs.cmu.edu/~enron/
 [aeslc]: https://huggingface.co/datasets/aeslc
@@ -150,20 +147,18 @@ The augmentation family supplies the _multi-positive_ side by construction: each
 
 ### Code
 
-| Dataset                               | Role         | Format                | Coverage                                                             |
-| ------------------------------------- | ------------ | --------------------- | -------------------------------------------------------------------- |
-| ✅ [CodeSearchNet][codesearchnet]     | MLM, pairs   | parquet               | Docstring → function, 6 languages                                    |
-| ✅ [POJ-104][poj104]                  | pairs        | parquet               | 104 C++ problems × ~500 clone solutions; equivalence-class positives |
-| ✅ [The Vault][thevault]              | pairs        | parquet               | Docstring → function, 10 languages, 11 docstring styles              |
-| ✅ [XLCoST][xlcost]                   | pairs        | parquet               | NL → code aligned across 7 languages                                 |
-| ✅ [CommitPackFT][commitpackft]       | pairs        | parquet               | Commit message → diff, 277 languages                                 |
-| ✅ [CodeContests][codecontests]       | triplets     | parquet               | Problem → solution; wrong solutions as hard negatives ¹              |
-| ✅ [ComPile-IR][compile-ir]           | MLM          | parquet               | LLVM IR modules ²                                                    |
-| ✅ [The Stack v2][thestack]           | MLM, pairs   | parquet               | \~1T tokens, 86 languages ³                                          |
-| ✅ [CommitPackFT-apply][commitpackft] | denoise pair | parquet               | `[old + subject] → new` fast-apply ⁴                                 |
-| 🔜 [the-Stack lint/format][thestack]  | denoise pair | parquet (+ generated) | deterministic ruff/black/gofmt before → after ³                      |
-| 🔜 [CodeNet][codenet]                 | pairs        | tar → parquet         | 14M submissions, 50+ languages ⁵                                     |
-| 🔜 [AnghaBench / ExeBench][exebench]  | pairs        | parquet               | C → LLVM IR pairs ⁶                                                  |
+- ✅ [CodeSearchNet][codesearchnet]: MLM, pairs; parquet; docstring → function, 6 languages
+- ✅ [POJ-104][poj104]: pairs; parquet; 104 C++ problems × ~500 clone solutions; equivalence-class positives
+- ✅ [The Vault][thevault]: pairs; parquet; docstring → function, 10 languages, 11 docstring styles
+- ✅ [XLCoST][xlcost]: pairs; parquet; NL → code aligned across 7 languages
+- ✅ [CommitPackFT][commitpackft]: pairs; parquet; commit message → diff, 277 languages
+- ✅ [CodeContests][codecontests]: triplets; parquet; problem → solution; wrong solutions as hard negatives ¹
+- ✅ [ComPile-IR][compile-ir]: MLM; parquet; LLVM IR modules ²
+- ✅ [The Stack v2][thestack]: MLM, pairs; parquet; \~1T tokens, 86 languages ³
+- ✅ [CommitPackFT-apply][commitpackft]: denoise pair; parquet; `[old + subject] → new` fast-apply ⁴
+- 🔜 [the-Stack lint/format][thestack]: denoise pair; parquet (+ generated); deterministic ruff/black/gofmt before → after ³
+- 🔜 [CodeNet][codenet]: pairs; tar → parquet; 14M submissions, 50+ languages ⁵
+- 🔜 [AnghaBench / ExeBench][exebench]: pairs; parquet; C → LLVM IR pairs ⁶
 
 > ¹ Acquired via `uv run scripts/data/download_codecontests.py` (the `hf_snapshot` source kind), with a competition-skewed language mix (C++ / Python / Java) that buys NL ↔ code alignment and equivalence supervision rather than language breadth.
 > ² Production LLVM IR from Rust / Julia / Swift / C-C++ (\~1.3T tokens), staged as a capped shard count via `uv run scripts/data/download_compile_ir.py --max-shards N` (the `hf_snapshot` source kind) so the mixture weight, not the byte count, controls representation.
@@ -188,13 +183,11 @@ The augmentation family supplies the _multi-positive_ side by construction: each
 Paired `(corrupted → canonical)` transductions that pressure the uniform byte encoder toward surface-invariant semantics (the denoising-autoencoder regularizer in `NORMALIZATION_TASKS.md`).
 These now parse through the mixture JSONs' `(anchor, positive)` contract on the standard `TextPairLoader` path, supplying the multi-positive surface-robustness side of the personal-search mixture; in-place corruption-MLM over the web corpora above remains a complementary cheap vehicle.
 
-| Dataset                                  | Role             | Format         | Coverage                                             |
-| ---------------------------------------- | ---------------- | -------------- | ---------------------------------------------------- |
-| ✅ [C4\_200M][c4200m]                    | denoise pair     | zip → parquet  | 185M synthetic GEC pairs; permissive training bulk ¹ |
-| ✅ [Google Text Normalization][googletn] | denoise pair     | CSV → parquet  | written ↔ spoken hard classes; best non-AR fit ²     |
-| 🔜 [LogHub / LogHub-2.0][loghub]         | denoise, extract | logs → parquet | `{time}{source}{priority}{message}` schema-fill      |
-| ✅ [PleIAs Post-OCR][pleias]             | denoise pair     | parquet        | \~1B words permissive OCR → clean                    |
-| ✅ [GitHub Typo Corpus][githubtypo]      | denoise pair     | parquet        | real code-comment-register typos ³                   |
+- ✅ [C4\_200M][c4200m]: denoise pair; zip → parquet; 185M synthetic GEC pairs; permissive training bulk ¹
+- ✅ [Google Text Normalization][googletn]: denoise pair; CSV → parquet; written ↔ spoken hard classes; best non-AR fit ²
+- 🔜 [LogHub / LogHub-2.0][loghub]: denoise, extract; logs → parquet; `{time}{source}{priority}{message}` schema-fill
+- ✅ [PleIAs Post-OCR][pleias]: denoise pair; parquet; \~1B words permissive OCR → clean
+- ✅ [GitHub Typo Corpus][githubtypo]: denoise pair; parquet; real code-comment-register typos ³
 
 > ¹ Named `c4_200m` and acquired via `uv run scripts/data/download_c4_200m.py --max-shards N`, whose `text_jsonl` source kind repacks one TSV shard at a time (default one ~18M-pair shard); C4-derived with Apache-licensed corruption code — the permissive workhorse for the semantic-regularizer A/B.
 > The gold GEC sets (cLang-8, JFLEG, W\&I+LOCNESS, CoNLL-2014) stay as evals because they are non-commercial or gated.
@@ -213,13 +206,11 @@ These now parse through the mixture JSONs' `(anchor, positive)` contract on the 
 A defensive content-moderation / safe-search track, mirroring the de-identification track: the model learns a robust toxic/benign boundary, never a generation target.
 CSAM is entirely out of scope.
 
-| Dataset                       | Role   | Format  | Coverage                                                                    |
-| ----------------------------- | ------ | ------- | --------------------------------------------------------------------------- |
-| ✅ [ToxiGen][toxigen]         | safety | parquet | ~260K implicit toxic/benign statements over 13 groups; text+label ¹         |
-| ✅ [Civil Comments][civilcom] | safety | parquet | ~1.9M real comments with continuous toxicity scores; text+label, CC0 ²      |
-| 🔜 [Hateful Memes][hmemes]    | safety | —       | multimodal hate; Meta/DrivenData-gated, non-commercial — not HF-stageable ³ |
-| 🔜 [XD-Violence][xdv]         | safety | —       | weakly-labeled violence; HF mirror ships features, not raw media ⁴          |
-| 🔜 [UCF-Crime][ucfc]          | safety | —       | 13 real-crime surveillance classes; zip video, license tag needs vetting ⁵  |
+- ✅ [ToxiGen][toxigen]: safety; parquet; ~260K implicit toxic/benign statements over 13 groups; text+label ¹
+- ✅ [Civil Comments][civilcom]: safety; parquet; ~1.9M real comments with continuous toxicity scores; text+label, CC0 ²
+- 🔜 [Hateful Memes][hmemes]: safety; —; multimodal hate; Meta/DrivenData-gated, non-commercial — not HF-stageable ³
+- 🔜 [XD-Violence][xdv]: safety; —; weakly-labeled violence; HF mirror ships features, not raw media ⁴
+- 🔜 [UCF-Crime][ucfc]: safety; —; 13 real-crime surveillance classes; zip video, license tag needs vetting ⁵
 
 > ¹ `toxigen`, acquired via `uv run scripts/data/download_toxigen.py` (the `hf_snapshot` source kind; configs annotated+train → flat text/label/toxicity_score/target_group/source).
 > RESEARCH-USE: no SPDX license on HF — vet before commercial.
@@ -240,19 +231,17 @@ CSAM is entirely out of scope.
 
 ### Captioning & Contrastive
 
-| Dataset                         | Role       | Format               | Coverage                                                   |
-| ------------------------------- | ---------- | -------------------- | ---------------------------------------------------------- |
-| ✅ [COCO Captions][coco]        | image-text | parquet              | Human captions; 5 per image, 8 hard negatives ¹            |
-| ✅ [Conceptual 12M][cc12m]      | image-text | WebDataset → parquet | 12M web alt-text pairs ²                                   |
-| ✅ [LAION-CC3M][cc3m]           | image-text | WebDataset → parquet | \~3M web image-text pairs ²                                |
-| 🔜 [DataComp-small][datacomp]   | image-text | WebDataset → parquet | 12.8M CLIP-scored pairs ³                                  |
-| 🔜 [BLIP3-KALE][kale]           | image-text | parquet (URLs)       | 171M synthetic captions ³                                  |
-| 🔜 [LAION-Aesthetics][laionaes] | image-text | parquet (URLs)       | aesthetic-filtered web ³                                   |
-| 🔜 [ImageNet][imagenet]         | image      | JPEG                 | Pre-resized; linear-probe evaluation only                  |
-| ✅ [DOCCI][docci]               | image-text | parquet              | \~15K images, one long dense human description each ⁴      |
-| ✅ [XM3600][xm3600]             | image-text | parquet              | 3,600 geo-diverse images, HUMAN captions in 36 languages ⁴ |
-| ✅ [RSICD][rsicd]               | image-text | parquet              | \~11K remote-sensing / aerial images, 5 captions each ⁴    |
-| ✅ [DocLayNet][doclaynet]       | image-text | parquet              | document pages; weak captions = layout class names ⁴       |
+- ✅ [COCO Captions][coco]: image-text; parquet; human captions; 5 per image, 8 hard negatives ¹
+- ✅ [Conceptual 12M][cc12m]: image-text; WebDataset → parquet; 12M web alt-text pairs ²
+- ✅ [LAION-CC3M][cc3m]: image-text; WebDataset → parquet; \~3M web image-text pairs ²
+- 🔜 [DataComp-small][datacomp]: image-text; WebDataset → parquet; 12.8M CLIP-scored pairs ³
+- 🔜 [BLIP3-KALE][kale]: image-text; parquet (URLs); 171M synthetic captions ³
+- 🔜 [LAION-Aesthetics][laionaes]: image-text; parquet (URLs); aesthetic-filtered web ³
+- 🔜 [ImageNet][imagenet]: image; JPEG; pre-resized; linear-probe evaluation only
+- ✅ [DOCCI][docci]: image-text; parquet; \~15K images, one long dense human description each ⁴
+- ✅ [XM3600][xm3600]: image-text; parquet; 3,600 geo-diverse images, HUMAN captions in 36 languages ⁴
+- ✅ [RSICD][rsicd]: image-text; parquet; \~11K remote-sensing / aerial images, 5 captions each ⁴
+- ✅ [DocLayNet][doclaynet]: image-text; parquet; document pages; weak captions = layout class names ⁴
 
 > ¹ Hard negatives are mined offline by `mine_hard_negatives.py` (eight per row) and the first non-empty caption is the positive.
 > ² Repacked from WebDataset tars to parquet by the `webdataset` source kind and read zero-copy through `ImageTextParquetLoader`.
@@ -273,11 +262,9 @@ CSAM is entirely out of scope.
 
 ### Grounding
 
-| Dataset                          | Role       | Format  | Coverage                                                                   |
-| -------------------------------- | ---------- | ------- | -------------------------------------------------------------------------- |
-| ✅ [Visual Genome][visualgenome] | image-text | parquet | \~108K images, dense region descriptions (≤16 per image, multi-positive) ² |
-| ✅ [Flickr30k][flickr30k]        | image-text | parquet | caption retrieval; Entities variant is phrase → bbox, gated ¹              |
-| ✅ [Fashion-IQ][fashioniq]       | image-text | parquet | composed retrieval; SIMPLIFIED to (modifier caption, target image) ³       |
+- ✅ [Visual Genome][visualgenome]: image-text; parquet; \~108K images, dense region descriptions (≤16 per image, multi-positive) ²
+- ✅ [Flickr30k][flickr30k]: image-text; parquet; caption retrieval; Entities variant is phrase → bbox, gated ¹
+- ✅ [Fashion-IQ][fashioniq]: image-text; parquet; composed retrieval; SIMPLIFIED to (modifier caption, target image) ³
 
 > ¹ The plain `nlphuji/flickr30k` captions mirror is parquet; the Flickr30k-Entities grounding variant (276K phrase → bbox links) is a separate, gated artifact.
 > ² Acquired via `uv run scripts/data/download_visual_genome.py` (the `hf_snapshot` source kind, nirmalendu01/visual_genome mirror, image bytes inline), flattening up to 16 region descriptions per image into a `captions` list<string>; the bbox/relation graph stays out of scope.
@@ -317,13 +304,11 @@ CSAM is entirely out of scope.
 
 ### Privacy & De-identification
 
-| Dataset                     | Role   | Format               | Coverage                                                                         |
-| --------------------------- | ------ | -------------------- | -------------------------------------------------------------------------------- |
-| 🔜 [WIDER FACE][widerface]  | redact | imgs+boxes → parquet | Face detection, 32K images / 393K faces; heavy scale, pose, occlusion variation  |
-| 🔜 [CrowdHuman][crowdhuman] | redact | imgs+boxes → parquet | Dense persons in crowds; head, visible, and full-body boxes                      |
-| 🔜 [CCPD][ccpd]             | redact | imgs+quads → parquet | \~250K license plates with 4-corner polygons and plate strings (China)           |
-| 🔜 [RodoSol-ALPR][rodosol]  | redact | imgs+quads → parquet | Brazilian car + motorcycle plates; geographic coverage beyond CCPD               |
-| 🔜 _synthetic composites_   | redact | rendered → parquet   | Faces / plates / PII composited onto scenes → unlimited exact masks, no labeling |
+- 🔜 [WIDER FACE][widerface]: redact; imgs+boxes → parquet; face detection, 32K images / 393K faces; heavy scale, pose, occlusion variation
+- 🔜 [CrowdHuman][crowdhuman]: redact; imgs+boxes → parquet; dense persons in crowds; head, visible, and full-body boxes
+- 🔜 [CCPD][ccpd]: redact; imgs+quads → parquet; \~250K license plates with 4-corner polygons and plate strings (China)
+- 🔜 [RodoSol-ALPR][rodosol]: redact; imgs+quads → parquet; Brazilian car + motorcycle plates; geographic coverage beyond CCPD
+- 🔜 _synthetic composites_: redact; rendered → parquet; faces / plates / PII composited onto scenes → unlimited exact masks, no labeling
 
 > The training target is a per-pixel __redaction mask__ keyed by type (face / plate / person / PII), composited (blur / replace) _externally_ so the encoder never regenerates pixels.
 > The street corpora below (Cityscapes, Mapillary) and the on-disk DROID dashcam clips supply in-the-wild faces + plates; synthetic compositing is the scalable, annotation-free source.
@@ -335,13 +320,11 @@ CSAM is entirely out of scope.
 
 ### Dense Labeling & Segmentation
 
-| Dataset                          | Role        | Format               | Coverage                                                                    |
-| -------------------------------- | ----------- | -------------------- | --------------------------------------------------------------------------- |
-| 🔜 [ADE20K][ade20k]              | seg         | imgs+masks → parquet | Scene parsing, 150 classes; the semantic-segmentation standard              |
-| 🔜 [COCO-Stuff][cocostuff]       | seg         | imgs+masks → parquet | Things + stuff, 171 classes, \~120K images                                  |
-| 🔜 [Cityscapes][cityscapes]      | seg, redact | imgs+masks → parquet | Urban street, 19 classes; dual-use — in-frame faces + plates feed de-id too |
-| 🔜 [Mapillary Vistas][mapillary] | seg, redact | imgs+masks → parquet | Global street-level, 66+ classes; geographic + de-id overlap                |
-| 🔜 [SA-1B][sa1b]                 | masks       | imgs+masks → parquet | 11M images / 1.1B class-agnostic masks; warm-starts the dense mask head     |
+- 🔜 [ADE20K][ade20k]: seg; imgs+masks → parquet; scene parsing, 150 classes; the semantic-segmentation standard
+- 🔜 [COCO-Stuff][cocostuff]: seg; imgs+masks → parquet; things + stuff, 171 classes, \~120K images
+- 🔜 [Cityscapes][cityscapes]: seg, redact; imgs+masks → parquet; urban street, 19 classes; dual-use — in-frame faces + plates feed de-id too
+- 🔜 [Mapillary Vistas][mapillary]: seg, redact; imgs+masks → parquet; global street-level, 66+ classes; geographic + de-id overlap
+- 🔜 [SA-1B][sa1b]: masks; imgs+masks → parquet; 11M images / 1.1B class-agnostic masks; warm-starts the dense mask head
 
 > The target is a per-patch __class map__ aligned to the encoder output grid.
 > SA-1B is class-agnostic (mask-head pretraining, not semantics); the street corpora are shared with de-identification, so one download feeds both dense heads.
@@ -354,18 +337,16 @@ CSAM is entirely out of scope.
 
 ## Video
 
-| Dataset                                  | Role          | Format                  | Coverage                                               |
-| ---------------------------------------- | ------------- | ----------------------- | ------------------------------------------------------ |
-| ✅ [MSR-VTT][msrvtt]                     | video-text    | parquet                 | 9K clips, \~20 captions each, 8 hard negatives ¹       |
-| ✅ [WebVid-10M][webvid]                  | video-text    | WebDataset → parquet    | 10M caption → clip pairs ²                             |
-| ✅ [Panda-70M][panda70m]                 | video-text    | WebDataset → parquet    | Captioned clips, testing split staged ²                |
-| ✅ [Kinetics-400][kinetics]              | video, action | tar.gz → parquet        | 400 action classes as captions ²                       |
-| ✅ [DiDeMo][didemo]                      | video-text    | tar → parquet           | \~10K Flickr clips, \~4 ordered moment captions each ⁴ |
-| ✅ [MeViS][mevis]                        | video-text    | frames → parquet        | \~2K clips, \~33K referring motion expressions ⁵       |
-| ✅ [VATEX][vatex]                        | video-text    | YouTube fetch → parquet | \~29K clips, 20 captions each (10 EN + 10 ZH) ⁶        |
-| ✅ [ActivityNet Captions][activitynet]   | video-text    | YouTube fetch → parquet | \~15K videos, \~3.65 dense captions each ⁶             |
-| 🔜 [Something-Something v2][somethingv2] | video, action | webm → parquet          | temporal action, 220K clips                            |
-| ✅ [HowTo100M][howto100m]                | video-text    | YouTube fetch → parquet | \~136M narrated clips, per-clip ASR captions ³         |
+- ✅ [MSR-VTT][msrvtt]: video-text; parquet; 9K clips, \~20 captions each, 8 hard negatives ¹
+- ✅ [WebVid-10M][webvid]: video-text; WebDataset → parquet; 10M caption → clip pairs ²
+- ✅ [Panda-70M][panda70m]: video-text; WebDataset → parquet; captioned clips, testing split staged ²
+- ✅ [Kinetics-400][kinetics]: video, action; tar.gz → parquet; 400 action classes as captions ²
+- ✅ [DiDeMo][didemo]: video-text; tar → parquet; \~10K Flickr clips, \~4 ordered moment captions each ⁴
+- ✅ [MeViS][mevis]: video-text; frames → parquet; \~2K clips, \~33K referring motion expressions ⁵
+- ✅ [VATEX][vatex]: video-text; YouTube fetch → parquet; \~29K clips, 20 captions each (10 EN + 10 ZH) ⁶
+- ✅ [ActivityNet Captions][activitynet]: video-text; YouTube fetch → parquet; \~15K videos, \~3.65 dense captions each ⁶
+- 🔜 [Something-Something v2][somethingv2]: video, action; webm → parquet; temporal action, 220K clips
+- ✅ [HowTo100M][howto100m]: video-text; YouTube fetch → parquet; \~136M narrated clips, per-clip ASR captions ³
 
 > ¹ Fetched and repacked on demand via `uv run scripts/data/download_msrvtt.py` (its media-fetch downloader) because the license blocks redistribution, with an in-batch shuffle synthesizing rerank negatives.
 > ² Repacked to parquet by the `webdataset` source kind (Panda-70M's tars), the `hf_snapshot` source kind (WebVid's snapshot parquet), or its media-fetch downloader (Kinetics-400's CSV-joined action label); WebVid is Shutterstock-licensed stock video.
@@ -392,14 +373,13 @@ CSAM is entirely out of scope.
 UForm carries no custom audio kernels, and no GPU audio codec exists across the NVIDIA, AMD, and Intel SDKs.
 Audio is decoded host-side to PCM via libavformat, then an on-GPU `cuFFT` short-time Fourier transform (Hann window) and a mel-filterbank `cuBLAS` GEMM produce log-mel frames in the same token-stream shape as the byte encoder.
 AudioCaps and AudioSet are read through `AudioParquetLoader`; VGGSound is on the roadmap.
+Each entry reads `corpus: modalities; format; scale; license`.
 
-| Dataset                   | Modalities            | Format                  | Scale                            | License   |
-| ------------------------- | --------------------- | ----------------------- | -------------------------------- | --------- |
-| ✅ [AudioCaps][audiocaps] | audio + text          | parquet                 | 50K captioned clips ¹            | research  |
-| ✅ [Clotho v2][clotho]    | audio + text          | WAV → parquet           | 6,974 clips × 5 human captions ³ | research  |
-| ✅ [Auto-ACD][autoacd]    | audio + text          | YouTube fetch → parquet | 1.9M captioned clips ⁴           | research  |
-| ✅ [AudioSet][audioset]   | audio + labels        | parquet                 | 2M clips ²                       | CC BY 4.0 |
-| 🔜 [VGGSound][vggsound]   | video + audio + label | video → parquet         | Clean audio-visual               | CC BY 4.0 |
+- ✅ [AudioCaps][audiocaps]: audio + text; parquet; 50K captioned clips ¹; research
+- ✅ [Clotho v2][clotho]: audio + text; WAV → parquet; 6,974 clips × 5 human captions ³; research
+- ✅ [Auto-ACD][autoacd]: audio + text; YouTube fetch → parquet; 1.9M captioned clips ⁴; research
+- ✅ [AudioSet][audioset]: audio + labels; parquet; 2M clips ²; CC BY 4.0
+- 🔜 [VGGSound][vggsound]: video + audio + label; video → parquet; clean audio-visual; CC BY 4.0
 
 > ¹ WAV/PCM payloads decoded by `AudioParquetLoader` → `AudioDecoderPool.decode_clip_tape_to_logmel`.
 > ² Parquet payloads with event labels joined into the contrastive text.
@@ -417,12 +397,10 @@ AudioCaps and AudioSet are read through `AudioParquetLoader`; VGGSound is on the
 ## 3D Meshes
 
 A future modality with nothing staged yet, so the corpus and its loader will land together.
-The two text-richest options:
+The two text-richest options, each reading `corpus: format; text per object; license`:
 
-| Dataset                                       | Format         | Text per object                                | License                         |
-| --------------------------------------------- | -------------- | ---------------------------------------------- | ------------------------------- |
-| 🔜 [Objaverse-XL][objaverse] + [Cap3D][cap3d] | mesh → parquet | \~10M meshes; \~660K with \~10-word captions ¹ | mixed; Cap3D subset CC0 / CC BY |
-| 🔜 [ABO][abo]                                 | mesh → parquet | \~398K products with full e-commerce text ²    | CC BY-NC 4.0                    |
+- 🔜 [Objaverse-XL][objaverse] + [Cap3D][cap3d]: mesh → parquet; \~10M meshes, \~660K with \~10-word captions ¹; mixed, Cap3D subset CC0 / CC BY
+- 🔜 [ABO][abo]: mesh → parquet; \~398K products with full e-commerce text ²; CC BY-NC 4.0
 
 > ¹ Sketchfab / Thingiverse / Smithsonian descriptions of varied quality, plus the uniform Cap3D LLM-caption layer.
 > ² Title, multi-paragraph description, feature list, dimensions, brand, and category.
@@ -451,12 +429,12 @@ Neither is staged; both need an RLDS → parquet repacker plus a `VLAParquetLoad
 Video paired with audio, dialogue, narration, or sensor streams, for scene-level understanding and reconstruction — a future tier whose candidate set is below.
 VGGSound and AudioSet (see Audio) also serve here in their audio-visual role.
 
-| Dataset                          | Modalities                                      | Format          | Scale                  | License                |
-| -------------------------------- | ----------------------------------------------- | --------------- | ---------------------- | ---------------------- |
-| 🔜 [HD-VILA-100M][hdvila]        | video + audio + ASR                             | video → parquet | 100M clips             | MIT                    |
-| 🔜 [Ego4D][ego4d]                | video + audio + speech + gaze + IMU + narration | video → parquet | 3,670 hours            | research               |
-| 🔜 [LSMDC][lsmdc]                | video + audio + audio-description + dialogue    | video → parquet | 200 movies, 128K clips | research               |
-| 🔜 [Condensed Movies][condensed] | video + dialogue + plot summaries               | video → parquet | 33K clips, 3.6K movies | trailers public-domain |
+Each entry reads `corpus: modalities; format; scale; license`.
+
+- 🔜 [HD-VILA-100M][hdvila]: video + audio + ASR; video → parquet; 100M clips; MIT
+- 🔜 [Ego4D][ego4d]: video + audio + speech + gaze + IMU + narration; video → parquet; 3,670 hours; research
+- 🔜 [LSMDC][lsmdc]: video + audio + audio-description + dialogue; video → parquet; 200 movies, 128K clips; research
+- 🔜 [Condensed Movies][condensed]: video + dialogue + plot summaries; video → parquet; 33K clips, 3.6K movies; trailers public-domain
 
 [hdvila]: https://github.com/microsoft/XPretrain/tree/main/hd-vila-100m
 [ego4d]: https://ego4d-data.org/

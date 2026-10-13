@@ -1,7 +1,9 @@
 /**
- *  @brief The storage session's one firewalled body: configure cuDF's KvikIO layer. See the header for
- *      the contract. cuDF lives only in this translation unit and the sibling @c dataset_shards.cpp .
+ *  @brief The storage session's one firewalled body: configure cuDF's KvikIO layer.
  *  @file src/loaders/direct_storage.cpp
+ *
+ *  See the header for the contract. cuDF lives only in this translation unit and the sibling
+ *  @c dataset_shards.cpp .
  */
 
 #include <cstring> // `std::strcmp`

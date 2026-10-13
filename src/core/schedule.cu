@@ -32,7 +32,7 @@ expected_t barrier_round_t::advance(gpu_stream_t &stream) noexcept {
                          dim3 {1, 1, 1}, stream, device_round_, increment_);
 }
 
-/** @brief Loads the eight elements at @p column of @p row as four packed words; out-of-range cells read zero. */
+/** Loads the eight elements at @p column of @p row as four packed words; out-of-range cells read zero. */
 [[nodiscard]] static __device__ inline uint4 transpose_load_(bf16_t const *row_start, std::size_t column,
                                                              std::size_t columns, bool aligned) {
     if (aligned && column + 8u <= columns) return *reinterpret_cast<uint4 const *>(row_start + column);
@@ -43,8 +43,7 @@ expected_t barrier_round_t::advance(gpu_stream_t &stream) noexcept {
     return make_uint4(words[0], words[1], words[2], words[3]);
 }
 
-__global__ void __launch_bounds__(256)
-    uc::transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destination) {
+__global__ void __launch_bounds__(256) uc::transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destination) {
     __shared__ u32_t tile[64][33];
     std::size_t const rows = source.extent(0), columns = source.extent(1);
     std::size_t const source_stride = source.stride_bytes(0) / sizeof(bf16_t);
@@ -60,13 +59,12 @@ __global__ void __launch_bounds__(256)
 
     std::size_t const upper_row = row_start + 2u * pair, column = column_start + quad * 8u;
     uint4 const zero = make_uint4(0u, 0u, 0u, 0u);
-    uint4 const upper = upper_row < rows ? transpose_load_(source.data() + upper_row * source_stride, column, columns,
-                                                          aligned)
-                                         : zero;
-    uint4 const lower = upper_row + 1u < rows
-                            ? transpose_load_(source.data() + (upper_row + 1u) * source_stride, column, columns,
-                                              aligned)
+    uint4 const upper = upper_row < rows
+                            ? transpose_load_(source.data() + upper_row * source_stride, column, columns, aligned)
                             : zero;
+    uint4 const lower = upper_row + 1u < rows ? transpose_load_(source.data() + (upper_row + 1u) * source_stride,
+                                                                column, columns, aligned)
+                                              : zero;
     u32_t const first[4] = {upper.x, upper.y, upper.z, upper.w};
     u32_t const second[4] = {lower.x, lower.y, lower.z, lower.w};
 #pragma unroll
@@ -92,7 +90,7 @@ __global__ void __launch_bounds__(256)
 }
 
 expected<std::size_t> uc::pack_bytes_bf16(std::size_t columns, std::size_t depth,
-                                                         nk_capability_t capabilities) noexcept {
+                                          nk_capability_t capabilities) noexcept {
     nk_size_t bytes = 0;
     if (nk_status_t const status = nk_dots_pack_size_bf16_best(columns, depth, capabilities, &bytes);
         status != nk_success_k)
@@ -102,8 +100,7 @@ expected<std::size_t> uc::pack_bytes_bf16(std::size_t columns, std::size_t depth
 }
 
 expected<b8r1_tensor_arena_t> uc::allocate_pack_bf16(std::size_t columns, std::size_t depth,
-                                                                    nk_capability_t capabilities,
-                                                                    gpu_arena_t &arena) noexcept {
+                                                     nk_capability_t capabilities, gpu_arena_t &arena) noexcept {
     using result_t = expected<b8r1_tensor_arena_t>;
     expected<std::size_t> bytes = pack_bytes_bf16(columns, depth, capabilities);
     if (!bytes) return result_t::fail(std::move(bytes));
@@ -116,7 +113,7 @@ expected<b8r1_tensor_arena_t> uc::allocate_pack_bf16(std::size_t columns, std::s
 }
 
 expected_t uc::pack_bf16(bf16r2_view_t b, b8r1_span_t packed, nk_capability_t capabilities,
-                                        gpu_stream_t &stream) noexcept {
+                         gpu_stream_t &stream) noexcept {
     std::size_t const columns = b.extent(0);
     return numkong_result(
         nk_dots_pack_bf16_best(reinterpret_cast<nk_bf16_t const *>(b.data()), columns, b.extent(1), b.stride_bytes(0),
@@ -124,8 +121,8 @@ expected_t uc::pack_bf16(bf16r2_view_t b, b8r1_span_t packed, nk_capability_t ca
         "packing");
 }
 
-expected_t uc::multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t c,
-                                            nk_capability_t capabilities, gpu_stream_t &stream) noexcept {
+expected_t uc::multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t c, nk_capability_t capabilities,
+                             gpu_stream_t &stream) noexcept {
     if (c.extent(0) != a.extent(0))
         return expected_t::fail(status_t::shape_unsupported_k, "[{}x{}]·Bᵀ cannot fill [{}x{}]", a.extent(0),
                                 a.extent(1), c.extent(0), c.extent(1));
@@ -136,8 +133,8 @@ expected_t uc::multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t
 }
 
 expected_t uc::pack_weight_bf16(bf16r2_view_t weight, bf16r1_span_t transposed, b8r1_span_t packed,
-                                               b8r1_span_t packed_transposed, nk_capability_t capabilities,
-                                               gpu_stream_t &stream) noexcept {
+                                b8r1_span_t packed_transposed, nk_capability_t capabilities,
+                                gpu_stream_t &stream) noexcept {
     std::size_t const outputs = weight.extent(0), inputs = weight.extent(1);
     bf16r2_span_t const padded {transposed.data(), inputs, round_up_to_multiple(outputs, std::size_t {8})};
     bf16r2_span_t const weight_transposed = padded(nk::all, nk::range(0, outputs), nk::slice);
@@ -147,11 +144,10 @@ expected_t uc::pack_weight_bf16(bf16r2_view_t weight, bf16r1_span_t transposed, 
     return staged;
 }
 
-expected_t uc::weight_gradient_bf16(bf16r2_view_t output_grad, bf16r2_view_t input,
-                                                   bf16r2_span_t weight_grad, bf16r1_span_t transposed_grad,
-                                                   bf16r1_span_t transposed_input, b8r1_span_t packed_input,
-                                                   f32r1_span_t product, nk_capability_t capabilities,
-                                                   gpu_stream_t &stream) noexcept {
+expected_t uc::weight_gradient_bf16(bf16r2_view_t output_grad, bf16r2_view_t input, bf16r2_span_t weight_grad,
+                                    bf16r1_span_t transposed_grad, bf16r1_span_t transposed_input,
+                                    b8r1_span_t packed_input, f32r1_span_t product, nk_capability_t capabilities,
+                                    gpu_stream_t &stream) noexcept {
     std::size_t const tokens = output_grad.extent(0), outputs = output_grad.extent(1), inputs = input.extent(1);
     std::size_t const padded_tokens = round_up_to_multiple(tokens, std::size_t {8});
     bf16r2_span_t const output_grad_padded {transposed_grad.data(), outputs, padded_tokens};

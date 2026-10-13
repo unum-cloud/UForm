@@ -12,14 +12,14 @@
  *  @b single host thread drives an @b interleaved small-chunk feed across the @c engine_count engines, so decode
  *  work stays submitted to every physical engine at once while the silicon runs it asynchronously — the GPU is the
  *  master, the pool a slave that only demuxes. The engines own @b no streams: the whole GPU tail (the
- *  NV12→interleaved-RGB conversion and the tube tiling) rides the caller's one stream.
+ *  NV12 → interleaved-RGB conversion and the tube tiling) rides the caller's one stream.
  */
 #include <cmath> // `std::cbrt`, `std::log` — the 3-D factor policy's geometric target
 
+#include <unistd.h> // `::write`, `STDERR_FILENO`
+
 #include <algorithm> // `std::min`, `std::max`, `std::find`, `std::upper_bound`
 #include <memory>    // `std::unique_ptr` — the session's pimpl (`nvdec_state_t`)
-
-#include <unistd.h> // `::write`, `STDERR_FILENO`
 
 #include <cuda.h> // vendor-boundary: the Driver API types (`CUstream`, `CUresult`) the NVDEC headers build on
 
@@ -43,85 +43,109 @@ using namespace ul;
 
 namespace fu = ashvardanian::forkunion;
 
-/** @brief Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
- *      decorrelated under one @c (seed,step,rank) — the same salts the tokens / image / audio loaders use. */
+/** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
+ *  decorrelated under one @c (seed,step,rank) — the same salts the tokens / image / audio loaders use. */
 inline constexpr u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
 inline constexpr u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
 
-/** @brief The elementary-stream formats NVDEC consumes; the enum is contiguous from @c h264_k so a
- *      @c static_cast indexes each engine's per-codec entry table. */
+/** The elementary-stream formats NVDEC consumes; the enum is contiguous from @c h264_k so a
+ *  @c static_cast indexes each engine's per-codec entry table. */
 enum class clip_codec_t : u8_t { h264_k = 0, h265_k, vp9_k, av1_k, mpeg2_k, mpeg4_k, vc1_k };
-/** @brief Count of @ref clip_codec_t enumerators — the width of an engine's per-codec entry table. */
+
+/** Count of @ref clip_codec_t enumerators — the width of an engine's per-codec entry table. */
 inline constexpr std::size_t clip_codec_count_k = 7;
 
-/** @brief One codec's NVDEC parser + decoder within one engine — not a cache: the @b parser is built once and
- *      persists across clips, while the @b decoder is destroyed and recreated from each clip's probed sequence
- *      format on its sequence header (per-job width/height), so a decoder never survives a job. */
+/** One codec's NVDEC parser + decoder within one engine — not a cache: the @b parser is built once and
+ *  persists across clips, while the @b decoder is destroyed and recreated from each clip's probed sequence
+ *  format on its sequence header (per-job width/height), so a decoder never survives a job. */
 struct codec_entry_t {
-    /** @brief The persistent NVDEC parser for this codec — built lazily on first use, reused across every clip. */
+
+    /** The persistent NVDEC parser for this codec — built lazily on first use, reused across every clip. */
     CUvideoparser parser = nullptr;
-    /** @brief The NVDEC decoder — rebuilt from each clip's sequence header to that job's grid target, never cached. */
+
+    /** The NVDEC decoder — rebuilt from each clip's sequence header to that job's grid target, never cached. */
     CUvideodecoder decoder = nullptr;
 };
 
-/** @brief Per-clip mutable state the three NVDEC parser callbacks reach through the engine's @c current pointer —
- *      the destination frames, the frame budget, and the grid-scaled geometry. */
+/** Per-clip mutable state the three NVDEC parser callbacks reach through the engine's @c current pointer —
+ *  the destination frames, the frame budget, and the grid-scaled geometry. */
 struct video_decode_context_t {
-    /** @brief Base of this decode group's frames in the shared scratch — the NV12→RGB destination. */
+
+    /** Base of this decode group's frames in the shared scratch — the NV12 → RGB destination. */
     pixel_t *frames_base = nullptr;
-    /** @brief The caller's stream every display-callback conversion enqueues on (the engines own none). */
+
+    /** The caller's stream every display-callback conversion enqueues on (the engines own none). */
     gpu_stream_t *stream = nullptr;
-    /** @brief The frame budget this job keeps — the display callback stops once this many are decoded. */
+
+    /** The frame budget this job keeps — the display callback stops once this many are decoded. */
     std::size_t frames_requested = 0;
-    /** @brief Frames converted and written so far — the running index into @c frames_base . */
+
+    /** Frames converted and written so far — the running index into @c frames_base . */
     std::size_t frames_decoded = 0;
-    /** @brief Displayed frames seen so far — drives the @c temporal_stride subsampling independent of keeps. */
+
+    /** Displayed frames seen so far — drives the @c temporal_stride subsampling independent of keeps. */
     std::size_t frames_displayed = 0;
-    /** @brief Keep every @c temporal_stride -th displayed frame — the representation's explicit temporal density. */
+
+    /** Keep every @c temporal_stride -th displayed frame — the representation's explicit temporal density. */
     std::size_t temporal_stride = 1;
-    /** @brief The clip's grid target height in pixels: @c patch_rows·P . */
+
+    /** The clip's grid target height in pixels: @c patch_rows·P . */
     std::size_t height = 0;
-    /** @brief The clip's grid target width in pixels: @c patch_cols·P . */
+
+    /** The clip's grid target width in pixels: @c patch_cols·P . */
     std::size_t width = 0;
-    /** @brief The resolved codec — selects this engine's @ref codec_entry_t for the parser / decoder. */
+
+    /** The resolved codec — selects this engine's @ref codec_entry_t for the parser / decoder. */
     clip_codec_t codec = clip_codec_t::h264_k;
-    /** @brief The first fault the callbacks hit — kept so the drive can mark-and-continue past a bad job. */
+
+    /** The first fault the callbacks hit — kept so the drive can mark-and-continue past a bad job. */
     status_t status = status_t::success_k;
 };
 
-/** @brief One decode engine, self-sufficient for the NVDEC callbacks: its own per-codec parser / decoder entry
- *      table, plus copies of the shared @c cuvid handle, context lock, and decode-surface ceiling (aliases, not owned
- *      — @ref nvdec_state_t frees the underlying resources). The callbacks reach everything through the engine, so no
- *      back-pointer to the session is needed. An engine owns no stream: the whole GPU tail rides the caller's one
- *      stream, and NVDEC engine parallelism comes from the distinct decoders, not from streams. */
+/** One decode engine, self-sufficient for the NVDEC callbacks: its own per-codec parser / decoder entry
+ *  table, plus copies of the shared @c cuvid handle, context lock, and decode-surface ceiling (aliases, not owned
+ *  — @ref nvdec_state_t frees the underlying resources). The callbacks reach everything through the engine, so no
+ *  back-pointer to the session is needed. An engine owns no stream: the whole GPU tail rides the caller's one
+ *  stream, and NVDEC engine parallelism comes from the distinct decoders, not from streams. */
 struct nvdec_engine_t {
-    /** @brief Shared cuvid function table owned by @ref nvdec_state_t — a copy so the callbacks reach it. */
+
+    /** Shared cuvid function table owned by @ref nvdec_state_t — a copy so the callbacks reach it. */
     CuvidFunctions *cuvid = nullptr;
-    /** @brief Shared context lock, aliased — serializes the context-critical cuvid calls across engines. */
+
+    /** Shared context lock, aliased — serializes the context-critical cuvid calls across engines. */
     CUvideoctxlock context_lock = nullptr;
-    /** @brief Decode-surface width ceiling every decoder this engine builds is capped to. */
+
+    /** Decode-surface width ceiling every decoder this engine builds is capped to. */
     unsigned long max_width = 0;
-    /** @brief Decode-surface height ceiling every decoder this engine builds is capped to. */
+
+    /** Decode-surface height ceiling every decoder this engine builds is capped to. */
     unsigned long max_height = 0;
-    /** @brief The per-codec parser / decoder entries, indexed by @ref clip_codec_t — built lazily per codec. */
+
+    /** The per-codec parser / decoder entries, indexed by @ref clip_codec_t — built lazily per codec. */
     codec_entry_t entries[clip_codec_count_k] {};
-    /** @brief The job the callbacks are serving right now — set before each feed, cleared when the job retires. */
+
+    /** The job the callbacks are serving right now — set before each feed, cleared when the job retires. */
     video_decode_context_t *current = nullptr;
 };
 
-/** @brief The session's owned NVDEC state and sole resource owner: the cuvid loader, the CUDA context, the shared
- *      context lock, and the decode @ref nvdec_engine_t engines. Defined at global scope (the header forward-declares
- *      it there) so this translation unit needs no namespace block. */
+/** The session's owned NVDEC state and sole resource owner: the cuvid loader, the CUDA context, the shared
+ *  context lock, and the decode @ref nvdec_engine_t engines. Defined at global scope (the header forward-declares
+ *  it there) so this translation unit needs no namespace block. */
 struct nvdec_state_t {
-    /** @brief The dynamically loaded libnvcuvid function table — the one owner, freed in the destructor. */
+
+    /** The dynamically loaded libnvcuvid function table — the one owner, freed in the destructor. */
     CuvidFunctions *cuvid = nullptr;
-    /** @brief The CUDA context the session was made against — captured from the current context at @c make . */
+
+    /** The CUDA context the session was made against — captured from the current context at @c make . */
     CUcontext context = nullptr;
-    /** @brief The shared context lock serializing the context-critical cuvid calls across every engine. */
+
+    /** The shared context lock serializing the context-critical cuvid calls across every engine. */
     CUvideoctxlock context_lock = nullptr;
-    /** @brief How many decode @ref nvdec_engine_t engines are stood up — the caller-stated concurrency. */
+
+    /** How many decode @ref nvdec_engine_t engines are stood up — the caller-stated concurrency. */
     u32_t engine_count = 0;
-    /** @brief The owned decode engines, each with its own per-codec parser / decoder entries. */
+
+    /** The owned decode engines, each with its own per-codec parser / decoder entries. */
     array<nvdec_engine_t> engines {};
 
     ~nvdec_state_t() noexcept {
@@ -143,7 +167,8 @@ struct nvdec_state_t {
  *
  *  __grid_size__ grid-stride over the frame's @c height·width pixels; no dynamic shared memory. NVDEC surfaces are
  *  pitch-strided ( @p pitch >= width ), and the shared-pitch chroma plane sits @c pitch·height bytes past luma; the
- *  destination is tightly packed at @c width·3 . */
+ *  destination is tightly packed at @c width·3 .
+ */
 static __global__ void nv12_to_interleaved_rgb_kernel_(pixel_t const *nv12_luma, pixel_t const *nv12_chroma,
                                                        pixel_t *rgb_out, std::size_t height, std::size_t width,
                                                        std::size_t pitch) {
@@ -168,33 +193,40 @@ static __global__ void nv12_to_interleaved_rgb_kernel_(pixel_t const *nv12_luma,
     }
 }
 
-/** @brief Per-job source bookkeeping for the sub-row tube scatter — one entry per (clip,representation) segment. Its
- *      frames live in the clip's shared decode-group buffer at @c frames_offset (all of the clip's frames at this
- *      segment's @c (pr·P,pc·P) spatial target, temporal_stride 1); the segment subsamples that buffer temporally by
- *      @c frame_stride and lands its tubes at @c (dest_row,dest_column_begin) in the batch grid. A dropped/short
- *      segment carries @c length==0 and contributes nothing. */
+/** Per-job source bookkeeping for the sub-row tube scatter — one entry per (clip,representation) segment. Its
+ *  frames live in the clip's shared decode-group buffer at @c frames_offset (all of the clip's frames at this
+ *  segment's @c (pr·P,pc·P) spatial target, temporal_stride 1); the segment subsamples that buffer temporally by
+ *  @c frame_stride and lands its tubes at @c (dest_row,dest_column_begin) in the batch grid. A dropped/short
+ *  segment carries @c length==0 and contributes nothing. */
 struct tile_job_t {
-    /** @brief Element offset of this job's decode-group buffer in the shared frame scratch — the group holds every
-     *      decoded frame at this segment's @c (pr·P,pc·P) spatial target, shared across the clip's representations. */
+
+    /** Element offset of this job's decode-group buffer in the shared frame scratch — the group holds every
+     *  decoded frame at this segment's @c (pr·P,pc·P) spatial target, shared across the clip's representations. */
     u64_t frames_offset;
-    /** @brief The segment's column span = @c temporal_groups·patch_rows·patch_cols ; 0 means dropped/short. */
+
+    /** The segment's column span = @c temporal_groups·patch_rows·patch_cols ; 0 means dropped/short. */
     u32_t length;
-    /** @brief The grid row this segment lands in: @c segment_offset / columns_per_row . */
+
+    /** The grid row this segment lands in: @c segment_offset / columns_per_row . */
     u32_t dest_row;
-    /** @brief The first grid column of this segment's span: @c segment_offset % columns_per_row . */
+
+    /** The first grid column of this segment's span: @c segment_offset % columns_per_row . */
     u32_t dest_column_begin;
-    /** @brief Temporal subsample of the shared decode-group buffer — the representation's frame density (≥1): the
-     *      tile draws compact frame @c k from group frame @c k·frame_stride , so reps of one clip share one decode. */
+
+    /** Temporal subsample of the shared decode-group buffer — the representation's frame density (≥1): the
+     *  tile draws compact frame @c k from group frame @c k·frame_stride , so reps of one clip share one decode. */
     u32_t frame_stride;
-    /** @brief Spatial patch rows of this segment's factorization — the tile kernel's inner geometry. */
+
+    /** Spatial patch rows of this segment's factorization — the tile kernel's inner geometry. */
     u16_t patch_rows;
-    /** @brief Spatial patch columns of this segment's factorization — the tile kernel's inner geometry. */
+
+    /** Spatial patch columns of this segment's factorization — the tile kernel's inner geometry. */
     u16_t patch_cols;
 };
 
-/** @brief Least @p index in @c [0,count] with @c prefix[index] > @p value — an in-register upper_bound so each
- *      output element finds its job in @c O(log jobs) . Zero-length jobs leave equal consecutive prefixes and so are
- *      never selected as an owner. */
+/** Least @p index in @c [0,count] with @c prefix[index] > @p value — an in-register upper_bound so each
+ *  output element finds its job in @c O(log jobs) . Zero-length jobs leave equal consecutive prefixes and so are
+ *  never selected as an owner. */
 [[nodiscard]] static __device__ u32_t upper_bound_prefix_(u64_t const *prefix, u32_t count, u64_t value) noexcept {
     u32_t low = 0, high = count;
     while (low < high) {
@@ -205,16 +237,19 @@ struct tile_job_t {
     return low;
 }
 
-/** @brief Scatter every segment's tubes, drawn from its clip's shared decode-group buffer @b [frames,pr·P,pc·P,C],
+/**
+ *  @brief Scatter every segment's tubes, drawn from its clip's shared decode-group buffer @b [frames,pr·P,pc·P,C],
  *      into the batch tube grid @b [rows,columns_per_row,tube_frames,P,P,C] at the segment's
- *      @c [dest_column_begin,dest_column_begin+length) cells of row @c dest_row — segment column
- *      @c (tg·pr+patch_row)·pc+patch_col , tube frame @c t drawn from the group buffer at frame
- *      @c (tg·tube_frames+t)·frame_stride , the representation's temporal subsample. NVDEC already scaled each frame
- *      to the @c (pc·P,pr·P) target, so this is a pure gather; a short clip's missing frames and every unwritten grid
- *      cell stay PAD-zero (the grid is memset ahead of this on the same stream).
+ *      @c [dest_column_begin,dest_column_begin+length) cells of row @c dest_row .
+ *
+ *  A segment's column is @c (tg·pr+patch_row)·pc+patch_col , and its tube frame @c t is drawn from the group buffer
+ *  at frame @c (tg·tube_frames+t)·frame_stride , the representation's temporal subsample. NVDEC already scaled
+ *  each frame to the @c (pc·P,pr·P) target, so this is a pure gather; a short clip's missing frames and every
+ *  unwritten grid cell stay PAD-zero (the grid is memset ahead of this on the same stream).
  *
  *  __grid_size__ grid-stride over the union of every job's output elements; each element locates its job by an
- *      upper_bound on the contiguous @p element_prefix @b [job_count+1] . No dynamic shared memory. */
+ *  upper_bound on the contiguous @p element_prefix @b [job_count+1] . No dynamic shared memory.
+ */
 static __global__ void tile_tubes_kernel_(pixel_t *tiled, pixel_t const *frames, tile_job_t const *jobs,
                                           u64_t const *element_prefix, u32_t job_count, u32_t columns_per_row,
                                           u32_t tube_frames, u32_t patch_size, u32_t channels) {
@@ -264,25 +299,32 @@ static __global__ void tile_tubes_kernel_(pixel_t *tiled, pixel_t const *frames,
     }
 }
 
-/** @brief A segment's 3-D patch factorization — temporal groups × patch rows × patch cols; its product is the
- *      segment's column footprint, derived from the clip's decoded native resolution, never a fixed budget. */
+/** A segment's 3-D patch factorization — temporal groups × patch rows × patch cols; its product is the
+ *  segment's column footprint, derived from the clip's decoded native resolution, never a fixed budget. */
 struct patch_triple_t {
-    /** @brief Temporal groups — the number of tube time-windows the sampled frames pack into. */
+
+    /** Temporal groups — the number of tube time-windows the sampled frames pack into. */
     u16_t temporal_groups = 1;
-    /** @brief Patch rows — the spatial vertical patch count, @c ⌈native_height/patch_size⌉ . */
+
+    /** Patch rows — the spatial vertical patch count, @c ⌈native_height/patch_size⌉ . */
     u16_t patch_rows = 1;
-    /** @brief Patch columns — the spatial horizontal patch count, @c ⌈native_width/patch_size⌉ . */
+
+    /** Patch columns — the spatial horizontal patch count, @c ⌈native_width/patch_size⌉ . */
     u16_t patch_cols = 1;
 };
 
-/** @brief Derive a representation's @c (temporal_groups,patch_rows,patch_cols) from the clip's decoded native
+/**
+ *  @brief Derive a representation's @c (temporal_groups,patch_rows,patch_cols) from the clip's decoded native
  *      @c (frames,width,height) — the video analogue of the image loader's native-derived footprint, with a temporal
- *      axis folded ahead of the spatial patch. @c patch_rows/@c patch_cols tile the native frame at @p patch_size ;
- *      @c temporal_groups packs the @p frame_stride -sampled frames into @p tube_frames -deep tubes. The native
- *      footprint is then clamped to fit one row of @p max_columns , downscaled toward its own shape (cube-root scale
- *      then trim the largest axis) so an arbitrarily large clip fits — NVDEC scales each frame to the reduced target
- *      — rather than overflowing. @p max_columns is the grid capacity, not a per-representation budget: the geometry
- *      is the content's, only capped by the row it must land in. */
+ *      axis folded ahead of the spatial patch.
+ *
+ *  @c patch_rows and @c patch_cols tile the native frame at @p patch_size ; @c temporal_groups packs the
+ *  @p frame_stride -sampled frames into @p tube_frames -deep tubes. The native footprint is then clamped to fit
+ *  one row of @p max_columns , downscaled toward its own shape (cube-root scale then trim the largest axis) so an
+ *  arbitrarily large clip fits — NVDEC scales each frame to the reduced target — rather than overflowing.
+ *  @p max_columns is the grid capacity, not a per-representation budget: the geometry is the content's, only
+ *  capped by the row it must land in.
+ */
 [[nodiscard]] static patch_triple_t derive_triple_(u32_t frames, u32_t width, u32_t height, u32_t patch_size,
                                                    u32_t tube_frames, u32_t frame_stride, u32_t max_columns) noexcept {
     u32_t const stride = std::max<u32_t>(frame_stride, 1u);
@@ -312,7 +354,7 @@ struct patch_triple_t {
                            static_cast<u16_t>(std::min<u32_t>(patch_cols, 0xFFFFu))};
 }
 
-/** @brief Map a resolved codec onto the NVDEC codec enum. */
+/** Map a resolved codec onto the NVDEC codec enum. */
 [[nodiscard]] static cudaVideoCodec to_nvdec_codec(clip_codec_t codec) noexcept {
     switch (codec) {
     case clip_codec_t::h264_k: return cudaVideoCodec_H264;
@@ -326,15 +368,16 @@ struct patch_triple_t {
     return cudaVideoCodec_H264;
 }
 
-/** @brief Baseline decode-surface count — covers the reordering depth of the mainstream profiles when a stream's
- *      own @c min_num_decode_surfaces is smaller. */
+/** Baseline decode-surface count — covers the reordering depth of the mainstream profiles when a stream's
+ *  own @c min_num_decode_surfaces is smaller. */
 inline constexpr int default_decode_surface_count_k = 20;
-/** @brief Ceiling on a decoder's decode-surface pool — the depth every engine's parser is built to index, so the
- *      sequence callback can honor a stream's @c min_num_decode_surfaces without the parser re-clamping it. Covers
- *      the deepest DPB the mainstream HEVC / AV1 profiles this loader targets ever request. */
+
+/** Ceiling on a decoder's decode-surface pool — the depth every engine's parser is built to index, so the
+ *  sequence callback can honor a stream's @c min_num_decode_surfaces without the parser re-clamping it. Covers
+ *  the deepest DPB the mainstream HEVC / AV1 profiles this loader targets ever request. */
 inline constexpr int nvdec_max_decode_surfaces_k = 32;
 
-/** @brief The one decoder-create recipe: 8-bit NV12 4:2:0, scaling each coded frame to the clip's grid target. */
+/** The one decoder-create recipe: 8-bit NV12 4:2:0, scaling each coded frame to the clip's grid target. */
 [[nodiscard]] static CUVIDDECODECREATEINFO make_decoder_create_info(
     cudaVideoCodec codec, cudaVideoChromaFormat chroma, CUvideoctxlock context_lock, unsigned long coded_width,
     unsigned long coded_height, unsigned long target_width, unsigned long target_height, unsigned long max_width,
@@ -358,8 +401,8 @@ inline constexpr int nvdec_max_decode_surfaces_k = 32;
     return create_info;
 }
 
-/** @brief NVDEC sequence callback: reject non-8-bit / non-4:2:0 streams, else (re)create this engine's codec-entry
- *      decoder scaling to the clip's grid target. */
+/** NVDEC sequence callback: reject non-8-bit / non-4:2:0 streams, else (re)create this engine's codec-entry
+ *  decoder scaling to the clip's grid target. */
 extern "C" int CUDAAPI on_video_sequence(void *user_data, CUVIDEOFORMAT *format) noexcept {
     auto *engine = static_cast<nvdec_engine_t *>(user_data);
     if (engine == nullptr || engine->current == nullptr || format == nullptr) return 0;
@@ -395,7 +438,7 @@ extern "C" int CUDAAPI on_video_sequence(void *user_data, CUVIDEOFORMAT *format)
     return decode_surfaces;
 }
 
-/** @brief NVDEC decode callback: schedule the picture unless the budget is already met. */
+/** NVDEC decode callback: schedule the picture unless the budget is already met. */
 extern "C" int CUDAAPI on_picture_decode(void *user_data, CUVIDPICPARAMS *params) noexcept {
     auto *engine = static_cast<nvdec_engine_t *>(user_data);
     if (engine == nullptr || engine->current == nullptr) return 0;
@@ -408,8 +451,8 @@ extern "C" int CUDAAPI on_picture_decode(void *user_data, CUVIDPICPARAMS *params
     return 1;
 }
 
-/** @brief NVDEC display callback: map the NV12 surface, launch the interleaved-RGB conversion of the sub-sampled
- *      frame onto the engine's stream, unmap. */
+/** NVDEC display callback: map the NV12 surface, launch the interleaved-RGB conversion of the sub-sampled
+ *  frame onto the engine's stream, unmap. */
 extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *display_info) noexcept {
     auto *engine = static_cast<nvdec_engine_t *>(user_data);
     if (engine == nullptr || engine->current == nullptr) return 0;
@@ -455,8 +498,8 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
     return 1;
 }
 
-/** @brief Feed an AV1 low-overhead OBU stream to the parser one temporal unit at a time — submitting the whole
- *      clip at once faults inside libnvcuvid after the first frame. */
+/** Feed an AV1 low-overhead OBU stream to the parser one temporal unit at a time — submitting the whole
+ *  clip at once faults inside libnvcuvid after the first frame. */
 [[nodiscard]] static CUresult feed_av1_temporal_units(CuvidFunctions *cuvid, CUvideoparser parser,
                                                       std::span<u8_t const> stream) noexcept {
     auto feed_unit = [&](std::size_t begin, std::size_t end, bool last) -> CUresult {
@@ -501,24 +544,30 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
 
 #pragma region Host Container Demux
 
-/** @brief One demuxed clip: its Annex-B elementary stream, its resolved codec, native frame dimensions and count,
- *      and whether the demux succeeded — filled in parallel over the pool, consumed by the engine decoders. */
+/** One demuxed clip: its Annex-B elementary stream, its resolved codec, native frame dimensions and count,
+ *  and whether the demux succeeded — filled in parallel over the pool, consumed by the engine decoders. */
 struct demuxed_clip_t {
-    /** @brief The demuxed Annex-B elementary stream — the engine decoders' input; empty on demux failure. */
+
+    /** The demuxed Annex-B elementary stream — the engine decoders' input; empty on demux failure. */
     array<b8_t> annex_b {};
-    /** @brief The resolved elementary-stream codec — selects the engine's parser / decoder entry. */
+
+    /** The resolved elementary-stream codec — selects the engine's parser / decoder entry. */
     clip_codec_t codec = clip_codec_t::h264_k;
-    /** @brief Native frame width in pixels, or 0 when the container did not carry it. */
+
+    /** Native frame width in pixels, or 0 when the container did not carry it. */
     u32_t width = 0;
-    /** @brief Native frame height in pixels, or 0 when the container did not carry it. */
+
+    /** Native frame height in pixels, or 0 when the container did not carry it. */
     u32_t height = 0;
-    /** @brief Native frame count (indexed or duration-estimated), 0 if unknown — weights the temporal factor. */
+
+    /** Native frame count (indexed or duration-estimated), 0 if unknown — weights the temporal factor. */
     u32_t frames = 0;
-    /** @brief Whether demux succeeded — a false entry contributes nothing and stays PAD-zero. */
+
+    /** Whether demux succeeded — a false entry contributes nothing and stays PAD-zero. */
     bool ok = false;
 };
 
-/** @brief @c true if @p bytes opens with a 3- or 4-byte Annex-B NAL start code. */
+/** @c true if @p bytes opens with a 3- or 4-byte Annex-B NAL start code. */
 [[nodiscard]] static bool looks_like_annex_b(std::span<b8_t const> bytes) noexcept {
     if (bytes.size() < 4u) return false;
     auto byte_at = [&](std::size_t index) { return static_cast<u8_t>(bytes[index]); };
@@ -526,7 +575,7 @@ struct demuxed_clip_t {
     return byte_at(0) == 0u && byte_at(1) == 0u && byte_at(2) == 1u;
 }
 
-/** @brief Best-effort H.264 vs H.265 sniff from the first Annex-B NAL header. */
+/** Best-effort H.264 vs H.265 sniff from the first Annex-B NAL header. */
 [[nodiscard]] static clip_codec_t sniff_annex_b_codec(std::span<b8_t const> bytes) noexcept {
     std::size_t index = 0;
     while (index + 3u < bytes.size()) {
@@ -546,7 +595,7 @@ struct demuxed_clip_t {
     return hevc_type >= 32u && hevc_type <= 34u ? clip_codec_t::h265_k : clip_codec_t::h264_k;
 }
 
-/** @brief Append @p count bytes from @p source to @p destination ; @c false on allocation failure. */
+/** Append @p count bytes from @p source to @p destination ; @c false on allocation failure. */
 [[nodiscard]] static bool append_bytes(array<b8_t> &destination, b8_t const *source, std::size_t count) noexcept {
     std::size_t const previous = destination.size();
     if (destination.try_resize_uninitialized(previous + count) != status_t::success_k) return false;
@@ -554,13 +603,16 @@ struct demuxed_clip_t {
     return true;
 }
 
-/** @brief Backing state for the in-memory @c AVIOContext read / seek callbacks. */
+/** Backing state for the in-memory @c AVIOContext read / seek callbacks. */
 struct memory_reader_t {
-    /** @brief The clip's container bytes the AVIO callbacks read from — borrowed, not owned. */
+
+    /** The clip's container bytes the AVIO callbacks read from — borrowed, not owned. */
     b8_t const *data = nullptr;
-    /** @brief Total size of @c data in bytes — the AVIO seek's end bound. */
+
+    /** Total size of @c data in bytes — the AVIO seek's end bound. */
     std::size_t size = 0;
-    /** @brief The current read cursor into @c data , advanced by every read and moved by every seek. */
+
+    /** The current read cursor into @c data , advanced by every read and moved by every seek. */
     std::size_t position = 0;
 };
 
@@ -588,7 +640,7 @@ extern "C" i64_t video_memory_seek(void *opaque, i64_t offset, int whence) noexc
     return position;
 }
 
-/** @brief Map an @c AVCodecID onto @ref clip_codec_t ; @c false leaves @p codec untouched. */
+/** Map an @c AVCodecID onto @ref clip_codec_t ; @c false leaves @p codec untouched. */
 [[nodiscard]] static bool map_av_codec(int av_codec_id, clip_codec_t &codec) noexcept {
     switch (av_codec_id) {
     case AV_CODEC_ID_H264: codec = clip_codec_t::h264_k; return true;
@@ -602,16 +654,16 @@ extern "C" i64_t video_memory_seek(void *opaque, i64_t offset, int whence) noexc
     }
 }
 
-/** @brief The bitstream filter converting a container-wrapped codec to Annex-B; @c nullptr passes packets through
- *      unfiltered (VP9 / AV1 / MPEG). */
+/** The bitstream filter converting a container-wrapped codec to Annex-B; @c nullptr passes packets through
+ *  unfiltered (VP9 / AV1 / MPEG). */
 [[nodiscard]] static char const *bitstream_filter_name(clip_codec_t codec) noexcept {
     if (codec == clip_codec_t::h264_k) return "h264_mp4toannexb";
     if (codec == clip_codec_t::h265_k) return "hevc_mp4toannexb";
     return nullptr;
 }
 
-/** @brief Demux one container's bytes into @p out 's Annex-B scratch, resolve its codec, and record its native
- *      frame dimensions and count — the per-clip work the pool runs in parallel. */
+/** Demux one container's bytes into @p out 's Annex-B scratch, resolve its codec, and record its native
+ *  frame dimensions and count — the per-clip work the pool runs in parallel. */
 static void demux_container(std::span<b8_t const> container, demuxed_clip_t &out) noexcept {
     out.annex_b.clear();
     out.ok = false;
@@ -760,8 +812,8 @@ static void demux_container(std::span<b8_t const> container, demuxed_clip_t &out
     out.ok = true;
 }
 
-/** @brief Build the parser for @p codec 's entry in @p engine on first use — @c pUserData is the engine so the
- *      callbacks reach its entries and in-flight context. */
+/** Build the parser for @p codec 's entry in @p engine on first use — @c pUserData is the engine so the
+ *  callbacks reach its entries and in-flight context. */
 [[nodiscard]] static expected_t ensure_parser(nvdec_engine_t &engine, clip_codec_t codec) noexcept {
     codec_entry_t &entry = engine.entries[static_cast<std::size_t>(codec)];
     if (entry.parser != nullptr) return {};
@@ -781,10 +833,10 @@ static void demux_container(std::span<b8_t const> container, demuxed_clip_t &out
     return {};
 }
 
-/** @brief The feed granularity of the interleaved decode drive — small enough that no single parse call monopolizes
- *      the one host thread, so decode work stays submitted across every engine at once. Measured on a 7-engine
- *      H100: a whole-clip-per-call feed uses one engine and runs slower than a single decoder, while 64 KB chunks
- *      reach ~6x — near the engine count. */
+/** The feed granularity of the interleaved decode drive — small enough that no single parse call monopolizes
+ *  the one host thread, so decode work stays submitted across every engine at once. Measured on a 7-engine
+ *  H100: a whole-clip-per-call feed uses one engine and runs slower than a single decoder, while 64 KB chunks
+ *  reach ~6x — near the engine count. */
 inline constexpr std::size_t nvdec_feed_chunk_bytes_k = 64u * 1024u;
 
 nvdec_session_t::nvdec_session_t() noexcept = default;
@@ -828,30 +880,36 @@ expected<nvdec_session_t> nvdec_session_t::make(nvdec_config_t config) noexcept 
     return result_t {nvdec_session_t {std::move(state)}};
 }
 
-/** @brief The batch grid's decode geometry, read once from the @b [rows,columns,tube_frames,P,P,C] videos span. */
+/** The batch grid's decode geometry, read once from the @b [rows,columns,tube_frames,P,P,C] videos span. */
 struct video_grid_geometry_t {
-    /** @brief Grid rows — the number of tube rows the segments pack across. */
+
+    /** Grid rows — the number of tube rows the segments pack across. */
     u32_t rows = 0;
-    /** @brief Grid columns per row — a row's cell budget the token cursor never lets a segment cross. */
+
+    /** Grid columns per row — a row's cell budget the token cursor never lets a segment cross. */
     u32_t columns = 0;
-    /** @brief Tube depth in frames — the temporal extent of one grid cell. */
+
+    /** Tube depth in frames — the temporal extent of one grid cell. */
     u32_t tube_frames = 0;
-    /** @brief Patch edge P in pixels — a cell's spatial P×P footprint. */
+
+    /** Patch edge P in pixels — a cell's spatial P×P footprint. */
     u32_t patch_size = 0;
-    /** @brief Channel count C — fixed at 3, the NV12→RGB conversion's output. */
+
+    /** Channel count C — fixed at 3, the NV12 → RGB conversion's output. */
     u32_t channels = 0;
-    /** @brief Elements per grid cell — @c tube_frames·P·P·C , the compact-frame and grid stride. */
+
+    /** Elements per grid cell — @c tube_frames·P·P·C , the compact-frame and grid stride. */
     std::size_t per_cell = 0;
 };
 
-/** @brief Read and validate the batch grid geometry from @p videos — the NV12→RGB path emits exactly 3 channels and
- *      the grid needs a nonzero tube depth, both hard failures. */
+/** Read and validate the batch grid geometry from @p videos — the NV12 → RGB path emits exactly 3 channels and
+ *  the grid needs a nonzero tube depth, both hard failures. */
 [[nodiscard]] static expected<video_grid_geometry_t> decode_geometry_(pixel_tubes_span_t videos) noexcept {
     using result_t = expected<video_grid_geometry_t>;
     u32_t const channels = static_cast<u32_t>(videos.extent(5));
     if (channels != 3u)
         return result_t::fail(status_t::shape_unsupported_k,
-                              "the NV12→RGB conversion emits 3 channels, but videos wants {}", channels);
+                              "the NV12 → RGB conversion emits 3 channels, but videos wants {}", channels);
     u32_t const tube_frames = static_cast<u32_t>(videos.extent(2));
     if (tube_frames == 0)
         return result_t::fail(status_t::shape_unsupported_k, "the video grid needs a nonzero tube depth");
@@ -866,62 +924,80 @@ struct video_grid_geometry_t {
     return result_t {std::move(geometry)};
 }
 
-/** @brief One decode unit: a clip decoded once for a distinct spatial target @c (patch_rows,patch_cols) , shared by
- *      every representation of that clip whose factorization lands on that target (they differ only in
- *      @c frame_stride , a temporal subsample the tile applies). The group owns a contiguous frame buffer holding
- *      @c frames_to_decode frames at @c (patch_rows·P,patch_cols·P,C) , temporal_stride 1; the drive decodes the clip's
- *      elementary stream into it once, and each of the clip's tile jobs at this target reads back through it. */
+/** One decode unit: a clip decoded once for a distinct spatial target @c (patch_rows,patch_cols) , shared by
+ *  every representation of that clip whose factorization lands on that target (they differ only in
+ *  @c frame_stride , a temporal subsample the tile applies). The group owns a contiguous frame buffer holding
+ *  @c frames_to_decode frames at @c (patch_rows·P,patch_cols·P,C) , temporal_stride 1; the drive decodes the clip's
+ *  elementary stream into it once, and each of the clip's tile jobs at this target reads back through it. */
 struct decode_group_t {
-    /** @brief Index of the clip whose one elementary stream this group decodes — into the demux result table. */
+
+    /** Index of the clip whose one elementary stream this group decodes — into the demux result table. */
     u32_t clip;
-    /** @brief Element offset of this group's frame buffer in the shared frame scratch — the tile jobs' @c frames_offset
-     *      and the frame-scratch accumulator's running total. */
+
+    /** Element offset of this group's frame buffer in the shared frame scratch — the tile jobs' @c frames_offset
+     *  and the frame-scratch accumulator's running total. */
     u64_t frames_offset;
-    /** @brief Frames to decode / buffer for this group — @c max over its representations of
-     *      @c temporal_groups·tube_frames·frame_stride , the largest frame index any sharing tile job reads (plus one),
-     *      so the shared buffer never under-covers a strided subsample. A short stream leaves the tail PAD-zero. */
+
+    /** Frames to decode / buffer for this group — @c max over its representations of
+     *  @c temporal_groups·tube_frames·frame_stride , the largest frame index any sharing tile job reads (plus one),
+     *  so the shared buffer never under-covers a strided subsample. A short stream leaves the tail PAD-zero. */
     u32_t frames_to_decode;
-    /** @brief Spatial patch rows of this group's target — NVDEC scales each frame to @c patch_rows·P tall. */
+
+    /** Spatial patch rows of this group's target — NVDEC scales each frame to @c patch_rows·P tall. */
     u16_t patch_rows;
-    /** @brief Spatial patch columns of this group's target — NVDEC scales each frame to @c patch_cols·P wide. */
+
+    /** Spatial patch columns of this group's target — NVDEC scales each frame to @c patch_cols·P wide. */
     u16_t patch_cols;
 };
 
-/** @brief The host repack scan's whole output: the per-segment grid geometry (offsets/lengths/modality), the per-job
- *      tile placement and spatial factors, the output-element prefix, and the per-clip decode groups — everything the
- *      device uploads, the decode drive, and the tile stage read. Owns its scratch so one scan fills it and the later
- *      stages borrow spans into it. */
+/** The host repack scan's whole output: the per-segment grid geometry (offsets/lengths/modality), the per-job
+ *  tile placement and spatial factors, the output-element prefix, and the per-clip decode groups — everything the
+ *  device uploads, the decode drive, and the tile stage read. Owns its scratch so one scan fills it and the later
+ *  stages borrow spans into it. */
 struct cursor_plan_t {
-    /** @brief Segment start columns @b [max_segments+1] — element @c max_segments is the packed total. */
+
+    /** Segment start columns @b [max_segments+1] — element @c max_segments is the packed total. */
     array<u32_t> offsets {};
-    /** @brief Per-segment column span @b [max_segments] ; 0 for a PAD, dropped, or overflowing segment. */
+
+    /** Per-segment column span @b [max_segments] ; 0 for a PAD, dropped, or overflowing segment. */
     array<u32_t> lengths {};
-    /** @brief Per-segment modality @b [max_segments] — @c video_k for a live segment, else @c text_k PAD. */
+
+    /** Per-segment modality @b [max_segments] — @c video_k for a live segment, else @c text_k PAD. */
     array<modality_t> modality {};
-    /** @brief Per-job (tg,pr,pc) factor triple @b [job_count·3] — the device video-shape descriptor. */
+
+    /** Per-job (tg,pr,pc) factor triple @b [job_count·3] — the device video-shape descriptor. */
     array<u16_t> shapes {};
-    /** @brief Per-job tile placement + spatial factors @b [job_count] — the tile kernel's source table; each job's
-     *      @c frames_offset points at its clip's decode group and its @c frame_stride subsamples that group. */
+
+    /** Per-job tile placement + spatial factors @b [job_count] — the tile kernel's source table; each job's
+     *  @c frames_offset points at its clip's decode group and its @c frame_stride subsamples that group. */
     array<tile_job_t> jobs {};
-    /** @brief Output-element prefix @b [job_count+1] — the tile kernel's grid-stride owner search; independent of the
-     *      shared frame buffers, whose sizing lives on the decode groups. */
+
+    /** Output-element prefix @b [job_count+1] — the tile kernel's grid-stride owner search; independent of the
+     *  shared frame buffers, whose sizing lives on the decode groups. */
     array<u64_t> prefix {};
-    /** @brief The distinct-spatial decode groups @b [group_count] — one clip decode per @c (clip,pr,pc) . */
+
+    /** The distinct-spatial decode groups @b [group_count] — one clip decode per @c (clip,pr,pc) . */
     array<decode_group_t> groups {};
-    /** @brief Per-group NVDEC callback context @b [group_count] — the drive publishes and the callbacks fill it. */
+
+    /** Per-group NVDEC callback context @b [group_count] — the drive publishes and the callbacks fill it. */
     array<video_decode_context_t> contexts {};
-    /** @brief Total shared-frame-buffer bytes across every decode group — the frame-scratch size. */
+
+    /** Total shared-frame-buffer bytes across every decode group — the frame-scratch size. */
     u64_t frame_prefix = 0;
 };
 
-/** @brief Stage 2 — the serial token-cursor repack scan. Walk every segment: derive each live (clip,representation)
- *      segment's footprint from the clip's decoded native resolution, clamped to a row ( @ref derive_triple_ ), jump
- *      the cursor past a row boundary it would cross, drop-with-diagnostic a segment once the grid is full, and record
- *      the segment geometry plus the per-job tile placement. Each live job binds to its clip's @c (clip,pr,pc) decode
- *      group ( @ref decode_group_t ) — one NVDEC decode per distinct spatial target, shared across the clip's
- *      representations, which differ only in @c frame_stride and subsample the shared frames in the tile. A second
- *      pass lays the groups out in the shared frame scratch and a third resolves each job's @c frames_offset to its
- *      group's buffer. Segments past the drawn ones PAD. Returns the fully populated @ref cursor_plan_t . */
+/**
+ *  @brief Stage 2 — the serial token-cursor repack scan.
+ *
+ *  Walk every segment: derive each live (clip,representation) segment's footprint from the clip's decoded native
+ *  resolution, clamped to a row ( @ref derive_triple_ ), jump the cursor past a row boundary it would cross,
+ *  drop-with-diagnostic a segment once the grid is full, and record the segment geometry plus the per-job tile
+ *  placement. Each live job binds to its clip's @c (clip,pr,pc) decode group ( @ref decode_group_t ) — one NVDEC
+ *  decode per distinct spatial target, shared across the clip's representations, which differ only in
+ *  @c frame_stride and subsample the shared frames in the tile. A second pass lays the groups out in the shared
+ *  frame scratch and a third resolves each job's @c frames_offset to its group's buffer. Segments past the drawn
+ *  ones PAD. Returns the fully populated @ref cursor_plan_t .
+ */
 [[nodiscard]] static expected<cursor_plan_t> build_token_cursor_(video_grid_geometry_t const &geometry,
                                                                  std::span<video_batch_shape_t const> representations,
                                                                  std::span<demuxed_clip_t const> demuxed,
@@ -1050,10 +1126,10 @@ struct cursor_plan_t {
     return result_t {std::move(plan)};
 }
 
-/** @brief Stage 2's device side — upload the per-segment geometry (offsets/lengths/modality) and the per-job
- *      (tg,pr,pc) descriptor to the batch's device spans, then zero the whole tube grid so PAD cells and every
- *      failed/short clip stay PAD-zero. The tile and NV12→RGB kernels write on the same stream, so this memset is
- *      their fence — no event. */
+/** Stage 2's device side — upload the per-segment geometry (offsets/lengths/modality) and the per-job
+ *  (tg,pr,pc) descriptor to the batch's device spans, then zero the whole tube grid so PAD cells and every
+ *  failed/short clip stay PAD-zero. The tile and NV12 → RGB kernels write on the same stream, so this memset is
+ *  their fence — no event. */
 [[nodiscard]] static expected_t upload_geometry_(cursor_plan_t const &plan, video_grid_geometry_t const &geometry,
                                                  pixel_tubes_span_t videos, video_shape_span_t video_shapes,
                                                  u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
@@ -1075,55 +1151,66 @@ struct cursor_plan_t {
     return {};
 }
 
-/** @brief The interleaved decode drive's shared inputs — the engine table, the per-clip demux results, and the
- *      per-group decode targets the drive publishes onto an engine before feeding it. A borrow bundle: every span of
- *      scratch the caller keeps alive across the whole drive. The decode unit is a @ref decode_group_t — one clip
- *      decoded once per distinct spatial target, its frames shared by that clip's representations. */
+/** The interleaved decode drive's shared inputs — the engine table, the per-clip demux results, and the
+ *  per-group decode targets the drive publishes onto an engine before feeding it. A borrow bundle: every span of
+ *  scratch the caller keeps alive across the whole drive. The decode unit is a @ref decode_group_t — one clip
+ *  decoded once per distinct spatial target, its frames shared by that clip's representations. */
 struct decode_jobs_t {
-    /** @brief The owned NVDEC state — its engines' persistent parsers and per-clip decoders the drive feeds. */
+
+    /** The owned NVDEC state — its engines' persistent parsers and per-clip decoders the drive feeds. */
     nvdec_state_t *state = nullptr;
-    /** @brief Per-clip demux results @b [clip_count] — the codec, Annex-B bytes, and success flag per clip. */
+
+    /** Per-clip demux results @b [clip_count] — the codec, Annex-B bytes, and success flag per clip. */
     std::span<demuxed_clip_t const> demuxed {};
-    /** @brief The decode groups @b [group_count] — each a clip decoded once to a distinct @c (pr,pc) target. */
+
+    /** The decode groups @b [group_count] — each a clip decoded once to a distinct @c (pr,pc) target. */
     std::span<decode_group_t const> groups {};
-    /** @brief Per-group NVDEC callback context @b [group_count] — published on an engine, filled by the callbacks. */
+
+    /** Per-group NVDEC callback context @b [group_count] — published on an engine, filled by the callbacks. */
     std::span<video_decode_context_t> contexts {};
-    /** @brief Base of the shared frame scratch — group @c g lands at @c frames_base+groups[g].frames_offset . */
+
+    /** Base of the shared frame scratch — group @c g lands at @c frames_base+groups[g].frames_offset . */
     pixel_t *frames_base = nullptr;
-    /** @brief Patch edge P — a group's decode target is @c patch_rows·P by @c patch_cols·P . */
+
+    /** Patch edge P — a group's decode target is @c patch_rows·P by @c patch_cols·P . */
     u32_t patch_size = 0;
-    /** @brief The caller's stream every NV12→RGB conversion enqueues on. */
+
+    /** The caller's stream every NV12 → RGB conversion enqueues on. */
     gpu_stream_t *stream = nullptr;
 };
 
-/** @brief The outcome of opening one group on an engine: a chunk-fed clip is @c opened (its Annex-B tail follows), an
- *      AV1 clip is @c av1_done (its OBU temporal units were fed inline, so the engine advances), and a spent stripe
- *      is @c drained . Replaces the old empty-span return that conflated @c av1_done with @c drained . */
+/** The outcome of opening one group on an engine: a chunk-fed clip is @c opened (its Annex-B tail follows), an
+ *  AV1 clip is @c av1_done (its OBU temporal units were fed inline, so the engine advances), and a spent stripe
+ *  is @c drained . Replaces the old empty-span return that conflated @c av1_done with @c drained . */
 enum class feed_state_ : u8_t { opened, av1_done, drained };
 
-/** @brief @ref open_clip_ 's return — the feed outcome plus, when @c opened , the Annex-B tail to chunk-feed. */
+/** @ref open_clip_ 's return — the feed outcome plus, when @c opened , the Annex-B tail to chunk-feed. */
 struct clip_feed_t {
-    /** @brief Which of the three feed outcomes @ref open_clip_ reached. */
+
+    /** Which of the three feed outcomes @ref open_clip_ reached. */
     feed_state_ state = feed_state_::drained;
-    /** @brief The opened group's Annex-B tail to chunk-feed; nonempty only when @c state==opened . */
+
+    /** The opened group's Annex-B tail to chunk-feed; nonempty only when @c state==opened . */
     std::span<b8_t const> pending {};
 };
 
-/** @brief One engine's live position in the interleaved feed: the decode group it is on and that group's
- *      still-unsubmitted Annex-B tail. The tail empties once the group's final chunk is fed, cueing the engine to its
- *      next group. */
+/** One engine's live position in the interleaved feed: the decode group it is on and that group's
+ *  still-unsubmitted Annex-B tail. The tail empties once the group's final chunk is fed, cueing the engine to its
+ *  next group. */
 struct engine_cursor_t {
-    /** @brief The group index this engine is on — its @c {e,e+N,…} stripe of the decode groups. */
+
+    /** The group index this engine is on — its @c {e,e+N,…} stripe of the decode groups. */
     std::size_t group_index = 0;
-    /** @brief The current group's Annex-B bytes still to submit; empty once the engine is drained. */
+
+    /** The current group's Annex-B bytes still to submit; empty once the engine is drained. */
     std::span<b8_t const> pending {};
 };
 
-/** @brief Advance engine @p e to its next feedable group at/after @p group (skipping demux-failed, empty, and
- *      parser-build-failed groups), publish that group's decode context on the engine, and report the feed outcome. A
- *      non-AV1 clip returns @c opened with its Annex-B tail for the caller to chunk-feed; an AV1 clip is fed inline
- *      here (its OBU temporal units must not be split) and returns @c av1_done ; a spent stripe returns @c drained .
- *      @p group is left pointing at the group that was opened or fed inline. */
+/** Advance engine @p e to its next feedable group at/after @p group (skipping demux-failed, empty, and
+ *  parser-build-failed groups), publish that group's decode context on the engine, and report the feed outcome. A
+ *  non-AV1 clip returns @c opened with its Annex-B tail for the caller to chunk-feed; an AV1 clip is fed inline
+ *  here (its OBU temporal units must not be split) and returns @c av1_done ; a spent stripe returns @c drained .
+ *  @p group is left pointing at the group that was opened or fed inline. */
 [[nodiscard]] static clip_feed_t open_clip_(decode_jobs_t &drive, u32_t e, std::size_t &group) noexcept {
     nvdec_state_t *const state = drive.state;
     u32_t const engine_count = state->engine_count;
@@ -1161,9 +1248,9 @@ struct engine_cursor_t {
     return clip_feed_t {feed_state_::drained, {}};
 }
 
-/** @brief Drive engine @p e forward until it opens a chunk-fed group or drains, retrying past every AV1 group it
- *      decodes inline. Returns the Annex-B tail to feed — empty exactly once the engine's @c {e,e+N,…} stripe is
- *      spent. */
+/** Drive engine @p e forward until it opens a chunk-fed group or drains, retrying past every AV1 group it
+ *  decodes inline. Returns the Annex-B tail to feed — empty exactly once the engine's @c {e,e+N,…} stripe is
+ *  spent. */
 [[nodiscard]] static std::span<b8_t const> advance_engine_(decode_jobs_t &drive, u32_t e, std::size_t &group) noexcept {
     for (;;) {
         clip_feed_t const feed = open_clip_(drive, e, group);
@@ -1173,12 +1260,16 @@ struct engine_cursor_t {
     }
 }
 
-/** @brief Stage 3 — decode from this single host thread, chunk-interleaved across the engines: the GPU is the
- *      master, not a thread pool. Engine @c e owns groups @c {e,e+N,…} (a group is one clip decoded once for a
- *      distinct spatial target) and works them in order; each round feeds one @ref nvdec_feed_chunk_bytes_k chunk of
- *      every live engine's current group so decode work stays submitted across every physical NVDEC unit at once (a
- *      whole-clip-per-call feed uses only one). The decode is hardware-async and every NV12→RGB conversion enqueues on
- *      the caller's one stream, so there are no per-engine streams, events, or workers. */
+/**
+ *  @brief Stage 3 — decode from this single host thread, chunk-interleaved across the engines: the GPU is the
+ *      master, not a thread pool.
+ *
+ *  Engine @c e owns groups @c {e,e+N,…} (a group is one clip decoded once for a distinct spatial target) and works
+ *  them in order; each round feeds one @ref nvdec_feed_chunk_bytes_k chunk of every live engine's current group so
+ *  decode work stays submitted across every physical NVDEC unit at once (a whole-clip-per-call feed uses only one).
+ *  The decode is hardware-async and every NV12 → RGB conversion enqueues on the caller's one stream, so there are
+ *  no per-engine streams, events, or workers.
+ */
 [[nodiscard]] static expected_t drive_decode_(decode_jobs_t &drive, gpu_stream_t &stream) noexcept {
     nvdec_state_t *const state = drive.state;
     u32_t const engine_count = state->engine_count;
@@ -1217,9 +1308,9 @@ struct engine_cursor_t {
     return {};
 }
 
-/** @brief A wholly black batch is a systematic failure (unsupported codec, driver fault), not graceful degradation,
- *      so fail loud when every decodable group produced no frames; a lone bad clip stays PAD-zero and the drive
- *      mark-and-continues past it. */
+/** A wholly black batch is a systematic failure (unsupported codec, driver fault), not graceful degradation,
+ *  so fail loud when every decodable group produced no frames; a lone bad clip stays PAD-zero and the drive
+ *  mark-and-continues past it. */
 [[nodiscard]] static expected_t audit_black_batch_(std::span<demuxed_clip_t const> demuxed,
                                                    std::span<decode_group_t const> groups,
                                                    std::span<video_decode_context_t const> contexts) noexcept {
@@ -1238,10 +1329,13 @@ struct engine_cursor_t {
     return {};
 }
 
-/** @brief Stage 4 — scatter every job's frames into the grid at its segment placement, then synchronize. Upload the
- *      per-job tile table plus the output-element prefix, launch one grid-strided tile kernel over the union of the
- *      jobs' output elements (each subsampling its clip's shared decode-group buffer by @c frame_stride ), and block
- *      until the grid is complete. */
+/**
+ *  @brief Stage 4 — scatter every job's frames into the grid at its segment placement, then synchronize.
+ *
+ *  Upload the per-job tile table plus the output-element prefix, launch one grid-strided tile kernel over the union
+ *  of the jobs' output elements (each subsampling its clip's shared decode-group buffer by @c frame_stride ), and
+ *  block until the grid is complete.
+ */
 [[nodiscard]] static expected_t tile_and_sync_(video_grid_geometry_t const &geometry, pixel_tubes_span_t videos,
                                                pixel_t *frames_base, std::span<tile_job_t const> jobs,
                                                std::span<u64_t const> prefix, gpu_stream_t &stream) noexcept {
@@ -1379,7 +1473,7 @@ expected_t ul::decode_videos(nvdec_session_t &nvdec, cpu_decode_pool_t &pool, co
     std::size_t const clips = drawn_rows.size();
     if (clips == 0) return {};
 
-    // Hop each drawn clip's container bytes device→pinned into an Arrow tape (buffer + offsets, one NULL separator
+    // Hop each drawn clip's container bytes device → pinned into an Arrow tape (buffer + offsets, one NULL separator
     // per clip so `tape[i]` reports exactly the clip's length) — the demuxer's host-side source, one tape type end
     // to end rather than a caller-built table of spans.
     array<b8_t, pinned_alloc<b8_t>> encoded;

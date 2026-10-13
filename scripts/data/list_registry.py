@@ -190,7 +190,8 @@ def _acquire_plan() -> tuple[list[str], list[str]]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    """Print the selected registry sections, or the shardable and whole downloader stems."""
+    parser =argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--trainers", action="store_true", help="Print trainer-to-data convention.")
     parser.add_argument("--mixtures", action="store_true", help="Print per-trainer corpus mixtures.")
     parser.add_argument("--sources", action="store_true", help="Print the DATASETS corpus registry.")

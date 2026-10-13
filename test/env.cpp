@@ -35,18 +35,23 @@
 using namespace unum::uform::core;
 using namespace unum::uform::test;
 
-/** @brief Reservation ceiling of the probe arena — roomy enough for the bump tail plus the heap-like range. */
+/** Reservation ceiling of the probe arena — roomy enough for the bump tail plus the heap-like range. */
 inline constexpr std::size_t probe_reserve_bytes_k = 64ull * 1024 * 1024;
-/** @brief The heap-like registrable range — sized like the optimizer's world-gradient heap. */
+
+/** The heap-like registrable range — sized like the optimizer's world-gradient heap. */
 inline constexpr std::size_t probe_heap_bytes_k = 16ull * 1024 * 1024;
-/** @brief The ordinary bump allocation preceding the heap, so the mapped prefix carries a used tail. */
+
+/** The ordinary bump allocation preceding the heap, so the mapped prefix carries a used tail. */
 inline constexpr std::size_t probe_tail_bytes_k = 3ull * 1024 * 1024;
 
 #if defined(UFORM_WITH_INFINIBAND)
-/** @brief Register one GPU's registrable arena range with its same-index NIC and report the outcome —
+
+/**
+ *  @brief Register one GPU's registrable arena range with its same-index NIC and report the outcome —
  *      the per-device body of the GPUDirect check.
  *  @param[inout] suite The probe suite the checks report into.
- *  @param[in] device The GPU ordinal, paired with NIC @c mlx5_<device> (clamped to the NIC count). */
+ *  @param[in] device The GPU ordinal, paired with NIC @c mlx5_<device> (clamped to the NIC count).
+ */
 static void probe_gpu_registration_(test_suite_t &suite, int device) noexcept {
     CUcontext context = nullptr;
     CUdevice handle = 0;
@@ -89,9 +94,11 @@ static void probe_gpu_registration_(test_suite_t &suite, int device) noexcept {
 }
 #endif
 
-/** @brief When the mesh contract names an exchange directory, prove it is writable from this node by
+/**
+ *  @brief When the mesh contract names an exchange directory, prove it is writable from this node by
  *      creating and removing a probe file.
- *  @param[inout] suite The probe suite the check reports into. */
+ *  @param[inout] suite The probe suite the check reports into.
+ */
 static void probe_exchange_directory_(test_suite_t &suite) noexcept {
     char const *const exchange_directory = std::getenv("UFORM_EXCHANGE_DIR");
     if (host_domain_count_from_environment() == 1u) return; // Single-node runs never rendezvous.

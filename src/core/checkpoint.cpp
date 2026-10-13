@@ -5,11 +5,11 @@
  *  @author Ash Vardanian
  *  @date July 3, 2026
  */
-#include <charconv> // `std::from_chars` — the step metadata parse
-
 #include <unistd.h>   // `pwrite`, `pread`, `close`
 #include <fcntl.h>    // `open`
 #include <sys/stat.h> // `fstat` — the payload extent
+
+#include <charconv> // `std::from_chars` — the step metadata parse
 
 #include <yyjson.h> // the safetensors JSON header — exceptions-free C
 
@@ -18,7 +18,7 @@
 namespace uc = unum::uform::core;
 using namespace uc;
 
-/** @brief A move-only owning wrapper over a POSIX file descriptor. */
+/** A move-only owning wrapper over a POSIX file descriptor. */
 struct checkpoint_file_t {
     checkpoint_file_t() noexcept = default;
     checkpoint_file_t(checkpoint_file_t const &) = delete;
@@ -35,7 +35,7 @@ struct checkpoint_file_t {
         if (descriptor_ >= 0) ::close(descriptor_);
     }
 
-    /** @brief Open @p path for reading, or create-truncate it for writing. */
+    /** Open @p path for reading, or create-truncate it for writing. */
     [[nodiscard]] static expected<checkpoint_file_t> make(sz::string_view_t path, bool writable) noexcept {
         sz::string_t path_text; // `open` needs a NUL-terminated `c_str`; short paths stay inline
         if (sz::failed(path_text.try_assign({path.data(), path.size()})))
@@ -54,8 +54,8 @@ struct checkpoint_file_t {
     int descriptor_ = -1;
 };
 
-/** @brief Write @p count bytes at @p offset , whole or fail — looped, because one `pwrite` moves at
- *      most ~2 GB on Linux and may stop short before that. */
+/** Write @p count bytes at @p offset , whole or fail — looped, because one `pwrite` moves at
+ *  most ~2 GB on Linux and may stop short before that. */
 [[nodiscard]] static expected_t write_at_(checkpoint_file_t const &file, std::size_t offset, void const *bytes,
                                           std::size_t count) noexcept {
     char const *cursor = static_cast<char const *>(bytes);
@@ -72,8 +72,8 @@ struct checkpoint_file_t {
     return {};
 }
 
-/** @brief Read @p count bytes at @p offset , whole or fail — looped like @ref write_at_ ; a premature
- *      end-of-file is a failure, the callers size their reads from the file's own metadata. */
+/** Read @p count bytes at @p offset , whole or fail — looped like @ref write_at_ ; a premature
+ *  end-of-file is a failure, the callers size their reads from the file's own metadata. */
 [[nodiscard]] static expected_t read_at_(checkpoint_file_t const &file, std::size_t offset, void *bytes,
                                          std::size_t count) noexcept {
     char *cursor = static_cast<char *>(bytes);
@@ -90,10 +90,12 @@ struct checkpoint_file_t {
     return {};
 }
 
-/** @brief Serialize the safetensors header for @p entries inside @p pool : the step metadata first,
+/**
+ *  @brief Serialize the safetensors header for @p entries inside @p pool : the step metadata first,
  *      then a `name: {dtype, shape, data_offsets}` record per tensor, offsets as byte prefix sums in
  *      insertion order. The returned view points into the pool's backing.
- *  @retval status_t::bad_alloc_k The pool ran dry — the caller grows it and retries. */
+ *  @retval status_t::bad_alloc_k The pool ran dry — the caller grows it and retries.
+ */
 [[nodiscard]] static expected<sz::string_view_t> write_header_(std::span<checkpoint_entry_t const> entries, u64_t step,
                                                                yyjson_alc *pool) noexcept {
     using serialized_t = expected<sz::string_view_t>;
@@ -131,11 +133,11 @@ struct checkpoint_file_t {
     return serialized_t {sz::string_view_t {header, header_bytes}};
 }
 
-/** @brief The mirror of @ref write_header_ : parse the @p header text inside @p pool , index every
- *      BF16 record into @p entries — shapes tolerated as rank-1 @c [cols] or rank-2 @c [rows,cols] ,
- *      offsets validated against @p payload_bytes — and pick @p step out of the metadata. Records of
- *      other dtypes are skipped: this cell trains in BFloat16 only, and a lookup treats them exactly
- *      like absent names. */
+/** The mirror of @ref write_header_ : parse the @p header text inside @p pool , index every
+ *  BF16 record into @p entries — shapes tolerated as rank-1 @c [cols] or rank-2 @c [rows,cols] ,
+ *  offsets validated against @p payload_bytes — and pick @p step out of the metadata. Records of
+ *  other dtypes are skipped: this cell trains in BFloat16 only, and a lookup treats them exactly
+ *  like absent names. */
 [[nodiscard]] static expected_t read_header_(std::span<char> header, yyjson_alc *pool, u64_t payload_bytes,
                                              array<checkpoint_entry_t> &entries, u64_t &step) noexcept {
     yyjson_doc *document = // default flags skip the trailing pad spaces; the pool owns the document

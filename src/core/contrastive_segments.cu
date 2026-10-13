@@ -89,8 +89,9 @@ static __global__ void contrastive_scaled_cosine_kernel_(f32r3_view_t raw_dot, f
 /**
  *  @brief Per-from-vertex weight totals by sign — the two @b unsigned sums @c Σw⁺(i) / @c Σw⁻(i) over one
  *      subgraph — the score-free pre-pass supplying the balanced-reduction denominators, resolved pair by
- *      pair through the relation graph. Run once per subgraph; the row totals accumulate serially on the
- *      stream — no atomics.
+ *      pair through the relation graph.
+ *
+ *  Run once per subgraph; the row totals accumulate serially on the stream — no atomics.
  *
  *  __grid_size__ @c [num_vertices,1,1] ; one CTA per vertex row; threads stripe the subgraph's rows; no
  *  dynamic shared memory.
@@ -120,8 +121,9 @@ static __global__ void contrastive_weight_totals_by_sign_kernel_(f32r1_span_t po
 /**
  *  @brief NaN-safe balanced weighted sigmoid-BCE over one subgraph block, all prefixes fused: writes the
  *      @b final per-vertex-scaled @c dL/d(logit) and accumulates the four per-vertex rows (softplus
- *      masses, bias and log-β gradient summands). A non-finite @c t·logit leaves the pair's gradient
- *      zero; a @c w==0 pair is skipped in place.
+ *      masses, bias and log-β gradient summands).
+ *
+ *  A non-finite @c t·logit leaves the pair's gradient zero; a @c w==0 pair is skipped in place.
  *
  *  __grid_size__ @c [num_vertices,1,1] ; one CTA per vertex row; the prefix loop lives inside the CTA and
  *  the threads stripe the subgraph's rows, so the row accumulators stay race-free; no dynamic shared

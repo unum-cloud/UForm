@@ -5,15 +5,15 @@
  *  @file src/loaders/dataset_shards.cpp
  */
 
+#include <dirent.h>   // vendor-boundary: POSIX `opendir` / `readdir` — the raw directory scan, no glob to link
+#include <sys/stat.h> // vendor-boundary: POSIX `stat` — the footerless formats' byte-size file weight
+
 #include <algorithm> // `std::sort` — the deterministic shard order
 #include <span>      // `std::span` — the borrowed payload / offsets
 #include <string>
 #include <vector>
 
-#include <dirent.h>   // vendor-boundary: POSIX `opendir` / `readdir` — the raw directory scan, no glob to link
-#include <fnmatch.h>  // vendor-boundary: POSIX `fnmatch` — the shard filename pattern match
-#include <sys/stat.h> // vendor-boundary: POSIX `stat` — the footerless formats' byte-size file weight
-
+#include <fnmatch.h> // vendor-boundary: POSIX `fnmatch` — the shard filename pattern match
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_view.hpp>
 #include <cudf/concatenate.hpp>         // `cudf::concatenate` — merge decoded JSONL shards into one field
@@ -37,25 +37,30 @@ namespace ul = unum::uform::loaders;
 using namespace uc;
 using namespace ul;
 
-/** @brief One decoded column's device-resident spans and the cuDF columns that back them — everything
- *      RAII, nothing hand-freed. A shared @b representation (not a shared type) behind both the Parquet
- *      and JSONL readers: the payload and offsets are @c std::span borrows into an owned cuDF buffer. */
+/** One decoded column's device-resident spans and the cuDF columns that back them — everything
+ *  RAII, nothing hand-freed. A shared @b representation (not a shared type) behind both the Parquet
+ *  and JSONL readers: the payload and offsets are @c std::span borrows into an owned cuDF buffer. */
 struct column_span_t {
-    /** @brief cuDF's widened leaf-offset column, owned; the leaf offsets are always cast to @c u64 . */
+
+    /** cuDF's widened leaf-offset column, owned; the leaf offsets are always cast to @c u64 . */
     std::unique_ptr<cudf::column> widened_offsets;
-    /** @brief cuDF's widened group-offset column, owned; non-null only for a nested @c list<string> . */
+
+    /** cuDF's widened group-offset column, owned; non-null only for a nested @c list<string> . */
     std::unique_ptr<cudf::column> widened_groups;
-    /** @brief The column's leaf bytes, back to back — borrowed from the owning table / column. */
+
+    /** The column's leaf bytes, back to back — borrowed from the owning table / column. */
     std::span<b8_t const> payload;
-    /** @brief @b [elements+1] leaf offsets — owned by @ref widened_offsets . */
+
+    /** @b [elements+1] leaf offsets — owned by @ref widened_offsets . */
     std::span<u64_t const> offsets;
-    /** @brief @b [rows+1] row → element offsets for a nested column — owned by @ref widened_groups ;
-     *      empty for a flat column. */
+
+    /** @b [rows+1] row → element offsets for a nested column — owned by @ref widened_groups ;
+     *  empty for a flat column. */
     std::span<u64_t const> groups;
 };
 
-/** @brief What a decoded Parquet file owns and lends: the cuDF table (every column's payload + native
- *      offsets) and one @ref column_span_t per requested column, in request order. */
+/** What a decoded Parquet file owns and lends: the cuDF table (every column's payload + native
+ *  offsets) and one @ref column_span_t per requested column, in request order. */
 struct parquet_file_t::state_t {
     std::unique_ptr<cudf::table> table;
     array<column_span_t> columns;
@@ -79,23 +84,26 @@ std::span<u64_t const> parquet_file_t::groups(std::size_t index) const noexcept 
     return state_ ? state_->columns[index].groups : std::span<u64_t const> {};
 }
 
-/** @brief A decoded column flattened to its leaf payload, the leaf offsets child, and — for a nested
- *      @c list<string> column — the outer row → element offsets child. A @c string and a
- *      @c list<uint8> column differ only in which child holds the payload and carry no groups; a
- *      @c list<string> column carries both offset levels. */
+/** A decoded column flattened to its leaf payload, the leaf offsets child, and — for a nested
+ *  @c list<string> column — the outer row → element offsets child. A @c string and a
+ *  @c list<uint8> column differ only in which child holds the payload and carry no groups; a
+ *  @c list<string> column carries both offset levels. */
 struct flat_column_t {
-    /** @brief The column's leaf bytes, back to back. */
+
+    /** The column's leaf bytes, back to back. */
     std::span<b8_t const> payload;
-    /** @brief The leaf offsets child — @c elements+1 entries, 32- or 64-bit. */
+
+    /** The leaf offsets child — @c elements+1 entries, 32- or 64-bit. */
     cudf::column_view offsets;
-    /** @brief The outer row → element offsets child for a nested column; a default (empty-type)
-     *      column_view for a flat one. */
+
+    /** The outer row → element offsets child for a nested column; a default (empty-type)
+     *  column_view for a flat one. */
     cudf::column_view groups;
 };
 
-/** @brief Flatten the @p name column @p decoded to its payload and offset levels, or a
- *      @c shape_unsupported_k failure naming it when it is not one of @c string , @c list<uint8> , or
- *      @c list<string> . */
+/** Flatten the @p name column @p decoded to its payload and offset levels, or a
+ *  @c shape_unsupported_k failure naming it when it is not one of @c string , @c list<uint8> , or
+ *  @c list<string> . */
 [[nodiscard]] static expected<flat_column_t> flatten_column_(cudf::column_view const &decoded, sz::string_view_t name,
                                                              rmm::cuda_stream_view stream) noexcept {
     using result_t = expected<flat_column_t>;
@@ -131,9 +139,9 @@ struct flat_column_t {
     return result_t::fail(status_t::shape_unsupported_k, "column {} is not string, list<uint8>, or list<string>", name);
 }
 
-/** @brief Own a @c u64_t copy of @p offsets — cuDF decodes 32- or 64-bit @b signed offsets, and byte
- *      positions are unsigned sizes, so the one @c cudf::cast to @c UINT64 both widens and unsigns.
- *      Writes the borrow into @p span and the owning column into @p owner . */
+/** Own a @c u64_t copy of @p offsets — cuDF decodes 32- or 64-bit @b signed offsets, and byte
+ *  positions are unsigned sizes, so the one @c cudf::cast to @c UINT64 both widens and unsigns.
+ *  Writes the borrow into @p span and the owning column into @p owner . */
 static void widen_offsets_(cudf::column_view const &offsets, rmm::cuda_stream_view stream, std::span<u64_t const> &span,
                            std::unique_ptr<cudf::column> &owner) {
     owner = cudf::cast(offsets, cudf::data_type {cudf::type_id::UINT64}, stream);
@@ -246,8 +254,8 @@ expected<parquet_length_metadata_t> parquet_file_t::column_metadata(gpu_direct_s
     }
 }
 
-/** @brief Widen a flattened column's offsets into an owned @ref column_span_t — the decode tail both
- *      readers share once cuDF hands back a @ref flat_column_t . */
+/** Widen a flattened column's offsets into an owned @ref column_span_t — the decode tail both
+ *  readers share once cuDF hands back a @ref flat_column_t . */
 static column_span_t adopt_flat_(flat_column_t const &flat, rmm::cuda_stream_view stream) {
     column_span_t column;
     column.payload = flat.payload;
@@ -257,8 +265,8 @@ static column_span_t adopt_flat_(flat_column_t const &flat, rmm::cuda_stream_vie
     return column;
 }
 
-/** @brief A decoded JSONL field: the owned cuDF column — extracted from a shard's table, or the
- *      concatenation of several — and its flattened device spans. */
+/** A decoded JSONL field: the owned cuDF column — extracted from a shard's table, or the
+ *  concatenation of several — and its flattened device spans. */
 struct jsonl_file_t::state_t {
     std::unique_ptr<cudf::column> field;
     column_span_t span;

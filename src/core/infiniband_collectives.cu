@@ -23,7 +23,7 @@ using namespace unum::uform::core;
 
 #if defined(UFORM_WITH_INFINIBAND)
 
-/** @brief Lane width of the single-block doorbell kernels; only lane 0 posts and spins. */
+/** Lane width of the single-block doorbell kernels; only lane 0 posts and spins. */
 inline constexpr unsigned infiniband_doorbell_block_threads_k = 32u;
 
 /**
@@ -42,16 +42,17 @@ static __global__ void infiniband_allreduce_post_kernel_(infiniband_links_view_t
     u32_t const flag_value = flag_round[0] + round + 1u;
     infiniband_post_write(link.queue, reinterpret_cast<u64_t>(shard), link.local_access_key,
                           link.remote_heap_base + link.landing_offset + step_parity * link.landing_parity_stride,
-                          link.remote_access_key, static_cast<u32_t>(shard_scalars * sizeof(f32_t)), false, nullptr);
+                          link.remote_access_key, static_cast<u32_t>(shard_scalars * sizeof(f32_t)),
+                          infiniband_signaling_t::unsignaled_k, nullptr);
     infiniband_post_write(link.queue, 0u, link.local_access_key,
                           link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
-                          link.remote_access_key, sizeof(u32_t), true, &flag_value);
+                          link.remote_access_key, sizeof(u32_t), infiniband_signaling_t::signaled_k, &flag_value);
     infiniband_drain_one(link.completion);
 }
 
-/** @brief Flag-wait step of one round: lane 0 acquire-spins until the inbound flag reaches the absolute
- *      target (monotonic @c >= — the flag never resets), then a system fence orders the partner's landed
- *      payload before the next kernel, propagated to the block by the closing @c __syncthreads . */
+/** Flag-wait step of one round: lane 0 acquire-spins until the inbound flag reaches the absolute
+ *  target (monotonic @c >= — the flag never resets), then a system fence orders the partner's landed
+ *  payload before the next kernel, propagated to the block by the closing @c __syncthreads . */
 static __global__ void infiniband_flag_wait_kernel_(infiniband_links_view_t links, u32_t round,
                                                     infiniband_round_view_t flag_round) {
     if (threadIdx.x == 0) {
@@ -66,9 +67,9 @@ static __global__ void infiniband_flag_wait_kernel_(infiniband_links_view_t link
     __syncthreads();
 }
 
-/** @brief Accumulate step of one all-reduce round: fold the partner's landed shard into this domain's,
- *      one explicit round-to-nearest-even add per element — no fused-multiply-add contraction, so the
- *      SPMD-static fold order is bit-identical on every domain. */
+/** Accumulate step of one all-reduce round: fold the partner's landed shard into this domain's,
+ *  one explicit round-to-nearest-even add per element — no fused-multiply-add contraction, so the
+ *  SPMD-static fold order is bit-identical on every domain. */
 static __global__ void infiniband_accumulate_f32_kernel_(infiniband_links_view_t links, u32_t round, f32_t *shard,
                                                          std::size_t shard_scalars,
                                                          infiniband_round_view_t flag_round) {
@@ -108,19 +109,23 @@ static __global__ void infiniband_allgather_post_kernel_(infiniband_links_view_t
     u32_t const step_parity = (flag_round[0] / static_cast<u32_t>(links.extent(0))) & 1u;
     infiniband_post_write(link.queue, reinterpret_cast<u64_t>(gathered_bytes + send_byte_offset), link.local_access_key,
                           link.remote_heap_base + send_byte_offset, link.remote_access_key,
-                          static_cast<u32_t>(send_bytes), false, nullptr);
+                          static_cast<u32_t>(send_bytes), infiniband_signaling_t::unsignaled_k, nullptr);
     infiniband_post_write(link.queue, 0u, link.local_access_key,
                           link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
-                          link.remote_access_key, sizeof(u32_t), true, &flag_value);
+                          link.remote_access_key, sizeof(u32_t), infiniband_signaling_t::signaled_k, &flag_value);
     infiniband_drain_one(link.completion);
 }
 
-/** @brief Post one all-to-all round: ship this domain's send block destined for the round's partner to that
- *      partner's landing, then a completion flag. The partner is baked in @c links[round] — its
- *      @c remote_multimem_domain_index selects which send block to ship — and the symmetric heap puts each
- *      side's round landing at the same @c landing_offset , so the write needs no partner-specific arithmetic.
+/**
+ *  @brief Post one all-to-all round: ship this domain's send block destined for the round's partner to that
+ *      partner's landing, then a completion flag.
  *
- *  __grid_size__ @c [1,1,1] , one warp; no dynamic shared memory. */
+ *  The partner is baked in @c links[round] — its @c remote_multimem_domain_index selects which send block to
+ *  ship — and the symmetric heap puts each side's round landing at the same @c landing_offset , so the write
+ *  needs no partner-specific arithmetic.
+ *
+ *  __grid_size__ @c [1,1,1] , one warp; no dynamic shared memory.
+ */
 static __global__ void infiniband_alltoall_post_kernel_(infiniband_links_view_t links, u32_t round,
                                                         infiniband_alltoall_plan_t plan, char const *send_bytes,
                                                         infiniband_round_view_t flag_round) {
@@ -132,17 +137,18 @@ static __global__ void infiniband_alltoall_post_kernel_(infiniband_links_view_t 
 
     infiniband_post_write(link.queue, reinterpret_cast<u64_t>(send_bytes + send_byte_offset), link.local_access_key,
                           link.remote_heap_base + link.landing_offset + step_parity * link.landing_parity_stride,
-                          link.remote_access_key, static_cast<u32_t>(plan.block_bytes), false, nullptr);
+                          link.remote_access_key, static_cast<u32_t>(plan.block_bytes),
+                          infiniband_signaling_t::unsignaled_k, nullptr);
     infiniband_post_write(link.queue, 0u, link.local_access_key,
                           link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
-                          link.remote_access_key, sizeof(u32_t), true, &flag_value);
+                          link.remote_access_key, sizeof(u32_t), infiniband_signaling_t::signaled_k, &flag_value);
     infiniband_drain_one(link.completion);
 }
 
 expected<infiniband_nic_t> infiniband_nic_t::make(u32_t local_gpu_index, u8_t infiniband_port) noexcept {
     infiniband_nic_t nic;
     nic.port_ = infiniband_port;
-    // The NIC's page registrations ( @c cuMemHostRegister ) are scoped to its GPU's primary context, so
+    // The NIC's page registrations (`cuMemHostRegister`) are scoped to its GPU's primary context, so
     // the NIC holds one reference for its lifetime — otherwise a transient wiring stream releasing the
     // last reference resets the context and silently destroys every registration the doorbell kernels
     // still dereference.
@@ -328,19 +334,22 @@ expected<infiniband_queue_mapping_t> infiniband_queue_mapping_t::make(ibv_qp *qu
     std::size_t const send_queue_bytes = static_cast<std::size_t>(raw_queue.sq.wqe_cnt) *
                                          static_cast<std::size_t>(raw_queue.sq.stride);
     void *send_queue_device = nullptr;
-    if (expected_t mapped = registry.acquire(raw_queue.sq.buf, send_queue_bytes, false, send_queue_device); !mapped)
+    if (expected_t mapped = registry.acquire(raw_queue.sq.buf, send_queue_bytes, host_memory_t::dma_k,
+                                             send_queue_device);
+        !mapped)
         return expected<infiniband_queue_mapping_t>::fail(std::move(mapped));
     mapping.send_queue_range_ = {raw_queue.sq.buf, send_queue_bytes};
     mapping.handles_.send_queue = {static_cast<std::byte *>(send_queue_device), send_queue_bytes};
 
     void *doorbell_device = nullptr;
-    if (expected_t mapped = registry.acquire(raw_queue.dbrec, sizeof(u32_t) * 2, false, doorbell_device); !mapped)
+    if (expected_t mapped = registry.acquire(raw_queue.dbrec, sizeof(u32_t) * 2, host_memory_t::dma_k, doorbell_device);
+        !mapped)
         return expected<infiniband_queue_mapping_t>::fail(std::move(mapped));
     mapping.doorbell_range_ = {raw_queue.dbrec, sizeof(u32_t) * 2};
     mapping.handles_.doorbell_record = static_cast<u32_t *>(doorbell_device);
 
     std::size_t const blueflame_bytes = raw_queue.bf.size != 0 ? raw_queue.bf.size : sizeof(u64_t);
-    if (expected_t mapped = registry.acquire(raw_queue.bf.reg, blueflame_bytes, true,
+    if (expected_t mapped = registry.acquire(raw_queue.bf.reg, blueflame_bytes, host_memory_t::mmio_k,
                                              mapping.handles_.blueflame_register);
         !mapped)
         return expected<infiniband_queue_mapping_t>::fail( //
@@ -397,13 +406,16 @@ expected<infiniband_completion_mapping_t> infiniband_completion_mapping_t::make(
     std::size_t const ring_bytes = static_cast<std::size_t>(raw_completion.cqe_cnt) *
                                    static_cast<std::size_t>(raw_completion.cqe_size);
     void *ring_device = nullptr;
-    if (expected_t mapped = registry.acquire(raw_completion.buf, ring_bytes, false, ring_device); !mapped)
+    if (expected_t mapped = registry.acquire(raw_completion.buf, ring_bytes, host_memory_t::dma_k, ring_device);
+        !mapped)
         return expected<infiniband_completion_mapping_t>::fail(std::move(mapped));
     mapping.ring_range_ = {raw_completion.buf, ring_bytes};
     mapping.handles_.ring = {static_cast<std::byte *>(ring_device), ring_bytes};
 
     void *doorbell_device = nullptr;
-    if (expected_t mapped = registry.acquire(raw_completion.dbrec, sizeof(u32_t) * 2, false, doorbell_device); !mapped)
+    if (expected_t mapped = registry.acquire(raw_completion.dbrec, sizeof(u32_t) * 2, host_memory_t::dma_k,
+                                             doorbell_device);
+        !mapped)
         return expected<infiniband_completion_mapping_t>::fail(std::move(mapped));
     mapping.doorbell_range_ = {raw_completion.dbrec, sizeof(u32_t) * 2};
     mapping.handles_.doorbell_record = static_cast<u32_t *>(doorbell_device);
@@ -612,7 +624,7 @@ expected<colocated_domain_t> colocated_domain_t::make(mesh_topology_t const &top
     if (domain.nics_.try_resize(gpus) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "NIC table allocation failed ({} GPUs)", gpus);
     for (u32_t member = 0; member != gpus; ++member) {
-        expected<infiniband_nic_t> nic = infiniband_nic_t::make(member); // local ordinal -> mlx5_<member>
+        expected<infiniband_nic_t> nic = infiniband_nic_t::make(member); // local ordinal → mlx5_<member>
         if (!nic) return result_t::fail(std::move(nic));
         domain.nics_[member] = std::move(nic.value_);
     }

@@ -1,13 +1,15 @@
 /**
  *  @brief Conformance suite for the media data-loaders and the batch's coordinate adapter — one binary,
- *      four tiers. Tier A is host-only: the keyed draw and the weighted file pick. Tier B is a host oracle
- *      of the multi-segment-per-row packing cursor. Tier C is on-device with no external media: a fabricated
- *      mixed row driven through @ref fill_coords and checked against a per-modality coordinate oracle. Tier D
- *      is on-device and env-driven: audio / image / video decoded into a real @ref multimodal_batch_on_gpu_t
- *      and read back against the segment contract, plus decode fault-isolation and a real mixed packet.
+ *      four tiers.
  *  @file test/loaders.cu
  *  @author Ash Vardanian
  *  @date July 6, 2026
+ *
+ *  Tier A is host-only: the keyed draw and the weighted file pick. Tier B is a host oracle
+ *  of the multi-segment-per-row packing cursor. Tier C is on-device with no external media: a fabricated
+ *  mixed row driven through @ref fill_coords and checked against a per-modality coordinate oracle. Tier D
+ *  is on-device and env-driven: audio / image / video decoded into a real @ref multimodal_batch_on_gpu_t
+ *  and read back against the segment contract, plus decode fault-isolation and a real mixed packet.
  *
  *  Every decode tier takes its media through an environment variable ( @c UFORM_TEST_AUDIO ,
  *  @c UFORM_TEST_IMAGE , @c UFORM_TEST_VIDEO ), each a comma-separated path list, so CI can point the same
@@ -44,10 +46,11 @@ using namespace unum::uform::core;
 using namespace unum::uform::loaders;
 using namespace unum::uform::test;
 
-/** @brief The loaders' file-local keyed-draw salts, pinned here as a frozen copy (like Tier A's finalize
- *      golden): a changed loader salt diverges these host oracles, catching a silent reshuffle of the draw. */
+/** The loaders' file-local keyed-draw salts, pinned here as a frozen copy (like Tier A's finalize
+ *  golden): a changed loader salt diverges these host oracles, catching a silent reshuffle of the draw. */
 inline constexpr u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
-/** @brief The frozen row-draw salt — the loaders' per-row keyed-permutation constant, mirrored for Tier A. */
+
+/** The frozen row-draw salt — the loaders' per-row keyed-permutation constant, mirrored for Tier A. */
 inline constexpr u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
 
 using i16r2_tensor_pinned_t = nk::tensor<i16_t, pinned_alloc<i16_t>, 2>;
@@ -58,19 +61,24 @@ using pixelr2_tensor_pinned_t = nk::tensor<pixel_t, pinned_alloc<pixel_t>, 2>;
 
 // Fixtures: a fabricated device tape and the environment-variable media reader.
 
-/** @brief An owning fabricated device tape: the concatenated blob bytes staged onto the device arena plus
- *      the host offsets, in the Apache Arrow packed layout @ref column_view_t reads. Each blob is followed by
- *      one @c 0x00 guard byte held @b inside its packed-view element (the packed view excludes no terminator),
- *      a trailing null the media decoders ignore and a cheap margin for a bytestream parser that reads one past
- *      the end. Move-only; the arena reclaims the device bytes with its lifetime. */
+/**
+ *  @brief An owning fabricated device tape: the concatenated blob bytes staged onto the device arena plus
+ *      the host offsets, in the Apache Arrow packed layout @ref column_view_t reads.
+ *
+ *  Each blob is followed by one @c 0x00 guard byte held @b inside its packed-view element (the packed view
+ *  excludes no terminator), a trailing null the media decoders ignore and a cheap margin for a bytestream
+ *  parser that reads one past the end. Move-only; the arena reclaims the device bytes with its lifetime.
+ */
 struct fabricated_tape_t {
-    /** @brief The concatenated blob bytes on the device arena — every blob followed by its guard byte. */
+
+    /** The concatenated blob bytes on the device arena — every blob followed by its guard byte. */
     b8r1_tensor_arena_t device_bytes {};
-    /** @brief @b [blobs+1] byte offsets on the host — the Arrow offsets @ref view hands to @ref column_view_t . */
+
+    /** @b [blobs+1] byte offsets on the host — the Arrow offsets @ref view hands to @ref column_view_t . */
     array<u64_t> offsets {};
 
     /** The Arrow packed view a loader decodes: two @c std::span s over the device buffer and host
-     *      offsets, so @c tape[row] is a device slice computed on the host. */
+     *  offsets, so @c tape[row] is a device slice computed on the host. */
     [[nodiscard]] column_view_t view() const noexcept {
         // vendor-boundary: the Apache Arrow packed view is inherently two `std::span`s over the raw device
         // buffer and the host offsets — the one construction that forces a pointer past the tensor handle.
@@ -78,11 +86,13 @@ struct fabricated_tape_t {
                               std::span<u64_t const> {offsets.data(), offsets.size()}};
     }
 
-    /** @brief Pack @p blobs into a fresh device tape on @p arena , staging the host accumulator through
+    /**
+     *  @brief Pack @p blobs into a fresh device tape on @p arena , staging the host accumulator through
      *      @ref copy_host_to_device and synchronizing so the pageable accumulator is safe to drop.
      *  @param[inout] arena The device arena the concatenated bytes are allocated from.
      *  @param[inout] stream The stream the staging copy enqueues on; synchronized before returning.
-     *  @param[in] blobs The blobs to pack back to back, one Arrow element each. */
+     *  @param[in] blobs The blobs to pack back to back, one Arrow element each.
+     */
     [[nodiscard]] static expected<fabricated_tape_t> make(gpu_arena_t &arena, gpu_stream_t &stream,
                                                           std::span<std::span<b8_t const> const> blobs) noexcept {
         using result_t = expected<fabricated_tape_t>;
@@ -156,9 +166,11 @@ static void for_each_env_input(char const *name, path_fn_ &&on_path) noexcept {
         if (!path.empty()) on_path(path);
 }
 
-/** @brief The bytes of the first comma-separated path in environment variable @p name — empty when the
+/**
+ *  @brief The bytes of the first comma-separated path in environment variable @p name — empty when the
  *      variable is unset — for the cases that need a single fixture rather than a fan-out.
- *  @param[in] name The environment variable holding the comma-separated path list. */
+ *  @param[in] name The environment variable holding the comma-separated path list.
+ */
 [[nodiscard]] static array<b8_t> first_env_fixture(char const *name) noexcept {
     char const *value = std::getenv(name);
     if (value == nullptr) return {};
@@ -169,7 +181,7 @@ static void for_each_env_input(char const *name, path_fn_ &&on_path) noexcept {
 
 // Tier A — host-only primitives.
 
-/** @brief The keyed draw is stable (a splitmix64 golden fold) and a genuine permutation that reshuffles by rank. */
+/** The keyed draw is stable (a splitmix64 golden fold) and a genuine permutation that reshuffles by rank. */
 static void draw_primitives_are_stable(test_suite_t &suite) {
     constexpr splitmix64_hash_t hash {};
     u64_t const seed = 0xC0FFEEull;
@@ -203,7 +215,7 @@ static void draw_primitives_are_stable(test_suite_t &suite) {
     suite.check(differs, "a different rank must reshuffle the draw");
 }
 
-/** @brief The weighted file pick is row-proportional, distinct, and floored at two shards. */
+/** The weighted file pick is row-proportional, distinct, and floored at two shards. */
 static void file_pick_is_weighted_and_distinct(test_suite_t &suite) {
     constexpr splitmix64_hash_t hash {};
     u64_t const seed = 0x515Eull;
@@ -246,8 +258,8 @@ static void file_pick_is_weighted_and_distinct(test_suite_t &suite) {
 // Tier B — the multi-segment-per-row packing cursor, host oracle of the shared token-cursor scan every media
 // loader now obeys: each `[offset,offset+len)` stays in one row, pre-jump gaps appear, PAD repeats the cursor.
 
-/** @brief The packing cursor keeps every segment in one row, packs several per row, jumps before a crossing,
- *      and repeats the cursor with zero length on PAD — the host oracle every media loader's scan mirrors. */
+/** The packing cursor keeps every segment in one row, packs several per row, jumps before a crossing,
+ *  and repeats the cursor with zero length on PAD — the host oracle every media loader's scan mirrors. */
 static void segment_geometry_packs_multiple_per_row(test_suite_t &suite) {
     u32_t const columns = 8u, rows = 3u, capacity = rows * columns, total_segments = 8u;
     stack_array<u64_t, 5> item_bytes; // truncated to the row width, packed back to back
@@ -299,13 +311,18 @@ static void segment_geometry_packs_multiple_per_row(test_suite_t &suite) {
 // fabricates a segment table, and asserts the segment contract shape-agnostically, so an external `UFORM_TEST_*`
 // fixture of any resolution passes.
 
-/** @brief The batch's positional crux: fabricate a row mixing text + image + video + audio segments (with
+/**
+ *  @brief The batch's positional crux: fabricate a row mixing text + image + video + audio segments (with
  *      their shape descriptors), stage them onto a real batch, run @ref fill_coords , and check every cell's
- *      @c (t,h,w) against a host oracle — text / audio walk the 1-D position axis, image is 2-D spatial, video
- *      is 3-D absolute-frame. Needs no external media.
+ *      @c (t,h,w) against a host oracle.
+ *
+ *  Text / audio walk the 1-D position axis, image is 2-D spatial, video is 3-D absolute-frame.
+ *  Needs no external media.
+ *
  *  @param[inout] suite The running tally.
  *  @param[inout] arena The device arena the batch and coordinate scratch are allocated from.
- *  @param[inout] stream The stream every stage enqueues on. */
+ *  @param[inout] stream The stream every stage enqueues on.
+ */
 static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream) {
     u32_t const columns = 32u, max_segments = 8u, tube_frames = 2u;
     multimodal_batch_shape_t shape {};
@@ -395,14 +412,16 @@ static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &
     suite.check(ok, "every cell's (t,h,w) must match the per-modality coordinate oracle");
 }
 
-/** @brief Decode @p clip into a one-row audio batch and assert the raw-frame contract: one @c audio_k segment
+/**
+ *  @brief Decode @p clip into a one-row audio batch and assert the raw-frame contract: one @c audio_k segment
  *      filling the row, finite samples, and a PAD @c text_k remainder.
  *  @param[inout] suite The running tally.
  *  @param[in] label The case label the diagnostics carry.
  *  @param[in] clip The encoded clip bytes; an empty clip skips the case.
  *  @param[inout] arena The device arena.
  *  @param[inout] stream The stream every stage enqueues on.
- *  @param[inout] pool The CPU-decode worker pool. */
+ *  @param[inout] pool The CPU-decode worker pool.
+ */
 static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, array<b8_t> const &clip, gpu_arena_t &arena,
                              gpu_stream_t &stream, cpu_decode_pool_t &pool) {
     if (clip.empty()) return; // an unset fixture — skip
@@ -460,14 +479,16 @@ static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, array
     suite.check(offsets[max_segments] == lengths[0], "[{}] terminal offset must close the last segment", label);
 }
 
-/** @brief A real env audio clip and an in-test garbage blob decode into one two-row batch: mark-and-continue
+/**
+ *  @brief A real env audio clip and an in-test garbage blob decode into one two-row batch: mark-and-continue
  *      keeps the batch coherent — the garbage row fault-isolates to silence while both segments stay @c audio_k
  *      and the decode as a whole still succeeds.
  *  @param[inout] suite The running tally.
  *  @param[inout] arena The device arena.
  *  @param[inout] stream The stream every stage enqueues on.
  *  @param[inout] pool The CPU-decode worker pool.
- *  @param[in] clip The real env audio clip; an empty clip skips the case. */
+ *  @param[in] clip The real env audio clip; an empty clip skips the case.
+ */
 static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream,
                                   cpu_decode_pool_t &pool, array<b8_t> const &clip) {
     if (clip.empty()) return; // audio fixture unset — skip
@@ -522,7 +543,8 @@ static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_s
     suite.check(garbage_silent, "a corrupt clip must fault-isolate to silence, not corrupt its neighbour");
 }
 
-/** @brief Decode @p blob into a one-row RGBA image batch and assert: one @c image_k segment, its
+/**
+ *  @brief Decode @p blob into a one-row RGBA image batch and assert: one @c image_k segment, its
  *      @c (patch_rows,patch_cols) factoring its length, sub-row placement, and a valid alpha byte.
  *  @param[inout] suite The running tally.
  *  @param[in] label The case label the diagnostics carry.
@@ -530,7 +552,8 @@ static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_s
  *  @param[inout] arena The device arena.
  *  @param[inout] stream The stream every stage enqueues on.
  *  @param[inout] pool The CPU-decode worker pool.
- *  @param[inout] jpeg This GPU's nvJPEG session. */
+ *  @param[inout] jpeg This GPU's nvJPEG session.
+ */
 static void run_image_decode(test_suite_t &suite, sz::string_view_t label, array<b8_t> const &blob, gpu_arena_t &arena,
                              gpu_stream_t &stream, cpu_decode_pool_t &pool, nvjpeg_session_t &jpeg) {
     if (blob.empty()) return; // an unset fixture — skip
@@ -593,10 +616,14 @@ static void run_image_decode(test_suite_t &suite, sz::string_view_t label, array
     suite.check(max_alpha <= 255u, "[{}] alpha channel must be a valid byte", label); // shape-agnostic
 }
 
-/** @brief Decode @p clip into one video batch, one representation per entry of @p frame_strides , and assert each
+/**
+ *  @brief Decode @p clip into one video batch, one representation per entry of @p frame_strides , and assert each
  *      emits a @c video_k segment whose derived @c (temporal_groups,patch_rows,patch_cols) is self-consistent and
- *      fits the grid; distinct strides yield distinct temporal factorizations. The footprint is derived from the
- *      fixture's native resolution and clamped to a row, so a fixture of any size downscales to fit.
+ *      fits the grid.
+ *
+ *  Distinct strides yield distinct temporal factorizations. The footprint is derived from the
+ *  fixture's native resolution and clamped to a row, so a fixture of any size downscales to fit.
+ *
  *  @param[inout] suite The running tally.
  *  @param[in] label The case label the diagnostics carry.
  *  @param[in] clip The encoded clip bytes; an empty clip skips the case.
@@ -604,7 +631,8 @@ static void run_image_decode(test_suite_t &suite, sz::string_view_t label, array
  *  @param[inout] arena The device arena.
  *  @param[inout] stream The stream every stage enqueues on.
  *  @param[inout] pool The CPU demux pool.
- *  @param[inout] nvdec The multi-engine NVDEC session. */
+ *  @param[inout] nvdec The multi-engine NVDEC session.
+ */
 static void run_video_decode(test_suite_t &suite, sz::string_view_t label, array<b8_t> const &clip,
                              std::span<u32_t const> frame_strides, gpu_arena_t &arena, gpu_stream_t &stream,
                              cpu_decode_pool_t &pool, nvdec_session_t &nvdec) {
@@ -667,18 +695,22 @@ static void run_video_decode(test_suite_t &suite, sz::string_view_t label, array
                     "[{}] distinct frame strides must yield distinct factorizations", label);
 }
 
-/** @brief A real multimodal packet: decode a real audio clip and image, then pack both real segments — their
+/**
+ *  @brief A real multimodal packet: decode a real audio clip and image, then pack both real segments — their
  *      true decoded lengths and the image's real @c (patch_rows,patch_cols) — into one mixed row and check
- *      @ref fill_coords routes each modality's coordinates. A single loader owns the whole segment table at
- *      fill, so a mixed row is assembled here the way the cross-rank mixer produces it, over genuinely decoded
- *      geometry.
+ *      @ref fill_coords routes each modality's coordinates.
+ *
+ *  A single loader owns the whole segment table at fill, so a mixed row is assembled here the way the
+ *  cross-rank mixer produces it, over genuinely decoded geometry.
+ *
  *  @param[inout] suite The running tally.
  *  @param[inout] arena The device arena.
  *  @param[inout] stream The stream every stage enqueues on.
  *  @param[inout] pool The CPU-decode worker pool.
  *  @param[inout] jpeg This GPU's nvJPEG session.
  *  @param[in] audio_clip The real env audio clip; empty skips the case.
- *  @param[in] image_blob The real env image blob; empty skips the case. */
+ *  @param[in] image_blob The real env image blob; empty skips the case.
+ */
 static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream,
                                      cpu_decode_pool_t &pool, nvjpeg_session_t &jpeg, array<b8_t> const &audio_clip,
                                      array<b8_t> const &image_blob) {
@@ -821,10 +853,12 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
 
 /**
  *  @brief The distributed sampling tier: every rank bootstraps the mesh, draws its shard set from a shared
- *      dataset (the keyed weighted pick), publishes it to the rendezvous, and asserts its set differs from every
- *      peer's — the cross-node "different nodes sample different files" contract the single-process oracle can
- *      only assert as arithmetic. Gated on @c UFORM_HOST_DOMAIN_INDEX ; a no-op without a @c UFORM_TEST_DATASET
- *      glob, so a laptop run skips it and a 4-8-16 launch exercises it (see @c loaders-4-8-16.sbatch ).
+ *      dataset (the keyed weighted pick), publishes it to the rendezvous, and asserts its set differs from
+ *      every peer's.
+ *
+ *  This is the cross-node "different nodes sample different files" contract the single-process oracle can
+ *  only assert as arithmetic. Gated on @c UFORM_HOST_DOMAIN_INDEX ; a no-op without a @c UFORM_TEST_DATASET
+ *  glob, so a laptop run skips it and a 4-8-16 launch exercises it (see @c loaders-4-8-16.sbatch ).
  */
 static void cross_rank_sampling(test_suite_t &suite) {
     char const *const dataset = std::getenv("UFORM_TEST_DATASET");

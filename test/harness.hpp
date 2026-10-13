@@ -15,10 +15,11 @@
 #pragma once
 
 #include <cstdlib> // `std::getenv` — the `UFORM_TEST_FILTER` launcher contract
-#include <format>  // `std::vformat_to`, `std::make_format_args`
-#include <regex>   // `std::regex`, `std::regex_search` — the case-name filter
 
 #include <unistd.h> // `::write`, `STDERR_FILENO`
+
+#include <format> // `std::vformat_to`, `std::make_format_args`
+#include <regex>  // `std::regex`, `std::regex_search` — the case-name filter
 
 #include "core/types.hpp" // `expected`, `format_into`, `format_at_t`, `format_into_t`, `sz`, the scalar aliases
 
@@ -26,7 +27,7 @@ namespace unum::uform::test {
 
 using namespace unum::uform::core;
 
-/** @brief The file name of a `__FILE__`-style path — the trailing component after the last `/`. */
+/** The file name of a `__FILE__`-style path — the trailing component after the last `/`. */
 [[nodiscard]] inline char const *path_basename(char const *path) noexcept {
     char const *base = path;
     for (char const *character = path; *character != '\0'; ++character)
@@ -34,8 +35,8 @@ using namespace unum::uform::core;
     return base;
 }
 
-/** @brief Write one already-assembled line to standard error — the host-diagnostic channel (§3), never
- *      `printf`. */
+/** Write one already-assembled line to standard error — the host-diagnostic channel (§3), never
+ *  `printf`. */
 inline void emit_line(sz::string_view_t line) noexcept {
     ssize_t const written = ::write(STDERR_FILENO, line.data(), line.size());
     (void)written;
@@ -43,10 +44,11 @@ inline void emit_line(sz::string_view_t line) noexcept {
 
 /**
  *  @brief The launcher's case filter: `UFORM_TEST_FILTER` holds a regular expression matched against each
- *      case's formatted name — the NumKong / StringZilla convention — so a targeted question about one
- *      case answers in minutes instead of re-running the whole matrix. An unset variable accepts every
- *      case; a malformed pattern warns once and also accepts every case, because a broken filter must
- *      never silently skip the suite.
+ *      case's formatted name — the NumKong / StringZilla convention.
+ *
+ *  A targeted question about one case answers in minutes instead of re-running the whole matrix.
+ *  An unset variable accepts every case; a malformed pattern warns once and also accepts every case,
+ *  because a broken filter must never silently skip the suite.
  */
 [[nodiscard]] inline bool test_filter_accepts(sz::string_view_t case_name) noexcept {
     static char const *const pattern = std::getenv("UFORM_TEST_FILTER"); // vendor-boundary: launcher contract
@@ -74,15 +76,20 @@ inline void emit_line(sz::string_view_t line) noexcept {
 
 /**
  *  @brief The cumulative outcome of a test binary: a running pass/fail tally, constructed in `main` and
- *      threaded by reference into every case. Silent on success — a passing check only advances the count;
- *      a failing one prints @c file:line and the formatted reason, then the process exits non-zero.
+ *      threaded by reference into every case.
+ *
+ *  Silent on success — a passing check only advances the count;
+ *  a failing one prints @c file:line and the formatted reason, then the process exits non-zero.
  */
 struct test_suite_t {
-    /** @brief The binary's name, printed in the summary line. */
+
+    /** The binary's name, printed in the summary line. */
     sz::string_view_t name {};
-    /** @brief Checks that passed. */
+
+    /** Checks that passed. */
     u32_t passed = 0;
-    /** @brief Checks that failed; the process exits non-zero when it is not zero. */
+
+    /** Checks that failed; the process exits non-zero when it is not zero. */
     u32_t failed = 0;
 
     /**
@@ -108,7 +115,7 @@ struct test_suite_t {
         emit_line(line.view());
     }
 
-    /** @brief The one summary line and the process exit code. */
+    /** The one summary line and the process exit code. */
     [[nodiscard]] int finish() noexcept {
         sz::string_t line;
         (void)format_into(line, "{}: {} ({}/{} checks passed)\n", failed == 0 ? "PASS" : "FAIL", name, passed,

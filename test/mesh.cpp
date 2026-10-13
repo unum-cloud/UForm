@@ -24,11 +24,11 @@
 #include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fclose` — planting a simulated peer's exchange files
 #include <cstdlib> // `std::getenv`, `std::atoi`
 
+#include <unistd.h> // `::getpid`
+
 #include <utility>      // `std::move`
 #include <system_error> // `std::error_code` — the out-param every `std::filesystem` call reports through
 #include <filesystem>   // `std::filesystem` — the temporary exchange directory
-
-#include <unistd.h> // `::getpid`
 
 #include <cuda.h> // `cuInit`, `cuDeviceGet`, `cuDeviceGetName`
 
@@ -39,8 +39,8 @@ using namespace unum::uform::core;
 using namespace unum::uform::test;
 namespace fs = std::filesystem;
 
-/** @brief One host_domain's facts in the exact line-oriented wire format `build_facts_` emits — what a
- *      peer publishes under its `mesh` key for the lead to read. */
+/** One host_domain's facts in the exact line-oriented wire format `build_facts_` emits — what a
+ *  peer publishes under its `mesh` key for the lead to read. */
 static sz::string_t facts_payload(sz::string_view_t job, u32_t index, u32_t count, u32_t multimem, u32_t devices,
                                   sz::string_view_t hostname, sz::string_view_t device_name) {
     sz::string_t text;
@@ -55,8 +55,8 @@ static sz::string_t facts_payload(sz::string_view_t job, u32_t index, u32_t coun
     return text;
 }
 
-/** @brief A merged manifest in the wire format `build_manifest_` emits — what the lead publishes for every
- *      follower to adopt; every row carries @p device_name so a follower's self-row agrees with its probe. */
+/** A merged manifest in the wire format `build_manifest_` emits — what the lead publishes for every
+ *  follower to adopt; every row carries @p device_name so a follower's self-row agrees with its probe. */
 static sz::string_t manifest_payload(sz::string_view_t job, u32_t multimem, u32_t rows, u32_t devices,
                                      sz::string_view_t device_name) {
     sz::string_t text;
@@ -67,8 +67,8 @@ static sz::string_t manifest_payload(sz::string_view_t job, u32_t multimem, u32_
     return text;
 }
 
-/** @brief Write @p content into @p path — one simulated peer's exchange file, planted before the bootstrap
- *      under test reads it. Uses stdio, never a `std::*stream`. */
+/** Write @p content into @p path — one simulated peer's exchange file, planted before the bootstrap
+ *  under test reads it. Uses stdio, never a `std::*stream`. */
 static void plant(fs::path const &path, sz::string_t const &content) {
     std::FILE *file = std::fopen(path.c_str(), "wb");
     if (file == nullptr) return;
@@ -76,9 +76,9 @@ static void plant(fs::path const &path, sz::string_t const &content) {
     std::fclose(file);
 }
 
-/** @brief The device-0 model name with spaces replaced by underscores — exactly what
- *      `probe_local_host_domain_` records, so a planted peer's `device_name` matches this box's probe and
- *      the uniformity check passes. */
+/** The device-0 model name with spaces replaced by underscores — exactly what
+ *  `probe_local_host_domain_` records, so a planted peer's `device_name` matches this box's probe and
+ *  the uniformity check passes. */
 static bool probe_local_device_name(sz::string_t &name) {
     CUdevice device = 0;
     if (cuDeviceGet(&device, 0) != CUDA_SUCCESS) return false;
@@ -90,9 +90,9 @@ static bool probe_local_device_name(sz::string_t &name) {
     return true;
 }
 
-/** @brief The durable exchange round-trips a payload byte-for-byte: `publish_text` writes it atomically
- *      (temp + rename, no leftover), `await_text` reads it whole, and a second publish replaces the first —
- *      the primitive every wiring phase carries its coordinates over. Hand-built topology, no GPU. */
+/** The durable exchange round-trips a payload byte-for-byte: `publish_text` writes it atomically
+ *  (temp + rename, no leftover), `await_text` reads it whole, and a second publish replaces the first —
+ *  the primitive every wiring phase carries its coordinates over. Hand-built topology, no GPU. */
 static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
     fs::path const directory = base / "exchange";
     std::error_code error;
@@ -118,8 +118,8 @@ static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
     suite.check(again.view() == replacement, "republish should atomically replace: got {}", again);
 }
 
-/** @brief The single-host_domain world: `bootstrap(0,1)` assembles the whole topology from the local probe
- *      and never opens the exchange directory — the common one-box case. */
+/** The single-host_domain world: `bootstrap(0,1)` assembles the whole topology from the local probe
+ *  and never opens the exchange directory — the common one-box case. */
 static void single_box_world(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
     sz::string_t const base_str {base.c_str()};
     auto result = mesh_topology_t::bootstrap(0, 1, local_devices, base_str.c_str(), "single_box", 10.0);
@@ -134,9 +134,9 @@ static void single_box_world(test_suite_t &suite, fs::path const &base, u32_t lo
     suite.check(!fs::exists(base / "single_box"), "a single-box world should create no exchange files");
 }
 
-/** @brief The substance: a lead reads a peer's published facts, validates agreement, and assembles the
- *      world; a follower adopts the lead's manifest. Both halves run against a matching simulated peer
- *      carrying this box's real GPU identity, and each must arrive at the correct world table. */
+/** The substance: a lead reads a peer's published facts, validates agreement, and assembles the
+ *  world; a follower adopts the lead's manifest. Both halves run against a matching simulated peer
+ *  carrying this box's real GPU identity, and each must arrive at the correct world table. */
 static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
     sz::string_t device_name;
     if (!probe_local_device_name(device_name)) return suite.check(false, "probing the local GPU name");
@@ -187,10 +187,10 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
     }
 }
 
-/** @brief The cluster tier, activated by `$UFORM_HOST_DOMAIN_INDEX` and driven by `mesh-4-8-16.sbatch`:
- *      every rank bootstraps the world for real, then proves the assembled world table is byte-identical
- *      across ranks (round-trip fidelity + phase ordering) and the closing barrier completes. The world
- *      size travels as `$UFORM_HOST_DOMAIN_COUNT` (Slurm's `$SLURM_NTASKS` as a fallback). */
+/** The cluster tier, activated by `$UFORM_HOST_DOMAIN_INDEX` and driven by `mesh-4-8-16.sbatch`:
+ *  every rank bootstraps the world for real, then proves the assembled world table is byte-identical
+ *  across ranks (round-trip fidelity + phase ordering) and the closing barrier completes. The world
+ *  size travels as `$UFORM_HOST_DOMAIN_COUNT` (Slurm's `$SLURM_NTASKS` as a fallback). */
 static void run_cluster_exchange(test_suite_t &suite) {
     u32_t const index = host_domain_index_from_environment();
     u32_t count = 0;

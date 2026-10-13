@@ -1,11 +1,13 @@
 /**
  *  @brief The audio loader's bodies: the libav + ForkUnion decoder session and the draw → stage → decode →
- *      chunk batch path — see the header for the contract. Host decode is a firewall over the libav C API
- *      (like @c dataset_shards.cpp firewalls cuDF): every libav / libswresample error is wrapped and can leave only
- *      as an @ref expected_t . The decode lands one mono Float32 clip; the GPU then chunks it into frames of
- *      @c chunk_samples raw samples and scatters each clip into the batch's @c audio_samples as one sub-row
- *      segment. No cuFFT, no mel — the spectral frontend is a learnable layer of the encoder.
+ *      chunk batch path — see the header for the contract.
  *  @file src/loaders/audio_loader.cu
+ *
+ *  Host decode is a firewall over the libav C API (like @c dataset_shards.cpp firewalls cuDF): every libav /
+ *  libswresample error is wrapped and can leave only as an @ref expected_t . The decode lands one mono Float32
+ *  clip; the GPU then chunks it into frames of @c chunk_samples raw samples and scatters each clip into the
+ *  batch's @c audio_samples as one sub-row segment. No cuFFT, no mel — the spectral frontend is a learnable
+ *  layer of the encoder.
  */
 #include <cstring> // `std::memcpy` — the in-memory AVIO read callback (vendor-boundary)
 
@@ -33,12 +35,13 @@ using namespace ul;
 namespace fu = ashvardanian::forkunion;
 
 /**
- *  @brief Write one batch's audio-segment geometry with the serial cursor model (the tokens loader's walk):
- *      thread 0 packs each clip's @p columns_per_row frames into rows (one clip fills a whole row), jumping the
- *      cursor past a row boundary a segment would cross, and records @c segment_offsets / @c segment_lengths and
- *      @c audio_k into @p segment_modality . Audio is 1-D, so there is no shape descriptor. A segment that
- *      overflows the rectangle is dropped loudly (zero length); PAD segments carry zero length, the repeated
- *      cursor, and @c text_k .
+ *  @brief Write one batch's audio-segment geometry with the serial cursor model (the tokens loader's walk).
+ *
+ *  Thread 0 packs each clip's @p columns_per_row frames into rows (one clip fills a whole row), jumping the
+ *  cursor past a row boundary a segment would cross, and records @c segment_offsets / @c segment_lengths and
+ *  @c audio_k into @p segment_modality . Audio is 1-D, so there is no shape descriptor. A segment that
+ *  overflows the rectangle is dropped loudly (zero length); PAD segments carry zero length, the repeated
+ *  cursor, and @c text_k .
  *
  *  __grid_size__ @c [1,1,1] , one thread live; no dynamic shared memory.
  */
@@ -67,23 +70,23 @@ static __global__ void audio_segments_kernel_(u32r1_span_t segment_offsets, u32r
     segment_offsets[total_segments] = cursor;
 }
 
-/** @brief Backing state for the in-memory AVIO read / seek callbacks over one clip's bytes. */
+/** Backing state for the in-memory AVIO read / seek callbacks over one clip's bytes. */
 struct memory_reader_t {
     b8_t const *data = nullptr;
     std::size_t size = 0;
     std::size_t position = 0;
 };
 
-/** @brief Working buffer size of the custom @c AVIOContext ; FFmpeg's own 32 KB default. */
+/** Working buffer size of the custom @c AVIOContext ; FFmpeg's own 32 KB default. */
 constexpr std::size_t avio_buffer_bytes_k = 32u * 1024u;
 
-/** @brief Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
- *      decorrelated under one @c (seed,step,rank) — the same salts the tokens and image loaders use. */
+/** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
+ *  decorrelated under one @c (seed,step,rank) — the same salts the tokens and image loaders use. */
 inline constexpr u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
 inline constexpr u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
 
-/** @brief @c AVIOContext read callback: copy up to @p buffer_size bytes from the in-memory clip, advancing the
- *      reader; @c AVERROR_EOF at the end. */
+/** @c AVIOContext read callback: copy up to @p buffer_size bytes from the in-memory clip, advancing the
+ *  reader; @c AVERROR_EOF at the end. */
 static int memory_read_(void *opaque, u8_t *buffer, int buffer_size) noexcept {
     auto *reader = static_cast<memory_reader_t *>(opaque);
     std::size_t const remaining = reader->size - reader->position;
@@ -95,8 +98,8 @@ static int memory_read_(void *opaque, u8_t *buffer, int buffer_size) noexcept {
     return to_read;
 }
 
-/** @brief @c AVIOContext seek callback over the in-memory clip: honors @c SEEK_SET/CUR/END and the
- *      @c AVSEEK_SIZE size query; @c -1 on an out-of-range target. */
+/** @c AVIOContext seek callback over the in-memory clip: honors @c SEEK_SET/CUR/END and the
+ *  @c AVSEEK_SIZE size query; @c -1 on an out-of-range target. */
 static i64_t memory_seek_(void *opaque, i64_t offset, int whence) noexcept {
     auto *reader = static_cast<memory_reader_t *>(opaque);
     if (whence == AVSEEK_SIZE) return static_cast<i64_t>(reader->size);
@@ -110,36 +113,43 @@ static i64_t memory_seek_(void *opaque, i64_t offset, int whence) noexcept {
     return position;
 }
 
-/**
- *  @brief One clip's libav demux + decode + resample chain, owned as a unit so that a single @ref release
- *      unwinds every handle exactly once on every exit — no per-failure teardown, no double-free. @ref av_open_
- *      builds it; @ref decode_one_clip_ holds it as a local, and its destructor is the one and only unwind.
- */
+/** One clip's libav demux + decode + resample chain, owned as a unit so that a single @ref release
+ *  unwinds every handle exactly once on every exit — no per-failure teardown, no double-free. @ref av_open_
+ *  builds it; @ref decode_one_clip_ holds it as a local, and its destructor is the one and only unwind. */
 struct decode_session_ {
-    /** @brief Backing bytes for the in-memory AVIO callbacks; @c avio holds its address, so it lives here. */
+
+    /** Backing bytes for the in-memory AVIO callbacks; @c avio holds its address, so it lives here. */
     memory_reader_t reader {};
-    /** @brief The custom in-memory @c AVIOContext feeding the demuxer the clip's bytes (no filesystem touch). */
+
+    /** The custom in-memory @c AVIOContext feeding the demuxer the clip's bytes (no filesystem touch). */
     AVIOContext *avio = nullptr;
-    /** @brief The demuxer context — freed by @c avformat_close_input once opened, else @c avformat_free_context ;
-     *      @c av_open_ nulls it on an @c avformat_open_input failure (which frees it itself) so @ref release skips
-     *      it and never double-frees. */
+
+    /** The demuxer context — freed by @c avformat_close_input once opened, else @c avformat_free_context ;
+     *  @c av_open_ nulls it on an @c avformat_open_input failure (which frees it itself) so @ref release skips
+     *  it and never double-frees. */
     AVFormatContext *format = nullptr;
-    /** @brief Whether @c avformat_open_input succeeded — selects which of the two demuxer teardowns @ref release
-     *      runs. */
+
+    /** Whether @c avformat_open_input succeeded — selects which of the two demuxer teardowns @ref release
+     *  runs. */
     bool format_opened = false;
-    /** @brief The audio decoder context bound to the picked stream's codec parameters. */
+
+    /** The audio decoder context bound to the picked stream's codec parameters. */
     AVCodecContext *decoder = nullptr;
-    /** @brief The libswresample context converting the decoded audio to mono Float32 at the target rate. */
+
+    /** The libswresample context converting the decoded audio to mono Float32 at the target rate. */
     SwrContext *resampler = nullptr;
-    /** @brief The reusable packet the demuxer reads each compressed unit into. */
+
+    /** The reusable packet the demuxer reads each compressed unit into. */
     AVPacket *packet = nullptr;
-    /** @brief The reusable frame the decoder emits each PCM block into. */
+
+    /** The reusable frame the decoder emits each PCM block into. */
     AVFrame *frame = nullptr;
-    /** @brief The picked audio stream's index in @c format->streams , or negative before one is found. */
+
+    /** The picked audio stream's index in @c format->streams , or negative before one is found. */
     int audio_stream_index = -1;
 
-    /** @brief Free every held libav handle exactly once; correct in any partially-built state, so every exit —
-     *      success or failure — unwinds through this single call (invoked by the destructor). */
+    /** Free every held libav handle exactly once; correct in any partially-built state, so every exit —
+     *  success or failure — unwinds through this single call (invoked by the destructor). */
     void release() noexcept {
         if (frame != nullptr) av_frame_free(&frame);
         if (packet != nullptr) av_packet_free(&packet);
@@ -153,17 +163,19 @@ struct decode_session_ {
         }
     }
 
-    /** @brief RAII: the single unwind for the whole chain on every return path. */
+    /** RAII: the single unwind for the whole chain on every return path. */
     ~decode_session_() noexcept { release(); }
 };
 
 /**
  *  @brief Build the demux + decode + resample chain for one clip's bytes into @p session — the setup half of
- *      @ref decode_one_clip_ . Stands up its own libav stack over the in-memory bytes (no filesystem touch), so
- *      several run concurrently on the worker pool. Targets one interleaved mono Float32 channel at
- *      @p sample_rate ; the input layout / rate / format come from the decoder. On any failure the partially
- *      built @p session is left in a state @ref decode_session_::release unwinds cleanly, so the caller returns
- *      the status and the session's destructor owns the teardown.
+ *      @ref decode_one_clip_ .
+ *
+ *  Stands up its own libav stack over the in-memory bytes (no filesystem touch), so several run concurrently
+ *  on the worker pool. Targets one interleaved mono Float32 channel at @p sample_rate ; the input layout /
+ *  rate / format come from the decoder. On any failure the partially built @p session is left in a state
+ *  @ref decode_session_::release unwinds cleanly, so the caller returns the status and the session's
+ *  destructor owns the teardown.
  *
  *  @param[in] encoded The clip's encoded bytes, kept alive by the caller for @p session 's whole lifetime.
  *  @param[in] sample_rate The mono rate the resampler converts to.
@@ -243,14 +255,17 @@ struct decode_session_ {
     return status_t::success_k;
 }
 
-/** @brief The mutable state threaded through the resample phases, so the outcome / full pair is spelled once
- *      instead of re-declared beside each of the decode, flush, and drain loops. */
+/** The mutable state threaded through the resample phases, so the outcome / full pair is spelled once
+ *  instead of re-declared beside each of the decode, flush, and drain loops. */
 struct resample_cursor_t {
-    /** @brief Samples already written into the fixed-length row. */
+
+    /** Samples already written into the fixed-length row. */
     std::size_t written = 0;
-    /** @brief Whether the row reached @c clip_samples — the signal to stop pulling. */
+
+    /** Whether the row reached @c clip_samples — the signal to stop pulling. */
     bool full = false;
-    /** @brief The first error seen, or @c success_k while the phases keep running. */
+
+    /** The first error seen, or @c success_k while the phases keep running. */
     status_t outcome = status_t::success_k;
 };
 
@@ -290,13 +305,15 @@ static bool feed_(SwrContext *resampler, AVFrame *decoded, std::span<f32_t> wave
     return decoded != nullptr || converted != 0;
 }
 
-/** @brief Pull every frame the decoder currently holds and @ref feed_ each into the row, advancing @p cursor .
+/**
+ *  @brief Pull every frame the decoder currently holds and @ref feed_ each into the row, advancing @p cursor .
  *      Shared by the main decode and the post-flush tail — both just receive-then-resample until the decoder
  *      yields @c EAGAIN or @c EOF .
  *  @param[inout] session The open session whose decoder is drained and whose reusable frame is reused.
  *  @param[out] waveform The fixed-length row the resampled samples land into.
  *  @param[in] clip_samples The row's capacity.
- *  @param[inout] cursor The write position / full / outcome state advanced in place. */
+ *  @param[inout] cursor The write position / full / outcome state advanced in place.
+ */
 static void receive_frames_(decode_session_ &session, std::span<f32_t> waveform, u32_t clip_samples,
                             resample_cursor_t &cursor) noexcept {
     while (cursor.outcome == status_t::success_k && !cursor.full) {
@@ -311,13 +328,11 @@ static void receive_frames_(decode_session_ &session, std::span<f32_t> waveform,
     }
 }
 
-/**
- *  @brief Decode one encoded clip and resample it to mono Float32 at @p target_sample_rate , writing exactly
- *      @p clip_samples samples into @p waveform — padded with silence when the clip is short, truncated when it
- *      is long. @ref av_open_ builds the demux + decode + resample chain into a local @ref decode_session_ whose
- *      destructor is the one and only unwind for every return; this body drives the pull / decode / resample
- *      loop over it. No filesystem touch, so several run concurrently on the worker pool.
- */
+/** Decode one encoded clip and resample it to mono Float32 at @p target_sample_rate , writing exactly
+ *  @p clip_samples samples into @p waveform — padded with silence when the clip is short, truncated when it
+ *  is long. @ref av_open_ builds the demux + decode + resample chain into a local @ref decode_session_ whose
+ *  destructor is the one and only unwind for every return; this body drives the pull / decode / resample
+ *  loop over it. No filesystem touch, so several run concurrently on the worker pool. */
 [[nodiscard]] static status_t decode_one_clip_(std::span<b8_t const> encoded, u32_t target_sample_rate,
                                                u32_t clip_samples, std::span<f32_t> waveform) noexcept {
     // Silence is the well-defined empty / failure output — a bad clip becomes a padded row, never a
@@ -391,7 +406,7 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, std::s
     // One clip fills a whole row: `columns` frames, each of `chunk_samples` raw samples.
     u32_t const clip_samples = columns * chunk_samples;
 
-    // Hop each drawn clip's encoded bytes device→pinned back to back — the decoder's host-side source. A pinned
+    // Hop each drawn clip's encoded bytes device → pinned back to back — the decoder's host-side source. A pinned
     // `column_view_t` (packed `encoded` buffer + `[clips+1]` offsets) tapes them, so a per-clip byte range is one
     // indexed `staged_tape[clip]` read whose length is the adjacent-offset difference — no side table to disagree.
     array<b8_t, pinned_alloc<b8_t>> encoded;

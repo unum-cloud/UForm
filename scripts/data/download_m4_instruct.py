@@ -75,6 +75,7 @@ def download(
     max_shards: int | None = None,
     fraction: float | None = None,
 ) -> int:
+    """Snapshot M4-Instruct-Data into `out_dir`, capped by `max_shards` / `fraction`, and return an exit code."""
     out_dir.mkdir(parents=True, exist_ok=True)
     sentinel = out_dir / ".downloaded"
     if sentinel.exists() and not force:

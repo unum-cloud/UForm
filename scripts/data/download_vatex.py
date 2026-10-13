@@ -11,7 +11,7 @@ Modality: video + text.  VATEX ships caption JSON only — `vatex_training_v1.0.
 `vatex_validation_v1.0.json` from the official site (https://eric-xw.github.io/vatex-website/) — where
 each entry carries a `videoID` of the form `<youtube_id>_<start:06d>_<end:06d>` plus `enCap` (10 English
 captions) and `chCap` (10 Chinese captions).  The clips themselves must be fetched.  This thin builder
-keeps ONLY its bespoke index read + id parse (`_clip_records`); the shared
+keeps only its bespoke index read + id parse (`_clip_records`); the shared
 `acquire_clips.acquire_clips` orchestrator does the rest — a Slurm `(rank, world)` split so each
 worker fetches a disjoint `clips[rank::world]` stride, intra-host GNU-`parallel` fan-out, per-shard
 yt-dlp fetch (an H.264 `bestvideo+bestaudio` mux trimmed to the clip's window), and the uniform registry

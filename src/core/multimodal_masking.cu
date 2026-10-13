@@ -6,6 +6,7 @@
  *  @date July 3, 2026
  */
 #include <algorithm> // `std::max` — the head product scratch sizing
+#include <limits>    // `std::numeric_limits` — the softmax's row-maximum identity
 
 #include <numkong/each.h> // `nk_each_sum_f32_best` — the media heads adding onto the shared gradient
 
@@ -13,9 +14,9 @@
 
 using namespace unum::uform::core;
 
-/** @brief All-threads-get-the-total CTA max — the fixed-order sibling of @ref block_reduce_broadcast for
- *      the softmax's row maximum: per-warp shuffle trees, lane-0 partials through static shared memory,
- *      one final warp tree, one broadcast cell. Deterministic, sized for @p block_size_ threads. */
+/** All-threads-get-the-total CTA max — the fixed-order sibling of @ref block_reduce_broadcast for
+ *  the softmax's row maximum: per-warp shuffle trees, lane-0 partials through static shared memory,
+ *  one final warp tree, one broadcast cell. Deterministic, sized for @p block_size_ threads. */
 template <unsigned block_size_>
 [[nodiscard]] static __device__ f32_t block_reduce_max_broadcast_(f32_t value) noexcept {
     static_assert(block_size_ % warp_size_k == 0, "the staging array assumes whole warps");
@@ -29,7 +30,7 @@ template <unsigned block_size_>
     if (lane_index == 0u) warp_partials[warp_index] = value;
     __syncthreads();
     if (warp_index == 0u) {
-        f32_t staged = lane_index < warps_k ? warp_partials[lane_index] : -INFINITY;
+        f32_t staged = lane_index < warps_k ? warp_partials[lane_index] : -std::numeric_limits<f32_t>::infinity();
         for (unsigned delta = warp_size_k / 2u; delta != 0u; delta /= 2u)
             staged = fmaxf(staged, __shfl_xor_sync(0xffffffffu, staged, delta));
         if (lane_index == 0u) block_total = staged;
@@ -42,7 +43,8 @@ template <unsigned block_size_>
  *  @brief Corrupt one segment in place: walk its tokens left-to-right, open geometric spans, and at each
  *      covered position write the distorted byte (MASK / random / kept clean) and a loss weight of one.
  *      PAD breaks and never opens a span; uncovered positions were already copied clean with weight zero.
- *      A non- @c text_k segment is skipped outright — media rows keep their clean tokens and zero weight.
+ *
+ *  A non- @c text_k segment is skipped outright — media rows keep their clean tokens and zero weight.
  *
  *  __grid_size__ @c [grid_size_for(segments),1,1] , one thread per segment; no dynamic shared memory.
  */
@@ -83,10 +85,12 @@ static __global__ void masked_token_corrupt_kernel_(tokens_view_t clean, tokens_
     }
 }
 
-/** @brief Count the loss-bearing positions and publish @c {λ/max(count,1), count} — one scalar the CE
+/**
+ *  @brief Count the loss-bearing positions and publish @c {λ/max(count,1), count} — one scalar the CE
  *      kernel scales gradients by, so the masked count never visits the host.
  *
- *  __grid_size__ @c [1,1,1] , one block; no dynamic shared memory. */
+ *  __grid_size__ @c [1,1,1] , one block; no dynamic shared memory.
+ */
 static __global__ void masked_count_kernel_(u32r1_view_t loss_weights, f32r1_span_t scale_and_count, f32_t weight) {
     f32_t live = 0.0f;
     for (std::size_t index = threadIdx.x; index < loss_weights.extent(0); index += blockDim.x)
@@ -112,7 +116,7 @@ static __global__ void masked_cross_entropy_kernel_(f32r2_view_t logits, tokens_
     u32_t const target = targets[row];
     u32_t const vocabulary = logits.extent(1);
 
-    f32_t thread_max = -INFINITY;
+    f32_t thread_max = -std::numeric_limits<f32_t>::infinity();
     for (u32_t byte = threadIdx.x; byte < vocabulary; byte += blockDim.x)
         thread_max = fmaxf(thread_max, logits[row, byte]);
     f32_t const row_max = block_reduce_max_broadcast_<kernel_block_size_default_k>(thread_max);
@@ -132,9 +136,11 @@ static __global__ void masked_cross_entropy_kernel_(f32r2_view_t logits, tokens_
     position_loss[row] = live ? __logf(denominator) - (logits[row, target] - row_max) : 0.0f;
 }
 
-/** @brief Fold the per-position CE summands into @c {λ·Σ, count} — the rank's loss surface.
+/**
+ *  @brief Fold the per-position CE summands into @c {λ·Σ, count} — the rank's loss surface.
  *
- *  __grid_size__ @c [1,1,1] , one block, fixed-order tree; no dynamic shared memory. */
+ *  __grid_size__ @c [1,1,1] , one block, fixed-order tree; no dynamic shared memory.
+ */
 static __global__ void masked_finalize_kernel_(f32r1_view_t position_loss, f32r1_view_t scale_and_count,
                                                f32r1_span_t loss_summands, f32_t weight) {
     f32_t thread_sum = 0.0f;
@@ -146,11 +152,9 @@ static __global__ void masked_finalize_kernel_(f32r1_view_t position_loss, f32r1
     loss_summands[1] = scale_and_count[1];
 }
 
-/**
- *  @brief Allocate off @p arena one linear head's NumKong packs and transients: its @b [outputs,hidden] weight packed
- *      both ways, the weight gradient's transposes over @p rows states (the input one wide enough to stage the
- *      weight's padded transpose too), the @c normalizedᵀ pack, and the Float32 products of all three products.
- */
+/** Allocate off @p arena one linear head's NumKong packs and transients: its @b [outputs,hidden] weight packed
+ *  both ways, the weight gradient's transposes over @p rows states (the input one wide enough to stage the
+ *  weight's padded transpose too), the @c normalizedᵀ pack, and the Float32 products of all three products. */
 static expected_t allocate_head_products_(gpu_arena_t &arena, nk_capability_t capabilities, std::size_t outputs,
                                           std::size_t hidden, std::size_t rows, b8r1_tensor_arena_t &packed_weight,
                                           b8r1_tensor_arena_t &packed_weight_transposed,
@@ -306,14 +310,18 @@ expected_t masked_tokens_t::fill(sz::string_view_t name, array<differentiable_we
     return {};
 }
 
-/** @brief The variance floor of the per-patch z-scoring — the MAE loss normalizes both the prediction and
- *      the target by their own mean and standard deviation. */
+/** The variance floor of the per-patch z-scoring — the MAE loss normalizes both the prediction and
+ *  the target by their own mean and standard deviation. */
 inline constexpr f32_t patch_variance_epsilon_k = 1.0e-6f;
 
-/** @brief Sample the patch mask: a patch is masked when its draw falls under @p mask_ratio . Tube masking
- *      (@p temporal_groups > 1 ) keys only the spatial index, so a masked cell stays masked across time.
+/**
+ *  @brief Sample the patch mask: a patch is masked when its draw falls under @p mask_ratio .
  *
- *  __grid_size__ @c [grid_size_for(patches),1,1] , one thread per patch; no dynamic shared memory. */
+ *  Tube masking keys only the spatial index when @p temporal_groups > 1 , so a masked cell stays masked
+ *  across time.
+ *
+ *  __grid_size__ @c [grid_size_for(patches),1,1] , one thread per patch; no dynamic shared memory.
+ */
 static __global__ void patch_mask_sample_kernel_(u32r1_span_t mask, u64_t seed, data_epoch_t data_epoch,
                                                  f32_t mask_ratio, u32_t spatial_patches) {
     u32_t const patch = blockIdx.x * blockDim.x + threadIdx.x;
@@ -324,10 +332,12 @@ static __global__ void patch_mask_sample_kernel_(u32r1_span_t mask, u64_t seed, 
     mask[patch] = draw < mask_ratio ? 1u : 0u;
 }
 
-/** @brief Zero the raw patch rows the mask selects, in place; visible rows keep their pixels. The driver
+/**
+ *  @brief Zero the raw patch rows the mask selects, in place; visible rows keep their pixels. The driver
  *      calls this on the live batch media so the tower re-patchifies the corrupted pixels.
  *
- *  __grid_size__ @c [grid_size_for(patches),1,1] , persistent stride; no dynamic shared memory. */
+ *  __grid_size__ @c [grid_size_for(patches),1,1] , persistent stride; no dynamic shared memory.
+ */
 static __global__ void patch_corrupt_raw_kernel_(nk::tensor_span<pixel_t, 2> raw, u32r1_view_t mask) {
     std::size_t const patches = mask.extent(0);
     u32_t const patch_scalars = raw.extent(1);
@@ -337,10 +347,12 @@ static __global__ void patch_corrupt_raw_kernel_(nk::tensor_span<pixel_t, 2> raw
     }
 }
 
-/** @brief Count the masked patches and publish @c {λ·2/(patch_pixels·max(count,1)), count} — the MAE
+/**
+ *  @brief Count the masked patches and publish @c {λ·2/(patch_pixels·max(count,1)), count} — the MAE
  *      gradient's per-element constant, so the count never visits the host.
  *
- *  __grid_size__ @c [1,1,1] , one block; no dynamic shared memory. */
+ *  __grid_size__ @c [1,1,1] , one block; no dynamic shared memory.
+ */
 static __global__ void patch_count_kernel_(u32r1_view_t mask, f32r1_span_t scale_and_count, f32_t weight,
                                            u32_t patch_pixels) {
     f32_t live = 0.0f;
@@ -529,11 +541,13 @@ expected_t masked_patches_t::fill(sz::string_view_t name, array<differentiable_w
     return {};
 }
 
-/** @brief Sample the frame mask: a frame is masked when its independent per-frame draw falls under
+/**
+ *  @brief Sample the frame mask: a frame is masked when its independent per-frame draw falls under
  *      @p mask_ratio . Keyed on the frame index alone with the @c frame_mask_k salt — no tube concept, so
  *      whole waveform frames are masked i.i.d.
  *
- *  __grid_size__ @c [grid_size_for(frames),1,1] , one thread per frame; no dynamic shared memory. */
+ *  __grid_size__ @c [grid_size_for(frames),1,1] , one thread per frame; no dynamic shared memory.
+ */
 static __global__ void frame_mask_sample_kernel_(u32r1_span_t mask, u64_t seed, data_epoch_t data_epoch,
                                                  f32_t mask_ratio) {
     u32_t const frame = blockIdx.x * blockDim.x + threadIdx.x;
@@ -543,10 +557,12 @@ static __global__ void frame_mask_sample_kernel_(u32r1_span_t mask, u64_t seed, 
     mask[frame] = draw < mask_ratio ? 1u : 0u;
 }
 
-/** @brief Zero the raw waveform frames the mask selects, in place; visible frames keep their Float32
+/**
+ *  @brief Zero the raw waveform frames the mask selects, in place; visible frames keep their Float32
  *      samples. The driver calls this on the live batch audio so the tower re-projects the corrupted samples.
  *
- *  __grid_size__ @c [grid_size_for(frames),1,1] , persistent stride; no dynamic shared memory. */
+ *  __grid_size__ @c [grid_size_for(frames),1,1] , persistent stride; no dynamic shared memory.
+ */
 static __global__ void frame_corrupt_raw_kernel_(f32r2_span_t raw, u32r1_view_t mask) {
     std::size_t const frames = mask.extent(0);
     u32_t const chunk_samples = raw.extent(1);
@@ -556,10 +572,12 @@ static __global__ void frame_corrupt_raw_kernel_(f32r2_span_t raw, u32r1_view_t 
     }
 }
 
-/** @brief Count the masked frames and publish @c {λ·2/(chunk_samples·max(count,1)), count} — the MAE
+/**
+ *  @brief Count the masked frames and publish @c {λ·2/(chunk_samples·max(count,1)), count} — the MAE
  *      gradient's per-element constant, so the count never visits the host.
  *
- *  __grid_size__ @c [1,1,1] , one block; no dynamic shared memory. */
+ *  __grid_size__ @c [1,1,1] , one block; no dynamic shared memory.
+ */
 static __global__ void frame_count_kernel_(u32r1_view_t mask, f32r1_span_t scale_and_count, f32_t weight,
                                            u32_t chunk_samples) {
     f32_t live = 0.0f;
@@ -574,8 +592,10 @@ static __global__ void frame_count_kernel_(u32r1_view_t mask, f32r1_span_t scale
 /**
  *  @brief Per-frame normalized-MSE over one masked audio frame: z-score the prediction and the raw Float32
  *      target by their own mean / standard deviation, accumulate the squared difference, and write the
- *      pre-scaled gradient — visible frames write zeros and score nothing. The prediction rides BFloat16
- *      off the decode matmul; the target is the raw waveform frame, read as Float32.
+ *      pre-scaled gradient — visible frames write zeros and score nothing.
+ *
+ *  The prediction rides BFloat16 off the decode matmul; the target is the raw waveform frame, read as
+ *  Float32.
  *
  *  __grid_size__ @c [max_frames,1,1] , one block per frame; no dynamic shared memory.
  */

@@ -13,7 +13,7 @@ average 3.65 temporally localized sentences.  The HuggingFace loader script itse
 from `captions.zip` on the original author's host (https://cs.stanford.edu/people/ranjaykrishna/densevid/),
 so this builder does the same: it downloads `captions.zip`, reads `train.json` (and `val_1.json`), whose
 keys are `v_<youtube_id>` with `timestamps` (`[start, end]` pairs) and `sentences`.  The videos
-themselves must be fetched.  This thin builder keeps ONLY its bespoke index read (`_clip_records`); the
+themselves must be fetched.  This thin builder keeps only its bespoke index read (`_clip_records`); the
 shared `acquire_clips.acquire_clips` orchestrator does the rest — a Slurm `(rank, world)` split so
 each worker fetches a disjoint `clips[rank::world]` stride, intra-host GNU-`parallel` fan-out, per-shard
 yt-dlp fetch (an H.264 `bestvideo+bestaudio` mux of the whole video), and the uniform registry parquet:

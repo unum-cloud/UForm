@@ -45,13 +45,17 @@ using namespace unum::uform::core;
 using namespace unum::uform::train;
 using namespace unum::uform::test;
 
-/** @brief The tiny shared geometry — @c depth=2 , @c hidden=256 , @c 16 steps, and a two-step warmup so even
- *      the tiny run crosses both schedule phases. Tokens ride a @c 2×64 rectangle; the omni variant fills
- *      every media slice over a @c 4×64 one, so the keyed partition holds all four modalities live at every
- *      step and the composite loss measures the same mixture throughout — descent stays comparable. Sixteen
- *      steps, because descent is asserted on the @b world mean: at a 16-GPU world the data spreads twice as
- *      wide as one box's, and the eight-step horizon left the token head's early-vs-late comparison genuinely
- *      marginal (a ~0.7% rise on the world mean) while every machinery invariant held. */
+/**
+ *  @brief The tiny shared geometry — @c depth=2 , @c hidden=256 , @c 16 steps, and a two-step warmup so even
+ *      the tiny run crosses both schedule phases.
+ *
+ *  Tokens ride a @c 2×64 rectangle; the omni variant fills every media slice over a @c 4×64 one, so the keyed
+ *  partition holds all four modalities live at every step and the composite loss measures the same mixture
+ *  throughout — descent stays comparable. Sixteen steps, because descent is asserted on the @b world mean: at a
+ *  16-GPU world the data spreads twice as wide as one box's, and the eight-step horizon left the token head's
+ *  early-vs-late comparison genuinely marginal (a ~0.7% rise on the world mean) while every machinery invariant
+ *  held.
+ */
 [[nodiscard]] static base_config_t test_geometry_(bool omni) noexcept {
     base_config_t config;
     config.batch = multimodal_batch_shape_t {2u, 2u, 64u};
@@ -68,10 +72,13 @@ using namespace unum::uform::test;
     return config;
 }
 
-/** @brief A narrowed copy of the bootstrapped world: this process alone drives @p gpus GPUs as an isolated
- *      one-host-domain mesh — the sweep's cheap tier and the capture case's world. Safe because a single-host
- *      topology carries no rendezvous state; the one cross-field invariant is that @c host_domains sizes to
- *      @c shape.host_domain_count() . */
+/**
+ *  @brief A narrowed copy of the bootstrapped world: this process alone drives @p gpus GPUs as an isolated
+ *      one-host-domain mesh — the sweep's cheap tier and the capture case's world.
+ *
+ *  Safe because a single-host topology carries no rendezvous state; the one cross-field invariant is that
+ *  @c host_domains sizes to @c shape.host_domain_count() .
+ */
 [[nodiscard]] static expected<mesh_topology_t> narrowed_topology_(mesh_topology_t const &world, u32_t gpus) noexcept {
     using result_t = expected<mesh_topology_t>;
     mesh_topology_t narrowed;
@@ -87,35 +94,43 @@ using namespace unum::uform::test;
     return result_t {std::move(narrowed)};
 }
 
-/** @brief One optimizer window's payload budget at the tiny test geometry, with generous margin — the omni
- *      mixture's registration list needs ~1.7M scalars. A tier's shared domain multiplies this by its
- *      window count; @c reserve fails loudly if a geometry change ever outgrows it. */
+/** One optimizer window's payload budget at the tiny test geometry, with generous margin — the omni
+ *  mixture's registration list needs ~1.7M scalars. A tier's shared domain multiplies this by its
+ *  window count; @c reserve fails loudly if a geometry change ever outgrows it. */
 inline constexpr std::size_t tier_window_scalars_k = 4u << 20;
 
-/** @brief The test tier's rendezvous deadline — short enough that a dead peer never costs the surviving
- *      domain two minutes per case, but long enough for the real two-node cold start: the FIRST exchange
- *      rides NFS attribute-cache latency plus the peers' eager-module-loading skew, which can take tens
- *      of seconds (a warm local rendezvous completes in well under one). */
+/** The test tier's rendezvous deadline — short enough that a dead peer never costs the surviving
+ *  domain two minutes per case, but long enough for the real two-node cold start: the FIRST exchange
+ *  rides NFS attribute-cache latency plus the peers' eager-module-loading skew, which can take tens
+ *  of seconds (a warm local rendezvous completes in well under one). */
 inline constexpr f64_t test_rendezvous_timeout_seconds_k = 60.0;
 
-/** @brief One width tier's shared surfaces: the topology plus the collective state every cell of the tier
- *      reuses instead of re-creating — threaded by reference from @c main , like production. */
+/** One width tier's shared surfaces: the topology plus the collective state every cell of the tier
+ *  reuses instead of re-creating — threaded by reference from @c main , like production. */
 struct tier_t {
-    /** @brief The tier's world description. */
+
+    /** The tier's world description. */
     mesh_topology_t const &topology;
-    /** @brief The tier's one multicast domain — every case reserves its own window from it. */
+
+    /** The tier's one multicast domain — every case reserves its own window from it. */
     multimem_domain_t &domain;
-    /** @brief The tier's one cross-domain all-reduce — every case's optimizer borrows it. */
+
+    /** The tier's one cross-domain all-reduce — every case's optimizer borrows it. */
     infiniband_all_reduce<f32_t> &world_reduce;
-    /** @brief The suite's one telemetry ledger — every case's trainer and optimizer feed it. */
+
+    /** The suite's one telemetry ledger — every case's trainer and optimizer feed it. */
     telemetry_ledger_t &ledger;
 };
 
-/** @brief One collective surface shared by every consumer of a tier — multicast objects are a scarce
+/**
+ *  @brief One collective surface shared by every consumer of a tier — multicast objects are a scarce
  *      fabric resource, so the suite creates one per tier in @c main and threads it by reference, exactly
- *      as @ref base_trainer_t::run composes production. Bring-up streams are transient locals (the domain
- *      retains no stream), and the self-advancing barrier rounds make reuse across many optimizer
- *      instances safe by construction: every barrier derives its target from its own member's scalar. */
+ *      as @ref base_trainer_t::run composes production.
+ *
+ *  Bring-up streams are transient locals (the domain retains no stream), and the self-advancing barrier
+ *  rounds make reuse across many optimizer instances safe by construction: every barrier derives its
+ *  target from its own member's scalar.
+ */
 [[nodiscard]] static expected<multimem_domain_t> make_tier_domain_(mesh_topology_t const &topology,
                                                                    u32_t windows) noexcept {
     using result_t = expected<multimem_domain_t>;
@@ -134,8 +149,8 @@ struct tier_t {
                                    streams);
 }
 
-/** @brief The suite-lifetime arena hosting the tiers' world-reduce heaps — on device 0, visible to every
- *      local device, because the ranks peer-read the gateway's world sum over NVLink. */
+/** The suite-lifetime arena hosting the tiers' world-reduce heaps — on device 0, visible to every
+ *  local device, because the ranks peer-read the gateway's world sum over NVLink. */
 [[nodiscard]] static expected<gpu_arena_t> make_reduce_arena_(u32_t gpus) noexcept {
     using result_t = expected<gpu_arena_t>;
     array<i32_t> devices;
@@ -149,9 +164,9 @@ struct tier_t {
     return gpu_arena_t::make(0, 256ull << 20, devices.view());
 }
 
-/** @brief One tier's world all-reduce buffer, wired once and borrowed by every case — sized like a domain
- *      window ( @ref tier_window_scalars_k , the elementwise reduce leaves a smaller case's tail unread).
- *      A single-domain tier gets the zero-round identity, wired without touching InfiniBand. */
+/** One tier's world all-reduce buffer, wired once and borrowed by every case — sized like a domain
+ *  window ( @ref tier_window_scalars_k , the elementwise reduce leaves a smaller case's tail unread).
+ *  A single-domain tier gets the zero-round identity, wired without touching InfiniBand. */
 [[nodiscard]] static expected<infiniband_all_reduce<f32_t>> make_tier_reduce_(colocated_domain_t &colocated,
                                                                               gpu_arena_t &arena) noexcept {
     using result_t = expected<infiniband_all_reduce<f32_t>>;
@@ -168,9 +183,9 @@ struct tier_t {
     return wired;
 }
 
-/** @brief The distributed Adafactor over the transient flat replica-major registration table — the same
- *      construction @ref base_trainer_t::run performs. A second call on the same domain reserves the next
- *      disjoint window (fresh moments), borrowing the tier's one world all-reduce. */
+/** The distributed Adafactor over the transient flat replica-major registration table — the same
+ *  construction @ref base_trainer_t::run performs. A second call on the same domain reserves the next
+ *  disjoint window (fresh moments), borrowing the tier's one world all-reduce. */
 [[nodiscard]] static expected<distributed_adafactor_t> make_optimizer_(base_trainer_t &trainer,
                                                                        multimem_domain_t &domain,
                                                                        infiniband_all_reduce<f32_t> &world_reduce,
@@ -190,23 +205,27 @@ struct tier_t {
                                          trainer.replicas[0].weights.size(), optimizer_config, trainer.streams, ledger);
 }
 
-/** @brief The world's health, owned by @c main beside the suite and threaded by reference into every case:
- *      a device-side fault poisons the local context (every later case fails with the same unrelated
- *      "unspecified launch failure"), and a dead peer domain makes every later rendezvous wait its full
- *      deadline — either way the first detection reports once and the remaining cases return immediately,
- *      so a faulted run finishes in seconds instead of minutes. */
+/** The world's health, owned by @c main beside the suite and threaded by reference into every case:
+ *  a device-side fault poisons the local context (every later case fails with the same unrelated
+ *  "unspecified launch failure"), and a dead peer domain makes every later rendezvous wait its full
+ *  deadline — either way the first detection reports once and the remaining cases return immediately,
+ *  so a faulted run finishes in seconds instead of minutes. */
 struct world_health_t {
-    /** @brief Cleared at the first poisoned-context or unresponsive-peer detection; later cases skip. */
+
+    /** Cleared at the first poisoned-context or unresponsive-peer detection; later cases skip. */
     bool alive = true;
-    /** @brief Consecutive optimizer-setup failures — a healthy world never fails setup, so two in a row
-     *      mean the peer domain is gone. */
+
+    /** Consecutive optimizer-setup failures — a healthy world never fails setup, so two in a row
+     *  mean the peer domain is gone. */
     u32_t consecutive_setup_failures = 0;
 };
 
-/** @brief Probe @p health before a case: report the first poisoned-context or unresponsive-peer detection
+/**
+ *  @brief Probe @p health before a case: report the first poisoned-context or unresponsive-peer detection
  *      once, and tell every later case to return immediately.
  *  @param[inout] suite The suite the one abort line reports into.
- *  @param[inout] health The world's health record, cleared at the first detection. */
+ *  @param[inout] health The world's health record, cleared at the first detection.
+ */
 [[nodiscard]] static bool world_still_healthy_(test_suite_t &suite, world_health_t &health) noexcept {
     if (!health.alive) return false;
     if (health.consecutive_setup_failures >= 2u) {
@@ -221,8 +240,8 @@ struct world_health_t {
     return false;
 }
 
-/** @brief Enqueue steps @b [begin,end) of the two-region loop — an empty @p graphs span runs the model region
- *      eagerly, a filled one replays the captured graphs. */
+/** Enqueue steps @b [begin,end) of the two-region loop — an empty @p graphs span runs the model region
+ *  eagerly, a filled one replays the captured graphs. */
 [[nodiscard]] static expected_t run_steps_(base_trainer_t &trainer, distributed_adafactor_t &optimizer,
                                            std::span<gpu_replay_graph_t> graphs, u32_t begin, u32_t end) noexcept {
     for (u32_t ordinal = begin; ordinal != end; ++ordinal)
@@ -230,7 +249,7 @@ struct world_health_t {
     return {};
 }
 
-/** @brief Drain every replica's stream — the barrier before any host-side comparison. */
+/** Drain every replica's stream — the barrier before any host-side comparison. */
 static void synchronize_(base_trainer_t &trainer) noexcept {
     for (std::size_t member_index = 0; member_index != trainer.streams.size(); ++member_index) {
         switch_to_gpu_t gpu_scope {trainer.streams[member_index]};
@@ -238,8 +257,8 @@ static void synchronize_(base_trainer_t &trainer) noexcept {
     }
 }
 
-/** @brief DtoH one replica's whole registration list into a byte-comparable host array — the snapshot behind
- *      assertions A, C, and the gradient-propagation check. */
+/** DtoH one replica's whole registration list into a byte-comparable host array — the snapshot behind
+ *  assertions A, C, and the gradient-propagation check. */
 [[nodiscard]] static expected<array<bf16_t>> snapshot_weights_(array<differentiable_weights_t> const &weights,
                                                                gpu_stream_t &stream) noexcept {
     using result_t = expected<array<bf16_t>>;
@@ -310,9 +329,9 @@ static void synchronize_(base_trainer_t &trainer) noexcept {
     return worst <= 1.0e-2f * largest;
 }
 
-/** @brief The warmup / cosine policy's own properties, pure host math: a strictly monotone ramp topping out
- *      exactly at the peak, a never-rising decay bounded by @b [floor, peak] , and a tail settling onto the
- *      floor. */
+/** The warmup / cosine policy's own properties, pure host math: a strictly monotone ramp topping out
+ *  exactly at the peak, a never-rising decay bounded by @b [floor, peak] , and a tail settling onto the
+ *  floor. */
 static void learning_rate_schedule(test_suite_t &suite) {
     base_config_t config;
     config.learning_rate = 1.0e-3f;
@@ -344,10 +363,10 @@ static void learning_rate_schedule(test_suite_t &suite) {
                 config.min_learning_rate * 1.1f);
 }
 
-/** @brief The checkpoint naming contract over one built replica: the registration list carries the semantic
- *      per-weight names every SafeTensors parser keys by (under the driver's @c model. prefix), derived from
- *      @p config and asserted in full order — a @c fill reorder or rename fails loudly here before it silently
- *      re-keys a checkpoint. Piggybacks on an already-built trainer, so it costs no bring-up of its own. */
+/** The checkpoint naming contract over one built replica: the registration list carries the semantic
+ *  per-weight names every SafeTensors parser keys by (under the driver's @c model. prefix), derived from
+ *  @p config and asserted in full order — a @c fill reorder or rename fails loudly here before it silently
+ *  re-keys a checkpoint. Piggybacks on an already-built trainer, so it costs no bring-up of its own. */
 static void check_weight_naming_(test_suite_t &suite, char const *label, base_config_t const &config,
                                  std::span<differentiable_weights_t const> weights) {
     std::size_t index = 0;
@@ -384,10 +403,10 @@ static void check_weight_naming_(test_suite_t &suite, char const *label, base_co
     suite.check(index == weights.size(), "[{}] registration count: got {} want {}", label, weights.size(), index);
 }
 
-/** @brief Drain every member's stream before a case's trainer — and the wired collectives borrowing its
- *      arenas — leaves scope: a doorbell or completion-drain kernel still in flight would otherwise poke
- *      NIC structures the teardown frees, and mlx5's pools recycle those pages into the next case's
- *      queues (a roaming device fault the page registry alone cannot prevent). */
+/** Drain every member's stream before a case's trainer — and the wired collectives borrowing its
+ *  arenas — leaves scope: a doorbell or completion-drain kernel still in flight would otherwise poke
+ *  NIC structures the teardown frees, and mlx5's pools recycle those pages into the next case's
+ *  queues (a roaming device fault the page registry alone cannot prevent). */
 [[nodiscard]] static expected_t drain_all_streams_(base_trainer_t &trainer) noexcept {
     for (std::size_t member_index = 0; member_index != trainer.streams.size(); ++member_index) {
         switch_to_gpu_t gpu_scope {trainer.streams[member_index]};
@@ -399,10 +418,10 @@ static void check_weight_naming_(test_suite_t &suite, char const *label, base_co
     return {};
 }
 
-/** @brief Bring up the trainer for one mixture, run the captured two-region loop reading telemetry every step,
- *      and fold the five invariants (A replica identity, B round progression, C capture == eager, D loss
- *      descent, E every live head trained) into @p suite . D and E read the ledger's running loss
- *      statistics — every local member's sample mass, not a lead-only coin flip. */
+/** Bring up the trainer for one mixture, run the captured two-region loop reading telemetry every step,
+ *  and fold the five invariants (A replica identity, B round progression, C capture == eager, D loss
+ *  descent, E every live head trained) into @p suite . D and E read the ledger's running loss
+ *  statistics — every local member's sample mass, not a lead-only coin flip. */
 static void run_base_conformance(test_suite_t &suite, world_health_t &health, char const *label,
                                  base_config_t const &config, mesh_topology_t const &topology,
                                  multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce,
@@ -573,9 +592,9 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
         suite.check(false, "[{}] end-of-case drain: {}", label, drained.description_);
 }
 
-/** @brief One sweep cell: bring up the trainer, run two eager steps, then capture and replay two more over the
- *      same trainer — both model-region modes under one mixture — asserting finite losses and the final-norm
- *      extents every head reconstructs against. */
+/** One sweep cell: bring up the trainer, run two eager steps, then capture and replay two more over the
+ *  same trainer — both model-region modes under one mixture — asserting finite losses and the final-norm
+ *  extents every head reconstructs against. */
 static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t tier, sz::string_view_t label,
                             base_config_t const &config) {
     if (!test_filter_accepts(label)) return;
@@ -616,7 +635,7 @@ static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t 
         suite.check(false, "[{}] end-of-case drain: {}", label, drained.description_);
 }
 
-/** @brief One sweep cell's config: @p subset 's media bits over @p rows full-width rows of @p columns cells. */
+/** One sweep cell's config: @p subset 's media bits over @p rows full-width rows of @p columns cells. */
 [[nodiscard]] static base_config_t sweep_config_(u32_t subset, u32_t rows, u32_t columns) noexcept {
     base_config_t config = test_geometry_(false);
     config.batch = multimodal_batch_shape_t {rows, rows, columns};
@@ -627,13 +646,17 @@ static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t 
     return config;
 }
 
-/** @brief The two-tier sweep. The cheap tier walks every media subset (2³) crossed with one-row and two-row
- *      budgets on an isolated one-GPU world — every modality-presence combination, the zero-live-rows corner,
- *      and the 1-member peer-read domain — plus two corners the cross-product never reaches: an omni cell with
- *      five rows over four live modalities (the uneven partition, whose extra row rotates across epochs) and an
- *      omni cell at 96 columns (the non-square patch factorization). The wide tier reruns every subset at the
- *      bootstrapped world's full width, so shape handling composes with the real collectives — and widens to
- *      the multi-node world automatically under the sbatch launcher. */
+/**
+ *  @brief The two-tier sweep.
+ *
+ *  The cheap tier walks every media subset (2³) crossed with one-row and two-row
+ *  budgets on an isolated one-GPU world — every modality-presence combination, the zero-live-rows corner,
+ *  and the 1-member peer-read domain — plus two corners the cross-product never reaches: an omni cell with
+ *  five rows over four live modalities (the uneven partition, whose extra row rotates across epochs) and an
+ *  omni cell at 96 columns (the non-square patch factorization). The wide tier reruns every subset at the
+ *  bootstrapped world's full width, so shape handling composes with the real collectives — and widens to
+ *  the multi-node world automatically under the sbatch launcher.
+ */
 static void mixture_sweep(test_suite_t &suite, world_health_t &health, tier_t wide, tier_t cheap) {
     for (u32_t subset = 0; subset != 8u; ++subset)
         for (u32_t rows = 1; rows != 3u; ++rows) {

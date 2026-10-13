@@ -26,7 +26,7 @@ are typed and null-safe, and pyarrow reads them row group by row group over HTTP
 leading slice is read WITHOUT downloading or parsing a whole shard, at bounded memory.
 
 Bounded index (the 100M-clip trap).
-HowTo100M is far too large to materialise; `_clip_records` therefore STREAMS the parquet shards in order
+HowTo100M is far too large to materialise; `_clip_records` therefore streams the parquet shards in order
 with `pyarrow.parquet.ParquetFile.iter_batches` and stops after `_INDEX_CAP` distinct `(vid, start, end)`
 windows (default 200k, set by `--index-cap` / `$UFORM_INDEX_CAP`), pulling only the footer and the
 leading row groups of the remote files.  Records that share a window are folded into one clip whose
@@ -82,8 +82,10 @@ _DEFAULT_INDEX_CAP = 200_000
 
 
 class _HttpRangeReader:
-    """A minimal seekable, HTTP-range-backed byte reader so `pyarrow.parquet` can read a remote parquet
-    file's footer and only the leading row groups it consumes — bounded transfer, never the whole shard.
+    """A minimal seekable, HTTP-range-backed byte reader for remote parquet files.
+
+    It lets `pyarrow.parquet` read a remote parquet file's footer and only the leading row groups it consumes,
+    a bounded transfer that never pulls the whole shard.
 
     Parquet's metadata lives in the file footer, so a reader must seek: pure forward streaming cannot work.
     This wrapper serves pyarrow's many small, mostly-sequential reads from a `_BLOCK`-sized read-ahead cache
@@ -157,7 +159,7 @@ def _stream_leading_records(cap: int) -> list[dict[str, object]]:
     Opens each remote parquet shard in order through `_HttpRangeReader` and walks its rows with
     `ParquetFile.iter_batches` (only the `video_id` / `start` / `end` / `text` columns), folding rows that
     share a `(vid, start, end)` window into a single clip whose captions are joined. Stops as soon as `cap`
-    DISTINCT windows have been seen, so only the footer and leading row groups of the shards are ever
+    distinct windows have been seen, so only the footer and leading row groups of the shards are ever
     transferred and the in-memory footprint stays bounded by `cap`.
 
     Args:

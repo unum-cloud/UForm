@@ -25,8 +25,8 @@
 #include <numkong/tensor.hpp>          // `nk::tensor_span`, `nk::tensor_view` — `differentiable_weights_t`
 #include <stringzilla/stringzilla.hpp> // `sz::string_t` — the exception-free diagnostics carrier
 
-/** @brief `std::format` support for StringZilla slices, so diagnostics interpolate them directly —
- *      no conversion shims at call sites. */
+/** `std::format` support for StringZilla slices, so diagnostics interpolate them directly —
+ *  no conversion shims at call sites. */
 template <>
 struct std::formatter<ashvardanian::stringzilla::string_view_t> : std::formatter<std::string_view> {
     auto format(ashvardanian::stringzilla::string_view_t text, std::format_context &context) const {
@@ -34,7 +34,7 @@ struct std::formatter<ashvardanian::stringzilla::string_view_t> : std::formatter
     }
 };
 
-/** @brief `std::format` support for owning StringZilla strings — same bridge, by reference. */
+/** `std::format` support for owning StringZilla strings — same bridge, by reference. */
 template <>
 struct std::formatter<ashvardanian::stringzilla::string_t> : std::formatter<std::string_view> {
     auto format(ashvardanian::stringzilla::string_t const &text, std::format_context &context) const {
@@ -95,54 +95,56 @@ using e4m3r2_span_t = nk::tensor_span<e4m3_t, 2>;
 using e4m3r3_view_t = nk::tensor_view<e4m3_t, 3>;
 using e4m3r3_span_t = nk::tensor_span<e4m3_t, 3>;
 
-/** @brief One vocabulary entry's index — the byte-level vocabulary (256 bytes + the special tokens)
- *      fits 16 bits, and every token tape, staging cell, and embedding lookup trades in this width. */
+/** One vocabulary entry's index — the byte-level vocabulary (256 bytes + the special tokens)
+ *  fits 16 bits, and every token tape, staging cell, and embedding lookup trades in this width. */
 using token_id_t = u16_t;
 
-/** @brief One raw image / video channel sample, as decoders emit it — 8-bit, interleaved channels;
- *      normalization is the entry projection's job, inside the differentiated step. */
+/** One raw image / video channel sample, as decoders emit it — 8-bit, interleaved channels;
+ *  normalization is the entry projection's job, inside the differentiated step. */
 using pixel_t = u8_t;
 
-/** @brief Thread count of one CUDA warp — the granularity of every shuffle-based reduction tree. */
+/** Thread count of one CUDA warp — the granularity of every shuffle-based reduction tree. */
 inline constexpr unsigned warp_size_k = 32u;
 
-/** @brief Default thread count per CTA for hand-rolled kernels. Fits the CUB @c BlockReduce<f32_t,256>
- *      temp-storage budget (1 KB SMEM) with full occupancy on sm_90 and sm_100. */
+/** Default thread count per CTA for hand-rolled kernels. Fits the CUB @c BlockReduce<f32_t,256>
+ *  temp-storage budget (1 KB SMEM) with full occupancy on sm_90 and sm_100. */
 inline constexpr unsigned kernel_block_size_default_k = 256u;
 
-/** @brief The typical upper bound on the number of GPUs attached to the same host process
+/**
+ *  @brief The typical upper bound on the number of GPUs attached to the same host process
  *      within the same "multimem" domain.
- *  @sa Defines the upper bound for @ref mesh_shape_t::gpus_per_host_domain. */
+ *  @sa Defines the upper bound for @ref mesh_shape_t::gpus_per_host_domain.
+ */
 inline constexpr unsigned max_gpus_per_host_k = 32u;
 
-/** @brief One pass over the data — the sole key of every deterministic draw (shuffling, mixing, masking,
- *      synthetic contents). Distinct from @ref optimizer_step_t : a resumed run at the same data epoch
- *      reproduces the same draws regardless of how many optimizer steps preceded it. */
+/** One pass over the data — the sole key of every deterministic draw (shuffling, mixing, masking,
+ *  synthetic contents). Distinct from @ref optimizer_step_t : a resumed run at the same data epoch
+ *  reproduces the same draws regardless of how many optimizer steps preceded it. */
 struct data_epoch_t {
     u32_t ordinal = 0;
 };
 
-/** @brief One optimizer iteration — the learning-rate schedule's clock and the report / checkpoint
- *      cadence. Never a draw key. Synthetic corpora key the pass on the iteration; that crossing is
- *      spelled @c data_epoch_t {optimizer_step.ordinal} exactly where it happens. */
+/** One optimizer iteration — the learning-rate schedule's clock and the report / checkpoint
+ *  cadence. Never a draw key. Synthetic corpora key the pass on the iteration; that crossing is
+ *  spelled @c data_epoch_t {optimizer_step.ordinal} exactly where it happens. */
 struct optimizer_step_t {
     u32_t ordinal = 0;
 };
 
-/** @brief One observed round of a device-side collective barrier — @ref barrier_round_t 's self-advanced
- *      scalar, read back for telemetry and conformance. Never a caller input: the device bumps it, the
- *      host only observes. */
+/** One observed round of a device-side collective barrier — @ref barrier_round_t 's self-advanced
+ *  scalar, read back for telemetry and conformance. Never a caller input: the device bumps it, the
+ *  host only observes. */
 struct concurrency_round_t {
     u32_t ordinal = 0;
 };
 
-/** @brief @c ceil(numerator/denominator) over non-negative integers — grid sizing, chunk counts. */
+/** @c ceil(numerator/denominator) over non-negative integers — grid sizing, chunk counts. */
 [[nodiscard]] inline constexpr std::size_t divide_round_up(std::size_t numerator, std::size_t denominator) noexcept {
     return (numerator + denominator - 1u) / denominator;
 }
 
-/** @brief @c ceil(log2(value)) for @c value>=1 — the recursive-doubling round count over @c value
- *      domains. */
+/** @c ceil(log2(value)) for @c value>=1 — the recursive-doubling round count over @c value
+ *  domains. */
 [[nodiscard]] inline constexpr u32_t ceil_log2(u32_t value) noexcept {
     u32_t rounds = 0;
     while ((1u << rounds) < value) ++rounds;
@@ -151,12 +153,13 @@ struct concurrency_round_t {
 
 /**
  *  @brief The project's one keyed hasher — a splitmix64 core, used three ways and nothing else, so no
- *      free-standing @c mix / @c combine / @c derive helpers proliferate. Pure and device-callable;
- *      stateless by design (no engine object to step, unlike @c std::minstd or a @c curandState ), so a
- *      thread hashes its own @c (key,index) pair independently and any result is recomputable from its inputs
- *      on any host or GPU and across restarts. Every keyed draw — dataset shuffling, batch mixing, span
- *      masking, dropout — builds on this; @ref epoch_permutation is the one primitive it cannot be (a
- *      hash collides, a permutation does not).
+ *      free-standing @c mix / @c combine / @c derive helpers proliferate.
+ *
+ *  Pure and device-callable; stateless by design (no engine object to step, unlike @c std::minstd or a
+ *  @c curandState ), so a thread hashes its own @c (key,index) pair independently and any result is
+ *  recomputable from its inputs on any host or GPU and across restarts. Every keyed draw — dataset
+ *  shuffling, batch mixing, span masking, dropout — builds on this; @ref epoch_permutation is the one
+ *  primitive it cannot be (a hash collides, a permutation does not).
  *
  *  - @c hash(word) avalanches one word (the finalizer).
  *  - @c hash(key,value) folds @p value into @p key (one mixing step).
@@ -165,17 +168,20 @@ struct concurrency_round_t {
  *    two-argument case.
  */
 struct splitmix64_hash_t {
-    /** @brief Avalanche one 64-bit word — the splitmix64 finalizer. */
+
+    /** Avalanche one 64-bit word — the splitmix64 finalizer. */
     [[nodiscard]] constexpr u64_t operator()(u64_t word) const noexcept {
         word = (word ^ (word >> 30)) * 0xBF58476D1CE4E5B9ull;
         word = (word ^ (word >> 27)) * 0x94D049BB133111EBull;
         return word ^ (word >> 31);
     }
-    /** @brief Fold @p value into @p key — one order-dependent mixing step (golden-ratio increment). */
+
+    /** Fold @p value into @p key — one order-dependent mixing step (golden-ratio increment). */
     [[nodiscard]] constexpr u64_t operator()(u64_t key, u64_t value) const noexcept {
         return (*this)(key + 0x9E3779B97F4A7C15ull + value);
     }
-    /** @brief Fold three or more values left to right by recursing on the two-argument step. */
+
+    /** Fold three or more values left to right by recursing on the two-argument step. */
     template <typename... rest_>
         requires(sizeof...(rest_) >= 1)
     [[nodiscard]] constexpr u64_t operator()(u64_t key, u64_t value, rest_... rest) const noexcept {
@@ -183,11 +189,11 @@ struct splitmix64_hash_t {
     }
 };
 
-/** @brief The keyed bijection over @c [0,count) : a 4-round Feistel — its round the one
- *      @ref splitmix64_hash_t — over the smallest even-bit domain covering @p count , cycle-walked back
- *      into range. Identical on every host and GPU for the same @c (seed,data_epoch) , so no shuffle ever
- *      needs an exchange, and @b without replacement (a bijection) — the guarantee the hasher's draws,
- *      which collide, cannot give. */
+/** The keyed bijection over @c [0,count) : a 4-round Feistel — its round the one
+ *  @ref splitmix64_hash_t — over the smallest even-bit domain covering @p count , cycle-walked back
+ *  into range. Identical on every host and GPU for the same @c (seed,data_epoch) , so no shuffle ever
+ *  needs an exchange, and @b without replacement (a bijection) — the guarantee the hasher's draws,
+ *  which collide, cannot give. */
 [[nodiscard]] constexpr std::size_t epoch_permutation(u64_t seed, data_epoch_t data_epoch, std::size_t index,
                                                       std::size_t count) noexcept {
     splitmix64_hash_t const hash {};
@@ -209,27 +215,32 @@ struct splitmix64_hash_t {
     return value;
 }
 
-/** @brief Outcome of any fallible operation. @c success_k==0 ; all error codes are negative + stable. */
+/** Outcome of any fallible operation. @c success_k==0 ; all error codes are negative + stable. */
 enum class status_t : i32_t {
-    /** @brief The operation completed; outputs are valid. */
+
+    /** The operation completed; outputs are valid. */
     success_k = 0,
 
-    /** @brief A caller-provided buffer was too small or a device allocation failed. */
+    /** A caller-provided buffer was too small or a device allocation failed. */
     bad_alloc_k = -10,
-    /** @brief A caller argument was null, empty, or otherwise invalid. */
+
+    /** A caller argument was null, empty, or otherwise invalid. */
     invalid_input_k = -11,
-    /** @brief The requested geometry / dtype / extents are unsupported by the dispatched kernel. */
+
+    /** The requested geometry / dtype / extents are unsupported by the dispatched kernel. */
     shape_unsupported_k = -12,
-    /** @brief A CUDA Runtime call failed. */
+
+    /** A CUDA Runtime call failed. */
     cuda_error_k = -13,
-    /** @brief A host I/O / file operation failed (read / write / rename / timeout on a peer's file). */
+
+    /** A host I/O / file operation failed (read / write / rename / timeout on a peer's file). */
     io_error_k = -19,
 
-    /** @brief An unclassified failure; prefer a specific code above when one fits. */
+    /** An unclassified failure; prefer a specific code above when one fits. */
     other_k = -1,
 };
 
-/** @brief Static-string name for a @ref status_t value (the single name table; no allocation). */
+/** Static-string name for a @ref status_t value (the single name table; no allocation). */
 [[nodiscard]] inline char const *to_string(status_t status) noexcept {
     switch (status) {
     case status_t::success_k: return "success";
@@ -243,10 +254,10 @@ enum class status_t : i32_t {
     return "unknown";
 }
 
-/** @brief An output iterator @c std::vformat_to writes through, appending straight into an exception-free
- *      StringZilla string. An allocation failure latches into the shared @c failed flag (when bound) and
- *      truncates the text — for diagnostics that is acceptable as-is; for payloads, @ref format_into
- *      surfaces the flag. */
+/** An output iterator @c std::vformat_to writes through, appending straight into an exception-free
+ *  StringZilla string. An allocation failure latches into the shared @c failed flag (when bound) and
+ *  truncates the text — for diagnostics that is acceptable as-is; for payloads, @ref format_into
+ *  surfaces the flag. */
 struct format_into_t {
     using difference_type = std::ptrdiff_t;
 
@@ -262,9 +273,9 @@ struct format_into_t {
     }
 };
 
-/** @brief `std::format` straight into an exception-free StringZilla string, appending — the one spelling
- *      for every payload and path assembly. @c false only on allocation failure (the text is then
- *      truncated); the format string is compile-time checked. */
+/** `std::format` straight into an exception-free StringZilla string, appending — the one spelling
+ *  for every payload and path assembly. @c false only on allocation failure (the text is then
+ *  truncated); the format string is compile-time checked. */
 template <typename... arg_types_>
 [[nodiscard]] inline bool format_into(sz::string_t &text, std::format_string<arg_types_...> format_string,
                                       arg_types_ &&...args) noexcept {
@@ -273,14 +284,15 @@ template <typename... arg_types_>
     return !failed;
 }
 
-/** @brief A format string bundled with the @c std::source_location of the call site that spelled it. The
- *      implicit conversion from a string literal lets @ref expected::fail capture the failure site behind
- *      its variadic pack, where a defaulted trailing argument cannot go — and without a macro. */
+/** A format string bundled with the @c std::source_location of the call site that spelled it. The
+ *  implicit conversion from a string literal lets @ref expected::fail capture the failure site behind
+ *  its variadic pack, where a defaulted trailing argument cannot go — and without a macro. */
 struct format_at_t {
     char const *format = nullptr;
     std::source_location location {};
 
-    format_at_t(char const *format, std::source_location location = std::source_location::current()) noexcept
+    format_at_t(char const *format, // vendor-boundary: the literal `std::vformat_to` consumes
+                std::source_location location = std::source_location::current()) noexcept
         : format(format), location(location) {}
 };
 
@@ -308,12 +320,12 @@ struct expected {
     expected(expected const &) noexcept = delete;
     expected &operator=(expected const &) noexcept = delete;
 
-    /** @brief Success: adopts @p value , making the union member live. */
+    /** Success: adopts @p value , making the union member live. */
     expected(value_type_ value) noexcept : value_(std::move(value)) {}
 
-    /** @brief Move: the error channel travels unconditionally; the value is adopted only when @p other is
-     *      on the success path, since the union member is live only then. The @c noexcept is the same
-     *      compile-time proof that @c value_type_ moves without throwing. */
+    /** Move: the error channel travels unconditionally; the value is adopted only when @p other is
+     *  on the success path, since the union member is live only then. The @c noexcept is the same
+     *  compile-time proof that @c value_type_ moves without throwing. */
     expected(expected &&other) noexcept
         : status_(other.status_), cu_error_(other.cu_error_), description_(std::move(other.description_)),
           location_(other.location_) {
@@ -335,19 +347,19 @@ struct expected {
         if (status_ == status_t::success_k) value_.~value_type_();
     }
 
-    /** @brief @c true iff the operation succeeded and @ref value_ is readable. */
+    /** @c true iff the operation succeeded and @ref value_ is readable. */
     [[nodiscard]] explicit operator bool() const noexcept { return status_ == status_t::success_k; }
 
-    /** @brief Reach the held value on the success path — the @c std::optional / @c std::expected idiom,
-     *      so a consumer writes @c result->field or @c *result instead of @c result.value_ . Reading it
-     *      on a failed @ref expected is a logic error, gated by @ref operator bool . */
+    /** Reach the held value on the success path, so a consumer writes @c result->field or @c *result
+     *  instead of @c result.value_ . Reading it on a failed @ref expected is a logic error, gated by
+     *  @ref operator bool . */
     [[nodiscard]] value_type_ *operator->() noexcept { return &value_; }
     [[nodiscard]] value_type_ const *operator->() const noexcept { return &value_; }
     [[nodiscard]] value_type_ &operator*() noexcept { return value_; }
     [[nodiscard]] value_type_ const &operator*() const noexcept { return value_; }
 
-    /** @brief Failure tagged with a @ref status_t : materializes @p format + @p args into the description
-     *      and records the failure site @ref format_at_t captured. */
+    /** Failure tagged with a @ref status_t : materializes @p format + @p args into the description
+     *  and records the failure site @ref format_at_t captured. */
     template <typename... arg_types_>
     [[nodiscard]] static expected fail(status_t status, format_at_t format, arg_types_ &&...args) noexcept {
         expected result {failure_t {}, status};
@@ -356,8 +368,8 @@ struct expected {
         return result;
     }
 
-    /** @brief Failure carrying a CUDA Driver error: same as the @ref status_t overload, tagged
-     *      @c cuda_error_k , with the driver's own error string appended to the description. */
+    /** Failure carrying a CUDA Driver error: same as the @ref status_t overload, tagged
+     *  @c cuda_error_k , with the driver's own error string appended to the description. */
     template <typename... arg_types_>
     [[nodiscard]] static expected fail(CUresult cu_error, format_at_t format, arg_types_ &&...args) noexcept {
         expected result = fail(status_t::cuda_error_k, format, std::forward<arg_types_>(args)...);
@@ -370,9 +382,9 @@ struct expected {
         return result;
     }
 
-    /** @brief Failure adopted from another @ref expected 's error channel: the status, driver error,
-     *      description, and failure site travel @b unchanged — the composition path for helpers, so
-     *      forwarding never reformats and never loses the original location. */
+    /** Failure adopted from another @ref expected 's error channel: the status, driver error,
+     *  description, and failure site travel @b unchanged — the composition path for helpers, so
+     *  forwarding never reformats and never loses the original location. */
     template <typename other_type_>
     [[nodiscard]] static expected fail(expected<other_type_> &&other) noexcept {
         expected result {failure_t {}, other.status_};
@@ -384,16 +396,15 @@ struct expected {
 
   private:
     struct failure_t {};
-    /** @brief Failure ctor: sets a non-success @p status and leaves the union @ref value_ unconstructed,
-     *      so the @c status_==success_k ⇔ value_ live invariant the destructor relies on holds at once. */
+
+    /** Failure ctor: sets a non-success @p status and leaves the union @ref value_ unconstructed,
+     *  so the @c status_==success_k ⇔ value_ live invariant the destructor relies on holds at once. */
     expected(failure_t, status_t status) noexcept : status_(status) {}
 };
 
-/**
- *  @brief The value-less @ref expected — the return type of fallible actions that produce no result
- *      (publish, await, barrier), carrying the same status / driver-error / description / location
- *      channel. Default-constructed means success: @c return @c {} .
- */
+/** The value-less @ref expected — the return type of fallible actions that produce no result
+ *  (publish, await, barrier), carrying the same status / driver-error / description / location
+ *  channel. Default-constructed means success: @c return @c {} . */
 template <>
 struct expected<void> {
     status_t status_ = status_t::success_k;
@@ -408,11 +419,11 @@ struct expected<void> {
     expected(expected &&) noexcept = default;
     expected &operator=(expected &&) noexcept = default;
 
-    /** @brief @c true iff the action succeeded. */
+    /** @c true iff the action succeeded. */
     [[nodiscard]] explicit operator bool() const noexcept { return status_ == status_t::success_k; }
 
-    /** @brief Failure tagged with a @ref status_t : materializes @p format + @p args into the description
-     *      and records the failure site @ref format_at_t captured. */
+    /** Failure tagged with a @ref status_t : materializes @p format + @p args into the description
+     *  and records the failure site @ref format_at_t captured. */
     template <typename... arg_types_>
     [[nodiscard]] static expected fail(status_t status, format_at_t format, arg_types_ &&...args) noexcept {
         expected result;
@@ -422,8 +433,8 @@ struct expected<void> {
         return result;
     }
 
-    /** @brief Failure carrying a CUDA Driver error: same as the @ref status_t overload, tagged
-     *      @c cuda_error_k , with the driver's own error string appended to the description. */
+    /** Failure carrying a CUDA Driver error: same as the @ref status_t overload, tagged
+     *  @c cuda_error_k , with the driver's own error string appended to the description. */
     template <typename... arg_types_>
     [[nodiscard]] static expected fail(CUresult cu_error, format_at_t format, arg_types_ &&...args) noexcept {
         expected result = fail(status_t::cuda_error_k, format, std::forward<arg_types_>(args)...);
@@ -436,7 +447,7 @@ struct expected<void> {
         return result;
     }
 
-    /** @brief Failure adopted from another @ref expected 's error channel, unchanged. */
+    /** Failure adopted from another @ref expected 's error channel, unchanged. */
     template <typename other_type_>
     [[nodiscard]] static expected fail(expected<other_type_> &&other) noexcept {
         expected result;
@@ -448,16 +459,17 @@ struct expected<void> {
     }
 };
 
-/** @brief The everyday spelling of the value-less @ref expected . */
+/** The everyday spelling of the value-less @ref expected . */
 using expected_t = expected<void>;
 
-/** @brief One named weight matrix with its gradient — what models publish and optimizers consume.
- *      Vector parameters (norm scales, biases) are @b [1,cols] . The optimizer reads the gradient and
- *      writes the weights, hence the mutability split. The publishing cell's @c fill spells @ref name —
- *      the checkpoint key every SafeTensors parser matches on — since it owns the structure the name
- *      describes; the composition root adds only its @c model. prefix. */
+/** One named weight matrix with its gradient — what models publish and optimizers consume.
+ *  Vector parameters (norm scales, biases) are @b [1,cols] . The optimizer reads the gradient and
+ *  writes the weights, hence the mutability split. The publishing cell's @c fill spells @ref name —
+ *  the checkpoint key every SafeTensors parser matches on — since it owns the structure the name
+ *  describes; the composition root adds only its @c model. prefix. */
 struct differentiable_weights_t {
-    /** @brief The owned checkpoint name — short names ride StringZilla's inline buffer. */
+
+    /** The owned checkpoint name — short names ride StringZilla's inline buffer. */
     sz::string_t name {};
     nk::tensor_span<bf16_t, 2> weights {};
     nk::tensor_view<bf16_t, 2> weights_grad {};

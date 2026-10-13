@@ -1,11 +1,12 @@
 /**
- *  @brief The Parquet tokens loader's bodies and kernels — see the header for the contract. The pack
- *      pair mirrors the mixer's ( @c multimodal_batch.cu ): a serial geometry walk writing offsets +
- *      lengths under the segments-never-cross-rows rule, then a CTA-per-segment gather. The row draw is
- *      a third kernel — a keyed permutation of the pooled files' rows, without replacement.
+ *  @brief The Parquet tokens loader's bodies and kernels — see the header for the contract.
  *  @file src/loaders/tokens_loader.cu
  *  @author Ash Vardanian
  *  @date July 4, 2026
+ *
+ *  The pack pair mirrors the mixer's ( @c multimodal_batch.cu ): a serial geometry walk writing offsets +
+ *  lengths under the segments-never-cross-rows rule, then a CTA-per-segment gather. The row draw is a third
+ *  kernel — a keyed permutation of the pooled files' rows, without replacement.
  */
 #include <algorithm> // `std::min` (floor), `std::upper_bound` (weighted file pick), `std::find` (dedup)
 
@@ -14,19 +15,21 @@
 using namespace unum::uform::core;
 using namespace unum::uform::loaders;
 
-/** @brief Rank-2 token span — a batch's [rows, columns] token rectangle; its extents ARE the shape. */
+/** Rank-2 token span — a batch's [rows, columns] token rectangle; its extents ARE the shape. */
 using tokens_matrix_span_t = nk::tensor_span<token_id_t, 2>;
 
-/** @brief Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row permutation
- *      stay decorrelated under one @c (seed, epoch, rank) . */
+/** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row permutation
+ *  stay decorrelated under one @c (seed, epoch, rank) . */
 inline constexpr u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
 inline constexpr u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
 
 /**
  *  @brief Draw the whole fill's document rows: a keyed permutation of @c [0, pooled_rows) into
  *      @p record_indices , without replacement (a Feistel bijection, so distinct draw positions map to
- *      distinct rows). Because the pool is the picked files concatenated, a batch's slice of this
- *      permutation is a scatter of rows across those files.
+ *      distinct rows).
+ *
+ *  Because the pool is the picked files concatenated, a batch's slice of this permutation is a scatter of
+ *  rows across those files.
  *
  *  __grid_size__ grid-stride over @c record_indices ; no dynamic shared memory.
  */
@@ -41,10 +44,12 @@ static __global__ void sample_rows_kernel_(u64r1_span_t record_indices, u64_t se
 
 /**
  *  @brief Write one batch's geometry: thread 0 walks the destination segments serially — the repack cursor
- *      is a strict scan — reading each drawn document's byte count through its reservoir row index,
- *      truncating to the row width, and jumping the cursor past any row boundary the segment would
- *      cross. A segment that would overflow the rectangle is dropped loudly (zero length). Segments past
- *      the drawn documents PAD: zero length, repeated offset.
+ *      is a strict scan.
+ *
+ *  It reads each drawn document's byte count through its reservoir row index, truncates to the row width,
+ *  and jumps the cursor past any row boundary the segment would cross. A segment that would overflow the
+ *  rectangle is dropped loudly (zero length). Segments past the drawn documents PAD: zero length, repeated
+ *  offset.
  *
  *  __grid_size__ @c [1,1,1] , one thread live; no dynamic shared memory.
  */
@@ -104,13 +109,11 @@ static __global__ void tokens_gather_kernel_(b8r1_view_t reservoir_payload, u64r
             static_cast<u8_t>(reservoir_payload[source_begin + column]));
 }
 
-/**
- *  @brief The format-agnostic pack: draw the whole fill's rows over @p reservoir_column on the GPU
- *      (a keyed permutation of @p pool_rows , without replacement) and pack @b every batch from it. Both
- *      the Parquet and JSONL loaders share this once they hold a decoded reservoir — only how the
- *      reservoir is obtained differs (a footer-known Parquet read vs a JSONL decode + concat). A pure
- *      enqueue on @p gpu_stream .
- */
+/** The format-agnostic pack: draw the whole fill's rows over @p reservoir_column on the GPU
+ *  (a keyed permutation of @p pool_rows , without replacement) and pack @b every batch from it. Both
+ *  the Parquet and JSONL loaders share this once they hold a decoded reservoir — only how the
+ *  reservoir is obtained differs (a footer-known Parquet read vs a JSONL decode + concat). A pure
+ *  enqueue on @p gpu_stream . */
 [[nodiscard]] static expected_t pack_reservoir_(column_view_t reservoir_column, std::size_t pool_rows, u64_t row_key,
                                                 data_epoch_t data_epoch, std::span<multimodal_batch_on_gpu_t> batches,
                                                 gpu_stream_t &gpu_stream) noexcept {
@@ -202,7 +205,7 @@ expected_t tokens_loader_parquet_t::fill(gpu_stream_t &gpu_stream, tokens_base_l
         return expected_t::fail(status_t::shape_unsupported_k, "the batch carries no segment capacity");
     std::size_t const total_segments = unroll * documents;
 
-    // Open distinct files with the keyed weighted draw shared with @ref drawn_shards, then decode them into one
+    // Open distinct files with the keyed weighted draw shared with `drawn_shards`, then decode them into one
     // device reservoir; the true pool size is the decoded row count.
     auto picked = pick_shards_(gpu_rank, training_step, total_segments);
     if (!picked) return expected_t::fail(std::move(picked));
@@ -400,8 +403,8 @@ expected_t tokens_loader_csv_t::fill(gpu_stream_t &gpu_stream, tokens_base_loade
         std::span<std::size_t const> const chosen {picked_shards.data(), picked_count};
         if (std::find(chosen.begin(), chosen.end(), file) != chosen.end()) continue;
         // Decode this file to learn its rows (no footer), and keep it alive for the concat.
-        auto shard = csv_file_t::make(*storage_, absolute_paths_[file], config.column, config.delimiter,
-                                      config.header, gpu_stream);
+        auto shard = csv_file_t::make(*storage_, absolute_paths_[file], config.column, config.delimiter, config.header,
+                                      gpu_stream);
         if (!shard) return expected_t::fail(std::move(shard));
         pooled_rows += shard->rows();
         picked_shards[picked_count] = file;

@@ -48,9 +48,10 @@ namespace unum::uform::core {
 /**
  *  @brief The symmetric memory of one multimem_domain: one contiguous VA range whose per-member slices
  *      are physically resident on each member's device, every slice at @c base+member·stride — so a
- *      peer's address is arithmetic, never a table. Fixed-size, allocated once at @ref make ; no
- *      carving, no growth. Lives here, beside its one consumer @ref multimem_domain_t , not with the
- *      single-GPU allocators.
+ *      peer's address is arithmetic, never a table.
+ *
+ *  Fixed-size, allocated once at @ref make ; no carving, no growth. Lives here, beside its one consumer
+ *  @ref multimem_domain_t , not with the single-GPU allocators.
  *
  *  A multimem_domain may span @b more @b than @b one @b process — on an NVL72 the 72-GPU island is 18
  *  tray processes, and even a `{4,8,16}` HGX box runs two 4-GPU processes over one 8-GPU island. So the
@@ -94,37 +95,44 @@ struct gpu_symmetric_arena_t {
                                                               u32_t member_offset, std::size_t bytes_per_member,
                                                               std::size_t alignment_granularity = 1) noexcept;
 
-    /** @brief Export domain member @p member 's slice as a fabric handle — what its owner publishes so the
-     *      domain's other processes can @ref adopt_peer it. @p member must be one this process created. */
+    /** Export domain member @p member 's slice as a fabric handle — what its owner publishes so the
+     *  domain's other processes can @ref adopt_peer it. @p member must be one this process created. */
     [[nodiscard]] expected<CUmemFabricHandle> export_fabric_handle(std::size_t member) const noexcept;
 
-    /** @brief Import a remote member's slice from the fabric @p handle its owner exported and map it at
-     *      domain member @p member 's offset — the peer half of the cross-process symmetric range. */
+    /** Import a remote member's slice from the fabric @p handle its owner exported and map it at
+     *  domain member @p member 's offset — the peer half of the cross-process symmetric range. */
     [[nodiscard]] expected_t adopt_peer(std::size_t member, CUmemFabricHandle const &handle) noexcept;
 
-    /** @brief The whole multimem_domain's member count — the symmetric range's extent; the handle table's
-     *      size @b is this, so it is derived, never stored. */
+    /** The whole multimem_domain's member count — the symmetric range's extent; the handle table's
+     *  size @b is this, so it is derived, never stored. */
     [[nodiscard]] std::size_t member_count() const noexcept { return handles_.size(); }
-    /** @brief How many of them this process created locally. */
+
+    /** How many of them this process created locally. */
     [[nodiscard]] std::size_t local_member_count() const noexcept { return devices_.size(); }
-    /** @brief Local slice @p local_index 's device ordinal (this process's own devices, slice order). */
+
+    /** Local slice @p local_index 's device ordinal (this process's own devices, slice order). */
     [[nodiscard]] i32_t local_device(std::size_t local_index) const noexcept { return devices_[local_index]; }
-    /** @brief Byte distance between adjacent members' slices — the peer-address arithmetic constant. */
+
+    /** Byte distance between adjacent members' slices — the peer-address arithmetic constant. */
     [[nodiscard]] std::size_t member_stride() const noexcept { return member_stride_; }
-    /** @brief The whole range's base — member @p m 's slice starts at @c base()+m·member_stride() . */
+
+    /** The whole range's base — member @p m 's slice starts at @c base()+m·member_stride() . */
     [[nodiscard]] std::byte *base() noexcept { return reinterpret_cast<std::byte *>(base_); }
-    /** @brief Member @p member 's usable slice. */
+
+    /** Member @p member 's usable slice. */
     [[nodiscard]] std::span<std::byte> member_slice(std::size_t member) noexcept {
         return {reinterpret_cast<std::byte *>(base_ + member * member_stride_), bytes_per_member_};
     }
-    /** @brief Member @p member 's shareable physical handle — what a multicast object binds. */
+
+    /** Member @p member 's shareable physical handle — what a multicast object binds. */
     [[nodiscard]] CUmemGenericAllocationHandle member_handle(std::size_t member) const noexcept {
         return handles_[member];
     }
 
   private:
-    /** @brief Slice-creation properties: device-resident, pinned, RDMA-capable, and shareable — the
-     *      last one is what multicast binding requires. */
+
+    /** Slice-creation properties: device-resident, pinned, RDMA-capable, and shareable — the
+     *  last one is what multicast binding requires. */
     [[nodiscard]] static CUmemAllocationProp allocation_properties_(int device) noexcept {
         CUmemAllocationProp properties {};
         properties.type = CU_MEM_ALLOCATION_TYPE_PINNED;
@@ -158,22 +166,26 @@ struct gpu_symmetric_arena_t {
         handles_.reset();
     }
 
-    /** @brief Start of the one contiguous reservation covering every member's slice. */
+    /** Start of the one contiguous reservation covering every member's slice. */
     CUdeviceptr base_ = 0;
-    /** @brief Usable bytes per slice, as requested at @ref make . */
+
+    /** Usable bytes per slice, as requested at @ref make . */
     std::size_t bytes_per_member_ = 0;
-    /** @brief Granularity-rounded slice stride; also each slice's physical size. */
+
+    /** Granularity-rounded slice stride; also each slice's physical size. */
     std::size_t member_stride_ = 0;
-    /** @brief This process's local devices, slice order — the slices it created (not the whole domain). */
+
+    /** This process's local devices, slice order — the slices it created (not the whole domain). */
     array<i32_t> devices_ {};
-    /** @brief The physical handles indexed by @b domain member: local ones created, remote ones adopted;
-     *      0 for a member not yet filled. */
+
+    /** The physical handles indexed by @b domain member: local ones created, remote ones adopted;
+     *  0 for a member not yet filled. */
     array<CUmemGenericAllocationHandle> handles_ {};
 };
 
-/** @brief Which reduction tier a @ref multimem_domain_t runs: NVSwitch-fused @c multimem loads, or the
- *      serial peer-read fold — decided once at @c make by @c CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED ,
- *      identical results either way (both tiers are bit-deterministic). */
+/** Which reduction tier a @ref multimem_domain_t runs: NVSwitch-fused @c multimem loads, or the
+ *  serial peer-read fold — decided once at @c make by @c CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED ,
+ *  identical results either way (both tiers are bit-deterministic). */
 enum class multimem_tier_t : u32_t {
     switch_reduced_k = 0,
     peer_read_k = 1,
@@ -188,41 +200,52 @@ enum class multimem_tier_t : u32_t {
  *  for the domain's lifetime.
  */
 struct multimem_member_t {
-    /** @brief Multicast base of the Float32 payload — `multimem` loads and stores fan out here. */
+
+    /** Multicast base of the Float32 payload — `multimem` loads and stores fan out here. */
     f32_t *multimem_payload = nullptr;
-    /** @brief Multicast address of the arrival counter. */
+
+    /** Multicast address of the arrival counter. */
     u32_t *multimem_flag = nullptr;
-    /** @brief Base of the contiguous symmetric range covering every member's replica. */
+
+    /** Base of the contiguous symmetric range covering every member's replica. */
     std::byte *replicas = nullptr;
-    /** @brief This member's own round scalar (one word above its arrival flag) — read for the barrier
-     *      target and self-advanced by the barrier kernels, never touched by any other member. */
+
+    /** This member's own round scalar (one word above its arrival flag) — read for the barrier
+     *  target and self-advanced by the barrier kernels, never touched by any other member. */
     u32_t *round = nullptr;
-    /** @brief Byte distance between adjacent members' replicas. */
+
+    /** Byte distance between adjacent members' replicas. */
     std::size_t replica_stride = 0;
-    /** @brief Byte offset of the arrival counter inside every replica. */
+
+    /** Byte offset of the arrival counter inside every replica. */
     std::size_t flag_offset = 0;
-    /** @brief This member's index — whose replica is "own". */
+
+    /** This member's index — whose replica is "own". */
     u32_t member_index = 0;
-    /** @brief The domain's member count — the barrier's arrival target and the peer fold's extent. */
+
+    /** The domain's member count — the barrier's arrival target and the peer fold's extent. */
     u32_t member_count = 0;
 
 #if defined(__CUDACC__)
-    /** @brief Member @p member 's payload replica base. */
+
+    /** Member @p member 's payload replica base. */
     [[nodiscard]] __device__ f32_t *peer_payload(u32_t member) const noexcept {
         return reinterpret_cast<f32_t *>(replicas + member * replica_stride);
     }
-    /** @brief Member @p member 's arrival counter. */
+
+    /** Member @p member 's arrival counter. */
     [[nodiscard]] __device__ u32_t *peer_flag(u32_t member) const noexcept {
         return reinterpret_cast<u32_t *>(replicas + member * replica_stride + flag_offset);
     }
-    /** @brief This member's own arrival counter — the address the barrier spins on. */
+
+    /** This member's own arrival counter — the address the barrier spins on. */
     [[nodiscard]] __device__ u32_t const *own_flag() const noexcept { return peer_flag(member_index); }
 #endif
 };
 
 #if defined(__CUDACC__)
 
-/** @brief One switch-reduced load: the sum of this address across every bound replica. */
+/** One switch-reduced load: the sum of this address across every bound replica. */
 [[nodiscard]] __device__ inline f32_t multimem_load_reduce_add_(f32_t const *multimem_address) noexcept {
     f32_t value;
     asm volatile("multimem.ld_reduce.relaxed.sys.global.add.f32 %0, [%1];"
@@ -232,12 +255,12 @@ struct multimem_member_t {
     return value;
 }
 
-/** @brief One multicast release-add on the arrival counter of every replica. */
+/** One multicast release-add on the arrival counter of every replica. */
 __device__ inline void multimem_red_add_release_(u32_t *multimem_address, u32_t value) noexcept {
     asm volatile("multimem.red.release.sys.global.add.u32 [%0], %1;" : : "l"(multimem_address), "r"(value) : "memory");
 }
 
-/** @brief System-scope acquire load of this member's own arrival counter. */
+/** System-scope acquire load of this member's own arrival counter. */
 [[nodiscard]] __device__ inline u32_t multimem_load_acquire_(u32_t const *own_address) noexcept {
     u32_t value;
     asm volatile("ld.acquire.sys.global.u32 %0, [%1];" : "=r"(value) : "l"(own_address) : "memory");
@@ -246,9 +269,9 @@ __device__ inline void multimem_red_add_release_(u32_t *multimem_address, u32_t 
 
 #endif // defined(__CUDACC__)
 
-/** @brief A consumer's disjoint window of the domain payload: Float32 scalars
- *      @b [offset,offset+scalars) inside every replica — handed out by @ref multimem_domain_t::reserve ,
- *      so consumers' reduces never alias by construction. */
+/** A consumer's disjoint window of the domain payload: Float32 scalars
+ *  @b [offset,offset+scalars) inside every replica — handed out by @ref multimem_domain_t::reserve ,
+ *  so consumers' reduces never alias by construction. */
 struct multimem_window_t {
     std::size_t offset = 0;
     std::size_t scalars = 0;
@@ -293,10 +316,13 @@ struct multimem_domain_t {
     ~multimem_domain_t() noexcept { destroy_(); }
 
     /**
-     *  @brief Build the domain with @p payload_scalars Float32 per replica: the symmetric replica range
-     *      (this process's slices created, every peer's adopted over the mesh), the multicast object the
-     *      domain lead creates and every process imports and binds its local slices into, one multicast
-     *      mapping, and the zeroed arrival counters. Runs once, at setup, outside any capture.
+     *  @brief Build the domain with @p payload_scalars Float32 per replica: the symmetric replica range,
+     *      the multicast object, one multicast mapping, and the zeroed arrival counters. Runs once, at
+     *      setup, outside any capture.
+     *
+     *  The replica range holds this process's created slices and every peer's adopted ones, exchanged
+     *  over the mesh. The domain lead creates the multicast object, and every process imports it and
+     *  binds its local slices into it.
      *
      *  The multimem_domain may span processes ( @c gpus_per_multimem_domain > the local device count on a
      *  `{4,8,16}` box or an NVL72), so the world @p topology — not the length of @p local_devices — sets
@@ -314,22 +340,25 @@ struct multimem_domain_t {
                                                           std::size_t payload_scalars,
                                                           std::span<gpu_stream_t> local_streams) noexcept;
 
-    /** @brief The reduction tier this domain runs — see @ref multimem_tier_t . */
+    /** The reduction tier this domain runs — see @ref multimem_tier_t . */
     [[nodiscard]] multimem_tier_t tier() const noexcept {
         return multimem_handle_ != 0 ? multimem_tier_t::switch_reduced_k : multimem_tier_t::peer_read_k;
     }
-    /** @brief Domain member count. */
+
+    /** Domain member count. */
     [[nodiscard]] std::size_t member_count() const noexcept { return replicas_.member_count(); }
-    /** @brief Float32 payload scalars per replica. */
+
+    /** Float32 payload scalars per replica. */
     [[nodiscard]] std::size_t payload_scalars() const noexcept { return payload_scalars_; }
-    /** @brief Member @p member 's own payload replica — where its contribution is written. */
+
+    /** Member @p member 's own payload replica — where its contribution is written. */
     [[nodiscard]] f32r1_span_t payload(std::size_t member) noexcept {
         return {reinterpret_cast<f32_t *>(replicas_.member_slice(member).data()), payload_scalars_};
     }
 
-    /** @brief Reserve @p scalars of the payload for one consumer — bump-reserve at construction time,
-     *      loud failure past capacity; windows are disjoint by construction. Mirrors the arena
-     *      discipline: no per-window free, the domain outlives its consumers. */
+    /** Reserve @p scalars of the payload for one consumer — bump-reserve at construction time,
+     *  loud failure past capacity; windows are disjoint by construction. Mirrors the arena
+     *  discipline: no per-window free, the domain outlives its consumers. */
     [[nodiscard]] expected<multimem_window_t> reserve(std::size_t scalars) noexcept {
         if (reserved_scalars_ + scalars > payload_scalars_)
             return expected<multimem_window_t>::fail(
@@ -340,7 +369,7 @@ struct multimem_domain_t {
         return expected<multimem_window_t> {window};
     }
 
-    /** @brief Member @p member_index 's kernel-facing addresses. */
+    /** Member @p member_index 's kernel-facing addresses. */
     [[nodiscard]] multimem_member_t member(std::size_t member_index) noexcept {
         std::size_t const flag_offset = flag_offset_();
         multimem_member_t addresses;
@@ -358,20 +387,21 @@ struct multimem_domain_t {
         return addresses;
     }
 
-    /** @brief Enqueue the domain barrier for @p member_index — one arrival, one acquire-spin against the
-     *      member's own round scalar, which the kernel self-advances after the spin. On the peer tier the
-     *      arrival walks the members through the symmetric range instead. */
+    /** Enqueue the domain barrier for @p member_index — one arrival, one acquire-spin against the
+     *  member's own round scalar, which the kernel self-advances after the spin. On the peer tier the
+     *  arrival walks the members through the symmetric range instead. */
     [[nodiscard]] expected_t barrier(std::size_t member_index, gpu_stream_t &stream) noexcept;
 
-    /** @brief Enqueue member @p member_index 's reduce-scatter shard: @p destination receives the
-     *      domain-wide sum of @c [shard_begin,shard_begin+destination.extent(0)) . Call after the
-     *      barrier proved every member's payload complete. */
+    /** Enqueue member @p member_index 's reduce-scatter shard: @p destination receives the
+     *  domain-wide sum of @c [shard_begin,shard_begin+destination.extent(0)) . Call after the
+     *  barrier proved every member's payload complete. */
     [[nodiscard]] expected_t reduce_scatter(std::size_t member_index, f32r1_span_t destination, std::size_t shard_begin,
                                             gpu_stream_t &stream) noexcept;
 
   private:
-    /** @brief Byte offset of the arrival counter inside every replica — pure layout arithmetic over
-     *      @ref payload_scalars_ , never stored; each member's round scalar sits one word above its flag. */
+
+    /** Byte offset of the arrival counter inside every replica — pure layout arithmetic over
+     *  @ref payload_scalars_ , never stored; each member's round scalar sits one word above its flag. */
     [[nodiscard]] std::size_t flag_offset_() const noexcept {
         return round_up_to_multiple(payload_scalars_ * sizeof(f32_t), cache_line_bytes_k);
     }
@@ -385,8 +415,8 @@ struct multimem_domain_t {
         std::swap(member_offset_, other.member_offset_);
     }
 
-    /** @brief Reverse the multicast machinery; the symmetric arena member tears itself down after. This
-     *      process unbinds only the slices it bound — its @b local devices. */
+    /** Reverse the multicast machinery; the symmetric arena member tears itself down after. This
+     *  process unbinds only the slices it bound — its @b local devices. */
     void destroy_() noexcept {
         std::size_t const bound_bytes = replicas_.member_stride();
         if (multimem_pointer_ != 0) {
@@ -405,17 +435,22 @@ struct multimem_domain_t {
         }
     }
 
-    /** @brief The one contiguous replica range — every member's slice, peer-addressable by arithmetic. */
+    /** The one contiguous replica range — every member's slice, peer-addressable by arithmetic. */
     gpu_symmetric_arena_t replicas_ {};
-    /** @brief The multicast object every slice is bound into; 0 on the peer-read tier. */
+
+    /** The multicast object every slice is bound into; 0 on the peer-read tier. */
     CUmemGenericAllocationHandle multimem_handle_ = 0;
-    /** @brief The one multicast VA shared by all members; 0 on the peer-read tier. */
+
+    /** The one multicast VA shared by all members; 0 on the peer-read tier. */
     CUdeviceptr multimem_pointer_ = 0;
-    /** @brief Float32 payload scalars per replica. */
+
+    /** Float32 payload scalars per replica. */
     std::size_t payload_scalars_ = 0;
-    /** @brief The window-reservation cursor; see @ref reserve . */
+
+    /** The window-reservation cursor; see @ref reserve . */
     std::size_t reserved_scalars_ = 0;
-    /** @brief This process's first domain member — 0 iff it is the domain lead. */
+
+    /** This process's first domain member — 0 iff it is the domain lead. */
     u32_t member_offset_ = 0;
 };
 

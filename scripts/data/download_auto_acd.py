@@ -10,7 +10,7 @@
 
 Modality: audio + text.  Auto-ACD (`Loie/Auto-ACD`) ships a single CSV of `(youtube_id, caption)`
 rows — 1,920,945 of them — and nothing else; the audio has to be fetched at build time.  This thin
-builder keeps ONLY its bespoke index read + id parse (`_clip_records`); the shared
+builder keeps only its bespoke index read + id parse (`_clip_records`); the shared
 `acquire_clips.acquire_clips` orchestrator does the rest — a Slurm `(rank, world)` split so each
 worker fetches a disjoint `clips[rank::world]` stride of the corpus, intra-host GNU-`parallel` fan-out,
 per-shard yt-dlp fetch (bestaudio extracted to mp3), and the uniform registry parquet:

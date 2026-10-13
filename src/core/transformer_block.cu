@@ -9,8 +9,8 @@
 namespace uc = unum::uform::core;
 using namespace uc;
 
-/** @brief Learnable RMSNorm forward — declared in @ref transformer_block.cuh with external linkage so the
- *      encoder tower launches the same kernel. */
+/** Learnable RMSNorm forward — declared in @ref transformer_block.cuh with external linkage so the
+ *  encoder tower launches the same kernel. */
 __global__ void uc::rmsnorm_forward_kernel(bf16r2_view_t input, bf16r1_view_t scale, bf16r2_span_t output,
                                            f32r1_span_t inverse_rms, f32_t epsilon) {
     std::size_t const rows = input.extent(0);
@@ -30,9 +30,9 @@ __global__ void uc::rmsnorm_forward_kernel(bf16r2_view_t input, bf16r1_view_t sc
                                                    __bfloat162float(scale[channel]));
 }
 
-/** @brief Learnable RMSNorm backward for the row gradient — external linkage; see the header. */
+/** Learnable RMSNorm backward for the row gradient — external linkage; see the header. */
 __global__ void uc::rmsnorm_backward_kernel(bf16r2_view_t input, bf16r1_view_t scale, f32r1_view_t inverse_rms,
-                                            bf16r2_view_t output_grad, bf16r2_span_t input_grad, bool accumulate) {
+                                            bf16r2_view_t output_grad, bf16r2_span_t input_grad) {
     std::size_t const rows = input.extent(0);
     u32_t const width = static_cast<u32_t>(input.extent(1));
     std::size_t const row = blockIdx.x;
@@ -50,12 +50,11 @@ __global__ void uc::rmsnorm_backward_kernel(bf16r2_view_t input, bf16r1_view_t s
         f32_t const normalized = __bfloat162float(input[row, channel]) * inverse;
         f32_t const scaled_grad = __bfloat162float(output_grad[row, channel]) * __bfloat162float(scale[channel]);
         f32_t const row_grad = (scaled_grad - normalized * projection) * inverse;
-        f32_t const previous = accumulate ? __bfloat162float(input_grad[row, channel]) : 0.0f;
-        input_grad[row, channel] = __float2bfloat16_rn(previous + row_grad);
+        input_grad[row, channel] = __float2bfloat16_rn(row_grad);
     }
 }
 
-/** @brief Learnable RMSNorm backward for the scale gradient — external linkage; see the header. */
+/** Learnable RMSNorm backward for the scale gradient — external linkage; see the header. */
 __global__ void uc::rmsnorm_scale_grad_kernel(bf16r2_view_t input, f32r1_view_t inverse_rms, bf16r2_view_t output_grad,
                                               bf16r1_span_t scale_grad) {
     std::size_t const rows = input.extent(0);
@@ -69,7 +68,7 @@ __global__ void uc::rmsnorm_scale_grad_kernel(bf16r2_view_t input, f32r1_view_t 
     scale_grad[channel] = __float2bfloat16_rn(accumulated);
 }
 
-/** @brief The row-gradient backward of rmscast — external linkage; see the header. */
+/** The row-gradient backward of rmscast — external linkage; see the header. */
 __global__ void uc::rmscast_backward_kernel(f32r2_view_t input, bf16r1_view_t scale, f32r2_view_t output_grad,
                                             f32r2_view_t residual_grad, f32r2_span_t input_grad,
                                             f32r1_span_t inverse_rms, f32_t epsilon) {
@@ -101,7 +100,7 @@ __global__ void uc::rmscast_backward_kernel(f32r2_view_t input, bf16r1_view_t sc
     }
 }
 
-/** @brief The scale-gradient backward of rmscast — external linkage; see the header. */
+/** The scale-gradient backward of rmscast — external linkage; see the header. */
 __global__ void uc::rmscast_scale_grad_kernel(f32r2_view_t input, f32r1_view_t inverse_rms, f32r2_view_t output_grad,
                                               bf16r1_span_t scale_grad) {
     std::size_t const rows = input.extent(0);
@@ -114,9 +113,9 @@ __global__ void uc::rmscast_scale_grad_kernel(f32r2_view_t input, f32r1_view_t i
     scale_grad[channel] = __float2bfloat16_rn(accumulated);
 }
 
-/** @brief Inverted keyed dropout, in place — external linkage; see the header. The @p salt selects the
- *      site (per layer, per residual join) and @p data_epoch , read from device memory, advances the mask per
- *      step; @ref splitmix64_hash_t re-derives the identical keep decision wherever this runs. */
+/** Inverted keyed dropout, in place — external linkage; see the header. The @p salt selects the
+ *  site (per layer, per residual join) and @p data_epoch , read from device memory, advances the mask per
+ *  step; @ref splitmix64_hash_t re-derives the identical keep decision wherever this runs. */
 __global__ void uc::dropout_kernel(bf16r1_span_t values, u32r1_view_t data_epoch, u32_t salt, f32_t drop_probability) {
     u32_t const key = salt ^ (data_epoch[0] * 2654435761u);
     f32_t const keep_scale = 1.0f / (1.0f - drop_probability);
@@ -202,7 +201,7 @@ static __global__ void transformer_qk_norm_backward_kernel_(bf16r2_span_t grads,
     }
 }
 
-/** @brief Pick the axis table and angle for one within-head channel pair — the rotary storage invariant. */
+/** Pick the axis table and angle for one within-head channel pair — the rotary storage invariant. */
 [[nodiscard]] static __device__ f32_t transformer_rope_angle_(u32_t head_pair, i16r2_view_t coords, std::size_t token,
                                                               rope_angles_view_t const &angles) noexcept {
     u32_t const temporal_pairs = static_cast<u32_t>(angles.temporal.extent(1));
@@ -222,8 +221,9 @@ static __global__ void transformer_qk_norm_backward_kernel_(bf16r2_span_t grads,
 /**
  *  @brief Rotary rotation in place over one strided role slice (Q or K inside the packed QKV):
  *      the split-half channel pair @b (k,k+64) rotates by the axis angle its index selects — the
- *      NeoX convention the CPU inference kernels and the wider ecosystem share; @p angle_sign
- *      @c -1 gives the inverse rotation the backward applies to the post-RoPE gradients.
+ *      NeoX convention the CPU inference kernels and the wider ecosystem share.
+ *
+ *  Setting @p angle_sign to @c -1 gives the inverse rotation the backward applies to the post-RoPE gradients.
  *
  *  __grid_size__ @c [ceil(tokens·heads·64/block),1,1] grid-stride over channel pairs; no dynamic
  *  shared memory.
@@ -296,8 +296,8 @@ static __global__ void transformer_absolute_max_kernel_(bf16r1_view_t values, u3
     atomicMax(&max_bits[0], __float_as_uint(thread_max));
 }
 
-/** @brief Resolve the max-abs bits into the Float32 descale scalar @c max_abs/240 (floored to keep a
- *      zero weight tensor representable). One thread. */
+/** Resolve the max-abs bits into the Float32 descale scalar @c max_abs/240 (floored to keep a
+ *  zero weight tensor representable). One thread. */
 static __global__ void transformer_descale_from_max_kernel_(u32r1_span_t max_bits, f32r1_span_t descale) {
     if (threadIdx.x != 0u || blockIdx.x != 0u) return;
     f32_t const max_abs = __uint_as_float(max_bits[0]);
@@ -387,9 +387,9 @@ static __global__ void transformer_token_rescale_kernel_(f32r2_view_t products, 
 /**
  *  @brief The one cuDNN Int32 boundary: scale the batch's flat @c u32 segment starts (gapped —
  *      cuDNN's ragged prefix supports gaps; batch stride 0, the prefix supplies each segment's
- *      base) into the per-operand @b element offsets, and cast the stored lengths for the padding
- *      mask. One launch fills the block's whole Int32 staging; nothing outside it sees Int32.
- *      vendor-boundary.
+ *      base) into the per-operand @b element offsets, and cast the stored lengths for the padding mask.
+ *
+ *  One launch fills the block's whole Int32 staging; nothing outside it sees Int32. vendor-boundary.
  *
  *  __grid_size__ @c [1,1,1] , threads stripe @c segments+1 entries; no dynamic shared memory.
  */
@@ -405,8 +405,8 @@ static __global__ void transformer_ragged_offsets_kernel_(u32r1_view_t segment_o
     }
 }
 
-/** @brief Mark one SDPA-backward gradient output ( @c dQ / @c dK / @c dV ): the packed-QKV THD @p dims
- *      and @p strides of its operand, plus the ragged offset under @p ragged_uid . */
+/** Mark one SDPA-backward gradient output ( @c dQ / @c dK / @c dV ): the packed-QKV THD @p dims
+ *  and @p strides of its operand, plus the ragged offset under @p ragged_uid . */
 static void configure_sdpa_grad_output(std::shared_ptr<fe::graph::Tensor_attributes> const &node, // vendor-boundary
                                        fe::graph::Graph &graph, i64_t uid, i64_t ragged_uid,
                                        std::vector<i64_t> const &dims,    // vendor-boundary
@@ -853,8 +853,7 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
                                stream, scratch.qkv_grad.span(), angles, coords, heads, key_offset, inverse_sign);
     if (staged)
         staged = launch_kernel(reinterpret_cast<void const *>(&transformer_qk_norm_backward_kernel_), vector_grid,
-                               block_shape, stream, scratch.qkv_grad.span(), qkv_products_.view(), 2u * heads,
-                               epsilon);
+                               block_shape, stream, scratch.qkv_grad.span(), qkv_products_.view(), 2u * heads, epsilon);
 
     // QKV projection backward, then the pre-attention norm backward adding the residual-stream gradient.
     if (staged)
@@ -867,8 +866,8 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
                                scratch.residual_grad.view(), input_grad, scratch.inverse_rms.span(), epsilon);
     if (staged)
         staged = launch_kernel(reinterpret_cast<void const *>(&rmscast_scale_grad_kernel), channel_grid, block_shape,
-                               stream, input_stash_.view(), scratch.inverse_rms.view(),
-                               f32r2_view_t {hidden_products}, pre_norm_scale_grad_.span());
+                               stream, input_stash_.view(), scratch.inverse_rms.view(), f32r2_view_t {hidden_products},
+                               pre_norm_scale_grad_.span());
     return staged;
 }
 
@@ -893,7 +892,7 @@ expected_t transformer_block_bf16_t::build_sdpa_(gpu_arena_t &arena, gpu_arena_a
     u32_t const hidden = config_.hidden;
     auto const strides = sdpa_thd_strides(heads, token_stride);
     auto const log_sum_exp_strides = std::vector<i64_t> {heads * seq, seq, 1, 1}; // vendor-boundary
-    // The scale rides a device scalar tensor we own (bound via @ref sdpa_scalar ) — never the frontend's
+    // The scale rides a device scalar tensor we own (bound via `sdpa_scalar`) — never the frontend's
     // pass-by-value cache, which lives behind private members the raw execution path cannot reach.
 
     // Forward graph: owned bindings pinned now, per-call entries recorded for the dispatch stores.
@@ -1091,7 +1090,7 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const token_grid {static_cast<u32_t>(tokens), 1u, 1u};
     f32r1_view_t const token_scales_view = token_scales_.view();
-    // RMSNorm of @p groups vectors of @p columns per token, in place when @p target is @p source.
+    // RMSNorm of `groups` vectors of `columns` per token, in place when `target` is `source`.
     auto const normalize = [&](bf16_t const *source, f32_t const *gamma, bf16_t *target, std::size_t groups,
                                std::size_t columns, std::size_t stride) -> expected_t {
         nk_status_t const status = nk_each_rmsnorm_bf16_best(
@@ -1139,16 +1138,16 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
         return expected_t::fail(status_t::shape_unsupported_k, "attention scratch cannot hold [{}x{}]", tokens, hidden);
     auto const *const qkv_e4m3 = reinterpret_cast<nk_e4m3_t const *>(qkv_e4m3_.data());
     std::size_t const qkv_bytes = 3 * hidden * sizeof(e4m3_t);
-    nk_status_t status = nk_attention_pack_e4m3_best(
-        heads, transformer_head_dim_k, segment_offsets.data(), segment_lengths.data(), segments, qkv_e4m3 + hidden,
-        qkv_bytes, qkv_e4m3 + 2 * hidden, qkv_bytes, packed_keys_values_.data(), 0, segments * heads, capabilities_,
-        stream.numkong());
+    nk_status_t status = nk_attention_pack_e4m3_best(heads, transformer_head_dim_k, segment_offsets.data(),
+                                                     segment_lengths.data(), segments, qkv_e4m3 + hidden, qkv_bytes,
+                                                     qkv_e4m3 + 2 * hidden, qkv_bytes, packed_keys_values_.data(), 0,
+                                                     segments * heads, capabilities_, stream.numkong());
     if (status == nk_success_k)
-        status = nk_attention_packed_e4m3_best(
-            heads, heads, transformer_head_dim_k, segment_offsets.data(), tokens,
-            1.0f / sqrtf(static_cast<f32_t>(transformer_head_dim_k)), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, qkv_e4m3,
-            qkv_bytes, packed_keys_values_.data(), products_.data(), hidden * sizeof(f32_t), NUMKONG_NULL, 0,
-            NUMKONG_SIZE_MAX, capabilities_, stream.numkong());
+        status = nk_attention_packed_e4m3_best(heads, heads, transformer_head_dim_k, segment_offsets.data(), tokens,
+                                               1.0f / sqrtf(static_cast<f32_t>(transformer_head_dim_k)),
+                                               NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, qkv_e4m3, qkv_bytes,
+                                               packed_keys_values_.data(), products_.data(), hidden * sizeof(f32_t),
+                                               NUMKONG_NULL, 0, NUMKONG_SIZE_MAX, capabilities_, stream.numkong());
     if (status != nk_success_k)
         return expected_t::fail(status_t::cuda_error_k, "E4M3 attention failed: {}", nk_status_name(status));
 

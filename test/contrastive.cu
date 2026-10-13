@@ -31,13 +31,13 @@ static void check(bool condition, char const *label) {
     if (!condition) ++failures;
 }
 
-/** @brief Deterministic pseudo-random filler in roughly [-0.5, 0.5). */
+/** Deterministic pseudo-random filler in roughly [-0.5, 0.5). */
 static f32_t hash_fill(std::size_t index, std::size_t salt) {
     std::size_t const mixed = (index * 2654435761ull + salt * 40503ull + 12345ull) % 1000ull;
     return static_cast<f32_t>(mixed) / 1000.0f - 0.5f;
 }
 
-/** @brief The host-side pair resolver — mirrors `contrastive_pair_relation` decision for decision. */
+/** The host-side pair resolver — mirrors `contrastive_pair_relation` decision for decision. */
 struct host_relations_t {
     std::vector<u32_t> attract_offsets, attract_ids, repel_offsets, repel_ids, ignore_offsets, ignore_ids;
     std::vector<f32_t> attract_scores, repel_scores;
@@ -72,7 +72,7 @@ struct host_relations_t {
     }
 };
 
-/** @brief The Float64 oracle: the exact per-header math of the segments loss over host BFloat16 towers. */
+/** The Float64 oracle: the exact per-header math of the segments loss over host BFloat16 towers. */
 static f64_t host_loss(std::vector<bf16_t> const &vertices, std::vector<bf16_t> const &neighbors,
                        std::size_t num_vertices, std::size_t num_neighbors, std::size_t hidden,
                        std::vector<u32_t> const &prefixes, host_relations_t const &relations, f64_t beta, f64_t bias,
@@ -286,7 +286,7 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
     cuCtxPopCurrent(nullptr);
 }
 
-/** @brief Negative tests: every invalid staging must fail loudly, never fall back. */
+/** Negative tests: every invalid staging must fail loudly, never fall back. */
 static void run_negative_cases() {
     std::printf("case negatives\n");
     auto stream = gpu_stream_t::make(0);
@@ -311,7 +311,7 @@ static void run_negative_cases() {
     cuCtxPopCurrent(nullptr);
 }
 
-/** @brief The distributed tier: 2 GPUs vs the single-GPU global reference on identical data. */
+/** The distributed tier: 2 GPUs vs the single-GPU global reference on identical data. */
 static void run_distributed_case() {
     int device_count = 0;
     cuDeviceGetCount(&device_count);
@@ -452,9 +452,9 @@ static void run_distributed_case() {
           "distributed force matches the global finite difference");
 }
 
-/** @brief The cross-domain tier: one process per multimem_domain, GDAKI gather + all-reduce over the
- *      local HCAs, verified against the same global Float64 oracle each process computes independently.
- *      Activated by UFORM_HOST_DOMAIN_INDEX in the environment. */
+/** The cross-domain tier: one process per multimem_domain, GDAKI gather + all-reduce over the
+ *  local HCAs, verified against the same global Float64 oracle each process computes independently.
+ *  Activated by UFORM_HOST_DOMAIN_INDEX in the environment. */
 static int run_cross_domain_case() {
 #if !defined(UFORM_WITH_INFINIBAND)
     std::printf("cross-domain: SKIP (built without UFORM_WITH_INFINIBAND)\n");
@@ -608,12 +608,12 @@ static int run_cross_domain_case() {
 #endif
 }
 
-/** @brief The FP64 attention-pool + head parity gate: seed a tiny text tower with keyed weights, run the
- *      contrastive forward over a fabricated ragged batch (one PAD segment included — the historical pool
- *      failure mode was PAD masking, never arithmetic), and compare the emitted vertices against a
- *      double-precision host replica of exactly the new math — the softmax pool over the tower's own
- *      final-norm states, then RMSNorm → fc1 → SiLU → fc2. The backward runs the same chain in reverse:
- *      every pool / head weight gradient must match the host fold to the BFloat16 floor. */
+/** The FP64 attention-pool + head parity gate: seed a tiny text tower with keyed weights, run the
+ *  contrastive forward over a fabricated ragged batch (one PAD segment included — the historical pool
+ *  failure mode was PAD masking, never arithmetic), and compare the emitted vertices against a
+ *  double-precision host replica of exactly the new math — the softmax pool over the tower's own
+ *  final-norm states, then RMSNorm → fc1 → SiLU → fc2. The backward runs the same chain in reverse:
+ *  every pool / head weight gradient must match the host fold to the BFloat16 floor. */
 static void run_pool_parity_case() {
     std::printf("case pool-parity (FP64 host oracle over the pool + head)\n");
     constexpr u32_t rows_k = 2, segments_k = 4, columns_k = 8, hidden_k = 256, tokens_k = rows_k * columns_k;

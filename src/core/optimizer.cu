@@ -14,9 +14,9 @@
 
 using namespace unum::uform::core;
 
-/** @brief Read one gradient scalar at @p row , @p column : the reduced Float32 world sum when present —
- *      through a rank-2 view over this state's block of the packed world tape — the local BFloat16 buffer
- *      otherwise, read straight through its rank-2 handle. */
+/** Read one gradient scalar at @p row , @p column : the reduced Float32 world sum when present —
+ *  through a rank-2 view over this state's block of the packed world tape — the local BFloat16 buffer
+ *  otherwise, read straight through its rank-2 handle. */
 [[nodiscard]] __device__ inline f32_t adafactor_gradient_(adafactor_state_t const &state, f32r1_view_t reduced,
                                                           u32_t row, u32_t column) noexcept {
     if (!reduced.empty()) {
@@ -136,7 +136,7 @@ static __global__ void adafactor_apply_kernel_(adafactor_state_t state, f32r1_sp
     }
 }
 
-/** @brief Cast one BFloat16 gradient buffer into its window of the Float32 world-gradient surface.
+/** Cast one BFloat16 gradient buffer into its window of the Float32 world-gradient surface.
  *  __grid_size__ grid-stride; no dynamic shared memory. */
 static __global__ void adafactor_stage_gradient_kernel_(bf16r1_span_t gradient, f32r1_span_t destination) {
     std::size_t const total = gradient.extent(0);
@@ -146,13 +146,17 @@ static __global__ void adafactor_stage_gradient_kernel_(bf16r1_span_t gradient, 
         destination[index] = __bfloat162float(gradient[index]);
 }
 
-/** @brief Materialise the deterministic domain-reduced gradient into this rank's own buffer — one
+/**
+ *  @brief Materialise the deterministic domain-reduced gradient into this rank's own buffer — one
  *      switch-fused load per element from this consumer's window at @p shard_begin , or the peer tier's
- *      fixed-order serial fold — scaled by @p world_scale , the @c 1/gpus_per_colocated_domain that turns
- *      the world @b sum into the world @b mean : the learning-rate semantics stay world-size-invariant,
- *      and the cross-domain all-reduce of domain terms each pre-scaled by @c 1/world sums to exactly the
- *      world mean (the scale is linear, so applying it before or after the sum is the same value).
- *  __grid_size__ grid-stride; no dynamic shared memory. */
+ *      fixed-order serial fold.
+ *
+ *  The result is scaled by @p world_scale , the @c 1/gpus_per_colocated_domain that turns the world @b sum
+ *  into the world @b mean : the learning-rate semantics stay world-size-invariant, and the cross-domain
+ *  all-reduce of domain terms each pre-scaled by @c 1/world sums to exactly the world mean (the scale is
+ *  linear, so applying it before or after the sum is the same value).
+ *  __grid_size__ grid-stride; no dynamic shared memory.
+ */
 static __global__ void adafactor_reduce_gradient_kernel_(multimem_member_t member, f32r1_span_t destination,
                                                          std::size_t shard_begin, f32_t world_scale) {
     std::size_t const total = destination.extent(0);
@@ -172,7 +176,7 @@ static __global__ void adafactor_reduce_gradient_kernel_(multimem_member_t membe
     }
 }
 
-/** @brief Seed the Float32 masters of the vector weights from their live BFloat16 values.
+/** Seed the Float32 masters of the vector weights from their live BFloat16 values.
  *  __grid_size__ grid-stride; no dynamic shared memory. */
 static __global__ void adafactor_seed_master_kernel_(bf16r1_span_t weights, f32r1_span_t master) {
     std::size_t const total = weights.extent(0);

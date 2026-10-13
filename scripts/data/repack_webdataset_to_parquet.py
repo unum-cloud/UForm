@@ -6,7 +6,7 @@
 #     "xxhash",
 # ]
 # ///
-"""Repack one WebDataset tar shard to a Parquet sibling with full annotation preservation.
+r"""Repack one WebDataset tar shard to a Parquet sibling with full annotation preservation.
 
 Modality: image+text (cc12m, laion_cc3m) and video+text (panda70m, webvid_10m).  The unit of
 work for the GNU `parallel` repack model: one process per shard, so many shards convert
@@ -31,7 +31,7 @@ verify" policy frees disk for the next dataset (no rollback).
 
 Run one process per shard under GNU parallel at full core saturation:
 
-    ls $UFORM_DATA_ROOT/cc12m/cc12m-train-*.tar | \\
+    ls $UFORM_DATA_ROOT/cc12m/cc12m-train-*.tar | \
         parallel -j$(nproc) uv run scripts/data/repack_webdataset_to_parquet.py {}
 
 Pass `--keep-tar` to skip the delete step (useful for the validation run on panda70m before

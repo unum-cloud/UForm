@@ -213,7 +213,8 @@ def repack(tarball_path: Path, out_dir: Path, max_messages: int, overwrite: bool
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
+    """Fetch the Enron Email tarball and repack its message pairs to Parquet."""
+    parser =argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
     parser.add_argument(
         "--data-root",
         default=DEFAULT_DATA_ROOT,

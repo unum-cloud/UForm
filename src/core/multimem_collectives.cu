@@ -12,14 +12,14 @@
 namespace uc = unum::uform::core;
 using namespace uc;
 
-/** @brief A fabric handle is 64 opaque bytes; the mesh rendezvous carries text, so it travels 128-hex. */
+/** A fabric handle is 64 opaque bytes; the mesh rendezvous carries text, so it travels 128-hex. */
 static bool format_fabric_handle_(sz::string_t &text, CUmemFabricHandle const &handle) noexcept {
     bool built = true;
     for (unsigned char const byte : handle.data) built = built && format_into(text, "{:02x}", static_cast<u32_t>(byte));
     return built;
 }
 
-/** @brief Parse a 128-hex fabric-handle token back into its 64 bytes; @c false on any non-hex or short token. */
+/** Parse a 128-hex fabric-handle token back into its 64 bytes; @c false on any non-hex or short token. */
 static bool parse_fabric_handle_(sz::string_view_t token, CUmemFabricHandle &handle) noexcept {
     if (token.size() != 2u * sizeof(handle.data)) return false;
     for (std::size_t index = 0; index != sizeof(handle.data); ++index) {
@@ -35,9 +35,10 @@ static bool parse_fabric_handle_(sz::string_view_t token, CUmemFabricHandle &han
 /**
  *  @brief Domain barrier: lane 0 release-adds 1 into every replica's counter, then acquire-spins on its
  *      @b own counter until all @c member_count arrivals of this round landed, and finally self-advances
- *      its @b own round scalar. Monotonic — neither counter ever resets, so a captured step replays
- *      cleanly, and every round read and write stays on the member's own stream: no enqueue order can
- *      hand a barrier a stale round.
+ *      its @b own round scalar.
+ *
+ *  Monotonic — neither counter ever resets, so a captured step replays cleanly, and every round read
+ *  and write stays on the member's own stream: no enqueue order can hand a barrier a stale round.
  *
  *  __grid_size__ @c [1,1,1] , one warp; no dynamic shared memory.
  */
@@ -108,8 +109,8 @@ static __global__ void multimem_reduce_scatter_peer_kernel_(multimem_member_t me
     }
 }
 
-/** @brief Grant every local device read-write access to the slice mapped at @p slice — shared by the
- *      local-create and peer-adopt paths, so the peer-read tier reads every replica through the range. */
+/** Grant every local device read-write access to the slice mapped at @p slice — shared by the
+ *  local-create and peer-adopt paths, so the peer-read tier reads every replica through the range. */
 static expected_t grant_local_access_(CUdeviceptr slice, std::size_t bytes, std::span<i32_t const> local_devices,
                                       u32_t member) noexcept {
     for (i32_t const reader : local_devices) {

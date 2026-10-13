@@ -1,11 +1,13 @@
 /**
  *  @brief The multimodal masked-modeling objective: deterministic corruption of a clean batch into a
  *      distorted one, and the reconstruction heads that score the tower's states against the clean
- *      target — byte cross-entropy for tokens, normalized-pixel MSE for image / video patches, and
- *      normalized-sample MSE for 1-D audio frames.
+ *      target.
  *  @file src/core/multimodal_masking.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
+ *
+ *  The heads are byte cross-entropy for tokens, normalized-pixel MSE for image / video patches, and
+ *  normalized-sample MSE for 1-D audio frames.
  *
  *  @section masking_two_instances Two instances of one batch
  *
@@ -37,30 +39,36 @@
 
 namespace unum::uform::core {
 
-/** @brief The byte vocabulary: 256 UTF-8 byte values plus the PAD and MASK specials. */
+/** The byte vocabulary: 256 UTF-8 byte values plus the PAD and MASK specials. */
 inline constexpr u32_t byte_vocabulary_k = 258u;
-/** @brief The PAD byte id — token 256; ineligible for masking, its loss weight is always zero. */
+
+/** The PAD byte id — token 256; ineligible for masking, its loss weight is always zero. */
 inline constexpr token_id_t byte_pad_k = 256u;
-/** @brief The MASK byte id — token 257, what the replace fraction of masked positions shows the tower. */
+
+/** The MASK byte id — token 257, what the replace fraction of masked positions shows the tower. */
 inline constexpr token_id_t byte_mask_k = 257u;
 
-/** @brief The deterministic corruption policy — a host value type, baked per run. */
+/** The deterministic corruption policy — a host value type, baked per run. */
 struct masking_recipe_t {
-    /** @brief The run's masking seed — independent of the shuffle seed by convention. */
+
+    /** The run's masking seed — independent of the shuffle seed by convention. */
     u64_t seed = 0;
-    /** @brief Target fraction of token positions covered by spans. */
+
+    /** Target fraction of token positions covered by spans. */
     f32_t token_mask_probability = 0.15f;
-    /** @brief Mean geometric span length; a span opens at rate @c token_mask_probability/token_mean_span . */
+
+    /** Mean geometric span length; a span opens at rate @c token_mask_probability/token_mean_span . */
     f32_t token_mean_span = 16.0f;
-    /** @brief Of covered token positions: shown as MASK / replaced by a random byte / kept clean. */
+
+    /** Of covered token positions: shown as MASK / replaced by a random byte / kept clean. */
     f32_t replace_fraction = 0.80f, random_fraction = 0.10f;
 };
 
-/** @brief The domain-separation salts that keep the independent draws at one corruption position from
- *      correlating: each purpose re-keys the hash so the span-open coin, the span-continue coin, the
- *      token-action coin, the random byte, the patch-mask coin, and the audio-frame-mask coin are
- *      statistically distinct streams. The @ref masked_frames_t frame path keys @c frame_mask_k rather
- *      than reusing the 2-D @c patch_mask_k salt. */
+/** The domain-separation salts that keep the independent draws at one corruption position from
+ *  correlating: each purpose re-keys the hash so the span-open coin, the span-continue coin, the
+ *  token-action coin, the random byte, the patch-mask coin, and the audio-frame-mask coin are
+ *  statistically distinct streams. The @ref masked_frames_t frame path keys @c frame_mask_k rather
+ *  than reusing the 2-D @c patch_mask_k salt. */
 enum class masking_draw_purpose_t : u32_t {
     span_open_k = 0,
     span_continue_k = 1,
@@ -70,64 +78,81 @@ enum class masking_draw_purpose_t : u32_t {
     frame_mask_k = 5,
 };
 
-/** @brief One counter-based draw in @b [0,1) , keyed through the one @ref splitmix64_hash_t — pure,
- *      stateless, device-callable, bit-reproducible on every rank. @p purpose is a
- *      @ref masking_draw_purpose_t salt cast to @c u32_t . */
+/** One counter-based draw in @b [0,1) , keyed through the one @ref splitmix64_hash_t — pure,
+ *  stateless, device-callable, bit-reproducible on every rank. @p purpose is a
+ *  @ref masking_draw_purpose_t salt cast to @c u32_t . */
 [[nodiscard]] constexpr f32_t masking_draw(u64_t seed, data_epoch_t data_epoch, u32_t sample_index, u32_t position,
                                            u32_t purpose) noexcept {
     u64_t const mixed = splitmix64_hash_t {}(seed, data_epoch.ordinal, purpose, sample_index, position);
     return static_cast<f32_t>(mixed >> 40) * 0x1.0p-24f; // The top 24 bits as a uniform [0,1).
 }
 
-/** @brief The baked geometry and weight of one byte masked-modeling head — a different config is a
- *      different object. */
+/** The baked geometry and weight of one byte masked-modeling head — a different config is a
+ *  different object. */
 struct masked_tokens_config_t {
-    /** @brief Decoder rows; @ref byte_vocabulary_k for the byte objective. */
+
+    /** Decoder rows; @ref byte_vocabulary_k for the byte objective. */
     u32_t vocabulary = byte_vocabulary_k;
-    /** @brief Embedding width — must match the tower's. */
+
+    /** Embedding width — must match the tower's. */
     u32_t hidden = 0;
-    /** @brief Most token positions one call carries — the @c normalized / @c normalized_grad extent. */
+
+    /** Most token positions one call carries — the @c normalized / @c normalized_grad extent. */
     u32_t max_tokens = 0;
-    /** @brief λ — the objective's weight inside the composite loss, folded into the gradient scale. */
+
+    /** λ — the objective's weight inside the composite loss, folded into the gradient scale. */
     f32_t weight = 1.0f;
 };
 
-/** @brief The baked geometry and weight of one masked-patch (MAE) head — a different config is a
+/**
+ *  @brief The baked geometry and weight of one masked-patch (MAE) head — a different config is a
  *      different object. Image and video share this shape; they differ only in @c patch_pixels , the mask
  *      ratio, and whether the mask is tubed across time.
  *  @note Audio no longer rides this 2-D patch head: it is raw 1-D frames on the sibling @ref masked_frames_t ,
  *      which masks whole Float32 frames and scores their raw samples with the same normalized MSE rather
- *      than this patch objective. */
+ *      than this patch objective.
+ */
 struct masked_patches_config_t {
-    /** @brief Embedding width — must match the tower's. */
+
+    /** Embedding width — must match the tower's. */
     u32_t hidden = 0;
-    /** @brief Scalars per patch vector: image @c 3·p² , video @c tube_time·3·th·tw . */
+
+    /** Scalars per patch vector: image @c 3·p² , video @c tube_time·3·th·tw . */
     u32_t patch_pixels = 0;
-    /** @brief Most patches one call carries — the @c normalized / patch-table extent. */
+
+    /** Most patches one call carries — the @c normalized / patch-table extent. */
     u32_t max_patches = 0;
-    /** @brief Fraction of patches masked and scored — 0.75 image, 0.90 video. */
+
+    /** Fraction of patches masked and scored — 0.75 image, 0.90 video. */
     f32_t mask_ratio = 0.75f;
-    /** @brief One for per-patch random masking; the video temporal-group count for tube masking, where a
-     *      masked spatial cell stays masked across all its time groups. @c max_patches must divide evenly. */
+
+    /** One for per-patch random masking; the video temporal-group count for tube masking, where a
+     *  masked spatial cell stays masked across all its time groups. @c max_patches must divide evenly. */
     u32_t temporal_groups = 1;
-    /** @brief λ — the objective's weight inside the composite loss, folded into the gradient scale. */
+
+    /** λ — the objective's weight inside the composite loss, folded into the gradient scale. */
     f32_t weight = 1.0f;
 };
 
-/** @brief The baked geometry and weight of one masked-frame (1-D raw-audio MAE) head — a different config is
- *      a different object. Audio arrives as raw waveform frames, not 2-D patches, so this head masks whole
- *      Float32 frames per-frame i.i.d. and reconstructs their raw samples; there is no tube concept. */
+/** The baked geometry and weight of one masked-frame (1-D raw-audio MAE) head — a different config is
+ *  a different object. Audio arrives as raw waveform frames, not 2-D patches, so this head masks whole
+ *  Float32 frames per-frame i.i.d. and reconstructs their raw samples; there is no tube concept. */
 struct masked_frames_config_t {
-    /** @brief Embedding width — must match the tower's. */
+
+    /** Embedding width — must match the tower's. */
     u32_t hidden = 0;
-    /** @brief Float32 samples per waveform frame — the innermost @c audio_samples extent and the recon
-     *      head's fan-out @c hidden→chunk_samples . */
+
+    /** Float32 samples per waveform frame — the innermost @c audio_samples extent and the recon
+     *  head's fan-out @c hidden → @c chunk_samples . */
     u32_t chunk_samples = 0;
-    /** @brief Most frames one call carries — the @c normalized / frame-table extent. */
+
+    /** Most frames one call carries — the @c normalized / frame-table extent. */
     u32_t max_frames = 0;
-    /** @brief Fraction of frames masked and scored, each frame drawn independently. */
+
+    /** Fraction of frames masked and scored, each frame drawn independently. */
     f32_t mask_ratio = 0.75f;
-    /** @brief λ — the objective's weight inside the composite loss, folded into the gradient scale. */
+
+    /** λ — the objective's weight inside the composite loss, folded into the gradient scale. */
     f32_t weight = 1.0f;
 };
 
@@ -136,8 +161,10 @@ struct masked_frames_config_t {
 /**
  *  @brief The byte masked-modeling objective: a deterministic span-masking corruptor and an untied byte
  *      decoder with fused cross-entropy. @ref corrupt turns a clean token stream into the distorted one
- *      the tower reads plus the per-position loss weights; @ref operator() scores the tower's final-norm
- *      states against the clean bytes and writes @c d(normalized) for the additive join.
+ *      the tower reads plus the per-position loss weights.
+ *
+ *  @ref operator() scores the tower's final-norm states against the clean bytes and writes
+ *  @c d(normalized) for the additive join.
  *
  *  The decoder is deliberately @b untied from the tower's embedding table: at ~258×hidden it costs
  *  kilobytes, gets its own clean @ref differentiable_weights_t , and the loss is @b dense — every position
@@ -146,22 +173,23 @@ struct masked_frames_config_t {
  */
 struct masked_tokens_t {
 
-    /** @brief Allocate the decoder, its NumKong packs, and every scratch — once, at setup. */
+    /** Allocate the decoder, its NumKong packs, and every scratch — once, at setup. */
     [[nodiscard]] static expected<masked_tokens_t> make(gpu_arena_t &arena, masked_tokens_config_t config) noexcept;
 
-    /** @brief Pack the decoder for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
-     *      step, after the weights change and before the first @ref operator() . */
+    /** Pack the decoder for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
+     *  step, after the weights change and before the first @ref operator() . */
     [[nodiscard]] expected_t pack_weights(gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief Corrupt @p clean into @p distorted and emit the per-position @p loss_weights — pure enqueue.
-     *      Only @c text_k segments are corrupted; a segment whose @p segment_modality is any media kind is
-     *      skipped outright, leaving its tokens clean with weight zero (mixed rows form at mix time, so this
-     *      routes on the tag rather than trusting media positions to hold PAD). Each text segment's tokens
-     *      are walked left-to-right: geometric spans open at @c token_mask_probability/token_mean_span and
-     *      continue at @c 1-1/token_mean_span ; a covered position is shown MASK / a random byte / its clean
-     *      self per the recipe fractions, and carries a loss weight of one. PAD is never eligible; uncovered
-     *      positions copy clean with weight zero.
+     *
+     *  Only @c text_k segments are corrupted; a segment whose @p segment_modality is any media kind is
+     *  skipped outright, leaving its tokens clean with weight zero (mixed rows form at mix time, so this
+     *  routes on the tag rather than trusting media positions to hold PAD). Each text segment's tokens
+     *  are walked left-to-right: geometric spans open at @c token_mask_probability/token_mean_span and
+     *  continue at @c 1-1/token_mean_span ; a covered position is shown MASK / a random byte / its clean
+     *  self per the recipe fractions, and carries a loss weight of one. PAD is never eligible; uncovered
+     *  positions copy clean with weight zero.
      *
      *  @param[in] clean The clean token stream @b [tokens] in flat @c segment_offsets space.
      *  @param[out] distorted The tower's input @b [tokens] — clean elsewhere, corrupted at covered spans.
@@ -189,31 +217,40 @@ struct masked_tokens_t {
                                         u32r1_view_t loss_weights, f32r1_span_t loss_summands,
                                         bf16r2_span_t normalized_grad, gpu_stream_t &stream) noexcept;
 
-    /** @brief Append the decoder weight to @p weights under the checkpoint name @p name — the owning
-     *      replica spells the instance name, since one head class may serve several modalities. */
+    /** Append the decoder weight to @p weights under the checkpoint name @p name — the owning
+     *  replica spells the instance name, since one head class may serve several modalities. */
     [[nodiscard]] expected_t fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept;
-    /** @brief The decoder weights @b [vocabulary·hidden] — the checkpoint enumerator's handle. */
+
+    /** The decoder weights @b [vocabulary·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> decoder_weights() noexcept { return decoder_weight_.span().flatten<1>(); }
 
   private:
     masked_tokens_config_t config_ {};
-    /** @brief The NumKong capabilities of the arena's device, picking every product and cast. */
+
+    /** The NumKong capabilities of the arena's device, picking every product and cast. */
     nk_capability_t capabilities_ = 0;
-    /** @brief The untied decoder @b [vocabulary,hidden] and its gradient buffer. */
+
+    /** The untied decoder @b [vocabulary,hidden] and its gradient buffer. */
     bf16r2_tensor_arena_t decoder_weight_ {}, decoder_weight_grad_ {};
-    /** @brief The decoder packed as the logits' B operand and, transposed, as @c d(normalized) 's. */
+
+    /** The decoder packed as the logits' B operand and, transposed, as @c d(normalized) 's. */
     b8r1_tensor_arena_t packed_decoder_ {}, packed_decoder_transposed_ {};
-    /** @brief @b [max_tokens,vocabulary] Float32 logits — the cross-entropy's stable surface. */
+
+    /** @b [max_tokens,vocabulary] Float32 logits — the cross-entropy's stable surface. */
     f32r2_tensor_arena_t logits_ {};
-    /** @brief @b [max_tokens,vocabulary] BFloat16 @c d(logits) — the backward products' operand, its rows padded
-     *      to 8 for NumKong's 16-byte stride rule, since the byte vocabulary is 258 wide. */
+
+    /** @b [max_tokens,vocabulary] BFloat16 @c d(logits) — the backward products' operand, its rows padded
+     *  to 8 for NumKong's 16-byte stride rule, since the byte vocabulary is 258 wide. */
     bf16r2_tensor_arena_t logit_grad_ {};
-    /** @brief @b [max_tokens] per-position cross-entropy summands. */
+
+    /** @b [max_tokens] per-position cross-entropy summands. */
     f32r1_tensor_arena_t position_loss_ {};
-    /** @brief @b [2] @c {λ/max(count,1), count} — device-computed, so the count never visits the host. */
+
+    /** @b [2] @c {λ/max(count,1), count} — device-computed, so the count never visits the host. */
     f32r1_tensor_arena_t gradient_scale_ {};
-    /** @brief The weight gradient's transposes, the latter also staging the decoder's for @ref pack_weights ,
-     *      the pack of @c normalizedᵀ , and the Float32 products before their casts. */
+
+    /** The weight gradient's transposes, the latter also staging the decoder's for @ref pack_weights ,
+     *  the pack of @c normalizedᵀ , and the Float32 products before their casts. */
     bf16r1_tensor_arena_t transposed_grad_ {}, transposed_input_ {};
     b8r1_tensor_arena_t packed_input_ {};
     f32r1_tensor_arena_t products_ {};
@@ -221,12 +258,13 @@ struct masked_tokens_t {
 
 /**
  *  @brief The masked-image / video objective: a deterministic patch-mask sampler and a raw-media corruptor,
- *      plus a linear reconstruction head with a per-patch normalized-MSE loss. @ref sample_mask draws the
- *      patch mask and @ref corrupt_raw zeros the masked raw media rows in place before the tower
- *      re-patchifies; @ref operator() reconstructs the clean patches from the tower's states and writes
- *      @c d(normalized) for the additive join.
+ *      plus a linear reconstruction head with a per-patch normalized-MSE loss.
  *
- *  The head is a plain linear projection @c hidden→patch_pixels : the tower already RMSNorms the states it
+ *  @ref sample_mask draws the patch mask and @ref corrupt_raw zeros the masked raw media rows in place
+ *  before the tower re-patchifies; @ref operator() reconstructs the clean patches from the tower's states
+ *  and writes @c d(normalized) for the additive join.
+ *
+ *  The head is a plain linear projection @c hidden → @c patch_pixels : the tower already RMSNorms the states it
  *  hands back through @c normalized() , so a second pre-norm here would only re-normalize. A masked patch's
  *  raw row is zeroed — no @c d(patches) is needed from the tower, so the objective stays fully orthogonal to
  *  the entry projection.
@@ -242,17 +280,18 @@ struct masked_tokens_t {
  */
 struct masked_patches_t {
 
-    /** @brief Allocate the recon head, its NumKong packs, and every scratch — once, at setup. */
+    /** Allocate the recon head, its NumKong packs, and every scratch — once, at setup. */
     [[nodiscard]] static expected<masked_patches_t> make(gpu_arena_t &arena, masked_patches_config_t config) noexcept;
 
-    /** @brief Pack the recon head for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
-     *      step, after the weights change and before the first @ref operator() . */
+    /** Pack the recon head for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
+     *  step, after the weights change and before the first @ref operator() . */
     [[nodiscard]] expected_t pack_weights(gpu_stream_t &stream) noexcept;
 
     /**
-     *  @brief Sample the patch mask into @c mask_ — pure enqueue, nothing else. A patch is masked with
-     *      probability @c mask_ratio , tubed across time groups when @c temporal_groups > 1 so a masked
-     *      spatial cell stays masked across all its time groups.
+     *  @brief Sample the patch mask into @c mask_ — pure enqueue, nothing else.
+     *
+     *  A patch is masked with probability @c mask_ratio , tubed across time groups when
+     *  @c temporal_groups > 1 so a masked spatial cell stays masked across all its time groups.
      */
     [[nodiscard]] expected_t sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch,
                                          gpu_stream_t &stream) noexcept;
@@ -279,31 +318,40 @@ struct masked_patches_t {
                                         f32r1_span_t loss_summands, bf16r2_span_t normalized_grad,
                                         gpu_stream_t &stream) noexcept;
 
-    /** @brief Append the recon weight to @p weights under the checkpoint name @p name — the owning
-     *      replica spells the instance name, since one head class may serve several modalities. */
+    /** Append the recon weight to @p weights under the checkpoint name @p name — the owning
+     *  replica spells the instance name, since one head class may serve several modalities. */
     [[nodiscard]] expected_t fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept;
-    /** @brief The recon weights @b [patch_pixels·hidden] — the checkpoint enumerator's handle. */
+
+    /** The recon weights @b [patch_pixels·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> recon_weights() noexcept { return recon_weight_.span().flatten<1>(); }
 
   private:
     masked_patches_config_t config_ {};
-    /** @brief The NumKong capabilities of the arena's device, picking every product and cast. */
+
+    /** The NumKong capabilities of the arena's device, picking every product and cast. */
     nk_capability_t capabilities_ = 0;
-    /** @brief The linear reconstruction head @b [patch_pixels,hidden] and its gradient buffer. */
+
+    /** The linear reconstruction head @b [patch_pixels,hidden] and its gradient buffer. */
     bf16r2_tensor_arena_t recon_weight_ {}, recon_weight_grad_ {};
-    /** @brief @b [max_patches,patch_pixels] reconstructed patches and their loss gradient. */
+
+    /** @b [max_patches,patch_pixels] reconstructed patches and their loss gradient. */
     bf16r2_tensor_arena_t predicted_ {}, predicted_grad_ {};
-    /** @brief @b [max_patches] the sampled mask (one masked, zero visible) the loss gates on. */
+
+    /** @b [max_patches] the sampled mask (one masked, zero visible) the loss gates on. */
     u32r1_tensor_arena_t mask_ {};
-    /** @brief @b [max_patches] per-patch normalized-MSE summands. */
+
+    /** @b [max_patches] per-patch normalized-MSE summands. */
     f32r1_tensor_arena_t position_loss_ {};
-    /** @brief @b [2] @c {λ·2/(patch_pixels·max(count,1)), count} — device-computed. */
+
+    /** @b [2] @c {λ·2/(patch_pixels·max(count,1)), count} — device-computed. */
     f32r1_tensor_arena_t gradient_scale_ {};
-    /** @brief The recon head packed as the prediction's B operand and, transposed, as @c d(normalized) 's. */
+
+    /** The recon head packed as the prediction's B operand and, transposed, as @c d(normalized) 's. */
     b8r1_tensor_arena_t packed_recon_ {}, packed_recon_transposed_ {};
-    /** @brief The weight gradient's transposes, the latter also staging the head's for @ref pack_weights , the
-     *      pack of @c normalizedᵀ , the Float32 products before their casts, and the widened @c d(normalized)
-     *      this head adds onto. */
+
+    /** The weight gradient's transposes, the latter also staging the head's for @ref pack_weights , the
+     *  pack of @c normalizedᵀ , the Float32 products before their casts, and the widened @c d(normalized)
+     *  this head adds onto. */
     bf16r1_tensor_arena_t transposed_grad_ {}, transposed_input_ {};
     b8r1_tensor_arena_t packed_input_ {};
     f32r1_tensor_arena_t products_ {}, widened_grad_ {};
@@ -312,13 +360,14 @@ struct masked_patches_t {
 /**
  *  @brief The masked-audio objective: a deterministic per-frame mask sampler and a raw-media corruptor,
  *      plus a linear reconstruction head with a per-frame normalized-MSE loss over the raw Float32 waveform.
- *      @ref sample_mask draws the frame mask and @ref corrupt_raw zeros the masked raw waveform rows in place
- *      before the tower re-projects; @ref operator() reconstructs the clean frames from the tower's states and
- *      writes @c d(normalized) for the additive join.
+ *
+ *  @ref sample_mask draws the frame mask and @ref corrupt_raw zeros the masked raw waveform rows in place
+ *  before the tower re-projects; @ref operator() reconstructs the clean frames from the tower's states and
+ *  writes @c d(normalized) for the additive join.
  *
  *  Audio is delivered raw as @c audio_samples[rows,columns,chunk_samples] — a run of 1-D waveform frames,
  *  not 2-D patches — and the tower's audio entry linearly projects each @c chunk_samples -wide frame to
- *  @c hidden . This head is the mirror on the way out: a plain linear projection @c hidden→chunk_samples
+ *  @c hidden . This head is the mirror on the way out: a plain linear projection @c hidden → @c chunk_samples
  *  whose target is the raw frame. The states arrive already RMSNormed through @c normalized() , so no
  *  pre-norm is repeated here, and a masked frame's raw row is zeroed, so the objective stays orthogonal to
  *  the entry projection.
@@ -333,16 +382,17 @@ struct masked_patches_t {
  */
 struct masked_frames_t {
 
-    /** @brief Allocate the recon head, its NumKong packs, and every scratch — once, at setup. */
+    /** Allocate the recon head, its NumKong packs, and every scratch — once, at setup. */
     [[nodiscard]] static expected<masked_frames_t> make(gpu_arena_t &arena, masked_frames_config_t config) noexcept;
 
-    /** @brief Pack the recon head for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
-     *      step, after the weights change and before the first @ref operator() . */
+    /** Pack the recon head for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
+     *  step, after the weights change and before the first @ref operator() . */
     [[nodiscard]] expected_t pack_weights(gpu_stream_t &stream) noexcept;
 
     /**
-     *  @brief Sample the frame mask into @c mask_ — pure enqueue, nothing else. A frame is masked with
-     *      probability @c mask_ratio , drawn independently per frame.
+     *  @brief Sample the frame mask into @c mask_ — pure enqueue, nothing else.
+     *
+     *  A frame is masked with probability @c mask_ratio , drawn independently per frame.
      */
     [[nodiscard]] expected_t sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch,
                                          gpu_stream_t &stream) noexcept;
@@ -368,31 +418,40 @@ struct masked_frames_t {
     [[nodiscard]] expected_t operator()(bf16r2_view_t normalized, f32r2_view_t clean_frames, f32r1_span_t loss_summands,
                                         bf16r2_span_t normalized_grad, gpu_stream_t &stream) noexcept;
 
-    /** @brief Append the recon weight to @p weights under the checkpoint name @p name — the owning
-     *      replica spells the instance name, since one head class may serve several modalities. */
+    /** Append the recon weight to @p weights under the checkpoint name @p name — the owning
+     *  replica spells the instance name, since one head class may serve several modalities. */
     [[nodiscard]] expected_t fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept;
-    /** @brief The recon weights @b [chunk_samples·hidden] — the checkpoint enumerator's handle. */
+
+    /** The recon weights @b [chunk_samples·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> recon_weights() noexcept { return recon_weight_.span().flatten<1>(); }
 
   private:
     masked_frames_config_t config_ {};
-    /** @brief The NumKong capabilities of the arena's device, picking every product and cast. */
+
+    /** The NumKong capabilities of the arena's device, picking every product and cast. */
     nk_capability_t capabilities_ = 0;
-    /** @brief The linear reconstruction head @b [chunk_samples,hidden] and its gradient buffer. */
+
+    /** The linear reconstruction head @b [chunk_samples,hidden] and its gradient buffer. */
     bf16r2_tensor_arena_t recon_weight_ {}, recon_weight_grad_ {};
-    /** @brief @b [max_frames,chunk_samples] reconstructed frames and their loss gradient. */
+
+    /** @b [max_frames,chunk_samples] reconstructed frames and their loss gradient. */
     bf16r2_tensor_arena_t predicted_ {}, predicted_grad_ {};
-    /** @brief @b [max_frames] the sampled mask (one masked, zero visible) the loss gates on. */
+
+    /** @b [max_frames] the sampled mask (one masked, zero visible) the loss gates on. */
     u32r1_tensor_arena_t mask_ {};
-    /** @brief @b [max_frames] per-frame normalized-MSE summands. */
+
+    /** @b [max_frames] per-frame normalized-MSE summands. */
     f32r1_tensor_arena_t position_loss_ {};
-    /** @brief @b [2] @c {λ·2/(chunk_samples·max(count,1)), count} — device-computed. */
+
+    /** @b [2] @c {λ·2/(chunk_samples·max(count,1)), count} — device-computed. */
     f32r1_tensor_arena_t gradient_scale_ {};
-    /** @brief The recon head packed as the prediction's B operand and, transposed, as @c d(normalized) 's. */
+
+    /** The recon head packed as the prediction's B operand and, transposed, as @c d(normalized) 's. */
     b8r1_tensor_arena_t packed_recon_ {}, packed_recon_transposed_ {};
-    /** @brief The weight gradient's transposes, the latter also staging the head's for @ref pack_weights , the
-     *      pack of @c normalizedᵀ , the Float32 products before their casts, and the widened @c d(normalized)
-     *      this head adds onto. */
+
+    /** The weight gradient's transposes, the latter also staging the head's for @ref pack_weights , the
+     *  pack of @c normalizedᵀ , the Float32 products before their casts, and the widened @c d(normalized)
+     *  this head adds onto. */
     bf16r1_tensor_arena_t transposed_grad_ {}, transposed_input_ {};
     b8r1_tensor_arena_t packed_input_ {};
     f32r1_tensor_arena_t products_ {}, widened_grad_ {};

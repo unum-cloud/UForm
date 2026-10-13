@@ -160,7 +160,8 @@ def repack(zip_path: Path, shard: int, out_dir: Path, overwrite: bool, max_rows:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
+    """Fetch the C4_200M archive and repack the selected TSV shard to Parquet."""
+    parser =argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
     parser.add_argument(
         "--data-root",
         default=DEFAULT_DATA_ROOT,

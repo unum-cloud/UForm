@@ -28,9 +28,9 @@
 #include <cstdlib> // `std::atoi`, `std::getenv`
 #include <cstring> // `std::strlen`
 
-#include <numbers> // `std::numbers::pi_v` — the decay's half-period
-
 #include <unistd.h> // `::write`, `STDOUT_FILENO`, `STDERR_FILENO` — the host diagnostic channel
+
+#include <numbers> // `std::numbers::pi_v` — the decay's half-period
 
 #include <cuda.h> // `cuInit`, `cuMemcpyDtoDAsync`, `cuMemsetD8Async`, `cuStreamSynchronize`
 
@@ -61,8 +61,10 @@ static __global__ void synthetic_tokens_kernel_(nk::tensor_span<token_id_t, 2> t
 /**
  *  @brief Write every row's segment descriptor from the host-drawn partition: rows below @p image_begin are
  *      tokens, then the image / video / audio runs in @ref modality_t order (an empty run leaves consecutive
- *      begins equal). One full-width segment per row; image / video rows also carry the near-square
- *      @c (patch_rows,patch_cols) aspect the coordinate adapter reads.
+ *      begins equal).
+ *
+ *  One full-width segment per row; image / video rows also carry the near-square
+ *  @c (patch_rows,patch_cols) aspect the coordinate adapter reads.
  *
  *  @b grid_size @c [rows,1,1] , one CTA per row; only thread 0 writes; no dynamic shared memory.
  */
@@ -136,14 +138,14 @@ static __global__ void synthetic_audio_kernel_(f32r2_span_t frames, u64_t seed, 
     }
 }
 
-/** @brief Write one line to STDOUT through POSIX @c ::write , newline-terminated. */
+/** Write one line to STDOUT through POSIX @c ::write , newline-terminated. */
 static void report_(sz::string_view_t line) noexcept {
     ::write(STDOUT_FILENO, line.data(), line.size());
     ::write(STDOUT_FILENO, "\n", 1);
 }
 
-/** @brief Tag @p message with the binary name, write it to STDERR, and hand back main's failure code — so
- *      every fallible phase collapses to one line: @c return @c fail_out_(x.description_.view()) . */
+/** Tag @p message with the binary name, write it to STDERR, and hand back main's failure code — so
+ *  every fallible phase collapses to one line: @c return @c fail_out_(x.description_.view()) . */
 [[nodiscard]] static int fail_out_(sz::string_view_t message) noexcept {
     sz::string_t line;
     if (format_into(line, "uform_base: {}", message)) {
@@ -153,14 +155,14 @@ static void report_(sz::string_view_t line) noexcept {
     return 1;
 }
 
-/** @brief One media row's @c (patch_rows,patch_cols) grid factorization — the aspect descriptor the
- *      coordinate adapter reads. */
+/** One media row's @c (patch_rows,patch_cols) grid factorization — the aspect descriptor the
+ *  coordinate adapter reads. */
 struct grid_factor_t {
     u16_t patch_rows = 0, patch_cols = 0;
 };
 
-/** @brief The near-square factorization of one media row's @p columns patches. Picks the largest divisor no
- *      greater than the square root as the column count, so the grid stays as square as the budget allows. */
+/** The near-square factorization of one media row's @p columns patches. Picks the largest divisor no
+ *  greater than the square root as the column count, so the grid stays as square as the budget allows. */
 [[nodiscard]] static grid_factor_t square_factor_(u32_t columns) noexcept {
     u32_t side = 1u;
     while ((side + 1u) * (side + 1u) <= columns) ++side;
@@ -168,17 +170,17 @@ struct grid_factor_t {
     return grid_factor_t {static_cast<u16_t>(columns / side), static_cast<u16_t>(side)};
 }
 
-/** @brief Deterministic uniform weight fill matched to ~N(0,std²) variance, identical on every replica —
- *      replica identity is an initialization invariant the conformance tests assert. */
+/** Deterministic uniform weight fill matched to ~N(0,std²) variance, identical on every replica —
+ *  replica identity is an initialization invariant the conformance tests assert. */
 [[nodiscard]] static f32_t hash_fill_(std::size_t index, u32_t salt, f32_t std) noexcept {
     u64_t const mixed = splitmix64_hash_t {}(salt, 0u, 1u, static_cast<u32_t>(index), 0u);
     f32_t const uniform = static_cast<f32_t>(mixed >> 40) * 0x1.0p-24f;
     return (uniform - 0.5f) * 3.4641016f * std;
 }
 
-/** @brief Seed every matrix of one replica's registration list: full matrices from the deterministic hash
- *      fill, vector scales (rows==1) exactly one. Identical on every replica; the parity test reruns it so
- *      both runs start from equals. */
+/** Seed every matrix of one replica's registration list: full matrices from the deterministic hash
+ *  fill, vector scales (rows==1) exactly one. Identical on every replica; the parity test reruns it so
+ *  both runs start from equals. */
 [[nodiscard]] static expected_t seed_weights_(array<differentiable_weights_t> const &weights,
                                               gpu_stream_t &stream) noexcept {
     std::span<differentiable_weights_t const> const list {weights.view().data(), weights.size()};
@@ -200,14 +202,14 @@ struct grid_factor_t {
     return {};
 }
 
-/** @brief One head's @c {λ·Σ, count} summand pair — the currency the ledger's loss rows accumulate. */
+/** One head's @c {λ·Σ, count} summand pair — the currency the ledger's loss rows accumulate. */
 struct summand_pair_t {
     f64_t sum = 0.0;
     f64_t count = 0.0;
 };
 
-/** @brief Read one head's @b [2] @c {λ·Σ, count} summands back to host. Best-effort: a slipped readback
- *      reports zeros, never fails the run. Caller holds the stream's context. */
+/** Read one head's @b [2] @c {λ·Σ, count} summands back to host. Best-effort: a slipped readback
+ *  reports zeros, never fails the run. Caller holds the stream's context. */
 [[nodiscard]] static summand_pair_t read_summands_(f32r1_tensor_arena_t &summands, gpu_stream_t &stream) noexcept {
     f32r1_tensor_pinned_t staging = f32r1_tensor_pinned_t::uninitialized({2}, pinned_alloc<f32_t> {}).value;
     if (!staging) return {};
@@ -225,26 +227,28 @@ f32_t base_config_t::learning_rate_for(optimizer_step_t optimizer_step) const no
     return min_learning_rate + (learning_rate - min_learning_rate) * cosine;
 }
 
-/** @brief The masking corruptor's keyed recipe — its seed derived once from the run seed. */
+/** The masking corruptor's keyed recipe — its seed derived once from the run seed. */
 [[nodiscard]] static masking_recipe_t masking_recipe_(base_config_t const &config) noexcept {
     masking_recipe_t recipe;
     recipe.seed = config.seed * 2654435761u + 17u;
     return recipe;
 }
 
-/** @brief One step's keyed row partition: the live modalities in @ref modality_t order, each with its row
- *      count and the first row of its contiguous run. */
+/** One step's keyed row partition: the live modalities in @ref modality_t order, each with its row
+ *  count and the first row of its contiguous run. */
 struct row_partition_t {
-    /** @brief Rows per modality, indexed by @ref modality_t — zero for absent modalities. */
+
+    /** Rows per modality, indexed by @ref modality_t — zero for absent modalities. */
     u32_t rows[4] = {};
-    /** @brief The first row of each modality's run — prefix sums of @ref rows in modality order. */
+
+    /** The first row of each modality's run — prefix sums of @ref rows in modality order. */
     u32_t begins[4] = {};
 };
 
-/** @brief Partition the row budget across the live modalities — any counts, no per-modality caps, exactly the
- *      freedom the real mixer has. Every live modality gets the floor share; the keyed draw rotates which ones
- *      carry the remainder, so every mixture recurs across passes (and a one-row omni batch deterministically
- *      leaves most heads with zero live rows — the dynamic-M edge). */
+/** Partition the row budget across the live modalities — any counts, no per-modality caps, exactly the
+ *  freedom the real mixer has. Every live modality gets the floor share; the keyed draw rotates which ones
+ *  carry the remainder, so every mixture recurs across passes (and a one-row omni batch deterministically
+ *  leaves most heads with zero live rows — the dynamic-M edge). */
 [[nodiscard]] static row_partition_t partition_rows_(base_config_t const &config, u32_t gpu_index_in_colocated_domain,
                                                      data_epoch_t data_epoch) noexcept {
     multimodal_batch_shape_t const &shape = config.batch;
@@ -273,8 +277,8 @@ struct row_partition_t {
     return partition;
 }
 
-/** @brief Fold the run description into the tower's make-config: the block geometry from the batch envelope,
- *      one media entry per live batch slice — the batch shape stays the single source of modality presence. */
+/** Fold the run description into the tower's make-config: the block geometry from the batch envelope,
+ *  one media entry per live batch slice — the batch shape stays the single source of modality presence. */
 [[nodiscard]] static encoder_tower_config_t tower_config_(base_config_t const &config) noexcept {
     multimodal_batch_shape_t const &batch = config.batch;
     u32_t const max_tokens = batch.max_rows_per_gpu * batch.max_columns_per_row;
@@ -302,12 +306,10 @@ struct row_partition_t {
     return tower;
 }
 
-/** @brief Snapshot one replica's registration list to @p path with the run's step count, each matrix keyed
- *      by the name its cell's @c fill spelled, under this composition root's @c model. prefix. */
-/** @brief Warm-start one replica from @p checkpoint : every weight matrix uploads its by-name tensor —
- *      a missing name or a shape mismatch fails loudly (warm starts are all-or-nothing; partial loads
- *      would silently train a half-seeded model). Async on @p stream off the pinned payload; the caller
- *      drains before the checkpoint's backing is released. */
+/** Warm-start one replica from @p checkpoint : every weight matrix uploads its by-name tensor —
+ *  a missing name or a shape mismatch fails loudly (warm starts are all-or-nothing; partial loads
+ *  would silently train a half-seeded model). Async on @p stream off the pinned payload; the caller
+ *  drains before the checkpoint's backing is released. */
 [[nodiscard]] static expected_t load_checkpoint_(checkpoint_to_load_t const &checkpoint,
                                                  array<differentiable_weights_t> const &weights,
                                                  gpu_stream_t &stream) noexcept {
@@ -331,6 +333,8 @@ struct row_partition_t {
     return {};
 }
 
+/** Snapshot one replica's registration list to @p path with the run's step count, each matrix keyed
+ *  by the name its cell's @c fill spelled, under this composition root's @c model. prefix. */
 [[nodiscard]] static expected_t save_checkpoint_(sz::string_view_t path, array<differentiable_weights_t> const &weights,
                                                  u32_t steps, gpu_stream_t &stream) noexcept {
     switch_to_gpu_t gpu_scope {stream};

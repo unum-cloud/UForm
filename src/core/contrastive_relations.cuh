@@ -65,11 +65,9 @@ namespace unum::uform::core {
 
 namespace nk = ashvardanian::numkong;
 
-/**
- *  @brief A per-anchor temperature-group id — a runtime category selecting one learnable (β, bias) entry
- *      from the recipe's device tables. Open by design: the group set is counted at runtime through
- *      @ref contrastive_recipe_t::temperature_group_count , never a fixed compile-time enumeration.
- */
+/** A per-anchor temperature-group id — a runtime category selecting one learnable (β, bias) entry
+ *  from the recipe's device tables. Open by design: the group set is counted at runtime through
+ *  @ref contrastive_recipe_t::temperature_group_count , never a fixed compile-time enumeration. */
 enum class temperature_group_t : u32_t {};
 
 /**
@@ -84,36 +82,44 @@ enum class temperature_group_t : u32_t {};
  *  entry count is never a separately-carried integer that can disagree.
  */
 struct contrastive_recipe_t {
-    /** @brief Logit scale β applied to every cosine; overridden by @ref inverse_temperature_device . */
+
+    /** Logit scale β applied to every cosine; overridden by @ref inverse_temperature_device . */
     f32_t inverse_temperature = 1.0f;
-    /** @brief Additive logit bias; overridden by @ref bias_device . */
+
+    /** Additive logit bias; overridden by @ref bias_device . */
     f32_t bias = 0.0f;
-    /** @brief Weight of every pair the graph names no edge for — the ambient all-pairs repulsion. The
-     *      kernels read the copy on @ref contrastive_relations_view_t (staged through @c upload ); this one
-     *      is inert after upload. */
+
+    /** Weight of every pair the graph names no edge for — the ambient all-pairs repulsion. The
+     *  kernels read the copy on @ref contrastive_relations_view_t (staged through @c upload ); this one
+     *  is inert after upload. */
     f32_t ambient_repulsion_weight = 1.0f;
-    /** @brief Optional @b [temperature_group_count] Float32 device entries of the learnable β; empty falls
-     *      back to the host scalar. */
+
+    /** Optional @b [temperature_group_count] Float32 device entries of the learnable β; empty falls
+     *  back to the host scalar. */
     f32r1_view_t inverse_temperature_device {};
-    /** @brief Optional @b [temperature_group_count] Float32 device entries of the learnable bias; empty
-     *      falls back to the host scalar. */
+
+    /** Optional @b [temperature_group_count] Float32 device entries of the learnable bias; empty
+     *  falls back to the host scalar. */
     f32r1_view_t bias_device {};
-    /** @brief Optional @b [from_vertices_per_gpu] per-anchor temperature-group selector; empty means group
-     *      0 for every vertex. */
+
+    /** Optional @b [from_vertices_per_gpu] per-anchor temperature-group selector; empty means group
+     *  0 for every vertex. */
     nk::tensor_view<temperature_group_t, 1> from_vertex_temperature_group {};
 
-    /** @brief Number of (β, bias) entries — carried by the device views; 1 on the host-scalar fallback. */
+    /** Number of (β, bias) entries — carried by the device views; 1 on the host-scalar fallback. */
     [[nodiscard]] constexpr u32_t temperature_group_count() const noexcept {
         return inverse_temperature_device.empty() ? 1u : static_cast<u32_t>(inverse_temperature_device.extent(0));
     }
 };
 
-/** @brief One resolved cell: the loss-sign multiplier and the weight; @c weight==0 means the cell is
- *      skipped and the multiplier carries no meaning. */
+/** One resolved cell: the loss-sign multiplier and the weight; @c weight==0 means the cell is
+ *  skipped and the multiplier carries no meaning. */
 struct contrastive_pair_relation_t {
-    /** @brief Loss-sign multiplier (+1 attract / −1 repel) — multiplies the logit as @c target·logit . */
+
+    /** Loss-sign multiplier (+1 attract / −1 repel) — multiplies the logit as @c target·logit . */
     f32_t target;
-    /** @brief Per-cell weight; 0 skips the cell entirely. */
+
+    /** Per-cell weight; 0 skips the cell entirely. */
     f32_t weight;
 };
 
@@ -122,70 +128,83 @@ struct contrastive_pair_relation_t {
  *      kernels @b by value.
  *
  *  Three CSR edge sets over the local vertex rows: attract and repel with per-edge scores, ignore
- *  without. Every
- *  extent is carried by its view: @ref from_vertices_per_gpu derives from the offsets row, and empty
- *  @ref ignore_offsets means no ignores. All ids are @b global vertex ids, sorted ascending within
- *  each row's run.
+ *  without. Every extent is carried by its view: @ref from_vertices_per_gpu derives from the offsets
+ *  row, and empty @ref ignore_offsets means no ignores. All ids are @b global vertex ids, sorted
+ *  ascending within each row's run.
  */
 struct contrastive_relations_view_t {
-    /** @brief Attract @b [from_vertices_per_gpu+1] row pointers — always present; all-zero on the
-     *      self-edge default path. */
+
+    /** Attract @b [from_vertices_per_gpu+1] row pointers — always present; all-zero on the
+     *  self-edge default path. */
     u32r1_view_t attract_offsets {};
-    /** @brief Attract @b [attract_edge_count] global ids, sorted ascending per run; empty selects the
-     *      self-edge default parity path. */
+
+    /** Attract @b [attract_edge_count] global ids, sorted ascending per run; empty selects the
+     *  self-edge default parity path. */
     u32r1_view_t attract_ids {};
-    /** @brief Attract @b [attract_edge_count] per-edge weights. */
+
+    /** Attract @b [attract_edge_count] per-edge weights. */
     f32r1_view_t attract_scores {};
-    /** @brief Repel @b [from_vertices_per_gpu+1] row pointers. */
+
+    /** Repel @b [from_vertices_per_gpu+1] row pointers. */
     u32r1_view_t repel_offsets {};
-    /** @brief Repel global ids, sorted ascending per run. */
+
+    /** Repel global ids, sorted ascending per run. */
     u32r1_view_t repel_ids {};
-    /** @brief Repel per-edge weights. */
+
+    /** Repel per-edge weights. */
     f32r1_view_t repel_scores {};
-    /** @brief Ignore @b [from_vertices_per_gpu+1] row pointers; empty when there are no ignores. */
+
+    /** Ignore @b [from_vertices_per_gpu+1] row pointers; empty when there are no ignores. */
     u32r1_view_t ignore_offsets {};
-    /** @brief Ignore global ids, sorted ascending per run. */
+
+    /** Ignore global ids, sorted ascending per run. */
     u32r1_view_t ignore_ids {};
-    /** @brief Optional @b [from_vertices_per_gpu] UInt32 device column of from-vertex token counts; 0 == PAD
-     *      (magnitude unused), a row no pair resolves against. Empty means every vertex is live. */
+
+    /** Optional @b [from_vertices_per_gpu] UInt32 device column of from-vertex token counts; 0 == PAD
+     *  (magnitude unused), a row no pair resolves against. Empty means every vertex is live. */
     u32r1_view_t from_vertex_effective_length {};
-    /** @brief Optional @b [to_vertices_per_mesh] UInt32 device column of to-vertex token counts over the
-     *      whole global vertex axis, indexed by @b global id; 0 == PAD (magnitude unused). Empty means all
-     *      live. */
+
+    /** Optional @b [to_vertices_per_mesh] UInt32 device column of to-vertex token counts over the
+     *  whole global vertex axis, indexed by @b global id; 0 == PAD (magnitude unused). Empty means all
+     *  live. */
     u32r1_view_t to_vertex_effective_length {};
 
-    /** @brief Global id of local vertex 0's own copy — the base of the implicit self-edges. */
+    /** Global id of local vertex 0's own copy — the base of the implicit self-edges. */
     std::size_t self_edge_base = 0;
-    /** @brief Weight of every unnamed cell; 0 removes in-batch negatives. */
+
+    /** Weight of every unnamed cell; 0 removes in-batch negatives. */
     f32_t ambient_repulsion_weight = 1.0f;
 
-    /** @brief Number of from-vertex rows the graph describes — one less than the offsets row. Like the
-     *      views' own accessors, @c constexpr and therefore device-callable. */
+    /** Number of from-vertex rows the graph describes — one less than the offsets row. Like the
+     *  views' own accessors, @c constexpr and therefore device-callable. */
     [[nodiscard]] constexpr u32_t from_vertices_per_gpu() const noexcept {
         return attract_offsets.empty() ? 0u : static_cast<u32_t>(attract_offsets.extent(0) - 1u);
     }
-    /** @brief Whether explicit attract edges drive the labels (vs the self-edge default). */
+
+    /** Whether explicit attract edges drive the labels (vs the self-edge default). */
     [[nodiscard]] constexpr bool has_explicit_attract_edges() const noexcept { return attract_ids.extent(0) != 0u; }
 };
 
 #if defined(__CUDACC__)
 
-/** @brief Membership search inside one sorted CSR run — CUB's thread-level lower bound plus the equality
- *      check; the position of @p id , or @p end when absent. */
+/** Membership search inside one sorted CSR run — CUB's thread-level lower bound plus the equality
+ *  check; the position of @p id , or @p end when absent. Vendor boundary: CUB takes a raw pointer
+ *  and a count, not a view, into the CSR `ids` run. */
 [[nodiscard]] __device__ inline u32_t contrastive_run_find_(u32r1_view_t ids, u32_t begin, u32_t end,
                                                             u32_t id) noexcept {
-    // vendor-boundary: cub needs a raw pointer + count, not a view, into the CSR `ids` run.
     u32_t const position = begin + cub::LowerBound(ids.data() + begin, end - begin, id);
     return position < end && ids[position] == id ? position : end;
 }
 
-/** @brief Resolve one cell of the @b [from_vertices_per_gpu,to_vertices_per_mesh] grid to its target and weight,
+/**
+ *  @brief Resolve one cell of the @b [from_vertices_per_gpu,to_vertices_per_mesh] grid to its target and weight,
  *      in the file-header precedence: PAD > ignore > attract > repel > implicit negative. Padding is read
  *      from the view's own effective-length columns — the label grid carries its whole state.
  *
  *  @param[in] relations The graph views, taken by value at kernel launch.
  *  @param[in] vertex_index Row in @c [0,from_vertices_per_gpu) .
- *  @param[in] neighbor_global Position on the @b global vertex axis. */
+ *  @param[in] neighbor_global Position on the @b global vertex axis.
+ */
 [[nodiscard]] __device__ inline contrastive_pair_relation_t contrastive_pair_relation(
     contrastive_relations_view_t const &relations, u32_t vertex_index, u32_t neighbor_global) noexcept {
 
@@ -240,11 +259,13 @@ struct contrastive_relations_view_t {
  */
 struct contrastive_relations_t {
 
-    /** @brief Allocate the eight columns off @p arena at their worst-case capacity; every upload
+    /**
+     *  @brief Allocate the eight columns off @p arena at their worst-case capacity; every upload
      *      @c resize s them to the step's live extents without moving an address — the columns' own
      *      shapes are the single source of the live counts.
      *  @param[in] max_vertices Most local vertex rows any step will carry.
-     *  @param[in] max_edges Most explicit edges any step will carry, per edge set. */
+     *  @param[in] max_edges Most explicit edges any step will carry, per edge set.
+     */
     [[nodiscard]] static expected<contrastive_relations_t> make(gpu_arena_t &arena, u32_t max_vertices,
                                                                 u32_t max_edges) noexcept {
         if (max_vertices == 0)
@@ -324,8 +345,6 @@ struct contrastive_relations_t {
                 !checked)
                 return checked;
 
-        // Resize every column to the step's live extents — no address moves, and an overflow beyond the
-        // reserved capacity fails here, loudly, before anything is staged.
         bool resized = nk::succeeded(attract_offsets_.resize({from_vertices_per_gpu + 1u}));
         resized = resized && nk::succeeded(repel_offsets_.resize({from_vertices_per_gpu + 1u}));
         resized = resized && nk::succeeded(attract_ids_.resize({attract_ids.extent(0)}));
@@ -342,7 +361,6 @@ struct contrastive_relations_t {
                 repel_ids.extent(0), repel_ids_.capacity(), has_ignores ? ignore_ids.extent(0) : 0u,
                 ignore_ids_.capacity());
 
-        // Stage every validated column; the typed helper carries extents and element sizes itself.
         expected_t copied = copy_host_to_device(attract_offsets, attract_offsets_.span(), stream);
         if (copied) copied = copy_host_to_device(attract_ids, attract_ids_.span(), stream);
         if (copied) copied = copy_host_to_device(attract_scores, attract_scores_.span(), stream);
@@ -360,9 +378,9 @@ struct contrastive_relations_t {
         return {};
     }
 
-    /** @brief Stage the zero-edge self-edge default: the offsets row is zeroed (every run empty), both
-     *      edge sets collapse to empty extents, and the borrowed effective-length columns are adopted as
-     *      in @ref upload . */
+    /** Stage the zero-edge self-edge default: the offsets row is zeroed (every run empty), both
+     *  edge sets collapse to empty extents, and the borrowed effective-length columns are adopted as
+     *  in @ref upload . */
     [[nodiscard]] expected_t upload_self_edges(u32_t from_vertices_per_gpu, u32r1_view_t from_vertex_effective_length,
                                                u32r1_view_t to_vertex_effective_length, std::size_t self_edge_base,
                                                f32_t ambient_repulsion_weight, gpu_stream_t &stream) noexcept {
@@ -388,9 +406,9 @@ struct contrastive_relations_t {
         return {};
     }
 
-    /** @brief Views over the owned columns' live extents — the shapes the last successful upload resized
-     *      them to; kernels take this by value. An ignore set staged with zero edges is indistinguishable
-     *      from no ignores, so its views collapse to empty. */
+    /** Views over the owned columns' live extents — the shapes the last successful upload resized
+     *  them to; kernels take this by value. An ignore set staged with zero edges is indistinguishable
+     *  from no ignores, so its views collapse to empty. */
     [[nodiscard]] contrastive_relations_view_t view() const noexcept {
         contrastive_relations_view_t view;
         view.attract_offsets = attract_offsets_.view();
@@ -409,9 +427,10 @@ struct contrastive_relations_t {
     }
 
   private:
-    /** @brief All host-side invariants of one edge set (attract / repel / ignore); every violation names
-     *      the @p edge_kind and the row. */
-    [[nodiscard]] expected_t validate_edges_(char const *edge_kind, u32r1_view_t offsets, u32r1_view_t ids,
+
+    /** All host-side invariants of one edge set (attract / repel / ignore); every violation names
+     *  the @p edge_kind and the row. */
+    [[nodiscard]] expected_t validate_edges_(sz::string_view_t edge_kind, u32r1_view_t offsets, u32r1_view_t ids,
                                              f32r1_view_t scores, std::size_t to_vertices_per_mesh) const noexcept {
         std::size_t const rows = offsets.extent(0) - 1u;
         std::size_t const edge_count = ids.extent(0);
@@ -448,15 +467,17 @@ struct contrastive_relations_t {
         return {};
     }
 
-    // The owned CSR columns, allocated once at their worst-case capacity and resized per upload: each
-    // tensor's own shape IS the live extent, and its `capacity()` the staging ceiling — no shadow counts.
+    /** The owned CSR columns, allocated once at their worst-case capacity and resized per upload: each
+     *  tensor's own shape IS the live extent, and its `capacity()` the staging ceiling — no shadow counts. */
     u32r1_tensor_arena_t attract_offsets_ {}, repel_offsets_ {}, ignore_offsets_ {};
     u32r1_tensor_arena_t attract_ids_ {}, repel_ids_ {}, ignore_ids_ {};
     f32r1_tensor_arena_t attract_scores_ {}, repel_scores_ {};
-    // Borrowed per-step PAD state — the batch pipeline owns these at capture-stable addresses.
+
+    /** Borrowed per-step PAD state — the batch pipeline owns these at capture-stable addresses. */
     u32r1_view_t from_vertex_effective_length_ {};
     u32r1_view_t to_vertex_effective_length_ {};
-    // The self-edge default's anchor base and the ambient repulsion — plain label scalars, not extents.
+
+    /** The self-edge default's anchor base and the ambient repulsion — plain label scalars, not extents. */
     std::size_t self_edge_base_ = 0;
     f32_t ambient_repulsion_weight_ = 1.0f;
 };

@@ -14,14 +14,15 @@
 
 using namespace unum::uform::core;
 
-/** @brief How many values one signal probe samples at most — one warp, 256 strides per lane. */
+/** How many values one signal probe samples at most — one warp, 256 strides per lane. */
 inline constexpr std::size_t telemetry_sample_budget_k = 32u * 256u;
 
 /**
  *  @brief One signal probe: the warp stride-samples @p values , ballots the zero / non-finite verdicts,
- *      folds an XOR checksum and an L2 across lanes, and lane 0 updates @p row in place — trapping only
- *      on a non-finite value, whatever the policy; an all-zero window is counted, and a violation only
- *      under @ref nonzero_signal_k .
+ *      folds an XOR checksum and an L2 across lanes, and lane 0 updates @p row in place.
+ *
+ *  Traps only on a non-finite value, whatever the policy; an all-zero window is counted, and a violation
+ *  only under @ref nonzero_signal_k .
  *  __grid_size__ @c [1,1,1] , one warp; no dynamic shared memory.
  */
 static __global__ void telemetry_signal_probe_kernel_(f32r1_view_t values, nk::tensor_span<telemetry_row_t, 1> row,
@@ -63,9 +64,12 @@ static __global__ void telemetry_signal_probe_kernel_(f32r1_view_t values, nk::t
     }
 }
 
-/** @brief One round probe: a single thread reads the member's own round scalar, counts a violation when
+/**
+ *  @brief One round probe: a single thread reads the member's own round scalar, counts a violation when
  *      it moved backwards, and records the value.
- *  __grid_size__ @c [1,1,1] , one thread live; no dynamic shared memory. */
+ *
+ *  __grid_size__ @c [1,1,1] , one thread live; no dynamic shared memory.
+ */
 static __global__ void telemetry_round_probe_kernel_(multimem_member_t member,
                                                      nk::tensor_span<telemetry_row_t, 1> row) {
     if (threadIdx.x != 0u || blockIdx.x != 0u) return;

@@ -4,7 +4,7 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Carve the standard MSR-VTT 1K test split out of the train_9k parquet.
+r"""Carve the standard MSR-VTT 1K test split out of the train_9k parquet.
 
 MSR-VTT ships a canonical held-out test set of 1,000 video clips defined in
 `msrvtt_test_1k.json` (video IDs video7010..video9999, the last 3K of the 10K
@@ -24,9 +24,9 @@ they were repacked separately and the standard protocol evaluates on video IDs
 listed in ``msrvtt_test_1k.json``.  To repack the test videos, call
 ``repack_msrvtt_to_parquet`` with ``--json msrvtt_test_1k.json``:
 
-    uv run scripts/data/repack_msrvtt_to_parquet.py \\
-        --json  data/msrvtt-captions/msrvtt_test_1k.json \\
-        --zip   data/msrvtt-captions/MSRVTT_Videos.zip \\
+    uv run scripts/data/repack_msrvtt_to_parquet.py \
+        --json  data/msrvtt-captions/msrvtt_test_1k.json \
+        --zip   data/msrvtt-captions/MSRVTT_Videos.zip \
         --out   data/msrvtt-captions/test_1k.parquet
 
 This carve script is the complementary tool: if ``test_1k.parquet`` is already

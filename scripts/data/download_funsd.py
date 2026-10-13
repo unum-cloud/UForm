@@ -34,6 +34,7 @@ _DEFAULT_OUT_DIR = data_root() / "funsd"
 
 
 def download(out_dir: Path, force: bool = False) -> int:
+    """Snapshot both FUNSD mirrors into `out_dir` and return a process exit code."""
     out_dir.mkdir(parents=True, exist_ok=True)
     sentinel = out_dir / ".downloaded"
     if sentinel.exists() and not force:

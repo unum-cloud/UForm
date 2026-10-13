@@ -4,7 +4,7 @@
 #     "yt-dlp",
 # ]
 # ///
-"""Host-side YouTube media-clip fetcher shared by the fetch-dependent dataset builders.
+r"""Host-side YouTube media-clip fetcher shared by the fetch-dependent dataset builders.
 
 Modality: audio + video.  Several research corpora (Auto-ACD, VATEX, ActivityNet Captions) ship
 only captions plus a YouTube id and an optional `[start, end]` window — the media itself has to be
@@ -26,10 +26,10 @@ mp4 trim.
 
 CLI usage:
     # Smoke-test a handful of public ids (some failures are expected and reported, not fatal):
-    uv run scripts/data/acquire_clips.py --kind video --ids dQw4w9WgXcQ aqz-KE-bpKQ \\
+    uv run scripts/data/acquire_clips.py --kind video --ids dQw4w9WgXcQ aqz-KE-bpKQ \
         --out-dir /tmp/clips --manifest /tmp/clips/manifest.json
     # Fetch a 10-second audio window from one id:
-    uv run scripts/data/acquire_clips.py --kind audio --ids YS6CoSybkYU --start 30 --end 40 \\
+    uv run scripts/data/acquire_clips.py --kind audio --ids YS6CoSybkYU --start 30 --end 40 \
         --out-dir /tmp/audio
     # Shard mode used by the dataset builders under GNU parallel (one JSON clip spec per line):
     uv run scripts/data/acquire_clips.py --clips-jsonl shard_007.jsonl --out-dir staging/shard_007
