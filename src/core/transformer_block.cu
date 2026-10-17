@@ -1143,11 +1143,11 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
                                                      qkv_e4m3 + 2 * hidden, qkv_bytes, packed_keys_values_.data(), 0,
                                                      segments * heads, capabilities_, stream.numkong());
     if (status == nk_success_k)
-        status = nk_attention_packed_e4m3_best(heads, heads, transformer_head_dim_k, segment_offsets.data(), tokens,
-                                               1.0f / sqrtf(static_cast<f32_t>(transformer_head_dim_k)),
-                                               NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, qkv_e4m3, qkv_bytes,
-                                               packed_keys_values_.data(), products_.data(), hidden * sizeof(f32_t),
-                                               NUMKONG_NULL, 0, NUMKONG_SIZE_MAX, capabilities_, stream.numkong());
+        status = nk_attention_packed_e4m3_best(
+            heads, heads, transformer_head_dim_k, segment_offsets.data(), tokens,
+            1.0f / sqrtf(static_cast<f32_t>(transformer_head_dim_k)), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, qkv_e4m3,
+            qkv_bytes, packed_keys_values_.data(), products_.data(), hidden * sizeof(f32_t), NUMKONG_NULL, 0,
+            NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, capabilities_, stream.numkong());
     if (status != nk_success_k)
         return expected_t::fail(status_t::cuda_error_k, "E4M3 attention failed: {}", nk_status_name(status));
 
@@ -1188,9 +1188,10 @@ expected_t transformer_block_e4m3_t::project_(std::size_t product, e4m3r2_view_t
     std::size_t const tokens = activations.extent(0), depth = activations.extent(1), width = values.extent(1);
     if (nk::failed(products_.resize({tokens, width})))
         return expected_t::fail(status_t::shape_unsupported_k, "product scratch cannot hold [{}x{}]", tokens, width);
-    nk_status_t const status = nk_dots_packed_e4m3_best(
-        reinterpret_cast<nk_e4m3_t const *>(activations.data()), packed_weights_[product].data(), products_.data(),
-        tokens, width, depth, depth * sizeof(e4m3_t), width * sizeof(f32_t), capabilities_, stream.numkong());
+    nk_status_t const status = nk_dots_packed_e4m3_best(reinterpret_cast<nk_e4m3_t const *>(activations.data()),
+                                                        packed_weights_[product].data(), products_.data(), tokens,
+                                                        width, depth, depth * sizeof(e4m3_t), width * sizeof(f32_t),
+                                                        NUMKONG_NULL, 0, capabilities_, stream.numkong());
     if (status != nk_success_k)
         return expected_t::fail(status_t::cuda_error_k, "E4M3 product {} failed: {}", product, nk_status_name(status));
     f32r1_view_t const weight_descale {weight_descales_.data() + product, 1};

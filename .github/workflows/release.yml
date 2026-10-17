@@ -16,6 +16,8 @@ permissions:
 jobs:
   versioning:
     name: Update Version
+    # Every other job needs this one, so a private fork never tags, releases or publishes.
+    if: github.repository == 'unum-cloud/UForm'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

@@ -128,7 +128,7 @@ expected_t uc::multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t
                                 a.extent(1), c.extent(0), c.extent(1));
     return numkong_result(nk_dots_packed_bf16_best(reinterpret_cast<nk_bf16_t const *>(a.data()), packed_b.data(),
                                                    c.data(), a.extent(0), c.extent(1), a.extent(1), a.stride_bytes(0),
-                                                   c.stride_bytes(0), capabilities, stream.numkong()),
+                                                   c.stride_bytes(0), NUMKONG_NULL, 0, capabilities, stream.numkong()),
                           "product");
 }
 

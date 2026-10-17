@@ -612,8 +612,8 @@ static int run_cross_domain_case() {
  *  contrastive forward over a fabricated ragged batch (one PAD segment included — the historical pool
  *  failure mode was PAD masking, never arithmetic), and compare the emitted vertices against a
  *  double-precision host replica of exactly the new math — the softmax pool over the tower's own
- *  final-norm states, then RMSNorm → fc1 → SiLU → fc2. The backward runs the same chain in reverse:
- *  every pool / head weight gradient must match the host fold to the BFloat16 floor. */
+ *  final-norm states, then RMSNorm → fc1 → SiLU → fc2. The backward runs the same chain in reverse, and
+ *  the pool's own state and query gradients must match the host softmax backward to the BFloat16 floor. */
 static void run_pool_parity_case() {
     std::printf("case pool-parity (FP64 host oracle over the pool + head)\n");
     constexpr u32_t rows_k = 2, segments_k = 4, columns_k = 8, hidden_k = 256, tokens_k = rows_k * columns_k;
@@ -666,16 +666,17 @@ static void run_pool_parity_case() {
                      scalars * sizeof(bf16_t));
     }
 
-    // A fabricated ragged batch: three live text segments of lengths {8, 5, 3} and one PAD — the batch
-    // packer's contract (offsets repeat on PAD, lengths carry the live counts).
+    // A fabricated ragged batch: three live text segments of lengths {8, 5, 2}, a gap token closing the
+    // second row, and one PAD — the batch packer's contract (offsets repeat on PAD, lengths carry the live
+    // counts).
     auto batch = multimodal_batch_on_gpu_t::make(gpu_arena_alloc<b8_t> {arena.value_}, shape);
     if (!batch) {
         check(false, "pool-parity batch make");
         cuCtxPopCurrent(nullptr);
         return;
     }
-    u32_t const offsets_host[segments_k + 1] = {0, 8, 13, 16, 16};
-    u32_t const lengths_host[segments_k] = {8, 5, 3, 0};
+    u32_t const offsets_host[segments_k + 1] = {0, 8, 13, 15, 15};
+    u32_t const lengths_host[segments_k] = {8, 5, 2, 0};
     modality_t const modality_host[segments_k] = {modality_t::text_k, modality_t::text_k, modality_t::text_k,
                                                   modality_t::text_k};
     std::vector<token_id_t> tokens_host(tokens_k);
@@ -730,6 +731,12 @@ static void run_pool_parity_case() {
     };
     double const scale = 1.0 / std::sqrt(double(transformer_head_dim_k));
     std::vector<double> pooled_host(std::size_t(segments_k) * hidden_k, 0.0);
+    // The pool's backward rides the same softmax with the keyed force as d(pooled) and K = V = the states:
+    // dS = P∘(dO·Vᵀ − dO·O), d(states) = P·dO + scale·dS·q, d(query) = scale·Σ dS·K.
+    std::vector<bf16_t> force_host(std::size_t(segments_k) * hidden_k);
+    for (std::size_t index = 0; index != force_host.size(); ++index)
+        force_host[index] = __float2bfloat16(hash_fill(index, 777) * 0.1f);
+    std::vector<double> states_grad_host(std::size_t(tokens_k) * hidden_k, 0.0), query_grad_host(hidden_k, 0.0);
     for (u32_t segment = 0; segment != segments_k; ++segment) {
         u32_t const length = lengths_host[segment];
         if (length == 0u) continue; // a PAD vertex is don't-care — the loss PADs it out, so no oracle here
@@ -757,6 +764,28 @@ static void run_pool_parity_case() {
                     value += std::exp(scores[token] - score_max) / denominator *
                              double(__bfloat162float(states_host[std::size_t(offset + token) * hidden_k + base]));
                 pooled_host[std::size_t(segment) * hidden_k + base] = value;
+            }
+            std::size_t const pooled_row = std::size_t(segment) * hidden_k + head * transformer_head_dim_k;
+            double output_dot = 0.0;
+            for (u32_t channel = 0; channel != transformer_head_dim_k; ++channel)
+                output_dot += double(__bfloat162float(force_host[pooled_row + channel])) *
+                              pooled_host[pooled_row + channel];
+            for (u32_t token = 0; token != pool_length; ++token) {
+                std::size_t const state_row = std::size_t(offset + token) * hidden_k + head * transformer_head_dim_k;
+                double const probability = std::exp(scores[token] - score_max) / denominator;
+                double probability_grad = 0.0;
+                for (u32_t channel = 0; channel != transformer_head_dim_k; ++channel)
+                    probability_grad += double(__bfloat162float(force_host[pooled_row + channel])) *
+                                        double(__bfloat162float(states_host[state_row + channel]));
+                double const score_grad = probability * (probability_grad - output_dot);
+                for (u32_t channel = 0; channel != transformer_head_dim_k; ++channel) {
+                    u32_t const base = head * transformer_head_dim_k + channel;
+                    states_grad_host[state_row + channel] +=
+                        probability * double(__bfloat162float(force_host[pooled_row + channel])) +
+                        scale * score_grad * weight_at(query_index, base);
+                    query_grad_host[base] += scale * score_grad *
+                                             double(__bfloat162float(states_host[state_row + channel]));
+                }
             }
         }
     }
@@ -798,11 +827,8 @@ static void run_pool_parity_case() {
     std::printf("    forward parity worst relative error %.3e\n", worst);
     check(worst < 3e-2, "pool + head forward matches the FP64 oracle to the BFloat16 floor");
 
-    // Backward smoke over the same chain: a keyed vertices force, then every pool / head gradient finite
+    // Backward smoke over the same chain: the keyed vertices force, then every pool / head gradient finite
     // and the query gradient nonzero (the pool actually differentiated).
-    std::vector<bf16_t> force_host(std::size_t(segments_k) * hidden_k);
-    for (std::size_t index = 0; index != force_host.size(); ++index)
-        force_host[index] = __float2bfloat16(hash_fill(index, 777) * 0.1f);
     cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(vertices_grad_tensor.data()), force_host.data(),
                  force_host.size() * sizeof(bf16_t));
     auto propagated = tower.value_.backward(vertices_grad_tensor.view(), bf16r2_view_t {}, batch.value_, stream.value_);
@@ -825,6 +851,65 @@ static void run_pool_parity_case() {
         }
         check(all_finite, "every pool / head gradient is finite");
         check(query_grad_energy > 0.0, "the pool query gradient is nonzero");
+    }
+
+    // The tower's d(normalized) is overwritten by the block stack's backward before it returns, so a second
+    // pool replays forward + backward over the tower's states and query, into the spent vertices buffer.
+    auto pool = tower_pool_t::make(arena.value_, config.block);
+    f32r2_tensor_arena_t states_grad =
+        f32r2_tensor_arena_t::uninitialized({tokens_k, hidden_k}, gpu_arena_alloc<f32_t> {arena.value_}).value;
+    f32r2_tensor_arena_t value_grad =
+        f32r2_tensor_arena_t::uninitialized({tokens_k, hidden_k}, gpu_arena_alloc<f32_t> {arena.value_}).value;
+    bf16r1_tensor_arena_t query_grad =
+        bf16r1_tensor_arena_t::uninitialized({hidden_k}, gpu_arena_alloc<bf16_t> {arena.value_}).value;
+    if (!pool || !states_grad || !value_grad || !query_grad) {
+        check(false, "pool-parity pool make");
+        cuCtxPopCurrent(nullptr);
+        return;
+    }
+    bf16r1_view_t const query {weights[query_index].weights.data(), hidden_k};
+    auto pooled = pool.value_.forward(query, tower.value_.normalized(), batch.value_.segment_offsets.view(),
+                                      batch.value_.segment_lengths.view(), vertices_tensor.span(), stream.value_);
+    if (pooled)
+        pooled = pool.value_.backward(query, vertices_grad_tensor.view(), states_grad.span(), value_grad.span(),
+                                      query_grad.span(), stream.value_);
+    if (!pooled) std::printf("    %s\n", pooled.description_.c_str());
+    check(static_cast<bool>(pooled), "pool-parity pool backward");
+    if (pooled) {
+        cuStreamSynchronize(stream.value_.get());
+        std::vector<f32_t> states_grad_device(states_grad_host.size());
+        cuMemcpyDtoH(states_grad_device.data(), reinterpret_cast<CUdeviceptr>(states_grad.data()),
+                     states_grad_device.size() * sizeof(f32_t));
+        staging.resize(hidden_k);
+        cuMemcpyDtoH(staging.data(), reinterpret_cast<CUdeviceptr>(query_grad.data()), hidden_k * sizeof(bf16_t));
+        std::vector<bool> live_rows(tokens_k, false);
+        for (u32_t segment = 0; segment != segments_k; ++segment)
+            for (u32_t token = 0; token != lengths_host[segment]; ++token)
+                live_rows[offsets_host[segment] + token] = true;
+        double states_peak = 0.0, states_worst = 0.0, query_peak = 0.0, query_worst = 0.0;
+        bool gaps_zero = true;
+        for (std::size_t index = 0; index != states_grad_host.size(); ++index) {
+            if (!live_rows[index / hidden_k]) {
+                gaps_zero = gaps_zero && states_grad_device[index] == 0.0f;
+                continue;
+            }
+            states_peak = std::max(states_peak, std::abs(states_grad_host[index]));
+            states_worst = std::max(states_worst,
+                                    std::abs(states_grad_host[index] - double(states_grad_device[index])));
+        }
+        for (u32_t channel = 0; channel != hidden_k; ++channel) {
+            query_peak = std::max(query_peak, std::abs(query_grad_host[channel]));
+            query_worst = std::max(query_worst,
+                                   std::abs(query_grad_host[channel] - double(__bfloat162float(staging[channel]))));
+        }
+        states_worst /= states_peak;
+        query_worst /= query_peak;
+        std::printf("    pool backward worst relative error: states %.3e, query %.3e\n", states_worst, query_worst);
+        // NumKong rounds P and dS to BFloat16 for its tensor-core products, and the query gradient lands in
+        // BFloat16: a few 2⁻⁹ unit roundoffs over F32 sums.
+        check(states_worst < 1e-2, "pool d(states) matches the FP64 oracle on live rows to the BFloat16 floor");
+        check(gaps_zero, "pool d(states) is exactly zero on gap rows");
+        check(query_worst < 1e-2, "pool query gradient matches the FP64 oracle to the BFloat16 floor");
     }
 
     // The quarter-precision twin: quantize the same tower and require every live vertex to stay on the

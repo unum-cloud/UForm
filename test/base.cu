@@ -743,6 +743,37 @@ int main() {
         return suite.finish();
     }
 
+    // Each tier's one cross-domain all-reduce buffer, wired here — at the composition root — and borrowed
+    // by every case's optimizer, exactly as each case reserves its window from the tier's shared domain.
+    // Its heap lives in a suite-lifetime arena visible to every device (the ranks peer-read the world sum),
+    // sized like the domain payload; the cheap tier's single-domain buffer is the zero-round identity.
+    expected<gpu_arena_t> reduce_arena = make_reduce_arena_(topology.value_.shape.gpus_per_host_domain);
+    if (!reduce_arena) {
+        suite.check(false, "tier reduce arena: {}", reduce_arena.description_);
+        return suite.finish();
+    }
+    // The suite's one telemetry ledger — armed on every channel, its device table in the same
+    // all-visible arena as the tier reduce heaps; every case's trainer and optimizer feed it, and the
+    // conformance assertions read its running statistics instead of keeping test-local bookkeeping.
+    expected<gpu_stream_t> ledger_bring_up = gpu_stream_t::make(0); // transient — orders the table's zeroing
+    if (!ledger_bring_up) {
+        suite.check(false, "ledger bring-up stream: {}", ledger_bring_up.description_);
+        return suite.finish();
+    }
+    expected<telemetry_ledger_t> ledger = telemetry_ledger_t::make(
+        reduce_arena.value_, telemetry_losses_k | telemetry_signals_k | telemetry_rounds_k, 4096u,
+        ledger_bring_up.value_);
+    if (!ledger) {
+        suite.check(false, "suite telemetry ledger: {}", ledger.description_);
+        return suite.finish();
+    }
+
+    world_health_t health;
+
+    // The capture case needs no domain, so it runs before the tiers build theirs and stays green on a
+    // world that cannot allocate one.
+    if (test_filter_accepts("capture/replay")) graph_capture(suite, health, narrow.value_, ledger.value_);
+
     // The collective surfaces are created once per width tier and threaded by reference — multicast
     // objects are a scarce fabric resource, and the self-advancing barrier rounds make one domain safe
     // for every consumer in turn. Window budget: 2 per conformance case + 8 wide cells, 19 cheap cells.
@@ -767,15 +798,6 @@ int main() {
         return suite.finish();
     }
 
-    // Each tier's one cross-domain all-reduce buffer, wired here — at the composition root — and borrowed
-    // by every case's optimizer, exactly as each case reserves its window from the tier's shared domain.
-    // Its heap lives in a suite-lifetime arena visible to every device (the ranks peer-read the world sum),
-    // sized like the domain payload; the cheap tier's single-domain buffer is the zero-round identity.
-    expected<gpu_arena_t> reduce_arena = make_reduce_arena_(topology.value_.shape.gpus_per_host_domain);
-    if (!reduce_arena) {
-        suite.check(false, "tier reduce arena: {}", reduce_arena.description_);
-        return suite.finish();
-    }
     expected<infiniband_all_reduce<f32_t>> wide_reduce = make_tier_reduce_(wide_colocated.value_, reduce_arena.value_);
     if (!wide_reduce) {
         suite.check(false, "wide-tier world all-reduce: {}", wide_reduce.description_);
@@ -788,25 +810,8 @@ int main() {
         return suite.finish();
     }
 
-    // The suite's one telemetry ledger — armed on every channel, its device table in the same
-    // all-visible arena as the tier reduce heaps; every case's trainer and optimizer feed it, and the
-    // conformance assertions read its running statistics instead of keeping test-local bookkeeping.
-    expected<gpu_stream_t> ledger_bring_up = gpu_stream_t::make(0); // transient — orders the table's zeroing
-    if (!ledger_bring_up) {
-        suite.check(false, "ledger bring-up stream: {}", ledger_bring_up.description_);
-        return suite.finish();
-    }
-    expected<telemetry_ledger_t> ledger = telemetry_ledger_t::make(
-        reduce_arena.value_, telemetry_losses_k | telemetry_signals_k | telemetry_rounds_k, 4096u,
-        ledger_bring_up.value_);
-    if (!ledger) {
-        suite.check(false, "suite telemetry ledger: {}", ledger.description_);
-        return suite.finish();
-    }
-
     tier_t const wide {topology.value_, wide_domain.value_, wide_reduce.value_, ledger.value_};
     tier_t const cheap {narrow.value_, cheap_domain.value_, cheap_reduce.value_, ledger.value_};
-    world_health_t health;
 
     // Targeted runs: UFORM_TEST_FILTER is a regular expression against each case's name (the
     // NumKong / StringZilla convention), so a wire-run question about one cell answers in a couple of
@@ -818,6 +823,5 @@ int main() {
         run_base_conformance(suite, health, "omni", test_geometry_(true), wide.topology, wide.domain, wide.world_reduce,
                              wide.ledger);
     mixture_sweep(suite, health, wide, cheap);
-    if (test_filter_accepts("capture/replay")) graph_capture(suite, health, narrow.value_, ledger.value_);
     return suite.finish();
 }

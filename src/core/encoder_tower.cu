@@ -698,7 +698,7 @@ expected_t tower_pool_t::forward(bf16r1_view_t query, bf16r2_view_t states, u32r
                                                tower_pool_scale_(), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX,
                                                reinterpret_cast<nk_bf16_t const *>(query.data()), 0, packed_.data(),
                                                pooled_.data(), hidden * sizeof(f32_t), log_sum_exp_.data(), 0,
-                                               NUMKONG_SIZE_MAX, capabilities_, stream.numkong());
+                                               NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, capabilities_, stream.numkong());
     if (status == nk_success_k)
         status = nk_cast_best(pooled_.data(), nk_f32_k, pooled.data(), nk_bf16_k, segments * hidden, capabilities_,
                               stream.numkong());
@@ -729,7 +729,7 @@ expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad
             NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, reinterpret_cast<nk_bf16_t const *>(query.data()), 0, packed_.data(),
             pooled_.data(), pooled_grad_.data(), hidden * sizeof(f32_t), log_sum_exp_.data(), query_partials_.data(),
             hidden * sizeof(f32_t), key_grad.data(), value_grad.data(), key_grad.stride_bytes(0), 0, NUMKONG_SIZE_MAX,
-            capabilities_, stream.numkong());
+            NUMKONG_NULL, 0, capabilities_, stream.numkong());
     if (status == nk_success_k)
         status = nk_each_sum_f32_best(key_grad.data(), value_grad.data(), tokens * hidden, key_grad.data(),
                                       capabilities_, stream.numkong());

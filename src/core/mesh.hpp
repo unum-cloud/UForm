@@ -219,8 +219,8 @@ struct mesh_location_t {
 
 /**
  *  @brief Discover the single-host_domain shape: all three domains coincide with the visible device
- *      count, after verifying every device supports @c multimem.* multicast and every pair is
- *      P2P-reachable — capabilities are probed and validated, never assumed.
+ *      count, after verifying every pair is P2P-reachable — capabilities are probed and validated, never
+ *      assumed. Multicast is not required: a @ref multimem_domain_t without it runs its peer-read tier.
  *
  *  Covers the common one-box world (an HGX box driven by one process); the multi-host_domain world builds
  *  on it through @ref mesh_topology_t::bootstrap . The probe sees @b only this process's devices — a wider
@@ -237,14 +237,6 @@ struct mesh_location_t {
         CUdevice device = 0;
         if (CUresult result = cuDeviceGet(&device, device_index); result != CUDA_SUCCESS)
             return expected<mesh_shape_t>::fail(result, "device handle query failed (device={})", device_index);
-        int multicast_supported = 0;
-        if (CUresult result = cuDeviceGetAttribute(&multicast_supported, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED,
-                                                   device);
-            result != CUDA_SUCCESS)
-            return expected<mesh_shape_t>::fail(result, "multicast attribute query failed (device={})", device_index);
-        if (multicast_supported == 0)
-            return expected<mesh_shape_t>::fail(status_t::shape_unsupported_k,
-                                                "device {} lacks multimem multicast support", device_index);
         for (int peer_index = 0; peer_index != device_count; ++peer_index) {
             if (peer_index == device_index) continue;
             CUdevice peer = 0;

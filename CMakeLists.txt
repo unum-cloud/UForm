@@ -135,9 +135,9 @@ set(NUMKONG_BUILD_CUDA ON)
 set(NUMKONG_CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
 set(NUMKONG_BUILD_TEST OFF)
 set(NUMKONG_BUILD_BENCH OFF)
-uform_sibling(numkong https://github.com/ashvardanian/NumKong c450acffcc001cbd10169516b79fe33f6f8ed154)
-uform_sibling(stringzilla https://github.com/ashvardanian/StringZilla 7826f358a51df3871fba5cc825ebab3e1163174a)
-uform_sibling(forkunion https://github.com/ashvardanian/ForkUnion 075d14137420f204ff175acd2d29c22e163e241c)
+uform_sibling(numkong https://github.com/ashvardanian/NumKong df1ab982a00b8aa97f39821cb5f371bd98caa43f)
+uform_sibling(stringzilla https://github.com/ashvardanian/StringZilla afac5997e3fb15fd1586eca6724f9dacea152cb0)
+uform_sibling(forkunion https://github.com/ashvardanian/ForkUnion 606eb35bad36e720116f9ab0b83299543b50c3b1)
 
 FetchContent_Declare(
     yyjson

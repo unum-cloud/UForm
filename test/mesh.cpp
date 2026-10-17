@@ -15,7 +15,7 @@
  *      - @ref world_reconciles — the substance: a lead reads a peer's facts, validates agreement, and
  *        assembles the world; a follower adopts the lead's manifest. Both are driven against a @b matching
  *        simulated peer planted with this box's real GPU identity, so agreement genuinely passes. Needs a
- *        multicast + P2P capable GPU (bootstrap front-loads `discover_mesh_shape`); a box without one SKIPs.
+ *        P2P-capable GPU set (bootstrap front-loads `discover_mesh_shape`); a box without one SKIPs.
  *
  *  The genuine multi-node happy path is @ref run_cluster_exchange , driven by
  *  `scripts/slurm/test_mesh-4-8-16.sbatch`: every rank bootstraps for real and must assemble a @b byte-identical
@@ -249,7 +249,7 @@ int main() {
         return suite.finish();
     }
 
-    // Bootstrap front-loads `discover_mesh_shape`, so the assembly tiers need a multicast + P2P GPU.
+    // Bootstrap front-loads `discover_mesh_shape`, so the assembly tiers need P2P-capable GPUs.
     auto discovered = discover_mesh_shape();
     if (discovered) {
         u32_t const local_devices = (*discovered).gpus_per_host_domain;

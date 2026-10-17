@@ -29,13 +29,13 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Image Recognition",
 ]
 # Base install = the CPU inference path: pure-Python multimodal encoders over huggingface_hub
-# weights, tokenizers, Pillow decode, and SimSIMD similarity. GPU inference and the GPU training +
+# weights, tokenizers, Pillow decode, and NumKong similarity. GPU inference and the GPU training +
 # data-tooling paths layer on through the optional-dependency groups below.
 dependencies = [
     "huggingface_hub>=0.16.4",
     "tokenizers>=0.13.3",
     "pillow",
-    "simsimd",
+    "numkong>=8.0.0rc1",
     "numpy>=1.24.0,<3.0.0",
 ]
 description = "Pocket-Sized Multimodal AI: CPU + GPU inference and GPU training for content understanding and generation"
