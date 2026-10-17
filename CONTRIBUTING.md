@@ -19,7 +19,7 @@ Configuring CMake also arms the hooks in `.githooks/`; to arm them without a bui
 
 | Path             | Contents                                                             | Namespace              |
 | :--------------- | :------------------------------------------------------------------- | :--------------------- |
-| `c/uform/*.h`    | the C ABI, with `uform.h` over one header per modality               | none                   |
+| `c/uform/*.h`    | the C ABI, with `uform.h` over the model, encode and train headers   | none                   |
 | `src/core/`      | device memory, batches, graphs, mesh, transports, cells, checkpoints | `unum::uform::core`    |
 | `src/loaders/`   | storage sessions, shard readers, and image, video and audio decode   | `unum::uform::loaders` |
 | `src/train/`     | the composition root of a training run, `base_trainer_t::run`        | `unum::uform::train`   |
