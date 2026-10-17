@@ -922,10 +922,16 @@ judge_cuda_path() {
     chevrons=$(printf '%s\n' "$added" | grep -nE '<<<.*>>>' || true)
     runtime_includes=$(printf '%s\n' "$added" | grep -nE '#include\s*<cuda_runtime(_api)?\.h>' || true)
     # A split string literal whose fragment lacks the trailing `//` pin gets restitched by clang-format
-    # into unreadable staircases; every fragment except the last must end with `" //`.
-    unpinned_splits=$(printf '%s\n' "$added" | awk '
-        prev ~ /"[[:space:]]*$/ && prev !~ /\/\/[[:space:]]*$/ && $0 ~ /^\+[[:space:]]*"/ { print NR": "prev }
-        { prev = $0 }' || true)
+    # into unreadable staircases; every fragment except the last must end with `" //`. CMake lists of quoted
+    # paths share the shape but no clang-format pass, so only C and C++ sources are judged.
+    unpinned_splits=""
+    case "$file" in
+    *.c | *.h | *.cu | *.cuh | *.cpp | *.hpp)
+        unpinned_splits=$(printf '%s\n' "$added" | awk '
+            prev ~ /"[[:space:]]*$/ && prev !~ /\/\/[[:space:]]*$/ && $0 ~ /^\+[[:space:]]*"/ { print NR": "prev }
+            { prev = $0 }' || true)
+        ;;
+    esac
     # Banned vocabulary: one word per concept — byte-granting is `allocate`, window-granting is
     # `reserve`, contiguous regions are `buffer` / `chunk` / `plane`, and the optimizer's per-weight
     # state is not a `slot`.

@@ -13,7 +13,10 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build_${presetName}",
       "cacheVariables": {
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CUDA_HOST_COMPILER": "clang++"
       }
     },
     {
@@ -22,7 +25,8 @@
       "displayName": "Debug - unoptimized host code",
       "description": "Unoptimized host code with full DWARF, every library, tool and suite.",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug"
+        "CMAKE_BUILD_TYPE": "Debug",
+        "UFORM_BUILD_CUDA": "ON"
       }
     },
     {
@@ -34,7 +38,8 @@
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
-        "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O0 -Xptxas -O0 -DNDEBUG"
+        "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O0 -Xptxas -O0 -DNDEBUG",
+        "UFORM_BUILD_CUDA": "ON"
       }
     },
     {
@@ -44,7 +49,8 @@
       "description": "Optimized, with host DWARF and -lineinfo device line tables for cuda-gdb and Nsight. The tree `.clangd` reads.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O2 -g -lineinfo -DNDEBUG"
+        "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O2 -g -lineinfo -DNDEBUG",
+        "UFORM_BUILD_CUDA": "ON"
       }
     },
     {
@@ -53,8 +59,80 @@
       "displayName": "Release - every target",
       "description": "Libraries, the trainer and the conformance suites, fully optimized.",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release"
+        "CMAKE_BUILD_TYPE": "Release",
+        "UFORM_BUILD_CUDA": "ON"
       }
+    },
+    {
+      "name": "library",
+      "hidden": true,
+      "description": "The C library alone, fully optimized, without the trainer or the conformance suites.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "UFORM_BUILD_CUDA": "OFF",
+        "UFORM_BUILD_ROCM": "OFF",
+        "UFORM_BUILD_LIB_C": "ON",
+        "UFORM_BUILD_TEST": "OFF",
+        "UFORM_BUILD_TOOLS": "OFF"
+      }
+    },
+    {
+      "name": "cpu_library",
+      "inherits": [
+        "base",
+        "library"
+      ],
+      "displayName": "CPU Library - the C library for the host alone"
+    },
+    {
+      "name": "stub_library",
+      "inherits": [
+        "base",
+        "library"
+      ],
+      "displayName": "Stub Library - the C headers over a library that reports every verb unsupported",
+      "cacheVariables": {
+        "UFORM_BUILD_LIB_C": "OFF",
+        "UFORM_BUILD_LIB_C_STUB": "ON"
+      }
+    },
+    {
+      "name": "nvidia_amd_library",
+      "inherits": [
+        "base",
+        "library"
+      ],
+      "displayName": "NVIDIA and AMD Library - the C library with both GPU residencies",
+      "description": "Clang compiles the host code of both vendors: NVCC hosts on it, and ROCm's own Clang compiles the HIP units.",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CUDA_HOST_COMPILER": "clang++",
+        "CMAKE_HIP_COMPILER": "/opt/rocm/llvm/bin/clang++",
+        "UFORM_BUILD_CUDA": "ON",
+        "UFORM_BUILD_ROCM": "ON"
+      }
+    },
+    {
+      "name": "wasm32_emscripten_release",
+      "inherits": [
+        "base",
+        "library"
+      ],
+      "displayName": "WebAssembly Emscripten Release - the C library for browsers and Node",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-emscripten.cmake",
+      "cacheVariables": {
+        "CMAKE_CROSSCOMPILING_EMULATOR": "node"
+      }
+    },
+    {
+      "name": "wasm32_wasi_release",
+      "inherits": [
+        "base",
+        "library"
+      ],
+      "displayName": "WebAssembly WASI Release - the C library for standalone runtimes",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-wasi.cmake"
     }
   ],
   "buildPresets": [
@@ -73,6 +151,26 @@
     {
       "name": "release",
       "configurePreset": "release"
+    },
+    {
+      "name": "cpu_library",
+      "configurePreset": "cpu_library"
+    },
+    {
+      "name": "stub_library",
+      "configurePreset": "stub_library"
+    },
+    {
+      "name": "nvidia_amd_library",
+      "configurePreset": "nvidia_amd_library"
+    },
+    {
+      "name": "wasm32_emscripten_release",
+      "configurePreset": "wasm32_emscripten_release"
+    },
+    {
+      "name": "wasm32_wasi_release",
+      "configurePreset": "wasm32_wasi_release"
     }
   ],
   "testPresets": [
