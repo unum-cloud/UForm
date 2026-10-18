@@ -1,37 +1,59 @@
 {
   "name": "@unum-cloud/uform",
-  "type": "module",
   "version": "4.0.0-rc.1",
   "description": "Pocket-Sized Multimodal AI for Content Understanding and Generation",
-  "dependencies": {
-    "@huggingface/hub": "^0.14.8",
-    "@xenova/transformers": "^2.17.0",
-    "node-fetch": "^3.3.2",
-    "onnxruntime-node": "^1.17.0",
-    "onnxruntime-web": "^1.17.3"
-  },
-  "devDependencies": {
-    "nodemon": "^2.0.15"
-  },
-  "scripts": {
-    "start": "node javascript/encoders.mjs",
-    "test": "node javascript/encoders_test.js"
-  },
-  "main": "javascript/index.mjs",
-  "files": [
-    "javascript/index.mjs",
-    "javascript/encoders.mjs",
-    "javascript/hub.mjs"
-  ],
-  "directories": {
-    "doc": "docs"
-  },
   "keywords": [
     "AI",
     "multimodal",
-    "content generation",
-    "huggingface"
+    "embeddings",
+    "wasm"
   ],
   "author": "Ash Vardanian, Unum Cloud",
-  "license": "Apache-2.0"
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/unum-cloud/UForm",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/unum-cloud/UForm.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "javascript/dist",
+    "javascript/README.md",
+    "prebuilds"
+  ],
+  "dependencies": {
+    "bindings": "^1.5.0",
+    "node-gyp-build": "^4.8.4"
+  },
+  "devDependencies": {
+    "@types/bindings": "^1.5.5",
+    "@types/node": "^24.3.0",
+    "cmake-js": "^8.0.0",
+    "typescript": "^5.9.2"
+  },
+  "scripts": {
+    "build-js": "tsc -p javascript/tsconfig-esm.json && tsc -p javascript/tsconfig-cjs.json && cp javascript/dist-package-esm.json javascript/dist/esm/package.json && cp javascript/dist-package-cjs.json javascript/dist/cjs/package.json",
+    "build-native": "cmake-js compile --out build_node --CDUFORM_BUILD_LIB_C=ON --CDUFORM_BUILD_LIB_NODE=ON --CDUFORM_BUILD_TEST=OFF --CDUFORM_BUILD_TOOLS=OFF --target uform_node",
+    "build-native-stub": "cmake-js compile --out build_node_stub --CDUFORM_BUILD_LIB_C=OFF --CDUFORM_BUILD_LIB_C_STUB=ON --CDUFORM_BUILD_LIB_NODE=ON --CDUFORM_BUILD_TEST=OFF --CDUFORM_BUILD_TOOLS=OFF --target uform_node && node javascript/stage-prebuild.js build_node_stub",
+    "build-wasm": "cmake --preset wasm32_emscripten_release -DUFORM_BUILD_LIB_NODE=ON && cmake --build --preset wasm32_emscripten_release --target uform_wasm && mkdir -p javascript/dist/wasm && cp build_wasm32_emscripten_release/javascript/uform.mjs build_wasm32_emscripten_release/javascript/uform.wasm javascript/dist/wasm/",
+    "prebuild": "npm run build-native && node javascript/stage-prebuild.js build_node",
+    "test": "node --test ./javascript/uform.test.js"
+  },
+  "main": "javascript/dist/cjs/uform.js",
+  "module": "javascript/dist/esm/uform.js",
+  "types": "javascript/dist/cjs/uform.d.ts",
+  "exports": {
+    ".": {
+      "types": "./javascript/dist/cjs/uform.d.ts",
+      "import": "./javascript/dist/esm/uform.js",
+      "require": "./javascript/dist/cjs/uform.js"
+    },
+    "./wasm": {
+      "types": "./javascript/dist/cjs/wasm.d.ts",
+      "import": "./javascript/dist/esm/wasm.js",
+      "require": "./javascript/dist/cjs/wasm.js"
+    }
+  }
 }
