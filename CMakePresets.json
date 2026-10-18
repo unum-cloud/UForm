@@ -122,6 +122,11 @@
       "displayName": "WebAssembly Emscripten Release - the C library for browsers and Node",
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-emscripten.cmake",
       "cacheVariables": {
+        "CMAKE_C_COMPILER": null,
+        "CMAKE_CXX_COMPILER": null,
+        "CMAKE_CUDA_HOST_COMPILER": null,
+        "NUMKONG_TARGET_ARCH": "v128",
+        "STRINGZILLA_TARGET_ARCH": "v128",
         "CMAKE_CROSSCOMPILING_EMULATOR": "node"
       }
     },
@@ -132,7 +137,14 @@
         "library"
       ],
       "displayName": "WebAssembly WASI Release - the C library for standalone runtimes",
-      "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-wasi.cmake"
+      "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-wasi.cmake",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": null,
+        "CMAKE_CXX_COMPILER": null,
+        "CMAKE_CUDA_HOST_COMPILER": null,
+        "NUMKONG_TARGET_ARCH": "v128",
+        "STRINGZILLA_TARGET_ARCH": "v128"
+      }
     }
   ],
   "buildPresets": [

@@ -1,0 +1,201 @@
+/**
+ *  @file src/encode.cpp
+ *  @author Ash Vardanian
+ *  @date October 17, 2026
+ *  @brief The verbs of @c encode.h over decoded inputs: pack each input form into the batch contract and run the
+ *      model's tower over it. The verbs decoding files live in @c encode_media.cpp.
+ *
+ *  Every verb plans its items first, so the outputs are sized before anything is decoded, then packs the slices its
+ *  progress handler asks for into one batch row of segments laid back to back, so short items cost no padding:
+ *
+ *      Verb                  One token                       Planned from
+ *      text                  one byte                        the tape alone
+ *      image pixels          one patch of the resized crop   the height and width
+ *      image                 one patch of the resized crop   the file's header
+ *      video                 one tube of patches             a demux of the container
+ *      audio samples         one frame of chunk samples      the count, resampled to the model's rate
+ *      audio                 one frame of chunk samples      a decode into the context, its silent tail dropped
+ *
+ *  Media decode on the executor's threads: its pool on the host, its decoder pool beside GPUs, and one thread of the
+ *  caller's without an executor.
+ */
+#include "encode.hpp"
+#include "media/audio.hpp"    // `resample_mono`
+#include "media/planning.hpp" // `image_patch_budget`, `image_patch_grid`
+
+using namespace unum::uform;
+
+#pragma region Packers
+
+/** UTF-8 bytes, each a token, cut at the context. */
+struct text_packer_t {
+    static constexpr modality_t modality_k = modality_t::text_k;
+    uform_tape_view_t tape;
+
+    std::size_t cell_bytes(ui::geometry_t const &) const noexcept { return sizeof(token_id_t); }
+    failure_t validate(ui::geometry_t const &) const noexcept { return {}; }
+    failure_t prepare(chunked_arena_t &, std::size_t, ui::geometry_t const &) noexcept { return {}; }
+
+    failure_t plan(std::size_t item, item_plan_t &plan, ui::geometry_t const &geometry, std::size_t) const noexcept {
+        plan.spanned = tape.offsets[item + 1] - tape.offsets[item];
+        plan.tokens = static_cast<u32_t>(plan.spanned < geometry.context ? plan.spanned : geometry.context);
+        return {};
+    }
+
+    failure_t stage(std::size_t item, item_plan_t const &plan, b8_t *cells, ui::geometry_t const &,
+                    std::size_t) const noexcept {
+        std::span<b8_t const> const bytes = entry_of(tape, item, 1);
+        token_id_t *const tokens = static_cast<token_id_t *>(static_cast<void *>(cells));
+        for (u32_t token = 0; token != plan.tokens; ++token) tokens[token] = static_cast<token_id_t>(bytes[token]);
+        return {};
+    }
+};
+
+/** Interleaved RGB rows, cropped to their patch grid's aspect and resized on the host. */
+struct pixels_packer_t {
+    static constexpr modality_t modality_k = modality_t::image_k;
+    uform_tape_view_t tape;
+    std::size_t count;
+    uint32_t const *heights;
+    uint32_t const *widths;
+
+    /** One RGBA copy of the largest item per thread, which the resize reads. */
+    pixel_t *expanded = nullptr;
+    std::size_t expanded_stride = 0;
+
+    std::size_t cell_bytes(ui::geometry_t const &geometry) const noexcept {
+        return std::size_t {geometry.image_patch_side} * geometry.image_patch_side * geometry.image_channels;
+    }
+
+    failure_t validate(ui::geometry_t const &geometry) const noexcept {
+        if (failure_t const refused = validate_images(geometry); refused.message) return refused;
+        if (count && (!heights || !widths))
+            return {uform_status_invalid_argument_k, "Every item needs its height and width"};
+        for (std::size_t item = 0; item != count; ++item)
+            if (entry_of(tape, item, 1).size() != std::size_t {heights[item]} * widths[item] * 3)
+                return {uform_status_shape_mismatch_k, "An item's bytes disagree with its height and width"};
+        return {};
+    }
+
+    failure_t prepare(chunked_arena_t &staging, std::size_t threads, ui::geometry_t const &) noexcept {
+        for (std::size_t item = 0; item != count; ++item) {
+            std::size_t const bytes = std::size_t {heights[item]} * widths[item] * um::image_channels_k;
+            expanded_stride = bytes > expanded_stride ? bytes : expanded_stride;
+        }
+        if (!expanded_stride) return {};
+        expanded = staging.allocate<pixel_t>(expanded_stride * threads);
+        if (!expanded) return {uform_status_out_of_memory_k, "Failed to allocate the pixel staging"};
+        return {};
+    }
+
+    failure_t plan(std::size_t item, item_plan_t &plan, ui::geometry_t const &geometry, std::size_t) const noexcept {
+        um::image_extent_t const native {widths[item], heights[item]};
+        if (!native.width || !native.height) return {};
+        u32_t const budget = um::image_patch_budget(native, geometry.image_patch_side, geometry.context,
+                                                    geometry.context);
+        um::patch_grid_t const grid = um::image_patch_grid(budget, native);
+        plan.tokens = static_cast<u32_t>(grid.rows) * grid.columns;
+        plan.spanned = native_patches(native, geometry.image_patch_side);
+        plan.shape[0] = grid.rows, plan.shape[1] = grid.columns;
+        return {};
+    }
+
+    failure_t stage(std::size_t item, item_plan_t const &plan, b8_t *cells, ui::geometry_t const &geometry,
+                    std::size_t thread) const noexcept {
+        if (!plan.tokens) return {};
+        std::size_t const height = heights[item], width = widths[item], pixels = height * width;
+        std::span<b8_t const> const rgb = entry_of(tape, item, 1);
+        pixel_t *const rgba = expanded + thread * expanded_stride;
+        for (std::size_t pixel = 0; pixel != pixels; ++pixel) {
+            for (std::size_t channel = 0; channel != 3; ++channel)
+                rgba[pixel * 4 + channel] = static_cast<pixel_t>(rgb[pixel * 3 + channel]);
+            rgba[pixel * 4 + 3] = 255;
+        }
+        std::size_t const side = geometry.image_patch_side;
+        core::expected_t const resized = um::resize_image(
+            {rgba, {height, width, um::image_channels_k}},
+            {static_cast<pixel_t *>(static_cast<void *>(cells)), {plan.shape[0], plan.shape[1], side, side, 4}});
+        if (!resized) return {media_status_of(resized.status_), "An image could not be resized"};
+        return {};
+    }
+};
+
+/** Mono Float32 samples, resampled to the model's rate and cut into frames. */
+struct samples_packer_t {
+    static constexpr modality_t modality_k = modality_t::audio_k;
+    uform_tape_view_t tape;
+    u32_t sample_rate;
+
+    std::size_t cell_bytes(ui::geometry_t const &geometry) const noexcept {
+        return std::size_t {geometry.audio_chunk_samples} * sizeof(f32_t);
+    }
+
+    failure_t validate(ui::geometry_t const &geometry) const noexcept {
+        if (failure_t const refused = validate_audio(geometry); refused.message) return refused;
+        if (!sample_rate) return {uform_status_invalid_argument_k, "The sample rate must not be zero"};
+        return {};
+    }
+
+    failure_t prepare(chunked_arena_t &, std::size_t, ui::geometry_t const &) noexcept { return {}; }
+
+    /** Samples item @p item spans at the model's rate of @p geometry . */
+    std::size_t resampled(std::size_t item, ui::geometry_t const &geometry) const noexcept {
+        std::size_t const samples = tape.offsets[item + 1] - tape.offsets[item];
+        if (sample_rate == geometry.audio_sample_rate) return samples;
+        return core::divide_round_up(samples * geometry.audio_sample_rate, sample_rate);
+    }
+
+    failure_t plan(std::size_t item, item_plan_t &plan, ui::geometry_t const &geometry, std::size_t) const noexcept {
+        plan.spanned = core::divide_round_up(resampled(item, geometry), geometry.audio_chunk_samples);
+        plan.tokens = static_cast<u32_t>(plan.spanned < geometry.context ? plan.spanned : geometry.context);
+        return {};
+    }
+
+    failure_t stage(std::size_t item, item_plan_t const &plan, b8_t *cells, ui::geometry_t const &geometry,
+                    std::size_t) const noexcept {
+        f32_t *const frames = static_cast<f32_t *>(static_cast<void *>(cells));
+        std::size_t const capacity = std::size_t {plan.tokens} * geometry.audio_chunk_samples;
+        std::size_t const total = resampled(item, geometry), kept = total < capacity ? total : capacity;
+        std::span<b8_t const> const bytes = entry_of(tape, item, sizeof(f32_t));
+        if (sample_rate == geometry.audio_sample_rate) std::memcpy(frames, bytes.data(), kept * sizeof(f32_t));
+        else if (kept) {
+            core::expected_t const resampled_into = um::resample_mono(
+                {static_cast<f32_t const *>(static_cast<void const *>(bytes.data())), bytes.size() / sizeof(f32_t)},
+                sample_rate, geometry.audio_sample_rate, {frames, kept});
+            if (!resampled_into) return {media_status_of(resampled_into.status_), "A recording could not be resampled"};
+        }
+        std::memset(frames + kept, 0, (capacity - kept) * sizeof(f32_t));
+        return {};
+    }
+};
+
+#pragma endregion Packers
+
+extern "C" {
+
+UFORM_EXPORT void uform_text_encode(uform_text_encode_t *arguments) {
+    if (submitted<uform_text_encode>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    uform_tape_view_t const tape = arguments->texts;
+    text_packer_t packer {tape};
+    encode_call(*arguments, packer, tape, uform_scalar_u8_k, {tape.data, tape.offsets}, outcome);
+}
+
+UFORM_EXPORT void uform_image_encode_pixels(uform_image_encode_pixels_t *arguments) {
+    if (submitted<uform_image_encode_pixels>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    uform_tape_view_t const tape = arguments->pixels;
+    pixels_packer_t packer {tape, arguments->count, arguments->heights, arguments->widths};
+    encode_call(*arguments, packer, tape, uform_scalar_u8_k,
+                {tape.data, tape.offsets, arguments->heights, arguments->widths}, outcome);
+}
+
+UFORM_EXPORT void uform_audio_encode_samples(uform_audio_encode_samples_t *arguments) {
+    if (submitted<uform_audio_encode_samples>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    uform_tape_view_t const tape = arguments->samples;
+    samples_packer_t packer {tape, arguments->sample_rate};
+    encode_call(*arguments, packer, tape, uform_scalar_f32_k, {tape.data, tape.offsets}, outcome);
+}
+
+} // extern "C"

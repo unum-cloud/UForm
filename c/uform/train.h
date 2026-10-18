@@ -36,9 +36,14 @@
  *  library rebases them onto the global axis after the shuffle.
  *
  *  @code{.c}
+ *  uform_mesh_t mesh = NULL;
+ *  uform_mesh_bootstrap(&(uform_mesh_bootstrap_t){.mesh = &mesh, .executor = executor, .outcome = &outcome,
+ *      .options = {.host_domain_index = node, .host_domain_count = nodes, .directory = {exchange, exchange_length},
+ *                  .job = {job, job_length}}});
+ *
  *  uform_trainer_t trainer = NULL;
  *  uform_trainer_init_vram(&(uform_trainer_init_vram_t){
- *      .trainer = &trainer, .executor = executor, .outcome = &outcome, .depth = 12, .hidden = 512,
+ *      .trainer = &trainer, .executor = executor, .outcome = &outcome, .mesh = mesh, .depth = 12, .hidden = 512,
  *      .batch = {.max_rows_per_device = 64, .max_segments_per_device = 256, .max_columns_per_row = 1024,
  *                .max_bags_per_device = 128, .image = {.patch_side = 16}},
  *      .objective = uform_objective_joint_k, .schedule = {.steps = 100000}, .seed = 42});
@@ -55,6 +60,7 @@
  *  uform_trainer_save(&(uform_trainer_save_t){
  *      .trainer = trainer, .executor = executor, .outcome = &outcome, .path = {path, path_length}});
  *  uform_trainer_free(trainer);
+ *  uform_mesh_free(mesh);
  *  @endcode
  */
 #ifndef UNUM_UFORM_TRAIN_H
@@ -163,6 +169,12 @@ typedef enum uform_objective_t {
     uform_objective_joint_k = 2,
 } uform_objective_t;
 
+/** The canonical spelling of an objective, as @c uform_objective_joint_k spells "joint". */
+UFORM_EXPORT char const* uform_objective_name(uform_objective_t objective);
+
+/** Reads an objective back; @c uform_objective_masked_k when unrecognized. */
+UFORM_EXPORT uform_objective_t uform_objective_from_name(uform_bytes_view_t name);
+
 /** How the masked objective corrupts a batch and weighs its heads; every zero derives the default named. */
 typedef struct uform_masking_t {
 
@@ -209,6 +221,12 @@ typedef enum uform_negatives_t {
     /** Repel edges alone. */
     uform_negatives_named_k = 1,
 } uform_negatives_t;
+
+/** The canonical spelling of a negatives policy, as @c uform_negatives_named_k spells "named". */
+UFORM_EXPORT char const* uform_negatives_name(uform_negatives_t negatives);
+
+/** Reads a negatives policy back; @c uform_negatives_ambient_k when unrecognized. */
+UFORM_EXPORT uform_negatives_t uform_negatives_from_name(uform_bytes_view_t name);
 
 /** How the contrastive loss scores the pooled embeddings; every zero derives the default named. */
 typedef struct uform_contrastive_t {
@@ -277,8 +295,97 @@ typedef struct uform_mesh_options_t {
     double timeout_seconds;
 } uform_mesh_options_t;
 
-/** A training run: the tower replicas, gradients, optimizer moments, heads, temperatures and collectives
- *  on the executor's devices. */
+/**
+ *  @brief One process's place among the processes of a run: the topology every process agreed on at
+ *      bootstrap, and the InfiniBand domain joining its NVLink domains.
+ *
+ *  The process-wide half of a run's transport, made once and borrowed by every trainer, so no consumer wires
+ *  its own adapters. The NVLink multicast domain is not here: its size is the sum of what its consumers
+ *  reserve, so each trainer makes its own over the mesh's devices. Bootstrap is a one-time rendezvous through
+ *  files in @c directory; after it, processes talk only over NVLink and InfiniBand.
+ */
+typedef struct uform_mesh_handle_t* uform_mesh_t;
+
+/** The arguments of @c uform_mesh_bootstrap. */
+typedef struct uform_mesh_bootstrap_t {
+
+    /** Output for the new mesh, written once every process has joined. */
+    uform_mesh_t* mesh;
+
+    /** A VRAM executor whose devices are this process's members of the mesh. */
+    uform_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c uform_status_deferred_k. */
+    uform_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. Peers wait for each other either way. */
+    uform_completion_t completion;
+
+    /** Where this process sits and how the processes meet. */
+    uform_mesh_options_t options;
+} uform_mesh_bootstrap_t;
+
+/** Joins this process to the run's mesh; every process of the run calls it with the same count, multicast
+ *  extent, directory and job. */
+UFORM_EXPORT void uform_mesh_bootstrap(uform_mesh_bootstrap_t* arguments);
+
+/** How a mesh's NVLink domains reduce. */
+typedef enum uform_multimem_tier_t {
+
+    /** The NVLink switch reduces through multicast memory. */
+    uform_multimem_tier_switch_reduced_k = 0,
+
+    /** Every member reads its peers in a fixed order, where multicast is absent; bit-identical results. */
+    uform_multimem_tier_peer_read_k = 1,
+} uform_multimem_tier_t;
+
+/** What a mesh reports about itself. */
+typedef struct uform_mesh_description_t {
+
+    /** GPUs one process drives. */
+    size_t gpus_per_host_domain;
+
+    /** GPUs one NVLink domain spans. */
+    size_t gpus_per_multimem_domain;
+
+    /** GPUs in the whole run. */
+    size_t gpus_per_colocated_domain;
+
+    /** This process's index among the run's processes. */
+    size_t host_domain_index;
+
+    /** The run-wide index of this process's first GPU, where its share of a sharded dataset begins. */
+    size_t first_gpu_index;
+
+    /** How its NVLink domains reduce. */
+    uform_multimem_tier_t multimem_tier;
+} uform_mesh_description_t;
+
+/** The arguments of @c uform_mesh_describe. */
+typedef struct uform_mesh_describe_t {
+
+    /** The mesh to be described. */
+    uform_mesh_t mesh;
+
+    /** Output for the outcome, final once its status leaves @c uform_status_deferred_k. */
+    uform_outcome_t* outcome;
+
+    /** Output, filled whole. */
+    uform_mesh_description_t* description;
+} uform_mesh_describe_t;
+
+/** Reports a mesh's shape and this process's place in it. */
+UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t* arguments);
+
+/** Leaves the mesh; @c NULL is safe, and it cannot fail, so takes no outcome. Every trainer borrowing it must
+ *  be freed first. */
+UFORM_EXPORT void uform_mesh_free(uform_mesh_t mesh);
+
+/** The canonical spelling of a multimem tier, as @c uform_multimem_tier_peer_read_k spells "peer-read". */
+UFORM_EXPORT char const* uform_multimem_tier_name(uform_multimem_tier_t tier);
+
+/** A training run: the tower replicas, gradients, optimizer moments, heads, temperatures and the collectives
+ *  sized by them, on the executor's devices. */
 typedef struct uform_trainer_handle_t* uform_trainer_t;
 
 /** The arguments of @c uform_trainer_init_vram. */
@@ -321,8 +428,9 @@ typedef struct uform_trainer_init_vram_t {
     /** The learning-rate schedule. */
     uform_schedule_t schedule;
 
-    /** This process's place in the run; zeroed for one process. */
-    uform_mesh_options_t mesh;
+    /** The @b optional mesh, borrowed until the trainer is freed and made over this same executor; @c NULL
+     *  runs this process alone. */
+    uform_mesh_t mesh;
 
     /** The base of every keyed draw: initialization, corruption and the shuffle. */
     uint64_t seed;
@@ -331,8 +439,8 @@ typedef struct uform_trainer_init_vram_t {
     uform_progress_t progress;
 } uform_trainer_init_vram_t;
 
-/** Bootstraps the mesh, builds one replica per device, and starts or resumes the run; every process of the
- *  run calls it with the same geometry, objective and seed. */
+/** Builds one replica per device, the NVLink domain its consumers reserve over the mesh, and starts or
+ *  resumes the run; every process of the run calls it with the same geometry, objective and seed. */
 UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t* arguments);
 
 /** One edge set over a step's items, as compressed sparse rows. */

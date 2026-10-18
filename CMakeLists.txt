@@ -12,7 +12,7 @@
 #   sudo apt install -y \
 #     libcudnn9-dev-cuda-13 libnpp-dev-13-3 libnvjpeg-dev-13-3 libcufile-dev-13-3 \
 #     libavformat-dev libavcodec-dev libavutil-dev libswresample-dev \
-#     libjpeg-turbo8-dev libpng-dev libwebp-dev \
+#     libjpeg-turbo8-dev libturbojpeg0-dev libpng-dev libwebp-dev \
 #     libibverbs-dev ccache
 #
 # Prerequisites — RAPIDS cuDF (pip wheel into a repo-local venv).
@@ -278,8 +278,9 @@ if (UFORM_BUILD_CUDA)
     FetchContent_MakeAvailable(ffnvcodec)
 endif ()
 
-# `ctest` reads the tests from the build root, so testing is enabled here for every subdirectory that adds some.
-if (UFORM_BUILD_TEST)
+# `ctest` reads the tests from the build root, so testing is enabled here for every subdirectory that adds some: the
+# conformance suites, and the C test beside the C libraries.
+if (UFORM_BUILD_TEST OR UFORM_BUILD_LIB_C)
     enable_testing()
 endif ()
 

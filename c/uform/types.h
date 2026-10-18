@@ -493,19 +493,15 @@ typedef struct uform_executor_for_vram_t {
 
     /** Deferred calls it tracks at once, sizing its deferred table; zero takes a default. */
     size_t deferred_limit;
-
-    /** The @b optional ForkUnion @c fu_pool_t for the share of decoding that needs the host - container
-     *  demux, PNG and WebP, audio; @c NULL runs that share on one host thread of the executor's own. Unlike
-     *  USearch's VRAM executor, which never decodes, so the field is deliberate, not drift. */
-    void* pool;
 } uform_executor_for_vram_t;
 
 /**
  *  @brief Opens one submission stream on every named device, or borrows the caller's, all of them driven by
  *      whichever host thread submits.
  *
- *  Text and JPEG images never leave the device; the rest of decoding runs on the borrowed pool or the
- *  executor's own host thread. A GPU executor never changes process-wide device flags.
+ *  Text and JPEG images never leave the device; the rest of decoding - container demux, PNG and WebP, audio,
+ *  and every modality on AMD - runs on host threads the executor spawns beside its streams, 7/8 of the cores
+ *  local to its devices. A GPU executor never changes process-wide device flags.
  */
 UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t* arguments);
 

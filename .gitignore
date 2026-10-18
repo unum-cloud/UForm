@@ -1,6 +1,8 @@
 # Build outputs
 /build*/
 /dist/
+/javascript/dist/
+/prebuilds/
 .build
 
 # CUDA / profiling / crashes
