@@ -7,21 +7,32 @@ on:
     branches: ["main-dev"]
 
 env:
-  BUILD_TYPE: Release
   GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
   PYTHONUTF8: 1
+  PYTHONFAULTHANDLER: 1
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: 22
+  EMSCRIPTEN_VERSION: 6.0.9
+  WASI_SDK_VERSION: "34"
+  WASMTIME_VERSION: v48.0.2
+  CUDA_VERSION: "13-4"
+  ROCM_VERSION: 7.2.4
+  # The host codecs the engine decodes images, video and audio with; WebAssembly builds take decoded media instead.
+  UBUNTU_CODECS: >-
+    libjpeg-turbo8-dev libpng-dev libwebp-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
+    libswscale-dev
+  MACOS_CODECS: jpeg-turbo libpng webp ffmpeg
 
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
   contents: read
 
 jobs:
   versioning:
     name: Update Version
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -33,13 +44,14 @@ jobs:
           update-version-in: |
             package.json:"version": "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
             CITATION.cff:^version: (\d+\.\d+\.\d+(?:-rc\.\d+)?)
-            pyproject.toml:^version = "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
             Cargo.toml:^version = "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
+            javascript/uform.test.js:version\(\), "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
+            src_stub/types.cpp:return "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
           dry-run: "true"
 
   lint:
     name: Lint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -48,7 +60,7 @@ jobs:
       - name: Set Up Python
         uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
       - name: Install Linters
         run: |
           python -m pip install --upgrade pip
@@ -62,50 +74,239 @@ jobs:
 
   test_data_scripts:
     name: Test Data Scripts
-    runs-on: ubuntu-latest
-
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-      - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/checkout@v7
+      - name: Set Up Python
+        uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
-
-      - name: Install dependencies
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install --group test
+      - name: Test Data Scripts
+        run: python -X faulthandler -m pytest -x scripts/data
 
-      - name: Test with PyTest
-        run: python -X faulthandler -m pytest -x
-
-  # Returns once the binding sits on the C ABI in c/uform/.
-  test_javascript:
-    name: Test JavaScript
-    if: ${{ false }}
-    runs-on: ubuntu-latest
-
+  test_ubuntu_cpu:
+    name: Test C and Python on Ubuntu with the CPU library
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/checkout@v7
+      - name: Install Codecs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build $UBUNTU_CODECS
+
+      # The suites write the tiny checkpoint as a fixture, which the C test and the inference parity test load.
+      - name: Build C
+        run: |
+          cmake --preset cpu_library -D UFORM_BUILD_TEST=ON
+          cmake --build --preset cpu_library
+      - name: Test C
+        run: ctest --test-dir build_cpu_library --output-on-failure
+
+      - name: Set Up Python
+        uses: actions/setup-python@v7
         with:
-          node-version: 20
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Build Python
+        env:
+          CC: clang
+          CXX: clang++
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --group test .
+      - name: Test Python
+        env:
+          UFORM_TEST_CHECKPOINT: ${{ github.workspace }}/build_cpu_library/tiny.safetensors
+        run: python -X faulthandler -m pytest -x test/python
+
+  test_rust:
+    name: Test Rust on Ubuntu
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Codecs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build $UBUNTU_CODECS
+      # `rust-version = "1.100"` is ahead of stable until 1.100 ships.
+      - name: Set Up Rust
+        run: |
+          rustup toolchain install beta --profile minimal --component clippy
+          rustup default beta
+          rustc -vV
+      - name: Lint Rust
+        run: cargo clippy --all-targets --features stub -- -D warnings
+      - name: Build Rust over the Engine
+        run: cargo test --no-run
+      - name: Test Rust over the Stub
+        run: cargo test --features stub
+
+  test_javascript:
+    name: Test JavaScript on Ubuntu
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Codecs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build $UBUNTU_CODECS
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
       - name: Install Dependencies
-        run: npm install
+        run: npm install --ignore-scripts
+      - name: Build the Addon over the Engine
+        run: npm run build-native
+      # The suite asserts the stub's geometry, so it loads the stub's addon from `prebuilds/`.
+      - name: Build the Addon over the Stub
+        run: npm run build-native-stub
+      - name: Build JavaScript
+        run: npm run build-js
       - name: Test JavaScript
         run: npm test
 
-  test_swift:
-    name: Test Swift
-    runs-on: macos-14
-
+  test_swift_macos:
+    name: Test Swift on macOS
+    runs-on: macos-26
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-      - name: Build
-        run: swift build
-      - name: Run tests
-        run: swift test
+        uses: actions/checkout@v7
+      - name: Build the Stub Library
+        run: |
+          cmake --preset stub_library
+          cmake --build --preset stub_library --target uform_static_stub
+      - name: Test Swift
+        run: swift test -Xlinker -L${{ github.workspace }}/build_stub_library/stub
+
+  test_swift_ubuntu:
+    name: Test Swift on Ubuntu
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Build the Stub Library
+        run: |
+          cmake --preset stub_library
+          cmake --build --preset stub_library --target uform_static_stub
+      - name: Test Swift
+        run: swift test -Xlinker -L${{ github.workspace }}/build_stub_library/stub
+
+  test_c_macos:
+    name: Test C on macOS
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Codecs
+        run: brew install ninja $MACOS_CODECS
+      - name: Build C
+        run: |
+          cmake --preset cpu_library -D UFORM_BUILD_TEST=ON \
+            -D CMAKE_PREFIX_PATH="$(brew --prefix);$(brew --prefix jpeg-turbo)"
+          cmake --build --preset cpu_library
+      - name: Test C
+        run: ctest --test-dir build_cpu_library --output-on-failure
+
+  test_wasm_node:
+    name: Test WASM under Node
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set Up Emscripten
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSCRIPTEN_VERSION }}
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # The preset runs every test under Node, the C test over the tiny checkpoint the suites write.
+      - name: Build and Test C
+        run: |
+          cmake --preset wasm32_emscripten_release -D UFORM_BUILD_TEST=ON
+          cmake --build --preset wasm32_emscripten_release
+          ctest --test-dir build_wasm32_emscripten_release --output-on-failure
+
+      # The JavaScript suite asserts the stub's geometry, so its module and its addon both link the stub.
+      - name: Build the WASM Module over the Stub
+        run: |
+          cmake --preset wasm32_emscripten_release -B build_wasm32_emscripten_stub \
+            -D UFORM_BUILD_LIB_C=OFF -D UFORM_BUILD_LIB_C_STUB=ON -D UFORM_BUILD_LIB_NODE=ON
+          cmake --build build_wasm32_emscripten_stub --target uform_wasm
+      - name: Build JavaScript
+        run: |
+          npm install --ignore-scripts
+          npm run build-native-stub
+          npm run build-js
+          mkdir -p javascript/dist/wasm
+          cp build_wasm32_emscripten_stub/javascript/uform.mjs build_wasm32_emscripten_stub/javascript/uform.wasm \
+            javascript/dist/wasm/
+      - name: Test JavaScript over WASM
+        run: npm test
+
+  test_wasm_wasmtime:
+    name: Test WASM under Wasmtime
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set Up WASI SDK and Wasmtime
+        run: |
+          curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz" \
+            | tar xz -C "$HOME"
+          echo "WASI_SDK_PATH=$HOME/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux" >> "$GITHUB_ENV"
+          curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version "$WASMTIME_VERSION"
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+      - name: Build and Test C
+        run: |
+          cmake --preset wasm32_wasi_release -D UFORM_BUILD_TEST=ON
+          cmake --build --preset wasm32_wasi_release
+          ctest --test-dir build_wasm32_wasi_release --output-on-failure
+
+  # Compile-only: no hosted runner carries a GPU, so this proves both residencies, the trainer and the mesh build.
+  build_gpu_libraries:
+    name: Build NVIDIA and AMD libraries
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Free Disk Space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+      - name: Install CUDA, cuDNN and the Codecs
+        run: |
+          curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          sudo apt-get update
+          sudo apt-get install -y ninja-build libibverbs-dev $UBUNTU_CODECS \
+            cuda-minimal-build-"$CUDA_VERSION" cuda-driver-dev-"$CUDA_VERSION" cuda-nvrtc-dev-"$CUDA_VERSION" \
+            cuda-nvtx-"$CUDA_VERSION" libcufile-dev-"$CUDA_VERSION" libnvjpeg-dev-"$CUDA_VERSION" libnpp-dev-"$CUDA_VERSION" \
+            libcudnn9-dev-cuda-13 libnvidia-decode-580
+          echo "/usr/local/cuda-${CUDA_VERSION/-/.}/bin" >> "$GITHUB_PATH"
+      - name: Install ROCm
+        run: |
+          sudo mkdir -p /etc/apt/keyrings
+          curl -sSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
+          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${ROCM_VERSION} noble main" \
+            | sudo tee /etc/apt/sources.list.d/rocm.list
+          sudo apt-get update
+          sudo apt-get install -y rocm-core rocm-llvm rocm-device-libs rocm-cmake hipcc hip-dev hip-runtime-amd
+      # The loaders read Parquet through libcudf, which ships as a wheel that CMake finds in the repository's `.venv`.
+      - name: Install libcudf
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --extra-index-url https://pypi.nvidia.com libcudf-cu13
+      - name: Build Libraries and the Trainer
+        run: |
+          cmake --preset nvidia_amd_library -D UFORM_BUILD_TOOLS=ON -D CMAKE_HIP_ARCHITECTURES=gfx942 \
+            -D CMAKE_PREFIX_PATH=/opt/rocm
+          cmake --build --preset nvidia_amd_library
