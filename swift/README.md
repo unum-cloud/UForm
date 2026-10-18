@@ -1,99 +1,220 @@
-# UForm Swift SDK
+# UForm for Swift
 
-UForm offers first-party support for Swift.
-To get started, add UForm to your project using Swift Package Manager.
+The Swift package binds the C ABI in `c/uform/` through `UFormC`, a target exposing its headers, and links the `libuform_static` engine CMake builds.
+It requires Swift 6.2 or newer, on macOS 15, iOS 18, tvOS 18, watchOS 11, visionOS 2, or Linux.
+Models are tokenizer-free, so the package has no dependencies beyond the C library: text crosses as UTF-8 bytes, media as encoded files or decoded samples.
 
-```bash
-swift package init --type executable
-swift package add uform
+## Installation
+
+```swift
+dependencies: [
+    .package(url: "https://github.com/unum-cloud/UForm", .upToNextMajor(from: "4.0.0"))
+]
 ```
 
-Then, import UForm in your Swift code:
+The package compiles the Swift surface only.
+The engine itself is `libuform_static`, built by CMake and linked by the package, so point the linker at the build directory or install the library system-wide.
+
+```sh
+cmake --preset cpu_library
+cmake --build --preset cpu_library --target uform_static
+swift build -Xlinker -Lbuild_cpu_library
+```
+
+The test suite runs in seconds against the stub library, which answers every verb with deterministic rows of the right shape:
+
+```sh
+cmake --preset stub_library
+cmake --build --preset stub_library --target uform_static_stub
+swift test -Xlinker -Lbuild_stub_library/stub
+```
+
+## Quickstart
 
 ```swift
 import UForm
+
+let executor = try Executor.forRam()
+let arena = try Arena(on: executor)                                  // where the outputs land
+let model = try Model.loadRam(path: "model.safetensors")
+let encoded = try model.on(executor).textEncode(["A blue house"], outputs: .embeddings, arena: arena)
+let embedding = Array(encoded.embeddings![0])                        // [Float], the model's dimensions wide
 ```
 
-## Embeddings
+## Receivers & Deferred Calls
 
-### Text Embeddings
+The receiver chooses where a verb runs and how it completes, and the verb stays the same.
+Called on the model, a verb runs on the calling thread; on `model.on(executor)` it blocks on that executor, after every call submitted there before it; on `model.deferred(executor)` it submits there and answers a `Deferred` at once.
 
 ```swift
-let textModel = try await TextEncoder(
-    modelName: "unum-cloud/uform3-image-text-english-small",
-    computeUnits: .cpuAndNeuralEngine
-)
-let text = "A group of friends enjoy a barbecue on a sandy beach, with one person grilling over a large black grill, while the other sits nearby, laughing and enjoying the camaraderie."
-let textEmbedding: Embedding = try textModel.encode(text)
-let textVector: [Float32] = textEmbedding.asFloats()
+let here = try model.textEncode(texts, arena: arena)                  // the calling thread
+let blocking = try model.on(executor).textEncode(texts, arena: arena) // blocking, on the executor
+let call = try model.deferred(executor).imageEncode(files, arena: arena) // Deferred<Encoded>
+let images = try await call.value  // or: try call.wait()
 ```
 
-### Image Embeddings
+A `Deferred` owns its outcome, its outputs and copies of its inputs until the call is final, so the caller's arrays may go at once.
+It borrows the model, the executor and the arena as a blocking call does, since releasing any of them waits for the calls naming it.
+`status` reads `deferred` until then, through `uform_outcome_status`, and `wait()` blocks through `uform_outcome_wait` and answers the result or throws the failure, the same every time it is asked.
+`value` waits on a Dispatch thread and then reads the result in the caller's isolation, so an `async` caller suspends rather than blocks.
+Releasing an unfinished one waits for it first.
 
 ```swift
-let imageModel = try await ImageEncoder(
-    modelName: "unum-cloud/uform3-image-text-english-small",
-    computeUnits: .cpuAndNeuralEngine
-)
-let imageURL = "https://github.com/ashvardanian/ashvardanian/blob/master/demos/bbq-on-beach.jpg?raw=true"
-guard let url = URL(string: imageURL),
-    let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil),
-    let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, nil) {
-    throw Exception("Could not load image from URL: \(imageURL)")
+let call = try model.deferred(executor).audioEncode(recordings, arena: arena)
+if call.status == .deferred {
+    // other work
 }
-
-var imageEmbedding: Embedding = try imageModel.encode(cgImage)
-var imageVector: [Float32] = embedding.asFloats()
+let encoded = try await call.value  // or: try call.wait()
 ```
 
-### Choosing Target Device
+A failure this binding catches before the call crosses, like heights and widths that do not name one per image, throws at submission, and one the library catches arrives through `status` and `wait`.
+A submission finding the executor's deferred table full, sized by `deferredLimit`, finishes at once with `contended`.
 
-Apple chips provide several functional units capable of high-throughput matrix multiplication and AI inference.
-Those `computeUnits` include the CPU, GPU, and Neural Engine.
-For maximum compatibility, the `.all` option is used by default.
-Sadly, Apple's scheduler is not always optimal, and it might be beneficial to specify the target device explicitly, especially if the models are pre-compiled for the Apple Neural Engine, as it may yield significant performance gains.
+## Executors
 
-| Model               | GPU Text E. | ANE Text E. | GPU Image E. | ANE Image E. |
-| :------------------ | ----------: | ----------: | -----------: | -----------: |
-| `english-small`     | 2.53 ms     | 0.53 ms     | 6.57 ms      | 1.23 ms      |
-| `english-base`      | 2.54 ms     | 0.61 ms     | 18.90 ms     | 3.79 ms      |
-| `english-large`     | 2.30 ms     | 0.61 ms     | 79.68 ms     | 20.94 ms     |
-| `multilingual-base` | 2.34 ms     | 0.50 ms     | 18.98 ms     | 3.77 ms      |
-
-> On Apple M4 iPad, running iOS 18.2.
-> Batch size is 1, and the model is pre-loaded into memory.
-> The original encoders use `f32` single-precision numbers for maximum compatibility, and mostly rely on __GPU__ for computation.
-> The quantized encoders use a mixture of `i8`, `f16`, and `f32` numbers for maximum performance, and mostly rely on the Apple Neural Engine (__ANE__) for computation.
-> The median latency is reported.
-
-### Computing Distances
-
-There are several ways to compute distances between embeddings, once you have them.
-Naive Swift code might look like this:
+A model says where its weights live; an `Executor` says who runs the calls on them.
+One executor serves any number of models of its residency, so several models share one machine's cores or devices.
 
 ```swift
-func cosineSimilarity(_ a: [Float32], _ b: [Float32]) -> Float32 {
-    let dotProduct = zip(a, b).map(*).reduce(0, +)
-    let normA = sqrt(a.map { $0 * $0 }.reduce(0, +))
-    let normB = sqrt(b.map { $0 * $0 }.reduce(0, +))
-    return dotProduct / (normA * normB)
+let hostThreads = try Executor.forRam(memoryDomains: [0, 1], threads: 0, deferredLimit: 0)
+let deviceStreams = try Executor.forVram(devices: [0, 1], streams: nil, scratchLimit: 1 << 30)
+try hostThreads.drain(mood: .parked)
+```
+
+Each factory takes every argument its C constructor has, and only those.
+A thread count of zero takes 7/8 of the cores the memory domains carry, and `forVram` takes no thread count at all, since the submitting thread drives one stream per device.
+`Executor.onPool(memoryDomains:pool:deferredLimit:)` mirrors the C verb that borrows a ForkUnion pool, and reports `unsupported` until the library wires borrowed pools.
+`drain(mood:)` waits for the executor's earlier calls and picks whether its threads park or spin once idle.
+
+## Arenas
+
+Every output whose length scales with the call - pooled embeddings, per-token states and their offsets - lands in an `Arena` you pass, and the verb answers views over it without copying.
+There is one verb per operation: no allocating twin, no caller buffers, and no default arena.
+`Arena(on: executor)` places it where that executor computes, decided once, and `Arena()` makes host pages for the calling thread.
+Each call rewinds its arena, so the previous call's views die and a steady loop allocates once it reaches its high-water mark.
+Reading a stale view traps, as an out-of-bounds index does; to keep a result past the next call, pass that call another arena.
+An arena serves one call at a time, so each deferred call needs its own, and a call naming an arena another call holds finishes `contended`.
+An arena from a VRAM executor holds device memory, which host accessors refuse with a trap.
+
+```swift
+let arena = try Arena(on: executor)
+for batch in batches {
+    let encoded = try model.on(executor).textEncode(batch, arena: arena) // rewinds: the last batch's rows are gone
+    index.add(encoded.embeddings!)
+}
+let calls = try zip(shards, arenas).map { shard, arena in
+    try model.deferred(executor).imageEncode(shard, arena: arena)        // one arena per submitted call
+}
+for call in calls { consume(try await call.value) }                      // or: try call.wait()
+```
+
+A result keeps the arena it reads alive, so it outlives the model and the caller's reference alike.
+
+## Encoding
+
+Every verb runs one forward and keeps the surfaces `outputs` names, deciding which C output pointers the binding passes:
+
+- `.embeddings`, the default, lands one pooled row per item as `Rows`;
+- `.states` lands the final-norm states, one row per token each item kept after truncation, as `RowsTape`;
+- naming neither is refused with `invalidArgument`.
+
+```swift
+let encoded = try model.textEncode(texts, outputs: [.embeddings, .states], arena: arena)
+let pooled = encoded.embeddings!                  // pooled[i] is item i's row
+let states = encoded.states!                      // states[i] is item i's rows, one per byte of its text
+print(pooled.columns, pooled.stride, pooled.scalar, states[0].count, encoded.stats.truncated)
+```
+
+The six verbs take one input form each:
+
+```swift
+try model.textEncode(["a caption"], arena: arena)                                     // UTF-8, a byte per token
+try model.imageEncode([jpeg, png], arena: arena)                                      // JPEG, PNG or WebP files
+try model.imageEncodePixels([rgb], heights: [480], widths: [640], arena: arena)       // interleaved 8-bit RGB
+try model.videoEncode([mp4], arena: arena)                                            // MP4 or WebM files
+try model.audioEncode([wav], arena: arena)                                            // WAV, FLAC, MP3 or Opus
+try model.audioEncodeSamples([samples], sampleRate: 16_000, arena: arena)             // mono Float samples
+```
+
+`EncodeConfig` carries the rest: `outputsScalar`, `f32` by default, and a `progress` handler with its `progressSteps`.
+Rows of `f32`, `bf16` and `f16` read as `Float`, and `withUnsafeBytes` hands any scalar on as stored, such as to a USearch index.
+
+```swift
+let config = EncodeConfig(outputsScalar: .bf16, progress: { done, total in done < limit ? .continue : .cancel })
+let narrow = try model.textEncode(texts, arena: arena, config: config)
+narrow.embeddings!.withUnsafeBytes { bytes in index.add(bytes) }
+```
+
+A handler never runs on two threads at once, but may run on whichever thread advanced the work, hence `@Sendable`; returning `.cancel` stops the call with `cancelled`.
+
+## Models
+
+Residency is the constructor's name, as in the C lifecycle verbs, so a residency a build lacks has no constructor to call.
+
+```swift
+let inRam = try Model.loadRam(path: "model.safetensors", memoryDomains: [0], quantization: .bf16)
+let inVram = try Model.loadVram(path: "model.safetensors", executor: deviceStreams, devices: [0, 1])
+let fromBytes = try Model.loadRamBuffer(checkpoint.span.bytes, quantization: .e4m3)
+let description = try inRam.describe()
+print(description.dimensions, description.context, description.quantization, description.memoryUsage)
+```
+
+`quantization` is the scalar the transformer blocks run in: `bf16` as the checkpoint stores it, or `e4m3` quantized at load.
+
+## Training
+
+Training is GPU-only, so every constructor takes a VRAM executor, and the trainer's verbs block on it.
+
+```swift
+let mesh = try Mesh.bootstrap(executor: deviceStreams, options: MeshOptions(
+    hostDomainIndex: node, hostDomainCount: nodes, directory: "/shared/rendezvous", job: "run-42"))
+let trainer = try Trainer.initVram(
+    executor: deviceStreams, depth: 12, hidden: 512,
+    batch: BatchShape(maxRowsPerDevice: 64, maxSegmentsPerDevice: 256, maxColumnsPerRow: 1024,
+                      maxBagsPerDevice: 128, image: ImageShape(patchSide: 16)),
+    objective: .joint, schedule: Schedule(steps: 100_000), mesh: mesh, seed: 42)
+let step = try trainer.step(
+    modalities: [.text, .image, .text, .image], contents: items, bags: [0, 0, 1, 1],
+    relations: Relations(attract: Edges(offsets: [0, 1, 2, 3, 4], ids: [1, 0, 3, 2])))
+print(step.stats.step, step.stats.loss, step.stats.contrastiveLoss)
+try trainer.save(path: "checkpoint.safetensors")
+```
+
+`Modality`, `Objective`, `Negatives` and `MultimemTier` spell themselves through the library's own name tables.
+
+## Errors
+
+`UFormError` is the only error the SDK throws, and every method says so with `throws(UFormError)`, so a `catch` reads `error.status` with no cast.
+`Status` has one constant per `uform_status_*_k` of the C interface, and its `description` spells it as the library does, like `invalid-argument`.
+
+```swift
+do {
+    _ = try Model.loadRam(path: "missing.safetensors")
+} catch {
+    print(error.status, error.message) // io The checkpoint could not be opened for reading
 }
 ```
 
-A faster way to compute distances is to use the Accelerate framework:
+`Scalar`, `Mood` and every other closed set read a spelling back with `init?(name:)`, and nil for one the library does not spell.
 
-```swift
-import Accelerate
+## What This Binding Does Not Expose
 
-func cosineSimilarity(_ a: [Float32], _ b: [Float32]) -> Float32 {
-    var result: Float32 = 0
-    var aNorm: Float32 = 0
-    var bNorm: Float32 = 0
-    vDSP_dotpr(a, 1, b, 1, &result, vDSP_Length(a.count))
-    vDSP_svesq(a, 1, &aNorm, vDSP_Length(a.count))
-    vDSP_svesq(b, 1, &bNorm, vDSP_Length(b.count))
-    return result / sqrt(aNorm * bNorm)
-}
-```
+- The constructors address no model or trainer yet, so no receiver offers them; each takes an optional `executor` and blocks.
+- A trainer is bound to the executor it was made on, so its verbs block there and take no receiver.
 
-An even faster approach would be to use USearch or SimSIMD, that work not only for `Float32` and `Float64`, but also for `Float16`, `Int8`, and binary embeddings.
+## Design
+
+- __A thin layer over the C ABI.__
+  One Swift file per header - `Types`, `Model`, `Encode`, `Train` - and a C verb `uform_<noun>_<verb>` is a camel-cased method here, such as `imageEncodePixels`.
+- __The receiver chooses, the verb stays.__
+  The model runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
+- __Deferred calls use the language's own idioms.__
+  `status` polls through `uform_outcome_status`, `wait()` blocks through `uform_outcome_wait`, and `try await call.value` runs that wait on a Dispatch thread, so an `async` caller suspends.
+- __No life of its own.__
+  The binding starts no threads, keeps no queues and caches nothing; releasing a `Deferred` rides its `deinit`, which waits for the call first.
+- __Arenas are lent and reused, never shared.__
+  Every output verb takes an arena and answers views borrowing it; a view remembers which call wrote it and traps once a later one did.
+- __Statuses and modes are enums.__
+  `Status`, `Scalar`, `Mood`, `Modality`, `Objective`, `Negatives` and `MultimemTier` carry their C enumerators and spell themselves through the C name functions, never strings.
+- __Nothing costs anything until it is used.__
+  Blocking calls take no deferred-table entry, a surface `outputs` leaves out is never computed, and an arena allocates only when a call writes into it.
