@@ -1,21 +1,44 @@
 [package]
-name = "uform"
-version = "4.0.0-rc.1"
+authors = ["Ash Vardanian <info@unum.cloud>"]
+description = "Pocket-sized multimodal encoders and their training steps over the UForm C interface"
 edition = "2021"
 rust-version = "1.100"
+include = [
+  "/rust/**",
+  "/src/**",
+  "/src_stub/**",
+  "/c/**",
+  "/cmake/**",
+  "/CMakeLists.txt",
+  "/CMakePresets.json",
+  "/VERSION",
+  "/build.rs",
+]
 license = "Apache-2.0"
+name = "uform"
 publish = false
-description = "Multimodal encoders and their training steps over the UForm C interface"
+repository = "https://github.com/unum-cloud/UForm"
+version = "4.0.0-rc.1"
 
 [lib]
 name = "uform"
-path = "rust/uform.rs"
+path = "rust/lib.rs"
 
-[dependencies]
-numkong = { version = "8.0.0-rc.1", features = ["std", "parallel"] }
-forkunion = "4.0.0-rc.1"
+# Which implementation of the C interface gets linked. Naming none links the engine for the host
+# alone; the GPU features add residencies to it, and `build.rs` refuses the stub beside either.
+#
+# The host engine is deliberately not a feature: Cargo unions features across the dependency graph
+# and never subtracts, so a named default could only be turned off by every consumer at once.
+[features]
+# The engine with the NVIDIA residency, the trainer and the mesh; needs a CUDA toolkit at build time.
+cuda = []
+# The engine with the AMD residency; needs ROCm at build time.
+rocm = []
+# The stand-in, which answers the same verbs over the C++ standard library alone - seconds to build,
+# deterministic rows, and no codecs. For testing a caller, never for shipping.
+stub = []
 
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = 3
+[build-dependencies]
+# The library is CMake's to build - `build.rs` drives it rather than restating the targets and the
+# per-target flags in Rust.
+cmake = "0.1"
