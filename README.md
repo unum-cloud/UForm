@@ -22,9 +22,13 @@ Multimodal Perception from 64 to 1024 Dimensions
 <br/>
 Text • Images • Videos • Audio • Code • Graphs
 <br/>
-CUDA Training • CUDA Inference • ONNX • CoreML
+CUDA Training • CPU, NVIDIA and AMD Inference • WebAssembly
 <br/>
+<a href="https://github.com/unum-cloud/UForm/tree/main/c/uform">C</a>
+ • 
 <a href="https://github.com/unum-cloud/UForm/blob/main/python/README.md">Python</a>
+ • 
+<a href="https://github.com/unum-cloud/UForm/blob/main/rust/README.md">Rust</a>
  • 
 <a href="https://github.com/unum-cloud/UForm/blob/main/javascript/README.md">JavaScript</a>
  • 
@@ -331,24 +335,29 @@ Cross-modal retrieval and the structured-output tasks — de-identification, seg
 
 ```bash
 uform/
-├── c/                the C ABI in uform/*.h, shared by every binding
-├── src/              the CUDA training and inference stack, one namespace per folder
+├── c/                the C ABI in uform/*.h, shared by every binding, and its test
+├── src/              the engine behind the C ABI, one namespace per folder
+│   ├── *.cpp         the verbs of each header: types, model, encode and train
+│   ├── inference/    the tower on the host, and the NVIDIA and AMD kernels beside it
+│   ├── media/        image, video and audio decoding on the host
 │   ├── core/         device memory, batches, streams, mesh, transports, model cells, checkpoints
-│   ├── loaders/      storage sessions, shard readers, image, video and audio decode
+│   ├── loaders/      storage sessions, shard readers, and GPU image, video and audio decode
 │   └── train/        the composition root of a training run
+├── src_stub/         a stand-in answering the same verbs over the C++ standard library alone
 ├── tools/            the trainer binary
-├── test/             conformance suites, one file per cell
+├── test/             conformance suites, one file per cell, and the binding suites in python/
 ├── scripts/
 │   ├── data/         dataset acquisition, repacking and mining, with the mixture JSONs
 │   └── slurm/        cluster runners for training, tests and acquisition
-├── python/           the Python package
-├── javascript/       the JavaScript package
-├── swift/            the Swift package
-├── rust/             the Rust crate
+├── python/           the CPython extension over the C ABI
+├── rust/             the Rust crate over the C ABI
+├── javascript/       the Node-API addon and the WebAssembly module over the C ABI
+├── swift/            the Swift package over the C ABI
 └── docs/             the documentation site
 ```
 
-The bindings date from UForm 3 and move onto the C ABI in `c/uform/`.
+Every binding is a thin layer over the C ABI in `c/uform/`: one module per header, one method per verb, and the same receivers, executors and arenas in each language.
+Each links either the engine or the stand-in of `src_stub/`, which answers every verb with deterministic rows in seconds of build time, so the binding suites run without a checkpoint.
 Conventions, hooks and the commit format are described in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## FAQ

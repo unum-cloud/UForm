@@ -1,0 +1,1 @@
+.. mdinclude:: ../../rust/README.md

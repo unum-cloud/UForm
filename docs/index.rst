@@ -1,25 +1,27 @@
-====================
-Overview
-====================
+=====
+UForm
+=====
 .. mdinclude:: ../README.md
 
-.. toctree:: 
+.. toctree::
    :hidden:
-   :caption: �
+   :caption: Languages
 
+   c/index
    python/index
+   rust/index
    javascript/index
    swift/index
 
-.. toctree:: 
+.. toctree::
    :hidden:
-   :caption: �
+   :caption: Project
 
    contributing
    benchmarks
 
-.. toctree:: 
+.. toctree::
    :hidden:
-   :caption: �
+   :caption: Index
 
    genindex

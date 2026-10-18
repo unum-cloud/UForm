@@ -7,31 +7,26 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 project = "Unum · UForm"
-copyright = "2023, Unum"
+copyright = "2023-2026, Unum"
 author = "Unum"
-release = open("../VERSION", "r").read().strip()
-with open("_static/custom.js", "r+") as js:
-    content = js.read()
-    js.seek(0)
-    js.truncate()
-    js.write(content.replace("$(VERSION)", release))
+with open("../VERSION") as version_file:
+    release = version_file.read().strip()
+# Reaches `custom.js` as `DOCUMENTATION_OPTIONS.VERSION`.
+version = release
 
 # General configuration
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
 extensions = [
-    "breathe",
     "m2r2",
     "sphinx.ext.autodoc",
-    "sphinx_js",
-    "sphinx.ext.autosummary",
-    "sphinx.ext.intersphinx",
     "sphinx.ext.napoleon",
     "sphinxcontrib.jquery",
     "sphinxcontrib.googleanalytics",
 ]
 
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store", "*.md"]
+m2r_anonymous_references = True
 
 googleanalytics_id = "341385789"
 googleanalytics_enabled = True
@@ -44,9 +39,4 @@ html_theme = "furo"
 html_static_path = ["_static"]
 html_css_files = ["custom.css"]
 html_js_files = ["custom.js"]
-html_baseurl = "/docs/uform/"
-
-breathe_projects = {"UForm": "../build/xml"}
-breathe_default_project = "UForm"
-
-js_source_path = "../javascript/"
+html_baseurl = "https://unum-cloud.github.io/UForm/"
