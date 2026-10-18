@@ -6,8 +6,8 @@
  *
  *  @ref parquet_file_t and @ref jsonl_file_t decode one shard — Parquet columns or a newline-delimited JSON
  *  field — straight into device memory over KvikIO / GPU Direct Storage, own the decoded columns for their
- *  lifetime, and hand out @b zero-copy StringZilla views. No host bounce, no Apache Arrow, no bespoke tape —
- *  cuDF is a required dependency, and its owned columns are the tape.
+ *  lifetime, and hand out @b zero-copy @ref column_view_t borrows. No host bounce, no Apache Arrow, no bespoke
+ *  tape — cuDF is a required dependency, and its owned columns are the tape.
  *
  *  A file's payload — the concatenated bytes of every row of a column — is borrowed in place from the
  *  owned cuDF table, never copied out. cuDF emits 32- or 64-bit @b signed offsets; the reader casts them
@@ -27,7 +27,7 @@
 #include <memory> // `std::unique_ptr` — the pimpl owning the cuDF table
 #include <span>   // `std::span`
 
-#include "core/types.hpp"    // `expected`, `status_t`, the scalar aliases, `sz::packed_tape_view`, `sz::string_t`
+#include "core/types.hpp"    // `expected`, `status_t`, the scalar aliases, `b8r1_view_t`, `sz::string_t`
 #include "core/array.hpp"    // `array` — the glob expansion result
 #include "core/schedule.cuh" // `gpu_stream_t`
 #include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t` — the reader's GDS precondition
@@ -36,11 +36,27 @@ namespace unum::uform::loaders {
 
 using namespace unum::uform::core;
 
-/** A decoded column, device-resident: every row's bytes back to back with @c rows+1
- *  terminator-free @c u64_t offsets (byte positions are unsigned sizes) — element @c i is the full
- *  @c [offsets[i], offsets[i+1]) span. Both text ( @c string ) and media ( @c list<uint8> )
- *  columns arrive as this. */
-using column_view_t = sz::packed_tape_view<b8_t, u64_t>;
+/** A column of byte strings: every element's bytes back to back with @c elements+1 terminator-free
+ *  @c u64_t offsets — element @c i is the full @c [offsets[i],offsets[i+1]) span. Both text ( @c string )
+ *  and media ( @c list<uint8> ) columns arrive as this, the payload device-resident; the loaders re-view
+ *  it with host offsets to slice it on the host. */
+struct column_view_t {
+
+    /** Every element's bytes, back to back. */
+    b8r1_view_t payload;
+
+    /** @b [elements+1] byte offsets into @ref payload . */
+    u64r1_view_t offsets;
+
+    /** The element count, one less than the offsets. */
+    [[nodiscard]] std::size_t size() const noexcept { return offsets.empty() ? 0 : offsets.extent(0) - 1; }
+
+    /** Element @p index 's bytes, sliced on the host, so @ref offsets must be host-resident. */
+    [[nodiscard]] std::span<b8_t const> operator[](std::size_t index) const noexcept {
+        u64_t const *const bounds = offsets.data();
+        return {payload.data() + bounds[index], static_cast<std::size_t>(bounds[index + 1] - bounds[index])};
+    }
+};
 
 /** One shard's footer facts — the row count and a summed uncompressed byte size (the whole
  *  table, or one column) — read without decoding, to size the loader's file pool. */

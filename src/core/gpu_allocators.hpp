@@ -29,8 +29,8 @@
  *  marks — and @ref gpu_memory_report reads it on demand. Per-owner attribution is each owner's own
  *  accessors ( @ref gpu_arena_t::used / @ref gpu_arena_t::mapped ).
  *
- *  The arena's physical chunks are created @c gpuDirectRDMACapable , so the same chunks can later be
- *  registered as InfiniBand MRs or bound to a multicast object — symmetric / multimem backing is a property
+ *  The arena's physical chunks are created @c gpuDirectRDMACapable wherever the device supports it, so the same
+ *  chunks can later be registered as InfiniBand MRs or bound to a multicast object — symmetric / multimem backing is a property
  *  added to @b this arena at creation, not a third allocator: running the identical allocation program on every
  *  rank yields identical offsets, which is what makes a peer's buffer addressable as @c remote_base+offset .
  */
@@ -38,16 +38,59 @@
 
 #include <cstddef> // `std::size_t`, `std::byte`
 
-#include <utility>     // `std::exchange`
+#include <utility>     // `std::exchange`, `std::forward`
 #include <type_traits> // `std::true_type`
 #include <span>        // `std::span` — the `visible_to` device-ID list
 
-#include <cuda.h> // `CUdeviceptr`, `cuMemAddressReserve`, `cuMemCreate`, `cuMemMap`, `cuMemAllocAsync`
+#include <cuda.h>      // `CUdeviceptr`, `cuMemAddressReserve`, `cuMemMap`, `CUresult`, `cuGetErrorString`
+#include <cuda_bf16.h> // `__nv_bfloat16` behind the `bf16_t` alias
+#include <cuda_fp8.h>  // `__nv_fp8_e4m3` behind the `e4m3_t` alias
 
 #include "core/types.hpp" // `expected`, `status_t`
 #include "core/array.hpp" // `array` for exception-free chunk bookkeeping
 
 namespace unum::uform::core {
+
+using e4m3_t = __nv_fp8_e4m3;
+using bf16_t = __nv_bfloat16;
+
+/** The CUDA-scalar half of the rank-tagged borrow vocabulary in @c types.hpp . */
+using bf16r1_view_t = nk::tensor_view<bf16_t, 1>;
+using bf16r1_span_t = nk::tensor_span<bf16_t, 1>;
+using bf16r2_view_t = nk::tensor_view<bf16_t, 2>;
+using bf16r2_span_t = nk::tensor_span<bf16_t, 2>;
+using e4m3r1_view_t = nk::tensor_view<e4m3_t, 1>;
+using e4m3r1_span_t = nk::tensor_span<e4m3_t, 1>;
+using e4m3r2_view_t = nk::tensor_view<e4m3_t, 2>;
+using e4m3r2_span_t = nk::tensor_span<e4m3_t, 2>;
+using e4m3r3_view_t = nk::tensor_view<e4m3_t, 3>;
+using e4m3r3_span_t = nk::tensor_span<e4m3_t, 3>;
+
+/** Failure carrying a CUDA Driver error: @ref expected::fail tagged @c cuda_error_k , with the driver's
+ *  own error string appended to the description and @p cu_error kept in @c cu_error_ . */
+template <typename value_type_ = void, typename... arg_types_>
+[[nodiscard]] expected<value_type_> cuda_failure(CUresult cu_error, format_at_t format, arg_types_ &&...args) noexcept {
+    expected<value_type_> result = expected<value_type_>::fail(status_t::cuda_error_k, format,
+                                                               std::forward<arg_types_>(args)...);
+    result.cu_error_ = static_cast<i32_t>(cu_error);
+    char const *cu_error_string = nullptr;
+    if (cuGetErrorString(cu_error, &cu_error_string) != CUDA_SUCCESS || cu_error_string == nullptr)
+        cu_error_string = "unknown";
+    (void)result.description_.append(": ");
+    (void)result.description_.append(cu_error_string);
+    return result;
+}
+
+/** The Driver API address of the device @p pointer — the one place a pointer becomes a @c CUdeviceptr . */
+[[nodiscard]] inline CUdeviceptr device_address(void const *pointer) noexcept {
+    return reinterpret_cast<CUdeviceptr>(pointer);
+}
+
+/** The typed pointer at the Driver API @p address — the inverse of @ref device_address . */
+template <typename value_type_>
+[[nodiscard]] inline value_type_ *device_pointer(CUdeviceptr address) noexcept {
+    return reinterpret_cast<value_type_ *>(address);
+}
 
 /** Byte alignment of every arena allocation; matches the 256-byte guarantee of the CUDA allocators, so
  *  an allocation base is always vector-load aligned. */
@@ -84,7 +127,7 @@ struct gpu_memory_report_t {
 [[nodiscard]] inline expected<gpu_memory_report_t> gpu_memory_report(i32_t device) noexcept {
     gpu_memory_report_t report;
     if (CUresult result = cuMemGetInfo(&report.free_bytes, &report.total_bytes); result != CUDA_SUCCESS)
-        return expected<gpu_memory_report_t>::fail(result, "memory info query failed (device={})", device);
+        return cuda_failure<gpu_memory_report_t>(result, "memory info query failed (device={})", device);
     CUdevice device_handle = 0;
     CUmemoryPool pool = nullptr;
     if (cuDeviceGet(&device_handle, device) == CUDA_SUCCESS &&
@@ -191,8 +234,8 @@ struct gpu_arena_t {
     /**
      *  @brief Reserve @p reserve_bytes of VA on @p device ; no physical memory is committed yet.
      *
-     *  The chunks later mapped in are created @c gpuDirectRDMACapable so the arena's allocations can be
-     *  MR-registered or multicast-bound without re-allocation.
+     *  The chunks later mapped in are created @c gpuDirectRDMACapable where the device supports it, so the arena's
+     *  allocations can be MR-registered or multicast-bound without re-allocation.
      *
      *  Cross-device visibility is @b construction-time configuration: every peer named in
      *  @p visible_to is granted read-write access to every chunk this arena ever maps (a VMM
@@ -209,17 +252,17 @@ struct gpu_arena_t {
         arena.device_ = device;
         for (i32_t const peer : visible_to)
             if (peer != device)
-                if (arena.visible_to_.try_push_back(peer) != status_t::success_k)
+                if (arena.visible_to_.push_back(peer) != status_t::success_k)
                     return expected<gpu_arena_t>::fail(status_t::bad_alloc_k, "peer table allocation failed");
         CUmemAllocationProp properties = allocation_properties_(device);
         if (CUresult result = cuMemGetAllocationGranularity(&arena.granularity_, &properties,
                                                             CU_MEM_ALLOC_GRANULARITY_MINIMUM);
             result != CUDA_SUCCESS)
-            return expected<gpu_arena_t>::fail(result, "granularity query failed (device={})", device);
+            return cuda_failure<gpu_arena_t>(result, "granularity query failed (device={})", device);
         arena.reserved_bytes_ = round_up_to_multiple(reserve_bytes, arena.granularity_);
         if (CUresult result = cuMemAddressReserve(&arena.base_, arena.reserved_bytes_, 0, 0, 0); result != CUDA_SUCCESS)
-            return expected<gpu_arena_t>::fail(result, "VA reservation failed (device={} bytes={})", device,
-                                               arena.reserved_bytes_);
+            return cuda_failure<gpu_arena_t>(result, "VA reservation failed (device={} bytes={})", device,
+                                             arena.reserved_bytes_);
         return expected<gpu_arena_t> {std::move(arena)};
     }
 
@@ -249,19 +292,21 @@ struct gpu_arena_t {
      *  mapped prefix is exhausted. Returns @c nullptr when the reservation ceiling is hit or growth
      *  fails — on a bump arena a null can mean nothing else. */
     [[nodiscard]] std::byte *allocate_bytes(std::size_t bytes, std::size_t alignment = arena_alignment_k) noexcept {
-        std::size_t const aligned_cursor = round_up_to_multiple(used_bytes_, alignment);
-        if (aligned_cursor + bytes > reserved_bytes_) return nullptr;
-        if (aligned_cursor + bytes > mapped_bytes_)
-            if (grow_to_(aligned_cursor + bytes) != CUDA_SUCCESS) return nullptr;
-        used_bytes_ = aligned_cursor + bytes;
-        return reinterpret_cast<std::byte *>(base_ + aligned_cursor);
+        return allocate_object<std::byte>(bytes, alignment);
     }
 
     /** Allocate @p count elements of @c value_type_ off the bump cursor — the typed sibling of
      *  @ref allocate_bytes , mirroring `std::pmr::polymorphic_allocator::allocate_object` . */
     template <typename value_type_>
-    [[nodiscard]] value_type_ *allocate_object(std::size_t count = 1) noexcept {
-        return reinterpret_cast<value_type_ *>(allocate_bytes(count * sizeof(value_type_)));
+    [[nodiscard]] value_type_ *allocate_object(std::size_t count = 1,
+                                               std::size_t alignment = arena_alignment_k) noexcept {
+        std::size_t const bytes = count * sizeof(value_type_);
+        std::size_t const aligned_cursor = round_up_to_multiple(used_bytes_, alignment);
+        if (aligned_cursor + bytes > reserved_bytes_) return nullptr;
+        if (aligned_cursor + bytes > mapped_bytes_)
+            if (grow_to_(aligned_cursor + bytes) != CUDA_SUCCESS) return nullptr;
+        used_bytes_ = aligned_cursor + bytes;
+        return device_pointer<value_type_>(base_ + aligned_cursor);
     }
 
     /**
@@ -275,11 +320,19 @@ struct gpu_arena_t {
      *  granularity-aligned. @c nullptr on ceiling or growth failure, like @ref allocate_bytes .
      */
     [[nodiscard]] std::byte *allocate_registrable_bytes(std::size_t bytes) noexcept {
+        return allocate_registrable_object<std::byte>(bytes);
+    }
+
+    /** Allocate @p count elements of @c value_type_ inside one physical chunk — the typed sibling of
+     *  @ref allocate_registrable_bytes . */
+    template <typename value_type_>
+    [[nodiscard]] value_type_ *allocate_registrable_object(std::size_t count) noexcept {
+        std::size_t const bytes = count * sizeof(value_type_);
         std::size_t const chunk_start = mapped_bytes_;
         if (chunk_start + bytes > reserved_bytes_) return nullptr;
         if (grow_to_(chunk_start + bytes) != CUDA_SUCCESS) return nullptr;
         used_bytes_ = chunk_start + bytes;
-        return reinterpret_cast<std::byte *>(base_ + chunk_start);
+        return device_pointer<value_type_>(base_ + chunk_start);
     }
 
     /** Rewind the cursor to a @ref snapshot ; the physical backing stays mapped. The caller owns the
@@ -293,13 +346,16 @@ struct gpu_arena_t {
 
   private:
 
-    /** The one chunk-creation property set: device-resident, pinned, RDMA-capable. */
+    /** The one chunk-creation property set: device-resident, pinned, and RDMA-capable wherever the device can
+     *  register VMM memory with an adapter - consumer cards refuse that flag outright, and have no adapter. */
     [[nodiscard]] static CUmemAllocationProp allocation_properties_(int device) noexcept {
+        int rdma_supported = 0;
+        cuDeviceGetAttribute(&rdma_supported, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device);
         CUmemAllocationProp properties {};
         properties.type = CU_MEM_ALLOCATION_TYPE_PINNED;
         properties.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
         properties.location.id = device;
-        properties.allocFlags.gpuDirectRDMACapable = 1;
+        properties.allocFlags.gpuDirectRDMACapable = rdma_supported != 0;
         return properties;
     }
 
@@ -337,7 +393,7 @@ struct gpu_arena_t {
                     return result;
                 }
             }
-            if (chunks_.try_push_back({handle, chunk_bytes}) != status_t::success_k) {
+            if (chunks_.push_back({handle, chunk_bytes}) != status_t::success_k) {
                 cuMemUnmap(base_ + mapped_bytes_, chunk_bytes);
                 cuMemRelease(handle);
                 return CUDA_ERROR_OUT_OF_MEMORY; // Host-side chunk-table growth failed.
@@ -445,9 +501,7 @@ struct gpu_registrable_alloc {
     /** Allocate @p count elements inside one fresh physical chunk; @c nullptr on exhaustion or
      *  when unbound. */
     [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
-        return arena_ != nullptr
-                   ? reinterpret_cast<value_type *>(arena_->allocate_registrable_bytes(count * sizeof(value_type)))
-                   : nullptr;
+        return arena_ != nullptr ? arena_->allocate_registrable_object<value_type>(count) : nullptr;
     }
 
     /** A no-op: bump-arena memory is reclaimed by @ref gpu_arena_t::rewind , never per buffer. */
@@ -548,12 +602,12 @@ struct gpu_alloc {
     [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
         CUdeviceptr pointer = 0;
         if (cuMemAllocAsync(&pointer, count * sizeof(value_type), stream) != CUDA_SUCCESS) return nullptr;
-        return reinterpret_cast<value_type *>(pointer);
+        return device_pointer<value_type>(pointer);
     }
 
     /** Stream-ordered release back to the pool; safe after every enqueued consumer on @ref stream . */
     void deallocate(value_type *pointer, std::size_t) noexcept {
-        if (pointer != nullptr) cuMemFreeAsync(reinterpret_cast<CUdeviceptr>(pointer), stream);
+        if (pointer != nullptr) cuMemFreeAsync(device_address(pointer), stream);
     }
 
     [[nodiscard]] constexpr bool operator==(gpu_alloc const &other) const noexcept { return stream == other.stream; }
@@ -564,7 +618,7 @@ using gpu_alloc_t = gpu_alloc<b8_t>;
 
 /** The rank-tagged owning-tensor vocabulary — @c *_tensor_arena_t owns device memory off a
  *  @ref gpu_arena_t , @c *_tensor_pinned_t owns page-locked host memory; the borrowing @c *_view_t /
- *  @c *_span_t counterparts live in @c types.hpp . */
+ *  @c *_span_t counterparts live in @c types.hpp , the BFloat16 / E4M3 ones above. */
 using b8r1_tensor_arena_t = nk::tensor<b8_t, gpu_arena_alloc<b8_t>, 1>;
 using b8r1_tensor_registrable_t = nk::tensor<b8_t, gpu_registrable_alloc<b8_t>, 1>;
 using i16r2_tensor_arena_t = nk::tensor<i16_t, gpu_arena_alloc<i16_t>, 2>;

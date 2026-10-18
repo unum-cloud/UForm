@@ -93,20 +93,16 @@ expected<telemetry_ledger_t> telemetry_ledger_t::make(gpu_arena_t &arena, u32_t 
     if (!ledger.rows_) return result_t::fail(status_t::bad_alloc_k, "ledger row table allocation failed ({})", rows);
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "ledger context entry failed");
-    if (CUresult reset = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(ledger.rows_.data()), 0,
-                                         rows * sizeof(telemetry_row_t), stream.get());
-        reset != CUDA_SUCCESS)
-        return result_t::fail(reset, "ledger row table reset failed");
+    if (expected_t reset = zero_async(ledger.rows_.span(), stream); !reset) return result_t::fail(std::move(reset));
     if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
-        return result_t::fail(synced, "ledger row table reset drain failed");
-    if (ledger.names_.try_reserve(rows) != status_t::success_k ||
-        ledger.policies_.try_reserve(rows) != status_t::success_k ||
-        ledger.loss_stats_.try_reserve(rows) != status_t::success_k)
+        return cuda_failure<telemetry_ledger_t>(synced, "ledger row table reset drain failed");
+    if (ledger.names_.reserve(rows) != status_t::success_k || ledger.policies_.reserve(rows) != status_t::success_k ||
+        ledger.loss_stats_.reserve(rows) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "ledger host table allocation failed ({})", rows);
     // Row 0's host entries exist so probe handles index all tables uniformly.
-    if (ledger.names_.try_push_back(sz::string_t {}) != status_t::success_k ||
-        ledger.policies_.try_push_back(telemetry_policy_t::finite_signal_k) != status_t::success_k ||
-        ledger.loss_stats_.try_push_back(telemetry_loss_stats_t {}) != status_t::success_k)
+    if (ledger.names_.push_back(sz::string_t {}) != status_t::success_k ||
+        ledger.policies_.push_back(telemetry_policy_t::finite_signal_k) != status_t::success_k ||
+        ledger.loss_stats_.push_back(telemetry_loss_stats_t {}) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "ledger sentinel row allocation failed");
     return result_t {std::move(ledger)};
 }
@@ -119,11 +115,11 @@ expected<telemetry_probe_t> telemetry_ledger_t::register_probe(sz::string_view_t
         return result_t::fail(status_t::bad_alloc_k, "ledger probe registration of \"{}\" exceeds the {} rows", name,
                               rows_.extent(0) - 1u);
     sz::string_t owned;
-    if (sz::failed(owned.try_assign(name)))
+    if (sz::failed(owned.assign(name)))
         return result_t::fail(status_t::bad_alloc_k, "ledger probe name allocation failed");
-    if (names_.try_push_back(std::move(owned)) != status_t::success_k ||
-        policies_.try_push_back(policy) != status_t::success_k ||
-        loss_stats_.try_push_back(telemetry_loss_stats_t {}) != status_t::success_k)
+    if (names_.push_back(std::move(owned)) != status_t::success_k ||
+        policies_.push_back(policy) != status_t::success_k ||
+        loss_stats_.push_back(telemetry_loss_stats_t {}) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "ledger probe table growth failed");
     registered_ += 1u;
     return result_t {telemetry_probe_t {registered_}};
@@ -133,16 +129,15 @@ expected_t telemetry_ledger_t::probe_signal(telemetry_probe_t probe, f32r1_view_
                                             gpu_stream_t &stream) noexcept {
     if (probe.row == 0u || values.extent(0) == 0) return {};
     nk::tensor_span<telemetry_row_t, 1> const row {rows_.data() + probe.row, 1u};
-    return launch_kernel(reinterpret_cast<void const *>(&telemetry_signal_probe_kernel_), dim3 {1u, 1u, 1u},
-                         dim3 {32u, 1u, 1u}, stream, values, row, policies_[probe.row], probe.row);
+    return launch_kernel(&telemetry_signal_probe_kernel_, dim3 {1u, 1u, 1u}, dim3 {32u, 1u, 1u}, stream, values, row,
+                         policies_[probe.row], probe.row);
 }
 
 expected_t telemetry_ledger_t::probe_round(telemetry_probe_t probe, multimem_member_t member,
                                            gpu_stream_t &stream) noexcept {
     if (probe.row == 0u) return {};
     nk::tensor_span<telemetry_row_t, 1> const row {rows_.data() + probe.row, 1u};
-    return launch_kernel(reinterpret_cast<void const *>(&telemetry_round_probe_kernel_), dim3 {1u, 1u, 1u},
-                         dim3 {32u, 1u, 1u}, stream, member, row);
+    return launch_kernel(&telemetry_round_probe_kernel_, dim3 {1u, 1u, 1u}, dim3 {32u, 1u, 1u}, stream, member, row);
 }
 
 void telemetry_ledger_t::scalar(telemetry_probe_t probe, f64_t sum, f64_t count) noexcept {
@@ -167,12 +162,11 @@ expected<telemetry_row_t> telemetry_ledger_t::row(telemetry_probe_t probe, gpu_s
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "ledger row context entry failed");
     if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
-        return result_t::fail(synced, "ledger row synchronization failed");
+        return cuda_failure<telemetry_row_t>(synced, "ledger row synchronization failed");
     telemetry_row_t state;
-    if (CUresult copied = cuMemcpyDtoH(&state, reinterpret_cast<CUdeviceptr>(rows_.data() + probe.row),
-                                       sizeof(telemetry_row_t));
+    if (CUresult copied = cuMemcpyDtoH(&state, device_address(rows_.data() + probe.row), sizeof(telemetry_row_t));
         copied != CUDA_SUCCESS)
-        return result_t::fail(copied, "ledger row readback failed");
+        return cuda_failure<telemetry_row_t>(copied, "ledger row readback failed");
     return result_t {state};
 }
 
@@ -181,14 +175,14 @@ expected_t telemetry_ledger_t::report(gpu_stream_t &stream) noexcept {
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "ledger report context entry failed");
     if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
-        return expected_t::fail(synced, "ledger report synchronization failed");
+        return cuda_failure(synced, "ledger report synchronization failed");
     array<telemetry_row_t> states;
-    if (states.try_resize(registered_ + 1u) != status_t::success_k)
+    if (states.resize(registered_ + 1u) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "ledger report staging failed");
-    if (CUresult copied = cuMemcpyDtoH(states.data(), reinterpret_cast<CUdeviceptr>(rows_.data()),
+    if (CUresult copied = cuMemcpyDtoH(states.data(), device_address(rows_.data()),
                                        (registered_ + 1u) * sizeof(telemetry_row_t));
         copied != CUDA_SUCCESS)
-        return expected_t::fail(copied, "ledger report readback failed");
+        return cuda_failure(copied, "ledger report readback failed");
     for (u32_t index = 1; index <= registered_; ++index) {
         telemetry_row_t const &state = states[index];
         telemetry_loss_stats_t const &stats = loss_stats_[index];

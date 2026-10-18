@@ -158,7 +158,7 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
     f32_t *grad_f32 = arena.allocate_object<f32_t>(scalars);
     f32_t *loss_out = arena.allocate_object<f32_t>(1);
     u32_t *effective = arena.allocate_object<u32_t>(num_vertices);
-    cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(tower), host_tower.data(), scalars * sizeof(bf16_t));
+    cuMemcpyHtoD(device_address(tower), host_tower.data(), scalars * sizeof(bf16_t));
 
     // Relations: self-edge default, or explicit attract/repel with an ignore override; PAD via the
     // effective-length columns.
@@ -169,7 +169,7 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
     contrastive_relations_t relations = std::move(relations_made.value_);
     std::vector<u32_t> host_effective(num_vertices, 1u);
     if (with_pad) host_effective[num_vertices - 1] = 0u;
-    cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(effective), host_effective.data(), num_vertices * sizeof(u32_t));
+    cuMemcpyHtoD(device_address(effective), host_effective.data(), num_vertices * sizeof(u32_t));
     u32r1_view_t const effective_view {effective, with_pad ? num_vertices : 0};
     if (with_pad) {
         host_relations.vertex_effective = host_effective;
@@ -226,7 +226,7 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
     }
     cuStreamSynchronize(stream.get());
     f32_t device_loss = 0;
-    cuMemcpyDtoH(&device_loss, reinterpret_cast<CUdeviceptr>(loss_out), sizeof(f32_t));
+    cuMemcpyDtoH(&device_loss, device_address(loss_out), sizeof(f32_t));
 
     std::vector<u32_t> host_prefixes(prefixes.begin(), prefixes.end());
     f64_t const oracle = host_loss(host_tower, host_tower, num_vertices, num_vertices, hidden, host_prefixes,
@@ -238,9 +238,9 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
     // Finite-difference force check on a few sampled channels: the analytic BF16 gradient must sit
     // within BF16 resolution of (L(x+h) - L(x-h)) / 2h.
     std::vector<bf16_t> host_grad(scalars);
-    cuMemcpyDtoH(host_grad.data(), reinterpret_cast<CUdeviceptr>(grad), scalars * sizeof(bf16_t));
+    cuMemcpyDtoH(host_grad.data(), device_address(grad), scalars * sizeof(bf16_t));
     std::vector<f32_t> host_column(scalars);
-    cuMemcpyDtoH(host_column.data(), reinterpret_cast<CUdeviceptr>(grad_f32), scalars * sizeof(f32_t));
+    cuMemcpyDtoH(host_column.data(), device_address(grad_f32), scalars * sizeof(f32_t));
     bool forces_ok = true;
     for (std::size_t sample = 0; sample != 6 && forces_ok; ++sample) {
         std::size_t const index = (sample * 977ull + 13ull) % scalars;
@@ -275,7 +275,7 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
         if (expected_t launched = graph_made.value_.launch(stream.get()); !launched)
             return check(false, "replay launch");
     cuStreamSynchronize(stream.get());
-    cuMemcpyDtoH(host_grad.data(), reinterpret_cast<CUdeviceptr>(grad), scalars * sizeof(bf16_t));
+    cuMemcpyDtoH(host_grad.data(), device_address(grad), scalars * sizeof(bf16_t));
     f32_t largest = 0.0f, worst = 0.0f;
     for (std::size_t index = 0; index != scalars; ++index) {
         f32_t const eager = __bfloat162float(eager_grad[index]);
@@ -346,20 +346,19 @@ static void run_distributed_case() {
     // multimem domain → the ONE colocated domain → the consumer, borrowing all of it.
     for (std::size_t rank = 0; rank != gpus_k; ++rank) {
         auto stream_made = gpu_stream_t::make(devices[rank]);
-        if (!stream_made || streams.try_push_back(std::move(stream_made.value_)) != status_t::success_k) {
+        if (!stream_made || streams.push_back(std::move(stream_made.value_)) != status_t::success_k) {
             check(false, "distributed stream make");
             return;
         }
         cuCtxPushCurrent(streams[rank].context());
         auto arena_made = gpu_arena_t::make(devices[rank], 1ull << 30, {devices, gpus_k});
-        if (!arena_made || arenas.try_push_back(std::move(arena_made.value_)) != status_t::success_k) {
+        if (!arena_made || arenas.push_back(std::move(arena_made.value_)) != status_t::success_k) {
             check(false, "distributed arena make");
             return;
         }
         bf16_t *tower = arenas[rank].allocate_object<bf16_t>(scalars_k);
         bf16_t *grad = arenas[rank].allocate_object<bf16_t>(scalars_k);
-        cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(tower), global_tower.data() + rank * scalars_k,
-                     scalars_k * sizeof(bf16_t));
+        cuMemcpyHtoD(device_address(tower), global_tower.data() + rank * scalars_k, scalars_k * sizeof(bf16_t));
         towers[rank] = bf16r2_view_t {tower, vertices_k, hidden_k};
         grads[rank] = bf16r2_span_t {grad, vertices_k, hidden_k};
         owners[rank] = std::move(contrastive_relations_t::make(arenas[rank], vertices_k, 0).value_);
@@ -380,8 +379,9 @@ static void run_distributed_case() {
         check(false, "single-domain bootstrap");
         return;
     }
-    auto domain = multimem_domain_t::make(topology.value_, {devices, gpus_k},
-                                          distributed_contrastive_segments_t::payload_scalars_needed(config), streams);
+    auto domain = multimem_domain_t::make(
+        topology.value_, {devices, gpus_k},
+        distributed_contrastive_segments_t::payload_scalars_needed(config, topology.value_.shape), streams);
     if (!domain) {
         std::printf("    %s\n", domain.description_.c_str());
         check(false, "multimem domain make");
@@ -416,10 +416,10 @@ static void run_distributed_case() {
     std::vector<bf16_t> distributed_grad(2 * scalars_k);
     cuCtxPushCurrent(streams[0].context());
     f32_t summands[gpus_k] = {};
-    cuMemcpyDtoH(summands, reinterpret_cast<CUdeviceptr>(distributed.value_.loss_outs().data()), sizeof(summands));
+    cuMemcpyDtoH(summands, device_address(distributed.value_.loss_outs().data()), sizeof(summands));
     for (std::size_t rank = 0; rank != gpus_k; ++rank) {
         distributed_loss += summands[rank];
-        cuMemcpyDtoH(distributed_grad.data() + rank * scalars_k, reinterpret_cast<CUdeviceptr>(grads[rank].data()),
+        cuMemcpyDtoH(distributed_grad.data() + rank * scalars_k, device_address(grads[rank].data()),
                      scalars_k * sizeof(bf16_t));
     }
     cuCtxPopCurrent(nullptr);
@@ -495,15 +495,14 @@ static int run_cross_domain_case() {
     for (u32_t rank = 0; rank != gpus; ++rank) devices[rank] = i32_t(rank);
     for (u32_t rank = 0; rank != gpus; ++rank) {
         auto stream_made = gpu_stream_t::make(i32_t(rank));
-        if (!stream_made || streams.try_push_back(std::move(stream_made.value_)) != status_t::success_k) return 1;
+        if (!stream_made || streams.push_back(std::move(stream_made.value_)) != status_t::success_k) return 1;
         cuCtxPushCurrent(streams[rank].context());
         auto arena_made = gpu_arena_t::make(i32_t(rank), 1ull << 30, {devices.data(), gpus});
-        if (!arena_made || arenas.try_push_back(std::move(arena_made.value_)) != status_t::success_k) return 1;
+        if (!arena_made || arenas.push_back(std::move(arena_made.value_)) != status_t::success_k) return 1;
         bf16_t *tower = arenas[rank].allocate_object<bf16_t>(scalars_k);
         bf16_t *grad = arenas[rank].allocate_object<bf16_t>(scalars_k);
         std::size_t const global_rank = std::size_t(domain) * gpus + rank;
-        cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(tower), global_tower.data() + global_rank * scalars_k,
-                     scalars_k * sizeof(bf16_t));
+        cuMemcpyHtoD(device_address(tower), global_tower.data() + global_rank * scalars_k, scalars_k * sizeof(bf16_t));
         towers[rank] = bf16r2_view_t {tower, vertices_k, hidden_k};
         grads[rank] = bf16r2_span_t {grad, vertices_k, hidden_k};
         owners[rank] = std::move(contrastive_relations_t::make(arenas[rank], vertices_k, 0).value_);
@@ -518,7 +517,8 @@ static int run_cross_domain_case() {
     }
     // The composition roots, in main-order: the ONE multimem domain, the ONE colocated domain.
     auto multimem = multimem_domain_t::make(
-        topology, {devices.data(), gpus}, distributed_contrastive_segments_t::payload_scalars_needed(config), streams);
+        topology, {devices.data(), gpus},
+        distributed_contrastive_segments_t::payload_scalars_needed(config, topology.shape), streams);
     if (!multimem) {
         std::printf("  multimem: %s\n", multimem.description_.c_str());
         check(false, "multimem domain make");
@@ -562,8 +562,7 @@ static int run_cross_domain_case() {
     {
         cuCtxPushCurrent(streams[0].context());
         std::vector<f32_t> summands(gpus);
-        cuMemcpyDtoH(summands.data(), reinterpret_cast<CUdeviceptr>(distributed.value_.loss_outs().data()),
-                     gpus * sizeof(f32_t));
+        cuMemcpyDtoH(summands.data(), device_address(distributed.value_.loss_outs().data()), gpus * sizeof(f32_t));
         cuCtxPopCurrent(nullptr);
         for (f32_t const summand : summands) domain_loss += summand;
     }
@@ -586,7 +585,7 @@ static int run_cross_domain_case() {
     std::size_t const probe_index = (std::size_t(domain) * gpus + 1) * scalars_k + 321;
     std::vector<bf16_t> local_grad(scalars_k);
     cuCtxPushCurrent(streams[1 % gpus].context());
-    cuMemcpyDtoH(local_grad.data(), reinterpret_cast<CUdeviceptr>(grads[1 % gpus].data()), scalars_k * sizeof(bf16_t));
+    cuMemcpyDtoH(local_grad.data(), device_address(grads[1 % gpus].data()), scalars_k * sizeof(bf16_t));
     cuCtxPopCurrent(nullptr);
     f64_t const step_size = 1.0e-2;
     std::vector<bf16_t> plus = global_tower, minus = global_tower;
@@ -662,8 +661,7 @@ static void run_pool_parity_case() {
         staging.resize(scalars);
         for (std::size_t index = 0; index != scalars; ++index)
             staging[index] = __float2bfloat16(hash_fill(index, matrix + 101));
-        cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(weights[matrix].weights.data()), staging.data(),
-                     scalars * sizeof(bf16_t));
+        cuMemcpyHtoD(device_address(weights[matrix].weights.data()), staging.data(), scalars * sizeof(bf16_t));
     }
 
     // A fabricated ragged batch: three live text segments of lengths {8, 5, 2}, a gap token closing the
@@ -681,14 +679,10 @@ static void run_pool_parity_case() {
                                                   modality_t::text_k};
     std::vector<token_id_t> tokens_host(tokens_k);
     for (u32_t token = 0; token != tokens_k; ++token) tokens_host[token] = static_cast<token_id_t>(token % 251u);
-    cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(batch.value_.segment_offsets.data()), offsets_host,
-                 sizeof(offsets_host));
-    cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(batch.value_.segment_lengths.data()), lengths_host,
-                 sizeof(lengths_host));
-    cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(batch.value_.segment_modality.data()), modality_host,
-                 sizeof(modality_host));
-    cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(batch.value_.tokens.data()), tokens_host.data(),
-                 tokens_k * sizeof(token_id_t));
+    cuMemcpyHtoD(device_address(batch.value_.segment_offsets.data()), offsets_host, sizeof(offsets_host));
+    cuMemcpyHtoD(device_address(batch.value_.segment_lengths.data()), lengths_host, sizeof(lengths_host));
+    cuMemcpyHtoD(device_address(batch.value_.segment_modality.data()), modality_host, sizeof(modality_host));
+    cuMemcpyHtoD(device_address(batch.value_.tokens.data()), tokens_host.data(), tokens_k * sizeof(token_id_t));
 
     // Forward with vertices, then read back the tower's own final-norm states — the oracle's input, so
     // the parity isolates exactly the new pool + head math.
@@ -702,10 +696,8 @@ static void run_pool_parity_case() {
         cuCtxPopCurrent(nullptr);
         return;
     }
-    cuMemsetD8(reinterpret_cast<CUdeviceptr>(vertices_tensor.data()), 0,
-               std::size_t(segments_k) * hidden_k * sizeof(bf16_t));
-    cuMemsetD8(reinterpret_cast<CUdeviceptr>(vertices_grad_tensor.data()), 0,
-               std::size_t(segments_k) * hidden_k * sizeof(bf16_t));
+    cuMemsetD8(device_address(vertices_tensor.data()), 0, std::size_t(segments_k) * hidden_k * sizeof(bf16_t));
+    cuMemsetD8(device_address(vertices_grad_tensor.data()), 0, std::size_t(segments_k) * hidden_k * sizeof(bf16_t));
     auto ran = tower.value_.pack_weights(stream.value_);
     if (ran) ran = tower.value_.forward(batch.value_, vertices_tensor.span(), stream.value_);
     if (!ran) std::printf("    %s\n", ran.description_.c_str());
@@ -717,9 +709,9 @@ static void run_pool_parity_case() {
     cuStreamSynchronize(stream.value_.get());
 
     std::vector<bf16_t> states_host(std::size_t(tokens_k) * hidden_k);
-    cuMemcpyDtoH(states_host.data(), reinterpret_cast<CUdeviceptr>(tower.value_.normalized().data()),
+    cuMemcpyDtoH(states_host.data(), device_address(tower.value_.normalized().data()),
                  states_host.size() * sizeof(bf16_t));
-    cuMemcpyDtoH(vertices_device.data(), reinterpret_cast<CUdeviceptr>(vertices_tensor.data()),
+    cuMemcpyDtoH(vertices_device.data(), device_address(vertices_tensor.data()),
                  vertices_device.size() * sizeof(bf16_t));
 
     // Host replica in double precision: per-(segment,head) softmax pool, then RMSNorm → fc1 → SiLU → fc2.
@@ -829,8 +821,7 @@ static void run_pool_parity_case() {
 
     // Backward smoke over the same chain: the keyed vertices force, then every pool / head gradient finite
     // and the query gradient nonzero (the pool actually differentiated).
-    cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(vertices_grad_tensor.data()), force_host.data(),
-                 force_host.size() * sizeof(bf16_t));
+    cuMemcpyHtoD(device_address(vertices_grad_tensor.data()), force_host.data(), force_host.size() * sizeof(bf16_t));
     auto propagated = tower.value_.backward(vertices_grad_tensor.view(), bf16r2_view_t {}, batch.value_, stream.value_);
     if (!propagated) std::printf("    %s\n", propagated.description_.c_str());
     check(static_cast<bool>(propagated), "pool-parity backward");
@@ -841,8 +832,7 @@ static void run_pool_parity_case() {
         for (std::size_t matrix = query_index; matrix != weights.size(); ++matrix) {
             std::size_t const scalars = weights[matrix].weights_grad.extent(0) * weights[matrix].weights_grad.extent(1);
             staging.resize(scalars);
-            cuMemcpyDtoH(staging.data(), reinterpret_cast<CUdeviceptr>(weights[matrix].weights_grad.data()),
-                         scalars * sizeof(bf16_t));
+            cuMemcpyDtoH(staging.data(), device_address(weights[matrix].weights_grad.data()), scalars * sizeof(bf16_t));
             for (std::size_t index = 0; index != scalars; ++index) {
                 f32_t const value = __bfloat162float(staging[index]);
                 all_finite = all_finite && std::isfinite(value);
@@ -878,10 +868,10 @@ static void run_pool_parity_case() {
     if (pooled) {
         cuStreamSynchronize(stream.value_.get());
         std::vector<f32_t> states_grad_device(states_grad_host.size());
-        cuMemcpyDtoH(states_grad_device.data(), reinterpret_cast<CUdeviceptr>(states_grad.data()),
+        cuMemcpyDtoH(states_grad_device.data(), device_address(states_grad.data()),
                      states_grad_device.size() * sizeof(f32_t));
         staging.resize(hidden_k);
-        cuMemcpyDtoH(staging.data(), reinterpret_cast<CUdeviceptr>(query_grad.data()), hidden_k * sizeof(bf16_t));
+        cuMemcpyDtoH(staging.data(), device_address(query_grad.data()), hidden_k * sizeof(bf16_t));
         std::vector<bool> live_rows(tokens_k, false);
         for (u32_t segment = 0; segment != segments_k; ++segment)
             for (u32_t token = 0; token != lengths_host[segment]; ++token)
@@ -931,8 +921,7 @@ static void run_pool_parity_case() {
         if (twin_ran) {
             cuStreamSynchronize(stream.value_.get());
             std::vector<bf16_t> twin_host(std::size_t(segments_k) * hidden_k);
-            cuMemcpyDtoH(twin_host.data(), reinterpret_cast<CUdeviceptr>(twin_vertices.data()),
-                         twin_host.size() * sizeof(bf16_t));
+            cuMemcpyDtoH(twin_host.data(), device_address(twin_vertices.data()), twin_host.size() * sizeof(bf16_t));
             double worst_cosine = 1.0;
             for (u32_t segment = 0; segment != segments_k; ++segment) {
                 if (lengths_host[segment] == 0u) continue; // PAD vertices stay outside the parity

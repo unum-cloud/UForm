@@ -14,8 +14,6 @@
  *  master, the pool a slave that only demuxes. The engines own @b no streams: the whole GPU tail (the
  *  NV12 → interleaved-RGB conversion and the tube tiling) rides the caller's one stream.
  */
-#include <cmath> // `std::cbrt`, `std::log` — the 3-D factor policy's geometric target
-
 #include <unistd.h> // `::write`, `STDERR_FILENO`
 
 #include <algorithm> // `std::min`, `std::max`, `std::find`, `std::upper_bound`
@@ -23,23 +21,24 @@
 
 #include <cuda.h> // vendor-boundary: the Driver API types (`CUstream`, `CUresult`) the NVDEC headers build on
 
-extern "C" {
-#include <libavcodec/avcodec.h>   // vendor-boundary: the container demuxer's bitstream filters
-#include <libavcodec/bsf.h>       // vendor-boundary: `AVBSFContext`, `av_bsf_*`
-#include <libavformat/avformat.h> // vendor-boundary: `AVFormatContext`, `av_read_frame`
-#include <libavutil/mem.h>        // vendor-boundary: `av_malloc`, `av_free`
-}
 #include <ffnvcodec/dynlink_nvcuvid.h> // vendor-boundary: NVDEC parser / decoder structs + typedefs
 #include <ffnvcodec/dynlink_loader.h>  // vendor-boundary: `CuvidFunctions`, `cuvid_load_functions`
 
 #include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the host demux / decode-drive pool
 
+#include "media/planning.hpp" // `video_tube_grid` — each segment's 3-D factorization
+#include "media/video.hpp"    // `demux_video`, `demuxed_t`, `video_codec_t`
 #include "loaders/video_loader.cuh"
 
 namespace uc = unum::uform::core;
 namespace ul = unum::uform::loaders;
+namespace um = unum::uform::media;
 using namespace uc;
 using namespace ul;
+using um::demuxed_t;
+using um::video_codec_count_k;
+using um::video_codec_t;
+using um::video_grid_t;
 
 namespace fu = ashvardanian::forkunion;
 
@@ -47,13 +46,6 @@ namespace fu = ashvardanian::forkunion;
  *  decorrelated under one @c (seed,step,rank) — the same salts the tokens / image / audio loaders use. */
 inline constexpr u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
 inline constexpr u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
-
-/** The elementary-stream formats NVDEC consumes; the enum is contiguous from @c h264_k so a
- *  @c static_cast indexes each engine's per-codec entry table. */
-enum class clip_codec_t : u8_t { h264_k = 0, h265_k, vp9_k, av1_k, mpeg2_k, mpeg4_k, vc1_k };
-
-/** Count of @ref clip_codec_t enumerators — the width of an engine's per-codec entry table. */
-inline constexpr std::size_t clip_codec_count_k = 7;
 
 /** One codec's NVDEC parser + decoder within one engine — not a cache: the @b parser is built once and
  *  persists across clips, while the @b decoder is destroyed and recreated from each clip's probed sequence
@@ -96,7 +88,7 @@ struct video_decode_context_t {
     std::size_t width = 0;
 
     /** The resolved codec — selects this engine's @ref codec_entry_t for the parser / decoder. */
-    clip_codec_t codec = clip_codec_t::h264_k;
+    video_codec_t codec = video_codec_t::h264_k;
 
     /** The first fault the callbacks hit — kept so the drive can mark-and-continue past a bad job. */
     status_t status = status_t::success_k;
@@ -121,8 +113,8 @@ struct nvdec_engine_t {
     /** Decode-surface height ceiling every decoder this engine builds is capped to. */
     unsigned long max_height = 0;
 
-    /** The per-codec parser / decoder entries, indexed by @ref clip_codec_t — built lazily per codec. */
-    codec_entry_t entries[clip_codec_count_k] {};
+    /** The per-codec parser / decoder entries, indexed by @ref video_codec_t — built lazily per codec. */
+    codec_entry_t entries[video_codec_count_k] {};
 
     /** The job the callbacks are serving right now — set before each feed, cleared when the job retires. */
     video_decode_context_t *current = nullptr;
@@ -299,71 +291,16 @@ static __global__ void tile_tubes_kernel_(pixel_t *tiled, pixel_t const *frames,
     }
 }
 
-/** A segment's 3-D patch factorization — temporal groups × patch rows × patch cols; its product is the
- *  segment's column footprint, derived from the clip's decoded native resolution, never a fixed budget. */
-struct patch_triple_t {
-
-    /** Temporal groups — the number of tube time-windows the sampled frames pack into. */
-    u16_t temporal_groups = 1;
-
-    /** Patch rows — the spatial vertical patch count, @c ⌈native_height/patch_size⌉ . */
-    u16_t patch_rows = 1;
-
-    /** Patch columns — the spatial horizontal patch count, @c ⌈native_width/patch_size⌉ . */
-    u16_t patch_cols = 1;
-};
-
-/**
- *  @brief Derive a representation's @c (temporal_groups,patch_rows,patch_cols) from the clip's decoded native
- *      @c (frames,width,height) — the video analogue of the image loader's native-derived footprint, with a temporal
- *      axis folded ahead of the spatial patch.
- *
- *  @c patch_rows and @c patch_cols tile the native frame at @p patch_size ; @c temporal_groups packs the
- *  @p frame_stride -sampled frames into @p tube_frames -deep tubes. The native footprint is then clamped to fit
- *  one row of @p max_columns , downscaled toward its own shape (cube-root scale then trim the largest axis) so an
- *  arbitrarily large clip fits — NVDEC scales each frame to the reduced target — rather than overflowing.
- *  @p max_columns is the grid capacity, not a per-representation budget: the geometry is the content's, only
- *  capped by the row it must land in.
- */
-[[nodiscard]] static patch_triple_t derive_triple_(u32_t frames, u32_t width, u32_t height, u32_t patch_size,
-                                                   u32_t tube_frames, u32_t frame_stride, u32_t max_columns) noexcept {
-    u32_t const stride = std::max<u32_t>(frame_stride, 1u);
-    u32_t const depth = std::max<u32_t>(tube_frames, 1u);
-    u32_t const side = std::max<u32_t>(patch_size, 1u);
-    u32_t const sampled_frames = divide_round_up(std::max<u32_t>(frames, 1u), stride);
-    u32_t temporal_groups = divide_round_up(sampled_frames, depth);
-    u32_t patch_rows = divide_round_up(std::max<u32_t>(height, 1u), side);
-    u32_t patch_cols = divide_round_up(std::max<u32_t>(width, 1u), side);
-    u32_t const budget = std::max<u32_t>(max_columns, 1u);
-    if (static_cast<u64_t>(temporal_groups) * patch_rows * patch_cols > budget) {
-        double const product = static_cast<double>(temporal_groups) * patch_rows * patch_cols;
-        double const scale = std::cbrt(static_cast<double>(budget) / product);
-        temporal_groups = std::max<u32_t>(1u, static_cast<u32_t>(temporal_groups * scale));
-        patch_rows = std::max<u32_t>(1u, static_cast<u32_t>(patch_rows * scale));
-        patch_cols = std::max<u32_t>(1u, static_cast<u32_t>(patch_cols * scale));
-        // Floored scaling can leave the product a hair over budget; trim the largest axis until it fits one row.
-        while (static_cast<u64_t>(temporal_groups) * patch_rows * patch_cols > budget) {
-            if (patch_cols >= patch_rows && patch_cols >= temporal_groups && patch_cols > 1u) --patch_cols;
-            else if (patch_rows >= temporal_groups && patch_rows > 1u) --patch_rows;
-            else if (temporal_groups > 1u) --temporal_groups;
-            else break;
-        }
-    }
-    return patch_triple_t {static_cast<u16_t>(std::min<u32_t>(temporal_groups, 0xFFFFu)),
-                           static_cast<u16_t>(std::min<u32_t>(patch_rows, 0xFFFFu)),
-                           static_cast<u16_t>(std::min<u32_t>(patch_cols, 0xFFFFu))};
-}
-
 /** Map a resolved codec onto the NVDEC codec enum. */
-[[nodiscard]] static cudaVideoCodec to_nvdec_codec(clip_codec_t codec) noexcept {
+[[nodiscard]] static cudaVideoCodec to_nvdec_codec(video_codec_t codec) noexcept {
     switch (codec) {
-    case clip_codec_t::h264_k: return cudaVideoCodec_H264;
-    case clip_codec_t::h265_k: return cudaVideoCodec_HEVC;
-    case clip_codec_t::vp9_k: return cudaVideoCodec_VP9;
-    case clip_codec_t::av1_k: return cudaVideoCodec_AV1;
-    case clip_codec_t::mpeg2_k: return cudaVideoCodec_MPEG2;
-    case clip_codec_t::mpeg4_k: return cudaVideoCodec_MPEG4;
-    case clip_codec_t::vc1_k: return cudaVideoCodec_VC1;
+    case video_codec_t::h264_k: return cudaVideoCodec_H264;
+    case video_codec_t::h265_k: return cudaVideoCodec_HEVC;
+    case video_codec_t::vp9_k: return cudaVideoCodec_VP9;
+    case video_codec_t::av1_k: return cudaVideoCodec_AV1;
+    case video_codec_t::mpeg2_k: return cudaVideoCodec_MPEG2;
+    case video_codec_t::mpeg4_k: return cudaVideoCodec_MPEG4;
+    case video_codec_t::vc1_k: return cudaVideoCodec_VC1;
     }
     return cudaVideoCodec_H264;
 }
@@ -468,7 +405,7 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
     proc_params.second_field = display_info->repeat_first_field + 1;
     proc_params.top_field_first = display_info->top_field_first;
     proc_params.unpaired_field = display_info->repeat_first_field < 0;
-    proc_params.output_stream = reinterpret_cast<CUstream>(context->stream->get());
+    proc_params.output_stream = context->stream->get();
 
     unsigned long long nv12_pointer = 0;
     unsigned int nv12_pitch = 0;
@@ -477,15 +414,14 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
         context->status = status_t::cuda_error_k;
         return 0;
     }
-    auto const *nv12_luma = reinterpret_cast<pixel_t const *>(nv12_pointer);
+    pixel_t const *nv12_luma = device_pointer<pixel_t const>(nv12_pointer);
     pixel_t const *nv12_chroma = nv12_luma + static_cast<std::size_t>(nv12_pitch) * context->height;
     std::size_t const per_frame_pixels = context->height * context->width;
     pixel_t *frame_destination = context->frames_base + context->frames_decoded * per_frame_pixels * 3u;
-    expected_t launched = launch_kernel(reinterpret_cast<void const *>(&nv12_to_interleaved_rgb_kernel_),
-                                        dim3 {grid_size_for(per_frame_pixels), 1u, 1u},
-                                        dim3 {kernel_block_size_default_k, 1u, 1u}, *context->stream,
-                                        static_cast<pixel_t const *>(nv12_luma), nv12_chroma, frame_destination,
-                                        context->height, context->width, static_cast<std::size_t>(nv12_pitch));
+    expected_t launched = launch_kernel(
+        &nv12_to_interleaved_rgb_kernel_, dim3 {grid_size_for(per_frame_pixels), 1u, 1u},
+        dim3 {kernel_block_size_default_k, 1u, 1u}, *context->stream, nv12_luma, nv12_chroma, frame_destination,
+        context->height, context->width, static_cast<std::size_t>(nv12_pitch));
     // The RGB read and the mapped surface both live on `context->stream`; unmap only returns cuvid's host-side
     // surface handle, whose device reuse is re-enqueued behind this kernel on the SAME stream. Serial per-engine
     // stream order is therefore the fence against surface recycling — do NOT move this launch to another stream.
@@ -498,14 +434,19 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
     return 1;
 }
 
+/** The @c unsigned @c char payload pointer NVDEC's parser reads @p bytes through. */
+[[nodiscard]] static unsigned char const *cuvid_payload_(b8_t const *bytes) noexcept {
+    return reinterpret_cast<unsigned char const *>(bytes);
+}
+
 /** Feed an AV1 low-overhead OBU stream to the parser one temporal unit at a time — submitting the whole
  *  clip at once faults inside libnvcuvid after the first frame. */
 [[nodiscard]] static CUresult feed_av1_temporal_units(CuvidFunctions *cuvid, CUvideoparser parser,
-                                                      std::span<u8_t const> stream) noexcept {
+                                                      std::span<b8_t const> stream) noexcept {
     auto feed_unit = [&](std::size_t begin, std::size_t end, bool last) -> CUresult {
         if (end <= begin) return CUDA_SUCCESS;
         CUVIDSOURCEDATAPACKET packet {};
-        packet.payload = stream.data() + begin;
+        packet.payload = cuvid_payload_(stream.data() + begin);
         packet.payload_size = static_cast<unsigned long>(end - begin);
         packet.flags = last ? CUVID_PKT_ENDOFSTREAM : 0u;
         return cuvid->cuvidParseVideoData(parser, &packet);
@@ -513,7 +454,7 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
     std::size_t temporal_unit_start = 0;
     std::size_t offset = 0;
     while (offset < stream.size()) {
-        u8_t const obu_header = stream[offset];
+        u8_t const obu_header = std::to_integer<u8_t>(stream[offset]);
         u8_t const obu_type = (obu_header >> 3u) & 0x0Fu;
         bool const has_extension = ((obu_header >> 2u) & 0x01u) != 0u;
         bool const has_size_field = ((obu_header >> 1u) & 0x01u) != 0u;
@@ -523,7 +464,7 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
         std::size_t shift = 0;
         bool size_complete = false;
         while (cursor < stream.size() && shift < 56u) {
-            u8_t const leb_byte = stream[cursor++];
+            u8_t const leb_byte = std::to_integer<u8_t>(stream[cursor++]);
             obu_size |= static_cast<std::size_t>(leb_byte & 0x7Fu) << shift;
             if ((leb_byte & 0x80u) == 0u) {
                 size_complete = true;
@@ -544,277 +485,9 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
 
 #pragma region Host Container Demux
 
-/** One demuxed clip: its Annex-B elementary stream, its resolved codec, native frame dimensions and count,
- *  and whether the demux succeeded — filled in parallel over the pool, consumed by the engine decoders. */
-struct demuxed_clip_t {
-
-    /** The demuxed Annex-B elementary stream — the engine decoders' input; empty on demux failure. */
-    array<b8_t> annex_b {};
-
-    /** The resolved elementary-stream codec — selects the engine's parser / decoder entry. */
-    clip_codec_t codec = clip_codec_t::h264_k;
-
-    /** Native frame width in pixels, or 0 when the container did not carry it. */
-    u32_t width = 0;
-
-    /** Native frame height in pixels, or 0 when the container did not carry it. */
-    u32_t height = 0;
-
-    /** Native frame count (indexed or duration-estimated), 0 if unknown — weights the temporal factor. */
-    u32_t frames = 0;
-
-    /** Whether demux succeeded — a false entry contributes nothing and stays PAD-zero. */
-    bool ok = false;
-};
-
-/** @c true if @p bytes opens with a 3- or 4-byte Annex-B NAL start code. */
-[[nodiscard]] static bool looks_like_annex_b(std::span<b8_t const> bytes) noexcept {
-    if (bytes.size() < 4u) return false;
-    auto byte_at = [&](std::size_t index) { return static_cast<u8_t>(bytes[index]); };
-    if (byte_at(0) == 0u && byte_at(1) == 0u && byte_at(2) == 0u && byte_at(3) == 1u) return true;
-    return byte_at(0) == 0u && byte_at(1) == 0u && byte_at(2) == 1u;
-}
-
-/** Best-effort H.264 vs H.265 sniff from the first Annex-B NAL header. */
-[[nodiscard]] static clip_codec_t sniff_annex_b_codec(std::span<b8_t const> bytes) noexcept {
-    std::size_t index = 0;
-    while (index + 3u < bytes.size()) {
-        auto byte_at = [&](std::size_t offset) { return static_cast<u8_t>(bytes[index + offset]); };
-        if (byte_at(0) == 0u && byte_at(1) == 0u && byte_at(2) == 1u) {
-            index += 3u;
-            break;
-        }
-        if (byte_at(0) == 0u && byte_at(1) == 0u && byte_at(2) == 0u && byte_at(3) == 1u) {
-            index += 4u;
-            break;
-        }
-        ++index;
-    }
-    if (index >= bytes.size()) return clip_codec_t::h264_k;
-    u8_t const hevc_type = (static_cast<u8_t>(bytes[index]) >> 1u) & 0x3Fu;
-    return hevc_type >= 32u && hevc_type <= 34u ? clip_codec_t::h265_k : clip_codec_t::h264_k;
-}
-
-/** Append @p count bytes from @p source to @p destination ; @c false on allocation failure. */
-[[nodiscard]] static bool append_bytes(array<b8_t> &destination, b8_t const *source, std::size_t count) noexcept {
-    std::size_t const previous = destination.size();
-    if (destination.try_resize_uninitialized(previous + count) != status_t::success_k) return false;
-    for (std::size_t index = 0; index != count; ++index) destination[previous + index] = source[index];
-    return true;
-}
-
-/** Backing state for the in-memory @c AVIOContext read / seek callbacks. */
-struct memory_reader_t {
-
-    /** The clip's container bytes the AVIO callbacks read from — borrowed, not owned. */
-    b8_t const *data = nullptr;
-
-    /** Total size of @c data in bytes — the AVIO seek's end bound. */
-    std::size_t size = 0;
-
-    /** The current read cursor into @c data , advanced by every read and moved by every seek. */
-    std::size_t position = 0;
-};
-
-extern "C" int video_memory_read(void *opaque, u8_t *buffer, int buffer_size) noexcept {
-    auto *reader = static_cast<memory_reader_t *>(opaque);
-    std::size_t const remaining = reader->size - reader->position;
-    std::size_t const to_read = std::min<std::size_t>(static_cast<std::size_t>(buffer_size), remaining);
-    if (to_read == 0) return AVERROR_EOF;
-    for (std::size_t index = 0; index != to_read; ++index)
-        buffer[index] = static_cast<u8_t>(reader->data[reader->position + index]);
-    reader->position += to_read;
-    return static_cast<int>(to_read);
-}
-
-extern "C" i64_t video_memory_seek(void *opaque, i64_t offset, int whence) noexcept {
-    auto *reader = static_cast<memory_reader_t *>(opaque);
-    if (whence == AVSEEK_SIZE) return static_cast<i64_t>(reader->size);
-    i64_t position = 0;
-    if (whence == SEEK_SET) position = offset;
-    else if (whence == SEEK_CUR) position = static_cast<i64_t>(reader->position) + offset;
-    else if (whence == SEEK_END) position = static_cast<i64_t>(reader->size) + offset;
-    else return -1;
-    if (position < 0 || position > static_cast<i64_t>(reader->size)) return -1;
-    reader->position = static_cast<std::size_t>(position);
-    return position;
-}
-
-/** Map an @c AVCodecID onto @ref clip_codec_t ; @c false leaves @p codec untouched. */
-[[nodiscard]] static bool map_av_codec(int av_codec_id, clip_codec_t &codec) noexcept {
-    switch (av_codec_id) {
-    case AV_CODEC_ID_H264: codec = clip_codec_t::h264_k; return true;
-    case AV_CODEC_ID_HEVC: codec = clip_codec_t::h265_k; return true;
-    case AV_CODEC_ID_VP9: codec = clip_codec_t::vp9_k; return true;
-    case AV_CODEC_ID_AV1: codec = clip_codec_t::av1_k; return true;
-    case AV_CODEC_ID_MPEG2VIDEO: codec = clip_codec_t::mpeg2_k; return true;
-    case AV_CODEC_ID_MPEG4: codec = clip_codec_t::mpeg4_k; return true;
-    case AV_CODEC_ID_VC1: codec = clip_codec_t::vc1_k; return true;
-    default: return false;
-    }
-}
-
-/** The bitstream filter converting a container-wrapped codec to Annex-B; @c nullptr passes packets through
- *  unfiltered (VP9 / AV1 / MPEG). */
-[[nodiscard]] static char const *bitstream_filter_name(clip_codec_t codec) noexcept {
-    if (codec == clip_codec_t::h264_k) return "h264_mp4toannexb";
-    if (codec == clip_codec_t::h265_k) return "hevc_mp4toannexb";
-    return nullptr;
-}
-
-/** Demux one container's bytes into @p out 's Annex-B scratch, resolve its codec, and record its native
- *  frame dimensions and count — the per-clip work the pool runs in parallel. */
-static void demux_container(std::span<b8_t const> container, demuxed_clip_t &out) noexcept {
-    out.annex_b.clear();
-    out.ok = false;
-    out.width = out.height = out.frames = 0;
-    if (container.empty()) return;
-    if (looks_like_annex_b(container)) {
-        // A raw elementary stream carries no dimensions until decoded; a square grid is the honest default.
-        out.ok = append_bytes(out.annex_b, container.data(), container.size());
-        out.codec = sniff_annex_b_codec(container);
-        return;
-    }
-
-    memory_reader_t reader {container.data(), container.size(), 0u};
-    std::size_t const avio_buffer_bytes = 32u * 1024u;
-    // Every libav handle is declared up front and freed exactly once by `release_libav`, so every failure exit is a
-    // single `release_libav(); return;`. `avformat_open_input` frees and nulls `format` itself on failure while
-    // leaving our custom-IO `avio` ours to free (AVFMT_FLAG_CUSTOM_IO), so the guard's null-`format` skip plus its
-    // `avio` teardown is exactly right on that path — no double free, no leak.
-    u8_t *avio_buffer = static_cast<u8_t *>(av_malloc(avio_buffer_bytes));
-    AVIOContext *avio = nullptr;
-    AVFormatContext *format = nullptr;
-    AVBSFContext *bitstream_filter = nullptr;
-    AVPacket *raw_packet = nullptr;
-    AVPacket *filtered_packet = nullptr;
-    auto release_libav = [&]() noexcept {
-        if (raw_packet != nullptr) av_packet_free(&raw_packet);
-        if (filtered_packet != nullptr) av_packet_free(&filtered_packet);
-        if (bitstream_filter != nullptr) av_bsf_free(&bitstream_filter);
-        if (format != nullptr) avformat_close_input(&format);
-        if (avio != nullptr) {
-            if (avio->buffer != nullptr) av_freep(&avio->buffer);
-            avio_context_free(&avio);
-        }
-        else if (avio_buffer != nullptr) av_free(avio_buffer);
-    };
-    if (avio_buffer == nullptr) {
-        release_libav();
-        return;
-    }
-    avio = avio_alloc_context(avio_buffer, static_cast<int>(avio_buffer_bytes), 0, &reader, &video_memory_read, nullptr,
-                              &video_memory_seek);
-    if (avio == nullptr) {
-        release_libav();
-        return;
-    }
-    format = avformat_alloc_context();
-    if (format == nullptr) {
-        release_libav();
-        return;
-    }
-    format->pb = avio;
-    format->flags |= AVFMT_FLAG_CUSTOM_IO;
-    if (avformat_open_input(&format, nullptr, nullptr, nullptr) < 0) {
-        release_libav();
-        return;
-    }
-    if (avformat_find_stream_info(format, nullptr) < 0) {
-        release_libav();
-        return;
-    }
-    int video_stream_index = -1;
-    for (unsigned stream_index = 0; stream_index != format->nb_streams; ++stream_index)
-        if (format->streams[stream_index]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            video_stream_index = static_cast<int>(stream_index);
-            break;
-        }
-    if (video_stream_index < 0) {
-        release_libav();
-        return;
-    }
-    AVStream *video_stream = format->streams[video_stream_index];
-    clip_codec_t codec = clip_codec_t::h264_k;
-    if (!map_av_codec(static_cast<int>(video_stream->codecpar->codec_id), codec)) {
-        release_libav();
-        return;
-    }
-    out.width = static_cast<u32_t>(std::max(video_stream->codecpar->width, 0));
-    out.height = static_cast<u32_t>(std::max(video_stream->codecpar->height, 0));
-    // Frame count feeds the decode's temporal stride. Many mp4 / webm containers carry no frame index
-    // (`nb_frames == 0`); estimate it from duration × average frame rate (pure integer: `duration` is in
-    // AV_TIME_BASE units) so the sampled frames still spread across the clip instead of collapsing to its head.
-    if (video_stream->nb_frames > 0) out.frames = static_cast<u32_t>(video_stream->nb_frames);
-    else {
-        AVRational const rate = video_stream->avg_frame_rate;
-        if (rate.num > 0 && rate.den > 0 && format->duration > 0)
-            out.frames = static_cast<u32_t>(static_cast<i64_t>(format->duration) * rate.num /
-                                            (static_cast<i64_t>(rate.den) * AV_TIME_BASE));
-    }
-
-    if (char const *filter_name = bitstream_filter_name(codec); filter_name != nullptr) {
-        AVBitStreamFilter const *descriptor = av_bsf_get_by_name(filter_name);
-        if (descriptor == nullptr || av_bsf_alloc(descriptor, &bitstream_filter) < 0 ||
-            avcodec_parameters_copy(bitstream_filter->par_in, video_stream->codecpar) < 0) {
-            release_libav();
-            return;
-        }
-        bitstream_filter->time_base_in = video_stream->time_base;
-        if (av_bsf_init(bitstream_filter) < 0) {
-            release_libav();
-            return;
-        }
-    }
-
-    raw_packet = av_packet_alloc();
-    filtered_packet = av_packet_alloc();
-    bool ok = raw_packet != nullptr && filtered_packet != nullptr;
-    while (ok && av_read_frame(format, raw_packet) >= 0) {
-        if (raw_packet->stream_index != video_stream_index) {
-            av_packet_unref(raw_packet);
-            continue;
-        }
-        if (bitstream_filter != nullptr) {
-            if (av_bsf_send_packet(bitstream_filter, raw_packet) < 0) {
-                ok = false;
-                av_packet_unref(raw_packet);
-                break;
-            }
-            while (av_bsf_receive_packet(bitstream_filter, filtered_packet) == 0) {
-                ok = append_bytes(out.annex_b, reinterpret_cast<b8_t const *>(filtered_packet->data),
-                                  static_cast<std::size_t>(filtered_packet->size));
-                av_packet_unref(filtered_packet);
-                if (!ok) break;
-            }
-        }
-        else {
-            ok = append_bytes(out.annex_b, reinterpret_cast<b8_t const *>(raw_packet->data),
-                              static_cast<std::size_t>(raw_packet->size));
-        }
-        av_packet_unref(raw_packet);
-    }
-    if (ok && bitstream_filter != nullptr) {
-        av_bsf_send_packet(bitstream_filter, nullptr);
-        while (av_bsf_receive_packet(bitstream_filter, filtered_packet) == 0) {
-            ok = append_bytes(out.annex_b, reinterpret_cast<b8_t const *>(filtered_packet->data),
-                              static_cast<std::size_t>(filtered_packet->size));
-            av_packet_unref(filtered_packet);
-            if (!ok) break;
-        }
-    }
-    release_libav();
-    if (!ok || out.annex_b.empty()) {
-        out.annex_b.clear();
-        return;
-    }
-    out.codec = codec;
-    out.ok = true;
-}
-
 /** Build the parser for @p codec 's entry in @p engine on first use — @c pUserData is the engine so the
  *  callbacks reach its entries and in-flight context. */
-[[nodiscard]] static expected_t ensure_parser(nvdec_engine_t &engine, clip_codec_t codec) noexcept {
+[[nodiscard]] static expected_t ensure_parser(nvdec_engine_t &engine, video_codec_t codec) noexcept {
     codec_entry_t &entry = engine.entries[static_cast<std::size_t>(codec)];
     if (entry.parser != nullptr) return {};
     CUVIDPARSERPARAMS parser_params {};
@@ -867,7 +540,7 @@ expected<nvdec_session_t> nvdec_session_t::make(nvdec_config_t config) noexcept 
         return result_t::fail(status_t::cuda_error_k, "libnvcuvid dynamic load failed");
     if (state->cuvid->cuvidCtxLockCreate(&state->context_lock, state->context) != CUDA_SUCCESS)
         return result_t::fail(status_t::cuda_error_k, "NVDEC context lock creation failed");
-    if (state->engines.try_resize(engine_count) != status_t::success_k)
+    if (state->engines.resize(engine_count) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "NVDEC engine table allocation failed ({} engines)", engine_count);
     // Alias the shared handles into each engine so the parser callbacks reach them without a back-pointer; the engines
     // own only their per-codec decoders (freed by ~nvdec_state_t). No streams — decode rides the caller's stream.
@@ -990,7 +663,7 @@ struct cursor_plan_t {
  *  @brief Stage 2 — the serial token-cursor repack scan.
  *
  *  Walk every segment: derive each live (clip,representation) segment's footprint from the clip's decoded native
- *  resolution, clamped to a row ( @ref derive_triple_ ), jump the cursor past a row boundary it would cross,
+ *  resolution, clamped to a row ( @ref um::video_tube_grid ), jump the cursor past a row boundary it would cross,
  *  drop-with-diagnostic a segment once the grid is full, and record the segment geometry plus the per-job tile
  *  placement. Each live job binds to its clip's @c (clip,pr,pc) decode group ( @ref decode_group_t ) — one NVDEC
  *  decode per distinct spatial target, shared across the clip's representations, which differ only in
@@ -1000,20 +673,19 @@ struct cursor_plan_t {
  */
 [[nodiscard]] static expected<cursor_plan_t> build_token_cursor_(video_grid_geometry_t const &geometry,
                                                                  std::span<video_batch_shape_t const> representations,
-                                                                 std::span<demuxed_clip_t const> demuxed,
+                                                                 std::span<demuxed_t const> demuxed,
                                                                  std::size_t max_segments) noexcept {
     using result_t = expected<cursor_plan_t>;
     u32_t const reps_count = static_cast<u32_t>(representations.size());
     std::size_t const job_count = demuxed.size() * reps_count;
     cursor_plan_t plan;
     array<u32_t> job_group; // per-job index into `plan.groups`, meaningful only where the job's length is nonzero
-    if (plan.offsets.try_resize(max_segments + 1u) != status_t::success_k ||
-        plan.lengths.try_resize(max_segments) != status_t::success_k ||
-        plan.modality.try_resize(max_segments) != status_t::success_k ||
-        plan.shapes.try_resize(job_count * 3u) != status_t::success_k ||
-        plan.jobs.try_resize(job_count) != status_t::success_k ||
-        plan.prefix.try_resize(job_count + 1u) != status_t::success_k ||
-        job_group.try_resize(job_count) != status_t::success_k)
+    if (plan.offsets.resize(max_segments + 1u) != status_t::success_k ||
+        plan.lengths.resize(max_segments) != status_t::success_k ||
+        plan.modality.resize(max_segments) != status_t::success_k ||
+        plan.shapes.resize(job_count * 3u) != status_t::success_k ||
+        plan.jobs.resize(job_count) != status_t::success_k ||
+        plan.prefix.resize(job_count + 1u) != status_t::success_k || job_group.resize(job_count) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "video geometry scratch allocation failed ({} segments)",
                               max_segments);
 
@@ -1032,13 +704,12 @@ struct cursor_plan_t {
             // A segment/job is (clip, rep): clip = segment / reps_count, rep = segment % reps_count.
             std::size_t const clip = segment / reps_count;
             video_batch_shape_t const &rep = representations[segment % reps_count];
-            demuxed_clip_t const &decoded = demuxed[clip];
+            demuxed_t const &decoded = demuxed[clip];
             u32_t const stride = rep.frame_stride == 0u ? 1u : rep.frame_stride;
-            patch_triple_t const grid = derive_triple_(decoded.frames, decoded.width, decoded.height, patch_size,
-                                                       tube_frames, stride, columns);
-            length = static_cast<u32_t>(grid.temporal_groups) * grid.patch_rows * grid.patch_cols;
+            video_grid_t const grid = um::video_tube_grid(decoded.frames, decoded.extent, rep, columns);
+            length = static_cast<u32_t>(grid.temporal_groups) * grid.patch_rows * grid.patch_columns;
             modality = modality_t::video_k;
-            // A segment never crosses its row: jump the cursor to the next row when it would. `derive_triple_`
+            // A segment never crosses its row: jump the cursor to the next row when it would. `video_tube_grid`
             // already clamped `length` to one row, so a drop here means the grid ran out of rows, not that one
             // clip was too big.
             u32_t const room_in_row = columns - cursor % columns;
@@ -1053,7 +724,7 @@ struct cursor_plan_t {
             }
             plan.shapes[segment * 3u + 0u] = grid.temporal_groups;
             plan.shapes[segment * 3u + 1u] = grid.patch_rows;
-            plan.shapes[segment * 3u + 2u] = grid.patch_cols;
+            plan.shapes[segment * 3u + 2u] = grid.patch_columns;
             tile_job_t job;
             job.frames_offset = 0; // resolved in pass 3, once the group buffers have addresses
             job.length = length;
@@ -1061,7 +732,7 @@ struct cursor_plan_t {
             job.dest_column_begin = cursor % columns;
             job.frame_stride = stride;
             job.patch_rows = grid.patch_rows;
-            job.patch_cols = grid.patch_cols;
+            job.patch_cols = grid.patch_columns;
             plan.jobs[segment] = job;
             plan.prefix[segment] = output_elements;
             output_elements += static_cast<u64_t>(length) * per_cell;
@@ -1074,7 +745,8 @@ struct cursor_plan_t {
                 std::size_t found = plan.groups.size();
                 for (std::size_t g = 0; g != plan.groups.size(); ++g)
                     if (plan.groups[g].clip == static_cast<u32_t>(clip) &&
-                        plan.groups[g].patch_rows == grid.patch_rows && plan.groups[g].patch_cols == grid.patch_cols) {
+                        plan.groups[g].patch_rows == grid.patch_rows &&
+                        plan.groups[g].patch_cols == grid.patch_columns) {
                         found = g;
                         break;
                     }
@@ -1084,8 +756,8 @@ struct cursor_plan_t {
                     new_group.frames_offset = 0; // assigned in pass 2
                     new_group.frames_to_decode = reach;
                     new_group.patch_rows = grid.patch_rows;
-                    new_group.patch_cols = grid.patch_cols;
-                    if (plan.groups.try_push_back(new_group) != status_t::success_k)
+                    new_group.patch_cols = grid.patch_columns;
+                    if (plan.groups.push_back(new_group) != status_t::success_k)
                         return result_t::fail(status_t::bad_alloc_k, "video decode-group table allocation failed");
                 }
                 else {
@@ -1120,7 +792,7 @@ struct cursor_plan_t {
     // table the drive publishes and the callbacks fill.
     for (std::size_t job = 0; job != job_count; ++job)
         if (plan.jobs[job].length != 0u) plan.jobs[job].frames_offset = plan.groups[job_group[job]].frames_offset;
-    if (plan.contexts.try_resize(plan.groups.size()) != status_t::success_k)
+    if (plan.contexts.resize(plan.groups.size()) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "video decode context table allocation failed ({} groups)",
                               plan.groups.size());
     return result_t {std::move(plan)};
@@ -1135,20 +807,18 @@ struct cursor_plan_t {
                                                  u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
                                                  modality_span_t segment_modality, std::size_t job_count,
                                                  std::size_t max_segments, gpu_stream_t &stream) noexcept {
-    if (cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(segment_offsets.data()), plan.offsets.data(),
-                          (max_segments + 1u) * sizeof(u32_t), stream.get()) != CUDA_SUCCESS ||
-        cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(segment_lengths.data()), plan.lengths.data(),
-                          max_segments * sizeof(u32_t), stream.get()) != CUDA_SUCCESS ||
-        cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(segment_modality.data()), plan.modality.data(),
-                          max_segments * sizeof(modality_t), stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "video geometry upload failed");
-    nk::tensor_view<u16_t, 1> const shapes_host {plan.shapes.data(), job_count * 3u};
-    nk::tensor_span<u16_t, 1> const shapes_device {video_shapes.data(), job_count * 3u};
-    if (expected_t uploaded = copy_host_to_device(shapes_host, shapes_device, stream); !uploaded) return uploaded;
+    expected_t uploaded = copy_host_to_device(u32r1_view_t {plan.offsets.data(), max_segments + 1u}, segment_offsets,
+                                              stream);
+    if (uploaded)
+        uploaded = copy_host_to_device(u32r1_view_t {plan.lengths.data(), max_segments}, segment_lengths, stream);
+    if (uploaded)
+        uploaded = copy_host_to_device(modality_view_t {plan.modality.data(), max_segments}, segment_modality, stream);
+    if (uploaded)
+        uploaded = copy_host_to_device(nk::tensor_view<u16_t, 1> {plan.shapes.data(), job_count * 3u},
+                                       nk::tensor_span<u16_t, 1> {video_shapes.data(), job_count * 3u}, stream);
+    if (!uploaded) return uploaded;
     std::size_t const grid_elements = static_cast<std::size_t>(geometry.rows) * geometry.columns * geometry.per_cell;
-    if (cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(videos.data()), 0, grid_elements, stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "video grid clear failed");
-    return {};
+    return zero_async(nk::tensor_span<pixel_t, 1> {videos.data(), grid_elements}, stream);
 }
 
 /** The interleaved decode drive's shared inputs — the engine table, the per-clip demux results, and the
@@ -1160,8 +830,8 @@ struct decode_jobs_t {
     /** The owned NVDEC state — its engines' persistent parsers and per-clip decoders the drive feeds. */
     nvdec_state_t *state = nullptr;
 
-    /** Per-clip demux results @b [clip_count] — the codec, Annex-B bytes, and success flag per clip. */
-    std::span<demuxed_clip_t const> demuxed {};
+    /** Per-clip demux results @b [clip_count] — the codec and Annex-B bytes, empty for a failed clip. */
+    std::span<demuxed_t const> demuxed {};
 
     /** The decode groups @b [group_count] — each a clip decoded once to a distinct @c (pr,pc) target. */
     std::span<decode_group_t const> groups {};
@@ -1220,8 +890,8 @@ struct engine_cursor_t {
         // A group decodes one clip's elementary stream once, keeping every frame (temporal_stride 1) at its (pr,pc)
         // spatial target; the clip's representations subsample the shared frames per their frame_stride in the tile.
         decode_group_t const &unit = drive.groups[group];
-        demuxed_clip_t const &decoded = drive.demuxed[unit.clip];
-        if (!decoded.ok || unit.frames_to_decode == 0u) continue;
+        demuxed_t const &decoded = drive.demuxed[unit.clip];
+        if (decoded.annex_b.empty() || unit.frames_to_decode == 0u) continue;
         if (!ensure_parser(engine, decoded.codec)) {
             drive.contexts[group].status = status_t::cuda_error_k;
             continue;
@@ -1236,10 +906,9 @@ struct engine_cursor_t {
         context.stream = drive.stream;
         engine.current = &context;
         std::span<b8_t const> const bytes {decoded.annex_b.data(), decoded.annex_b.size()};
-        if (decoded.codec != clip_codec_t::av1_k) return clip_feed_t {feed_state_::opened, bytes}; // chunk-fed
+        if (decoded.codec != video_codec_t::av1_k) return clip_feed_t {feed_state_::opened, bytes}; // chunk-fed
         CUvideoparser const parser = engine.entries[static_cast<std::size_t>(decoded.codec)].parser;
-        if (feed_av1_temporal_units(engine.cuvid, parser,
-                                    {reinterpret_cast<u8_t const *>(bytes.data()), bytes.size()}) != CUDA_SUCCESS &&
+        if (feed_av1_temporal_units(engine.cuvid, parser, bytes) != CUDA_SUCCESS &&
             context.status == status_t::success_k)
             context.status = status_t::cuda_error_k;
         engine.current = nullptr; // retire the AV1 group — the caller advances and re-opens this engine
@@ -1274,7 +943,7 @@ struct engine_cursor_t {
     nvdec_state_t *const state = drive.state;
     u32_t const engine_count = state->engine_count;
     array<engine_cursor_t> cursors;
-    if (cursors.try_resize(engine_count) != status_t::success_k)
+    if (cursors.resize(engine_count) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "decode cursor allocation failed ({} engines)", engine_count);
 
     // Prime each engine on its stripe's first feedable group, then count the live engines once. `live` only ever
@@ -1292,7 +961,7 @@ struct engine_cursor_t {
             nvdec_engine_t &engine = state->engines[e];
             std::size_t const take = std::min(nvdec_feed_chunk_bytes_k, cursor.pending.size());
             CUVIDSOURCEDATAPACKET packet {};
-            packet.payload = reinterpret_cast<u8_t const *>(cursor.pending.data());
+            packet.payload = cuvid_payload_(cursor.pending.data());
             packet.payload_size = static_cast<unsigned long>(take);
             packet.flags = take == cursor.pending.size() ? CUVID_PKT_ENDOFSTREAM : 0u; // EOS on the final chunk
             CUvideoparser const parser = engine.entries[static_cast<std::size_t>(engine.current->codec)].parser;
@@ -1311,13 +980,13 @@ struct engine_cursor_t {
 /** A wholly black batch is a systematic failure (unsupported codec, driver fault), not graceful degradation,
  *  so fail loud when every decodable group produced no frames; a lone bad clip stays PAD-zero and the drive
  *  mark-and-continues past it. */
-[[nodiscard]] static expected_t audit_black_batch_(std::span<demuxed_clip_t const> demuxed,
+[[nodiscard]] static expected_t audit_black_batch_(std::span<demuxed_t const> demuxed,
                                                    std::span<decode_group_t const> groups,
                                                    std::span<video_decode_context_t const> contexts) noexcept {
     std::size_t const group_count = groups.size();
     std::size_t attempted = 0, produced = 0, hard_failures = 0;
     for (std::size_t group = 0; group != group_count; ++group)
-        if (demuxed[groups[group].clip].ok && groups[group].frames_to_decode != 0u) {
+        if (!demuxed[groups[group].clip].annex_b.empty() && groups[group].frames_to_decode != 0u) {
             ++attempted;
             if (contexts[group].frames_decoded != 0) ++produced;
             if (contexts[group].status != status_t::success_k) ++hard_failures;
@@ -1343,20 +1012,21 @@ struct engine_cursor_t {
     u64_t const output_elements = prefix[job_count]; // the tile's total output-element count, the grid's extent
     array<tile_job_t, gpu_alloc<tile_job_t>> device_jobs {gpu_alloc<tile_job_t> {stream.get()}};
     array<u64_t, gpu_alloc<u64_t>> device_prefix {gpu_alloc<u64_t> {stream.get()}};
-    if (device_jobs.try_resize_uninitialized(job_count) != status_t::success_k ||
-        device_prefix.try_resize_uninitialized(job_count + 1u) != status_t::success_k)
+    if (device_jobs.resize_uninitialized(job_count) != status_t::success_k ||
+        device_prefix.resize_uninitialized(job_count + 1u) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "tile job device allocation failed");
-    if (cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(device_jobs.data()), jobs.data(),
-                          job_count * sizeof(tile_job_t), stream.get()) != CUDA_SUCCESS ||
-        cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(device_prefix.data()), prefix.data(),
-                          (job_count + 1u) * sizeof(u64_t), stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "tile job upload failed");
+    expected_t uploaded = copy_host_to_device(nk::tensor_view<tile_job_t, 1> {jobs.data(), job_count},
+                                              nk::tensor_span<tile_job_t, 1> {device_jobs.data(), job_count}, stream);
+    if (uploaded)
+        uploaded = copy_host_to_device(u64r1_view_t {prefix.data(), job_count + 1u},
+                                       u64r1_span_t {device_prefix.data(), job_count + 1u}, stream);
+    if (!uploaded) return uploaded;
     if (output_elements != 0)
-        if (expected_t tiled = launch_kernel(
-                reinterpret_cast<void const *>(&tile_tubes_kernel_), dim3 {grid_size_for(output_elements), 1u, 1u},
-                dim3 {kernel_block_size_default_k, 1u, 1u}, stream, videos.data(), frames_base, device_jobs.data(),
-                device_prefix.data(), static_cast<u32_t>(job_count), geometry.columns, geometry.tube_frames,
-                geometry.patch_size, geometry.channels);
+        if (expected_t tiled = launch_kernel(&tile_tubes_kernel_, dim3 {grid_size_for(output_elements), 1u, 1u},
+                                             dim3 {kernel_block_size_default_k, 1u, 1u}, stream, videos.data(),
+                                             frames_base, device_jobs.data(), device_prefix.data(),
+                                             static_cast<u32_t>(job_count), geometry.columns, geometry.tube_frames,
+                                             geometry.patch_size, geometry.channels);
             !tiled)
             return tiled;
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
@@ -1401,20 +1071,22 @@ expected_t nvdec_session_t::decode_into(cpu_decode_pool_t &pool, column_view_t c
         return expected_t::fail(status_t::shape_unsupported_k, "batch cannot hold {} segments (cap {})", job_count,
                                 max_segments);
 
-    // Stage 1: parallel host demux over the borrowed pool — the one host-bound, embarrassingly parallel step.
-    array<demuxed_clip_t> demuxed;
-    if (demuxed.try_resize(clip_count) != status_t::success_k)
+    // Stage 1: parallel host demux over the borrowed pool — the one host-bound, embarrassingly parallel step. A clip
+    // that fails to demux keeps an empty stream, contributes nothing, and stays PAD-zero.
+    array<demuxed_t> demuxed;
+    if (demuxed.resize(clip_count) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "demux result table allocation failed ({} clips)", clip_count);
-    demuxed_clip_t *const demuxed_data = demuxed.data();
+    demuxed_t *const demuxed_data = demuxed.data();
     column_view_t const clips_tape = clips;
     {
         auto join = pool.for_n(clip_count,
                                [demuxed_data, clips_tape](std::size_t clip_index, fu::thread_in_domain_t) noexcept {
-                                   demux_container(clips_tape[clip_index], demuxed_data[clip_index]);
+                                   expected<demuxed_t> clip = um::demux_video(clips_tape[clip_index]);
+                                   if (clip) demuxed_data[clip_index] = std::move(clip.value_);
                                });
         (void)join; // The join's destructor blocks until every worker finishes.
     }
-    std::span<demuxed_clip_t const> const demuxed_view {demuxed.data(), clip_count};
+    std::span<demuxed_t const> const demuxed_view {demuxed.data(), clip_count};
 
     // Stage 2: the token cursor — the serial repack scan writing the segment geometry plus the per-job tile
     // placement and decode parameters.
@@ -1434,11 +1106,10 @@ expected_t nvdec_session_t::decode_into(cpu_decode_pool_t &pool, column_view_t c
     // `plan.groups[g].frames_offset`. Zeroed so a short clip's missing frames stay PAD-zero once tiled.
     array<u8_t, gpu_alloc<u8_t>> frames {gpu_alloc<u8_t> {stream.get()}};
     std::size_t const frames_bytes = static_cast<std::size_t>(plan.frame_prefix);
-    if (frames.try_resize_uninitialized(frames_bytes == 0 ? 1u : frames_bytes) != status_t::success_k)
+    if (frames.resize_uninitialized(frames_bytes == 0 ? 1u : frames_bytes) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "frame scratch allocation failed ({} bytes)", frames_bytes);
-    if (frames_bytes != 0 &&
-        cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(frames.data()), 0, frames_bytes, stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "frame scratch clear failed");
+    if (expected_t cleared = zero_async(nk::tensor_span<u8_t, 1> {frames.data(), frames_bytes}, stream); !cleared)
+        return cleared;
 
     // Stage 3: decode from this single host thread, chunk-interleaved across the engines — one decode per group.
     std::size_t const group_count = plan.groups.size();
@@ -1473,32 +1144,31 @@ expected_t ul::decode_videos(nvdec_session_t &nvdec, cpu_decode_pool_t &pool, co
     std::size_t const clips = drawn_rows.size();
     if (clips == 0) return {};
 
-    // Hop each drawn clip's container bytes device → pinned into an Arrow tape (buffer + offsets, one NULL separator
-    // per clip so `tape[i]` reports exactly the clip's length) — the demuxer's host-side source, one tape type end
-    // to end rather than a caller-built table of spans.
+    // Hop each drawn clip's container bytes device → pinned into a terminator-free tape (buffer + offsets, so
+    // `tape[i]` is exactly the clip's bytes) — the demuxer's host-side source, one tape type end to end rather
+    // than a caller-built table of spans. The demuxer reads by size, so no clip needs a delimiter.
     array<b8_t, pinned_alloc<b8_t>> encoded;
     array<u64_t> offsets;
     std::size_t total_bytes = 0;
-    for (std::size_t index = 0; index != clips; ++index) total_bytes += tape[drawn_rows[index]].size() + 1u;
-    if (encoded.try_resize_uninitialized(total_bytes) != status_t::success_k ||
-        offsets.try_resize(clips + 1u) != status_t::success_k)
+    for (std::size_t index = 0; index != clips; ++index) total_bytes += tape[drawn_rows[index]].size();
+    if (encoded.resize_uninitialized(total_bytes) != status_t::success_k ||
+        offsets.resize(clips + 1u) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "clip staging allocation failed ({} bytes)", total_bytes);
     std::size_t cursor = 0;
     offsets[0] = 0;
     for (std::size_t index = 0; index != clips; ++index) {
         auto const blob = tape[drawn_rows[index]];
-        if (blob.size() != 0 && cuMemcpyDtoHAsync(encoded.data() + cursor, reinterpret_cast<CUdeviceptr>(blob.data()),
-                                                  blob.size(), stream.get()) != CUDA_SUCCESS)
-            return expected_t::fail(status_t::cuda_error_k, "clip byte staging copy failed at clip {}", index);
+        if (expected_t hopped = copy_device_to_host(b8r1_view_t {blob.data(), blob.size()},
+                                                    b8r1_span_t {encoded.data() + cursor, blob.size()}, stream);
+            !hopped)
+            return hopped;
         cursor += blob.size();
-        encoded[cursor++] = b8_t {0}; // the NULL delimiter the Arrow tape's operator[] length excludes
         offsets[index + 1] = static_cast<u64_t>(cursor);
     }
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "clip byte staging synchronization failed");
 
-    column_view_t const pinned {std::span<b8_t const> {encoded.data(), cursor},
-                                std::span<u64_t const> {offsets.data(), offsets.size()}};
+    column_view_t const pinned {{encoded.data(), total_bytes}, {offsets.data(), clips + 1u}};
     return nvdec.decode_into(pool, pinned, representations, videos, video_shapes, segment_offsets, segment_lengths,
                              segment_modality, stream);
 }
@@ -1518,7 +1188,7 @@ expected<video_loader_parquet_t> video_loader_parquet_t::make(gpu_direct_storage
     loader.seed_ = seed;
     loader.video_ = video;
 
-    if (loader.row_prefix_.try_resize(loader.absolute_paths_.size() + 1) != status_t::success_k)
+    if (loader.row_prefix_.resize(loader.absolute_paths_.size() + 1) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)",
                               loader.absolute_paths_.size());
     loader.row_prefix_[0] = 0;
@@ -1565,8 +1235,8 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
 
     array<sz::string_view_t> picked_paths;
     array<std::size_t> picked_shards;
-    if (picked_paths.try_resize(shard_count) != status_t::success_k ||
-        picked_shards.try_resize(shard_count) != status_t::success_k)
+    if (picked_paths.resize(shard_count) != status_t::success_k ||
+        picked_shards.resize(shard_count) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "file pick allocation failed");
     std::size_t picked_count = 0, pooled_estimate = 0, attempt = 0;
     while ((pooled_estimate < total_clips || picked_count < floor_files) && picked_count < shard_count) {
@@ -1596,23 +1266,24 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
 
     column_view_t const column = reservoir.column(0);
+    std::size_t const offsets_count = column.size() + 1u;
     array<u64_t> reservoir_offsets;
-    if (reservoir_offsets.try_resize_uninitialized(column.offsets_.size()) != status_t::success_k)
+    if (reservoir_offsets.resize_uninitialized(offsets_count) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "reservoir offsets landing failed ({} rows)", pooled_rows);
-    if (cuMemcpyDtoHAsync(reservoir_offsets.data(), reinterpret_cast<CUdeviceptr>(column.offsets_.data()),
-                          column.offsets_.size() * sizeof(u64_t), gpu_stream.get()) != CUDA_SUCCESS ||
-        cuStreamSynchronize(gpu_stream.get()) != CUDA_SUCCESS)
+    if (expected_t landed = copy_device_to_host(column.offsets, {reservoir_offsets.data(), offsets_count}, gpu_stream);
+        !landed)
+        return landed;
+    if (cuStreamSynchronize(gpu_stream.get()) != CUDA_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "reservoir offsets readback failed");
 
     u64_t const row_key = hash(seed_, gpu_rank, row_draw_salt_k);
     array<u64_t> record_indices;
-    if (record_indices.try_resize_uninitialized(total_clips) != status_t::success_k)
+    if (record_indices.resize_uninitialized(total_clips) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "row index allocation failed ({} draws)", total_clips);
     for (std::size_t index = 0; index != total_clips; ++index)
         record_indices[index] = epoch_permutation(row_key, data_epoch_t {training_step}, index, pooled_rows);
 
-    std::span<u64_t const> const host_offsets {reservoir_offsets.data(), reservoir_offsets.size()};
-    column_view_t const tape {column.buffer_, host_offsets};
+    column_view_t const tape {column.payload, {reservoir_offsets.data(), offsets_count}};
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t &loaded = batches[batch];
         if (loaded.videos.extent(0) < rows || loaded.videos.extent(1) < columns_per_row ||

@@ -123,20 +123,20 @@ static __global__ void tokens_gather_kernel_(b8r1_view_t reservoir_payload, u64r
 
     // Per-fill device index buffer, drawn on the GPU by the keyed permutation of the whole pool.
     array<u64_t, gpu_alloc<u64_t>> record_indices {gpu_alloc<u64_t> {gpu_stream.get()}};
-    if (record_indices.try_resize_uninitialized(total_segments) != status_t::success_k)
+    if (record_indices.resize_uninitialized(total_segments) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "row index allocation failed ({} draws)", total_segments);
 
     switch_to_gpu_t gpu_scope {gpu_stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
-    if (expected_t drawn = launch_kernel(
-            reinterpret_cast<void const *>(&sample_rows_kernel_), dim3 {grid_size_for(total_segments), 1u, 1u},
-            dim3 {kernel_block_size_default_k, 1u, 1u}, gpu_stream,
-            u64r1_span_t {record_indices.data(), total_segments}, row_key, data_epoch, pool_rows);
+    if (expected_t drawn = launch_kernel(&sample_rows_kernel_, dim3 {grid_size_for(total_segments), 1u, 1u},
+                                         dim3 {kernel_block_size_default_k, 1u, 1u}, gpu_stream,
+                                         u64r1_span_t {record_indices.data(), total_segments}, row_key, data_epoch,
+                                         pool_rows);
         !drawn)
         return drawn;
 
-    u64r1_view_t const reservoir_offsets {reservoir_column.offsets_.data(), reservoir_column.offsets_.size()};
-    b8r1_view_t const reservoir_payload {reservoir_column.buffer_.data(), reservoir_column.buffer_.size()};
+    u64r1_view_t const reservoir_offsets = reservoir_column.offsets;
+    b8r1_view_t const reservoir_payload = reservoir_column.payload;
     dim3 const one_block {1u, 1u, 1u};
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const document_grid {static_cast<u32_t>(documents), 1u, 1u};
@@ -152,12 +152,11 @@ static __global__ void tokens_gather_kernel_(b8r1_view_t reservoir_payload, u64r
         u32r1_span_t const segment_lengths = loaded.segment_lengths.span();
         modality_span_t const segment_modality = loaded.segment_modality.span();
         tokens_matrix_span_t const tokens = loaded.tokens.span();
-        expected_t staged = launch_kernel(reinterpret_cast<void const *>(&tokens_geometry_kernel_), one_block,
-                                          one_block, gpu_stream, reservoir_offsets, batch_records, segment_offsets,
-                                          segment_lengths, segment_modality, tokens);
+        expected_t staged = launch_kernel(&tokens_geometry_kernel_, one_block, one_block, gpu_stream, reservoir_offsets,
+                                          batch_records, segment_offsets, segment_lengths, segment_modality, tokens);
         if (staged)
-            staged = launch_kernel(reinterpret_cast<void const *>(&tokens_gather_kernel_), document_grid, block_shape,
-                                   gpu_stream, reservoir_payload, reservoir_offsets, batch_records,
+            staged = launch_kernel(&tokens_gather_kernel_, document_grid, block_shape, gpu_stream, reservoir_payload,
+                                   reservoir_offsets, batch_records,
                                    u32r1_view_t {segment_offsets.data(), segment_offsets.extent(0)},
                                    u32r1_view_t {segment_lengths.data(), segment_lengths.extent(0)}, tokens);
         if (!staged) return staged;
@@ -181,7 +180,7 @@ expected<tokens_loader_parquet_t> tokens_loader_parquet_t::make(gpu_direct_stora
     // Footer only — host-side, no GPU, column-agnostic: a running prefix of each file's row count, the
     // weighted file draw's search table. The column is chosen per fill, so this reads the whole-table
     // footer, not a per-column one.
-    if (loader.row_prefix_.try_resize(loader.absolute_paths_.size() + 1) != status_t::success_k)
+    if (loader.row_prefix_.resize(loader.absolute_paths_.size() + 1) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)",
                               loader.absolute_paths_.size());
     loader.row_prefix_[0] = 0;
@@ -239,8 +238,8 @@ expected<array<sz::string_view_t>> tokens_loader_parquet_t::pick_shards_(u32_t g
     // accumulate until the pool covers the target, never fewer than two unless the dataset is one file.
     array<sz::string_view_t> picked_paths;
     array<std::size_t> picked_shards;
-    if (picked_paths.try_reserve(shard_count) != status_t::success_k ||
-        picked_shards.try_reserve(shard_count) != status_t::success_k)
+    if (picked_paths.reserve(shard_count) != status_t::success_k ||
+        picked_shards.reserve(shard_count) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "file pick allocation failed");
     std::size_t pooled_estimate = 0, attempt = 0;
     while ((pooled_estimate < target_segments || picked_paths.size() < floor_files) &&
@@ -250,8 +249,8 @@ expected<array<sz::string_view_t>> tokens_loader_parquet_t::pick_shards_(u32_t g
         std::size_t const file = static_cast<std::size_t>(
             std::upper_bound(row_prefix_.begin(), row_prefix_.end(), position) - row_prefix_.begin() - 1);
         if (std::find(picked_shards.begin(), picked_shards.end(), file) != picked_shards.end()) continue;
-        if (picked_shards.try_push_back(file) != status_t::success_k ||
-            picked_paths.try_push_back(absolute_paths_[file]) != status_t::success_k)
+        if (picked_shards.push_back(file) != status_t::success_k ||
+            picked_paths.push_back(absolute_paths_[file]) != status_t::success_k)
             return result_t::fail(status_t::bad_alloc_k, "file pick append failed");
         pooled_estimate += row_prefix_[file + 1] - row_prefix_[file];
     }
@@ -277,7 +276,7 @@ expected<tokens_loader_jsonl_t> tokens_loader_jsonl_t::make(gpu_direct_storage_s
     loader.seed_ = seed;
 
     // No footer — weigh files by byte size (POSIX stat), a running prefix for the weighted file draw.
-    if (loader.byte_prefix_.try_resize(loader.absolute_paths_.size() + 1) != status_t::success_k)
+    if (loader.byte_prefix_.resize(loader.absolute_paths_.size() + 1) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)",
                               loader.absolute_paths_.size());
     loader.byte_prefix_[0] = 0;
@@ -310,7 +309,7 @@ expected_t tokens_loader_jsonl_t::fill(gpu_stream_t &gpu_stream, tokens_base_loa
     // rows cover the fill — never fewer than two, unless the whole dataset is one file.
     array<jsonl_file_t> parts;
     array<std::size_t> picked_shards;
-    if (picked_shards.try_resize(shard_count) != status_t::success_k)
+    if (picked_shards.resize(shard_count) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "file pick allocation failed");
     std::size_t picked_count = 0;
     std::size_t pooled_rows = 0;
@@ -327,7 +326,7 @@ expected_t tokens_loader_jsonl_t::fill(gpu_stream_t &gpu_stream, tokens_base_loa
         if (!shard) return expected_t::fail(std::move(shard));
         pooled_rows += shard->rows();
         picked_shards[picked_count] = file;
-        if (parts.try_push_back(std::move(shard.value_)) != status_t::success_k)
+        if (parts.push_back(std::move(shard.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "reservoir parts allocation failed");
         ++picked_count;
     }
@@ -358,7 +357,7 @@ expected<tokens_loader_csv_t> tokens_loader_csv_t::make(gpu_direct_storage_sessi
     loader.seed_ = seed;
 
     // No footer — weigh files by byte size (POSIX stat), a running prefix for the weighted file draw.
-    if (loader.byte_prefix_.try_resize(loader.absolute_paths_.size() + 1) != status_t::success_k)
+    if (loader.byte_prefix_.resize(loader.absolute_paths_.size() + 1) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)",
                               loader.absolute_paths_.size());
     loader.byte_prefix_[0] = 0;
@@ -390,7 +389,7 @@ expected_t tokens_loader_csv_t::fill(gpu_stream_t &gpu_stream, tokens_base_loade
     // cover the fill — never fewer than two, unless the whole dataset is one file.
     array<csv_file_t> parts;
     array<std::size_t> picked_shards;
-    if (picked_shards.try_resize(shard_count) != status_t::success_k)
+    if (picked_shards.resize(shard_count) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "file pick allocation failed");
     std::size_t picked_count = 0;
     std::size_t pooled_rows = 0;
@@ -408,7 +407,7 @@ expected_t tokens_loader_csv_t::fill(gpu_stream_t &gpu_stream, tokens_base_loade
         if (!shard) return expected_t::fail(std::move(shard));
         pooled_rows += shard->rows();
         picked_shards[picked_count] = file;
-        if (parts.try_push_back(std::move(shard.value_)) != status_t::success_k)
+        if (parts.push_back(std::move(shard.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "reservoir parts allocation failed");
         ++picked_count;
     }

@@ -3,32 +3,21 @@
  *      chunk batch path — see the header for the contract.
  *  @file src/loaders/audio_loader.cu
  *
- *  Host decode is a firewall over the libav C API (like @c dataset_shards.cpp firewalls cuDF): every libav /
- *  libswresample error is wrapped and can leave only as an @ref expected_t . The decode lands one mono Float32
- *  clip; the GPU then chunks it into frames of @c chunk_samples raw samples and scatters each clip into the
- *  batch's @c audio_samples as one sub-row segment. No cuFFT, no mel — the spectral frontend is a learnable
- *  layer of the encoder.
+ *  Host decode is @ref unum::uform::media::decode_audio , one mono Float32 clip per job across the pool; the GPU then
+ *  chunks it into frames of @c chunk_samples raw samples and scatters each clip into the batch's @c audio_samples
+ *  as one sub-row segment. No cuFFT, no mel — the spectral frontend is a learnable layer of the encoder.
  */
-#include <cstring> // `std::memcpy` — the in-memory AVIO read callback (vendor-boundary)
-
 #include <algorithm> // `std::min`, `std::find`, `std::upper_bound` — the weighted file draw
 #include <utility>   // `std::move` — expected-channel propagation
 
-extern "C" {
-#include <libavcodec/avcodec.h>       // vendor-boundary: `avcodec_*`, `AVPacket`, `AVFrame`
-#include <libavformat/avformat.h>     // vendor-boundary: `avformat_*`, `AVFormatContext`, `AVIOContext`
-#include <libavutil/channel_layout.h> // vendor-boundary: `AVChannelLayout`, `av_channel_layout_*`
-#include <libavutil/mem.h>            // vendor-boundary: `av_malloc`, `av_free`, `av_freep`
-#include <libavutil/samplefmt.h>      // vendor-boundary: `AV_SAMPLE_FMT_FLT`
-#include <libswresample/swresample.h> // vendor-boundary: `swr_*`, `SwrContext`
-}
-
 #include <forkunion.hpp> // vendor-boundary: the host-CPU decode worker pool
 
+#include "media/audio.hpp" // `decode_audio` — the libav decode and resample to mono
 #include "loaders/audio_loader.cuh"
 
 namespace uc = unum::uform::core;
 namespace ul = unum::uform::loaders;
+namespace um = unum::uform::media;
 using namespace uc;
 using namespace ul;
 
@@ -70,314 +59,10 @@ static __global__ void audio_segments_kernel_(u32r1_span_t segment_offsets, u32r
     segment_offsets[total_segments] = cursor;
 }
 
-/** Backing state for the in-memory AVIO read / seek callbacks over one clip's bytes. */
-struct memory_reader_t {
-    b8_t const *data = nullptr;
-    std::size_t size = 0;
-    std::size_t position = 0;
-};
-
-/** Working buffer size of the custom @c AVIOContext ; FFmpeg's own 32 KB default. */
-constexpr std::size_t avio_buffer_bytes_k = 32u * 1024u;
-
 /** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
  *  decorrelated under one @c (seed,step,rank) — the same salts the tokens and image loaders use. */
 inline constexpr u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
 inline constexpr u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
-
-/** @c AVIOContext read callback: copy up to @p buffer_size bytes from the in-memory clip, advancing the
- *  reader; @c AVERROR_EOF at the end. */
-static int memory_read_(void *opaque, u8_t *buffer, int buffer_size) noexcept {
-    auto *reader = static_cast<memory_reader_t *>(opaque);
-    std::size_t const remaining = reader->size - reader->position;
-    std::size_t const requested = static_cast<std::size_t>(buffer_size);
-    int const to_read = static_cast<int>(requested < remaining ? requested : remaining);
-    if (to_read == 0) return AVERROR_EOF;
-    std::memcpy(buffer, reader->data + reader->position, static_cast<std::size_t>(to_read));
-    reader->position += static_cast<std::size_t>(to_read);
-    return to_read;
-}
-
-/** @c AVIOContext seek callback over the in-memory clip: honors @c SEEK_SET/CUR/END and the
- *  @c AVSEEK_SIZE size query; @c -1 on an out-of-range target. */
-static i64_t memory_seek_(void *opaque, i64_t offset, int whence) noexcept {
-    auto *reader = static_cast<memory_reader_t *>(opaque);
-    if (whence == AVSEEK_SIZE) return static_cast<i64_t>(reader->size);
-    i64_t position = 0;
-    if (whence == SEEK_SET) position = offset;
-    else if (whence == SEEK_CUR) position = static_cast<i64_t>(reader->position) + offset;
-    else if (whence == SEEK_END) position = static_cast<i64_t>(reader->size) + offset;
-    else return -1;
-    if (position < 0 || position > static_cast<i64_t>(reader->size)) return -1;
-    reader->position = static_cast<std::size_t>(position);
-    return position;
-}
-
-/** One clip's libav demux + decode + resample chain, owned as a unit so that a single @ref release
- *  unwinds every handle exactly once on every exit — no per-failure teardown, no double-free. @ref av_open_
- *  builds it; @ref decode_one_clip_ holds it as a local, and its destructor is the one and only unwind. */
-struct decode_session_ {
-
-    /** Backing bytes for the in-memory AVIO callbacks; @c avio holds its address, so it lives here. */
-    memory_reader_t reader {};
-
-    /** The custom in-memory @c AVIOContext feeding the demuxer the clip's bytes (no filesystem touch). */
-    AVIOContext *avio = nullptr;
-
-    /** The demuxer context — freed by @c avformat_close_input once opened, else @c avformat_free_context ;
-     *  @c av_open_ nulls it on an @c avformat_open_input failure (which frees it itself) so @ref release skips
-     *  it and never double-frees. */
-    AVFormatContext *format = nullptr;
-
-    /** Whether @c avformat_open_input succeeded — selects which of the two demuxer teardowns @ref release
-     *  runs. */
-    bool format_opened = false;
-
-    /** The audio decoder context bound to the picked stream's codec parameters. */
-    AVCodecContext *decoder = nullptr;
-
-    /** The libswresample context converting the decoded audio to mono Float32 at the target rate. */
-    SwrContext *resampler = nullptr;
-
-    /** The reusable packet the demuxer reads each compressed unit into. */
-    AVPacket *packet = nullptr;
-
-    /** The reusable frame the decoder emits each PCM block into. */
-    AVFrame *frame = nullptr;
-
-    /** The picked audio stream's index in @c format->streams , or negative before one is found. */
-    int audio_stream_index = -1;
-
-    /** Free every held libav handle exactly once; correct in any partially-built state, so every exit —
-     *  success or failure — unwinds through this single call (invoked by the destructor). */
-    void release() noexcept {
-        if (frame != nullptr) av_frame_free(&frame);
-        if (packet != nullptr) av_packet_free(&packet);
-        if (resampler != nullptr) swr_free(&resampler);
-        if (decoder != nullptr) avcodec_free_context(&decoder);
-        if (format_opened) { avformat_close_input(&format); }
-        else if (format != nullptr) { avformat_free_context(format); }
-        if (avio != nullptr) {
-            if (avio->buffer != nullptr) av_freep(&avio->buffer);
-            avio_context_free(&avio);
-        }
-    }
-
-    /** RAII: the single unwind for the whole chain on every return path. */
-    ~decode_session_() noexcept { release(); }
-};
-
-/**
- *  @brief Build the demux + decode + resample chain for one clip's bytes into @p session — the setup half of
- *      @ref decode_one_clip_ .
- *
- *  Stands up its own libav stack over the in-memory bytes (no filesystem touch), so several run concurrently
- *  on the worker pool. Targets one interleaved mono Float32 channel at @p sample_rate ; the input layout /
- *  rate / format come from the decoder. On any failure the partially built @p session is left in a state
- *  @ref decode_session_::release unwinds cleanly, so the caller returns the status and the session's
- *  destructor owns the teardown.
- *
- *  @param[in] encoded The clip's encoded bytes, kept alive by the caller for @p session 's whole lifetime.
- *  @param[in] sample_rate The mono rate the resampler converts to.
- *  @param[out] session The session the libav chain is built into.
- */
-[[nodiscard]] static status_t av_open_(std::span<b8_t const> encoded, u32_t sample_rate,
-                                       decode_session_ &session) noexcept {
-    session.reader = memory_reader_t {encoded.data(), encoded.size(), 0u};
-    u8_t *avio_buffer = static_cast<u8_t *>(av_malloc(avio_buffer_bytes_k));
-    if (avio_buffer == nullptr) return status_t::bad_alloc_k;
-    session.avio = avio_alloc_context(avio_buffer, static_cast<int>(avio_buffer_bytes_k), /*write=*/0, &session.reader,
-                                      &memory_read_, /*write_packet=*/nullptr, &memory_seek_);
-    if (session.avio == nullptr) {
-        av_free(avio_buffer);
-        return status_t::bad_alloc_k;
-    }
-    session.avio->seekable = AVIO_SEEKABLE_NORMAL; // advertise the seek callback so probing demuxers can rewind
-    session.format = avformat_alloc_context();
-    if (session.format == nullptr) return status_t::bad_alloc_k;
-    session.format->pb = session.avio;
-    session.format->flags |= AVFMT_FLAG_CUSTOM_IO;
-
-    if (avformat_open_input(&session.format, /*url=*/nullptr, /*fmt=*/nullptr, /*options=*/nullptr) < 0) {
-        // On failure `avformat_open_input` frees `format` itself; null it so `release` skips it (the AVIO
-        // buffer, still ours, is the one thing left for the single teardown to reclaim).
-        session.format = nullptr;
-        return status_t::io_error_k;
-    }
-    session.format_opened = true;
-    if (avformat_find_stream_info(session.format, /*options=*/nullptr) < 0) return status_t::io_error_k;
-
-    for (unsigned stream_index = 0; stream_index != session.format->nb_streams; ++stream_index)
-        if (session.format->streams[stream_index]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
-            session.audio_stream_index = static_cast<int>(stream_index);
-            break;
-        }
-    if (session.audio_stream_index < 0) return status_t::invalid_input_k;
-
-    AVStream *audio_stream = session.format->streams[session.audio_stream_index];
-    AVCodec const *codec = avcodec_find_decoder(audio_stream->codecpar->codec_id);
-    if (codec == nullptr) return status_t::shape_unsupported_k;
-    session.decoder = avcodec_alloc_context3(codec);
-    if (session.decoder == nullptr) return status_t::bad_alloc_k;
-    if (avcodec_parameters_to_context(session.decoder, audio_stream->codecpar) < 0 ||
-        avcodec_open2(session.decoder, codec, /*options=*/nullptr) < 0)
-        return status_t::io_error_k;
-
-    // Output is one interleaved Float32 mono channel at the target rate — the raw waveform the encoder's
-    // learnable frontend consumes; input layout / rate / format come from the decoder. Both layouts are
-    // value-initialized: `av_channel_layout_copy` uninitializes its destination first, and on a garbage
-    // stack struct that free()s a garbage custom-map pointer — a residue-dependent worker-thread crash.
-    AVChannelLayout output_layout {};
-    av_channel_layout_default(&output_layout, /*channels=*/1);
-    AVChannelLayout input_layout {};
-    if (session.decoder->ch_layout.nb_channels > 0) {
-        if (av_channel_layout_copy(&input_layout, &session.decoder->ch_layout) < 0) {
-            av_channel_layout_uninit(&output_layout);
-            return status_t::io_error_k;
-        }
-    }
-    else
-        av_channel_layout_default(&input_layout, audio_stream->codecpar->ch_layout.nb_channels > 0
-                                                     ? audio_stream->codecpar->ch_layout.nb_channels
-                                                     : 1);
-
-    int const resampler_built = swr_alloc_set_opts2(&session.resampler, &output_layout, AV_SAMPLE_FMT_FLT,
-                                                    static_cast<int>(sample_rate), &input_layout,
-                                                    session.decoder->sample_fmt, session.decoder->sample_rate,
-                                                    /*log_offset=*/0, /*log_ctx=*/nullptr);
-    av_channel_layout_uninit(&input_layout);
-    av_channel_layout_uninit(&output_layout);
-    if (resampler_built < 0 || swr_init(session.resampler) < 0) return status_t::io_error_k;
-
-    session.packet = av_packet_alloc();
-    session.frame = av_frame_alloc();
-    if (session.packet == nullptr || session.frame == nullptr) return status_t::bad_alloc_k;
-    return status_t::success_k;
-}
-
-/** The mutable state threaded through the resample phases, so the outcome / full pair is spelled once
- *  instead of re-declared beside each of the decode, flush, and drain loops. */
-struct resample_cursor_t {
-
-    /** Samples already written into the fixed-length row. */
-    std::size_t written = 0;
-
-    /** Whether the row reached @c clip_samples — the signal to stop pulling. */
-    bool full = false;
-
-    /** The first error seen, or @c success_k while the phases keep running. */
-    status_t outcome = status_t::success_k;
-};
-
-/**
- *  @brief Resample one step into the fixed-length mono row and advance @p cursor : a real @p decoded frame emits
- *      its samples, a null @p decoded pumps the resampler's delay line, so flush and drain share this one call.
- *      Mono Float32 is one plane, so the write pointer advances by whole samples.
- *
- *  @param[inout] resampler The libswresample context to convert through.
- *  @param[in] decoded The decoded frame to resample, or @c nullptr to drain the resampler to EOF.
- *  @param[out] waveform The fixed-length row samples land into (already pre-zeroed by the caller).
- *  @param[in] clip_samples The row's capacity — output is truncated to it.
- *  @param[inout] cursor The write position / full / outcome state advanced in place.
- *  @return Whether the resampler may still yield output: a real frame — always (the caller loops on the
- *      decoder, not on this return); a null drain feed — only while it emitted samples, @c false at its EOF.
- */
-static bool feed_(SwrContext *resampler, AVFrame *decoded, std::span<f32_t> waveform, u32_t clip_samples,
-                  resample_cursor_t &cursor) noexcept {
-    if (cursor.full || cursor.outcome != status_t::success_k) return false;
-    if (cursor.written >= clip_samples) {
-        cursor.full = true;
-        return false;
-    }
-    int const room = static_cast<int>(clip_samples - cursor.written);
-    u8_t *output_planes[1] = {reinterpret_cast<u8_t *>(waveform.data() + cursor.written)};
-    // `swr_convert` wants `uint8_t const *const *`; `AVFrame::extended_data` is `uint8_t **` — the canonical
-    // FFmpeg-bridge cast through `void *` reconciles the cv-qualifier levels.
-    u8_t const **input_planes = decoded ? (u8_t const **)(void *)decoded->extended_data : nullptr;
-    int const input_samples = decoded ? decoded->nb_samples : 0;
-    int const converted = swr_convert(resampler, output_planes, room, input_planes, input_samples);
-    if (converted < 0) {
-        cursor.outcome = status_t::io_error_k;
-        return false;
-    }
-    cursor.written += static_cast<std::size_t>(converted);
-    if (cursor.written >= clip_samples) cursor.full = true;
-    return decoded != nullptr || converted != 0;
-}
-
-/**
- *  @brief Pull every frame the decoder currently holds and @ref feed_ each into the row, advancing @p cursor .
- *      Shared by the main decode and the post-flush tail — both just receive-then-resample until the decoder
- *      yields @c EAGAIN or @c EOF .
- *  @param[inout] session The open session whose decoder is drained and whose reusable frame is reused.
- *  @param[out] waveform The fixed-length row the resampled samples land into.
- *  @param[in] clip_samples The row's capacity.
- *  @param[inout] cursor The write position / full / outcome state advanced in place.
- */
-static void receive_frames_(decode_session_ &session, std::span<f32_t> waveform, u32_t clip_samples,
-                            resample_cursor_t &cursor) noexcept {
-    while (cursor.outcome == status_t::success_k && !cursor.full) {
-        int const received = avcodec_receive_frame(session.decoder, session.frame);
-        if (received == AVERROR(EAGAIN) || received == AVERROR_EOF) break;
-        if (received < 0) {
-            cursor.outcome = status_t::io_error_k;
-            break;
-        }
-        feed_(session.resampler, session.frame, waveform, clip_samples, cursor);
-        av_frame_unref(session.frame);
-    }
-}
-
-/** Decode one encoded clip and resample it to mono Float32 at @p target_sample_rate , writing exactly
- *  @p clip_samples samples into @p waveform — padded with silence when the clip is short, truncated when it
- *  is long. @ref av_open_ builds the demux + decode + resample chain into a local @ref decode_session_ whose
- *  destructor is the one and only unwind for every return; this body drives the pull / decode / resample
- *  loop over it. No filesystem touch, so several run concurrently on the worker pool. */
-[[nodiscard]] static status_t decode_one_clip_(std::span<b8_t const> encoded, u32_t target_sample_rate,
-                                               u32_t clip_samples, std::span<f32_t> waveform) noexcept {
-    // Silence is the well-defined empty / failure output — a bad clip becomes a padded row, never a
-    // half-written one, so a caller that keeps the batch sees a coherent tensor.
-    for (u32_t sample = 0; sample != clip_samples; ++sample) waveform[sample] = 0.0f;
-    if (encoded.empty()) return status_t::invalid_input_k;
-
-    decode_session_ session;
-    if (status_t const opened = av_open_(encoded, target_sample_rate, session); opened != status_t::success_k)
-        return opened;
-
-    // Pull packets, decode frames, resample each into the fixed-length row until it fills or the container ends.
-    resample_cursor_t cursor;
-    while (cursor.outcome == status_t::success_k && !cursor.full) {
-        int const read = av_read_frame(session.format, session.packet);
-        if (read == AVERROR_EOF) break;
-        if (read < 0) {
-            cursor.outcome = status_t::io_error_k;
-            break;
-        }
-        if (session.packet->stream_index != session.audio_stream_index) {
-            av_packet_unref(session.packet);
-            continue;
-        }
-        int const sent = avcodec_send_packet(session.decoder, session.packet);
-        av_packet_unref(session.packet);
-        if (sent < 0 && sent != AVERROR(EAGAIN)) {
-            cursor.outcome = status_t::io_error_k;
-            break;
-        }
-        receive_frames_(session, waveform, clip_samples, cursor);
-    }
-
-    // Flush the decoder's tail frames, then drain the resampler's delay line — mandatory for codecs (MP3, AAC)
-    // that hold priming / look-ahead samples. Both phases just pump to EOF through the shared `feed_` step.
-    if (cursor.outcome == status_t::success_k) {
-        avcodec_send_packet(session.decoder, nullptr);
-        receive_frames_(session, waveform, clip_samples, cursor);
-    }
-    while (feed_(session.resampler, nullptr, waveform, clip_samples, cursor)) {}
-
-    // The tail past the decoded samples stays the pre-zeroed silence — the pad half of pad / truncate; the
-    // session's destructor is the single unwind as this returns.
-    return cursor.outcome;
-}
 
 expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, std::span<u64_t const> drawn_rows,
                              std::span<audio_batch_shape_t const> representations, audio_samples_span_t audio_samples,
@@ -411,26 +96,26 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, std::s
     // indexed `staged_tape[clip]` read whose length is the adjacent-offset difference — no side table to disagree.
     array<b8_t, pinned_alloc<b8_t>> encoded;
     array<u64_t> encoded_offsets;
-    if (encoded_offsets.try_resize_uninitialized(clips + 1) != status_t::success_k)
+    if (encoded_offsets.resize_uninitialized(clips + 1) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "clip offset staging allocation failed ({} clips)", clips);
     std::size_t total_bytes = 0;
     for (std::size_t index = 0; index != clips; ++index) total_bytes += tape[drawn_rows[index]].size();
-    if (encoded.try_resize_uninitialized(total_bytes) != status_t::success_k)
+    if (encoded.resize_uninitialized(total_bytes) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "clip staging allocation failed ({} bytes)", total_bytes);
     std::size_t cursor = 0;
     for (std::size_t index = 0; index != clips; ++index) {
         auto const blob = tape[drawn_rows[index]];
         encoded_offsets[index] = cursor;
-        if (blob.size() != 0 && cuMemcpyDtoHAsync(encoded.data() + cursor, reinterpret_cast<CUdeviceptr>(blob.data()),
-                                                  blob.size(), stream.get()) != CUDA_SUCCESS)
-            return expected_t::fail(status_t::cuda_error_k, "clip byte staging copy failed at clip {}", index);
+        if (expected_t hopped = copy_device_to_host(b8r1_view_t {blob.data(), blob.size()},
+                                                    b8r1_span_t {encoded.data() + cursor, blob.size()}, stream);
+            !hopped)
+            return hopped;
         cursor += blob.size();
     }
     encoded_offsets[clips] = cursor;
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "clip byte staging synchronization failed");
-    column_view_t const staged_tape {std::span<b8_t const> {encoded.data(), total_bytes},
-                                     std::span<u64_t const> {encoded_offsets.data(), clips + 1}};
+    column_view_t const staged_tape {{encoded.data(), total_bytes}, {encoded_offsets.data(), clips + 1}};
 
     // Decode + resample to mono Float32 across the borrowed pool, into a pinned waveform landing already carrying
     // the grid's `[clips,columns,chunk_samples]` layout: clip `c` fills row `c` (a clip is exactly `clip_samples`).
@@ -438,9 +123,9 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, std::s
     array<f32_t, pinned_alloc<f32_t>> waveforms;
     array<i32_t> statuses;
     array<u32_t> sample_rates; // each representation's resample rate, captured for the pool workers
-    if (waveforms.try_resize_uninitialized(waveform_samples) != status_t::success_k ||
-        statuses.try_resize_uninitialized(job_count) != status_t::success_k ||
-        sample_rates.try_resize(reps_count) != status_t::success_k)
+    if (waveforms.resize_uninitialized(waveform_samples) != status_t::success_k ||
+        statuses.resize_uninitialized(job_count) != status_t::success_k ||
+        sample_rates.resize(reps_count) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "waveform staging allocation failed ({} samples)",
                                 waveform_samples);
     for (std::size_t rep = 0; rep != reps_count; ++rep) sample_rates[rep] = representations[rep].sample_rate;
@@ -452,14 +137,12 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, std::s
     // chunked into row j. A clip is decoded once per representation (one decode for the single-representation case).
     pool.for_n(job_count, [=](std::size_t job, fu::thread_in_domain_t) noexcept {
         std::size_t const clip = job / reps;
-        std::span<b8_t const> const encoded_clip = staged_tape[clip];
-        std::span<b8_t const> const bytes {encoded_clip.data(), encoded_clip.size()};
-        std::span<f32_t> const job_waveform {waveform_base + job * static_cast<std::size_t>(clip_samples),
-                                             static_cast<std::size_t>(clip_samples)};
-        status_base[job] = static_cast<i32_t>(
-            decode_one_clip_(bytes, rate_base[job % reps], clip_samples, job_waveform));
+        std::span<b8_t const> const bytes = staged_tape[clip];
+        f32r1_span_t const job_waveform {waveform_base + job * static_cast<std::size_t>(clip_samples),
+                                         static_cast<std::size_t>(clip_samples)};
+        status_base[job] = static_cast<i32_t>(um::decode_audio(bytes, rate_base[job % reps], job_waveform).status_);
     });
-    // Mark-and-continue: a clip that fails to decode is left silence (decode_one_clip_ pre-zeros its row), matching
+    // Mark-and-continue: a clip that fails to decode is left silence (decode_audio zeros its row), matching
     // the batch's "existence is read from the data" contract and the video loader's per-clip fault isolation. Only a
     // wholly failed batch is a systematic error (a bad codec / driver), so fail loud only then.
     std::size_t failures = 0;
@@ -478,9 +161,9 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, std::s
         !hopped)
         return hopped;
 
-    expected_t staged = launch_kernel(reinterpret_cast<void const *>(&audio_segments_kernel_), dim3 {1u, 1u, 1u},
-                                      dim3 {1u, 1u, 1u}, stream, segment_offsets, segment_lengths, segment_modality,
-                                      static_cast<u32_t>(job_count), columns, rows);
+    expected_t staged = launch_kernel(&audio_segments_kernel_, dim3 {1u, 1u, 1u}, dim3 {1u, 1u, 1u}, stream,
+                                      segment_offsets, segment_lengths, segment_modality, static_cast<u32_t>(job_count),
+                                      columns, rows);
     // Retire the whole stream-ordered chain before the pinned decode landing falls out of scope.
     if (staged && cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
         staged = expected_t::fail(status_t::cuda_error_k, "audio staging synchronization failed");
@@ -510,7 +193,7 @@ expected<audio_loader_parquet_t> audio_loader_parquet_t::make(gpu_direct_storage
 
     // Footer only — host-side, no GPU: a running prefix of each file's row count, the weighted file draw's
     // search table; its back holds the dataset's total rows.
-    if (loader.row_prefix_.try_resize(loader.absolute_paths_.size() + 1) != status_t::success_k)
+    if (loader.row_prefix_.resize(loader.absolute_paths_.size() + 1) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)",
                               loader.absolute_paths_.size());
     loader.row_prefix_[0] = 0;
@@ -552,8 +235,8 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
     // fill's clips; never fewer than two, unless the whole dataset is one file.
     array<sz::string_view_t> picked_paths;
     array<std::size_t> picked_shards;
-    if (picked_paths.try_resize(shard_count) != status_t::success_k ||
-        picked_shards.try_resize(shard_count) != status_t::success_k)
+    if (picked_paths.resize(shard_count) != status_t::success_k ||
+        picked_shards.resize(shard_count) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "file pick allocation failed");
     std::size_t picked_count = 0, pooled_estimate = 0, attempt = 0;
     while ((pooled_estimate < total_clips || picked_count < floor_files) && picked_count < shard_count) {
@@ -585,24 +268,25 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
 
     // The reservoir's clip offsets to the host once — every per-row byte bound is then host arithmetic.
     column_view_t const column = reservoir.column(0);
+    std::size_t const offsets_count = column.size() + 1u;
     array<u64_t> reservoir_offsets;
-    if (reservoir_offsets.try_resize_uninitialized(column.offsets_.size()) != status_t::success_k)
+    if (reservoir_offsets.resize_uninitialized(offsets_count) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "reservoir offsets landing failed ({} rows)", pooled_rows);
-    if (cuMemcpyDtoHAsync(reservoir_offsets.data(), reinterpret_cast<CUdeviceptr>(column.offsets_.data()),
-                          column.offsets_.size() * sizeof(u64_t), gpu_stream.get()) != CUDA_SUCCESS ||
-        cuStreamSynchronize(gpu_stream.get()) != CUDA_SUCCESS)
+    if (expected_t landed = copy_device_to_host(column.offsets, {reservoir_offsets.data(), offsets_count}, gpu_stream);
+        !landed)
+        return landed;
+    if (cuStreamSynchronize(gpu_stream.get()) != CUDA_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "reservoir offsets readback failed");
 
     // Draw the whole fill's rows on the host — a keyed bijection over the pool.
     u64_t const row_key = hash(seed_, gpu_rank, row_draw_salt_k);
     array<u64_t> record_indices;
-    if (record_indices.try_resize_uninitialized(total_clips) != status_t::success_k)
+    if (record_indices.resize_uninitialized(total_clips) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "row index allocation failed ({} draws)", total_clips);
     for (std::size_t segment = 0; segment != total_clips; ++segment)
         record_indices[segment] = epoch_permutation(row_key, data_epoch_t {training_step}, segment, pooled_rows);
 
-    std::span<u64_t const> const host_offsets {reservoir_offsets.data(), reservoir_offsets.size()};
-    column_view_t const tape {column.buffer_, host_offsets};
+    column_view_t const tape {column.payload, {reservoir_offsets.data(), offsets_count}};
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t &loaded = batches[batch];
         audio_samples_view_t const grid_view = loaded.audio_samples.view();

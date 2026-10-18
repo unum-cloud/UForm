@@ -66,7 +66,8 @@
 #include "core/array.hpp"             // `array`
 #include "core/gpu_allocators.hpp"    // `pinned_alloc`
 #include "core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
-#include "core/multimodal_batch.hpp"  // `multimodal_batch_on_gpu_t`
+#include "core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`
+#include "media/video.hpp"            // `pixel_tubes_span_t`
 #include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
 #include "loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
 
@@ -83,10 +84,8 @@ using cpu_decode_pool_t = ashvardanian::forkunion::flat_pool_t;
 
 /** The writable @b [rows,columns,tube_frames,patch_side,patch_side,channels] tube grid of one batch's video
  *  rows — the decode's destination. Each drawn clip emits one segment @b per representation, and every segment
- *  scatters its @c temporal_groups·patch_rows·patch_cols tubes into a contiguous column sub-range of a single
- *  row @c [column_begin,column_begin+len) , several segments sharing a row; the grid is the whole
- *  @c rows·columns cell space, not one clip per row. */
-using pixel_tubes_span_t = nk::tensor_span<pixel_t, 6>;
+ *  scatters its @c temporal_groups·patch_rows·patch_columns tubes into a column sub-range of one row. */
+using media::pixel_tubes_span_t;
 
 /** The baked knobs of the @ref nvdec_session_t — the engine budget and each decoder's surface ceiling. */
 struct nvdec_config_t {

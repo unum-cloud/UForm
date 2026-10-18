@@ -40,11 +40,11 @@ static __global__ void infiniband_allreduce_post_kernel_(infiniband_links_view_t
     infiniband_link_t const link = links[round];
     u32_t const step_parity = (flag_round[0] / static_cast<u32_t>(links.extent(0))) & 1u;
     u32_t const flag_value = flag_round[0] + round + 1u;
-    infiniband_post_write(link.queue, reinterpret_cast<u64_t>(shard), link.local_access_key,
+    infiniband_post_write(link.queue, shard, link.local_access_key,
                           link.remote_heap_base + link.landing_offset + step_parity * link.landing_parity_stride,
                           link.remote_access_key, static_cast<u32_t>(shard_scalars * sizeof(f32_t)),
                           infiniband_signaling_t::unsignaled_k, nullptr);
-    infiniband_post_write(link.queue, 0u, link.local_access_key,
+    infiniband_post_write(link.queue, nullptr, link.local_access_key,
                           link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
                           link.remote_access_key, sizeof(u32_t), infiniband_signaling_t::signaled_k, &flag_value);
     infiniband_drain_one(link.completion);
@@ -69,14 +69,14 @@ static __global__ void infiniband_flag_wait_kernel_(infiniband_links_view_t link
 
 /** Accumulate step of one all-reduce round: fold the partner's landed shard into this domain's,
  *  one explicit round-to-nearest-even add per element — no fused-multiply-add contraction, so the
- *  SPMD-static fold order is bit-identical on every domain. */
+ *  SPMD-static fold order is bit-identical on every domain. The heap is symmetric with the shard at its
+ *  offset 0, so the landing sits at its own offset past the shard. */
 static __global__ void infiniband_accumulate_f32_kernel_(infiniband_links_view_t links, u32_t round, f32_t *shard,
                                                          std::size_t shard_scalars,
                                                          infiniband_round_view_t flag_round) {
     infiniband_link_t const link = links[round];
     u32_t const step_parity = (flag_round[0] / static_cast<u32_t>(links.extent(0))) & 1u;
-    f32_t const *landing = reinterpret_cast<f32_t const *>(link.local_landing.data() +
-                                                           step_parity * link.landing_parity_stride);
+    f32_t const *landing = shard + (link.landing_offset + step_parity * link.landing_parity_stride) / sizeof(f32_t);
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
     for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < shard_scalars;
          index += stride)
@@ -93,7 +93,7 @@ static __global__ void infiniband_accumulate_f32_kernel_(infiniband_links_view_t
  *  exactly the half it lacks at the right domain-major position.
  */
 static __global__ void infiniband_allgather_post_kernel_(infiniband_links_view_t links, u32_t round,
-                                                         infiniband_allgather_plan_t plan, char const *gathered_bytes,
+                                                         infiniband_allgather_plan_t plan, b8_t const *gathered_bytes,
                                                          infiniband_round_view_t flag_round) {
     if (threadIdx.x != 0) return;
     infiniband_link_t const link = links[round];
@@ -107,10 +107,10 @@ static __global__ void infiniband_allgather_post_kernel_(infiniband_links_view_t
     u32_t const flag_value = flag_round[0] + round + 1u;
 
     u32_t const step_parity = (flag_round[0] / static_cast<u32_t>(links.extent(0))) & 1u;
-    infiniband_post_write(link.queue, reinterpret_cast<u64_t>(gathered_bytes + send_byte_offset), link.local_access_key,
+    infiniband_post_write(link.queue, gathered_bytes + send_byte_offset, link.local_access_key,
                           link.remote_heap_base + send_byte_offset, link.remote_access_key,
                           static_cast<u32_t>(send_bytes), infiniband_signaling_t::unsignaled_k, nullptr);
-    infiniband_post_write(link.queue, 0u, link.local_access_key,
+    infiniband_post_write(link.queue, nullptr, link.local_access_key,
                           link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
                           link.remote_access_key, sizeof(u32_t), infiniband_signaling_t::signaled_k, &flag_value);
     infiniband_drain_one(link.completion);
@@ -127,7 +127,7 @@ static __global__ void infiniband_allgather_post_kernel_(infiniband_links_view_t
  *  __grid_size__ @c [1,1,1] , one warp; no dynamic shared memory.
  */
 static __global__ void infiniband_alltoall_post_kernel_(infiniband_links_view_t links, u32_t round,
-                                                        infiniband_alltoall_plan_t plan, char const *send_bytes,
+                                                        infiniband_alltoall_plan_t plan, b8_t const *send_bytes,
                                                         infiniband_round_view_t flag_round) {
     if (threadIdx.x != 0) return;
     infiniband_link_t const link = links[round];
@@ -135,11 +135,11 @@ static __global__ void infiniband_alltoall_post_kernel_(infiniband_links_view_t 
     u32_t const step_parity = (flag_round[0] / static_cast<u32_t>(links.extent(0))) & 1u;
     u32_t const flag_value = flag_round[0] + round + 1u;
 
-    infiniband_post_write(link.queue, reinterpret_cast<u64_t>(send_bytes + send_byte_offset), link.local_access_key,
+    infiniband_post_write(link.queue, send_bytes + send_byte_offset, link.local_access_key,
                           link.remote_heap_base + link.landing_offset + step_parity * link.landing_parity_stride,
                           link.remote_access_key, static_cast<u32_t>(plan.block_bytes),
                           infiniband_signaling_t::unsignaled_k, nullptr);
-    infiniband_post_write(link.queue, 0u, link.local_access_key,
+    infiniband_post_write(link.queue, nullptr, link.local_access_key,
                           link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
                           link.remote_access_key, sizeof(u32_t), infiniband_signaling_t::signaled_k, &flag_value);
     infiniband_drain_one(link.completion);
@@ -154,9 +154,9 @@ expected<infiniband_nic_t> infiniband_nic_t::make(u32_t local_gpu_index, u8_t in
     // still dereference.
     CUdevice paired_gpu = 0;
     if (CUresult resolved = cuDeviceGet(&paired_gpu, static_cast<int>(local_gpu_index)); resolved != CUDA_SUCCESS)
-        return expected<infiniband_nic_t>::fail(resolved, "paired GPU {} resolution failed", local_gpu_index);
+        return cuda_failure<infiniband_nic_t>(resolved, "paired GPU {} resolution failed", local_gpu_index);
     if (CUresult retained = cuDevicePrimaryCtxRetain(&nic.primary_context_, paired_gpu); retained != CUDA_SUCCESS)
-        return expected<infiniband_nic_t>::fail(retained, "primary-context retain failed (gpu={})", local_gpu_index);
+        return cuda_failure<infiniband_nic_t>(retained, "primary-context retain failed (gpu={})", local_gpu_index);
     nic.paired_gpu_ = paired_gpu;
     sz::string_t nic_name;
     if (!format_into(nic_name, "mlx5_{}", local_gpu_index))
@@ -233,7 +233,7 @@ expected<infiniband_endpoint_t> infiniband_endpoint_t::make(infiniband_nic_t &ni
     coordinates.queue_pair_number = endpoint.queue_pair_->qp_num;
     coordinates.packet_sequence_number = 0;
     coordinates.remote_key = endpoint.memory_region_->rkey;
-    coordinates.buffer_address = reinterpret_cast<u64_t>(gpu_buffer.data());
+    coordinates.buffer_address = device_address(gpu_buffer.data());
     std::memcpy(coordinates.global_identifier, nic.global_identifier(), sizeof(coordinates.global_identifier));
     return expected<infiniband_endpoint_t> {std::move(endpoint)};
 }
@@ -284,13 +284,12 @@ expected_t infiniband_endpoint_t::connect(infiniband_coordinates_t const &peer) 
 
 expected_t infiniband_endpoint_t::register_gpu_memory_(ibv_pd *protection_domain) noexcept {
     int dmabuf_descriptor = -1;
-    CUresult const exported = cuMemGetHandleForAddressRange(
-        &dmabuf_descriptor, reinterpret_cast<CUdeviceptr>(gpu_buffer_.data()), gpu_buffer_.extent(0),
-        CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
+    CUdeviceptr const buffer_address = device_address(gpu_buffer_.data());
+    CUresult const exported = cuMemGetHandleForAddressRange(&dmabuf_descriptor, buffer_address, gpu_buffer_.extent(0),
+                                                            CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD, 0);
     if (exported == CUDA_SUCCESS && dmabuf_descriptor >= 0) {
-        memory_region_ = ibv_reg_dmabuf_mr(protection_domain, 0, gpu_buffer_.extent(0),
-                                           reinterpret_cast<u64_t>(gpu_buffer_.data()), dmabuf_descriptor,
-                                           infiniband_access_flags_k);
+        memory_region_ = ibv_reg_dmabuf_mr(protection_domain, 0, gpu_buffer_.extent(0), buffer_address,
+                                           dmabuf_descriptor, infiniband_access_flags_k);
         if (memory_region_ != nullptr) {
             dmabuf_descriptor_ = dmabuf_descriptor;
             return {};
@@ -305,7 +304,7 @@ expected_t infiniband_endpoint_t::register_gpu_memory_(ibv_pd *protection_domain
                                 "GPU memory-region registration failed: dmabuf export {} (fd={}), " //
                                 "ibv_reg_mr errno={} ({} bytes at 0x{:x})",
                                 exported == CUDA_SUCCESS ? "ok" : "unsupported", dmabuf_descriptor, errno,
-                                gpu_buffer_.extent(0), reinterpret_cast<u64_t>(gpu_buffer_.data()));
+                                gpu_buffer_.extent(0), buffer_address);
     return {};
 }
 
@@ -333,24 +332,25 @@ expected<infiniband_queue_mapping_t> infiniband_queue_mapping_t::make(ibv_qp *qu
     mapping.registry_ = &registry;
     std::size_t const send_queue_bytes = static_cast<std::size_t>(raw_queue.sq.wqe_cnt) *
                                          static_cast<std::size_t>(raw_queue.sq.stride);
-    void *send_queue_device = nullptr;
+    CUdeviceptr send_queue_device = 0;
     if (expected_t mapped = registry.acquire(raw_queue.sq.buf, send_queue_bytes, host_memory_t::dma_k,
                                              send_queue_device);
         !mapped)
         return expected<infiniband_queue_mapping_t>::fail(std::move(mapped));
     mapping.send_queue_range_ = {raw_queue.sq.buf, send_queue_bytes};
-    mapping.handles_.send_queue = {static_cast<std::byte *>(send_queue_device), send_queue_bytes};
+    mapping.handles_.send_queue = {device_pointer<std::byte>(send_queue_device), send_queue_bytes};
 
-    void *doorbell_device = nullptr;
+    CUdeviceptr doorbell_device = 0;
     if (expected_t mapped = registry.acquire(raw_queue.dbrec, sizeof(u32_t) * 2, host_memory_t::dma_k, doorbell_device);
         !mapped)
         return expected<infiniband_queue_mapping_t>::fail(std::move(mapped));
     mapping.doorbell_range_ = {raw_queue.dbrec, sizeof(u32_t) * 2};
-    mapping.handles_.doorbell_record = static_cast<u32_t *>(doorbell_device);
+    mapping.handles_.doorbell_record = device_pointer<u32_t>(doorbell_device);
 
     std::size_t const blueflame_bytes = raw_queue.bf.size != 0 ? raw_queue.bf.size : sizeof(u64_t);
+    CUdeviceptr blueflame_device = 0;
     if (expected_t mapped = registry.acquire(raw_queue.bf.reg, blueflame_bytes, host_memory_t::mmio_k,
-                                             mapping.handles_.blueflame_register);
+                                             blueflame_device);
         !mapped)
         return expected<infiniband_queue_mapping_t>::fail( //
             status_t::io_error_k,
@@ -358,14 +358,15 @@ expected<infiniband_queue_mapping_t> infiniband_queue_mapping_t::make(ibv_qp *qu
             "device-initiated GDAKI is blocked on this platform: {}",
             mapped.description_);
     mapping.blueflame_range_ = {raw_queue.bf.reg, blueflame_bytes};
+    mapping.handles_.blueflame_register = device_pointer<void>(blueflame_device);
 
     mapping.handles_.producer_index = arena.allocate_object<u32_t>(1);
     if (mapping.handles_.producer_index == nullptr)
         return expected<infiniband_queue_mapping_t>::fail(
             status_t::bad_alloc_k, "producer-index counter allocation failed (arena_used={})", arena.used());
-    if (CUresult result = cuMemsetD8(reinterpret_cast<CUdeviceptr>(mapping.handles_.producer_index), 0, sizeof(u32_t));
+    if (CUresult result = cuMemsetD8(device_address(mapping.handles_.producer_index), 0, sizeof(u32_t));
         result != CUDA_SUCCESS)
-        return expected<infiniband_queue_mapping_t>::fail(result, "producer-index counter reset failed");
+        return cuda_failure<infiniband_queue_mapping_t>(result, "producer-index counter reset failed");
     return expected<infiniband_queue_mapping_t> {std::move(mapping)};
 }
 
@@ -405,28 +406,28 @@ expected<infiniband_completion_mapping_t> infiniband_completion_mapping_t::make(
     mapping.registry_ = &registry;
     std::size_t const ring_bytes = static_cast<std::size_t>(raw_completion.cqe_cnt) *
                                    static_cast<std::size_t>(raw_completion.cqe_size);
-    void *ring_device = nullptr;
+    CUdeviceptr ring_device = 0;
     if (expected_t mapped = registry.acquire(raw_completion.buf, ring_bytes, host_memory_t::dma_k, ring_device);
         !mapped)
         return expected<infiniband_completion_mapping_t>::fail(std::move(mapped));
     mapping.ring_range_ = {raw_completion.buf, ring_bytes};
-    mapping.handles_.ring = {static_cast<std::byte *>(ring_device), ring_bytes};
+    mapping.handles_.ring = {device_pointer<std::byte>(ring_device), ring_bytes};
 
-    void *doorbell_device = nullptr;
+    CUdeviceptr doorbell_device = 0;
     if (expected_t mapped = registry.acquire(raw_completion.dbrec, sizeof(u32_t) * 2, host_memory_t::dma_k,
                                              doorbell_device);
         !mapped)
         return expected<infiniband_completion_mapping_t>::fail(std::move(mapped));
     mapping.doorbell_range_ = {raw_completion.dbrec, sizeof(u32_t) * 2};
-    mapping.handles_.doorbell_record = static_cast<u32_t *>(doorbell_device);
+    mapping.handles_.doorbell_record = device_pointer<u32_t>(doorbell_device);
 
     mapping.handles_.consumer_index = arena.allocate_object<u32_t>(1);
     if (mapping.handles_.consumer_index == nullptr)
         return expected<infiniband_completion_mapping_t>::fail(
             status_t::bad_alloc_k, "consumer-index counter allocation failed (arena_used={})", arena.used());
-    if (CUresult result = cuMemsetD8(reinterpret_cast<CUdeviceptr>(mapping.handles_.consumer_index), 0, sizeof(u32_t));
+    if (CUresult result = cuMemsetD8(device_address(mapping.handles_.consumer_index), 0, sizeof(u32_t));
         result != CUDA_SUCCESS)
-        return expected<infiniband_completion_mapping_t>::fail(result, "consumer-index counter reset failed");
+        return cuda_failure<infiniband_completion_mapping_t>(result, "consumer-index counter reset failed");
     return expected<infiniband_completion_mapping_t> {std::move(mapping)};
 }
 
@@ -456,19 +457,19 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
     if (!member.heap_ || !member.links_ || !member.round_scalar_)
         return result_t::fail(status_t::bad_alloc_k, "member heap / table allocation failed ({} bytes, arena_used={})",
                               heap_bytes, arena.used());
-    if (cuMemsetD8(reinterpret_cast<CUdeviceptr>(member.heap_.data()), 0, heap_bytes) != CUDA_SUCCESS ||
-        cuMemsetD8(reinterpret_cast<CUdeviceptr>(member.round_scalar_.data()), 0, sizeof(u32_t)) != CUDA_SUCCESS)
+    if (cuMemsetD8(device_address(member.heap_.data()), 0, heap_bytes) != CUDA_SUCCESS ||
+        cuMemsetD8(device_address(member.round_scalar_.data()), 0, sizeof(u32_t)) != CUDA_SUCCESS)
         return result_t::fail(status_t::cuda_error_k, "member heap reset failed");
     expected<barrier_round_t> counter = barrier_round_t::make(u32r1_span_t {member.round_scalar_.data(), 1},
                                                               layout.rounds, stream);
     if (!counter) return result_t::fail(std::move(counter));
     member.round_ = std::move(counter.value_);
-    if (member.endpoints_.try_resize(layout.rounds) != status_t::success_k ||
-        member.queues_.try_resize(layout.rounds) != status_t::success_k ||
-        member.completions_.try_resize(layout.rounds) != status_t::success_k)
+    if (member.endpoints_.resize(layout.rounds) != status_t::success_k ||
+        member.queues_.resize(layout.rounds) != status_t::success_k ||
+        member.completions_.resize(layout.rounds) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "member tables failed ({} rounds)", layout.rounds);
     array<infiniband_link_t> host_links {};
-    if (host_links.try_resize(layout.rounds) != status_t::success_k)
+    if (host_links.resize(layout.rounds) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "host link staging failed");
 
     b8r1_span_t const heap_span {member.heap_.data(), heap_bytes};
@@ -525,47 +526,45 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
             // Each round its own even/odd landing pair, so a fast partner's next-step write never lands
             // on a buffer the slower side is still folding — the flag proves arrival, not consumption.
             std::size_t const landing = layout.landings_offset() + round * 2u * layout.landing_bytes;
-            link.local_landing = b8r1_span_t {member.heap_.data() + landing, layout.landing_bytes};
             link.landing_offset = landing;
             link.landing_parity_stride = static_cast<u32_t>(layout.landing_bytes);
         }
         else {
             // The payload doubles as the landing — the all-gather's domain-major buffer, parity-free.
-            link.local_landing = b8r1_span_t {member.heap_.data(), layout.payload_bytes};
             link.landing_offset = 0;
             link.landing_parity_stride = 0;
         }
         link.remote_flag_offset = layout.flags_offset() + round * 2u * sizeof(u32_t);
-        link.arrival_flag = reinterpret_cast<infiniband_round_t *>(member.heap_.data() + link.remote_flag_offset);
+        link.arrival_flag = typed_span<infiniband_round_t>(member.heap_.span()).data() +
+                            link.remote_flag_offset / sizeof(infiniband_round_t);
         host_links[round] = link;
     }
-    if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(member.links_.data()), host_links.view().data(),
+    if (CUresult result = cuMemcpyHtoD(device_address(member.links_.data()), host_links.view().data(),
                                        layout.rounds * sizeof(infiniband_link_t));
         result != CUDA_SUCCESS)
-        return result_t::fail(result, "link table upload failed");
+        return cuda_failure<infiniband_reach_t>(result, "link table upload failed");
     return result_t {std::move(member)};
 }
 
 expected_t infiniband_reach_t::allreduce_sum(gpu_stream_t &stream) noexcept {
     if (layout_.rounds == 0) return {};
     std::size_t const shard_scalars = layout_.payload_bytes / sizeof(f32_t);
-    f32_t *const shard = reinterpret_cast<f32_t *>(heap_.data());
+    f32_t *const shard = typed_span<f32_t>(heap_.span()).data();
     unsigned const accumulate_grid = grid_size_for(shard_scalars);
     dim3 const doorbell_grid {1u, 1u, 1u};
     dim3 const doorbell_block {infiniband_doorbell_block_threads_k, 1u, 1u};
     infiniband_links_view_t const links {links_.data(), layout_.rounds};
     infiniband_round_view_t const round_view {round_scalar_.data(), 1};
     for (u32_t round = 0; round != layout_.rounds; ++round) {
-        expected_t launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_allreduce_post_kernel_),
-                                            doorbell_grid, doorbell_block, stream, links, round,
-                                            static_cast<f32_t const *>(shard), shard_scalars, round_view);
+        expected_t launched = launch_kernel(&infiniband_allreduce_post_kernel_, doorbell_grid, doorbell_block, stream,
+                                            links, round, shard, shard_scalars, round_view);
         if (launched)
-            launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_flag_wait_kernel_), doorbell_grid,
-                                     doorbell_block, stream, links, round, round_view);
+            launched = launch_kernel(&infiniband_flag_wait_kernel_, doorbell_grid, doorbell_block, stream, links, round,
+                                     round_view);
         if (launched)
-            launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_accumulate_f32_kernel_),
-                                     dim3 {accumulate_grid, 1u, 1u}, dim3 {kernel_block_size_default_k, 1u, 1u}, stream,
-                                     links, round, shard, shard_scalars, round_view);
+            launched = launch_kernel(&infiniband_accumulate_f32_kernel_, dim3 {accumulate_grid, 1u, 1u},
+                                     dim3 {kernel_block_size_default_k, 1u, 1u}, stream, links, round, shard,
+                                     shard_scalars, round_view);
         if (!launched) return launched;
     }
     return {};
@@ -576,18 +575,17 @@ expected_t infiniband_reach_t::allgather(gpu_stream_t &stream) noexcept {
     infiniband_allgather_plan_t plan;
     plan.block_bytes = layout_.payload_bytes >> layout_.rounds;
     plan.this_multimem_domain = multimem_domain_index_;
-    char const *payload_bytes = reinterpret_cast<char const *>(heap_.data());
+    b8_t const *payload_bytes = heap_.data();
     dim3 const doorbell_grid {1u, 1u, 1u};
     dim3 const doorbell_block {infiniband_doorbell_block_threads_k, 1u, 1u};
     infiniband_links_view_t const links {links_.data(), layout_.rounds};
     infiniband_round_view_t const round_view {round_scalar_.data(), 1};
     for (u32_t round = 0; round != layout_.rounds; ++round) {
-        expected_t launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_allgather_post_kernel_),
-                                            doorbell_grid, doorbell_block, stream, links, round, plan, payload_bytes,
-                                            round_view);
+        expected_t launched = launch_kernel(&infiniband_allgather_post_kernel_, doorbell_grid, doorbell_block, stream,
+                                            links, round, plan, payload_bytes, round_view);
         if (launched)
-            launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_flag_wait_kernel_), doorbell_grid,
-                                     doorbell_block, stream, links, round, round_view);
+            launched = launch_kernel(&infiniband_flag_wait_kernel_, doorbell_grid, doorbell_block, stream, links, round,
+                                     round_view);
         if (!launched) return launched;
     }
     return {};
@@ -597,18 +595,17 @@ expected_t infiniband_reach_t::alltoall(gpu_stream_t &stream) noexcept {
     if (layout_.rounds == 0) return {};
     infiniband_alltoall_plan_t plan;
     plan.block_bytes = layout_.landing_bytes;
-    char const *send_bytes = reinterpret_cast<char const *>(heap_.data());
+    b8_t const *send_bytes = heap_.data();
     dim3 const doorbell_grid {1u, 1u, 1u};
     dim3 const doorbell_block {infiniband_doorbell_block_threads_k, 1u, 1u};
     infiniband_links_view_t const links {links_.data(), layout_.rounds};
     infiniband_round_view_t const round_view {round_scalar_.data(), 1};
     for (u32_t round = 0; round != layout_.rounds; ++round) {
-        expected_t launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_alltoall_post_kernel_),
-                                            doorbell_grid, doorbell_block, stream, links, round, plan, send_bytes,
-                                            round_view);
+        expected_t launched = launch_kernel(&infiniband_alltoall_post_kernel_, doorbell_grid, doorbell_block, stream,
+                                            links, round, plan, send_bytes, round_view);
         if (launched)
-            launched = launch_kernel(reinterpret_cast<void const *>(&infiniband_flag_wait_kernel_), doorbell_grid,
-                                     doorbell_block, stream, links, round, round_view);
+            launched = launch_kernel(&infiniband_flag_wait_kernel_, doorbell_grid, doorbell_block, stream, links, round,
+                                     round_view);
         if (!launched) return launched;
     }
     return {};
@@ -620,13 +617,13 @@ expected<colocated_domain_t> colocated_domain_t::make(mesh_topology_t const &top
     domain.topology_ = &topology;
     // A single-domain world never posts — no adapters to open, no InfiniBand hardware required.
     if (topology.shape.multimem_domain_count() == 1) return result_t {std::move(domain)};
-    u32_t const gpus = topology.shape.gpus_per_multimem_domain;
-    if (domain.nics_.try_resize(gpus) != status_t::success_k)
+    u32_t const gpus = topology.shape.gpus_per_host_domain;
+    if (domain.nics_.resize(gpus) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "NIC table allocation failed ({} GPUs)", gpus);
-    for (u32_t member = 0; member != gpus; ++member) {
-        expected<infiniband_nic_t> nic = infiniband_nic_t::make(member); // local ordinal → mlx5_<member>
+    for (u32_t local = 0; local != gpus; ++local) {
+        expected<infiniband_nic_t> nic = infiniband_nic_t::make(local); // local ordinal → mlx5_<local>
         if (!nic) return result_t::fail(std::move(nic));
-        domain.nics_[member] = std::move(nic.value_);
+        domain.nics_[local] = std::move(nic.value_);
     }
     return result_t {std::move(domain)};
 }
@@ -642,8 +639,14 @@ expected<infiniband_reach_t> colocated_domain_t::reach_(u32_t member_index, gpu_
     if (!format_into(key, "collective.{}", collective_id))
         return expected<infiniband_reach_t>::fail(status_t::bad_alloc_k, "rendezvous key formatting failed");
     layout.rounds = ceil_log2(topology_->shape.multimem_domain_count());
-    return infiniband_reach_t::make_(*topology_, member_index, nics_[member_index], arena, stream, layout, key.view(),
-                                     timeout_seconds);
+    u32_t const member_offset = topology_->shape.index_in_multimem_domain(topology_->first_gpu_index());
+    if (member_index < member_offset || member_index - member_offset >= nics_.size()) {
+        infiniband_reach_t unwired;
+        unwired.layout_ = layout;
+        return expected<infiniband_reach_t> {std::move(unwired)};
+    }
+    return infiniband_reach_t::make_(*topology_, member_index, nics_[member_index - member_offset], arena, stream,
+                                     layout, key.view(), timeout_seconds);
 }
 
 #endif // defined(UFORM_WITH_INFINIBAND)

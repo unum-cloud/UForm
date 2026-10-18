@@ -51,8 +51,9 @@
 #include <cstddef> // `std::size_t`
 #include <cstring> // `std::memset` — zeroing pinned scalar cells
 
-#include <utility> // `std::exchange`, `std::forward`
-#include <span>    // `std::span` — the multi-stream capture rank list
+#include <utility>     // `std::exchange`, `std::forward`
+#include <span>        // `std::span` — the multi-stream capture rank list
+#include <type_traits> // `std::type_identity_t` — kernel arguments convert to the parameters, never deduce
 
 #include <cuda.h>      // `CUstream`, `CUgraph`, `CUgraphExec`, `CUevent`
 #include <cuda_bf16.h> // `__nv_bfloat16` — the training-currency scalar of the rank-1 aliases
@@ -64,7 +65,7 @@
 
 #include "core/types.hpp"          // `expected`, `expected_t`, `status_t`
 #include "core/array.hpp"          // `array` for the node-guard walk
-#include "core/gpu_allocators.hpp" // `gpu_arena_alloc` backing the owning rank-1 tensor aliases
+#include "core/gpu_allocators.hpp" // `gpu_arena_alloc`, `bf16_t`, `cuda_failure`
 
 namespace unum::uform::core {
 
@@ -78,6 +79,28 @@ using tokens_span_t = nk::tensor_span<token_id_t, 1>;
 
 /** Rank-1 token-id device-only buffer owned through a @ref gpu_arena_t — the token tape. */
 using tokens_tensor_arena_t = nk::tensor<token_id_t, gpu_arena_alloc<token_id_t>, 1>;
+
+/** One named weight matrix with its gradient — what models publish and optimizers consume.
+ *  Vector parameters (norm scales, biases) are @b [1,cols] . The optimizer reads the gradient and
+ *  writes the weights, hence the mutability split. The publishing cell's @c fill spells @ref name —
+ *  the checkpoint key every SafeTensors parser matches on — since it owns the structure the name
+ *  describes; the composition root adds only its @c model. prefix. */
+struct differentiable_weights_t {
+
+    /** The owned checkpoint name — short names ride StringZilla's inline buffer. */
+    sz::string_t name {};
+    nk::tensor_span<bf16_t, 2> weights {};
+    nk::tensor_view<bf16_t, 2> weights_grad {};
+
+    /** The same views under a copy of @ref name , the one allocation that can fail. */
+    [[nodiscard]] expected<differentiable_weights_t> copy() const noexcept {
+        differentiable_weights_t result {{}, weights, weights_grad};
+        if (sz::failed(result.name.assign(name.view())))
+            return expected<differentiable_weights_t>::fail(status_t::bad_alloc_k, "weight name copy failed: {}",
+                                                            name.view());
+        return expected<differentiable_weights_t> {std::move(result)};
+    }
+};
 
 /**
  *  @brief A move-only owning wrapper over a real (non-null) @c CUstream on one device.
@@ -119,18 +142,18 @@ struct gpu_stream_t {
                                                      int priority = 0) noexcept {
         CUdevice device_handle = 0;
         if (CUresult result = cuDeviceGet(&device_handle, device); result != CUDA_SUCCESS)
-            return expected<gpu_stream_t>::fail(result, "device handle query failed (device={})", device);
+            return cuda_failure<gpu_stream_t>(result, "device handle query failed (device={})", device);
         gpu_stream_t stream;
         stream.device_ = device;
         if (CUresult result = cuDevicePrimaryCtxRetain(&stream.context_, device_handle); result != CUDA_SUCCESS)
-            return expected<gpu_stream_t>::fail(result, "primary context retain failed (device={})", device);
+            return cuda_failure<gpu_stream_t>(result, "primary context retain failed (device={})", device);
         if (CUresult result = cuCtxPushCurrent(stream.context_); result != CUDA_SUCCESS)
-            return expected<gpu_stream_t>::fail(result, "context push failed (device={})", device);
+            return cuda_failure<gpu_stream_t>(result, "context push failed (device={})", device);
         CUresult const created = cuStreamCreateWithPriority(&stream.stream_, flags, priority);
         cuCtxPopCurrent(nullptr);
         if (created != CUDA_SUCCESS)
-            return expected<gpu_stream_t>::fail(created, "stream creation failed (device={} priority={})", device,
-                                                priority);
+            return cuda_failure<gpu_stream_t>(created, "stream creation failed (device={} priority={})", device,
+                                              priority);
         return expected<gpu_stream_t> {std::move(stream)};
     }
 
@@ -184,11 +207,10 @@ template <typename value_type_>
         return expected_t::fail(status_t::invalid_input_k,
                                 "device destination ({} scalars) is smaller than the host source ({})",
                                 device_destination.extent(0), host_source.extent(0));
-    if (CUresult result = cuMemcpyHtoDAsync(reinterpret_cast<CUdeviceptr>(device_destination.data()),
-                                            host_source.data(), host_source.extent(0) * sizeof(value_type_),
-                                            stream.get());
+    if (CUresult result = cuMemcpyHtoDAsync(device_address(device_destination.data()), host_source.data(),
+                                            host_source.extent(0) * sizeof(value_type_), stream.get());
         result != CUDA_SUCCESS)
-        return expected_t::fail(result, "host-to-device copy failed ({} scalars)", host_source.extent(0));
+        return cuda_failure(result, "host-to-device copy failed ({} scalars)", host_source.extent(0));
     return {};
 }
 
@@ -205,12 +227,60 @@ template <typename value_type_>
         return expected_t::fail(status_t::invalid_input_k,
                                 "host destination ({} scalars) is smaller than the device source ({})",
                                 host_destination.extent(0), device_source.extent(0));
-    if (CUresult result = cuMemcpyDtoHAsync(host_destination.data(),
-                                            reinterpret_cast<CUdeviceptr>(device_source.data()),
+    if (CUresult result = cuMemcpyDtoHAsync(host_destination.data(), device_address(device_source.data()),
                                             device_source.extent(0) * sizeof(value_type_), stream.get());
         result != CUDA_SUCCESS)
-        return expected_t::fail(result, "device-to-host copy failed ({} scalars)", device_source.extent(0));
+        return cuda_failure(result, "device-to-host copy failed ({} scalars)", device_source.extent(0));
     return {};
+}
+
+/** The device-only sibling of @ref copy_host_to_device : enqueue a device → device copy of a rank-1 view
+ *  into a same-typed device span on @p stream . An empty @p source is a no-op; a source longer than the
+ *  destination is a loud failure. */
+template <typename value_type_>
+[[nodiscard]] inline expected_t copy_device_to_device(nk::tensor_view<value_type_, 1> source,
+                                                      nk::tensor_span<value_type_, 1> destination,
+                                                      gpu_stream_t &stream) noexcept {
+    if (source.empty()) return {};
+    if (destination.extent(0) < source.extent(0))
+        return expected_t::fail(status_t::invalid_input_k,
+                                "device destination ({} scalars) is smaller than the source ({})",
+                                destination.extent(0), source.extent(0));
+    if (CUresult result = cuMemcpyDtoDAsync(device_address(destination.data()), device_address(source.data()),
+                                            source.extent(0) * sizeof(value_type_), stream.get());
+        result != CUDA_SUCCESS)
+        return cuda_failure(result, "device-to-device copy failed ({} scalars)", source.extent(0));
+    return {};
+}
+
+/** Enqueue zeroing every scalar of the contiguous device @p destination on @p stream — the typed spelling of
+ *  @c cuMemsetD8Async . A strided @p destination is a loud failure. */
+template <typename value_type_, std::size_t rank_>
+[[nodiscard]] inline expected_t zero_async(nk::tensor_span<value_type_, rank_> destination,
+                                           gpu_stream_t &stream) noexcept {
+    if (destination.empty()) return {};
+    if (!destination.is_contiguous())
+        return expected_t::fail(status_t::invalid_input_k, "cannot zero a strided device span");
+    if (CUresult result = cuMemsetD8Async(device_address(destination.data()), 0,
+                                          destination.numel() * sizeof(value_type_), stream.get());
+        result != CUDA_SUCCESS)
+        return cuda_failure(result, "device zeroing failed ({} scalars)", destination.numel());
+    return {};
+}
+
+/** The NumKong C ABI spelling of BFloat16 @p scalars — the one place UForm's CUDA scalar becomes NumKong's. */
+[[nodiscard]] inline nk_bf16_t const *numkong_scalars(bf16_t const *scalars) noexcept {
+    return reinterpret_cast<nk_bf16_t const *>(scalars);
+}
+
+/** The mutable twin of the BFloat16 @ref numkong_scalars . */
+[[nodiscard]] inline nk_bf16_t *numkong_scalars(bf16_t *scalars) noexcept {
+    return reinterpret_cast<nk_bf16_t *>(scalars);
+}
+
+/** The NumKong C ABI spelling of E4M3 @p scalars . */
+[[nodiscard]] inline nk_e4m3_t const *numkong_scalars(e4m3_t const *scalars) noexcept {
+    return reinterpret_cast<nk_e4m3_t const *>(scalars);
 }
 
 #if defined(__CUDACC__)
@@ -256,9 +326,19 @@ template <typename... arg_types_>
     if (CUresult result = cuLaunchKernel(function, grid_size.x, grid_size.y, grid_size.z, block_size.x, block_size.y,
                                          block_size.z, 0, stream.get(), argument_addresses, nullptr);
         result != CUDA_SUCCESS)
-        return expected_t::fail(result, "kernel launch failed (grid=[{},{},{}] block=[{},{},{}])", grid_size.x,
-                                grid_size.y, grid_size.z, block_size.x, block_size.y, block_size.z);
+        return cuda_failure(result, "kernel launch failed (grid=[{},{},{}] block=[{},{},{}])", grid_size.x, grid_size.y,
+                            grid_size.z, block_size.x, block_size.y, block_size.z);
     return {};
+}
+
+/** The typed spelling of @ref launch_kernel : takes the @c __global__ function itself, so every argument
+ *  converts to its parameter's exact type before the driver copies its bytes — spans become views, and an
+ *  argument no parameter accepts fails to compile. */
+template <typename... parameter_types_>
+[[nodiscard]] inline expected_t launch_kernel(void (*kernel)(parameter_types_...), dim3 grid_size, dim3 block_size,
+                                              gpu_stream_t &stream,
+                                              std::type_identity_t<parameter_types_> const &...arguments) noexcept {
+    return launch_kernel(reinterpret_cast<void const *>(kernel), grid_size, block_size, stream, arguments...);
 }
 
 /**
@@ -283,8 +363,7 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
     if (source.extent(0) == 0 || source.extent(1) == 0) return {};
     dim3 const grid {static_cast<u32_t>(divide_round_up(source.extent(1), std::size_t {64})),
                      static_cast<u32_t>(divide_round_up(source.extent(0), std::size_t {64})), 1u};
-    return launch_kernel(reinterpret_cast<void const *>(&transpose_bf16_kernel), grid, dim3 {256u, 1u, 1u}, stream,
-                         source, destination);
+    return launch_kernel(&transpose_bf16_kernel, grid, dim3 {256u, 1u, 1u}, stream, source, destination);
 }
 
 /** Lift a NumKong status into the cell's diagnostics, naming the @p step that returned it. */
@@ -439,7 +518,7 @@ struct gpu_replay_graph_t {
             return expected<gpu_replay_graph_t>::fail(status_t::invalid_input_k,
                                                       "capture needs a real stream, not the null stream");
         if (CUresult result = cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_RELAXED); result != CUDA_SUCCESS)
-            return expected<gpu_replay_graph_t>::fail(result, "stream capture begin failed");
+            return cuda_failure<gpu_replay_graph_t>(result, "stream capture begin failed");
         expected_t emitted = body();
         CUgraph graph = nullptr;
         CUresult const ended = cuStreamEndCapture(stream, &graph);
@@ -449,7 +528,7 @@ struct gpu_replay_graph_t {
         }
         if (ended != CUDA_SUCCESS || graph == nullptr) {
             if (graph != nullptr) cuGraphDestroy(graph);
-            return expected<gpu_replay_graph_t>::fail(ended, "stream capture end failed");
+            return cuda_failure<gpu_replay_graph_t>(ended, "stream capture end failed");
         }
         return adopt_(graph, stream);
     }
@@ -478,7 +557,7 @@ struct gpu_replay_graph_t {
         CUstream const trunk = streams.front();
         CUevent fork_event = nullptr;
         array<CUevent> join_events;
-        if (join_events.try_resize(streams.size() - 1u) != status_t::success_k)
+        if (join_events.resize(streams.size() - 1u) != status_t::success_k)
             return expected<gpu_replay_graph_t>::fail(status_t::bad_alloc_k,
                                                       "join-event table allocation failed (ranks={})", streams.size());
         expected_t outcome = make_event_for_(trunk, fork_event);
@@ -490,31 +569,31 @@ struct gpu_replay_graph_t {
         if (outcome) {
             CUresult const begun = cuStreamBeginCapture(trunk, CU_STREAM_CAPTURE_MODE_RELAXED);
             capturing = begun == CUDA_SUCCESS;
-            if (!capturing) outcome = expected_t::fail(begun, "stream capture begin failed (trunk)");
+            if (!capturing) outcome = cuda_failure(begun, "stream capture begin failed (trunk)");
         }
         if (outcome)
             if (CUresult result = cuEventRecord(fork_event, trunk); result != CUDA_SUCCESS)
-                outcome = expected_t::fail(result, "fork-event record failed");
+                outcome = cuda_failure(result, "fork-event record failed");
         if (outcome) outcome = body(std::size_t {0});
         for (std::size_t branch = 0; outcome && branch != join_events.size(); ++branch) {
             CUstream const branch_stream = streams[branch + 1u];
             if (CUresult result = cuStreamWaitEvent(branch_stream, fork_event, 0); result != CUDA_SUCCESS) {
-                outcome = expected_t::fail(result, "fork-event wait failed (rank={})", branch + 1u);
+                outcome = cuda_failure(result, "fork-event wait failed (rank={})", branch + 1u);
                 break;
             }
             outcome = body(branch + 1u);
             if (!outcome) break;
             if (CUresult result = cuEventRecord(join_events[branch], branch_stream); result != CUDA_SUCCESS)
-                outcome = expected_t::fail(result, "join-event record failed (rank={})", branch + 1u);
+                outcome = cuda_failure(result, "join-event record failed (rank={})", branch + 1u);
         }
         for (std::size_t branch = 0; outcome && branch != join_events.size(); ++branch)
             if (CUresult result = cuStreamWaitEvent(trunk, join_events[branch], 0); result != CUDA_SUCCESS)
-                outcome = expected_t::fail(result, "join-event wait failed (rank={})", branch + 1u);
+                outcome = cuda_failure(result, "join-event wait failed (rank={})", branch + 1u);
 
         if (capturing) {
             CUresult const ended = cuStreamEndCapture(trunk, &graph);
             if (outcome && (ended != CUDA_SUCCESS || graph == nullptr))
-                outcome = expected_t::fail(ended, "stream capture end failed (trunk)");
+                outcome = cuda_failure(ended, "stream capture end failed (trunk)");
         }
         (void)destroy_event_(fork_event);
         for (CUevent &event : join_events) (void)destroy_event_(event);
@@ -531,7 +610,7 @@ struct gpu_replay_graph_t {
         if (exec_ == nullptr)
             return expected_t::fail(status_t::invalid_input_k, "launching an empty (default or moved-from) graph");
         if (CUresult result = cuGraphLaunch(exec_, stream); result != CUDA_SUCCESS)
-            return expected_t::fail(result, "graph launch failed");
+            return cuda_failure(result, "graph launch failed");
         return {};
     }
 
@@ -550,10 +629,10 @@ struct gpu_replay_graph_t {
         cuGraphDestroy(graph);
         if (instantiated != CUDA_SUCCESS) {
             replay.exec_ = nullptr;
-            return expected<gpu_replay_graph_t>::fail(instantiated, "graph instantiation failed");
+            return cuda_failure<gpu_replay_graph_t>(instantiated, "graph instantiation failed");
         }
         if (CUresult result = cuGraphUpload(replay.exec_, stream); result != CUDA_SUCCESS)
-            return expected<gpu_replay_graph_t>::fail(result, "graph upload failed");
+            return cuda_failure<gpu_replay_graph_t>(result, "graph upload failed");
         return expected<gpu_replay_graph_t> {std::move(replay)};
     }
 
@@ -562,18 +641,18 @@ struct gpu_replay_graph_t {
     [[nodiscard]] static expected_t guard_alloc_nodes_(CUgraph graph) noexcept {
         std::size_t node_count = 0;
         if (CUresult result = cuGraphGetNodes(graph, nullptr, &node_count); result != CUDA_SUCCESS)
-            return expected_t::fail(result, "graph node query failed");
+            return cuda_failure(result, "graph node query failed");
         if (node_count == 0) return {};
         array<CUgraphNode> nodes;
-        if (nodes.try_resize_uninitialized(node_count) != status_t::success_k)
+        if (nodes.resize_uninitialized(node_count) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "graph node table allocation failed (nodes={})", node_count);
         if (CUresult result = cuGraphGetNodes(graph, nodes.data(), &node_count); result != CUDA_SUCCESS)
-            return expected_t::fail(result, "graph node listing failed");
+            return cuda_failure(result, "graph node listing failed");
         std::size_t allocation_nodes = 0;
         for (CUgraphNode node : nodes) {
             CUgraphNodeType node_type;
             if (CUresult result = cuGraphNodeGetType(node, &node_type); result != CUDA_SUCCESS)
-                return expected_t::fail(result, "graph node type query failed");
+                return cuda_failure(result, "graph node type query failed");
             allocation_nodes += node_type == CU_GRAPH_NODE_TYPE_MEM_ALLOC || node_type == CU_GRAPH_NODE_TYPE_MEM_FREE;
         }
         if (allocation_nodes != 0)
@@ -589,12 +668,12 @@ struct gpu_replay_graph_t {
     [[nodiscard]] static expected_t make_event_for_(CUstream stream, CUevent &event) noexcept {
         CUcontext stream_context = nullptr;
         if (CUresult result = cuStreamGetCtx(stream, &stream_context); result != CUDA_SUCCESS)
-            return expected_t::fail(result, "stream context query failed");
+            return cuda_failure(result, "stream context query failed");
         if (CUresult result = cuCtxPushCurrent(stream_context); result != CUDA_SUCCESS)
-            return expected_t::fail(result, "context push failed");
+            return cuda_failure(result, "context push failed");
         CUresult const created = cuEventCreate(&event, CU_EVENT_DISABLE_TIMING);
         cuCtxPopCurrent(nullptr);
-        if (created != CUDA_SUCCESS) return expected_t::fail(created, "event creation failed");
+        if (created != CUDA_SUCCESS) return cuda_failure(created, "event creation failed");
         return {};
     }
 
@@ -635,7 +714,7 @@ struct gpu_event_t {
     [[nodiscard]] static expected<gpu_event_t> make() noexcept {
         gpu_event_t event;
         if (CUresult result = cuEventCreate(&event.event_, CU_EVENT_DISABLE_TIMING); result != CUDA_SUCCESS)
-            return expected<gpu_event_t>::fail(result, "event creation failed");
+            return cuda_failure<gpu_event_t>(result, "event creation failed");
         return expected<gpu_event_t> {std::move(event)};
     }
 
@@ -677,10 +756,9 @@ struct barrier_round_t {
         counter.device_round_ = device_round;
         counter.increment_ = increment;
         // Seed one increment below zero so the first advance yields round 0 (device is the sole source of truth).
-        if (CUresult result = cuMemsetD32Async(reinterpret_cast<CUdeviceptr>(device_round.data()), 0u - increment, 1,
-                                               stream.get());
+        if (CUresult result = cuMemsetD32Async(device_address(device_round.data()), 0u - increment, 1, stream.get());
             result != CUDA_SUCCESS)
-            return expected<barrier_round_t>::fail(result, "round seed failed");
+            return cuda_failure<barrier_round_t>(result, "round seed failed");
         return expected<barrier_round_t> {std::move(counter)};
     }
 
@@ -763,8 +841,7 @@ struct cudnn_session_t {
     /** Bind the handle to @p stream — cuDNN executes on whatever stream the handle carries, so
      *  every consumer re-binds before its enqueue. */
     [[nodiscard]] expected_t bind(gpu_stream_t &stream) noexcept {
-        if (cudnnStatus_t status = cudnnSetStream(handle_, reinterpret_cast<cudaStream_t>(stream.get()));
-            status != CUDNN_STATUS_SUCCESS)
+        if (cudnnStatus_t status = cudnnSetStream(handle_, stream.get()); status != CUDNN_STATUS_SUCCESS)
             return expected_t::fail(status_t::cuda_error_k, "cuDNN stream binding failed ({})",
                                     cudnnGetErrorString(status));
         return {};

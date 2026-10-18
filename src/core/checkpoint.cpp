@@ -1,15 +1,19 @@
 /**
- *  @brief The checkpoint cell's implementation: yyjson header building / parsing and plain POSIX
- *      file I/O — see the header for the contract.
+ *  @brief The checkpoint cell's implementation: yyjson header building / parsing, plain POSIX writes and a
+ *      read-only mapping — see the header for the contract.
  *  @file src/core/checkpoint.cpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
  */
-#include <unistd.h>   // `pwrite`, `pread`, `close`
+#include <cstring> // `std::memcpy` — the length prefix and the header bytes
+
+#include <unistd.h>   // `pwrite`, `close`
 #include <fcntl.h>    // `open`
-#include <sys/stat.h> // `fstat` — the payload extent
+#include <sys/mman.h> // `mmap`, `munmap`
+#include <sys/stat.h> // `fstat` — the file extent
 
 #include <charconv> // `std::from_chars` — the step metadata parse
+#include <utility>  // `std::exchange`
 
 #include <yyjson.h> // the safetensors JSON header — exceptions-free C
 
@@ -35,14 +39,13 @@ struct checkpoint_file_t {
         if (descriptor_ >= 0) ::close(descriptor_);
     }
 
-    /** Open @p path for reading, or create-truncate it for writing. */
-    [[nodiscard]] static expected<checkpoint_file_t> make(sz::string_view_t path, bool writable) noexcept {
+    /** Open @p path with the POSIX @p flags , creating it @c 0644 when they ask to. */
+    [[nodiscard]] static expected<checkpoint_file_t> make(sz::string_view_t path, int flags) noexcept {
         sz::string_t path_text; // `open` needs a NUL-terminated `c_str`; short paths stay inline
-        if (sz::failed(path_text.try_assign({path.data(), path.size()})))
+        if (sz::failed(path_text.assign({path.data(), path.size()})))
             return expected<checkpoint_file_t>::fail(status_t::bad_alloc_k, "path staging failed");
         checkpoint_file_t file;
-        file.descriptor_ = writable ? ::open(path_text.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644)
-                                    : ::open(path_text.c_str(), O_RDONLY);
+        file.descriptor_ = ::open(path_text.c_str(), flags, 0644);
         if (file.descriptor_ < 0)
             return expected<checkpoint_file_t>::fail(status_t::io_error_k, "open failed: {}", path);
         return expected<checkpoint_file_t> {std::move(file)};
@@ -72,31 +75,14 @@ struct checkpoint_file_t {
     return {};
 }
 
-/** Read @p count bytes at @p offset , whole or fail — looped like @ref write_at_ ; a premature
- *  end-of-file is a failure, the callers size their reads from the file's own metadata. */
-[[nodiscard]] static expected_t read_at_(checkpoint_file_t const &file, std::size_t offset, void *bytes,
-                                         std::size_t count) noexcept {
-    char *cursor = static_cast<char *>(bytes);
-    std::size_t remaining = count;
-    while (remaining != 0) {
-        ssize_t const moved = ::pread(file.get(), cursor, remaining, static_cast<off_t>(offset));
-        if (moved <= 0)
-            return expected_t::fail(status_t::io_error_k, "pread failed at {} ({} bytes left of {})", offset, remaining,
-                                    count);
-        cursor += moved;
-        offset += static_cast<std::size_t>(moved);
-        remaining -= static_cast<std::size_t>(moved);
-    }
-    return {};
-}
-
 /**
- *  @brief Serialize the safetensors header for @p entries inside @p pool : the step metadata first,
- *      then a `name: {dtype, shape, data_offsets}` record per tensor, offsets as byte prefix sums in
- *      insertion order. The returned view points into the pool's backing.
+ *  @brief Serialize the safetensors header for @p entries inside @p pool : the metadata first, then a
+ *      `name: {dtype, shape, data_offsets}` record per tensor, offsets as byte prefix sums in insertion order.
+ *      The returned view points into the pool's backing.
  *  @retval status_t::bad_alloc_k The pool ran dry — the caller grows it and retries.
  */
-[[nodiscard]] static expected<sz::string_view_t> write_header_(std::span<checkpoint_entry_t const> entries, u64_t step,
+[[nodiscard]] static expected<sz::string_view_t> write_header_(std::span<checkpoint_entry_t const> entries,
+                                                               std::span<checkpoint_metadata_t const> pairs,
                                                                yyjson_alc *pool) noexcept {
     using serialized_t = expected<sz::string_view_t>;
     yyjson_mut_doc *document = yyjson_mut_doc_new(pool);
@@ -104,14 +90,18 @@ struct checkpoint_file_t {
     yyjson_mut_val *root = yyjson_mut_obj(document);
     yyjson_mut_doc_set_root(document, root);
     yyjson_mut_val *metadata = yyjson_mut_obj(document);
-    sz::string_t step_text; // referenced by the DOM until serialization below; fits the inline buffer
-    bool built = root != nullptr && metadata != nullptr && format_into(step_text, "{}", step) &&
-                 yyjson_mut_obj_add_strn(document, metadata, "step", step_text.data(), step_text.size()) &&
-                 yyjson_mut_obj_add_val(document, root, "__metadata__", metadata);
+    bool built = root != nullptr && metadata != nullptr;
+    for (std::size_t index = 0; built && index != pairs.size(); ++index) {
+        checkpoint_metadata_t const &pair = pairs[index];
+        yyjson_mut_val *key = yyjson_mut_strn(document, pair.key.data(), pair.key.size());
+        yyjson_mut_val *value = yyjson_mut_strn(document, pair.value.data(), pair.value.size());
+        built = key != nullptr && value != nullptr && yyjson_mut_obj_add(metadata, key, value);
+    }
+    built = built && yyjson_mut_obj_add_val(document, root, "__metadata__", metadata);
     std::size_t data_cursor = 0;
     for (std::size_t index = 0; built && index != entries.size(); ++index) {
         checkpoint_entry_t const &entry = entries[index];
-        std::size_t const bytes = entry.rows * entry.cols * sizeof(bf16_t);
+        std::size_t const bytes = entry.rows * entry.cols * sizeof(nk_bf16_t);
         yyjson_mut_val *key = yyjson_mut_strn(document, entry.name.data(), entry.name.size());
         yyjson_mut_val *tensor = yyjson_mut_obj(document);
         yyjson_mut_val *shape = yyjson_mut_arr(document);
@@ -133,13 +123,20 @@ struct checkpoint_file_t {
     return serialized_t {sz::string_view_t {header, header_bytes}};
 }
 
-/** The mirror of @ref write_header_ : parse the @p header text inside @p pool , index every
- *  BF16 record into @p entries — shapes tolerated as rank-1 @c [cols] or rank-2 @c [rows,cols] ,
- *  offsets validated against @p payload_bytes — and pick @p step out of the metadata. Records of
- *  other dtypes are skipped: this cell trains in BFloat16 only, and a lookup treats them exactly
- *  like absent names. */
+/** Copy @p text into an owned string. */
+[[nodiscard]] static expected_t own_text_(sz::string_t &owned, sz::string_view_t text) noexcept {
+    if (sz::failed(owned.assign({text.data(), text.size()})))
+        return expected_t::fail(status_t::bad_alloc_k, "text staging failed: {}", text);
+    return {};
+}
+
+/** The mirror of @ref write_header_ : parse the @p header text inside @p pool , index every BF16 record into
+ *  @p entries — shapes tolerated as rank-1 @c [cols] or rank-2 @c [rows,cols] , offsets validated against
+ *  @p payload_bytes — and every string metadata pair into @p pairs . Records of other dtypes are skipped: this
+ *  cell stores BFloat16 only, and a lookup treats them exactly like absent names. */
 [[nodiscard]] static expected_t read_header_(std::span<char> header, yyjson_alc *pool, u64_t payload_bytes,
-                                             array<checkpoint_entry_t> &entries, u64_t &step) noexcept {
+                                             array<checkpoint_entry_t> &entries,
+                                             array<checkpoint_metadata_t> &pairs) noexcept {
     yyjson_doc *document = // default flags skip the trailing pad spaces; the pool owns the document
         yyjson_read_opts(header.data(), header.size(), 0, pool, nullptr);
     yyjson_val *root = document != nullptr ? yyjson_doc_get_root(document) : nullptr;
@@ -152,9 +149,21 @@ struct checkpoint_file_t {
         yyjson_val *value = yyjson_obj_iter_get_val(key);
         sz::string_view_t const key_text {yyjson_get_str(key), yyjson_get_len(key)};
         if (key_text == "__metadata__") {
-            yyjson_val *step_value = yyjson_obj_get(value, "step");
-            char const *step_chars = yyjson_get_str(step_value); // null for absent or non-string
-            if (step_chars != nullptr) (void)std::from_chars(step_chars, step_chars + yyjson_get_len(step_value), step);
+            yyjson_obj_iter metadata_iterator;
+            if (!yyjson_obj_iter_init(value, &metadata_iterator))
+                return expected_t::fail(status_t::invalid_input_k, "__metadata__ is not an object");
+            yyjson_val *metadata_key = nullptr;
+            while ((metadata_key = yyjson_obj_iter_next(&metadata_iterator)) != nullptr) {
+                yyjson_val *metadata_value = yyjson_obj_iter_get_val(metadata_key);
+                char const *value_chars = yyjson_get_str(metadata_value); // null for non-strings, skipped
+                if (value_chars == nullptr) continue;
+                checkpoint_metadata_t pair;
+                expected_t owned = own_text_(pair.key, {yyjson_get_str(metadata_key), yyjson_get_len(metadata_key)});
+                if (owned) owned = own_text_(pair.value, {value_chars, yyjson_get_len(metadata_value)});
+                if (!owned) return owned;
+                if (pairs.push_back(std::move(pair)) != status_t::success_k)
+                    return expected_t::fail(status_t::bad_alloc_k, "metadata table growth failed");
+            }
             continue;
         }
         yyjson_val *dtype = yyjson_obj_get(value, "dtype");
@@ -173,78 +182,69 @@ struct checkpoint_file_t {
         yyjson_val *offsets = yyjson_obj_get(value, "data_offsets");
         u64_t const begin = yyjson_get_uint(yyjson_arr_get(offsets, 0));
         u64_t const end = yyjson_get_uint(yyjson_arr_get(offsets, 1));
-        bool const in_bounds = begin <= end && end <= payload_bytes && begin % sizeof(bf16_t) == 0;
-        if (!in_bounds || end - begin != rows * cols * sizeof(bf16_t))
+        bool const in_bounds = begin <= end && end <= payload_bytes && begin % sizeof(nk_bf16_t) == 0;
+        if (!in_bounds || end - begin != rows * cols * sizeof(nk_bf16_t))
             return expected_t::fail(status_t::invalid_input_k, "{} holds bytes [{}, {}), its shape [{},{}] disagrees",
                                     key_text, begin, end, rows, cols);
 
         checkpoint_entry_t entry;
-        if (sz::failed(entry.name.try_assign({key_text.data(), key_text.size()})))
-            return expected_t::fail(status_t::bad_alloc_k, "name staging failed: {}", key_text);
-        entry.rows = rows;
-        entry.cols = cols;
-        entry.scalar_offset = begin / sizeof(bf16_t);
-        if (entries.try_push_back(std::move(entry)) != status_t::success_k)
+        if (expected_t owned = own_text_(entry.name, key_text); !owned) return owned;
+        entry.rows = static_cast<std::size_t>(rows); // In bounds of a mapped payload, so 32-bit wasm fits it too.
+        entry.cols = static_cast<std::size_t>(cols);
+        entry.scalar_offset = static_cast<std::size_t>(begin / sizeof(nk_bf16_t));
+        if (entries.push_back(std::move(entry)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "entry table growth failed");
     }
     return {};
 }
 
-expected<checkpoint_to_save_t> checkpoint_to_save_t::make(pinned_alloc_t allocator) noexcept {
-    checkpoint_to_save_t container;
-    container.payload_ = array<bf16_t, pinned_alloc<bf16_t>> {pinned_alloc<bf16_t> {allocator}};
-    return expected<checkpoint_to_save_t> {std::move(container)};
-}
-
-expected_t checkpoint_to_save_t::try_reserve(u64_t total_scalars, u64_t tensor_count) noexcept {
-    if (payload_.try_reserve(total_scalars) != status_t::success_k)
-        return expected_t::fail(status_t::bad_alloc_k, "pinned payload reservation failed ({} scalars)", total_scalars);
-    if (entries_.try_reserve(tensor_count) != status_t::success_k)
+expected_t checkpoint_to_save_t::reserve(u64_t total_scalars, u64_t tensor_count) noexcept {
+    if (payload_.reserve(total_scalars) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "payload reservation failed ({} scalars)", total_scalars);
+    if (entries_.reserve(tensor_count) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "entry table reservation failed ({} tensors)", tensor_count);
     return {};
 }
 
-expected_t checkpoint_to_save_t::try_insert(sz::string_view_t name, nk::tensor_view<bf16_t, 2> data,
-                                            gpu_stream_t &stream) noexcept {
+expected_t checkpoint_to_save_t::insert(sz::string_view_t name, nk::tensor_view<nk_bf16_t, 2> data) noexcept {
     if (name.empty() || data.empty())
         return expected_t::fail(status_t::invalid_input_k, "an entry needs a name and data");
+    if (data.stride_bytes(1) != sizeof(nk_bf16_t) ||
+        data.stride_bytes(0) != static_cast<std::ptrdiff_t>(data.extent(1) * sizeof(nk_bf16_t)))
+        return expected_t::fail(status_t::shape_unsupported_k, "{} must be contiguous", name);
     for (checkpoint_entry_t const &existing : entries_)
         if (existing.name.view() == name)
             return expected_t::fail(status_t::invalid_input_k, "duplicate entry: {}", name);
-    switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
 
     checkpoint_entry_t entry;
-    if (sz::failed(entry.name.try_assign({name.data(), name.size()})))
-        return expected_t::fail(status_t::bad_alloc_k, "name staging failed: {}", name);
+    if (expected_t owned = own_text_(entry.name, name); !owned) return owned;
     entry.rows = data.extent(0);
     entry.cols = data.extent(1);
     entry.scalar_offset = payload_.size();
-
-    // Growing the pinned payload may relocate it — safe, because the per-insert synchronize below
-    // guarantees no copy is ever in flight between `try_insert` calls.
     std::size_t const scalars = data.numel();
-    if (payload_.try_resize_uninitialized(entry.scalar_offset + scalars) != status_t::success_k)
-        return expected_t::fail(status_t::bad_alloc_k, "pinned payload growth failed ({} scalars)",
+    if (payload_.resize_uninitialized(entry.scalar_offset + scalars) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "payload growth failed ({} scalars)",
                                 entry.scalar_offset + scalars);
-
-    // Stream order places this copy after every training kernel already enqueued; the bounded
-    // synchronize drains it, so the weights are snapshotted — and free to mutate — on return.
-    nk::tensor_view<bf16_t, 1> const device_source = data.flatten<1>();
-    nk::tensor_span<bf16_t, 1> const payload_span {payload_.data(), payload_.size()};
-    nk::tensor_span<bf16_t, 1> const host_destination = payload_span(
-        nk::range(entry.scalar_offset, entry.scalar_offset + scalars), nk::slice);
-    expected_t copied = copy_device_to_host(device_source, host_destination, stream);
-    if (copied)
-        if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
-            copied = expected_t::fail(result, "snapshot synchronize failed: {}", name);
-    if (copied && entries_.try_push_back(std::move(entry)) != status_t::success_k)
-        copied = expected_t::fail(status_t::bad_alloc_k, "entry table growth failed");
-    if (!copied) (void)payload_.try_resize(entry.scalar_offset); // a shrink never fails
-    return copied;
+    std::memcpy(payload_.data() + entry.scalar_offset, data.data(), scalars * sizeof(nk_bf16_t));
+    if (entries_.push_back(std::move(entry)) != status_t::success_k) {
+        (void)payload_.resize(payload_.size() - scalars); // a shrink never fails
+        return expected_t::fail(status_t::bad_alloc_k, "entry table growth failed");
+    }
+    return {};
 }
 
-expected_t checkpoint_to_save_t::save(sz::string_view_t path, u64_t step) noexcept {
+expected_t checkpoint_to_save_t::metadata(sz::string_view_t key, sz::string_view_t value) noexcept {
+    for (checkpoint_metadata_t &existing : metadata_)
+        if (existing.key.view() == key) return own_text_(existing.value, value);
+    checkpoint_metadata_t pair;
+    expected_t owned = own_text_(pair.key, key);
+    if (owned) owned = own_text_(pair.value, value);
+    if (owned && metadata_.push_back(std::move(pair)) != status_t::success_k)
+        owned = expected_t::fail(status_t::bad_alloc_k, "metadata table growth failed");
+    return owned;
+}
+
+expected_t checkpoint_to_save_t::save(sz::string_view_t path) noexcept {
     if (entries_.empty()) return expected_t::fail(status_t::invalid_input_k, "a checkpoint needs tensors");
 
     // The header builds in the hoisted scratch through a pool allocator spanning its whole backing —
@@ -253,96 +253,134 @@ expected_t checkpoint_to_save_t::save(sz::string_view_t path, u64_t step) noexce
     sz::string_view_t header {};
     for (;;) {
         std::size_t const pool_bytes = scratch_.capacity() != 0 ? scratch_.capacity() : 4096;
-        if (scratch_.try_resize_uninitialized(pool_bytes) != status_t::success_k)
+        if (scratch_.resize_uninitialized(pool_bytes) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "header scratch growth failed ({} bytes)", pool_bytes);
         yyjson_alc pool;
         if (!yyjson_alc_pool_init(&pool, scratch_.data(), scratch_.size()))
             return expected_t::fail(status_t::bad_alloc_k, "header pool setup failed ({} bytes)", scratch_.size());
-        expected<sz::string_view_t> serialized = write_header_(entries_.view(), step, &pool);
+        expected<sz::string_view_t> serialized = write_header_(entries_.view(), metadata_.view(), &pool);
         if (serialized) {
-            header = serialized.value_;
+            header = *serialized;
             break;
         }
-        if (scratch_.try_reserve(scratch_.size() * 2) != status_t::success_k)
+        if (scratch_.reserve(scratch_.size() * 2) != status_t::success_k)
             return expected_t::fail(std::move(serialized)); // a dry pool with no room left to grow
     }
 
     // The JSON is space-padded to the next 8-byte boundary and the recorded length counts the padding,
     // so the payload starts 8-aligned — byte-compatible with Hugging Face's own writer.
-    u64_t const header_length = round_up_to_multiple(header.size(), 8);
+    u64_t const header_length = divide_round_up(header.size(), 8) * 8;
     char const padding[8] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
 
-    expected<checkpoint_file_t> file = checkpoint_file_t::make(path, true);
+    expected<checkpoint_file_t> file = checkpoint_file_t::make(path, O_WRONLY | O_CREAT | O_TRUNC);
     if (!file) return expected_t::fail(std::move(file));
-    expected_t written = write_at_(file.value_, 0, &header_length, sizeof(header_length));
-    if (written) written = write_at_(file.value_, sizeof(header_length), header.data(), header.size());
+    expected_t written = write_at_(*file, 0, &header_length, sizeof(header_length));
+    if (written) written = write_at_(*file, sizeof(header_length), header.data(), header.size());
     if (written && header_length != header.size())
-        written = write_at_(file.value_, sizeof(header_length) + header.size(), padding, header_length - header.size());
+        written = write_at_(*file, sizeof(header_length) + header.size(), padding, header_length - header.size());
     if (!written) return written;
 
     // The payload is already contiguous in insertion order — one write moves all of it.
     std::size_t const payload_base = sizeof(header_length) + header_length;
-    return write_at_(file.value_, payload_base, payload_.data(), payload_.size() * sizeof(bf16_t));
+    return write_at_(*file, payload_base, payload_.data(), payload_.size() * sizeof(nk_bf16_t));
 }
 
 void checkpoint_to_save_t::clear() noexcept {
     entries_.clear();
+    metadata_.clear();
     payload_.clear();
     scratch_.clear();
 }
 
-expected<checkpoint_to_load_t> checkpoint_to_load_t::make(sz::string_view_t path, pinned_alloc_t allocator) noexcept {
-    using loaded_t = expected<checkpoint_to_load_t>;
-    expected<checkpoint_file_t> file = checkpoint_file_t::make(path, false);
-    if (!file) return loaded_t::fail(std::move(file));
+checkpoint_mapping_t::checkpoint_mapping_t(checkpoint_mapping_t &&other) noexcept
+    : bytes_(std::exchange(other.bytes_, {})) {}
 
-    // The length prefix is attacker-controlled bytes until proven otherwise, and the file's own extent
-    // is the only honest bound on it: `fstat` first, and a header the file can't hold is corruption.
+checkpoint_mapping_t &checkpoint_mapping_t::operator=(checkpoint_mapping_t &&other) noexcept {
+    if (this != &other) {
+        if (!bytes_.empty()) ::munmap(bytes_.data(), bytes_.size());
+        bytes_ = std::exchange(other.bytes_, {});
+    }
+    return *this;
+}
+
+checkpoint_mapping_t::~checkpoint_mapping_t() noexcept {
+    if (!bytes_.empty()) ::munmap(bytes_.data(), bytes_.size());
+}
+
+expected<checkpoint_mapping_t> checkpoint_mapping_t::make(sz::string_view_t path) noexcept {
+    using mapped_t = expected<checkpoint_mapping_t>;
+    expected<checkpoint_file_t> file = checkpoint_file_t::make(path, O_RDONLY);
+    if (!file) return mapped_t::fail(std::move(file));
     struct ::stat file_stat {};
-    if (::fstat(file.value_.get(), &file_stat) != 0)
-        return loaded_t::fail(status_t::io_error_k, "fstat failed: {}", path);
-    u64_t const file_bytes = static_cast<u64_t>(file_stat.st_size);
+    if (::fstat(file->get(), &file_stat) != 0) return mapped_t::fail(status_t::io_error_k, "fstat failed: {}", path);
+    std::size_t const file_bytes = static_cast<std::size_t>(file_stat.st_size);
+    if (file_bytes == 0) return mapped_t::fail(status_t::invalid_input_k, "{} is empty", path);
+    void *const mapped = ::mmap(nullptr, file_bytes, PROT_READ, MAP_PRIVATE, file->get(), 0);
+    if (mapped == MAP_FAILED) return mapped_t::fail(status_t::io_error_k, "mmap failed: {}", path);
+    checkpoint_mapping_t mapping;
+    mapping.bytes_ = {static_cast<b8_t *>(mapped), file_bytes};
+    return mapped_t {std::move(mapping)};
+}
+
+expected<checkpoint_to_load_t> checkpoint_to_load_t::make(sz::string_view_t path) noexcept {
+    using loaded_t = expected<checkpoint_to_load_t>;
+    expected<checkpoint_mapping_t> mapping = checkpoint_mapping_t::make(path);
+    if (!mapping) return loaded_t::fail(std::move(mapping));
+    loaded_t loaded = view(mapping->bytes());
+    if (loaded) loaded->mapping_ = std::move(*mapping);
+    return loaded;
+}
+
+expected<checkpoint_to_load_t> checkpoint_to_load_t::view(std::span<b8_t const> buffer) noexcept {
+    using loaded_t = expected<checkpoint_to_load_t>;
+
+    // The length prefix is untrusted bytes until proven otherwise, and the image's own extent is the only
+    // honest bound on it: a header the image can't hold is corruption.
     u64_t header_length = 0;
-    if (file_bytes < sizeof(header_length))
-        return loaded_t::fail(status_t::invalid_input_k, "{} is shorter than a length prefix", path);
-    if (expected_t read = read_at_(file.value_, 0, &header_length, sizeof(header_length)); !read)
-        return loaded_t::fail(std::move(read));
-    if (header_length == 0 || header_length > file_bytes - sizeof(header_length))
-        return loaded_t::fail(status_t::invalid_input_k, "{} declares a {}-byte header, the file holds {}", path,
-                              header_length, file_bytes);
-    u64_t const payload_bytes = file_bytes - sizeof(header_length) - header_length;
-    if (payload_bytes % sizeof(bf16_t) != 0)
-        return loaded_t::fail(status_t::invalid_input_k, "{} carries a torn payload ({} bytes)", path, payload_bytes);
+    if (buffer.size() < sizeof(header_length))
+        return loaded_t::fail(status_t::invalid_input_k, "a {}-byte image is shorter than a length prefix",
+                              buffer.size());
+    std::memcpy(&header_length, buffer.data(), sizeof(header_length));
+    if (header_length == 0 || header_length > buffer.size() - sizeof(header_length))
+        return loaded_t::fail(status_t::invalid_input_k, "the image declares a {}-byte header, it holds {}",
+                              header_length, buffer.size());
+    u64_t const payload_bytes = buffer.size() - sizeof(header_length) - header_length;
 
-    // The hoisted scratch holds the header bytes up front and the yyjson parse pool behind them — one
-    // allocation for the whole parse, owned by the container.
-    checkpoint_to_load_t loaded;
-    loaded.payload_ = array<bf16_t, pinned_alloc<bf16_t>> {pinned_alloc<bf16_t> {allocator}};
+    // The parse scratch holds a copy of the header up front and the yyjson pool behind it — one allocation,
+    // released once the tables are indexed.
+    array<char> scratch;
     std::size_t const pool_bytes = yyjson_read_max_memory_usage(header_length, 0);
-    if (loaded.scratch_.try_resize_uninitialized(header_length + pool_bytes) != status_t::success_k)
+    if (scratch.resize_uninitialized(header_length + pool_bytes) != status_t::success_k)
         return loaded_t::fail(status_t::bad_alloc_k, "header staging failed ({} bytes)", header_length + pool_bytes);
-    if (expected_t read = read_at_(file.value_, sizeof(header_length), loaded.scratch_.data(), header_length); !read)
-        return loaded_t::fail(std::move(read));
+    std::memcpy(scratch.data(), buffer.data() + sizeof(header_length), header_length);
     yyjson_alc pool;
-    if (!yyjson_alc_pool_init(&pool, loaded.scratch_.data() + header_length, pool_bytes))
+    if (!yyjson_alc_pool_init(&pool, scratch.data() + header_length, pool_bytes))
         return loaded_t::fail(status_t::bad_alloc_k, "parse pool setup failed ({} bytes)", pool_bytes);
-    std::span<char> const header {loaded.scratch_.data(), header_length};
-    if (expected_t parsed = read_header_(header, &pool, payload_bytes, loaded.entries_, loaded.step_); !parsed)
+    checkpoint_to_load_t loaded;
+    std::span<char> const header {scratch.data(), static_cast<std::size_t>(header_length)};
+    if (expected_t parsed = read_header_(header, &pool, payload_bytes, loaded.entries_, loaded.metadata_); !parsed)
         return loaded_t::fail(std::move(parsed));
-
-    // The whole payload in one read, straight into pinned pages — the caller's uploads DMA from here.
-    if (loaded.payload_.try_resize_uninitialized(payload_bytes / sizeof(bf16_t)) != status_t::success_k)
-        return loaded_t::fail(status_t::bad_alloc_k, "pinned payload staging failed ({} bytes)", payload_bytes);
-    if (expected_t read = read_at_(file.value_, sizeof(header_length) + header_length, loaded.payload_.data(),
-                                   payload_bytes);
-        !read)
-        return loaded_t::fail(std::move(read));
+    loaded.payload_ = static_cast<nk_bf16_t const *>(
+        static_cast<void const *>(buffer.data() + sizeof(header_length) + header_length));
     return loaded_t {std::move(loaded)};
 }
 
-nk::tensor_view<bf16_t, 2> checkpoint_to_load_t::operator[](sz::string_view_t layer_name) const noexcept {
+nk::tensor_view<nk_bf16_t, 2> checkpoint_to_load_t::operator[](sz::string_view_t name) const noexcept {
     for (checkpoint_entry_t const &entry : entries_)
-        if (entry.name.view() == layer_name)
-            return nk::tensor_view<bf16_t, 2> {payload_.data() + entry.scalar_offset, entry.rows, entry.cols};
+        if (entry.name.view() == name)
+            return nk::tensor_view<nk_bf16_t, 2> {payload_ + entry.scalar_offset, entry.rows, entry.cols};
     return {};
+}
+
+sz::string_view_t checkpoint_to_load_t::metadata(sz::string_view_t key) const noexcept {
+    for (checkpoint_metadata_t const &pair : metadata_)
+        if (pair.key.view() == key) return pair.value.view();
+    return {};
+}
+
+u64_t checkpoint_to_load_t::step() const noexcept {
+    sz::string_view_t const text = metadata("step");
+    u64_t step = 0;
+    (void)std::from_chars(text.data(), text.data() + text.size(), step);
+    return step;
 }

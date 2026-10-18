@@ -1,45 +1,43 @@
 /**
- *  @brief The Base training conformance test: builds the same @ref base_trainer_t the binary drives and asserts
- *      the invariants the loop itself never checks — deep replay conformance for the tokens and omni mixtures,
- *      plus a cross-product sweep over every media subset, row budget, and model-region mode.
+ *  @brief The Base training conformance test: builds the same @ref trainer_t the binary and the C verbs drive and
+ *      asserts the invariants the loop itself never checks — deep replay conformance for the tokens and omni
+ *      mixtures, plus a cross-product sweep over every media subset, row budget, and model-region mode.
  *  @file test/base.cu
  *  @author Ash Vardanian
  *  @date July 6, 2026
  *
  *  This is a test: a plain @c int @c main builds one @ref test_suite_t and threads it by reference into every
- *  case, consuming @c src/train/base.cuh 's typed surface instead of copying the driver. The collective
- *  surfaces — one multimem domain and one cross-domain all-reduce per width tier — are created once in @c main and
- *  threaded by reference into every case, exactly as @ref base_trainer_t::run composes production; each case
- *  keeps only its own trainer and optimizer. Launched under Slurm via @c scripts/slurm/test_base-4-8-16.sbatch ,
- *  the same binary runs the distributed tiers: @c main honors @c UFORM_HOST_DOMAIN_COUNT , so a two-node world
- *  exercises the InfiniBand reduce under every case below.
+ *  case, consuming @c src/train/trainer.hpp 's typed surface instead of copying the driver. Two meshes are made
+ *  once in @c main — the bootstrapped world and a one-GPU narrowing of it — and every case builds its own trainer
+ *  over one of them, exactly as the C verbs compose production. Launched under Slurm via
+ *  @c scripts/slurm/test_base-4-8-16.sbatch , the same binary runs the distributed tiers: @c main honors
+ *  @c UFORM_HOST_DOMAIN_COUNT , so a two-node world exercises the InfiniBand reduce under every case below.
  *
  *  The case matrix:
  *
  *      - @ref learning_rate_schedule — the warmup / cosine policy's properties, pure host math, no GPU.
  *      - @ref run_base_conformance for the tokens and omni mixtures at full width — @b A every replica
- *        bitwise-matches the lead, @b B every member's barrier round advanced and they all agree, @b C a
- *        reseeded eager rerun lands on the captured run, @b D each head's loss fell between its first
+ *        bitwise-matches the lead, @b B every member's barrier round advanced and they all agree, @b C an
+ *        eager trainer of the same seed lands on the captured run, @b D each head's loss fell between its first
  *        and last scored steps, @b E every live head's loss read nonzero at least once, @b F the captured
  *        window moved the weights off their seed.
  *      - @ref mixture_sweep — two width tiers: every media subset (2³) crossed with one-row and two-row
- *        budgets on an isolated one-GPU world (plus the uneven five-row and 96-column omni corners), then
- *        every subset again at the bootstrapped world's full width. Each cell steps eagerly, then captures
- *        and replays over the same trainer, so both model-region modes run under every mixture.
- *      - @ref graph_capture — the capture contract holds and two replays agree; runs on the
- *        one-GPU world and needs no domain, so it stays green even where multicast is not provisioned.
+ *        budgets on the one-GPU mesh (plus the uneven five-row and 96-column omni corners), then every subset
+ *        again at the bootstrapped world's full width. Each cell steps eagerly, then captures and replays over
+ *        the same trainer, so both model-region modes run under every mixture.
+ *      - @ref graph_capture — the capture contract holds and two replays agree, on the one-GPU mesh.
  */
 #include <cmath>   // `std::isfinite`
-#include <cstdlib> // `std::getenv`, `std::atoi` — the distributed tier's host_domain count
-#include <cstring> // `std::memcmp`, `std::memcpy`
+#include <cstdlib> // `std::getenv`, `std::strtod`
+#include <cstring> // `std::memcmp`, `std::memcpy`, `std::strlen`
 
 #include <algorithm> // `std::max` — the reusable staging tensor's size
-#include <span>      // `std::span` — the replay-graph table decays to a view for `step`
+#include <span>      // `std::span` — device lists
 
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
-#include "train/base.cuh" // `base_config_t`, `base_replica_t`, `base_trainer_t`
-#include "harness.hpp"    // `test_suite_t` — the cumulative pass/fail tally
+#include "train/trainer.hpp" // `trainer_config_t`, `trainer_t`, `mesh_t`, `synthetic_source_t`
+#include "harness.hpp"       // `test_suite_t` — the cumulative pass/fail tally
 
 using namespace unum::uform::core;
 using namespace unum::uform::train;
@@ -56,8 +54,8 @@ using namespace unum::uform::test;
  *  early-vs-late comparison genuinely marginal (a ~0.7% rise on the world mean) while every machinery invariant
  *  held.
  */
-[[nodiscard]] static base_config_t test_geometry_(bool omni) noexcept {
-    base_config_t config;
+[[nodiscard]] static trainer_config_t test_geometry_(bool omni) noexcept {
+    trainer_config_t config;
     config.batch = multimodal_batch_shape_t {2u, 2u, 64u};
     if (omni) {
         config.batch = multimodal_batch_shape_t {4u, 4u, 64u};
@@ -69,35 +67,9 @@ using namespace unum::uform::test;
     config.hidden = 256;
     config.steps = 16;
     config.warmup_steps = 2;
+    config.telemetry_channels = telemetry_losses_k | telemetry_signals_k | telemetry_rounds_k;
     return config;
 }
-
-/**
- *  @brief A narrowed copy of the bootstrapped world: this process alone drives @p gpus GPUs as an isolated
- *      one-host-domain mesh — the sweep's cheap tier and the capture case's world.
- *
- *  Safe because a single-host topology carries no rendezvous state; the one cross-field invariant is that
- *  @c host_domains sizes to @c shape.host_domain_count() .
- */
-[[nodiscard]] static expected<mesh_topology_t> narrowed_topology_(mesh_topology_t const &world, u32_t gpus) noexcept {
-    using result_t = expected<mesh_topology_t>;
-    mesh_topology_t narrowed;
-    narrowed.shape.gpus_per_host_domain = gpus;
-    narrowed.shape.gpus_per_multimem_domain = gpus;
-    narrowed.shape.gpus_per_colocated_domain = gpus;
-    narrowed.host_domain_index = 0;
-    if (narrowed.host_domains.try_resize(1) != status_t::success_k)
-        return result_t::fail(status_t::bad_alloc_k, "narrowed host-domain table allocation failed");
-    narrowed.host_domains[0] = world.host_domains[world.host_domain_index];
-    narrowed.host_domains[0].host_domain_index = 0;
-    narrowed.host_domains[0].device_count = gpus;
-    return result_t {std::move(narrowed)};
-}
-
-/** One optimizer window's payload budget at the tiny test geometry, with generous margin — the omni
- *  mixture's registration list needs ~1.7M scalars. A tier's shared domain multiplies this by its
- *  window count; @c reserve fails loudly if a geometry change ever outgrows it. */
-inline constexpr std::size_t tier_window_scalars_k = 4u << 20;
 
 /** The test tier's rendezvous deadline — short enough that a dead peer never costs the surviving
  *  domain two minutes per case, but long enough for the real two-node cold start: the FIRST exchange
@@ -105,104 +77,33 @@ inline constexpr std::size_t tier_window_scalars_k = 4u << 20;
  *  of seconds (a warm local rendezvous completes in well under one). */
 inline constexpr f64_t test_rendezvous_timeout_seconds_k = 60.0;
 
-/** One width tier's shared surfaces: the topology plus the collective state every cell of the tier
- *  reuses instead of re-creating — threaded by reference from @c main , like production. */
+/** One width tier: the mesh every cell of the tier builds its trainer over, and the devices it drives. */
 struct tier_t {
-
-    /** The tier's world description. */
-    mesh_topology_t const &topology;
-
-    /** The tier's one multicast domain — every case reserves its own window from it. */
-    multimem_domain_t &domain;
-
-    /** The tier's one cross-domain all-reduce — every case's optimizer borrows it. */
-    infiniband_all_reduce<f32_t> &world_reduce;
-
-    /** The suite's one telemetry ledger — every case's trainer and optimizer feed it. */
-    telemetry_ledger_t &ledger;
+    mesh_t &mesh;
+    std::span<i32_t const> devices;
 };
 
 /**
- *  @brief One collective surface shared by every consumer of a tier — multicast objects are a scarce
- *      fabric resource, so the suite creates one per tier in @c main and threads it by reference, exactly
- *      as @ref base_trainer_t::run composes production.
+ *  @brief Narrow the bootstrapped @p world into @p placed : this process alone drives its first @p gpus GPUs as an
+ *      isolated one-host-domain mesh — the sweep's cheap tier and the capture case's world.
  *
- *  Bring-up streams are transient locals (the domain retains no stream), and the self-advancing barrier
- *  rounds make reuse across many optimizer instances safe by construction: every barrier derives its
- *  target from its own member's scalar.
+ *  Safe because a single-host topology carries no rendezvous state; the one cross-field invariant is that
+ *  @c host_domains sizes to @c shape.host_domain_count() .
  */
-[[nodiscard]] static expected<multimem_domain_t> make_tier_domain_(mesh_topology_t const &topology,
-                                                                   u32_t windows) noexcept {
-    using result_t = expected<multimem_domain_t>;
-    u32_t const gpus = topology.shape.gpus_per_host_domain;
-    array<i32_t> devices;
-    per_gpu_array<gpu_stream_t> streams;
-    for (u32_t device = 0; device != gpus; ++device) {
-        if (devices.try_push_back(static_cast<i32_t>(device)) != status_t::success_k)
-            return result_t::fail(status_t::bad_alloc_k, "tier device table allocation failed");
-        expected<gpu_stream_t> stream = gpu_stream_t::make(static_cast<i32_t>(device));
-        if (!stream) return result_t::fail(std::move(stream));
-        if (streams.try_push_back(std::move(stream.value_)) != status_t::success_k)
-            return result_t::fail(status_t::bad_alloc_k, "tier stream table full");
-    }
-    return multimem_domain_t::make(topology, devices.view(), static_cast<std::size_t>(windows) * tier_window_scalars_k,
-                                   streams);
-}
-
-/** The suite-lifetime arena hosting the tiers' world-reduce heaps — on device 0, visible to every
- *  local device, because the ranks peer-read the gateway's world sum over NVLink. */
-[[nodiscard]] static expected<gpu_arena_t> make_reduce_arena_(u32_t gpus) noexcept {
-    using result_t = expected<gpu_arena_t>;
-    array<i32_t> devices;
-    for (u32_t device = 0; device != gpus; ++device)
-        if (devices.try_push_back(static_cast<i32_t>(device)) != status_t::success_k)
-            return result_t::fail(status_t::bad_alloc_k, "reduce-arena device table allocation failed");
-    expected<gpu_stream_t> lead_stream = gpu_stream_t::make(0);
-    if (!lead_stream) return result_t::fail(std::move(lead_stream));
-    switch_to_gpu_t gpu_scope {lead_stream.value_};
-    if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed");
-    return gpu_arena_t::make(0, 256ull << 20, devices.view());
-}
-
-/** One tier's world all-reduce buffer, wired once and borrowed by every case — sized like a domain
- *  window ( @ref tier_window_scalars_k , the elementwise reduce leaves a smaller case's tail unread).
- *  A single-domain tier gets the zero-round identity, wired without touching InfiniBand. */
-[[nodiscard]] static expected<infiniband_all_reduce<f32_t>> make_tier_reduce_(colocated_domain_t &colocated,
-                                                                              gpu_arena_t &arena) noexcept {
-    using result_t = expected<infiniband_all_reduce<f32_t>>;
-    expected<gpu_stream_t> wiring_stream = gpu_stream_t::make(0);
-    if (!wiring_stream) return result_t::fail(std::move(wiring_stream));
-    switch_to_gpu_t gpu_scope {wiring_stream.value_};
-    if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed");
-    result_t wired = infiniband_all_reduce<f32_t>::make(colocated, 0, arena, tier_window_scalars_k,
-                                                        wiring_stream.value_, test_rendezvous_timeout_seconds_k);
-    // The round-scalar seed is enqueued on the transient wiring stream — drain it before the stream dies.
-    if (wired)
-        if (CUresult synced = cuStreamSynchronize(wiring_stream.value_.get()); synced != CUDA_SUCCESS)
-            return result_t::fail(synced, "tier reduce wiring drain failed");
-    return wired;
-}
-
-/** The distributed Adafactor over the transient flat replica-major registration table — the same
- *  construction @ref base_trainer_t::run performs. A second call on the same domain reserves the next
- *  disjoint window (fresh moments), borrowing the tier's one world all-reduce. */
-[[nodiscard]] static expected<distributed_adafactor_t> make_optimizer_(base_trainer_t &trainer,
-                                                                       multimem_domain_t &domain,
-                                                                       infiniband_all_reduce<f32_t> &world_reduce,
-                                                                       telemetry_ledger_t &ledger) noexcept {
-    using result_t = expected<distributed_adafactor_t>;
-    array<differentiable_weights_t> registrations;
-    for (std::size_t member_index = 0; member_index != trainer.replicas.size(); ++member_index) {
-        array<differentiable_weights_t> const &owned = trainer.replicas[member_index].weights;
-        std::span<differentiable_weights_t const> const list {owned.view().data(), owned.size()};
-        for (differentiable_weights_t const &entry : list)
-            if (registrations.try_push_back(entry) != status_t::success_k)
-                return result_t::fail(status_t::bad_alloc_k, "registration table allocation failed");
-    }
-    adafactor_config_t optimizer_config; // the per-step learning rate travels through `step`, not the config
-    return distributed_adafactor_t::make(domain, world_reduce, trainer.arenas,
-                                         {registrations.view().data(), registrations.size()},
-                                         trainer.replicas[0].weights.size(), optimizer_config, trainer.streams, ledger);
+[[nodiscard]] static expected_t narrow_mesh_(mesh_t &placed, mesh_topology_t const &world, u32_t gpus) noexcept {
+    placed.topology.shape.gpus_per_host_domain = gpus;
+    placed.topology.shape.gpus_per_multimem_domain = gpus;
+    placed.topology.shape.gpus_per_colocated_domain = gpus;
+    placed.topology.host_domain_index = 0;
+    if (placed.topology.host_domains.resize(1) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "narrowed host-domain table allocation failed");
+    placed.topology.host_domains[0] = world.host_domains[world.host_domain_index];
+    placed.topology.host_domains[0].host_domain_index = 0;
+    placed.topology.host_domains[0].device_count = gpus;
+    expected<colocated_domain_t> colocated = colocated_domain_t::make(placed.topology);
+    if (!colocated) return expected_t::fail(std::move(colocated));
+    placed.colocated = std::move(colocated.value_);
+    return {};
 }
 
 /** The world's health, owned by @c main beside the suite and threaded by reference into every case:
@@ -215,7 +116,7 @@ struct world_health_t {
     /** Cleared at the first poisoned-context or unresponsive-peer detection; later cases skip. */
     bool alive = true;
 
-    /** Consecutive optimizer-setup failures — a healthy world never fails setup, so two in a row
+    /** Consecutive trainer bring-up failures — a healthy world never fails one, so two in a row
      *  mean the peer domain is gone. */
     u32_t consecutive_setup_failures = 0;
 };
@@ -240,21 +141,21 @@ struct world_health_t {
     return false;
 }
 
-/** Enqueue steps @b [begin,end) of the two-region loop — an empty @p graphs span runs the model region
- *  eagerly, a filled one replays the captured graphs. */
-[[nodiscard]] static expected_t run_steps_(base_trainer_t &trainer, distributed_adafactor_t &optimizer,
-                                           std::span<gpu_replay_graph_t> graphs, u32_t begin, u32_t end) noexcept {
-    for (u32_t ordinal = begin; ordinal != end; ++ordinal)
-        if (expected_t stepped = trainer.step(optimizer_step_t {ordinal}, optimizer, graphs); !stepped) return stepped;
-    return {};
+/** Build @p placed over @p tier for @p config , tallying bring-up failures into @p health . */
+[[nodiscard]] static expected_t make_trainer_(trainer_t &placed, tier_t tier, trainer_config_t const &config,
+                                              world_health_t &health) noexcept {
+    expected_t built = trainer_t::make(placed, tier.mesh, config, tier.devices);
+    health.consecutive_setup_failures = built ? 0u : health.consecutive_setup_failures + 1u;
+    return built;
 }
 
-/** Drain every replica's stream — the barrier before any host-side comparison. */
-static void synchronize_(base_trainer_t &trainer) noexcept {
-    for (std::size_t member_index = 0; member_index != trainer.streams.size(); ++member_index) {
-        switch_to_gpu_t gpu_scope {trainer.streams[member_index]};
-        cuStreamSynchronize(trainer.streams[member_index].get());
-    }
+/** Enqueue steps @b [begin,end) of the synthetic loop. */
+[[nodiscard]] static expected_t run_steps_(trainer_t &trainer, u32_t begin, u32_t end) noexcept {
+    synthetic_source_t source;
+    step_report_t report;
+    for (u32_t ordinal = begin; ordinal != end; ++ordinal)
+        if (expected_t stepped = trainer.step(source, optimizer_step_t {ordinal}, report); !stepped) return stepped;
+    return {};
 }
 
 /** DtoH one replica's whole registration list into a byte-comparable host array — the snapshot behind
@@ -264,7 +165,7 @@ static void synchronize_(base_trainer_t &trainer) noexcept {
     using result_t = expected<array<bf16_t>>;
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed");
-    std::span<differentiable_weights_t const> const list {weights.view().data(), weights.size()};
+    std::span<differentiable_weights_t const> const list = weights.view();
     std::size_t total = 0, largest = 0;
     for (differentiable_weights_t const &matrix : list) {
         std::size_t const scalars = matrix.weights.numel();
@@ -272,7 +173,7 @@ static void synchronize_(base_trainer_t &trainer) noexcept {
         largest = std::max(largest, scalars);
     }
     array<bf16_t> host;
-    if (host.try_resize_uninitialized(total) != status_t::success_k)
+    if (host.resize_uninitialized(total) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "snapshot allocation failed");
     nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging =
         nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::uninitialized({largest}, pinned_alloc<bf16_t> {}).value;
@@ -306,7 +207,7 @@ static void synchronize_(base_trainer_t &trainer) noexcept {
         return result_t::fail(std::move(copied));
     cuStreamSynchronize(stream.get());
     array<bf16_t> host;
-    if (host.try_resize_uninitialized(scalars) != status_t::success_k)
+    if (host.resize_uninitialized(scalars) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "snapshot allocation failed");
     std::memcpy(host.data(), staging.data(), scalars * sizeof(bf16_t));
     return result_t {std::move(host)};
@@ -333,7 +234,7 @@ static void synchronize_(base_trainer_t &trainer) noexcept {
  *  exactly at the peak, a never-rising decay bounded by @b [floor, peak] , and a tail settling onto the
  *  floor. */
 static void learning_rate_schedule(test_suite_t &suite) {
-    base_config_t config;
+    trainer_config_t config;
     config.learning_rate = 1.0e-3f;
     config.min_learning_rate = 1.0e-5f;
     config.warmup_steps = 10;
@@ -367,7 +268,7 @@ static void learning_rate_schedule(test_suite_t &suite) {
  *  per-weight names every SafeTensors parser keys by (under the driver's @c model. prefix), derived from
  *  @p config and asserted in full order — a @c fill reorder or rename fails loudly here before it silently
  *  re-keys a checkpoint. Piggybacks on an already-built trainer, so it costs no bring-up of its own. */
-static void check_weight_naming_(test_suite_t &suite, char const *label, base_config_t const &config,
+static void check_weight_naming_(test_suite_t &suite, char const *label, trainer_config_t const &config,
                                  std::span<differentiable_weights_t const> weights) {
     std::size_t index = 0;
     auto expect = [&](sz::string_view_t want) {
@@ -403,224 +304,192 @@ static void check_weight_naming_(test_suite_t &suite, char const *label, base_co
     suite.check(index == weights.size(), "[{}] registration count: got {} want {}", label, weights.size(), index);
 }
 
-/** Drain every member's stream before a case's trainer — and the wired collectives borrowing its
- *  arenas — leaves scope: a doorbell or completion-drain kernel still in flight would otherwise poke
- *  NIC structures the teardown frees, and mlx5's pools recycle those pages into the next case's
- *  queues (a roaming device fault the page registry alone cannot prevent). */
-[[nodiscard]] static expected_t drain_all_streams_(base_trainer_t &trainer) noexcept {
-    for (std::size_t member_index = 0; member_index != trainer.streams.size(); ++member_index) {
-        switch_to_gpu_t gpu_scope {trainer.streams[member_index]};
-        if (!gpu_scope.ok())
-            return expected_t::fail(status_t::cuda_error_k, "context entry failed (member={})", member_index);
-        if (CUresult synced = cuStreamSynchronize(trainer.streams[member_index].get()); synced != CUDA_SUCCESS)
-            return expected_t::fail(synced, "end-of-case stream drain failed (member={})", member_index);
-    }
-    return {};
-}
-
-/** Bring up the trainer for one mixture, run the captured two-region loop reading telemetry every step,
- *  and fold the five invariants (A replica identity, B round progression, C capture == eager, D loss
- *  descent, E every live head trained) into @p suite . D and E read the ledger's running loss
- *  statistics — every local member's sample mass, not a lead-only coin flip. */
+/** Bring up a captured trainer for one mixture, run its loop reading telemetry every step, and fold the
+ *  invariants A, B, D, E and F into @p suite ; then an eager trainer of the same seed checks C. D and E read the
+ *  ledger's running loss statistics — every local member's sample mass, not a lead-only coin flip. */
 static void run_base_conformance(test_suite_t &suite, world_health_t &health, char const *label,
-                                 base_config_t const &config, mesh_topology_t const &topology,
-                                 multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce,
-                                 telemetry_ledger_t &ledger) {
+                                 trainer_config_t const &config, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return;
-    base_trainer_t trainer;
-    if (expected_t built = base_trainer_t::make(trainer, config, topology, ledger); !built)
-        return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
-    u32_t const gpus = static_cast<u32_t>(trainer.replicas.size());
-    suite.check(gpus != 0u, "[{}] at least one visible GPU: got {}", label, gpus);
-    if (gpus == 0u) return;
-    check_weight_naming_(suite, label, config, trainer.replicas[0].weights.view());
+    mesh_topology_t const &topology = tier.mesh.topology;
+    array<bf16_t> captured_lead;
+    {
+        trainer_t trainer;
+        if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
+            return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
+        u32_t const gpus = static_cast<u32_t>(trainer.replicas.size());
+        check_weight_naming_(suite, label, config, trainer.replicas[0].weights.view());
 
-    // The captured optimizer and the assertion-C eager optimizer each reserve a fresh disjoint window
-    // from the tier's shared domain and borrow the tier's one world all-reduce.
-    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, domain, world_reduce, ledger);
-    if (!optimizer) {
-        ++health.consecutive_setup_failures;
-        return suite.check(false, "[{}] optimizer setup: {}", label, optimizer.description_);
-    }
-    health.consecutive_setup_failures = 0;
-    per_gpu_array<gpu_replay_graph_t> graphs;
-    if (expected_t captured = trainer.capture(graphs); !captured)
-        return suite.check(false, "[{}] model-region capture: {}", label, captured.description_);
-    // Assertion F's reference: the lead replica's freshly seeded weights, untouched by the capture.
-    expected<array<bf16_t>> seed_lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
-    if (!seed_lead) return suite.check(false, "[{}] seed snapshot: {}", label, seed_lead.description_);
+        // Assertion F's reference: the lead replica's freshly seeded weights, untouched by the capture.
+        expected<array<bf16_t>> seed_lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
+        if (!seed_lead) return suite.check(false, "[{}] seed snapshot: {}", label, seed_lead.description_);
 
-    // The captured run, telemetry every step — each reading aggregates every local member's summands
-    // into the ledger's running statistics. A midpoint snapshot splits the run into two halves;
-    // assertion D compares their sample-weighted means, so a head scored on only some steps (a routine
-    // event on short token rows at wide worlds) contributes its whole sample mass, not one noisy endpoint.
-    telemetry_probe_t const head_probes[4] = {trainer.probes.token, trainer.probes.image, trainer.probes.video,
-                                              trainer.probes.audio};
-    telemetry_loss_stats_t mid_stats[4] {};
-    for (u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
-        if (expected_t ran = trainer.step(optimizer_step_t {ordinal}, optimizer.value_, graphs); !ran)
-            return suite.check(false, "[{}] captured step {}: {}", label, ordinal, ran.description_);
-        (void)trainer.telemetry(domain, optimizer_step_t {ordinal});
-        if (ordinal + 1u == config.steps / 2u)
-            for (u32_t head = 0; head != 4u; ++head) mid_stats[head] = ledger.losses(head_probes[head]);
-    }
-    telemetry_loss_stats_t end_stats[4] {};
-    for (u32_t head = 0; head != 4u; ++head) end_stats[head] = ledger.losses(head_probes[head]);
+        // The captured run, telemetry every step. A midpoint snapshot splits the run into two halves; assertion D
+        // compares their sample-weighted means, so a head scored on only some steps contributes its whole sample
+        // mass, not one noisy endpoint.
+        telemetry_probe_t const head_probes[4] = {trainer.probes.token, trainer.probes.image, trainer.probes.video,
+                                                  trainer.probes.audio};
+        telemetry_loss_stats_t mid_stats[4] {};
+        synthetic_source_t source;
+        step_report_t report;
+        for (u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
+            if (expected_t ran = trainer.step(source, optimizer_step_t {ordinal}, report); !ran)
+                return suite.check(false, "[{}] captured step {}: {}", label, ordinal, ran.description_);
+            (void)trainer.telemetry(optimizer_step_t {ordinal});
+            if (ordinal + 1u == config.steps / 2u)
+                for (u32_t head = 0; head != 4u; ++head) mid_stats[head] = trainer.ledger.losses(head_probes[head]);
+        }
+        telemetry_loss_stats_t end_stats[4] {};
+        for (u32_t head = 0; head != 4u; ++head) end_stats[head] = trainer.ledger.losses(head_probes[head]);
 
-    // At multi-domain worlds a node's telemetry sees only its slice of the objective the optimizer
-    // minimizes — a local half can rise while the world mean falls, and that is descent, not a defect.
-    // Fold every host_domain's summands through the mesh exchange, so D judges the world mean and every
-    // node reaches the same verdict.
-    u32_t const host_domains = static_cast<u32_t>(topology.host_domains.size());
-    if (host_domains > 1u) {
-        sz::string_t mine;
-        bool formatted = true;
-        for (u32_t head = 0; head != 4u; ++head)
-            formatted = formatted &&
-                        format_into(mine, "{:.17e} {:.17e} {:.17e} {:.17e} {}\n", mid_stats[head].weighted_sum,
-                                    mid_stats[head].weight, end_stats[head].weighted_sum, end_stats[head].weight,
-                                    end_stats[head].scored_steps);
-        sz::string_t key;
-        formatted = formatted && static_cast<bool>(format_into(key, "conformance.{}.loss_summands", label));
-        if (!formatted) return suite.check(false, "[{}] loss-summand exchange formatting failed", label);
-        if (expected_t published = topology.publish_text(key.view(), mine.view()); !published)
-            return suite.check(false, "[{}] loss-summand publish: {}", label, published.description_);
-        telemetry_loss_stats_t world_mid[4] {}, world_end[4] {};
-        for (u32_t domain_index = 0; domain_index != host_domains; ++domain_index) {
-            sz::string_t text;
-            if (domain_index == topology.host_domain_index) {
-                if (sz::failed(text.try_assign(mine.view())))
-                    return suite.check(false, "[{}] loss-summand staging failed", label);
+        // At multi-domain worlds a node's telemetry sees only its slice of the objective the optimizer
+        // minimizes — a local half can rise while the world mean falls, and that is descent, not a defect.
+        // Fold every host_domain's summands through the mesh exchange, so D judges the world mean and every
+        // node reaches the same verdict.
+        u32_t const host_domains = static_cast<u32_t>(topology.host_domains.size());
+        if (host_domains > 1u) {
+            sz::string_t mine;
+            bool formatted = true;
+            for (u32_t head = 0; head != 4u; ++head)
+                formatted = formatted &&
+                            format_into(mine, "{:.17e} {:.17e} {:.17e} {:.17e} {}\n", mid_stats[head].weighted_sum,
+                                        mid_stats[head].weight, end_stats[head].weighted_sum, end_stats[head].weight,
+                                        end_stats[head].scored_steps);
+            sz::string_t key;
+            formatted = formatted && static_cast<bool>(format_into(key, "conformance.{}.loss_summands", label));
+            if (!formatted) return suite.check(false, "[{}] loss-summand exchange formatting failed", label);
+            if (expected_t published = topology.publish_text(key.view(), mine.view()); !published)
+                return suite.check(false, "[{}] loss-summand publish: {}", label, published.description_);
+            telemetry_loss_stats_t world_mid[4] {}, world_end[4] {};
+            for (u32_t domain_index = 0; domain_index != host_domains; ++domain_index) {
+                sz::string_t text;
+                if (domain_index == topology.host_domain_index) {
+                    if (sz::failed(text.assign(mine.view())))
+                        return suite.check(false, "[{}] loss-summand staging failed", label);
+                }
+                else if (expected_t arrived = topology.await_text(domain_index, key.view(), text,
+                                                                  test_rendezvous_timeout_seconds_k);
+                         !arrived)
+                    return suite.check(false, "[{}] loss-summand exchange: {}", label, arrived.description_);
+                char const *cursor = text.c_str();
+                for (u32_t head = 0; head != 4u; ++head) {
+                    char *next = nullptr;
+                    world_mid[head].weighted_sum += std::strtod(cursor, &next); // vendor-boundary: libc parse
+                    world_mid[head].weight += std::strtod(next, &next);         // vendor-boundary
+                    world_end[head].weighted_sum += std::strtod(next, &next);   // vendor-boundary
+                    world_end[head].weight += std::strtod(next, &next);         // vendor-boundary
+                    world_end[head].scored_steps += static_cast<u64_t>(std::strtod(next, &next)); // vendor-boundary
+                    cursor = next;
+                }
             }
-            else if (expected_t arrived = topology.await_text(domain_index, key.view(), text,
-                                                              test_rendezvous_timeout_seconds_k);
-                     !arrived)
-                return suite.check(false, "[{}] loss-summand exchange: {}", label, arrived.description_);
-            char const *cursor = text.c_str();
             for (u32_t head = 0; head != 4u; ++head) {
-                char *next = nullptr;
-                world_mid[head].weighted_sum += std::strtod(cursor, &next); // vendor-boundary: libc parse
-                world_mid[head].weight += std::strtod(next, &next);         // vendor-boundary
-                world_end[head].weighted_sum += std::strtod(next, &next);   // vendor-boundary
-                world_end[head].weight += std::strtod(next, &next);         // vendor-boundary
-                world_end[head].scored_steps += static_cast<u64_t>(std::strtod(next, &next)); // vendor-boundary
-                cursor = next;
+                mid_stats[head] = world_mid[head];
+                end_stats[head] = world_end[head];
             }
         }
-        for (u32_t head = 0; head != 4u; ++head) {
-            mid_stats[head] = world_mid[head];
-            end_stats[head] = world_end[head];
+        if (expected_t drained = trainer.synchronize(); !drained)
+            return suite.check(false, "[{}] drain: {}", label, drained.description_);
+        expected<array<bf16_t>> lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
+        if (!lead) return suite.check(false, "[{}] lead snapshot: {}", label, lead.description_);
+        captured_lead = std::move(lead.value_);
+
+        // A — every replica byte-matches the lead. Vacuous at one GPU (the peer loop is empty), but the run stands.
+        bool replicas_identical = true;
+        for (u32_t member_index = 1; member_index < gpus; ++member_index) {
+            expected<array<bf16_t>> peer = snapshot_weights_(trainer.replicas[member_index].weights,
+                                                             trainer.streams[member_index]);
+            replicas_identical = replicas_identical && peer && snapshots_match_(peer.value_, captured_lead);
         }
+        suite.check(replicas_identical, "[{}] every replica matches the lead bitwise (A)", label);
+
+        // B — every member's own barrier round advanced off zero, never moved backwards, and they all agree:
+        //     the ledger's monotone round rows carry all three (each member's scalar counts its own barriers).
+        expected<telemetry_row_t> lead_round = trainer.ledger.row(trainer.probes.rounds[0], trainer.streams[0]);
+        bool rounds_read = static_cast<bool>(lead_round), round_uniform = true, round_monotone = true;
+        for (u32_t member_index = 0; member_index < gpus; ++member_index) {
+            expected<telemetry_row_t> member_round = trainer.ledger.row(trainer.probes.rounds[member_index],
+                                                                        trainer.streams[member_index]);
+            rounds_read = rounds_read && member_round;
+            round_uniform = round_uniform && member_round && lead_round &&
+                            member_round.value_.last_scalar == lead_round.value_.last_scalar;
+            round_monotone = round_monotone && member_round && member_round.value_.violations == 0u;
+        }
+        suite.check(rounds_read && lead_round.value_.last_scalar > 0.0f,
+                    "[{}] barrier round advanced off zero: got {} (B)", label,
+                    rounds_read ? lead_round.value_.last_scalar : 0.0f);
+        suite.check(round_uniform, "[{}] barrier round reads identically through every member (B)", label);
+        suite.check(round_monotone, "[{}] no member's barrier round ever moved backwards (B)", label);
+
+        // D — per live head, the sample-weighted mean of the run's late half fell below the early half's;
+        //     the late half is a subtraction of two monotone snapshots. A head both halves scored votes;
+        //     the sums of voting heads decide. Loose by design — one deterministic descent, not convergence.
+        f64_t early_mean_sum = 0.0, late_mean_sum = 0.0;
+        u32_t voting_heads = 0;
+        for (u32_t head = 0; head != 4u; ++head) {
+            f64_t const early_weight = mid_stats[head].weight;
+            f64_t const late_weight = end_stats[head].weight - mid_stats[head].weight;
+            if (early_weight == 0.0 || late_weight == 0.0) continue; // unscored half — E guards coverage
+            early_mean_sum += mid_stats[head].weighted_sum / early_weight;
+            late_mean_sum += (end_stats[head].weighted_sum - mid_stats[head].weighted_sum) / late_weight;
+            ++voting_heads;
+        }
+        suite.check(voting_heads != 0u && std::isfinite(late_mean_sum) && late_mean_sum < early_mean_sum,
+                    "[{}] mean loss fell over {} steps: late-half {} want < early-half {} ({} heads voting) (D)", label,
+                    config.steps, late_mean_sum, early_mean_sum, voting_heads);
+
+        // E — every live head scored at least once: the keyed partition fed every modality rows, and every
+        //     head actually trained.
+        suite.check(end_stats[0].scored_steps > 0u, "[{}] the token head trained (E)", label);
+        if (config.batch.contains(modality_t::image_k))
+            suite.check(end_stats[1].scored_steps > 0u, "[{}] the image head trained (E)", label);
+        if (config.batch.contains(modality_t::video_k))
+            suite.check(end_stats[2].scored_steps > 0u, "[{}] the video head trained (E)", label);
+        if (config.batch.contains(modality_t::audio_k))
+            suite.check(end_stats[3].scored_steps > 0u, "[{}] the audio head trained (E)", label);
+
+        // F — the captured window moved the weights off their seed: gradients propagated through the whole
+        //     backbone and the optimizer applied them.
+        suite.check(!snapshots_match_(seed_lead.value_, captured_lead),
+                    "[{}] the captured window moved the weights off their seed (F)", label);
     }
-    synchronize_(trainer);
-    expected<array<bf16_t>> captured_lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
-    if (!captured_lead) return suite.check(false, "[{}] lead snapshot: {}", label, captured_lead.description_);
 
-    // A — every replica byte-matches the lead. Vacuous at one GPU (the peer loop is empty), but the run stands.
-    bool replicas_identical = true;
-    for (u32_t member_index = 1; member_index < gpus; ++member_index) {
-        expected<array<bf16_t>> peer = snapshot_weights_(trainer.replicas[member_index].weights,
-                                                         trainer.streams[member_index]);
-        replicas_identical = replicas_identical && peer && snapshots_match_(peer.value_, captured_lead.value_);
-    }
-    suite.check(replicas_identical, "[{}] every replica matches the lead bitwise (A)", label);
-
-    // B — every member's own barrier round advanced off zero, never moved backwards, and they all agree:
-    //     the ledger's monotone round rows carry all three (each member's scalar counts its own barriers).
-    expected<telemetry_row_t> lead_round = ledger.row(trainer.probes.rounds[0], trainer.streams[0]);
-    bool rounds_read = static_cast<bool>(lead_round), round_uniform = true, round_monotone = true;
-    for (u32_t member_index = 0; member_index < gpus; ++member_index) {
-        expected<telemetry_row_t> member_round = ledger.row(trainer.probes.rounds[member_index],
-                                                            trainer.streams[member_index]);
-        rounds_read = rounds_read && member_round;
-        round_uniform = round_uniform && member_round && lead_round &&
-                        member_round.value_.last_scalar == lead_round.value_.last_scalar;
-        round_monotone = round_monotone && member_round && member_round.value_.violations == 0u;
-    }
-    suite.check(rounds_read && lead_round.value_.last_scalar > 0.0f, "[{}] barrier round advanced off zero: got {} (B)",
-                label, rounds_read ? lead_round.value_.last_scalar : 0.0f);
-    suite.check(round_uniform, "[{}] barrier round reads identically through every member (B)", label);
-    suite.check(round_monotone, "[{}] no member's barrier round ever moved backwards (B)", label);
-
-    // D — per live head, the sample-weighted mean of the run's late half fell below the early half's;
-    //     the late half is a subtraction of two monotone snapshots. A head both halves scored votes;
-    //     the sums of voting heads decide. Loose by design — one deterministic descent, not convergence.
-    f64_t early_mean_sum = 0.0, late_mean_sum = 0.0;
-    u32_t voting_heads = 0;
-    for (u32_t head = 0; head != 4u; ++head) {
-        f64_t const early_weight = mid_stats[head].weight;
-        f64_t const late_weight = end_stats[head].weight - mid_stats[head].weight;
-        if (early_weight == 0.0 || late_weight == 0.0) continue; // unscored half — E guards coverage
-        early_mean_sum += mid_stats[head].weighted_sum / early_weight;
-        late_mean_sum += (end_stats[head].weighted_sum - mid_stats[head].weighted_sum) / late_weight;
-        ++voting_heads;
-    }
-    suite.check(voting_heads != 0u && std::isfinite(late_mean_sum) && late_mean_sum < early_mean_sum,
-                "[{}] mean loss fell over {} steps: late-half {} want < early-half {} ({} heads voting) (D)", label,
-                config.steps, late_mean_sum, early_mean_sum, voting_heads);
-
-    // E — every live head scored at least once: the keyed partition fed every modality rows, and every
-    //     head actually trained.
-    suite.check(end_stats[0].scored_steps > 0u, "[{}] the token head trained (E)", label);
-    if (config.batch.contains(modality_t::image_k))
-        suite.check(end_stats[1].scored_steps > 0u, "[{}] the image head trained (E)", label);
-    if (config.batch.contains(modality_t::video_k))
-        suite.check(end_stats[2].scored_steps > 0u, "[{}] the video head trained (E)", label);
-    if (config.batch.contains(modality_t::audio_k))
-        suite.check(end_stats[3].scored_steps > 0u, "[{}] the audio head trained (E)", label);
-
-    // F — the captured window moved the weights off their seed: gradients propagated through the whole
-    //     backbone and the optimizer applied them.
-    suite.check(!snapshots_match_(seed_lead.value_, captured_lead.value_),
-                "[{}] the captured window moved the weights off their seed (F)", label);
-
-    // C — capture == eager: reseed the replicas identically, take fresh moments on the second window, rerun the
-    //     same steps eagerly, and land on the captured run's weights. The strongest single check.
-    if (expected_t reseeded = trainer.reseed(); !reseeded)
-        return suite.check(false, "[{}] reseed: {}", label, reseeded.description_);
-    expected<distributed_adafactor_t> eager_optimizer = make_optimizer_(trainer, domain, world_reduce, ledger);
-    if (!eager_optimizer)
-        return suite.check(false, "[{}] eager optimizer setup: {}", label, eager_optimizer.description_);
-    if (expected_t ran = run_steps_(trainer, eager_optimizer.value_, {}, 0u, config.steps); !ran)
+    // C — capture == eager: a fresh trainer of the same seed starts from the same weights and fresh moments, runs
+    //     the same steps eagerly, and lands on the captured run's weights. The strongest single check.
+    trainer_config_t eager_config = config;
+    eager_config.capture = eager_k;
+    trainer_t eager;
+    if (expected_t built = make_trainer_(eager, tier, eager_config, health); !built)
+        return suite.check(false, "[{}] eager trainer bring-up: {}", label, built.description_);
+    if (expected_t ran = run_steps_(eager, 0u, config.steps); !ran)
         return suite.check(false, "[{}] eager run: {}", label, ran.description_);
-    synchronize_(trainer);
-    expected<array<bf16_t>> eager_lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
-    suite.check(eager_lead && snapshots_near_(eager_lead.value_, captured_lead.value_),
+    if (expected_t drained = eager.synchronize(); !drained)
+        return suite.check(false, "[{}] eager drain: {}", label, drained.description_);
+    expected<array<bf16_t>> eager_lead = snapshot_weights_(eager.replicas[0].weights, eager.streams[0]);
+    suite.check(eager_lead && snapshots_near_(eager_lead.value_, captured_lead),
                 "[{}] captured replay lands on the eager run (C)", label);
-
-    if (expected_t drained = drain_all_streams_(trainer); !drained)
-        suite.check(false, "[{}] end-of-case drain: {}", label, drained.description_);
 }
 
-/** One sweep cell: bring up the trainer, run two eager steps, then capture and replay two more over the
- *  same trainer — both model-region modes under one mixture — asserting finite losses and the final-norm
- *  extents every head reconstructs against. */
+/** One sweep cell: bring up an eager trainer, run two steps, then capture and replay two more over the same
+ *  trainer — both model-region modes under one mixture — asserting finite losses and the final-norm extents every
+ *  head reconstructs against. */
 static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t tier, sz::string_view_t label,
-                            base_config_t const &config) {
+                            trainer_config_t config) {
     if (!test_filter_accepts(label)) return;
     if (!world_still_healthy_(suite, health)) return;
-    base_trainer_t trainer;
-    if (expected_t built = base_trainer_t::make(trainer, config, tier.topology, tier.ledger); !built)
+    config.capture = eager_k;
+    trainer_t trainer;
+    if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
         return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
-    if (trainer.replicas.size() == 0) return suite.check(false, "[{}] no visible GPU", label);
-    expected<distributed_adafactor_t> optimizer = make_optimizer_(trainer, tier.domain, tier.world_reduce, tier.ledger);
-    if (!optimizer) {
-        ++health.consecutive_setup_failures;
-        return suite.check(false, "[{}] optimizer setup: {}", label, optimizer.description_);
-    }
-    health.consecutive_setup_failures = 0;
 
     // The eager state first, then the captured one over the same trainer — capture must also hold after the
     // optimizer has stepped (the capture-stable addresses survive weight updates).
-    if (expected_t ran = run_steps_(trainer, optimizer.value_, {}, 0u, 2u); !ran)
+    if (expected_t ran = run_steps_(trainer, 0u, 2u); !ran)
         return suite.check(false, "[{}] eager steps: {}", label, ran.description_);
-    f32_t const eager_loss = trainer.telemetry(tier.domain, optimizer_step_t {1u}).composite();
-    per_gpu_array<gpu_replay_graph_t> graphs;
-    if (expected_t captured = trainer.capture(graphs); !captured)
+    f32_t const eager_loss = trainer.telemetry(optimizer_step_t {1u}).composite();
+    if (expected_t captured = trainer.capture(); !captured)
         return suite.check(false, "[{}] capture: {}", label, captured.description_);
-    if (expected_t ran = run_steps_(trainer, optimizer.value_, graphs, 2u, 4u); !ran)
+    if (expected_t ran = run_steps_(trainer, 2u, 4u); !ran)
         return suite.check(false, "[{}] replayed steps: {}", label, ran.description_);
-    f32_t const replayed_loss = trainer.telemetry(tier.domain, optimizer_step_t {3u}).composite();
+    f32_t const replayed_loss = trainer.telemetry(optimizer_step_t {3u}).composite();
 
     suite.check(std::isfinite(eager_loss) && std::isfinite(replayed_loss),
                 "[{}] losses finite through both modes: eager {} replayed {}", label, eager_loss, replayed_loss);
@@ -631,13 +500,13 @@ static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t 
                 "[{}] normalized carries [max_tokens, hidden]: got [{}, {}] want [{}, {}]", label, normalized.extent(0),
                 normalized.extent(1), max_tokens, config.hidden);
 
-    if (expected_t drained = drain_all_streams_(trainer); !drained)
+    if (expected_t drained = trainer.synchronize(); !drained)
         suite.check(false, "[{}] end-of-case drain: {}", label, drained.description_);
 }
 
 /** One sweep cell's config: @p subset 's media bits over @p rows full-width rows of @p columns cells. */
-[[nodiscard]] static base_config_t sweep_config_(u32_t subset, u32_t rows, u32_t columns) noexcept {
-    base_config_t config = test_geometry_(false);
+[[nodiscard]] static trainer_config_t sweep_config_(u32_t subset, u32_t rows, u32_t columns) noexcept {
+    trainer_config_t config = test_geometry_(false);
     config.batch = multimodal_batch_shape_t {rows, rows, columns};
     config.steps = 4;
     if (subset & 1u) config.batch.image = image_batch_shape_t {8u, 3u};
@@ -649,13 +518,12 @@ static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t 
 /**
  *  @brief The two-tier sweep.
  *
- *  The cheap tier walks every media subset (2³) crossed with one-row and two-row
- *  budgets on an isolated one-GPU world — every modality-presence combination, the zero-live-rows corner,
- *  and the 1-member peer-read domain — plus two corners the cross-product never reaches: an omni cell with
- *  five rows over four live modalities (the uneven partition, whose extra row rotates across epochs) and an
- *  omni cell at 96 columns (the non-square patch factorization). The wide tier reruns every subset at the
- *  bootstrapped world's full width, so shape handling composes with the real collectives — and widens to
- *  the multi-node world automatically under the sbatch launcher.
+ *  The cheap tier walks every media subset (2³) crossed with one-row and two-row budgets on the one-GPU mesh —
+ *  every modality-presence combination, the zero-live-rows corner, and the 1-member peer-read domain — plus two
+ *  corners the cross-product never reaches: an omni cell with five rows over four live modalities (the uneven
+ *  partition, whose extra row rotates across epochs) and an omni cell at 96 columns (the non-square patch
+ *  factorization). The wide tier reruns every subset at the bootstrapped world's full width, so shape handling
+ *  composes with the real collectives — and widens to the multi-node world automatically under the sbatch launcher.
  */
 static void mixture_sweep(test_suite_t &suite, world_health_t &health, tier_t wide, tier_t cheap) {
     for (u32_t subset = 0; subset != 8u; ++subset)
@@ -668,7 +536,7 @@ static void mixture_sweep(test_suite_t &suite, world_health_t &health, tier_t wi
         }
     run_sweep_cell_(suite, health, cheap, "1gpu:omni rows=5", sweep_config_(7u, 5u, 64u));
     run_sweep_cell_(suite, health, cheap, "1gpu:omni rows=2 columns=96", sweep_config_(7u, 2u, 96u));
-    base_config_t tuned = sweep_config_(7u, 2u, 64u);
+    trainer_config_t tuned = sweep_config_(7u, 2u, 64u);
     tuned.algo_pick = algo_pick_t::benchmarked_k;
     run_sweep_cell_(suite, health, cheap, "1gpu:omni rows=2 tuned", tuned);
     for (u32_t subset = 0; subset != 8u; ++subset) {
@@ -680,33 +548,32 @@ static void mixture_sweep(test_suite_t &suite, world_health_t &health, tier_t wi
     }
 }
 
-/** The capture contract holds, one replay graph per replica builds, and two replays over one fixed eager preamble
- *  produce the same shared @c d(normalized) up to reduction order. Needs no domain or optimizer: the model region
- *  is pure local math, so this stays green even where multicast is not provisioned. */
-static void graph_capture(test_suite_t &suite, world_health_t &health, mesh_topology_t const &topology,
-                          telemetry_ledger_t &ledger) {
+/** The capture contract holds, one forward and one backward replay graph per replica build, and two forward replays
+ *  over one fixed eager preamble produce the same shared @c d(normalized) up to reduction order. */
+static void graph_capture(test_suite_t &suite, world_health_t &health, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return;
-    base_config_t const config = test_geometry_(false);
-    base_trainer_t trainer;
-    if (expected_t built = base_trainer_t::make(trainer, config, topology, ledger); !built)
+    trainer_config_t const config = test_geometry_(false);
+    trainer_t trainer;
+    if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
         return suite.check(false, "capture trainer bring-up: {}", built.description_);
-    u32_t const gpus = static_cast<u32_t>(trainer.replicas.size());
-    if (gpus == 0u) return suite.check(false, "capture: no visible GPU");
-    per_gpu_array<gpu_replay_graph_t> graphs;
-    if (expected_t captured = trainer.capture(graphs); !captured)
-        return suite.check(false, "model-region capture: {}", captured.description_);
-    suite.check(graphs.size() == gpus, "one captured model region per replica: got {} want {}", graphs.size(), gpus);
+    std::size_t const gpus = trainer.replicas.size();
+    suite.check(trainer.forward_graphs.size() == gpus && trainer.backward_graphs.size() == gpus,
+                "one captured forward and backward region per replica: got {} and {} want {}",
+                trainer.forward_graphs.size(), trainer.backward_graphs.size(), gpus);
+    if (trainer.forward_graphs.size() != gpus) return;
 
     switch_to_gpu_t gpu_scope {trainer.streams[0]};
     if (!gpu_scope.ok()) return suite.check(false, "capture context entry");
-    if (expected_t prepared = trainer.replicas[0].prepare(config, 0u, data_epoch_t {0u}, trainer.streams[0]); !prepared)
-        return suite.check(false, "capture preamble: {}", prepared.description_);
-    if (expected_t first = graphs[0].launch(trainer.streams[0].get()); !first)
+    base_replica_t &lead = trainer.replicas[0];
+    expected_t prepared = lead.draw(config, 0u, data_epoch_t {0u}, trainer.streams[0]);
+    if (prepared) prepared = lead.prepare(config, data_epoch_t {0u}, trainer.streams[0]);
+    if (!prepared) return suite.check(false, "capture preamble: {}", prepared.description_);
+    if (expected_t first = trainer.forward_graphs[0].launch(trainer.streams[0].get()); !first)
         return suite.check(false, "first replay: {}", first.description_);
-    expected<array<bf16_t>> first_grad = snapshot_grad_(trainer.replicas[0], trainer.streams[0]);
-    if (expected_t second = graphs[0].launch(trainer.streams[0].get()); !second)
+    expected<array<bf16_t>> first_grad = snapshot_grad_(lead, trainer.streams[0]);
+    if (expected_t second = trainer.forward_graphs[0].launch(trainer.streams[0].get()); !second)
         return suite.check(false, "second replay: {}", second.description_);
-    expected<array<bf16_t>> second_grad = snapshot_grad_(trainer.replicas[0], trainer.streams[0]);
+    expected<array<bf16_t>> second_grad = snapshot_grad_(lead, trainer.streams[0]);
     suite.check(first_grad && second_grad && snapshots_near_(first_grad.value_, second_grad.value_),
                 "two captured replays agree");
 }
@@ -722,106 +589,51 @@ int main() {
     // The schedule's properties are pure host math — asserted before any GPU work.
     learning_rate_schedule(suite);
 
-    if (cuInit(0) != CUDA_SUCCESS) {
-        suite.check(false, "cuInit failed");
+    int device_count = 0;
+    if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) {
+        suite.check(false, "no CUDA device answers");
         return suite.finish();
     }
+    array<i32_t> devices;
+    for (int device = 0; device != device_count; ++device)
+        if (devices.push_back(static_cast<i32_t>(device)) != status_t::success_k) {
+            suite.check(false, "device table allocation failed");
+            return suite.finish();
+        }
 
-    // One process per host_domain; the sbatch launcher raises UFORM_HOST_DOMAIN_COUNT for the two-node tier,
-    // and single-host worlds need no exchange directory.
-    u32_t const host_domain_index = host_domain_index_from_environment();
-    u32_t const host_domain_count = host_domain_count_from_environment();
-    expected<mesh_topology_t> topology = mesh_topology_t::bootstrap(host_domain_index, host_domain_count);
-    if (!topology) {
-        suite.check(false, "mesh bootstrap: {}", topology.description_);
+    // One process per host_domain; the sbatch launcher raises UFORM_HOST_DOMAIN_COUNT for the two-node tier and
+    // names the exchange, which this main maps onto the mesh options, as the library reads no environment.
+    mesh_options_t options;
+    options.host_domain_index = host_domain_index_from_environment();
+    options.host_domain_count = host_domain_count_from_environment();
+    options.timeout_seconds = test_rendezvous_timeout_seconds_k;
+    if (char const *directory = std::getenv("UFORM_EXCHANGE_DIR"); directory != nullptr)
+        options.directory = sz::string_view_t {directory, std::strlen(directory)};
+    if (char const *job = std::getenv("UFORM_JOB_ID"); job != nullptr)
+        options.job = sz::string_view_t {job, std::strlen(job)};
+    mesh_t wide_mesh;
+    if (expected_t joined = mesh_t::make(wide_mesh, options, devices.view()); !joined) {
+        suite.check(false, "mesh bootstrap: {}", joined.description_);
         return suite.finish();
     }
-
-    expected<mesh_topology_t> narrow = narrowed_topology_(topology.value_, 1u);
-    if (!narrow) {
-        suite.check(false, "narrowed topology: {}", narrow.description_);
+    mesh_t cheap_mesh;
+    if (expected_t narrowed = narrow_mesh_(cheap_mesh, wide_mesh.topology, 1u); !narrowed) {
+        suite.check(false, "narrowed mesh: {}", narrowed.description_);
         return suite.finish();
     }
-
-    // Each tier's one cross-domain all-reduce buffer, wired here — at the composition root — and borrowed
-    // by every case's optimizer, exactly as each case reserves its window from the tier's shared domain.
-    // Its heap lives in a suite-lifetime arena visible to every device (the ranks peer-read the world sum),
-    // sized like the domain payload; the cheap tier's single-domain buffer is the zero-round identity.
-    expected<gpu_arena_t> reduce_arena = make_reduce_arena_(topology.value_.shape.gpus_per_host_domain);
-    if (!reduce_arena) {
-        suite.check(false, "tier reduce arena: {}", reduce_arena.description_);
-        return suite.finish();
-    }
-    // The suite's one telemetry ledger — armed on every channel, its device table in the same
-    // all-visible arena as the tier reduce heaps; every case's trainer and optimizer feed it, and the
-    // conformance assertions read its running statistics instead of keeping test-local bookkeeping.
-    expected<gpu_stream_t> ledger_bring_up = gpu_stream_t::make(0); // transient — orders the table's zeroing
-    if (!ledger_bring_up) {
-        suite.check(false, "ledger bring-up stream: {}", ledger_bring_up.description_);
-        return suite.finish();
-    }
-    expected<telemetry_ledger_t> ledger = telemetry_ledger_t::make(
-        reduce_arena.value_, telemetry_losses_k | telemetry_signals_k | telemetry_rounds_k, 4096u,
-        ledger_bring_up.value_);
-    if (!ledger) {
-        suite.check(false, "suite telemetry ledger: {}", ledger.description_);
-        return suite.finish();
-    }
+    tier_t const wide {wide_mesh, devices.view()};
+    tier_t const cheap {cheap_mesh, devices.view().first(1)};
 
     world_health_t health;
-
-    // The capture case needs no domain, so it runs before the tiers build theirs and stays green on a
-    // world that cannot allocate one.
-    if (test_filter_accepts("capture/replay")) graph_capture(suite, health, narrow.value_, ledger.value_);
-
-    // The collective surfaces are created once per width tier and threaded by reference — multicast
-    // objects are a scarce fabric resource, and the self-advancing barrier rounds make one domain safe
-    // for every consumer in turn. Window budget: 2 per conformance case + 8 wide cells, 19 cheap cells.
-    expected<multimem_domain_t> wide_domain = make_tier_domain_(topology.value_, 16u);
-    if (!wide_domain) {
-        suite.check(false, "wide-tier domain: {}", wide_domain.description_);
-        return suite.finish();
-    }
-    expected<colocated_domain_t> wide_colocated = colocated_domain_t::make(topology.value_);
-    if (!wide_colocated) {
-        suite.check(false, "wide-tier colocated surface: {}", wide_colocated.description_);
-        return suite.finish();
-    }
-    expected<multimem_domain_t> cheap_domain = make_tier_domain_(narrow.value_, 24u);
-    if (!cheap_domain) {
-        suite.check(false, "cheap-tier domain: {}", cheap_domain.description_);
-        return suite.finish();
-    }
-    expected<colocated_domain_t> cheap_colocated = colocated_domain_t::make(narrow.value_);
-    if (!cheap_colocated) {
-        suite.check(false, "cheap-tier colocated surface: {}", cheap_colocated.description_);
-        return suite.finish();
-    }
-
-    expected<infiniband_all_reduce<f32_t>> wide_reduce = make_tier_reduce_(wide_colocated.value_, reduce_arena.value_);
-    if (!wide_reduce) {
-        suite.check(false, "wide-tier world all-reduce: {}", wide_reduce.description_);
-        return suite.finish();
-    }
-    expected<infiniband_all_reduce<f32_t>> cheap_reduce = make_tier_reduce_(cheap_colocated.value_,
-                                                                            reduce_arena.value_);
-    if (!cheap_reduce) {
-        suite.check(false, "cheap-tier world all-reduce: {}", cheap_reduce.description_);
-        return suite.finish();
-    }
-
-    tier_t const wide {topology.value_, wide_domain.value_, wide_reduce.value_, ledger.value_};
-    tier_t const cheap {narrow.value_, cheap_domain.value_, cheap_reduce.value_, ledger.value_};
+    if (test_filter_accepts("capture/replay")) graph_capture(suite, health, cheap);
 
     // Targeted runs: UFORM_TEST_FILTER is a regular expression against each case's name (the
     // NumKong / StringZilla convention), so a wire-run question about one cell answers in a couple of
     // minutes instead of re-running the whole matrix.
     if (test_filter_accepts("conformance/tokens"))
-        run_base_conformance(suite, health, "tokens", test_geometry_(false), wide.topology, wide.domain,
-                             wide.world_reduce, wide.ledger);
+        run_base_conformance(suite, health, "tokens", test_geometry_(false), wide);
     if (test_filter_accepts("conformance/omni"))
-        run_base_conformance(suite, health, "omni", test_geometry_(true), wide.topology, wide.domain, wide.world_reduce,
-                             wide.ledger);
+        run_base_conformance(suite, health, "omni", test_geometry_(true), wide);
     mixture_sweep(suite, health, wide, cheap);
     return suite.finish();
 }

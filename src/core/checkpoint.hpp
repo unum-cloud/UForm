@@ -8,27 +8,37 @@
  *
  *  @section checkpoint_containers Two containers, two directions
  *
- *  The checkpoint types are the containers — no caller-side table of views to materialize.
- *  @ref checkpoint_to_save_t snapshots each inserted tensor into its pinned payload immediately, so
- *  training may keep mutating the source; @ref checkpoint_to_save_t::save is then pure host I/O.
- *  @ref checkpoint_to_load_t reads a whole file once and hands out by-name views into its pinned
- *  payload — the caller uploads what it wants and decides what a missing name means, which is the
- *  whole warm-start policy: a masked-pretraining checkpoint fills the shared encoder, the objective
- *  heads come back empty, and the caller re-seeds them.
+ *  The checkpoint types are the containers — no caller-side table of views to materialize. Both are host-only:
+ *  a device-resident model downloads into @ref checkpoint_to_save_t and uploads out of
+ *  @ref checkpoint_to_load_t with its own copies. @ref checkpoint_to_save_t snapshots each inserted tensor into
+ *  its payload immediately, so training may keep mutating the source; @ref checkpoint_to_save_t::save is then
+ *  pure host I/O. @ref checkpoint_to_load_t maps a whole file once and hands out zero-copy by-name views into the
+ *  mapping — the caller copies what it wants and decides what a missing name means, which is the whole
+ *  warm-start policy: a masked-pretraining checkpoint fills the shared encoder, the objective heads come back
+ *  empty, and the caller re-seeds them.
  *
  *  Each cell's @c fill spells its own weights' names — the tower its structure ( @c embedding ,
  *  @c blocks.{i}.qkv , … ), each objective head its instance name — and the composition root adds only
  *  its @c model. prefix at both ends. Shapes are the true @b [rows,cols] extents of the rank-2 views;
  *  BFloat16 is the only training dtype; weights only — optimizer moments restart fresh on resume.
+ *
+ *  @section checkpoint_metadata Metadata is the geometry
+ *
+ *  Every value of the header's metadata object is a string, as the format demands. Training writes the step and the whole
+ *  geometry a reader needs to rebuild the model — @c depth , @c hidden , @c ffn_expansion , @c head_width ,
+ *  @c rms_epsilon , the rotary split and base, the @c context , and each modality's patch and pixel
+ *  statistics, lists comma-separated — so inference derives everything from the file alone.
  */
 #pragma once
 
 #include <cstddef> // `std::size_t`
 
-#include "core/types.hpp"          // `expected`, `expected_t`, `status_t`, `sz::string_t`
-#include "core/array.hpp"          // `array` — the entry table and the payload
-#include "core/gpu_allocators.hpp" // `pinned_alloc` — page-locked staging the DMA engines read directly
-#include "core/schedule.cuh"       // `gpu_stream_t` — orders the snapshot after the training kernels
+#include <span> // `std::span` — a caller-owned checkpoint image
+
+#include <numkong/types.h> // `nk_bf16_t`
+
+#include "core/types.hpp" // `expected`, `expected_t`, `status_t`, `sz::string_t`
+#include "core/array.hpp" // `array` — the entry tables and the payload
 
 namespace unum::uform::core {
 
@@ -40,23 +50,27 @@ struct checkpoint_entry_t {
     sz::string_t name {};
 
     /** Leading extent; @c 1 for vector parameters. */
-    u64_t rows = 0;
+    std::size_t rows = 0;
 
     /** Trailing extent. */
-    u64_t cols = 0;
+    std::size_t cols = 0;
 
     /** Scalar (not byte) offset inside the owner's payload. */
-    u64_t scalar_offset = 0;
+    std::size_t scalar_offset = 0;
+};
+
+/** One pair of the header's metadata object, both strings as the format stores them. */
+struct checkpoint_metadata_t {
+    sz::string_t key {};
+    sz::string_t value {};
 };
 
 /**
- *  @brief The outbound checkpoint container: @ref try_insert snapshots one device tensor into the
- *      pinned payload — stream-ordered after the kernels already enqueued, drained by a bounded
- *      synchronize — so the weights are free to mutate the moment it returns.
+ *  @brief The outbound checkpoint container: @ref insert snapshots one host tensor into the payload, so the
+ *      source is free to change the moment it returns, and @ref metadata records the geometry beside it.
  *
  *  @ref save is pure host I/O. All buffers grow lazily and keep their backing across cadences;
- *  @ref try_reserve hoists the growth entirely. Lead-rank-only by the caller's discipline; must not
- *  outlive the streams' contexts — releasing pinned pages needs the driver alive.
+ *  @ref reserve hoists the growth entirely. Lead-rank-only by the caller's discipline.
  */
 struct checkpoint_to_save_t {
 
@@ -67,29 +81,23 @@ struct checkpoint_to_save_t {
     checkpoint_to_save_t &operator=(checkpoint_to_save_t &&) noexcept = default;
     ~checkpoint_to_save_t() noexcept = default;
 
-    /** Adopts @p allocator — the byte-typed pinned handle the DMA-staged payload rebinds —
-     *  and allocates nothing until the first @ref try_reserve or @ref try_insert . */
-    [[nodiscard]] static expected<checkpoint_to_save_t> make(pinned_alloc_t allocator) noexcept;
-
     /** Optional hoist: pre-size the payload to @p total_scalars and the entry table to
-     *  @p tensor_count , so no @ref try_insert ever reallocates. Needs a current context at the
-     *  call, like every driver allocation here. */
-    [[nodiscard]] expected_t try_reserve(u64_t total_scalars, u64_t tensor_count) noexcept;
+     *  @p tensor_count , so no @ref insert ever reallocates. */
+    [[nodiscard]] expected_t reserve(u64_t total_scalars, u64_t tensor_count) noexcept;
 
-    /** Append one entry, snapshotting @p data into the pinned payload @b now : the copy is
-     *  enqueued on @p stream — after every kernel already there — and drained by a bounded
-     *  synchronize, so the caller may keep updating the weights the moment this returns.
-     *  @p name is copied into owned text; duplicates are rejected loudly. */
-    [[nodiscard]] expected_t try_insert(sz::string_view_t name, nk::tensor_view<bf16_t, 2> data,
-                                        gpu_stream_t &stream) noexcept;
+    /** Append one entry, copying @p data into the payload @b now . @p name is copied into owned text;
+     *  duplicates are rejected loudly. */
+    [[nodiscard]] expected_t insert(sz::string_view_t name, nk::tensor_view<nk_bf16_t, 2> data) noexcept;
 
-    /** Write the accumulated entries to @p path in the safetensors layout, with @c {"step": …}
-     *  metadata — the JSON header space-padded to an 8-byte boundary like Hugging Face's own
-     *  writer, then the whole contiguous payload in one shot. Pure host work: no stream, no GPU
-     *  calls. */
-    [[nodiscard]] expected_t save(sz::string_view_t path, u64_t step) noexcept;
+    /** Record the metadata value of @p key , replacing an earlier one. */
+    [[nodiscard]] expected_t metadata(sz::string_view_t key, sz::string_view_t value) noexcept;
 
-    /** Drop the entries, keep every buffer's backing — the next cadence re-inserts and
+    /** Write the accumulated entries and metadata to @p path in the safetensors layout — the JSON header
+     *  space-padded to an 8-byte boundary like Hugging Face's own writer, then the whole contiguous payload
+     *  in one shot. */
+    [[nodiscard]] expected_t save(sz::string_view_t path) noexcept;
+
+    /** Drop the entries and metadata, keep every buffer's backing — the next cadence re-inserts and
      *  re-saves allocation-free. */
     void clear() noexcept;
 
@@ -98,27 +106,47 @@ struct checkpoint_to_save_t {
 
   private:
 
-    /** Every inserted tensor's scalars back-to-back in insertion order — page-locked pages the
-     *  DMA engines write directly, and `save` streams to disk in a single write. */
-    array<bf16_t, pinned_alloc<bf16_t>> payload_ {};
+    /** Every inserted tensor's scalars back-to-back in insertion order — `save` streams them to disk in a
+     *  single write. */
+    array<nk_bf16_t> payload_ {};
 
-    /** The name / shape / offset record per inserted tensor — pageable on purpose, no DMA
-     *  engine ever touches it. */
+    /** The name / shape / offset record per inserted tensor. */
     array<checkpoint_entry_t> entries_ {};
+
+    /** The metadata pairs, in insertion order. */
+    array<checkpoint_metadata_t> metadata_ {};
 
     /** The yyjson pool `save` serializes the header in — grown lazily, settled after the
      *  first save. */
     array<char> scratch_ {};
 };
 
+/** A read-only file mapping, unmapped on destruction; empty for a checkpoint viewed in caller memory. */
+struct checkpoint_mapping_t {
+    checkpoint_mapping_t() noexcept = default;
+    checkpoint_mapping_t(checkpoint_mapping_t const &) = delete;
+    checkpoint_mapping_t &operator=(checkpoint_mapping_t const &) = delete;
+    checkpoint_mapping_t(checkpoint_mapping_t &&other) noexcept;
+    checkpoint_mapping_t &operator=(checkpoint_mapping_t &&other) noexcept;
+    ~checkpoint_mapping_t() noexcept;
+
+    /** Map @p path read-only, whole. */
+    [[nodiscard]] static expected<checkpoint_mapping_t> make(sz::string_view_t path) noexcept;
+
+    /** The mapped bytes. */
+    [[nodiscard]] std::span<b8_t const> bytes() const noexcept { return bytes_; }
+
+  private:
+    std::span<b8_t> bytes_ {};
+};
+
 /**
- *  @brief The inbound checkpoint container: @ref make reads a whole safetensors file once — header
- *      parsed and validated, payload staged into pinned pages — and @ref operator[] hands out
- *      read-only views by name.
+ *  @brief The inbound checkpoint container: @ref make maps a safetensors file once, or @ref view adopts one
+ *      already in memory, and @ref operator[] hands out zero-copy read-only views by name.
  *
- *  The caller uploads what it wants with @ref copy_host_to_device (true async DMA off the pinned
- *  backing); strictness is the caller's policy, not this container's. Must not outlive the streams'
- *  contexts — releasing pinned pages needs the driver alive.
+ *  The header is parsed and validated up front: its declared length is bounded by the image, and every entry's
+ *  @c data_offsets by its shape and the payload. Views stay valid while the container lives; strictness is the
+ *  caller's policy, not this container's.
  */
 struct checkpoint_to_load_t {
 
@@ -129,40 +157,38 @@ struct checkpoint_to_load_t {
     checkpoint_to_load_t &operator=(checkpoint_to_load_t &&) noexcept = default;
     ~checkpoint_to_load_t() noexcept = default;
 
-    /** Read @p path in full: parse the header — its declared length bounded by the file's own
-     *  extent, every entry's @c data_offsets validated against its shape and the payload — and
-     *  stage the payload into pages from @p allocator , the byte-typed pinned handle it rebinds.
-     *  Needs a current context at the call. Synchronous: the file is closed and everything
-     *  resident when this returns. */
-    [[nodiscard]] static expected<checkpoint_to_load_t> make(sz::string_view_t path, pinned_alloc_t allocator) noexcept;
+    /** Map @p path read-only and index it; the mapping lives as long as the container. */
+    [[nodiscard]] static expected<checkpoint_to_load_t> make(sz::string_view_t path) noexcept;
 
-    /** By-name lookup: a read-only rank-2 view into the pinned payload, or an @b empty view
-     *  when the file misses @p layer_name (or holds it in a dtype this cell doesn't train in) —
-     *  check @c .empty() and decide. */
-    [[nodiscard]] nk::tensor_view<bf16_t, 2> operator[](sz::string_view_t layer_name) const noexcept;
+    /** Index a checkpoint image the caller owns, which must outlive the container. */
+    [[nodiscard]] static expected<checkpoint_to_load_t> view(std::span<b8_t const> buffer) noexcept;
 
-    /** The @c {"__metadata__":{"step": …}} value the file was saved at; @c 0 when absent. */
-    [[nodiscard]] u64_t step() const noexcept { return step_; }
+    /** By-name lookup: a read-only rank-2 view into the image, or an @b empty view when the file misses
+     *  @p name (or holds it in a dtype other than BFloat16) — check @c .empty() and decide. */
+    [[nodiscard]] nk::tensor_view<nk_bf16_t, 2> operator[](sz::string_view_t name) const noexcept;
+
+    /** The metadata value of @p key , or an empty view when the file carries none. */
+    [[nodiscard]] sz::string_view_t metadata(sz::string_view_t key) const noexcept;
+
+    /** The @c step metadata the file was saved at; @c 0 when absent. */
+    [[nodiscard]] u64_t step() const noexcept;
 
     /** How many tensors the container indexed. */
     [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
 
   private:
 
-    /** The file's whole tensor payload — page-locked, so the caller's uploads are true async
-     *  DMA. */
-    array<bf16_t, pinned_alloc<bf16_t>> payload_ {};
+    /** The file mapping when @ref make opened one; empty for @ref view . */
+    checkpoint_mapping_t mapping_ {};
 
-    /** The name / shape / offset record per indexed BF16 tensor — pageable on purpose, no DMA
-     *  engine ever touches it. */
+    /** The first payload scalar, inside the mapping or the caller's image. */
+    nk_bf16_t const *payload_ = nullptr;
+
+    /** The name / shape / offset record per indexed BF16 tensor. */
     array<checkpoint_entry_t> entries_ {};
 
-    /** The hoisted parse scratch: the file's header bytes up front, the yyjson pool behind
-     *  them — one allocation for the whole parse. */
-    array<char> scratch_ {};
-
-    /** The parsed step metadata; @c 0 when the file carries none. */
-    u64_t step_ = 0;
+    /** The metadata pairs. */
+    array<checkpoint_metadata_t> metadata_ {};
 };
 
 } // namespace unum::uform::core

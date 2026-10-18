@@ -28,7 +28,7 @@
 #include "core/mesh.hpp"                   // `mesh_topology_t`, `host_domain_index_from_environment`
 #include "core/multimem_collectives.cuh"   // `multimem_domain_t`
 #include "core/infiniband_collectives.cuh" // `colocated_domain_t`
-#include "core/multimodal_batch.hpp"       // `multimodal_batch_on_gpu_t`, the shape, the mixer
+#include "core/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t`, the shape, the mixer
 #include "harness.hpp"                     // `test_suite_t`
 
 using namespace unum::uform::core;
@@ -96,7 +96,7 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
     if (expected_t staged = copy_host_to_device(tokens.view(), batch.tokens.span().flatten<1>(), stream); !staged)
         return staged;
     if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
-        return expected_t::fail(synced, "loaded fabrication sync failed for member {}", member);
+        return cuda_failure(synced, "loaded fabrication sync failed for member {}", member);
     return {};
 }
 
@@ -138,7 +138,7 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
     if (expected_t read = copy_device_to_host(mixed.tokens.view().flatten<1>(), tokens.span(), stream); !read)
         return read;
     if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
-        return expected_t::fail(synced, "mixed readback sync failed for member {}", member);
+        return cuda_failure(synced, "mixed readback sync failed for member {}", member);
 
     std::size_t const world = static_cast<std::size_t>(S) * member_count;
     for (u32_t s = 0; s != S; ++s) {
@@ -166,7 +166,7 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
 static void routing_is_a_bijection(test_suite_t &suite, u32_t member_count, u64_t seed, data_epoch_t epoch) {
     std::size_t const world = static_cast<std::size_t>(segments_per_member_k) * member_count;
     array<u8_t> seen;
-    if (seen.try_resize(world) != status_t::success_k) return suite.check(false, "bijection scratch alloc failed");
+    if (seen.resize(world) != status_t::success_k) return suite.check(false, "bijection scratch alloc failed");
     for (std::size_t index = 0; index != world; ++index) seen[index] = 0u;
     bool bijection = true;
     for (std::size_t destination = 0; destination != world; ++destination) {
@@ -250,7 +250,7 @@ inline constexpr u32_t pad_bag_k = bags_per_member_k;
     if (expected_t staged = copy_host_to_device(tokens.view(), batch.tokens.span().flatten<1>(), stream); !staged)
         return staged;
     if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
-        return expected_t::fail(synced, "bagged fabrication sync failed for member {}", member);
+        return cuda_failure(synced, "bagged fabrication sync failed for member {}", member);
     return {};
 }
 
@@ -323,7 +323,7 @@ using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_
             placed.bag = bag;
             placed.source_member = source_member;
             placed.source_segment = bag_first_segment_(source_bag) + position;
-            (void)mirror.try_push_back(placed);
+            (void)mirror.push_back(placed);
             cursor += L;
         }
     }
@@ -371,7 +371,7 @@ using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_
     if (expected_t read = copy_device_to_host(mixed.tokens.view().flatten<1>(), tokens.span(), stream); !read)
         return read;
     if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
-        return expected_t::fail(synced, "bagged readback sync failed for member {}", member);
+        return cuda_failure(synced, "bagged readback sync failed for member {}", member);
 
     mirrored_geometry_t const mirror = mirror_bag_geometry_(member, world_member_count, seed, epoch, rows, columns);
     u32_t const placed = static_cast<u32_t>(mirror.size());
@@ -423,28 +423,28 @@ struct mixer_members_t {
                                                                  multimodal_batch_shape_t shape) noexcept {
     using result_t = expected<mixer_members_t>;
     mixer_members_t members;
-    if (members.devices.try_resize(member_count) != status_t::success_k)
+    if (members.devices.resize(member_count) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "device table alloc failed");
     for (u32_t member = 0; member != member_count; ++member) members.devices[member] = static_cast<i32_t>(member);
-    if (members.streams.try_reserve(member_count) != status_t::success_k ||
-        members.arenas.try_reserve(member_count) != status_t::success_k ||
-        members.loaded.try_reserve(member_count) != status_t::success_k ||
-        members.mixed.try_reserve(member_count) != status_t::success_k)
+    if (members.streams.reserve(member_count) != status_t::success_k ||
+        members.arenas.reserve(member_count) != status_t::success_k ||
+        members.loaded.reserve(member_count) != status_t::success_k ||
+        members.mixed.reserve(member_count) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "per-member table reservation failed");
     for (u32_t member = 0; member != member_count; ++member) {
         auto stream_made = gpu_stream_t::make(static_cast<int>(member));
         if (!stream_made) return result_t::fail(std::move(stream_made));
-        (void)members.streams.try_push_back(std::move(stream_made.value_));
+        (void)members.streams.push_back(std::move(stream_made.value_));
         switch_to_gpu_t gpu_scope {members.streams[member]};
         auto arena_made = gpu_arena_t::make(static_cast<int>(member), 512ull << 20, members.devices.view());
         if (!arena_made) return result_t::fail(std::move(arena_made));
-        (void)members.arenas.try_push_back(std::move(arena_made.value_));
+        (void)members.arenas.push_back(std::move(arena_made.value_));
         auto loaded_made = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {members.arenas[member]}, shape);
         if (!loaded_made) return result_t::fail(std::move(loaded_made));
-        (void)members.loaded.try_push_back(std::move(loaded_made.value_));
+        (void)members.loaded.push_back(std::move(loaded_made.value_));
         auto mixed_made = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {members.arenas[member]}, shape);
         if (!mixed_made) return result_t::fail(std::move(mixed_made));
-        (void)members.mixed.try_push_back(std::move(mixed_made.value_));
+        (void)members.mixed.push_back(std::move(mixed_made.value_));
     }
     return result_t {std::move(members)};
 }
@@ -493,7 +493,8 @@ static void mixer_routes_segments(test_suite_t &suite) {
     routing_is_a_bijection(suite, world_member_count, seed, epoch);
 
     auto multimem_made = multimem_domain_t::make(
-        topology, members.devices.view(), 1024u,
+        topology, members.devices.view(),
+        1024u + multimodal_batch_mixer_t::payload_scalars_needed(shape, topology.shape),
         std::span<gpu_stream_t> {members.streams.data(), members.streams.size()});
     if (!multimem_made)
         return suite.check(false, "multimem_domain make (needs multicast capability): {}", multimem_made.description_);
@@ -563,7 +564,8 @@ static void mixer_routes_bags(test_suite_t &suite, u32_t rows, u32_t columns_per
             return suite.check(false, "fabricate bagged on GPU {}: {}", member, built.description_);
 
     auto multimem_made = multimem_domain_t::make(
-        topology, members.devices.view(), 1024u,
+        topology, members.devices.view(),
+        1024u + multimodal_batch_mixer_t::payload_scalars_needed(shape, topology.shape),
         std::span<gpu_stream_t> {members.streams.data(), members.streams.size()});
     if (!multimem_made)
         return suite.check(false, "multimem_domain make (needs multicast capability): {}", multimem_made.description_);

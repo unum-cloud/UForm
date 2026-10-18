@@ -117,11 +117,11 @@ struct gpu_symmetric_arena_t {
     [[nodiscard]] std::size_t member_stride() const noexcept { return member_stride_; }
 
     /** The whole range's base — member @p m 's slice starts at @c base()+m·member_stride() . */
-    [[nodiscard]] std::byte *base() noexcept { return reinterpret_cast<std::byte *>(base_); }
+    [[nodiscard]] CUdeviceptr base() const noexcept { return base_; }
 
     /** Member @p member 's usable slice. */
     [[nodiscard]] std::span<std::byte> member_slice(std::size_t member) noexcept {
-        return {reinterpret_cast<std::byte *>(base_ + member * member_stride_), bytes_per_member_};
+        return {device_pointer<std::byte>(base_ + member * member_stride_), bytes_per_member_};
     }
 
     /** Member @p member 's shareable physical handle — what a multicast object binds. */
@@ -195,9 +195,9 @@ enum class multimem_tier_t : u32_t {
  *  @brief One member's addresses inside the domain — the scalar-only POD kernels take by value.
  *
  *  @c multimem_* pointers fan out to every replica (null on the peer-read tier); everything else is
- *  arithmetic over the one contiguous replica range: member @c m 's replica starts at
- *  @c replicas+m·replica_stride , its arrival flag at @c +flag_offset . All addresses are capture-stable
- *  for the domain's lifetime.
+ *  arithmetic over the one contiguous replica range: member @c m 's payload starts at
+ *  @c replica_payloads+m·replica_stride_words , its arrival flag at @c replica_flags+m·replica_stride_words .
+ *  All addresses are capture-stable for the domain's lifetime.
  */
 struct multimem_member_t {
 
@@ -207,18 +207,18 @@ struct multimem_member_t {
     /** Multicast address of the arrival counter. */
     u32_t *multimem_flag = nullptr;
 
-    /** Base of the contiguous symmetric range covering every member's replica. */
-    std::byte *replicas = nullptr;
+    /** Member 0's payload replica, the start of the contiguous symmetric range. */
+    f32_t *replica_payloads = nullptr;
+
+    /** Member 0's arrival counter. */
+    u32_t *replica_flags = nullptr;
 
     /** This member's own round scalar (one word above its arrival flag) — read for the barrier
      *  target and self-advanced by the barrier kernels, never touched by any other member. */
     u32_t *round = nullptr;
 
-    /** Byte distance between adjacent members' replicas. */
-    std::size_t replica_stride = 0;
-
-    /** Byte offset of the arrival counter inside every replica. */
-    std::size_t flag_offset = 0;
+    /** Distance between adjacent members' replicas, in 4-byte payload scalars or flag words alike. */
+    std::size_t replica_stride_words = 0;
 
     /** This member's index — whose replica is "own". */
     u32_t member_index = 0;
@@ -230,12 +230,12 @@ struct multimem_member_t {
 
     /** Member @p member 's payload replica base. */
     [[nodiscard]] __device__ f32_t *peer_payload(u32_t member) const noexcept {
-        return reinterpret_cast<f32_t *>(replicas + member * replica_stride);
+        return replica_payloads + member * replica_stride_words;
     }
 
     /** Member @p member 's arrival counter. */
     [[nodiscard]] __device__ u32_t *peer_flag(u32_t member) const noexcept {
-        return reinterpret_cast<u32_t *>(replicas + member * replica_stride + flag_offset);
+        return replica_flags + member * replica_stride_words;
     }
 
     /** This member's own arrival counter — the address the barrier spins on. */
@@ -299,10 +299,8 @@ struct multimem_window_t {
  */
 struct multimem_domain_t {
 
-  private:
+    /** The empty domain a composition root places before @ref make fills it. */
     multimem_domain_t() noexcept = default;
-
-  public:
     multimem_domain_t(multimem_domain_t const &) = delete;
     multimem_domain_t &operator=(multimem_domain_t const &) = delete;
     multimem_domain_t(multimem_domain_t &&other) noexcept { swap_(other); }
@@ -348,12 +346,26 @@ struct multimem_domain_t {
     /** Domain member count. */
     [[nodiscard]] std::size_t member_count() const noexcept { return replicas_.member_count(); }
 
+    /** This process's first member: its local device @c d is domain member @c member_offset()+d . */
+    [[nodiscard]] std::size_t member_offset() const noexcept { return member_offset_; }
+
+    /** How many of the members this process drives. */
+    [[nodiscard]] std::size_t local_member_count() const noexcept { return replicas_.local_member_count(); }
+
     /** Float32 payload scalars per replica. */
     [[nodiscard]] std::size_t payload_scalars() const noexcept { return payload_scalars_; }
 
     /** Member @p member 's own payload replica — where its contribution is written. */
     [[nodiscard]] f32r1_span_t payload(std::size_t member) noexcept {
-        return {reinterpret_cast<f32_t *>(replicas_.member_slice(member).data()), payload_scalars_};
+        return {device_pointer<f32_t>(replicas_.base() + member * replicas_.member_stride()), payload_scalars_};
+    }
+
+    /** Member @p member 's @p window as bytes, for consumers staging non-Float32 data where every process's
+     *  members can read it. */
+    [[nodiscard]] b8r1_span_t window_bytes(std::size_t member, multimem_window_t window) noexcept {
+        return {
+            device_pointer<b8_t>(replicas_.base() + member * replicas_.member_stride() + window.offset * sizeof(f32_t)),
+            window.scalars * sizeof(f32_t)};
     }
 
     /** Reserve @p scalars of the payload for one consumer — bump-reserve at construction time,
@@ -374,14 +386,14 @@ struct multimem_domain_t {
         std::size_t const flag_offset = flag_offset_();
         multimem_member_t addresses;
         if (multimem_pointer_ != 0) {
-            addresses.multimem_payload = reinterpret_cast<f32_t *>(multimem_pointer_);
-            addresses.multimem_flag = reinterpret_cast<u32_t *>(multimem_pointer_ + flag_offset);
+            addresses.multimem_payload = device_pointer<f32_t>(multimem_pointer_);
+            addresses.multimem_flag = device_pointer<u32_t>(multimem_pointer_ + flag_offset);
         }
-        addresses.replicas = replicas_.base();
-        addresses.round = reinterpret_cast<u32_t *>(replicas_.member_slice(member_index).data() + flag_offset +
-                                                    sizeof(u32_t));
-        addresses.replica_stride = replicas_.member_stride();
-        addresses.flag_offset = flag_offset;
+        CUdeviceptr const replicas = replicas_.base();
+        addresses.replica_payloads = device_pointer<f32_t>(replicas);
+        addresses.replica_flags = device_pointer<u32_t>(replicas + flag_offset);
+        addresses.replica_stride_words = replicas_.member_stride() / sizeof(u32_t);
+        addresses.round = addresses.replica_flags + member_index * addresses.replica_stride_words + 1u;
         addresses.member_index = static_cast<u32_t>(member_index);
         addresses.member_count = static_cast<u32_t>(member_count());
         return addresses;

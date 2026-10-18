@@ -95,8 +95,9 @@
 
 #include <stringzilla/stringzilla.hpp> // `sz::string_t`, `sz::string_view_t` — exception-free text handling
 
-#include "core/types.hpp" // `expected`, `expected_t`, `status_t`, `format_into`
-#include "core/array.hpp" // `array` for the exception-free host_domain table
+#include "core/types.hpp"          // `expected`, `expected_t`, `status_t`, `format_into`
+#include "core/array.hpp"          // `array` for the exception-free host_domain table
+#include "core/gpu_allocators.hpp" // `cuda_failure`
 
 namespace unum::uform::core {
 
@@ -230,22 +231,22 @@ struct mesh_location_t {
 [[nodiscard]] inline expected<mesh_shape_t> discover_mesh_shape() noexcept {
     int device_count = 0;
     if (CUresult result = cuDeviceGetCount(&device_count); result != CUDA_SUCCESS)
-        return expected<mesh_shape_t>::fail(result, "device count query failed");
+        return cuda_failure<mesh_shape_t>(result, "device count query failed");
     if (device_count <= 0) return expected<mesh_shape_t>::fail(status_t::invalid_input_k, "no CUDA devices visible");
 
     for (int device_index = 0; device_index != device_count; ++device_index) {
         CUdevice device = 0;
         if (CUresult result = cuDeviceGet(&device, device_index); result != CUDA_SUCCESS)
-            return expected<mesh_shape_t>::fail(result, "device handle query failed (device={})", device_index);
+            return cuda_failure<mesh_shape_t>(result, "device handle query failed (device={})", device_index);
         for (int peer_index = 0; peer_index != device_count; ++peer_index) {
             if (peer_index == device_index) continue;
             CUdevice peer = 0;
             if (CUresult result = cuDeviceGet(&peer, peer_index); result != CUDA_SUCCESS)
-                return expected<mesh_shape_t>::fail(result, "device handle query failed (device={})", peer_index);
+                return cuda_failure<mesh_shape_t>(result, "device handle query failed (device={})", peer_index);
             int can_access = 0;
             if (CUresult result = cuDeviceCanAccessPeer(&can_access, device, peer); result != CUDA_SUCCESS)
-                return expected<mesh_shape_t>::fail(result, "P2P capability query failed (device={} peer={})",
-                                                    device_index, peer_index);
+                return cuda_failure<mesh_shape_t>(result, "P2P capability query failed (device={} peer={})",
+                                                  device_index, peer_index);
             if (can_access == 0)
                 return expected<mesh_shape_t>::fail(status_t::shape_unsupported_k,
                                                     "no P2P path between devices {} and {}", device_index, peer_index);
@@ -429,7 +430,7 @@ struct mesh_topology_t {
         mesh_topology_t topology;
         topology.shape = shape.value_;
         topology.host_domain_index = host_domain_index;
-        if (topology.host_domains.try_resize(host_domain_count) != status_t::success_k)
+        if (topology.host_domains.resize(host_domain_count) != status_t::success_k)
             return expected<mesh_topology_t>::fail(
                 status_t::bad_alloc_k, "host_domain table allocation failed (host_domains={})", host_domain_count);
         topology.host_domains[host_domain_index] = probed.value_.facts;
@@ -516,7 +517,7 @@ struct mesh_topology_t {
                 char buffer[512];
                 out.clear();
                 for (std::size_t read_count = 0; (read_count = std::fread(buffer, 1, sizeof(buffer), file)) != 0;)
-                    if (sz::failed(out.try_append(sz::string_view_t {buffer, read_count}))) {
+                    if (sz::failed(out.append(sz::string_view_t {buffer, read_count}))) {
                         std::fclose(file);
                         return expected_t::fail(status_t::bad_alloc_k, "reading \"{}\" exhausted the host heap",
                                                 path.value_);
@@ -631,10 +632,10 @@ struct mesh_topology_t {
         for (u32_t device_ordinal = 0; device_ordinal != device_count; ++device_ordinal) {
             CUdevice device = 0;
             if (CUresult result = cuDeviceGet(&device, static_cast<int>(device_ordinal)); result != CUDA_SUCCESS)
-                return expected<local_probe_t>::fail(result, "device handle query failed (device={})", device_ordinal);
+                return cuda_failure<local_probe_t>(result, "device handle query failed (device={})", device_ordinal);
             char name[device_name_capacity_k] = {};
             if (CUresult result = cuDeviceGetName(name, sizeof(name) - 1u, device); result != CUDA_SUCCESS)
-                return expected<local_probe_t>::fail(result, "device name query failed (device={})", device_ordinal);
+                return cuda_failure<local_probe_t>(result, "device name query failed (device={})", device_ordinal);
             for (char *character = name; *character != '\0'; ++character)
                 if (*character == ' ') *character = '_';
             if (device_ordinal == 0) std::memcpy(self.device_name, name, sizeof(name));
@@ -645,8 +646,8 @@ struct mesh_topology_t {
             CUuuid uuid {};
             // The globally-unique physical id — the token the lead proves no two host_domains share.
             if (CUresult result = cuDeviceGetUuid(&uuid, device); result != CUDA_SUCCESS)
-                return expected<local_probe_t>::fail(result, "device uuid query failed (device={})", device_ordinal);
-            if (probe.uuids.try_push_back(uuid) != status_t::success_k)
+                return cuda_failure<local_probe_t>(result, "device uuid query failed (device={})", device_ordinal);
+            if (probe.uuids.push_back(uuid) != status_t::success_k)
                 return expected<local_probe_t>::fail(status_t::shape_unsupported_k,
                                                      "a host_domain drives {} GPUs, over the {} cap", device_count,
                                                      max_gpus_per_host_k);
@@ -764,11 +765,11 @@ struct mesh_topology_t {
         array<claimed_gpu_t> claimed;
         // The world's physical GPU identities, this host_domain's first; sorted once at the end to prove
         // none is claimed twice — O(world log world), never a pairwise scan.
-        if (claimed.try_reserve(shape.gpus_per_colocated_domain) != status_t::success_k)
+        if (claimed.reserve(shape.gpus_per_colocated_domain) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "GPU-uniqueness table allocation failed ({} GPUs)",
                                     shape.gpus_per_colocated_domain);
         for (CUuuid const &uuid : probed.uuids.view())
-            if (claimed.try_push_back({uuid, 0u}) != status_t::success_k)
+            if (claimed.push_back({uuid, 0u}) != status_t::success_k)
                 return expected_t::fail(status_t::bad_alloc_k, "GPU-uniqueness table push failed");
 
         for (u32_t peer_index = 1; peer_index != host_domain_count(); ++peer_index) {
@@ -817,7 +818,7 @@ struct mesh_topology_t {
                 if (!parse_uuid_(token, uuid))
                     return expected_t::fail(status_t::io_error_k,
                                             "host_domain {} published a malformed GPU uuid \"{}\"", peer_index, token);
-                if (claimed.try_push_back({uuid, peer_index}) != status_t::success_k)
+                if (claimed.push_back({uuid, peer_index}) != status_t::success_k)
                     return expected_t::fail(status_t::bad_alloc_k, "GPU-uniqueness table push failed");
                 ++peer_uuids;
             }

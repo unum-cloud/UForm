@@ -394,11 +394,7 @@ struct contrastive_relations_t {
             return expected_t::fail(status_t::shape_unsupported_k,
                                     "self-edge relations for {} vertices exceed the column capacity of {}",
                                     from_vertices_per_gpu, attract_offsets_.capacity());
-        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(attract_offsets_.data()), 0,
-                                              (from_vertices_per_gpu + 1u) * sizeof(u32_t), stream.get());
-            result != CUDA_SUCCESS)
-            return expected_t::fail(result, "self-edge offsets reset failed (from_vertices_per_gpu={})",
-                                    from_vertices_per_gpu);
+        if (expected_t reset = zero_async(attract_offsets_.span(), stream); !reset) return reset;
         from_vertex_effective_length_ = from_vertex_effective_length;
         to_vertex_effective_length_ = to_vertex_effective_length;
         self_edge_base_ = self_edge_base;

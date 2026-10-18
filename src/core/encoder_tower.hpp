@@ -65,7 +65,7 @@
 #include <numkong/tensor.hpp>  // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
 #include "core/types.hpp"             // `expected`, `expected_t`, `status_t`, `differentiable_weights_t`
-#include "core/multimodal_batch.hpp"  // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`, `modality_t`
+#include "core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`, `modality_t`
 #include "core/transformer_block.cuh" // the block stack, `rope_angles_t`, shared `rmsnorm_*`
 
 namespace unum::uform::core {
@@ -91,6 +91,9 @@ struct encoder_tower_config_t {
 
     /** Video tube extents (temporal × spatial); any 0 ⇒ no video entry. */
     u32_t video_tube_frames = 0, video_patch_height = 0, video_patch_width = 0;
+
+    /** The source frames between two sampled video frames, scaling the temporal coordinate to absolute time. */
+    u32_t video_frame_stride = 1;
 
     /** The channel count every video pixel carries — independent of image, the innermost content rank. */
     u32_t video_channels = 3;

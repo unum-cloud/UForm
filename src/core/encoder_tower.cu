@@ -28,13 +28,7 @@ static __global__ void tower_text_entry_kernel_(tokens_view_t tokens, bf16r2_spa
     u32_t const length = lengths[segment];
     if (length == 0u) return;
     u32_t const offset = offsets[segment];
-    u32_t const hidden = static_cast<u32_t>(destination.extent(1));
-    for (u32_t k = 0; k != length; ++k) {
-        std::size_t const row = static_cast<std::size_t>(offset) + k;
-        std::size_t const id = static_cast<std::size_t>(tokens[row]);
-        for (u32_t channel = threadIdx.x; channel < hidden; channel += blockDim.x)
-            destination[row, channel] = table[id, channel];
-    }
+    gather_bytes_segment(tokens, table, offset, offset, length, destination, threadIdx.x, blockDim.x);
 }
 
 /**
@@ -162,20 +156,8 @@ static __global__ void tower_normalize_segment_kernel_(nk::tensor_view<pixel_t, 
     u32_t const length = lengths[segment];
     if (length == 0u) return;
     u32_t const offset = offsets[segment];
-    u32_t const spatial = static_cast<u32_t>(content.extent(1));
-    u32_t const channels = static_cast<u32_t>(content.extent(2));
-    std::size_t const cells = static_cast<std::size_t>(length) * spatial;
-    f32_t const inverse_byte_max = 1.0f / 255.0f;
-    for (std::size_t cell = threadIdx.x; cell < cells; cell += blockDim.x) {
-        u32_t const spatial_position = static_cast<u32_t>(cell % spatial);
-        std::size_t const row = static_cast<std::size_t>(offset) + cell / spatial;
-        for (u32_t channel = 0; channel != channels; ++channel) {
-            f32_t const value = (static_cast<f32_t>(content[row, spatial_position, channel]) * inverse_byte_max -
-                                 mean[channel]) *
-                                inverse_std[channel];
-            patches[row, spatial_position, channel] = __float2bfloat16(value);
-        }
-    }
+    stage_patches_segment(content, offset, offset, length, mean, inverse_std, patches, threadIdx.x, blockDim.x,
+                          tower_scalars_t {});
 }
 
 /**
@@ -195,13 +177,7 @@ static __global__ void tower_audio_segment_kernel_(nk::tensor_view<f32_t, 2> con
     u32_t const length = lengths[segment];
     if (length == 0u) return;
     u32_t const offset = offsets[segment];
-    u32_t const scalars = static_cast<u32_t>(content.extent(1));
-    std::size_t const cells = static_cast<std::size_t>(length) * scalars;
-    for (std::size_t cell = threadIdx.x; cell < cells; cell += blockDim.x) {
-        u32_t const scalar = static_cast<u32_t>(cell % scalars);
-        std::size_t const row = static_cast<std::size_t>(offset) + cell / scalars;
-        patches[row, scalar] = __float2bfloat16(content[row, scalar]);
-    }
+    stage_frames_segment(content, offset, offset, length, patches, threadIdx.x, blockDim.x, tower_scalars_t {});
 }
 
 /** The attention pool's softmax scale @c 1/√head_dim — one derivation for the device upload and
@@ -225,9 +201,8 @@ static expected_t head_forward_(bf16r2_view_t normalized, b8r1_tensor_arena_t co
                                              capabilities, stream.numkong()),
                                 "head fc1 narrowing");
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&tower_silu_kernel_), cell_grid,
-                               dim3 {kernel_block_size_default_k, 1u, 1u}, stream, hidden_state.flatten<1>(),
-                               activated.flatten<1>());
+        staged = launch_kernel(&tower_silu_kernel_, cell_grid, dim3 {kernel_block_size_default_k, 1u, 1u}, stream,
+                               hidden_state.flatten<1>(), activated.flatten<1>());
     if (staged) staged = multiply_bf16(activated, packed_fc2.view(), products, capabilities, stream);
     if (staged)
         staged = numkong_result(
@@ -252,14 +227,12 @@ static expected_t upload_pixel_constants(f32r1_tensor_arena_t &mean_arena, f32r1
         mean[channel] = mean_source[channel];
         inverse_std[channel] = 1.0f / std_source[channel];
     }
-    if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(mean_arena.data()), mean,
-                                       channels * sizeof(f32_t));
+    if (CUresult result = cuMemcpyHtoD(device_address(mean_arena.data()), mean, channels * sizeof(f32_t));
         result != CUDA_SUCCESS)
-        return expected_t::fail(result, "pixel mean upload failed");
-    if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(inverse_std_arena.data()), inverse_std,
-                                       channels * sizeof(f32_t));
+        return cuda_failure(result, "pixel mean upload failed");
+    if (CUresult result = cuMemcpyHtoD(device_address(inverse_std_arena.data()), inverse_std, channels * sizeof(f32_t));
         result != CUDA_SUCCESS)
-        return expected_t::fail(result, "pixel inverse-std upload failed");
+        return cuda_failure(result, "pixel inverse-std upload failed");
     return {};
 }
 
@@ -282,14 +255,9 @@ static expected_t stage_pixel_patches(nk::tensor_view<pixel_t, 3> raw, modality_
     u32_t const spatial = static_cast<u32_t>(raw.extent(1));
     u32_t const channels = static_cast<u32_t>(raw.extent(2));
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
-    if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(patches.data()), 0,
-                                          rows * static_cast<std::size_t>(spatial) * channels * sizeof(bf16_t),
-                                          stream.get());
-        result != CUDA_SUCCESS)
-        return expected_t::fail(result, "pixel patch reset failed");
-    return launch_kernel(reinterpret_cast<void const *>(&tower_normalize_segment_kernel_), segment_grid, block_shape,
-                         stream, raw, offsets, lengths, modality, target, mean, inverse_std,
-                         patches.reshape<3>({rows, spatial, channels}));
+    if (expected_t zeroed = zero_async(patches, stream); !zeroed) return zeroed;
+    return launch_kernel(&tower_normalize_segment_kernel_, segment_grid, block_shape, stream, raw, offsets, lengths,
+                         modality, target, mean, inverse_std, patches.reshape<3>({rows, spatial, channels}));
 }
 
 /**
@@ -354,14 +322,11 @@ static expected_t project_media_entries(multimodal_batch_on_gpu_t const &batch, 
     }
     if (packed_audio.data() != nullptr && batch.audio_samples.data() != nullptr) {
         u32_t const scalars = static_cast<u32_t>(batch.audio_samples.extent(2));
-        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(patch_scratch.data()), 0,
-                                              live_tokens * scalars * sizeof(bf16_t), stream.get());
-            result != CUDA_SUCCESS)
-            return expected_t::fail(result, "audio patch scratch reset failed");
-        nk::tensor_view<f32_t, 2> const raw = batch.audio_samples.view().reshape<2>({live_tokens, scalars});
         bf16r2_span_t const patches {patch_scratch.data(), live_tokens, scalars};
-        staged = launch_kernel(reinterpret_cast<void const *>(&tower_audio_segment_kernel_), segment_grid, block_shape,
-                               stream, raw, segment_offsets, segment_lengths, segment_modality, patches);
+        if (expected_t zeroed = zero_async(patches, stream); !zeroed) return zeroed;
+        nk::tensor_view<f32_t, 2> const raw = batch.audio_samples.view().reshape<2>({live_tokens, scalars});
+        staged = launch_kernel(&tower_audio_segment_kernel_, segment_grid, block_shape, stream, raw, segment_offsets,
+                               segment_lengths, segment_modality, patches);
         if (staged) staged = add_projection(patches, packed_audio);
     }
     return staged;
@@ -426,14 +391,11 @@ static expected_t project_media_weight_grads(multimodal_batch_on_gpu_t const &ba
     }
     if (audio_projection_grad.data() != nullptr && batch.audio_samples.data() != nullptr) {
         u32_t const scalars = static_cast<u32_t>(batch.audio_samples.extent(2));
-        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(patch_scratch.data()), 0,
-                                              live_tokens * scalars * sizeof(bf16_t), stream.get());
-            result != CUDA_SUCCESS)
-            return expected_t::fail(result, "audio patch scratch reset failed");
-        nk::tensor_view<f32_t, 2> const raw = batch.audio_samples.view().reshape<2>({live_tokens, scalars});
         bf16r2_span_t const patches {patch_scratch.data(), live_tokens, scalars};
-        staged = launch_kernel(reinterpret_cast<void const *>(&tower_audio_segment_kernel_), segment_grid, block_shape,
-                               stream, raw, segment_offsets, segment_lengths, segment_modality, patches);
+        if (expected_t zeroed = zero_async(patches, stream); !zeroed) return zeroed;
+        nk::tensor_view<f32_t, 2> const raw = batch.audio_samples.view().reshape<2>({live_tokens, scalars});
+        staged = launch_kernel(&tower_audio_segment_kernel_, segment_grid, block_shape, stream, raw, segment_offsets,
+                               segment_lengths, segment_modality, patches);
         if (staged) staged = weight_gradient(patches, audio_projection_grad.span());
     }
     return staged;
@@ -628,7 +590,7 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
     }
 
     // The block stack, over one scratch wide enough for the entries' and the head's weight gradients too.
-    if (tower.blocks_.try_resize(config.depth) != status_t::success_k)
+    if (tower.blocks_.resize(config.depth) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "block table allocation failed ({})", config.depth);
     expected<transformer_scratch_t> scratch = transformer_scratch_t::make(arena, config.block, max_entry_scalars);
     if (!scratch) return result_t::fail(std::move(scratch));
@@ -661,7 +623,7 @@ expected<tower_pool_t> tower_pool_t::make(gpu_arena_t &arena, transformer_block_
         status != nk_success_k)
         return result_t::fail(status_t::cuda_error_k, "pool pack sizing failed: {}", nk_status_name(status));
     array<u32_t> host;
-    if (host.try_resize(segments + 1u) != status_t::success_k)
+    if (host.resize(segments + 1u) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "pool staging allocation failed ({} segments)", segments);
     for (std::size_t segment = 0; segment <= segments; ++segment) host[segment] = static_cast<u32_t>(segment);
 
@@ -677,10 +639,10 @@ expected<tower_pool_t> tower_pool_t::make(gpu_arena_t &arena, transformer_block_
     if (!pool.query_offsets_ || !pool.packed_ || !pool.pooled_ || !pool.log_sum_exp_ || !pool.pooled_grad_ ||
         !pool.query_partials_)
         return result_t::fail(status_t::bad_alloc_k, "pool allocation failed (arena_used={})", arena.used());
-    if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(pool.query_offsets_.data()), host.data(),
+    if (CUresult result = cuMemcpyHtoD(device_address(pool.query_offsets_.data()), host.data(),
                                        (segments + 1u) * sizeof(u32_t));
         result != CUDA_SUCCESS)
-        return result_t::fail(result, "pool query-offset upload failed");
+        return cuda_failure<tower_pool_t>(result, "pool query-offset upload failed");
     return result_t {std::move(pool)};
 }
 
@@ -688,7 +650,7 @@ expected_t tower_pool_t::forward(bf16r1_view_t query, bf16r2_view_t states, u32r
                                  u32r1_view_t segment_lengths, bf16r2_span_t pooled, gpu_stream_t &stream) noexcept {
     std::size_t const segments = pooled_.extent(0), hidden = pooled_.extent(1);
     std::size_t const heads = hidden / transformer_head_dim_k;
-    auto const *const states_data = reinterpret_cast<nk_bf16_t const *>(states.data());
+    nk_bf16_t const *const states_data = numkong_scalars(states.data());
     nk_status_t status = nk_attention_pack_bf16_best(
         heads, transformer_head_dim_k, segment_offsets.data(), segment_lengths.data(), segments, states_data,
         hidden * sizeof(bf16_t), states_data, hidden * sizeof(bf16_t), packed_.data(), 0, segments * heads,
@@ -696,9 +658,9 @@ expected_t tower_pool_t::forward(bf16r1_view_t query, bf16r2_view_t states, u32r
     if (status == nk_success_k)
         status = nk_attention_packed_bf16_best(heads, heads, transformer_head_dim_k, query_offsets_.data(), segments,
                                                tower_pool_scale_(), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX,
-                                               reinterpret_cast<nk_bf16_t const *>(query.data()), 0, packed_.data(),
-                                               pooled_.data(), hidden * sizeof(f32_t), log_sum_exp_.data(), 0,
-                                               NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, capabilities_, stream.numkong());
+                                               numkong_scalars(query.data()), 0, packed_.data(), pooled_.data(),
+                                               hidden * sizeof(f32_t), log_sum_exp_.data(), 0, NUMKONG_SIZE_MAX,
+                                               NUMKONG_NULL, 0, capabilities_, stream.numkong());
     if (status == nk_success_k)
         status = nk_cast_best(pooled_.data(), nk_f32_k, pooled.data(), nk_bf16_k, segments * hidden, capabilities_,
                               stream.numkong());
@@ -713,21 +675,17 @@ expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad
     std::size_t const heads = hidden / transformer_head_dim_k;
     std::size_t const tokens = key_grad.extent(0);
     // NumKong never writes rows past a segment's live keys, nor the query rows of key-less PAD segments.
-    for (void *const zeroed : {static_cast<void *>(key_grad.data()), static_cast<void *>(value_grad.data())})
-        if (CUresult result = cuMemsetD32Async(reinterpret_cast<CUdeviceptr>(zeroed), 0, tokens * hidden, stream.get());
-            result != CUDA_SUCCESS)
-            return expected_t::fail(result, "pool gradient reset failed");
-    if (CUresult result = cuMemsetD32Async(reinterpret_cast<CUdeviceptr>(query_partials_.data()), 0, segments * hidden,
-                                           stream.get());
-        result != CUDA_SUCCESS)
-        return expected_t::fail(result, "pool query gradient reset failed");
+    for (f32_t *const gradient : {key_grad.data(), value_grad.data()})
+        if (expected_t zeroed = zero_async(f32r1_span_t {gradient, tokens * hidden}, stream); !zeroed) return zeroed;
+    if (expected_t zeroed = zero_async(f32r1_span_t {query_partials_.data(), segments * hidden}, stream); !zeroed)
+        return zeroed;
     nk_status_t status = nk_cast_best(pooled_grad.data(), nk_bf16_k, pooled_grad_.data(), nk_f32_k, segments * hidden,
                                       capabilities_, stream.numkong());
     if (status == nk_success_k)
         status = nk_attention_packed_gradients_bf16_best(
             heads, heads, transformer_head_dim_k, query_offsets_.data(), segments, tower_pool_scale_(),
-            NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, reinterpret_cast<nk_bf16_t const *>(query.data()), 0, packed_.data(),
-            pooled_.data(), pooled_grad_.data(), hidden * sizeof(f32_t), log_sum_exp_.data(), query_partials_.data(),
+            NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, numkong_scalars(query.data()), 0, packed_.data(), pooled_.data(),
+            pooled_grad_.data(), hidden * sizeof(f32_t), log_sum_exp_.data(), query_partials_.data(),
             hidden * sizeof(f32_t), key_grad.data(), value_grad.data(), key_grad.stride_bytes(0), 0, NUMKONG_SIZE_MAX,
             NUMKONG_NULL, 0, capabilities_, stream.numkong());
     if (status == nk_success_k)
@@ -736,8 +694,8 @@ expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad
     if (status != nk_success_k)
         return expected_t::fail(status_t::cuda_error_k, "attention pool backward failed: {}", nk_status_name(status));
     dim3 const channel_grid {static_cast<u32_t>(divide_round_up(hidden, kernel_block_size_default_k)), 1u, 1u};
-    return launch_kernel(reinterpret_cast<void const *>(&tower_pool_query_grad_kernel_), channel_grid,
-                         dim3 {kernel_block_size_default_k, 1u, 1u}, stream, query_partials_.view(), query_grad);
+    return launch_kernel(&tower_pool_query_grad_kernel_, channel_grid, dim3 {kernel_block_size_default_k, 1u, 1u},
+                         stream, query_partials_.view(), query_grad);
 }
 
 expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t vertices,
@@ -766,14 +724,8 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
 
     // Zero the coordinates (PAD / gap cells stay (0,0,0)) and the packed entry state (cells no segment writes
     // stay 0, and the media projections add onto that zero).
-    if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(coords_.data()), 0,
-                                          live_tokens * 3u * sizeof(i16_t), stream.get());
-        result != CUDA_SUCCESS)
-        return expected_t::fail(result, "coordinate reset failed");
-    if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(entry_output_.data()), 0,
-                                          live_tokens * hidden * sizeof(bf16_t), stream.get());
-        result != CUDA_SUCCESS)
-        return expected_t::fail(result, "entry state reset failed");
+    if (expected_t zeroed = zero_async(coords_.span(), stream); !zeroed) return zeroed;
+    if (expected_t zeroed = zero_async(entry_output_.span(), stream); !zeroed) return zeroed;
 
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const segment_grid {static_cast<u32_t>(segments), 1u, 1u};
@@ -788,7 +740,8 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
     u32r1_span_t const lengths_span {const_cast<u32_t *>(segment_lengths.data()), segment_lengths.extent(0)};
     modality_span_t const modality_span {const_cast<modality_t *>(segment_modality.data()), segment_modality.extent(0)};
     expected_t staged = fill_coords(offsets_span, lengths_span, modality_span, batch.image_shapes.view(),
-                                    batch.video_shapes.view(), config_.video_tube_frames, coords_.span(), stream);
+                                    batch.video_shapes.view(), config_.video_tube_frames, config_.video_frame_stride,
+                                    coords_.span(), stream);
     if (!staged) return staged;
 
     // Entry, per-segment gather: text segments look up the embedding table into their cells, which widen into
@@ -798,8 +751,8 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
     // untouched — no scatter, no atomics.
 
     live_token_ids_ = batch.tokens.flatten<1>();
-    staged = launch_kernel(reinterpret_cast<void const *>(&tower_text_entry_kernel_), segment_grid, block_shape, stream,
-                           live_token_ids_, entry_weight_.span(), segment_offsets, segment_lengths, segment_modality,
+    staged = launch_kernel(&tower_text_entry_kernel_, segment_grid, block_shape, stream, live_token_ids_,
+                           entry_weight_.span(), segment_offsets, segment_lengths, segment_modality,
                            entry_output_.span());
     if (staged)
         staged = numkong_result(nk_cast_best(entry_output_.data(), nk_bf16_k, activations_b_.data(), nk_f32_k,
@@ -829,7 +782,7 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
                                       hidden, capabilities_, stream.numkong());
     if (status == nk_success_k)
         status = nk_each_rmscast_bf16_best(stack_output_.data(), widened_final_norm_scale_.data(),
-                                           reinterpret_cast<nk_bf16_t *>(normalized_.data()), live_tokens, 1, hidden,
+                                           numkong_scalars(normalized_.data()), live_tokens, 1, hidden,
                                            hidden * sizeof(f32_t), hidden * sizeof(bf16_t), config_.block.rms_eps,
                                            capabilities_, stream.numkong());
     if (status != nk_success_k)
@@ -848,8 +801,8 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
 
     // The head: learnable-γ RMSNorm, then the biasless fc1 → SiLU → fc2 into the caller's vertices —
     // raw, never L2-normalized here (the loss owns the cosine geometry).
-    staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_forward_kernel), segment_grid, block_shape, stream,
-                           pooled_.view(), head_norm_scale_.view(), head_normalized_.span(), head_inverse_rms_.span(),
+    staged = launch_kernel(&rmsnorm_forward_kernel, segment_grid, block_shape, stream, pooled_.view(),
+                           head_norm_scale_.view(), head_normalized_.span(), head_inverse_rms_.span(),
                            config_.block.rms_eps);
     if (!staged) return staged;
     return head_forward_(head_normalized_.view(), packed_head_fc1_, packed_head_fc2_, head_hidden_.span(),
@@ -953,19 +906,18 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
         staged = weight_gradient(vertices_grad, head_activated_.view(), head_fc2_grad_.span());
         if (staged) staged = data_gradient(vertices_grad, packed_head_fc2_transposed_);
         if (staged)
-            staged = launch_kernel(reinterpret_cast<void const *>(&tower_silu_backward_kernel_), head_cell_grid,
-                                   block_shape, stream, head_hidden_.span().flatten<1>(),
-                                   segment_grad_a_.span().flatten<1>(), segment_grad_b_.span().flatten<1>());
+            staged = launch_kernel(&tower_silu_backward_kernel_, head_cell_grid, block_shape, stream,
+                                   head_hidden_.span().flatten<1>(), segment_grad_a_.span().flatten<1>(),
+                                   segment_grad_b_.span().flatten<1>());
         if (staged) staged = weight_gradient(segment_grad_b_.view(), head_normalized_.view(), head_fc1_grad_.span());
         if (staged) staged = data_gradient(segment_grad_b_.view(), packed_head_fc1_transposed_);
         if (staged)
-            staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_backward_kernel), segment_grid, block_shape,
-                                   stream, pooled_.view(), head_norm_scale_.view(), head_inverse_rms_.view(),
-                                   segment_grad_a_.view(), segment_grad_b_.span());
+            staged = launch_kernel(&rmsnorm_backward_kernel, segment_grid, block_shape, stream, pooled_.view(),
+                                   head_norm_scale_.view(), head_inverse_rms_.view(), segment_grad_a_.view(),
+                                   segment_grad_b_.span());
         if (staged)
-            staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_scale_grad_kernel), channel_grid,
-                                   block_shape, stream, pooled_.view(), head_inverse_rms_.view(),
-                                   segment_grad_a_.view(), head_norm_scale_grad_.span());
+            staged = launch_kernel(&rmsnorm_scale_grad_kernel, channel_grid, block_shape, stream, pooled_.view(),
+                                   head_inverse_rms_.view(), segment_grad_a_.view(), head_norm_scale_grad_.span());
         if (!staged) return staged;
 
         // The pool backward leaves the Float32 d(normalized) of every live token row in token_grad_a_.
@@ -990,13 +942,12 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
 
     // Final-norm backward: the Float32 d(normalized) in token_grad_a_ → the Float32 d(stack output) into
     // token_grad_b_, plus the scale grad.
-    staged = launch_kernel(reinterpret_cast<void const *>(&rmscast_backward_kernel), row_grid, block_shape, stream,
-                           stack_output_, final_norm_scale_.view(), token_grad_a_.view(), f32r2_view_t {},
-                           token_grad_b_.span(), final_inverse_rms_.span(), config_.block.rms_eps);
+    staged = launch_kernel(&rmscast_backward_kernel, row_grid, block_shape, stream, stack_output_,
+                           final_norm_scale_.view(), token_grad_a_.view(), f32r2_view_t {}, token_grad_b_.span(),
+                           final_inverse_rms_.span(), config_.block.rms_eps);
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&rmscast_scale_grad_kernel), channel_grid, block_shape,
-                               stream, stack_output_, final_inverse_rms_.view(), token_grad_a_.view(),
-                               final_norm_scale_grad_.span());
+        staged = launch_kernel(&rmscast_scale_grad_kernel, channel_grid, block_shape, stream, stack_output_,
+                               final_inverse_rms_.view(), token_grad_a_.view(), final_norm_scale_grad_.span());
     if (!staged) return staged;
 
     // Blocks in reverse; the flowing gradient ping-pongs the two token-gradient buffers. `coords_` still
@@ -1023,11 +974,7 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     // text segments overwrite their keys, positions are the flat cell indices, and the sort + serial per-run
     // fold stay deterministic with no atomics.
 
-    std::size_t const table_scalars = static_cast<std::size_t>(config_.vocabulary) * hidden;
-    if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(entry_weight_grad_.data()), 0,
-                                          table_scalars * sizeof(bf16_t), stream.get());
-        result != CUDA_SUCCESS)
-        return expected_t::fail(result, "embedding gradient reset failed");
+    if (expected_t zeroed = zero_async(entry_weight_grad_.span(), stream); !zeroed) return zeroed;
     // The sort scratch is one arena split into two halves, max_tokens apart: [0,live) and [max,max+live).
 
     std::size_t const max_tokens = config_.block.max_tokens;
@@ -1035,26 +982,24 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     tokens_span_t const keys_out = sort_keys_(nk::range(max_tokens, max_tokens + live_tokens), nk::slice);
     u32r1_span_t const values_in = sort_values_(nk::range(0, live_tokens), nk::slice);
     u32r1_span_t const values_out = sort_values_(nk::range(max_tokens, max_tokens + live_tokens), nk::slice);
-    if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(keys_in.data()), 0xFF,
-                                          live_tokens * sizeof(token_id_t), stream.get());
+    if (CUresult result = cuMemsetD8Async(device_address(keys_in.data()), 0xFF, live_tokens * sizeof(token_id_t),
+                                          stream.get());
         result != CUDA_SUCCESS)
-        return expected_t::fail(result, "sentinel key reset failed");
-    staged = launch_kernel(reinterpret_cast<void const *>(&tower_text_keys_kernel_), segment_grid, block_shape, stream,
-                           live_token_ids_, segment_offsets, segment_lengths, segment_modality, keys_in);
+        return cuda_failure(result, "sentinel key reset failed");
+    staged = launch_kernel(&tower_text_keys_kernel_, segment_grid, block_shape, stream, live_token_ids_,
+                           segment_offsets, segment_lengths, segment_modality, keys_in);
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&tower_iota_kernel_),
-                               dim3 {grid_size_for(live_tokens), 1u, 1u}, dim3 {warp_size_k, 1u, 1u}, stream,
-                               values_in);
+        staged = launch_kernel(&tower_iota_kernel_, dim3 {grid_size_for(live_tokens), 1u, 1u},
+                               dim3 {warp_size_k, 1u, 1u}, stream, values_in);
     if (!staged) return staged;
     std::size_t sort_bytes = sort_workspace_.extent(0);
     if (cudaError_t sorted = cub::DeviceRadixSort::SortPairs(
             sort_workspace_.data(), sort_bytes, keys_in.data(), keys_out.data(), values_in.data(), values_out.data(),
-            static_cast<int>(live_tokens), 0, sizeof(token_id_t) * 8, reinterpret_cast<cudaStream_t>(stream.get()));
+            static_cast<int>(live_tokens), 0, sizeof(token_id_t) * 8, stream.get());
         sorted != cudaSuccess)
         return expected_t::fail(status_t::cuda_error_k, "embedding sort failed (code={})", static_cast<int>(sorted));
-    staged = launch_kernel(reinterpret_cast<void const *>(&tower_embedding_scatter_kernel_), row_grid, block_shape,
-                           stream, tokens_view_t {keys_out}, u32r1_view_t {values_out}, entry_grad,
-                           entry_weight_grad_.span());
+    staged = launch_kernel(&tower_embedding_scatter_kernel_, row_grid, block_shape, stream, tokens_view_t {keys_out},
+                           u32r1_view_t {values_out}, entry_grad, entry_weight_grad_.span());
     if (!staged) return staged;
 
     // Media weight grads: re-stage each present modality's cells (segment-driven, so non-modality rows stay
@@ -1093,8 +1038,8 @@ expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) 
 
     auto push = [&weights](sz::string_view_t name, bf16r2_span_t weight, bf16r2_view_t grad) noexcept {
         differentiable_weights_t entry {{}, weight, grad};
-        if (sz::failed(entry.name.try_assign(name))) return status_t::bad_alloc_k;
-        return weights.try_push_back(std::move(entry));
+        if (sz::failed(entry.name.assign(name))) return status_t::bad_alloc_k;
+        return weights.push_back(std::move(entry));
     };
     auto push_flat = [&push](sz::string_view_t name, bf16r1_span_t weight, bf16r1_view_t grad, std::size_t rows,
                              std::size_t cols) noexcept {
@@ -1158,13 +1103,11 @@ expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) 
     bf16r2_tensor_arena_t copy =
         bf16r2_tensor_arena_t::uninitialized({source.extent(0), source.extent(1)}, bf16_alloc).value;
     if (!copy) return result_t::fail(status_t::bad_alloc_k, "twin {} allocation failed", name);
-    // vendor-boundary: device-to-device weight snapshot — no typed DtoD helper exists, so the driver copy
-    // is spelled by hand over the views' raw `data()` pointers.
-    if (CUresult result = cuMemcpyDtoDAsync(reinterpret_cast<CUdeviceptr>(copy.data()),
-                                            reinterpret_cast<CUdeviceptr>(source.data()),
-                                            source.extent(0) * source.extent(1) * sizeof(bf16_t), stream.get());
-        result != CUDA_SUCCESS)
-        return result_t::fail(result, "twin {} snapshot failed", name);
+    std::size_t const scalars = source.extent(0) * source.extent(1);
+    if (expected_t copied = copy_device_to_device(bf16r1_view_t {source.data(), scalars},
+                                                  bf16r1_span_t {copy.data(), scalars}, stream);
+        !copied)
+        return result_t::fail(std::move(copied));
     return result_t {std::move(copy)};
 }
 
@@ -1176,12 +1119,8 @@ expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) 
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     bf16r1_tensor_arena_t copy = bf16r1_tensor_arena_t::uninitialized({source.extent(0)}, bf16_alloc).value;
     if (!copy) return result_t::fail(status_t::bad_alloc_k, "twin {} allocation failed", name);
-    // vendor-boundary: device-to-device weight snapshot, as in the rank-2 overload above.
-    if (CUresult result = cuMemcpyDtoDAsync(reinterpret_cast<CUdeviceptr>(copy.data()),
-                                            reinterpret_cast<CUdeviceptr>(source.data()),
-                                            source.extent(0) * sizeof(bf16_t), stream.get());
-        result != CUDA_SUCCESS)
-        return result_t::fail(result, "twin {} snapshot failed", name);
+    if (expected_t copied = copy_device_to_device(source, copy.span(), stream); !copied)
+        return result_t::fail(std::move(copied));
     return result_t {std::move(copy)};
 }
 
@@ -1200,7 +1139,7 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
     gpu_arena_alloc<i16_t> i16_alloc {arena};
 
     // The block stack quantizes per layer; everything else below is a BFloat16 snapshot.
-    if (twin.blocks_.try_resize(config_.depth) != status_t::success_k)
+    if (twin.blocks_.resize(config_.depth) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "twin block table allocation failed ({})", config_.depth);
     for (u32_t layer_index = 0; layer_index != config_.depth; ++layer_index) {
         expected<transformer_block_e4m3_t> block = blocks_[layer_index].quantize_weights(arena, stream);
@@ -1299,7 +1238,7 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
 
     // The snapshots above are stream-ordered; drain them so the twin owns settled weights.
     if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
-        return result_t::fail(result, "twin snapshot drain failed");
+        return cuda_failure<encoder_tower_e4m3_t>(result, "twin snapshot drain failed");
     return result_t {std::move(twin)};
 }
 
@@ -1322,14 +1261,8 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
         return expected_t::fail(status_t::shape_unsupported_k, "tower scratch cannot hold {} live tokens (capacity {})",
                                 live_tokens, entry_output_.capacity() / hidden);
 
-    if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(coords_.data()), 0,
-                                          live_tokens * 3u * sizeof(i16_t), stream.get());
-        result != CUDA_SUCCESS)
-        return expected_t::fail(result, "coordinate reset failed");
-    if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(entry_output_.data()), 0,
-                                          live_tokens * hidden * sizeof(bf16_t), stream.get());
-        result != CUDA_SUCCESS)
-        return expected_t::fail(result, "entry state reset failed");
+    if (expected_t zeroed = zero_async(coords_.span(), stream); !zeroed) return zeroed;
+    if (expected_t zeroed = zero_async(entry_output_.span(), stream); !zeroed) return zeroed;
 
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const segment_grid {static_cast<u32_t>(segments), 1u, 1u};
@@ -1343,12 +1276,13 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
     u32r1_span_t const lengths_span {const_cast<u32_t *>(segment_lengths.data()), segment_lengths.extent(0)};
     modality_span_t const modality_span {const_cast<modality_t *>(segment_modality.data()), segment_modality.extent(0)};
     expected_t staged = fill_coords(offsets_span, lengths_span, modality_span, batch.image_shapes.view(),
-                                    batch.video_shapes.view(), config_.video_tube_frames, coords_.span(), stream);
+                                    batch.video_shapes.view(), config_.video_tube_frames, config_.video_frame_stride,
+                                    coords_.span(), stream);
     if (!staged) return staged;
 
     tokens_view_t const token_ids = batch.tokens.flatten<1>();
-    staged = launch_kernel(reinterpret_cast<void const *>(&tower_text_entry_kernel_), segment_grid, block_shape, stream,
-                           token_ids, entry_weight_.span(), segment_offsets, segment_lengths, segment_modality,
+    staged = launch_kernel(&tower_text_entry_kernel_, segment_grid, block_shape, stream, token_ids,
+                           entry_weight_.span(), segment_offsets, segment_lengths, segment_modality,
                            entry_output_.span());
     if (!staged) return staged;
 
@@ -1387,8 +1321,8 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
         return expected_t::fail(status_t::shape_unsupported_k, "twin norm scratch cannot hold {} live tokens",
                                 live_tokens);
     dim3 const token_grid {static_cast<u32_t>(live_tokens), 1u, 1u};
-    staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_forward_kernel), token_grid, block_shape, stream,
-                           layer_input, final_norm_scale_.view(), normalized_.span(), final_inverse_rms_.span(),
+    staged = launch_kernel(&rmsnorm_forward_kernel, token_grid, block_shape, stream, layer_input,
+                           final_norm_scale_.view(), normalized_.span(), final_inverse_rms_.span(),
                            config_.block.rms_eps);
     if (!staged) return staged;
 
@@ -1400,8 +1334,8 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
     staged = pool_.forward(pool_query_.view(), normalized_.view(), segment_offsets, segment_lengths, pooled_.span(),
                            stream);
     if (!staged) return staged;
-    staged = launch_kernel(reinterpret_cast<void const *>(&rmsnorm_forward_kernel), segment_grid, block_shape, stream,
-                           pooled_.view(), head_norm_scale_.view(), head_normalized_.span(), head_inverse_rms_.span(),
+    staged = launch_kernel(&rmsnorm_forward_kernel, segment_grid, block_shape, stream, pooled_.view(),
+                           head_norm_scale_.view(), head_normalized_.span(), head_inverse_rms_.span(),
                            config_.block.rms_eps);
     if (!staged) return staged;
     return head_forward_(head_normalized_.view(), packed_head_fc1_, packed_head_fc2_, head_hidden_.span(),

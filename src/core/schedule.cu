@@ -5,9 +5,8 @@
  *  @author Ash Vardanian
  *  @date July 5, 2026
  */
-#include <cstdint> // `std::uintptr_t`
-
-#include <cuda.h> // `CUdeviceptr`, driver launch surface
+#include <cuda.h>      // `CUdeviceptr`, driver launch surface
+#include <cuda/memory> // `cuda::is_aligned` — the transpose's 16-byte fast-path test
 
 #include "core/schedule.cuh" // `barrier_round_t`, `launch_kernel`, `transpose_bf16`, the NumKong products
 
@@ -28,18 +27,23 @@ static __global__ void barrier_round_increment_kernel_(u32r1_span_t round, u32_t
 }
 
 expected_t barrier_round_t::advance(gpu_stream_t &stream) noexcept {
-    return launch_kernel(reinterpret_cast<void const *>(&barrier_round_increment_kernel_), dim3 {1, 1, 1},
-                         dim3 {1, 1, 1}, stream, device_round_, increment_);
+    return launch_kernel(&barrier_round_increment_kernel_, dim3 {1, 1, 1}, dim3 {1, 1, 1}, stream, device_round_,
+                         increment_);
 }
 
 /** Loads the eight elements at @p column of @p row as four packed words; out-of-range cells read zero. */
 [[nodiscard]] static __device__ inline uint4 transpose_load_(bf16_t const *row_start, std::size_t column,
                                                              std::size_t columns, bool aligned) {
-    if (aligned && column + 8u <= columns) return *reinterpret_cast<uint4 const *>(row_start + column);
-    u16_t const *const halves = reinterpret_cast<u16_t const *>(row_start);
+    if (aligned && column + 8u <= columns) {
+        uint4 vector;
+        asm("ld.global.v4.u32 {%0, %1, %2, %3}, [%4];"
+            : "=r"(vector.x), "=r"(vector.y), "=r"(vector.z), "=r"(vector.w)
+            : "l"(row_start + column));
+        return vector;
+    }
     u32_t words[4] = {0u, 0u, 0u, 0u};
     for (u32_t lane = 0; lane != 8u && column + lane < columns; ++lane)
-        words[lane >> 1] |= static_cast<u32_t>(halves[column + lane]) << (16u * (lane & 1u));
+        words[lane >> 1] |= static_cast<u32_t>(__bfloat16_as_ushort(row_start[column + lane])) << (16u * (lane & 1u));
     return make_uint4(words[0], words[1], words[2], words[3]);
 }
 
@@ -48,11 +52,8 @@ __global__ void __launch_bounds__(256) uc::transpose_bf16_kernel(bf16r2_view_t s
     std::size_t const rows = source.extent(0), columns = source.extent(1);
     std::size_t const source_stride = source.stride_bytes(0) / sizeof(bf16_t);
     std::size_t const destination_stride = destination.stride_bytes(0) / sizeof(bf16_t);
-    bool const aligned = ((reinterpret_cast<std::uintptr_t>(source.data()) |
-                           reinterpret_cast<std::uintptr_t>(destination.data()) |
-                           static_cast<std::uintptr_t>(source.stride_bytes(0)) |
-                           static_cast<std::uintptr_t>(destination.stride_bytes(0))) &
-                          15u) == 0u;
+    bool const aligned = cuda::is_aligned(source.data(), 16u) && cuda::is_aligned(destination.data(), 16u) &&
+                         ((source.stride_bytes(0) | destination.stride_bytes(0)) & 15) == 0;
     std::size_t const row_start = static_cast<std::size_t>(blockIdx.y) * 64u;
     std::size_t const column_start = static_cast<std::size_t>(blockIdx.x) * 64u;
     u32_t const pair = threadIdx.x >> 3, quad = threadIdx.x & 7u;
@@ -80,12 +81,13 @@ __global__ void __launch_bounds__(256) uc::transpose_bf16_kernel(bf16r2_view_t s
         u32_t const *words = &tile[chunk >> 3][(chunk & 7u) * 4u];
         bf16_t *const target = destination.data() + target_row * destination_stride + target_column;
         if (aligned && target_column + 8u <= rows)
-            *reinterpret_cast<uint4 *>(target) = make_uint4(words[0], words[1], words[2], words[3]);
-        else {
-            u16_t *const halves = reinterpret_cast<u16_t *>(target);
+            asm volatile("st.global.v4.u32 [%0], {%1, %2, %3, %4};"
+                         :
+                         : "l"(target), "r"(words[0]), "r"(words[1]), "r"(words[2]), "r"(words[3])
+                         : "memory");
+        else
             for (u32_t lane = 0; lane != 8u && target_column + lane < rows; ++lane)
-                halves[lane] = static_cast<u16_t>(words[lane >> 1] >> (16u * (lane & 1u)));
-        }
+                target[lane] = __ushort_as_bfloat16(static_cast<u16_t>(words[lane >> 1] >> (16u * (lane & 1u))));
     }
 }
 
@@ -115,10 +117,9 @@ expected<b8r1_tensor_arena_t> uc::allocate_pack_bf16(std::size_t columns, std::s
 expected_t uc::pack_bf16(bf16r2_view_t b, b8r1_span_t packed, nk_capability_t capabilities,
                          gpu_stream_t &stream) noexcept {
     std::size_t const columns = b.extent(0);
-    return numkong_result(
-        nk_dots_pack_bf16_best(reinterpret_cast<nk_bf16_t const *>(b.data()), columns, b.extent(1), b.stride_bytes(0),
-                               packed.data(), 0, columns, capabilities, stream.numkong()),
-        "packing");
+    return numkong_result(nk_dots_pack_bf16_best(numkong_scalars(b.data()), columns, b.extent(1), b.stride_bytes(0),
+                                                 packed.data(), 0, columns, capabilities, stream.numkong()),
+                          "packing");
 }
 
 expected_t uc::multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t c, nk_capability_t capabilities,
@@ -126,9 +127,9 @@ expected_t uc::multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t
     if (c.extent(0) != a.extent(0))
         return expected_t::fail(status_t::shape_unsupported_k, "[{}x{}]·Bᵀ cannot fill [{}x{}]", a.extent(0),
                                 a.extent(1), c.extent(0), c.extent(1));
-    return numkong_result(nk_dots_packed_bf16_best(reinterpret_cast<nk_bf16_t const *>(a.data()), packed_b.data(),
-                                                   c.data(), a.extent(0), c.extent(1), a.extent(1), a.stride_bytes(0),
-                                                   c.stride_bytes(0), NUMKONG_NULL, 0, capabilities, stream.numkong()),
+    return numkong_result(nk_dots_packed_bf16_best(numkong_scalars(a.data()), packed_b.data(), c.data(), a.extent(0),
+                                                   c.extent(1), a.extent(1), a.stride_bytes(0), c.stride_bytes(0),
+                                                   NUMKONG_NULL, 0, capabilities, stream.numkong()),
                           "product");
 }
 

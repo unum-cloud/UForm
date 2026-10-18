@@ -328,7 +328,7 @@ struct contrastive_segments_t {
  *  This signature expresses the self-scoring configuration: @c towers serves as both the owned rows and
  *  the subgraph columns of one global vertex axis, so the row-side and column-side forces of every
  *  vertex always fold — a bipartite mesh is a different signature, not a flag. One call runs: the
- *  world-tower gather (multi-domain worlds), then per rank the loss (row force straight into the
+ *  world-tower staging and gather (when no process holds the whole world), then per rank the loss (row force straight into the
  *  caller's gradient, column forces into the domain window), the round barrier, the switch
  *  reduce-scatter, the cross-domain force all-reduce, and the column fold — enqueue-only,
  *  deterministic, capture-friendly.
@@ -336,9 +336,14 @@ struct contrastive_segments_t {
 struct distributed_contrastive_segments_t {
 
     /** How many Float32 payload scalars this consumer will @c reserve from the shared
-     *  @ref multimem_domain_t — for main's domain sizing. */
-    [[nodiscard]] static constexpr std::size_t payload_scalars_needed(contrastive_segments_config_t config) noexcept {
-        return static_cast<std::size_t>(config.gpu_subgraphs_per_step) * config.from_vertices_per_gpu * config.hidden;
+     *  @ref multimem_domain_t over @p shape — for main's domain sizing. Beside the column forces, a world no single
+     *  process holds whole also needs the BFloat16 world tower, staged in member 0's window. */
+    [[nodiscard]] static constexpr std::size_t payload_scalars_needed(contrastive_segments_config_t config,
+                                                                      mesh_shape_t const &shape) noexcept {
+        std::size_t const forces = static_cast<std::size_t>(config.gpu_subgraphs_per_step) *
+                                   config.from_vertices_per_gpu * config.hidden;
+        if (shape.gpus_per_host_domain == shape.gpus_per_colocated_domain) return forces;
+        return forces + forces * sizeof(bf16_t) / sizeof(f32_t);
     }
 
     /**
@@ -348,11 +353,12 @@ struct distributed_contrastive_segments_t {
      *
      *  The caller (main) owns the infrastructure, this object only borrows it.
      *
-     *  @param[inout] domain The main-owned level-1 surface; one force window is reserved from it.
+     *  @param[inout] domain The main-owned level-1 surface; one force window is reserved from it, and the world
+     *      tower window when this process does not hold the whole world.
      *  @param[inout] colocated The main-owned level-2 surface; reduce members are wired per rank and
      *      one gather member on the gateway — zero-round identities in single-domain worlds.
-     *  @param[in] arenas @b [gpus] per-rank arenas; loss scratch and member heaps allocate from each
-     *      rank's own.
+     *  @param[in] arenas @b [gpus] per-rank arenas, one per member this process drives
+     *      ( @c [domain.member_offset(),+gpus) ); loss scratch and member heaps allocate from each rank's own.
      *  @param[in] streams @b [gpus] per-rank streams; their contexts scope every per-device setup.
      *  @param[in] towers @b [gpus] per-rank pooled towers — capture-stable device views, baked here so
      *      the per-step slices carry no host arguments.
@@ -377,11 +383,12 @@ struct distributed_contrastive_segments_t {
     [[nodiscard]] u32_t world_domains() const noexcept { return colocated_->multimem_domain_count(); }
 
     /**
-     *  @brief Rank @p rank 's slice of one distributed evaluation — pure enqueue onto @p stream , the
+     *  @brief Local rank @p rank 's slice of one distributed evaluation — pure enqueue onto @p stream , the
      *      shape a fork/join capture body composes directly.
      *
-     *  Rank 0's slice carries the shared phase: (across domains) the world-tower gather every other
-     *  rank's stream waits on. All views were baked at @ref make ; the only per-call argument is the
+     *  When no process holds the whole world, every member first stages its tower into member 0's window and
+     *  barriers; across domains member 0 then gathers the remote towers into that window and a second barrier
+     *  releases the readers. All views were baked at @ref make ; the only per-call argument is the
      *  recipe. Ranks must be enqueued in order @c 0..gpus-1 within a step.
      */
     [[nodiscard]] expected_t operator()(std::size_t rank, contrastive_recipe_t recipe, gpu_stream_t &stream) noexcept;
@@ -389,12 +396,23 @@ struct distributed_contrastive_segments_t {
     /** The eager convenience: every rank's slice in order over the per-rank streams. */
     [[nodiscard]] expected_t operator()(contrastive_recipe_t recipe, std::span<gpu_stream_t> streams) noexcept;
 
+    /** Rebind rank @p rank 's relation view after its owner restaged edge sets of new extents — outside any
+     *  capture, before the next call. */
+    void rebind_relations(std::size_t rank, contrastive_relations_view_t relations) noexcept {
+        relations_[rank] = relations;
+    }
+
   private:
 
-    /** Stage this domain's towers into the gather member's own block, all-gather the remote
-     *  domains' blocks, and record the gather event every rank waits on. Gateway stream only,
+    /** Copy this domain's staged towers into the gather member's own block, all-gather the remote
+     *  domains' blocks, and copy the world tower back into member 0's window. Gateway stream only,
      *  caller already inside its context. */
     [[nodiscard]] expected_t gather_world_tower_(gpu_stream_t &stream) noexcept;
+
+    /** Member 0's window as the @b [subgraphs·rows·hidden] BFloat16 world tower every member reads. */
+    [[nodiscard]] bf16r1_span_t world_tower_() noexcept {
+        return typed_span<bf16_t>(domain_->window_bytes(0, world_tower_window_));
+    }
 
     /** Level-1 reduce of @p rank 's world columns — one switch-reduced window per domain into
      *  the rank's reduce member — then the level-2 recursive-doubling sum; @p column_force receives
@@ -425,15 +443,16 @@ struct distributed_contrastive_segments_t {
     /** This consumer's disjoint window of the domain payload, reserved at @ref make . */
     multimem_window_t window_ {};
 
+    /** The world tower's window, read only in member 0's replica; empty when this process holds the whole
+     *  world and reads the towers in place. */
+    multimem_window_t world_tower_window_ {};
+
     /** @b [gpus] rank-local loss summands on the lead device, peer-written by each rank. */
     f32r1_tensor_arena_t loss_outs_ {};
 
     /** This process's own multimem_domain coordinate — the recursive-doubling home index. Genuinely
      *  baked: not recoverable from the retained topology. */
     u32_t home_domain_index_ = 0;
-
-    /** The gateway's gather-complete ordering token every rank's stream waits on. */
-    gpu_event_t gather_ready_ {};
 
     /** One cross-domain all-reduce buffer per local GPU — its typed payload is the rank's world-column
      *  shard. */
@@ -445,8 +464,8 @@ struct distributed_contrastive_segments_t {
     /** All ranks' subgraph tables in one rank-major table, baked at @ref make . */
     array<gpu_subgraph_t> subgraph_tables_ {};
 
-    /** @b [gpus] tower views the gateway stages into the gather member's own block — populated
-     *  only across domains; the single-domain path reads the same views through the tables. */
+    /** @b [gpus] tower views each rank stages into the world tower — populated only with
+     *  @ref world_tower_window_ ; otherwise the tables read the same views in place. */
     per_gpu_array<bf16r2_view_t> gather_sources_ {};
 
     /** @b [gpus] per-local-GPU relation views — addresses baked, contents restaged per step. */

@@ -239,22 +239,17 @@ expected_t masked_tokens_t::corrupt(tokens_view_t clean, tokens_span_t distorted
         return expected_t::fail(status_t::shape_unsupported_k,
                                 "masking recipe replace+random fractions exceed one ({} + {})", recipe.replace_fraction,
                                 recipe.random_fraction);
-    if (cuMemcpyDtoDAsync(reinterpret_cast<CUdeviceptr>(distorted.data()), reinterpret_cast<CUdeviceptr>(clean.data()),
-                          tokens * sizeof(token_id_t), stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "distorted seed copy failed ({} tokens)", tokens);
-    if (cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(loss_weights.data()), 0, tokens * sizeof(u32_t), stream.get()) !=
-        CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "loss-weight reset failed ({} tokens)", tokens);
+    if (expected_t seeded = copy_device_to_device(clean, distorted, stream); !seeded) return seeded;
+    if (expected_t reset = zero_async(loss_weights, stream); !reset) return reset;
 
     f32_t const open_rate = recipe.token_mask_probability / recipe.token_mean_span;
     f32_t const continue_rate = 1.0f - 1.0f / recipe.token_mean_span;
     std::size_t const segments = segment_lengths.extent(0);
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const segment_grid {grid_size_for(segments), 1u, 1u};
-    return launch_kernel(reinterpret_cast<void const *>(&masked_token_corrupt_kernel_), segment_grid, block_shape,
-                         stream, clean, distorted, loss_weights, segment_offsets, segment_lengths, segment_modality,
-                         recipe.seed, data_epoch, open_rate, continue_rate, recipe.replace_fraction,
-                         recipe.random_fraction);
+    return launch_kernel(&masked_token_corrupt_kernel_, segment_grid, block_shape, stream, clean, distorted,
+                         loss_weights, segment_offsets, segment_lengths, segment_modality, recipe.seed, data_epoch,
+                         open_rate, continue_rate, recipe.replace_fraction, recipe.random_fraction);
 }
 
 expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t clean_targets, u32r1_view_t loss_weights,
@@ -275,16 +270,15 @@ expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t c
     bf16r2_span_t const padded_logit_grad = logit_grad_.span();
     bf16r2_span_t const logit_grad = padded_logit_grad(nk::all, nk::range(0, config_.vocabulary), nk::slice);
     f32r2_span_t const normalized_products {products_.data(), tokens, hidden};
-    expected_t staged = launch_kernel(reinterpret_cast<void const *>(&masked_count_kernel_), one_block, block_shape,
-                                      stream, loss_weights, gradient_scale_.span(), config_.weight);
+    expected_t staged = launch_kernel(&masked_count_kernel_, one_block, block_shape, stream, loss_weights,
+                                      gradient_scale_.span(), config_.weight);
     if (staged) staged = multiply_bf16(normalized, packed_decoder_.view(), logits_.span(), capabilities_, stream);
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&masked_cross_entropy_kernel_), row_grid, block_shape,
-                               stream, logits_.view(), clean_targets, loss_weights, gradient_scale_.view(),
-                               position_loss_.span(), logit_grad);
+        staged = launch_kernel(&masked_cross_entropy_kernel_, row_grid, block_shape, stream, logits_.view(),
+                               clean_targets, loss_weights, gradient_scale_.view(), position_loss_.span(), logit_grad);
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&masked_finalize_kernel_), one_block, block_shape, stream,
-                               position_loss_.view(), gradient_scale_.view(), loss_summands, config_.weight);
+        staged = launch_kernel(&masked_finalize_kernel_, one_block, block_shape, stream, position_loss_.view(),
+                               gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
         staged = multiply_bf16(logit_grad, packed_decoder_transposed_.view(), normalized_products, capabilities_,
                                stream);
@@ -301,11 +295,11 @@ expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t c
 
 expected_t masked_tokens_t::fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept {
     differentiable_weights_t weight;
-    if (sz::failed(weight.name.try_assign(name)))
+    if (sz::failed(weight.name.assign(name)))
         return expected_t::fail(status_t::bad_alloc_k, "weight name assignment failed");
     weight.weights = decoder_weight_.span();
     weight.weights_grad = decoder_weight_grad_.view();
-    if (weights.try_push_back(std::move(weight)) != status_t::success_k)
+    if (weights.push_back(std::move(weight)) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "weight table growth failed");
     return {};
 }
@@ -460,8 +454,8 @@ expected_t masked_patches_t::sample_mask(masking_recipe_t recipe, data_epoch_t d
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const patch_grid {grid_size_for(patches), 1u, 1u};
     u32_t const spatial_patches = patches / config_.temporal_groups;
-    return launch_kernel(reinterpret_cast<void const *>(&patch_mask_sample_kernel_), patch_grid, block_shape, stream,
-                         mask_.span(), recipe.seed, data_epoch, config_.mask_ratio, spatial_patches);
+    return launch_kernel(&patch_mask_sample_kernel_, patch_grid, block_shape, stream, mask_.span(), recipe.seed,
+                         data_epoch, config_.mask_ratio, spatial_patches);
 }
 
 expected_t masked_patches_t::corrupt_raw(nk::tensor_span<pixel_t, 2> raw_patches, gpu_stream_t &stream) noexcept {
@@ -471,8 +465,7 @@ expected_t masked_patches_t::corrupt_raw(nk::tensor_span<pixel_t, 2> raw_patches
                                 patches);
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const patch_grid {grid_size_for(patches), 1u, 1u};
-    return launch_kernel(reinterpret_cast<void const *>(&patch_corrupt_raw_kernel_), patch_grid, block_shape, stream,
-                         raw_patches, mask_.view());
+    return launch_kernel(&patch_corrupt_raw_kernel_, patch_grid, block_shape, stream, raw_patches, mask_.view());
 }
 
 expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t clean_patches,
@@ -494,20 +487,19 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
     std::size_t const rows = patches, outputs = patch_pixels;
     f32r2_span_t const predicted_products {products_.data(), rows, outputs};
     f32r2_span_t const normalized_products {products_.data(), rows, static_cast<std::size_t>(hidden)};
-    expected_t staged = launch_kernel(reinterpret_cast<void const *>(&patch_count_kernel_), one_block, block_shape,
-                                      stream, mask_.view(), gradient_scale_.span(), config_.weight, patch_pixels);
+    expected_t staged = launch_kernel(&patch_count_kernel_, one_block, block_shape, stream, mask_.view(),
+                                      gradient_scale_.span(), config_.weight, patch_pixels);
     if (staged) staged = multiply_bf16(normalized, packed_recon_.view(), predicted_products, capabilities_, stream);
     if (staged)
         staged = numkong_result(nk_cast_best(predicted_products.data(), nk_f32_k, predicted_.data(), nk_bf16_k,
                                              rows * outputs, capabilities_, stream.numkong()),
                                 "prediction narrowing");
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&patch_mae_loss_kernel_), row_grid, block_shape, stream,
-                               predicted_view, clean_patches, mask_.view(), gradient_scale_.view(),
-                               position_loss_.span(), predicted_grad_span);
+        staged = launch_kernel(&patch_mae_loss_kernel_, row_grid, block_shape, stream, predicted_view, clean_patches,
+                               mask_.view(), gradient_scale_.view(), position_loss_.span(), predicted_grad_span);
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&masked_finalize_kernel_), one_block, block_shape, stream,
-                               position_loss_.view(), gradient_scale_.view(), loss_summands, config_.weight);
+        staged = launch_kernel(&masked_finalize_kernel_, one_block, block_shape, stream, position_loss_.view(),
+                               gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
         staged = multiply_bf16(predicted_grad_.view(), packed_recon_transposed_.view(), normalized_products,
                                capabilities_, stream);
@@ -532,11 +524,11 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
 
 expected_t masked_patches_t::fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept {
     differentiable_weights_t weight;
-    if (sz::failed(weight.name.try_assign(name)))
+    if (sz::failed(weight.name.assign(name)))
         return expected_t::fail(status_t::bad_alloc_k, "weight name assignment failed");
     weight.weights = recon_weight_.span();
     weight.weights_grad = recon_weight_grad_.view();
-    if (weights.try_push_back(std::move(weight)) != status_t::success_k)
+    if (weights.push_back(std::move(weight)) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "weight table growth failed");
     return {};
 }
@@ -686,8 +678,8 @@ expected_t masked_frames_t::sample_mask(masking_recipe_t recipe, data_epoch_t da
     u32_t const frames = config_.max_frames;
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const frame_grid {grid_size_for(frames), 1u, 1u};
-    return launch_kernel(reinterpret_cast<void const *>(&frame_mask_sample_kernel_), frame_grid, block_shape, stream,
-                         mask_.span(), recipe.seed, data_epoch, config_.mask_ratio);
+    return launch_kernel(&frame_mask_sample_kernel_, frame_grid, block_shape, stream, mask_.span(), recipe.seed,
+                         data_epoch, config_.mask_ratio);
 }
 
 expected_t masked_frames_t::corrupt_raw(f32r2_span_t raw_frames, gpu_stream_t &stream) noexcept {
@@ -697,8 +689,7 @@ expected_t masked_frames_t::corrupt_raw(f32r2_span_t raw_frames, gpu_stream_t &s
                                 frames);
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const frame_grid {grid_size_for(frames), 1u, 1u};
-    return launch_kernel(reinterpret_cast<void const *>(&frame_corrupt_raw_kernel_), frame_grid, block_shape, stream,
-                         raw_frames, mask_.view());
+    return launch_kernel(&frame_corrupt_raw_kernel_, frame_grid, block_shape, stream, raw_frames, mask_.view());
 }
 
 expected_t masked_frames_t::operator()(bf16r2_view_t normalized, f32r2_view_t clean_frames, f32r1_span_t loss_summands,
@@ -719,20 +710,19 @@ expected_t masked_frames_t::operator()(bf16r2_view_t normalized, f32r2_view_t cl
     std::size_t const rows = frames, outputs = chunk_samples;
     f32r2_span_t const predicted_products {products_.data(), rows, outputs};
     f32r2_span_t const normalized_products {products_.data(), rows, static_cast<std::size_t>(hidden)};
-    expected_t staged = launch_kernel(reinterpret_cast<void const *>(&frame_count_kernel_), one_block, block_shape,
-                                      stream, mask_.view(), gradient_scale_.span(), config_.weight, chunk_samples);
+    expected_t staged = launch_kernel(&frame_count_kernel_, one_block, block_shape, stream, mask_.view(),
+                                      gradient_scale_.span(), config_.weight, chunk_samples);
     if (staged) staged = multiply_bf16(normalized, packed_recon_.view(), predicted_products, capabilities_, stream);
     if (staged)
         staged = numkong_result(nk_cast_best(predicted_products.data(), nk_f32_k, predicted_.data(), nk_bf16_k,
                                              rows * outputs, capabilities_, stream.numkong()),
                                 "prediction narrowing");
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&frame_mae_loss_kernel_), row_grid, block_shape, stream,
-                               predicted_view, clean_frames, mask_.view(), gradient_scale_.view(),
-                               position_loss_.span(), predicted_grad_span);
+        staged = launch_kernel(&frame_mae_loss_kernel_, row_grid, block_shape, stream, predicted_view, clean_frames,
+                               mask_.view(), gradient_scale_.view(), position_loss_.span(), predicted_grad_span);
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&masked_finalize_kernel_), one_block, block_shape, stream,
-                               position_loss_.view(), gradient_scale_.view(), loss_summands, config_.weight);
+        staged = launch_kernel(&masked_finalize_kernel_, one_block, block_shape, stream, position_loss_.view(),
+                               gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
         staged = multiply_bf16(predicted_grad_.view(), packed_recon_transposed_.view(), normalized_products,
                                capabilities_, stream);
@@ -757,11 +747,11 @@ expected_t masked_frames_t::operator()(bf16r2_view_t normalized, f32r2_view_t cl
 
 expected_t masked_frames_t::fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept {
     differentiable_weights_t weight;
-    if (sz::failed(weight.name.try_assign(name)))
+    if (sz::failed(weight.name.assign(name)))
         return expected_t::fail(status_t::bad_alloc_k, "weight name assignment failed");
     weight.weights = recon_weight_.span();
     weight.weights_grad = recon_weight_grad_.view();
-    if (weights.try_push_back(std::move(weight)) != status_t::success_k)
+    if (weights.push_back(std::move(weight)) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "weight table growth failed");
     return {};
 }

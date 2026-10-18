@@ -28,8 +28,9 @@
  *  Float32 gradient @b mean (the switch sum scaled by @c 1/gpus_per_colocated_domain , so learning-rate
  *  semantics are world-size-invariant) through @c multimem.ld_reduce — deterministic by construction — so
  *  identical Adafactor states receive identical inputs and every replica takes the identical step. Across
- *  multimem_domains the gateway's pre-scaled domain term rides the GDAKI all-reduce first, and every
- *  member reads the gateway's world mean over NVLink.
+ *  multimem_domains the gateway, domain member 0 wherever its process sits, rides its pre-scaled domain term
+ *  through the GDAKI all-reduce and writes the world mean back into its own symmetric window, and every member
+ *  reads it there over NVLink after one more domain barrier.
  */
 #pragma once
 
@@ -141,7 +142,7 @@ struct adafactor_t {
 struct distributed_adafactor_t {
 
     /** One rank's state and its materialised world-gradient buffer (single-domain worlds only —
-     *  multi-domain worlds read the gateway member's heap instead), plus the rank's registered
+     *  multi-domain worlds read the gateway member's window instead), plus the rank's registered
      *  gradient-boundary probes — inert zero handles when the signals channel is dark. */
     struct optimizer_rank_t {
         adafactor_t state {};
@@ -165,14 +166,15 @@ struct distributed_adafactor_t {
      *      shared @p domain , and the borrowed @p world_reduce buffer on the gateway.
      *
      *  Only member 0 touches InfiniBand, because the domain sums are already identical on every member and
-     *  the world sum is peer-read back over NVLink. The optimizer constructs no transport of its own:
+     *  the world sum is peer-read back over NVLink. The ranks are this process's members of the domain,
+     *  @c [domain.member_offset(),+arenas.size()) . The optimizer constructs no transport of its own:
      *  the buffer is wired once at the composition root and borrowed here, exactly like the domain —
      *  so many optimizers (the conformance suite's case matrix) share one set of queue pairs.
      *
      *  @param[inout] domain The main-owned level-1 surface; one gradient window is reserved from it.
-     *  @param[inout] world_reduce The main-owned cross-domain all-reduce buffer — a zero-round identity
-     *      in single-domain worlds. Its payload must span at least this optimizer's gradient scalars;
-     *      the unread tail beyond them is harmless (the reduce is elementwise).
+     *  @param[inout] world_reduce The main-owned cross-domain all-reduce buffer wired on member 0 — a zero-round
+     *      identity in single-domain worlds, unwired in processes not holding member 0. On the gateway its payload
+     *      must span at least this optimizer's gradient scalars; the unread tail beyond them is harmless.
      *  @param[in] weights Rank-major @b [ranks·weights_per_rank] weights table.
      */
     [[nodiscard]] static expected<distributed_adafactor_t> make(
@@ -181,14 +183,13 @@ struct distributed_adafactor_t {
         std::span<gpu_stream_t> streams, telemetry_ledger_t &ledger) noexcept;
 
     /**
-     *  @brief Rank @p rank 's slice of one world step — pure enqueue onto @p stream , the shape a
-     *      fork/join capture body composes directly. Rank 0's slice carries the domain's generation
-     *      advance.
+     *  @brief Local rank @p rank 's slice of one world step — pure enqueue onto @p stream , the shape a
+     *      fork/join capture body composes directly.
      *
      *  Stage the rank's BFloat16 grads into its window, barrier, materialise the
      *  switch-reduced world gradient, and take the identical Adafactor step; across
-     *  multimem_domains the gateway member's all-reduce runs between the materialise and the
-     *  update, and every rank reads the gateway's world sum. Ordering contract: this consumer's
+     *  multimem_domains the gateway stages after the barrier, all-reduces and publishes the world mean in its
+     *  window, and a second barrier lets every rank read it. Ordering contract: this consumer's
      *  advance/barrier phase must follow the same cross-consumer order on every rank (see
      *  @ref multimem_domain_t ); ranks are enqueued in order @c 0..gpus-1 within a step. The scheduled
      *  @p learning_rate must be identical on every rank of the step — replicas step in lockstep.
@@ -201,9 +202,8 @@ struct distributed_adafactor_t {
   private:
 
     /** The D>1 tail of one rank's step: the gateway materialises the domain sum into its world
-     *  member's heap, all-reduces it across domains, and records the event every rank's update
-     *  waits on; every rank then steps against the gateway's world sum. Caller holds the rank's
-     *  context. */
+     *  buffer, all-reduces it across domains and copies the world mean into its window; after a domain
+     *  barrier every rank steps against that window. Caller holds the rank's context. */
     [[nodiscard]] expected_t world_gradient_step_(std::size_t rank, f32_t learning_rate, gpu_stream_t &stream) noexcept;
 
     /** One Adafactor state (and, in single-domain worlds, one reduced buffer) per local GPU. */
@@ -222,9 +222,6 @@ struct distributed_adafactor_t {
     /** The run's telemetry ledger — borrowed, like @ref domain_ ; the per-rank probes above feed
      *  it at the gradient boundaries, inert whenever the signals channel is dark. */
     telemetry_ledger_t *ledger_ = nullptr;
-
-    /** The gateway's world-sum-ready ordering token every rank's update waits on. */
-    gpu_event_t world_ready_ {};
 };
 
 } // namespace unum::uform::core

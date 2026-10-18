@@ -92,17 +92,12 @@
 
 #include "core/types.hpp"    // `expected`, `expected_t`, `status_t`, the integer aliases
 #include "core/schedule.cuh" // `gpu_stream_t`, `launch_kernel`, the NumKong products, `cudnn_session_t`
+#include "core/tower_kernels.cuh" // the rotary and E4M3 scaling bodies, `e4m3_range_k`
 
 namespace unum::uform::core {
 
 /** The one head width every SDPA engine tier supports here; heads = hidden / 128. */
 inline constexpr u32_t transformer_head_dim_k = 128u;
-
-/** E4M3's largest normal magnitude — the quantisation range max_abs maps onto. */
-inline constexpr f32_t e4m3_range_k = 240.0f;
-
-/** The descale floor keeping a zero tensor representable — @c max_abs/240 clamps to this. */
-inline constexpr f32_t e4m3_descale_floor_k = 1.0e-12f;
 
 /** The baked geometry and numerics of one block — a different config is a different object. */
 struct transformer_block_config_t {
@@ -190,6 +185,20 @@ struct rope_angles_t {
 };
 
 #if defined(__CUDACC__)
+
+/** The conversions the training kernels hand the bodies of @ref tower_kernels.cuh . */
+struct tower_scalars_t {
+    __host__ __device__ f32_t widen(bf16_t value) const noexcept { return __bfloat162float(value); }
+    __host__ __device__ f32_t widen(f32_t value) const noexcept { return value; }
+    __host__ __device__ bf16_t narrow(f32_t value) const noexcept { return __float2bfloat16_rn(value); }
+    __host__ __device__ e4m3_t narrow_e4m3(f32_t value) const noexcept { return __nv_fp8_e4m3 {value}; }
+
+    /** A template, so the host pass never instantiates the device-only @c __sincosf . */
+    template <typename angle_type_>
+    __host__ __device__ void sincos(angle_type_ angle, f32_t *sine, f32_t *cosine) const noexcept {
+        __sincosf(angle, sine, cosine);
+    }
+};
 
 /**
  *  @brief Learnable RMSNorm forward over strided BFloat16 rows: @c y = x·rsqrt(mean(x²)+eps)·γ , saving the

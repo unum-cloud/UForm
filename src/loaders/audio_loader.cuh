@@ -42,7 +42,7 @@
 #include "core/array.hpp"             // `array` — the per-fill index scratch
 #include "core/gpu_allocators.hpp"    // `pinned_alloc` — the decode's host tapes
 #include "core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
-#include "core/multimodal_batch.hpp"  // `multimodal_batch_on_gpu_t` — the decode target
+#include "core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t` — the decode target
 #include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
 #include "loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
 

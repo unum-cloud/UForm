@@ -111,7 +111,7 @@ struct test_suite_t {
         (void)format_into(line, "  FAIL {}:{}  ", path_basename(message.location.file_name()),
                           static_cast<u32_t>(message.location.line()));
         std::vformat_to(format_into_t {&line}, message.format, std::make_format_args(args...));
-        (void)line.try_push_back('\n');
+        (void)line.push_back('\n');
         emit_line(line.view());
     }
 

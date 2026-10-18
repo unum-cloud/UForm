@@ -14,15 +14,13 @@
 #include <cstddef> // `std::ptrdiff_t`
 #include <cstdint> // `std::int32_t`, `std::uint32_t`
 
-#include <utility>         // `std::move`, `std::forward`
+#include <utility>         // `std::move`
+#include <new>             // `std::launder` — typed spans over byte regions
+#include <type_traits>     // `std::is_implicit_lifetime_v`
 #include <format>          // `std::vformat_to`, `std::make_format_args`, `std::formatter`
 #include <source_location> // `std::source_location`
 
-#include <cuda.h>      // `CUresult`, `cuGetErrorString`
-#include <cuda_bf16.h> // `__nv_bfloat16` behind the `bf16_t` alias
-#include <cuda_fp8.h>  // `__nv_fp8_e4m3` behind the `e4m3_t` alias
-
-#include <numkong/tensor.hpp>          // `nk::tensor_span`, `nk::tensor_view` — `differentiable_weights_t`
+#include <numkong/tensor.hpp>          // `nk::tensor_span`, `nk::tensor_view` — the rank-tagged borrows
 #include <stringzilla/stringzilla.hpp> // `sz::string_t` — the exception-free diagnostics carrier
 
 /** `std::format` support for StringZilla slices, so diagnostics interpolate them directly —
@@ -59,15 +57,14 @@ using i16_t = std::int16_t;
 using i32_t = std::int32_t;
 using i64_t = std::int64_t;
 
-using e4m3_t = __nv_fp8_e4m3;
-using bf16_t = __nv_bfloat16;
 using f32_t = float;
 using f64_t = double;
 
 /** The rank-tagged borrow vocabulary over the scalar dtypes — @c <dtype><rank>_view_t reads,
  *      @c <dtype><rank>_span_t writes, each a borrow into memory owned elsewhere. The owning
  *      @c *_tensor_arena_t / @c *_tensor_pinned_t counterparts live in @c gpu_allocators.hpp , beside the
- *      allocator they bind. Concept-named views (a token rectangle, a pixel image) stay with their cell. */
+ *      allocator they bind, as do the CUDA-scalar @c bf16_t / @c e4m3_t borrows. Concept-named views (a token
+ *      rectangle, a pixel image) stay with their cell. */
 using b8r1_view_t = nk::tensor_view<b8_t, 1>;
 using b8r1_span_t = nk::tensor_span<b8_t, 1>;
 using i16r2_view_t = nk::tensor_view<i16_t, 2>;
@@ -84,16 +81,24 @@ using f32r2_view_t = nk::tensor_view<f32_t, 2>;
 using f32r2_span_t = nk::tensor_span<f32_t, 2>;
 using f32r3_view_t = nk::tensor_view<f32_t, 3>;
 using f32r3_span_t = nk::tensor_span<f32_t, 3>;
-using bf16r1_view_t = nk::tensor_view<bf16_t, 1>;
-using bf16r1_span_t = nk::tensor_span<bf16_t, 1>;
-using bf16r2_view_t = nk::tensor_view<bf16_t, 2>;
-using bf16r2_span_t = nk::tensor_span<bf16_t, 2>;
-using e4m3r1_view_t = nk::tensor_view<e4m3_t, 1>;
-using e4m3r1_span_t = nk::tensor_span<e4m3_t, 1>;
-using e4m3r2_view_t = nk::tensor_view<e4m3_t, 2>;
-using e4m3r2_span_t = nk::tensor_span<e4m3_t, 2>;
-using e4m3r3_view_t = nk::tensor_view<e4m3_t, 3>;
-using e4m3r3_span_t = nk::tensor_span<e4m3_t, 3>;
+
+/** The whole @p value_type_ scalars of @p bytes , a trailing partial scalar dropped — the one place a byte region
+ *  takes on a scalar type. The region comes from an allocation, which creates implicit-lifetime scalars on first
+ *  access, so laundering the address is all it takes, and it touches no memory, so device regions qualify. */
+template <typename value_type_>
+[[nodiscard]] inline nk::tensor_span<value_type_, 1> typed_span(b8r1_span_t bytes) noexcept {
+    static_assert(std::is_implicit_lifetime_v<value_type_>);
+    std::size_t const count = bytes.extent(0) / sizeof(value_type_);
+    return {std::launder(static_cast<value_type_ *>(static_cast<void *>(bytes.data()))), count};
+}
+
+/** The read-only twin of @ref typed_span . */
+template <typename value_type_>
+[[nodiscard]] inline nk::tensor_view<value_type_, 1> typed_view(b8r1_view_t bytes) noexcept {
+    static_assert(std::is_implicit_lifetime_v<value_type_>);
+    std::size_t const count = bytes.extent(0) / sizeof(value_type_);
+    return {std::launder(static_cast<value_type_ const *>(static_cast<void const *>(bytes.data()))), count};
+}
 
 /** One vocabulary entry's index — the byte-level vocabulary (256 bytes + the special tokens)
  *  fits 16 bits, and every token tape, staging cell, and embedding lookup trades in this width. */
@@ -268,7 +273,7 @@ struct format_into_t {
     format_into_t &operator++() noexcept { return *this; }
     format_into_t operator++(int) noexcept { return *this; }
     format_into_t &operator=(char character) noexcept {
-        if (sz::failed(text->try_push_back(character)) && failed != nullptr) *failed = true;
+        if (sz::failed(text->push_back(character)) && failed != nullptr) *failed = true;
         return *this;
     }
 };
@@ -312,7 +317,7 @@ struct expected {
         value_type_ value_; // Live only on the success path (status_ == success_k); managed by hand below.
     };
     status_t status_ = status_t::success_k;
-    CUresult cu_error_ = CUDA_SUCCESS;
+    i32_t cu_error_ = 0; // The CUDA Driver `CUresult` code, zero (`CUDA_SUCCESS`) unless set by `cuda_failure`.
     sz::string_t description_ {};
     std::source_location location_ {};
 
@@ -368,20 +373,6 @@ struct expected {
         return result;
     }
 
-    /** Failure carrying a CUDA Driver error: same as the @ref status_t overload, tagged
-     *  @c cuda_error_k , with the driver's own error string appended to the description. */
-    template <typename... arg_types_>
-    [[nodiscard]] static expected fail(CUresult cu_error, format_at_t format, arg_types_ &&...args) noexcept {
-        expected result = fail(status_t::cuda_error_k, format, std::forward<arg_types_>(args)...);
-        result.cu_error_ = cu_error;
-        char const *cu_error_string = nullptr;
-        if (cuGetErrorString(cu_error, &cu_error_string) != CUDA_SUCCESS || cu_error_string == nullptr)
-            cu_error_string = "unknown";
-        (void)result.description_.try_append(": ");
-        (void)result.description_.try_append(cu_error_string);
-        return result;
-    }
-
     /** Failure adopted from another @ref expected 's error channel: the status, driver error,
      *  description, and failure site travel @b unchanged — the composition path for helpers, so
      *  forwarding never reformats and never loses the original location. */
@@ -408,7 +399,7 @@ struct expected {
 template <>
 struct expected<void> {
     status_t status_ = status_t::success_k;
-    CUresult cu_error_ = CUDA_SUCCESS;
+    i32_t cu_error_ = 0; // The CUDA Driver `CUresult` code, zero (`CUDA_SUCCESS`) unless set by `cuda_failure`.
     sz::string_t description_ {};
     std::source_location location_ {};
 
@@ -433,20 +424,6 @@ struct expected<void> {
         return result;
     }
 
-    /** Failure carrying a CUDA Driver error: same as the @ref status_t overload, tagged
-     *  @c cuda_error_k , with the driver's own error string appended to the description. */
-    template <typename... arg_types_>
-    [[nodiscard]] static expected fail(CUresult cu_error, format_at_t format, arg_types_ &&...args) noexcept {
-        expected result = fail(status_t::cuda_error_k, format, std::forward<arg_types_>(args)...);
-        result.cu_error_ = cu_error;
-        char const *cu_error_string = nullptr;
-        if (cuGetErrorString(cu_error, &cu_error_string) != CUDA_SUCCESS || cu_error_string == nullptr)
-            cu_error_string = "unknown";
-        (void)result.description_.try_append(": ");
-        (void)result.description_.try_append(cu_error_string);
-        return result;
-    }
-
     /** Failure adopted from another @ref expected 's error channel, unchanged. */
     template <typename other_type_>
     [[nodiscard]] static expected fail(expected<other_type_> &&other) noexcept {
@@ -461,18 +438,5 @@ struct expected<void> {
 
 /** The everyday spelling of the value-less @ref expected . */
 using expected_t = expected<void>;
-
-/** One named weight matrix with its gradient — what models publish and optimizers consume.
- *  Vector parameters (norm scales, biases) are @b [1,cols] . The optimizer reads the gradient and
- *  writes the weights, hence the mutability split. The publishing cell's @c fill spells @ref name —
- *  the checkpoint key every SafeTensors parser matches on — since it owns the structure the name
- *  describes; the composition root adds only its @c model. prefix. */
-struct differentiable_weights_t {
-
-    /** The owned checkpoint name — short names ride StringZilla's inline buffer. */
-    sz::string_t name {};
-    nk::tensor_span<bf16_t, 2> weights {};
-    nk::tensor_view<bf16_t, 2> weights_grad {};
-};
 
 } // namespace unum::uform::core

@@ -13,8 +13,8 @@ Read by the mains at the launcher boundary and passed into `mesh_topology_t::boo
   Defaults to `SLURM_NODEID`, then `OMPI_COMM_WORLD_RANK`, then 0.
 - `UFORM_HOST_DOMAIN_COUNT`: the world's node count, via `host_domain_count_from_environment`; 1 skips the InfiniBand tier entirely.
   Defaults to `SLURM_JOB_NUM_NODES`, then `OMPI_COMM_WORLD_SIZE`, then 1.
-- `UFORM_GPUS_PER_MULTIMEM_DOMAIN`: GPUs this process owns on its node — one process per node drives them all over NVLink.
-  Defaults to all visible GPUs.
+- `UFORM_GPUS_PER_MULTIMEM_DOMAIN`: GPUs one NVLink multicast domain spans, 72 on a GB200 NVL72 rack; several processes may share one.
+  Defaults to this process's visible GPUs.
 - `UFORM_JOB_ID`: the rendezvous namespace, minted once per job so two jobs on one filesystem never collide.
   Defaults to `SLURM_JOB_ID`.
 - `UFORM_EXCHANGE_DIR`: the shared-filesystem directory the multi-node bootstrap and collectives rendezvous through.

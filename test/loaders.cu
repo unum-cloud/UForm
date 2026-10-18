@@ -33,7 +33,7 @@
 #include "core/gpu_allocators.hpp"    // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`, the tensor aliases
 #include "core/schedule.cuh"          // `gpu_stream_t`, `copy_host_to_device`, `copy_device_to_host`
 #include "core/mesh.hpp"              // `mesh_topology_t`, `host_domain_index_from_environment`
-#include "core/multimodal_batch.hpp"  // `multimodal_batch_on_gpu_t`, the shape, `fill_coords`, `modality_t`
+#include "core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, the shape, `fill_coords`, `modality_t`
 #include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
 #include "loaders/dataset_shards.hpp" // `column_view_t`
 #include "loaders/tokens_loader.cuh"  // `tokens_loader_parquet_t`, `drawn_shards`
@@ -77,13 +77,10 @@ struct fabricated_tape_t {
     /** @b [blobs+1] byte offsets on the host — the Arrow offsets @ref view hands to @ref column_view_t . */
     array<u64_t> offsets {};
 
-    /** The Arrow packed view a loader decodes: two @c std::span s over the device buffer and host
-     *  offsets, so @c tape[row] is a device slice computed on the host. */
+    /** The Arrow packed view a loader decodes: the device buffer with 64-bit host offsets, so
+     *  @c tape[row] is a device slice computed on the host. */
     [[nodiscard]] column_view_t view() const noexcept {
-        // vendor-boundary: the Apache Arrow packed view is inherently two `std::span`s over the raw device
-        // buffer and the host offsets — the one construction that forces a pointer past the tensor handle.
-        return column_view_t {std::span<b8_t const> {device_bytes.data(), device_bytes.numel()},
-                              std::span<u64_t const> {offsets.data(), offsets.size()}};
+        return column_view_t {device_bytes.view(), {offsets.data(), offsets.size()}};
     }
 
     /**
@@ -97,30 +94,29 @@ struct fabricated_tape_t {
                                                           std::span<std::span<b8_t const> const> blobs) noexcept {
         using result_t = expected<fabricated_tape_t>;
         fabricated_tape_t tape;
-        if (tape.offsets.try_push_back(0) != status_t::success_k)
+        if (tape.offsets.push_back(0) != status_t::success_k)
             return result_t::fail(status_t::bad_alloc_k, "tape offsets seed failed");
         array<b8_t> host;
         for (std::span<b8_t const> const blob : blobs) {
             for (b8_t const byte : blob)
-                if (host.try_push_back(byte) != status_t::success_k)
+                if (host.push_back(byte) != status_t::success_k)
                     return result_t::fail(status_t::bad_alloc_k, "tape byte accumulate failed");
-            if (host.try_push_back(b8_t {0}) != status_t::success_k) // one guard byte per blob
+            if (host.push_back(b8_t {0}) != status_t::success_k) // one guard byte per blob
                 return result_t::fail(status_t::bad_alloc_k, "tape guard append failed");
-            if (tape.offsets.try_push_back(static_cast<u64_t>(host.size())) != status_t::success_k)
+            if (tape.offsets.push_back(static_cast<u64_t>(host.size())) != status_t::success_k)
                 return result_t::fail(status_t::bad_alloc_k, "tape offset append failed");
         }
         std::size_t const total = std::max<std::size_t>(host.size(), 1u);
         // Device memory: `uninitialized` + explicit memset — `zeros` writes through the host pointer.
         tape.device_bytes = b8r1_tensor_arena_t::uninitialized({total}, gpu_arena_alloc<b8_t> {arena}).value;
         if (!tape.device_bytes) return result_t::fail(status_t::bad_alloc_k, "tape device buffer alloc failed");
-        if (CUresult reset = cuMemsetD8(reinterpret_cast<CUdeviceptr>(tape.device_bytes.data()), 0, total);
-            reset != CUDA_SUCCESS)
-            return result_t::fail(reset, "tape device buffer reset failed");
+        if (CUresult reset = cuMemsetD8(device_address(tape.device_bytes.data()), 0, total); reset != CUDA_SUCCESS)
+            return cuda_failure<fabricated_tape_t>(reset, "tape device buffer reset failed");
         nk::tensor_view<b8_t, 1> const host_view {host.data(), host.size()};
         if (expected_t staged = copy_host_to_device(host_view, tape.device_bytes.span(), stream); !staged)
             return result_t::fail(std::move(staged));
         if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
-            return result_t::fail(synced, "tape staging sync failed");
+            return cuda_failure<fabricated_tape_t>(synced, "tape staging sync failed");
         return result_t {std::move(tape)};
     }
 };
@@ -133,19 +129,20 @@ struct fabricated_tape_t {
 [[nodiscard]] static array<b8_t> read_fixture(sz::string_view_t path) noexcept {
     array<b8_t> bytes;
     if (path.empty()) return bytes;
-    sz::string_t const owned {path};
+    sz::string_t owned;
+    if (sz::failed(owned.assign(path))) return bytes;
     std::FILE *file = std::fopen(owned.c_str(), "rb");
     if (file == nullptr) return bytes;
     std::fseek(file, 0, SEEK_END);
     long const size = std::ftell(file);
     std::fseek(file, 0, SEEK_SET);
     if (size > 0) {
-        if (bytes.try_resize(static_cast<std::size_t>(size)) != status_t::success_k) {
+        if (bytes.resize(static_cast<std::size_t>(size)) != status_t::success_k) {
             std::fclose(file);
             return bytes;
         }
         std::size_t const read = std::fread(bytes.data(), 1u, bytes.size(), file);
-        (void)bytes.try_resize(read);
+        (void)bytes.resize(read);
     }
     std::fclose(file);
     return bytes;
@@ -197,7 +194,7 @@ static void draw_primitives_are_stable(test_suite_t &suite) {
 
     std::size_t const draw_count = 100;
     array<u8_t> seen;
-    if (seen.try_resize(draw_count) != status_t::success_k) return suite.check(false, "seen scratch alloc failed");
+    if (seen.resize(draw_count) != status_t::success_k) return suite.check(false, "seen scratch alloc failed");
     bool bijection = true;
     for (std::size_t index = 0; index != draw_count; ++index) {
         std::size_t const row = epoch_permutation(hash(seed, 3u, row_draw_salt_k), data_epoch_t {7u}, index,
@@ -221,16 +218,16 @@ static void file_pick_is_weighted_and_distinct(test_suite_t &suite) {
     u64_t const seed = 0x515Eull;
     stack_array<std::size_t, 5> rows; // file 2 owns ~85% of the rows
     for (std::size_t count : {std::size_t {10}, std::size_t {5}, std::size_t {200}, std::size_t {20}, std::size_t {5}})
-        (void)rows.try_push_back(count);
+        (void)rows.push_back(count);
     array<std::size_t> prefix;
-    if (prefix.try_push_back(0) != status_t::success_k) return suite.check(false, "prefix scratch alloc failed");
+    if (prefix.push_back(0) != status_t::success_k) return suite.check(false, "prefix scratch alloc failed");
     for (std::size_t r = 0; r != rows.size(); ++r)
-        if (prefix.try_push_back(prefix[r] + rows[r]) != status_t::success_k)
+        if (prefix.push_back(prefix[r] + rows[r]) != status_t::success_k)
             return suite.check(false, "prefix scratch alloc failed");
     std::size_t const total_rows = prefix[rows.size()];
 
     array<std::size_t> hits;
-    if (hits.try_resize(rows.size()) != status_t::success_k) return suite.check(false, "hits scratch alloc failed");
+    if (hits.resize(rows.size()) != status_t::success_k) return suite.check(false, "hits scratch alloc failed");
     std::size_t const steps = 4000;
     bool floored = true, distinct = true;
     for (std::size_t step = 0; step != steps; ++step) {
@@ -244,7 +241,7 @@ static void file_pick_is_weighted_and_distinct(test_suite_t &suite) {
             bool already = false;
             for (std::size_t p = 0; p != picked.size(); ++p) already = already || picked[p] == file;
             if (already) continue;
-            (void)picked.try_push_back(file);
+            (void)picked.push_back(file);
         }
         floored = floored && picked.size() >= 2;
         distinct = distinct && (picked.size() < 2 || picked[0] != picked[1]);
@@ -263,12 +260,12 @@ static void file_pick_is_weighted_and_distinct(test_suite_t &suite) {
 static void segment_geometry_packs_multiple_per_row(test_suite_t &suite) {
     u32_t const columns = 8u, rows = 3u, capacity = rows * columns, total_segments = 8u;
     stack_array<u64_t, 5> item_bytes; // truncated to the row width, packed back to back
-    for (u64_t count : {u64_t {3}, u64_t {4}, u64_t {2}, u64_t {5}, u64_t {6}}) (void)item_bytes.try_push_back(count);
+    for (u64_t count : {u64_t {3}, u64_t {4}, u64_t {2}, u64_t {5}, u64_t {6}}) (void)item_bytes.push_back(count);
     u32_t const live_segments = static_cast<u32_t>(item_bytes.size());
 
     array<u32_t> offsets, lengths;
-    if (offsets.try_resize(total_segments + 1u) != status_t::success_k ||
-        lengths.try_resize(total_segments) != status_t::success_k)
+    if (offsets.resize(total_segments + 1u) != status_t::success_k ||
+        lengths.resize(total_segments) != status_t::success_k)
         return suite.check(false, "segment scratch alloc failed");
     u32_t cursor = 0, jumps = 0;
     for (u32_t index = 0; index != total_segments; ++index) {
@@ -324,12 +321,13 @@ static void segment_geometry_packs_multiple_per_row(test_suite_t &suite) {
  *  @param[inout] stream The stream every stage enqueues on.
  */
 static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream) {
-    u32_t const columns = 32u, max_segments = 8u, tube_frames = 2u;
+    u32_t const columns = 32u, max_segments = 8u, tube_frames = 2u, frame_stride = 3u;
     multimodal_batch_shape_t shape {};
     shape.max_rows_per_gpu = 1u;
     shape.max_segments_per_gpu = max_segments;
     shape.max_columns_per_row = columns;
     shape.video.tube_frames = tube_frames; // image/video patch sides stay 0 — fill_coords reads only descriptors
+    shape.video.frame_stride = frame_stride;
     auto made = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {arena}, shape);
     if (!made) return suite.check(false, "coords batch make: {}", to_string(made.status_));
     multimodal_batch_on_gpu_t batch = std::move(made.value_);
@@ -370,11 +368,11 @@ static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &
     i16r2_tensor_arena_t coords =
         i16r2_tensor_arena_t::uninitialized({tokens, 3u}, gpu_arena_alloc<i16_t> {arena}).value;
     if (!coords) return suite.check(false, "coords scratch alloc failed");
-    if (cuMemsetD8(reinterpret_cast<CUdeviceptr>(coords.data()), 0, tokens * 3u * sizeof(i16_t)) != CUDA_SUCCESS)
+    if (cuMemsetD8(device_address(coords.data()), 0, tokens * 3u * sizeof(i16_t)) != CUDA_SUCCESS)
         return suite.check(false, "coords scratch reset failed");
     expected_t filled = fill_coords(batch.segment_offsets.span(), batch.segment_lengths.span(),
                                     batch.segment_modality.span(), batch.image_shapes.view(), batch.video_shapes.view(),
-                                    tube_frames, coords.span(), stream);
+                                    tube_frames, frame_stride, coords.span(), stream);
     suite.check(static_cast<bool>(filled), "fill_coords should succeed: {}", to_string(filled.status_));
     if (!filled) return;
 
@@ -400,7 +398,7 @@ static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &
             }
             case modality_t::video_k: {
                 u32_t const pc = video_shapes[s, 2], gpf = static_cast<u32_t>(video_shapes[s, 1]) * pc;
-                want_t = static_cast<i16_t>((k / gpf) * tube_frames);
+                want_t = static_cast<i16_t>((k / gpf) * tube_frames * frame_stride); // the tube's first source frame
                 want_h = static_cast<i16_t>((k % gpf) / pc);
                 want_w = static_cast<i16_t>((k % gpf) % pc);
                 break;
@@ -441,7 +439,7 @@ static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, array
     if (!tape_made) return suite.check(false, "[{}] audio tape: {}", label, to_string(tape_made.status_));
     fabricated_tape_t tape = std::move(tape_made.value_);
     stack_array<u64_t, 1> drawn;
-    (void)drawn.try_push_back(0);
+    (void)drawn.push_back(0);
     audio_batch_shape_t const representation {chunk, sample_rate};
     std::span<audio_batch_shape_t const> const representations {&representation, 1};
     expected_t decoded = decode_audios(pool, tape.view(), drawn.view(), representations, batch.audio_samples.span(),
@@ -494,7 +492,7 @@ static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_s
     if (clip.empty()) return; // audio fixture unset — skip
     u32_t const columns = 16u, chunk = 400u, max_segments = 4u, sample_rate = 16000u;
     array<b8_t> garbage; // not a decodable container → silence, but not the whole batch
-    if (garbage.try_resize(64u) != status_t::success_k) return suite.check(false, "garbage scratch alloc failed");
+    if (garbage.resize(64u) != status_t::success_k) return suite.check(false, "garbage scratch alloc failed");
     for (std::size_t i = 0; i != garbage.size(); ++i) garbage[i] = b8_t {0x7F};
 
     multimodal_batch_shape_t shape {};
@@ -508,14 +506,14 @@ static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_s
     multimodal_batch_on_gpu_t batch = std::move(made.value_);
 
     stack_array<std::span<b8_t const>, 2> blobs;
-    (void)blobs.try_push_back(clip.view());
-    (void)blobs.try_push_back(garbage.view());
+    (void)blobs.push_back(clip.view());
+    (void)blobs.push_back(garbage.view());
     auto tape_made = fabricated_tape_t::make(arena, stream, blobs.view());
     if (!tape_made) return suite.check(false, "isolation tape: {}", to_string(tape_made.status_));
     fabricated_tape_t tape = std::move(tape_made.value_);
     stack_array<u64_t, 2> drawn;
-    (void)drawn.try_push_back(0);
-    (void)drawn.try_push_back(1);
+    (void)drawn.push_back(0);
+    (void)drawn.push_back(1);
     audio_batch_shape_t const representation {chunk, sample_rate};
     std::span<audio_batch_shape_t const> const representations {&representation, 1};
     expected_t decoded = decode_audios(pool, tape.view(), drawn.view(), representations, batch.audio_samples.span(),
@@ -573,7 +571,7 @@ static void run_image_decode(test_suite_t &suite, sz::string_view_t label, array
     if (!tape_made) return suite.check(false, "[{}] image tape: {}", label, to_string(tape_made.status_));
     fabricated_tape_t tape = std::move(tape_made.value_);
     stack_array<u64_t, 1> drawn;
-    (void)drawn.try_push_back(0);
+    (void)drawn.push_back(0);
     image_batch_shape_t const representation {patch, channels};
     std::span<image_batch_shape_t const> const representations {&representation, 1};
     expected_t decoded = decode_images(jpeg, pool, tape.view(), drawn.view(), representations, batch.images.span(),
@@ -651,14 +649,14 @@ static void run_video_decode(test_suite_t &suite, sz::string_view_t label, array
 
     stack_array<video_batch_shape_t, 4> representations; // one flat shape per stride, sharing the grid's patch geometry
     for (u32_t stride : frame_strides)
-        (void)representations.try_push_back(video_batch_shape_t {patch, channels, tube_frames, stride});
+        (void)representations.push_back(video_batch_shape_t {patch, channels, tube_frames, stride});
 
     std::span<b8_t const> one = clip.view();
     auto tape_made = fabricated_tape_t::make(arena, stream, {&one, 1});
     if (!tape_made) return suite.check(false, "[{}] video tape: {}", label, to_string(tape_made.status_));
     fabricated_tape_t tape = std::move(tape_made.value_);
     stack_array<u64_t, 1> drawn;
-    (void)drawn.try_push_back(0);
+    (void)drawn.push_back(0);
     expected_t decoded = decode_videos(nvdec, pool, tape.view(), drawn.view(), representations.view(),
                                        batch.videos.span(), batch.video_shapes.span(), batch.segment_offsets.span(),
                                        batch.segment_lengths.span(), batch.segment_modality.span(), stream);
@@ -732,7 +730,7 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
     if (!audio_tape_made) return suite.check(false, "multimodal: audio tape: {}", to_string(audio_tape_made.status_));
     fabricated_tape_t audio_tape = std::move(audio_tape_made.value_);
     stack_array<u64_t, 1> audio_drawn;
-    (void)audio_drawn.try_push_back(0);
+    (void)audio_drawn.push_back(0);
     audio_batch_shape_t const audio_representation {chunk, 16000u};
     std::span<audio_batch_shape_t const> const audio_reps {&audio_representation, 1};
     if (!decode_audios(pool, audio_tape.view(), audio_drawn.view(), audio_reps, audio_batch.audio_samples.span(),
@@ -756,7 +754,7 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
     if (!image_tape_made) return suite.check(false, "multimodal: image tape: {}", to_string(image_tape_made.status_));
     fabricated_tape_t image_tape = std::move(image_tape_made.value_);
     stack_array<u64_t, 1> image_drawn;
-    (void)image_drawn.try_push_back(0);
+    (void)image_drawn.push_back(0);
     image_batch_shape_t const image_representation {patch, 4u};
     std::span<image_batch_shape_t const> const image_reps {&image_representation, 1};
     if (!decode_images(jpeg, pool, image_tape.view(), image_drawn.view(), image_reps, image_batch.images.span(),
@@ -820,11 +818,11 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
     i16r2_tensor_arena_t coords =
         i16r2_tensor_arena_t::uninitialized({tokens, 3u}, gpu_arena_alloc<i16_t> {arena}).value;
     if (!coords) return suite.check(false, "multimodal: coords alloc failed");
-    if (cuMemsetD8(reinterpret_cast<CUdeviceptr>(coords.data()), 0, tokens * 3u * sizeof(i16_t)) != CUDA_SUCCESS)
+    if (cuMemsetD8(device_address(coords.data()), 0, tokens * 3u * sizeof(i16_t)) != CUDA_SUCCESS)
         return suite.check(false, "multimodal: coords reset failed");
     expected_t filled = fill_coords(mixed.segment_offsets.span(), mixed.segment_lengths.span(),
                                     mixed.segment_modality.span(), mixed.image_shapes.view(), mixed.video_shapes.view(),
-                                    tube_frames, coords.span(), stream);
+                                    tube_frames, mixed_shape.video.frame_stride, coords.span(), stream);
     suite.check(static_cast<bool>(filled), "multimodal: fill_coords over the mixed packet: {}",
                 to_string(filled.status_));
     if (!filled) return;
@@ -961,11 +959,11 @@ int main() {
         for_each_env_input("UFORM_TEST_VIDEO", [&](sz::string_view_t path) {
             array<b8_t> const clip = read_fixture(path);
             stack_array<u32_t, 1> one_stride;
-            (void)one_stride.try_push_back(1u);
+            (void)one_stride.push_back(1u);
             run_video_decode(suite, "video-1view", clip, one_stride.view(), arena, stream, pool, nvdec);
             stack_array<u32_t, 2> two_strides;
-            (void)two_strides.try_push_back(1u);
-            (void)two_strides.try_push_back(4u);
+            (void)two_strides.push_back(1u);
+            (void)two_strides.push_back(4u);
             run_video_decode(suite, "video-2view", clip, two_strides.view(), arena, stream, pool, nvdec);
         });
     }

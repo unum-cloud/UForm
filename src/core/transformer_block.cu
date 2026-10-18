@@ -142,7 +142,7 @@ expected<rope_angles_t> rope_angles_t::make(gpu_arena_t &arena, u32_t max_positi
     for (u32_t axis = 0; axis != 3; ++axis) total += static_cast<std::size_t>(max_positions) * pair_counts[axis];
     angles.angles_ = f32r1_tensor_arena_t::uninitialized({total}, f32_alloc).value;
     array<f32_t> host_angles {};
-    if (!angles.angles_ || host_angles.try_resize(total) != status_t::success_k)
+    if (!angles.angles_ || host_angles.resize(total) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "angle grid allocation failed ({} scalars)", total);
     std::size_t offset = 0;
     for (u32_t axis = 0; axis != 3; ++axis) {
@@ -155,10 +155,9 @@ expected<rope_angles_t> rope_angles_t::make(gpu_arena_t &arena, u32_t max_positi
                                                      -2.0 * pair / static_cast<f64_t>(denominators[axis])));
     }
     std::span<f32_t const> host_view = host_angles.view();
-    if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(angles.angles_.data()), host_view.data(),
-                                       total * sizeof(f32_t));
+    if (CUresult result = cuMemcpyHtoD(device_address(angles.angles_.data()), host_view.data(), total * sizeof(f32_t));
         result != CUDA_SUCCESS)
-        return result_t::fail(result, "angle grid upload failed");
+        return cuda_failure<rope_angles_t>(result, "angle grid upload failed");
     return result_t {std::move(angles)};
 }
 
@@ -201,23 +200,6 @@ static __global__ void transformer_qk_norm_backward_kernel_(bf16r2_span_t grads,
     }
 }
 
-/** Pick the axis table and angle for one within-head channel pair — the rotary storage invariant. */
-[[nodiscard]] static __device__ f32_t transformer_rope_angle_(u32_t head_pair, i16r2_view_t coords, std::size_t token,
-                                                              rope_angles_view_t const &angles) noexcept {
-    u32_t const temporal_pairs = static_cast<u32_t>(angles.temporal.extent(1));
-    u32_t const height_pairs = static_cast<u32_t>(angles.height.extent(1));
-    if (head_pair < temporal_pairs) {
-        std::size_t const coord = static_cast<std::size_t>(coords[token, 0]);
-        return angles.temporal[coord, head_pair];
-    }
-    if (head_pair < temporal_pairs + height_pairs) {
-        std::size_t const coord = static_cast<std::size_t>(coords[token, 1]);
-        return angles.height[coord, head_pair - temporal_pairs];
-    }
-    std::size_t const coord = static_cast<std::size_t>(coords[token, 2]);
-    return angles.width[coord, head_pair - temporal_pairs - height_pairs];
-}
-
 /**
  *  @brief Rotary rotation in place over one strided role slice (Q or K inside the packed QKV):
  *      the split-half channel pair @b (k,k+64) rotates by the axis angle its index selects — the
@@ -232,24 +214,9 @@ static __global__ void transformer_qk_norm_backward_kernel_(bf16r2_span_t grads,
  */
 static __global__ void transformer_rope_kernel_(bf16r2_span_t values, rope_angles_view_t angles, i16r2_view_t coords,
                                                 u32_t heads, u32_t role_offset, f32_t angle_sign) {
-    std::size_t const tokens = values.extent(0);
-    u32_t const pairs_per_head = transformer_head_dim_k >> 1u;
-    std::size_t const pairs_per_token = static_cast<std::size_t>(pairs_per_head) * heads;
-    std::size_t const total_pairs = pairs_per_token * tokens;
-    std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t pair_index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-         pair_index < total_pairs; pair_index += stride) {
-        std::size_t const token = pair_index / pairs_per_token;
-        u32_t const head = static_cast<u32_t>((pair_index % pairs_per_token) / pairs_per_head);
-        u32_t const pair = static_cast<u32_t>(pair_index % pairs_per_head);
-        u32_t const channel = role_offset + head * transformer_head_dim_k + pair;
-        f32_t const real = __bfloat162float(values[token, channel]);
-        f32_t const imaginary = __bfloat162float(values[token, channel + pairs_per_head]);
-        f32_t sin_value, cos_value;
-        __sincosf(angle_sign * transformer_rope_angle_(pair, coords, token, angles), &sin_value, &cos_value);
-        values[token, channel] = __float2bfloat16_rn(real * cos_value - imaginary * sin_value);
-        values[token, channel + pairs_per_head] = __float2bfloat16_rn(real * sin_value + imaginary * cos_value);
-    }
+    rope_rotate(values, angles, coords, heads, transformer_head_dim_k, role_offset, angle_sign,
+                static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x,
+                static_cast<std::size_t>(gridDim.x) * blockDim.x, tower_scalars_t {});
 }
 
 /**
@@ -331,10 +298,8 @@ template <typename value_type_>
 static __global__ void transformer_token_quantize_kernel_(nk::tensor_view<value_type_, 2> values, e4m3r2_span_t shadow,
                                                           f32r1_span_t token_scales) {
     std::size_t const token = blockIdx.x;
-    u32_t const width = static_cast<u32_t>(values.extent(1));
-    f32_t thread_max = 0.0f;
-    for (u32_t channel = threadIdx.x; channel < width; channel += blockDim.x)
-        thread_max = fmaxf(thread_max, fabsf(static_cast<f32_t>(values[token, channel])));
+    tower_scalars_t const scalars;
+    f32_t thread_max = token_largest(values, token, threadIdx.x, blockDim.x, scalars);
     // Max through the additive reduce tree: fold |x| via the shuffle butterfly's max analogue.
     for (unsigned delta = warp_size_k / 2u; delta != 0u; delta /= 2u)
         thread_max = fmaxf(thread_max, __shfl_xor_sync(0xffffffffu, thread_max, delta));
@@ -351,11 +316,8 @@ static __global__ void transformer_token_quantize_kernel_(nk::tensor_view<value_
         if (lane_index == 0u) token_max = staged;
     }
     __syncthreads();
-    f32_t const scale = fmaxf(token_max / e4m3_range_k, e4m3_descale_floor_k);
+    f32_t const scale = quantize_token(values, shadow, token, token_max, threadIdx.x, blockDim.x, scalars);
     if (threadIdx.x == 0u) token_scales[token] = scale;
-    f32_t const inverse = 1.0f / scale;
-    for (u32_t channel = threadIdx.x; channel < width; channel += blockDim.x)
-        shadow[token, channel] = __nv_fp8_e4m3 {static_cast<f32_t>(values[token, channel]) * inverse};
 }
 
 /**
@@ -368,20 +330,9 @@ static __global__ void transformer_token_quantize_kernel_(nk::tensor_view<value_
 static __global__ void transformer_token_rescale_kernel_(f32r2_view_t products, f32r1_view_t token_scales,
                                                          f32r1_view_t weight_descale, bf16r2_view_t residual,
                                                          bf16r2_span_t values) {
-    std::size_t const tokens = values.extent(0);
-    u32_t const width = static_cast<u32_t>(values.extent(1));
-    std::size_t const total = tokens * width;
-    std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    f32_t const descale = weight_descale[0];
-    for (std::size_t cell = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; cell < total;
-         cell += stride) {
-        std::size_t const token = cell / width;
-        u32_t const channel = static_cast<u32_t>(cell % width);
-        f32_t value = products[token, channel] * descale;
-        if (!token_scales.empty()) value *= token_scales[token];
-        if (!residual.empty()) value += __bfloat162float(residual[token, channel]);
-        values[token, channel] = __float2bfloat16_rn(value);
-    }
+    rescale_tokens_cells(products, token_scales, weight_descale[0], residual, values,
+                         static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x,
+                         static_cast<std::size_t>(gridDim.x) * blockDim.x, tower_scalars_t {});
 }
 
 /**
@@ -613,10 +564,10 @@ expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &a
 
     // Seed the device SDPA scale — a synchronous setup-path upload, once, outside any capture.
     f32_t const attention_scale = 1.0f / sqrtf(static_cast<f32_t>(transformer_head_dim_k));
-    if (CUresult result = cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(block.attn_scale_.data()), &attention_scale,
+    if (CUresult result = cuMemcpyHtoD(device_address(block.attn_scale_.data()), &attention_scale,
                                        sizeof(attention_scale));
         result != CUDA_SUCCESS)
-        return expected<transformer_block_bf16_t>::fail(result, "SDPA scale upload failed");
+        return cuda_failure<transformer_block_bf16_t>(result, "SDPA scale upload failed");
 
     if (expected_t built = block.build_sdpa_(arena, b8_alloc); !built)
         return expected<transformer_block_bf16_t>::fail(std::move(built));
@@ -660,11 +611,10 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
                                 tokens, config_.max_tokens);
 
     // Residual stash: the backward's pre-norm derivative needs the raw input.
-    if (CUresult result = cuMemcpyDtoDAsync(reinterpret_cast<CUdeviceptr>(input_stash_.data()),
-                                            reinterpret_cast<CUdeviceptr>(input.data()),
-                                            tokens * hidden * sizeof(f32_t), stream.get());
-        result != CUDA_SUCCESS)
-        return expected_t::fail(result, "input stash copy failed ({} tokens)", tokens);
+    if (expected_t stashed = copy_device_to_device(f32r1_view_t {input.data(), tokens * hidden},
+                                                   f32r1_span_t {input_stash_.data(), tokens * hidden}, stream);
+        !stashed)
+        return stashed;
 
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     f32_t const epsilon = config_.rms_eps;
@@ -683,9 +633,9 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
     // Pre-attention norm narrows the residual stream into the fused QKV product's operand.
     if (staged)
         staged = numkong_result(
-            nk_each_rmscast_bf16_best(input.data(), pre_scale, reinterpret_cast<nk_bf16_t *>(normalized_.data()),
-                                      tokens, 1, hidden, hidden * sizeof(f32_t), hidden * sizeof(bf16_t), epsilon,
-                                      capabilities_, stream.numkong()),
+            nk_each_rmscast_bf16_best(input.data(), pre_scale, numkong_scalars(normalized_.data()), tokens, 1, hidden,
+                                      hidden * sizeof(f32_t), hidden * sizeof(bf16_t), epsilon, capabilities_,
+                                      stream.numkong()),
             "pre-attention norm");
     if (staged)
         staged = multiply_bf16(normalized_.view(), packed_weights_[product_qkv_k].view(), qkv_products_.span(),
@@ -697,8 +647,8 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
                                 "QKV narrowing");
     if (staged)
         staged = numkong_result(
-            nk_each_rmscast_bf16_best(qkv_products_.data(), NUMKONG_NULL, reinterpret_cast<nk_bf16_t *>(qkv_.data()),
-                                      tokens, 2 * heads, transformer_head_dim_k, qkv_stride, qkv_narrow_stride, epsilon,
+            nk_each_rmscast_bf16_best(qkv_products_.data(), NUMKONG_NULL, numkong_scalars(qkv_.data()), tokens,
+                                      2 * heads, transformer_head_dim_k, qkv_stride, qkv_narrow_stride, epsilon,
                                       capabilities_, stream.numkong()),
             "QK-norm");
     if (!staged) return staged;
@@ -707,11 +657,11 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
     f32_t const forward_sign = 1.0f;
     std::size_t const rope_pairs = head_vectors * (transformer_head_dim_k >> 1u);
     dim3 const rope_grid {static_cast<u32_t>(divide_round_up(rope_pairs, kernel_block_size_default_k)), 1u, 1u};
-    staged = launch_kernel(reinterpret_cast<void const *>(&transformer_rope_kernel_), rope_grid, block_shape, stream,
-                           qkv_.span(), angles, coords, heads, query_offset, forward_sign);
+    staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, qkv_.span(), angles, coords,
+                           heads, query_offset, forward_sign);
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&transformer_rope_kernel_), rope_grid, block_shape,
-                               stream, qkv_.span(), angles, coords, heads, key_offset, forward_sign);
+        staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, qkv_.span(), angles, coords,
+                               heads, key_offset, forward_sign);
     if (!staged) return staged;
 
     // Fused SDPA over the packed segments, stashing the log-sum-exp for the backward.
@@ -725,11 +675,11 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
                                                      attn_residual_.data(), capabilities_, stream.numkong()),
                                 "attention residual");
     if (staged)
-        staged = numkong_result(nk_each_rmscast_bf16_best(attn_residual_.data(), post_scale,
-                                                          reinterpret_cast<nk_bf16_t *>(mlp_normalized_.data()), tokens,
-                                                          1, hidden, hidden * sizeof(f32_t), hidden * sizeof(bf16_t),
-                                                          epsilon, capabilities_, stream.numkong()),
-                                "post-attention norm");
+        staged = numkong_result(
+            nk_each_rmscast_bf16_best(attn_residual_.data(), post_scale, numkong_scalars(mlp_normalized_.data()),
+                                      tokens, 1, hidden, hidden * sizeof(f32_t), hidden * sizeof(bf16_t), epsilon,
+                                      capabilities_, stream.numkong()),
+            "post-attention norm");
 
     // SwiGLU MLP: fused gate/up product, SiLU·up in Float32 narrowed by a cast, down product, residual.
     if (staged)
@@ -804,7 +754,7 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
     // The gate/up gradient overwrites the narrowed output gradient both down-projection products consumed.
     if (staged)
         staged = launch_kernel(
-            reinterpret_cast<void const *>(&transformer_swiglu_backward_kernel_),
+            &transformer_swiglu_backward_kernel_,
             dim3 {static_cast<u32_t>(divide_round_up(tokens * ffn, kernel_block_size_default_k)), 1u, 1u}, block_shape,
             stream, gate_up_products_.view(), f32r2_view_t {silu_up_grad}, gate_up_grad);
     if (staged)
@@ -814,13 +764,13 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
 
     // Post-attention norm backward: the residual-stream gradient adds the output gradient.
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&rmscast_backward_kernel), token_grid, block_shape,
-                               stream, attn_residual_.view(), post_norm_scale_.view(), f32r2_view_t {hidden_products},
-                               output_grad, scratch.residual_grad.span(), scratch.inverse_rms.span(), epsilon);
+        staged = launch_kernel(&rmscast_backward_kernel, token_grid, block_shape, stream, attn_residual_.view(),
+                               post_norm_scale_.view(), f32r2_view_t {hidden_products}, output_grad,
+                               scratch.residual_grad.span(), scratch.inverse_rms.span(), epsilon);
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&rmscast_scale_grad_kernel), channel_grid, block_shape,
-                               stream, attn_residual_.view(), scratch.inverse_rms.view(),
-                               f32r2_view_t {hidden_products}, post_norm_scale_grad_.span());
+        staged = launch_kernel(&rmscast_scale_grad_kernel, channel_grid, block_shape, stream, attn_residual_.view(),
+                               scratch.inverse_rms.view(), f32r2_view_t {hidden_products},
+                               post_norm_scale_grad_.span());
 
     // Out-projection backward, then the attention-output gradient narrows into SDPA's dO.
     if (staged)
@@ -846,14 +796,14 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
     dim3 const vector_grid {
         static_cast<u32_t>(divide_round_up(2 * head_vectors * warp_size_k, kernel_block_size_default_k)), 1u, 1u};
     u32_t const query_offset = 0u, key_offset = hidden;
-    staged = launch_kernel(reinterpret_cast<void const *>(&transformer_rope_kernel_), rope_grid, block_shape, stream,
-                           scratch.qkv_grad.span(), angles, coords, heads, query_offset, inverse_sign);
+    staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, scratch.qkv_grad.span(), angles,
+                           coords, heads, query_offset, inverse_sign);
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&transformer_rope_kernel_), rope_grid, block_shape,
-                               stream, scratch.qkv_grad.span(), angles, coords, heads, key_offset, inverse_sign);
+        staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, scratch.qkv_grad.span(),
+                               angles, coords, heads, key_offset, inverse_sign);
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&transformer_qk_norm_backward_kernel_), vector_grid,
-                               block_shape, stream, scratch.qkv_grad.span(), qkv_products_.view(), 2u * heads, epsilon);
+        staged = launch_kernel(&transformer_qk_norm_backward_kernel_, vector_grid, block_shape, stream,
+                               scratch.qkv_grad.span(), qkv_products_.view(), 2u * heads, epsilon);
 
     // QKV projection backward, then the pre-attention norm backward adding the residual-stream gradient.
     if (staged)
@@ -861,13 +811,12 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
                                hidden_products, capabilities_, stream);
     if (staged) staged = weight_gradient(scratch.qkv_grad.view(), normalized_.view(), qkv_weight_grad_.span());
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&rmscast_backward_kernel), token_grid, block_shape,
-                               stream, input_stash_.view(), pre_norm_scale_.view(), f32r2_view_t {hidden_products},
-                               scratch.residual_grad.view(), input_grad, scratch.inverse_rms.span(), epsilon);
+        staged = launch_kernel(&rmscast_backward_kernel, token_grid, block_shape, stream, input_stash_.view(),
+                               pre_norm_scale_.view(), f32r2_view_t {hidden_products}, scratch.residual_grad.view(),
+                               input_grad, scratch.inverse_rms.span(), epsilon);
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&rmscast_scale_grad_kernel), channel_grid, block_shape,
-                               stream, input_stash_.view(), scratch.inverse_rms.view(), f32r2_view_t {hidden_products},
-                               pre_norm_scale_grad_.span());
+        staged = launch_kernel(&rmscast_scale_grad_kernel, channel_grid, block_shape, stream, input_stash_.view(),
+                               scratch.inverse_rms.view(), f32r2_view_t {hidden_products}, pre_norm_scale_grad_.span());
     return staged;
 }
 
@@ -1029,10 +978,9 @@ expected_t transformer_block_bf16_t::build_sdpa_(gpu_arena_t &arena, gpu_arena_a
 
 expected_t transformer_block_bf16_t::stage_ragged_offsets_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
                                                            gpu_stream_t &stream) noexcept {
-    return launch_kernel(reinterpret_cast<void const *>(&transformer_ragged_offsets_kernel_), dim3 {1u, 1u, 1u},
-                         dim3 {warp_size_k, 1u, 1u}, stream, segment_offsets, segment_lengths,
-                         ragged_qkv_offsets_.span(), ragged_hidden_offsets_.span(), ragged_seq_lens_.span(),
-                         config_.hidden);
+    return launch_kernel(&transformer_ragged_offsets_kernel_, dim3 {1u, 1u, 1u}, dim3 {warp_size_k, 1u, 1u}, stream,
+                         segment_offsets, segment_lengths, ragged_qkv_offsets_.span(), ragged_hidden_offsets_.span(),
+                         ragged_seq_lens_.span(), config_.hidden);
 }
 
 expected_t transformer_block_bf16_t::run_sdpa_forward_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
@@ -1093,9 +1041,9 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
     // RMSNorm of `groups` vectors of `columns` per token, in place when `target` is `source`.
     auto const normalize = [&](bf16_t const *source, f32_t const *gamma, bf16_t *target, std::size_t groups,
                                std::size_t columns, std::size_t stride) -> expected_t {
-        nk_status_t const status = nk_each_rmsnorm_bf16_best(
-            reinterpret_cast<nk_bf16_t const *>(source), gamma, reinterpret_cast<nk_bf16_t *>(target), tokens, groups,
-            columns, stride, stride, config_.rms_eps, capabilities_, stream.numkong());
+        nk_status_t const status = nk_each_rmsnorm_bf16_best(numkong_scalars(source), gamma, numkong_scalars(target),
+                                                             tokens, groups, columns, stride, stride, config_.rms_eps,
+                                                             capabilities_, stream.numkong());
         if (status != nk_success_k)
             return expected_t::fail(status_t::cuda_error_k, "RMSNorm failed: {}", nk_status_name(status));
         return {};
@@ -1105,9 +1053,8 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
     expected_t launched = normalize(input.data(), pre_norm_scale_.data(), normalized_.data(), 1, hidden,
                                     hidden * sizeof(bf16_t));
     if (launched)
-        launched = launch_kernel(reinterpret_cast<void const *>(&transformer_token_quantize_kernel_<bf16_t>),
-                                 token_grid, block_shape, stream, normalized_.view(), normalized_e4m3_.span(),
-                                 token_scales_.span());
+        launched = launch_kernel(&transformer_token_quantize_kernel_<bf16_t>, token_grid, block_shape, stream,
+                                 normalized_.view(), normalized_e4m3_.span(), token_scales_.span());
     if (!launched) return launched;
     launched = project_(product_qkv_k, normalized_e4m3_.view(), token_scales_view, {}, qkv_.span(), stream);
     if (!launched) return launched;
@@ -1120,11 +1067,11 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
     f32_t const forward_sign = 1.0f;
     std::size_t const rope_pairs = head_vectors * (transformer_head_dim_k >> 1u);
     dim3 const rope_grid {static_cast<u32_t>(divide_round_up(rope_pairs, kernel_block_size_default_k)), 1u, 1u};
-    launched = launch_kernel(reinterpret_cast<void const *>(&transformer_rope_kernel_), rope_grid, block_shape, stream,
-                             qkv_.span(), angles, coords, heads, query_offset, forward_sign);
+    launched = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, qkv_.span(), angles, coords,
+                             heads, query_offset, forward_sign);
     if (launched)
-        launched = launch_kernel(reinterpret_cast<void const *>(&transformer_rope_kernel_), rope_grid, block_shape,
-                                 stream, qkv_.span(), angles, coords, heads, key_offset, forward_sign);
+        launched = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, qkv_.span(), angles, coords,
+                                 heads, key_offset, forward_sign);
     if (!launched) return launched;
 
     // QK-norm leaves Q and K at unit RMS per head and V stays well inside E4M3's range, so all three cast
@@ -1136,7 +1083,7 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
         return expected_t::fail(status_t::cuda_error_k, "Q/K/V cast failed: {}", nk_status_name(status));
     if (nk::failed(products_.resize({tokens, hidden})))
         return expected_t::fail(status_t::shape_unsupported_k, "attention scratch cannot hold [{}x{}]", tokens, hidden);
-    auto const *const qkv_e4m3 = reinterpret_cast<nk_e4m3_t const *>(qkv_e4m3_.data());
+    nk_e4m3_t const *const qkv_e4m3 = numkong_scalars(qkv_e4m3_.data());
     std::size_t const qkv_bytes = 3 * hidden * sizeof(e4m3_t);
     nk_status_t status = nk_attention_pack_e4m3_best(heads, transformer_head_dim_k, segment_offsets.data(),
                                                      segment_lengths.data(), segments, qkv_e4m3 + hidden, qkv_bytes,
@@ -1152,8 +1099,8 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
         return expected_t::fail(status_t::cuda_error_k, "E4M3 attention failed: {}", nk_status_name(status));
 
     // Out-projection consumes the attention output under per-token scales, adding the residual input.
-    launched = launch_kernel(reinterpret_cast<void const *>(&transformer_token_quantize_kernel_<f32_t>), token_grid,
-                             block_shape, stream, products_.view(), attn_output_e4m3_.span(), token_scales_.span());
+    launched = launch_kernel(&transformer_token_quantize_kernel_<f32_t>, token_grid, block_shape, stream,
+                             products_.view(), attn_output_e4m3_.span(), token_scales_.span());
     if (launched)
         launched = project_(product_out_k, attn_output_e4m3_.view(), token_scales_view, input, attn_residual_.span(),
                             stream);
@@ -1161,23 +1108,20 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
         launched = normalize(attn_residual_.data(), post_norm_scale_.data(), normalized_.data(), 1, hidden,
                              hidden * sizeof(bf16_t));
     if (launched)
-        launched = launch_kernel(reinterpret_cast<void const *>(&transformer_token_quantize_kernel_<bf16_t>),
-                                 token_grid, block_shape, stream, normalized_.view(), normalized_e4m3_.span(),
-                                 token_scales_.span());
+        launched = launch_kernel(&transformer_token_quantize_kernel_<bf16_t>, token_grid, block_shape, stream,
+                                 normalized_.view(), normalized_e4m3_.span(), token_scales_.span());
     if (!launched) return launched;
     launched = project_(product_gate_up_k, normalized_e4m3_.view(), token_scales_view, {}, gate_up_.span(), stream);
     if (!launched) return launched;
-    auto *const gate_up = reinterpret_cast<nk_bf16_t const *>(gate_up_.data());
+    nk_bf16_t const *const gate_up = numkong_scalars(gate_up_.data());
     if (nk_status_t const status = nk_each_swiglu_bf16_best(
-            gate_up, gate_up + ffn, reinterpret_cast<nk_bf16_t *>(silu_up_.data()), tokens, ffn,
-            2 * ffn * sizeof(bf16_t), 2 * ffn * sizeof(bf16_t), ffn * sizeof(bf16_t), 1.0f, 1.0f, capabilities_,
-            stream.numkong());
+            gate_up, gate_up + ffn, numkong_scalars(silu_up_.data()), tokens, ffn, 2 * ffn * sizeof(bf16_t),
+            2 * ffn * sizeof(bf16_t), ffn * sizeof(bf16_t), 1.0f, 1.0f, capabilities_, stream.numkong());
         status != nk_success_k)
         return expected_t::fail(status_t::cuda_error_k, "SwiGLU failed: {}", nk_status_name(status));
     if (launched)
-        launched = launch_kernel(reinterpret_cast<void const *>(&transformer_token_quantize_kernel_<bf16_t>),
-                                 token_grid, block_shape, stream, silu_up_.view(), silu_up_e4m3_.span(),
-                                 token_scales_.span());
+        launched = launch_kernel(&transformer_token_quantize_kernel_<bf16_t>, token_grid, block_shape, stream,
+                                 silu_up_.view(), silu_up_e4m3_.span(), token_scales_.span());
     if (!launched) return launched;
     return project_(product_down_k, silu_up_e4m3_.view(), token_scales_view, attn_residual_.view(), output, stream);
 }
@@ -1188,17 +1132,15 @@ expected_t transformer_block_e4m3_t::project_(std::size_t product, e4m3r2_view_t
     std::size_t const tokens = activations.extent(0), depth = activations.extent(1), width = values.extent(1);
     if (nk::failed(products_.resize({tokens, width})))
         return expected_t::fail(status_t::shape_unsupported_k, "product scratch cannot hold [{}x{}]", tokens, width);
-    nk_status_t const status = nk_dots_packed_e4m3_best(reinterpret_cast<nk_e4m3_t const *>(activations.data()),
-                                                        packed_weights_[product].data(), products_.data(), tokens,
-                                                        width, depth, depth * sizeof(e4m3_t), width * sizeof(f32_t),
-                                                        NUMKONG_NULL, 0, capabilities_, stream.numkong());
+    nk_status_t const status = nk_dots_packed_e4m3_best(
+        numkong_scalars(activations.data()), packed_weights_[product].data(), products_.data(), tokens, width, depth,
+        depth * sizeof(e4m3_t), width * sizeof(f32_t), NUMKONG_NULL, 0, capabilities_, stream.numkong());
     if (status != nk_success_k)
         return expected_t::fail(status_t::cuda_error_k, "E4M3 product {} failed: {}", product, nk_status_name(status));
     f32r1_view_t const weight_descale {weight_descales_.data() + product, 1};
     dim3 const grid {static_cast<u32_t>(divide_round_up(tokens * width, kernel_block_size_default_k)), 1u, 1u};
-    return launch_kernel(reinterpret_cast<void const *>(&transformer_token_rescale_kernel_), grid,
-                         dim3 {kernel_block_size_default_k, 1u, 1u}, stream, products_.view(), token_scales,
-                         weight_descale, residual, values);
+    return launch_kernel(&transformer_token_rescale_kernel_, grid, dim3 {kernel_block_size_default_k, 1u, 1u}, stream,
+                         products_.view(), token_scales, weight_descale, residual, values);
 }
 
 expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gpu_arena_t &arena,
@@ -1291,21 +1233,19 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
     for (quantize_job_t const &job : jobs) {
         std::size_t const scalars = job.source->numel();
         dim3 const grid {static_cast<u32_t>(divide_round_up(scalars, kernel_block_size_default_k)), 1u, 1u};
-        if (cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(max_bits.data()), 0, sizeof(u32_t), stream.get()) !=
-            CUDA_SUCCESS)
-            return result_t::fail(status_t::cuda_error_k, "max-abs reset failed");
+        if (expected_t zeroed = zero_async(max_bits.span(), stream); !zeroed) return result_t::fail(std::move(zeroed));
         bf16r1_view_t const source_flat = job.source->view().flatten<1>();
-        expected_t launched = launch_kernel(reinterpret_cast<void const *>(&transformer_absolute_max_kernel_), grid,
-                                            block_shape, stream, source_flat, max_bits.span());
+        expected_t launched = launch_kernel(&transformer_absolute_max_kernel_, grid, block_shape, stream, source_flat,
+                                            max_bits.span());
         f32r1_span_t const descale {block.weight_descales_.data() + job.product, 1};
         if (launched)
-            launched = launch_kernel(reinterpret_cast<void const *>(&transformer_descale_from_max_kernel_),
-                                     dim3 {1u, 1u, 1u}, dim3 {1u, 1u, 1u}, stream, max_bits.span(), descale);
+            launched = launch_kernel(&transformer_descale_from_max_kernel_, dim3 {1u, 1u, 1u}, dim3 {1u, 1u, 1u},
+                                     stream, max_bits.span(), descale);
         if (launched) {
             f32r1_view_t const descale_view = descale;
             e4m3r1_span_t const shadow_flat = job.shadow->span().flatten<1>();
-            launched = launch_kernel(reinterpret_cast<void const *>(&transformer_quantize_e4m3_kernel_), grid,
-                                     block_shape, stream, source_flat, shadow_flat, descale_view);
+            launched = launch_kernel(&transformer_quantize_e4m3_kernel_, grid, block_shape, stream, source_flat,
+                                     shadow_flat, descale_view);
         }
         if (!launched) return result_t::fail(std::move(launched));
 
@@ -1318,9 +1258,9 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
         packed = b8r1_tensor_arena_t::uninitialized({static_cast<std::size_t>(packed_bytes)}, b8_alloc).value;
         if (!packed)
             return result_t::fail(status_t::bad_alloc_k, "packed weight allocation failed ({} bytes)", packed_bytes);
-        if (nk_status_t const status = nk_dots_pack_e4m3_best(reinterpret_cast<nk_e4m3_t const *>(job.shadow->data()),
-                                                              columns, depth, depth * sizeof(e4m3_t), packed.data(), 0,
-                                                              columns, block.capabilities_, stream.numkong());
+        if (nk_status_t const status = nk_dots_pack_e4m3_best(numkong_scalars(job.shadow->data()), columns, depth,
+                                                              depth * sizeof(e4m3_t), packed.data(), 0, columns,
+                                                              block.capabilities_, stream.numkong());
             status != nk_success_k)
             return result_t::fail(status_t::cuda_error_k, "E4M3 weight packing failed: {}", nk_status_name(status));
     }

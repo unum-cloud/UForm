@@ -15,7 +15,7 @@
  *
  *  A drawn blob is routed by its magic bytes. @b JPEG — the overwhelming majority of web corpora — decodes
  *  @b device-native: nvJPEG's hardware backend takes the compressed bitstream straight from the GDS-resident
- *  reservoir tape (device pointers into @c buffer_ , no host hop) and writes interleaved RGB to device.
+ *  reservoir tape (device pointers into its payload, no host hop) and writes interleaved RGB to device.
  *  @b PNG / @b WebP have no device decoder, so those rows take the audio loader's road — the compressed blob
  *  hops to a pinned tape, a @c forkunion pool decodes it on the CPU (libjpeg-turbo / libpng / libwebp) into
  *  a pinned pixel tape, and one bulk copy lands it on device. Both roads meet at the resize.
@@ -46,18 +46,17 @@
 #include "core/array.hpp"             // `array` — the per-fill index scratch
 #include "core/gpu_allocators.hpp"    // `pinned_alloc` — the non-JPEG fallback's host tapes
 #include "core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
-#include "core/multimodal_batch.hpp"  // `multimodal_batch_on_gpu_t` — the decode target
+#include "core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t` — the decode target
+#include "media/image.hpp"            // `pixel_patches_span_t`
 #include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
 #include "loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
 
 namespace unum::uform::loaders {
 
-/** The writable patch-arranged pixel grid of one batch, shaped
- *  @b [rows,columns,patch_side,patch_side,channels] (RGBA, @c channels=4 ) — the decode's destination.
- *  Each drawn image is one segment that scatters its @c patch_rows·patch_cols patches into a contiguous
- *  column sub-range of a single row @c [column_begin,column_begin+len) , several images sharing a row;
- *  the grid is the whole @c rows·columns cell space, not one image per row. */
-using pixel_patches_span_t = nk::tensor_span<pixel_t, 5>;
+/** The writable patch-arranged pixel grid of one batch, shaped @b [rows,columns,patch_side,patch_side,4] — the
+ *  decode's destination. Each drawn image scatters its patches into a column sub-range of one row, several
+ *  images sharing a row. */
+using media::pixel_patches_span_t;
 
 /** The host-side worker pool the CPU fallback fans PNG / WebP / progressive-JPEG decodes across —
  *  one per run, owned at the composition root (the @b only sanctioned host-thread pool), borrowed here. */
@@ -81,7 +80,7 @@ enum class nvjpeg_backend_t : u8_t {
 struct jpeg_entry_t {
 
     /** Device bitstream pointer into the reservoir tape. */
-    unsigned char const *bitstream;
+    b8_t const *bitstream;
 
     /** The bitstream's byte count. */
     std::size_t length;

@@ -119,7 +119,7 @@ static expected_t grant_local_access_(CUdeviceptr slice, std::size_t bytes, std:
         access.location.id = reader;
         access.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
         if (CUresult result = cuMemSetAccess(slice, bytes, &access, 1); result != CUDA_SUCCESS)
-            return expected_t::fail(result, "slice access grant failed (member={} reader={})", member, reader);
+            return cuda_failure(result, "slice access grant failed (member={} reader={})", member, reader);
     }
     return {};
 }
@@ -135,8 +135,8 @@ expected<gpu_symmetric_arena_t> gpu_symmetric_arena_t::make(std::span<i32_t cons
                               local_devices.size(), member_offset, member_count, bytes_per_member);
     gpu_symmetric_arena_t arena;
     arena.bytes_per_member_ = bytes_per_member;
-    if (arena.devices_.try_assign({local_devices.data(), local_devices.size()}) != status_t::success_k ||
-        arena.handles_.try_resize(member_count) != status_t::success_k)
+    if (arena.devices_.assign({local_devices.data(), local_devices.size()}) != status_t::success_k ||
+        arena.handles_.resize(member_count) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "member table allocation failed ({} of {})", local_devices.size(),
                               member_count);
 
@@ -149,7 +149,7 @@ expected<gpu_symmetric_arena_t> gpu_symmetric_arena_t::make(std::span<i32_t cons
         if (CUresult result = cuMemGetAllocationGranularity(&granularity, &properties,
                                                             CU_MEM_ALLOC_GRANULARITY_RECOMMENDED);
             result != CUDA_SUCCESS)
-            return result_t::fail(result, "granularity query failed (device={})", device);
+            return cuda_failure<gpu_symmetric_arena_t>(result, "granularity query failed (device={})", device);
         if (granularity > stride) stride = granularity;
     }
     arena.member_stride_ = round_up_to_multiple(bytes_per_member, stride);
@@ -157,7 +157,7 @@ expected<gpu_symmetric_arena_t> gpu_symmetric_arena_t::make(std::span<i32_t cons
     // Reserve the WHOLE domain's VA — remote members map into it through `adopt_peer`.
     std::size_t const total_bytes = arena.member_stride_ * member_count;
     if (CUresult result = cuMemAddressReserve(&arena.base_, total_bytes, 0, 0, 0); result != CUDA_SUCCESS)
-        return result_t::fail(result, "symmetric VA reservation failed ({} bytes)", total_bytes);
+        return cuda_failure<gpu_symmetric_arena_t>(result, "symmetric VA reservation failed ({} bytes)", total_bytes);
 
     // Create + map this process's local slices at their domain-member offsets.
     for (std::size_t local = 0; local != local_devices.size(); ++local) {
@@ -168,11 +168,11 @@ expected<gpu_symmetric_arena_t> gpu_symmetric_arena_t::make(std::span<i32_t cons
         // "mapped slice" are the same fact — teardown needs no separate high-water counter.
         CUmemGenericAllocationHandle handle = 0;
         if (CUresult result = cuMemCreate(&handle, arena.member_stride_, &properties, 0); result != CUDA_SUCCESS)
-            return result_t::fail(result, "slice allocation failed (device={} bytes={})", local_devices[local],
-                                  arena.member_stride_);
+            return cuda_failure<gpu_symmetric_arena_t>(result, "slice allocation failed (device={} bytes={})",
+                                                       local_devices[local], arena.member_stride_);
         if (CUresult result = cuMemMap(slice, arena.member_stride_, 0, handle, 0); result != CUDA_SUCCESS) {
             cuMemRelease(handle);
-            return result_t::fail(result, "slice mapping failed (member={})", member);
+            return cuda_failure<gpu_symmetric_arena_t>(result, "slice mapping failed (member={})", member);
         }
         arena.handles_[member] = handle;
         if (expected_t granted = grant_local_access_(slice, arena.member_stride_, arena.devices_.view(), member);
@@ -187,7 +187,7 @@ expected<CUmemFabricHandle> gpu_symmetric_arena_t::export_fabric_handle(std::siz
     CUmemFabricHandle fabric {};
     if (CUresult result = cuMemExportToShareableHandle(&fabric, handles_[member], CU_MEM_HANDLE_TYPE_FABRIC, 0);
         result != CUDA_SUCCESS)
-        return result_t::fail(result, "slice fabric-handle export failed (member={})", member);
+        return cuda_failure<CUmemFabricHandle>(result, "slice fabric-handle export failed (member={})", member);
     return result_t {fabric};
 }
 
@@ -196,11 +196,11 @@ expected_t gpu_symmetric_arena_t::adopt_peer(std::size_t member, CUmemFabricHand
     if (CUresult result = cuMemImportFromShareableHandle(
             &imported, const_cast<void *>(static_cast<void const *>(&handle)), CU_MEM_HANDLE_TYPE_FABRIC);
         result != CUDA_SUCCESS)
-        return expected_t::fail(result, "peer slice import failed (member={})", member);
+        return cuda_failure(result, "peer slice import failed (member={})", member);
     CUdeviceptr const slice = base_ + member * member_stride_;
     if (CUresult result = cuMemMap(slice, member_stride_, 0, imported, 0); result != CUDA_SUCCESS) {
         cuMemRelease(imported);
-        return expected_t::fail(result, "peer slice mapping failed (member={})", member);
+        return cuda_failure(result, "peer slice mapping failed (member={})", member);
     }
     handles_[member] = imported;
     return grant_local_access_(slice, member_stride_, devices_.view(), static_cast<u32_t>(member));
@@ -249,7 +249,7 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
         int supported = 0;
         if (CUresult result = cuDeviceGetAttribute(&supported, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, device);
             result != CUDA_SUCCESS)
-            return result_t::fail(result, "multicast attribute query failed (device={})", device);
+            return cuda_failure<multimem_domain_t>(result, "multicast attribute query failed (device={})", device);
         multimem_everywhere = multimem_everywhere && supported != 0;
     }
 
@@ -264,7 +264,7 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
         if (CUresult result = cuMulticastGetGranularity(&multimem_granularity, &multimem_properties,
                                                         CU_MULTICAST_GRANULARITY_RECOMMENDED);
             result != CUDA_SUCCESS)
-            return result_t::fail(result, "multicast granularity query failed");
+            return cuda_failure<multimem_domain_t>(result, "multicast granularity query failed");
     }
 
     // 1. Reserve the whole domain VA and create this process's local slices.
@@ -323,14 +323,14 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
         if (is_lead) {
             if (CUresult result = cuMulticastCreate(&domain.multimem_handle_, &multimem_properties);
                 result != CUDA_SUCCESS)
-                return result_t::fail(result, "multicast object creation failed (members={} bytes={})", member_count,
-                                      bound_bytes);
+                return cuda_failure<multimem_domain_t>(result, "multicast object creation failed (members={} bytes={})",
+                                                       member_count, bound_bytes);
             if (host_domains_per_domain > 1) {
                 CUmemFabricHandle fabric {};
                 if (CUresult result = cuMemExportToShareableHandle(&fabric, domain.multimem_handle_,
                                                                    CU_MEM_HANDLE_TYPE_FABRIC, 0);
                     result != CUDA_SUCCESS)
-                    return result_t::fail(result, "multicast fabric-handle export failed");
+                    return cuda_failure<multimem_domain_t>(result, "multicast fabric-handle export failed");
                 sz::string_t mc_text;
                 if (!format_fabric_handle_(mc_text, fabric))
                     return result_t::fail(status_t::bad_alloc_k, "multicast handle payload assembly failed");
@@ -356,29 +356,29 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
             if (CUresult result = cuMemImportFromShareableHandle(&domain.multimem_handle_, &fabric,
                                                                  CU_MEM_HANDLE_TYPE_FABRIC);
                 result != CUDA_SUCCESS)
-                return result_t::fail(result, "multicast object import failed");
+                return cuda_failure<multimem_domain_t>(result, "multicast object import failed");
         }
         // Add this process's local devices and bind its local slices — no peer dependency, so no barrier.
         for (i32_t const device : local_devices) {
             CUdevice device_handle = 0;
             if (CUresult result = cuDeviceGet(&device_handle, device); result != CUDA_SUCCESS)
-                return result_t::fail(result, "device handle failed ({})", device);
+                return cuda_failure<multimem_domain_t>(result, "device handle failed ({})", device);
             if (CUresult result = cuMulticastAddDevice(domain.multimem_handle_, device_handle); result != CUDA_SUCCESS)
-                return result_t::fail(result, "multicast add-device failed (device={})", device);
+                return cuda_failure<multimem_domain_t>(result, "multicast add-device failed (device={})", device);
         }
         for (std::size_t local = 0; local != local_count; ++local) {
             u32_t const member = member_offset + static_cast<u32_t>(local);
             if (CUresult result = cuMulticastBindMem(domain.multimem_handle_, 0, domain.replicas_.member_handle(member),
                                                      0, bound_bytes, 0);
                 result != CUDA_SUCCESS)
-                return result_t::fail(result, "multicast bind failed (member={})", member);
+                return cuda_failure<multimem_domain_t>(result, "multicast bind failed (member={})", member);
         }
         if (CUresult result = cuMemAddressReserve(&domain.multimem_pointer_, bound_bytes, 0, 0, 0);
             result != CUDA_SUCCESS)
-            return result_t::fail(result, "multicast reservation failed");
+            return cuda_failure<multimem_domain_t>(result, "multicast reservation failed");
         if (CUresult result = cuMemMap(domain.multimem_pointer_, bound_bytes, 0, domain.multimem_handle_, 0);
             result != CUDA_SUCCESS)
-            return result_t::fail(result, "multicast mapping failed");
+            return cuda_failure<multimem_domain_t>(result, "multicast mapping failed");
         if (expected_t granted = grant_local_access_(domain.multimem_pointer_, bound_bytes, local_devices,
                                                      member_offset);
             !granted)
@@ -390,10 +390,10 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
     //    arrivals; the barrier kernels self-advance from there.
     for (std::size_t local = 0; local != local_count; ++local) {
         u32_t const member = member_offset + static_cast<u32_t>(local);
-        std::span<std::byte> member_slice = domain.replicas_.member_slice(member);
-        CUdeviceptr const counters = reinterpret_cast<CUdeviceptr>(member_slice.data()) + domain.flag_offset_();
+        CUdeviceptr const counters = domain.replicas_.base() + member * domain.replicas_.member_stride() +
+                                     domain.flag_offset_();
         if (CUresult result = cuMemsetD8(counters, 0, 2 * sizeof(u32_t)); result != CUDA_SUCCESS)
-            return result_t::fail(result, "arrival counter reset failed (member={})", member);
+            return cuda_failure<multimem_domain_t>(result, "arrival counter reset failed (member={})", member);
     }
 
     // 5. Every process has finished binding before the first collective runs.
@@ -406,10 +406,8 @@ expected_t multimem_domain_t::barrier(std::size_t member_index, gpu_stream_t &st
     dim3 const one {1u, 1u, 1u};
     dim3 const warp {warp_size_k, 1u, 1u};
     if (tier() == multimem_tier_t::switch_reduced_k)
-        return launch_kernel(reinterpret_cast<void const *>(&multimem_barrier_kernel_), one, warp, stream,
-                             member(member_index));
-    return launch_kernel(reinterpret_cast<void const *>(&multimem_barrier_peer_kernel_), one, warp, stream,
-                         member(member_index));
+        return launch_kernel(&multimem_barrier_kernel_, one, warp, stream, member(member_index));
+    return launch_kernel(&multimem_barrier_peer_kernel_, one, warp, stream, member(member_index));
 }
 
 expected_t multimem_domain_t::reduce_scatter(std::size_t member_index, f32r1_span_t destination,
@@ -421,8 +419,8 @@ expected_t multimem_domain_t::reduce_scatter(std::size_t member_index, f32r1_spa
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const grid_shape {grid_size_for(shard_scalars), 1u, 1u};
     if (tier() == multimem_tier_t::switch_reduced_k)
-        return launch_kernel(reinterpret_cast<void const *>(&multimem_reduce_scatter_kernel_), grid_shape, block_shape,
-                             stream, member(member_index), destination, shard_begin);
-    return launch_kernel(reinterpret_cast<void const *>(&multimem_reduce_scatter_peer_kernel_), grid_shape, block_shape,
-                         stream, member(member_index), destination, shard_begin);
+        return launch_kernel(&multimem_reduce_scatter_kernel_, grid_shape, block_shape, stream, member(member_index),
+                             destination, shard_begin);
+    return launch_kernel(&multimem_reduce_scatter_peer_kernel_, grid_shape, block_shape, stream, member(member_index),
+                         destination, shard_begin);
 }

@@ -69,7 +69,7 @@ static sz::string_t manifest_payload(sz::string_view_t job, u32_t multimem, u32_
 
 /** Write @p content into @p path — one simulated peer's exchange file, planted before the bootstrap
  *  under test reads it. Uses stdio, never a `std::*stream`. */
-static void plant(fs::path const &path, sz::string_t const &content) {
+static void plant(fs::path const &path, sz::string_view_t content) {
     std::FILE *file = std::fopen(path.c_str(), "wb");
     if (file == nullptr) return;
     (void)std::fwrite(content.data(), 1, content.size(), file);
@@ -86,8 +86,7 @@ static bool probe_local_device_name(sz::string_t &name) {
     if (cuDeviceGetName(raw, sizeof(raw) - 1, device) != CUDA_SUCCESS) return false;
     for (char *character = raw; *character != '\0'; ++character)
         if (*character == ' ') *character = '_';
-    name = raw;
-    return true;
+    return sz::succeeded(name.assign(sz::string_view_t {raw}));
 }
 
 /** The durable exchange round-trips a payload byte-for-byte: `publish_text` writes it atomically
@@ -99,7 +98,7 @@ static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
     fs::create_directories(directory, error);
 
     mesh_topology_t topology;
-    if (topology.host_domains.try_resize(2) != status_t::success_k) return suite.check(false, "topology table alloc");
+    if (topology.host_domains.resize(2) != status_t::success_k) return suite.check(false, "topology table alloc");
     topology.host_domain_index = 0;
     (void)format_into(topology.exchange_directory, "{}", directory.c_str());
 
@@ -121,8 +120,7 @@ static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
 /** The single-host_domain world: `bootstrap(0,1)` assembles the whole topology from the local probe
  *  and never opens the exchange directory — the common one-box case. */
 static void single_box_world(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
-    sz::string_t const base_str {base.c_str()};
-    auto result = mesh_topology_t::bootstrap(0, 1, local_devices, base_str.c_str(), "single_box", 10.0);
+    auto result = mesh_topology_t::bootstrap(0, 1, local_devices, base.c_str(), "single_box", 10.0);
     if (!result) return suite.check(false, "single-box bootstrap should succeed: {}", result.description_);
     mesh_topology_t topology = std::move(*result);
     suite.check(topology.host_domain_count() == 1, "world should hold one host_domain: got {}",
@@ -140,7 +138,6 @@ static void single_box_world(test_suite_t &suite, fs::path const &base, u32_t lo
 static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
     sz::string_t device_name;
     if (!probe_local_device_name(device_name)) return suite.check(false, "probing the local GPU name");
-    sz::string_t const base_str {base.c_str()};
     std::error_code error;
 
     // The lead assembles the world by reading a peer's facts, then publishing the merged manifest.
@@ -151,7 +148,7 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
         plant(directory / "host_domain1.mesh",
               facts_payload(job, 1, 2, local_devices, local_devices, "faux-peer", device_name));
         plant(directory / "host_domain1.mesh.arrive", "1\n"); // the peer's arrival at the closing barrier
-        auto result = mesh_topology_t::bootstrap(0, 2, local_devices, base_str.c_str(), job, 10.0);
+        auto result = mesh_topology_t::bootstrap(0, 2, local_devices, base.c_str(), job, 10.0);
         if (!result) suite.check(false, "lead should assemble the world: {}", result.description_);
         else {
             mesh_topology_t lead = std::move(*result);
@@ -173,7 +170,7 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
         fs::create_directories(directory, error);
         plant(directory / "host_domain0.manifest", manifest_payload(job, local_devices, 2, local_devices, device_name));
         plant(directory / "host_domain0.mesh.release", "1\n"); // the lead's release at the closing barrier
-        auto result = mesh_topology_t::bootstrap(1, 2, local_devices, base_str.c_str(), job, 10.0);
+        auto result = mesh_topology_t::bootstrap(1, 2, local_devices, base.c_str(), job, 10.0);
         if (!result) suite.check(false, "follower should adopt the world: {}", result.description_);
         else {
             mesh_topology_t follower = std::move(*result);

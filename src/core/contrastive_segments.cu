@@ -546,15 +546,9 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
             to_vertices_per_mesh, relations.self_edge_base, config_.from_vertices_per_gpu);
 
     // Zero the accumulators: the six contiguous per-vertex rows and the Float32 owned-vertex force.
-    if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(from_vertex_accumulator_.data()), 0,
-                                          from_vertex_accumulator_.numel() * sizeof(f32_t), stream.get());
-        result != CUDA_SUCCESS)
-        return expected_t::fail(result, "accumulator-row reset failed");
+    if (expected_t reset = zero_async(from_vertex_accumulator_.span(), stream); !reset) return reset;
     for (f32r2_tensor_arena_t *const zeroed : {&from_vertices_grad_f32_, &from_vertices_grad_products_})
-        if (CUresult result = cuMemsetD8Async(reinterpret_cast<CUdeviceptr>(zeroed->data()), 0,
-                                              zeroed->numel() * sizeof(f32_t), stream.get());
-            result != CUDA_SUCCESS)
-            return expected_t::fail(result, "vertex-force accumulator reset failed");
+        if (expected_t reset = zero_async(zeroed->span(), stream); !reset) return reset;
 
     f32_t const vertices_per_mesh_float = static_cast<f32_t>(vertices_per_mesh);
     u32_t const prefix_count = prefixes_.size();
@@ -605,8 +599,8 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
 
     // Per-prefix owned-vertex norms, once; each subgraph recomputes only its own vertex norms.
 
-    expected_t launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_prefix_norms_kernel_), vertex_grid,
-                                        block_shape, stream, vertices, from_vertex_norms_.span(), prefixes_);
+    expected_t launched = launch_kernel(&contrastive_prefix_norms_kernel_, vertex_grid, block_shape, stream, vertices,
+                                        from_vertex_norms_.span(), prefixes_);
     if (launched) launched = transpose_bf16(vertices, vertices_transposed, stream);
     if (!launched) return launched;
 
@@ -614,17 +608,16 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
     // global vertex axis before any BCE block runs.
     for (std::size_t subgraph_index = 0; subgraph_index != gpu_subgraphs.extent(0); ++subgraph_index) {
         gpu_subgraph_t const subgraph = gpu_subgraphs[subgraph_index];
-        launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_weight_totals_by_sign_kernel_),
-                                 vertex_grid, block_shape, stream, pos_weight_row, neg_weight_row, relations,
-                                 num_neighbors, subgraph.global_offset);
+        launched = launch_kernel(&contrastive_weight_totals_by_sign_kernel_, vertex_grid, block_shape, stream,
+                                 pos_weight_row, neg_weight_row, relations, num_neighbors, subgraph.global_offset);
         if (!launched) return launched;
     }
 
     for (std::size_t subgraph_index = 0; subgraph_index != gpu_subgraphs.extent(0); ++subgraph_index) {
         gpu_subgraph_t const subgraph = gpu_subgraphs[subgraph_index];
 
-        launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_prefix_norms_kernel_), neighbor_grid,
-                                 block_shape, stream, subgraph.to_vertices, to_vertex_norms_.span(), prefixes_);
+        launched = launch_kernel(&contrastive_prefix_norms_kernel_, neighbor_grid, block_shape, stream,
+                                 subgraph.to_vertices, to_vertex_norms_.span(), prefixes_);
         if (launched) launched = transpose_bf16(subgraph.to_vertices, to_vertices_transposed, stream);
         if (!launched) return launched;
 
@@ -645,44 +638,42 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
             if (!product) return product;
         }
 
-        launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_scaled_cosine_kernel_), block_grid,
-                                 block_shape, stream, raw_dot_view, from_vertex_norms_view, to_vertex_norms_view,
-                                 recipe, scaled_cosine_.span());
+        launched = launch_kernel(&contrastive_scaled_cosine_kernel_, block_grid, block_shape, stream, raw_dot_view,
+                                 from_vertex_norms_view, to_vertex_norms_view, recipe, scaled_cosine_.span());
         if (launched)
-            launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_bce_balanced_kernel_), vertex_grid,
-                                     block_shape, stream, scaled_cosine_view, logit_grad_.span(),
-                                     f32r1_view_t {pos_weight_row}, f32r1_view_t {neg_weight_row}, pos_loss_row,
-                                     neg_loss_row, bias_grad_row, log_inverse_temperature_grad_row, relations, recipe,
-                                     vertices_per_mesh_float, subgraph.global_offset);
+            launched = launch_kernel(&contrastive_bce_balanced_kernel_, vertex_grid, block_shape, stream,
+                                     scaled_cosine_view, logit_grad_.span(), f32r1_view_t {pos_weight_row},
+                                     f32r1_view_t {neg_weight_row}, pos_loss_row, neg_loss_row, bias_grad_row,
+                                     log_inverse_temperature_grad_row, relations, recipe, vertices_per_mesh_float,
+                                     subgraph.global_offset);
         if (launched)
-            launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_raw_dot_grad_kernel_), block_grid,
-                                     block_shape, stream, logit_grad_view, from_vertex_norms_view, to_vertex_norms_view,
-                                     recipe, raw_dot_grad_.span());
+            launched = launch_kernel(&contrastive_raw_dot_grad_kernel_, block_grid, block_shape, stream,
+                                     logit_grad_view, from_vertex_norms_view, to_vertex_norms_view, recipe,
+                                     raw_dot_grad_.span());
         if (launched)
-            launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_from_vertex_self_coefficients_kernel_),
+            launched = launch_kernel(&contrastive_from_vertex_self_coefficients_kernel_,
                                      dim3 {config_.from_vertices_per_gpu, prefix_count, 1u}, block_shape, stream,
                                      raw_dot_grad_view, raw_dot_view, from_vertex_self_coefficients_.span());
         if (launched)
-            launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_to_vertex_self_coefficients_kernel_),
+            launched = launch_kernel(&contrastive_to_vertex_self_coefficients_kernel_,
                                      dim3 {config_.to_vertices_per_gpu, prefix_count, 1u}, block_shape, stream,
                                      raw_dot_grad_view, raw_dot_view, to_vertex_self_coefficients_.span());
         if (launched && prefix_count > 1u)
-            launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_suffix_accumulate_kernel_),
+            launched = launch_kernel(&contrastive_suffix_accumulate_kernel_,
                                      dim3 {grid_size_for(cells_per_prefix), 1u, 1u}, block_shape, stream,
                                      raw_dot_grad_.span());
         if (launched)
-            launched = launch_kernel(
-                reinterpret_cast<void const *>(&contrastive_cast_f32_to_bf16_kernel_), block_grid, block_shape, stream,
-                f32r2_view_t {raw_dot_grad_.data(), prefix_count * rows, num_neighbors}, raw_dot_grad_bf16);
+            launched = launch_kernel(&contrastive_cast_f32_to_bf16_kernel_, block_grid, block_shape, stream,
+                                     f32r2_view_t {raw_dot_grad_.data(), prefix_count * rows, num_neighbors},
+                                     raw_dot_grad_bf16);
         if (!launched) return launched;
 
         // Zero the subgraph's whole force so the segment products fill disjoint bands and the channels beyond
         // the last prefix stay exactly zero.
-        if (CUresult result = cuMemsetD8Async(
-                reinterpret_cast<CUdeviceptr>(subgraph.to_vertices_grad.data()), 0,
-                static_cast<std::size_t>(config_.to_vertices_per_gpu) * config_.hidden * sizeof(f32_t), stream.get());
-            result != CUDA_SUCCESS)
-            return expected_t::fail(result, "subgraph force reset failed (subgraph={})", subgraph_index);
+        std::size_t const force_scalars = static_cast<std::size_t>(config_.to_vertices_per_gpu) * config_.hidden;
+        if (expected_t reset = zero_async(f32r1_span_t {subgraph.to_vertices_grad.data(), force_scalars}, stream);
+            !reset)
+            return reset;
 
         // Gradients per segment: G_seg lives at the suffix-accumulated plane s, and each force fills its band of a
         // `[·,hidden]` tile — the owned one in the products scratch, added onto the accumulator below.
@@ -708,27 +699,26 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
             "vertex force addition");
         if (!launched) return launched;
 
-        launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_from_vertex_self_fold_kernel_),
-                                 vertex_grid, block_shape, stream, vertices, from_vertex_norms_view,
-                                 from_vertex_self_view, from_vertices_grad_f32_.span(), prefixes_);
+        launched = launch_kernel(&contrastive_from_vertex_self_fold_kernel_, vertex_grid, block_shape, stream, vertices,
+                                 from_vertex_norms_view, from_vertex_self_view, from_vertices_grad_f32_.span(),
+                                 prefixes_);
         if (launched)
-            launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_to_vertex_self_fold_kernel_),
-                                     neighbor_grid, block_shape, stream, subgraph.to_vertices, to_vertex_norms_view,
-                                     to_vertex_self_view, subgraph.to_vertices_grad, prefixes_);
+            launched = launch_kernel(&contrastive_to_vertex_self_fold_kernel_, neighbor_grid, block_shape, stream,
+                                     subgraph.to_vertices, to_vertex_norms_view, to_vertex_self_view,
+                                     subgraph.to_vertices_grad, prefixes_);
         if (!launched) return launched;
     }
 
-    launched = launch_kernel(reinterpret_cast<void const *>(&contrastive_finalize_kernel_), dim3 {1u, 1u, 1u},
-                             block_shape, stream, f32r1_view_t {pos_loss_row}, f32r1_view_t {neg_loss_row},
-                             f32r1_view_t {pos_weight_row}, f32r1_view_t {neg_weight_row}, f32r1_view_t {bias_grad_row},
+    launched = launch_kernel(&contrastive_finalize_kernel_, dim3 {1u, 1u, 1u}, block_shape, stream,
+                             f32r1_view_t {pos_loss_row}, f32r1_view_t {neg_loss_row}, f32r1_view_t {pos_weight_row},
+                             f32r1_view_t {neg_weight_row}, f32r1_view_t {bias_grad_row},
                              f32r1_view_t {log_inverse_temperature_grad_row}, recipe, loss_out, bias_grad,
                              log_inverse_temperature_grad, vertices_per_mesh_float);
     if (!launched) return launched;
 
     // Cast the owned-vertex force to BFloat16 — every vertex is owned by exactly one rank.
-    return launch_kernel(reinterpret_cast<void const *>(&contrastive_cast_f32_to_bf16_kernel_),
-                         dim3 {grid_size_for(rows * hidden), 1u, 1u}, block_shape, stream,
-                         from_vertices_grad_f32_.view(), from_vertices_grad);
+    return launch_kernel(&contrastive_cast_f32_to_bf16_kernel_, dim3 {grid_size_for(rows * hidden), 1u, 1u},
+                         block_shape, stream, from_vertices_grad_f32_.view(), from_vertices_grad);
 }
 
 /**
@@ -752,24 +742,21 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     contrastive_segments_config_t config, u32r1_view_t prefix_dims, f64_t timeout_seconds) noexcept {
     using result_t = expected<distributed_contrastive_segments_t>;
     std::size_t const gpus = arenas.size();
+    std::size_t const members = domain.member_count();
     u32_t const domains = colocated.multimem_domain_count();
-    if (gpus == 0 || streams.size() != gpus || domain.member_count() != gpus || towers.size() != gpus ||
+    if (gpus == 0 || streams.size() != gpus || domain.local_member_count() != gpus || towers.size() != gpus ||
         relations.size() != gpus || from_vertices_grads.size() != gpus)
         return result_t::fail(status_t::invalid_input_k,
                               "every rank needs an arena, stream, tower, relations, gradient, " //
-                              "and domain member ({} ranks, {} members)",
-                              gpus, domain.member_count());
-    if (config.gpu_subgraphs_per_step != gpus * domains || config.to_vertices_per_gpu != config.from_vertices_per_gpu)
+                              "and local domain member ({} ranks, {} local members)",
+                              gpus, domain.local_member_count());
+    if (config.gpu_subgraphs_per_step != members * domains ||
+        config.to_vertices_per_gpu != config.from_vertices_per_gpu)
         return result_t::fail(status_t::shape_unsupported_k,
                               "the self-scoring world scores one subgraph per GPU " //
-                              "(subgraphs={} gpus={} domains={} neighbors={} vertices={})",
-                              config.gpu_subgraphs_per_step, gpus, domains, config.to_vertices_per_gpu,
+                              "(subgraphs={} members={} domains={} neighbors={} vertices={})",
+                              config.gpu_subgraphs_per_step, members, domains, config.to_vertices_per_gpu,
                               config.from_vertices_per_gpu);
-    mesh_shape_t const &shape = colocated.topology().shape;
-    if (domains > 1 && shape.gpus_per_host_domain != shape.gpus_per_multimem_domain)
-        return result_t::fail(status_t::shape_unsupported_k,
-                              "one process must drive one multimem_domain (host={} multimem={})",
-                              shape.gpus_per_host_domain, shape.gpus_per_multimem_domain);
 
     distributed_contrastive_segments_t distributed;
     distributed.config_ = config;
@@ -778,20 +765,21 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     distributed.home_domain_index_ = domains > 1 ? colocated.topology().multimem_domain_index() : 0;
     std::size_t const subgraphs = config.gpu_subgraphs_per_step;
     std::size_t const tower_scalars = static_cast<std::size_t>(config.from_vertices_per_gpu) * config.hidden;
-    if (distributed.losses_.try_resize(gpus) != status_t::success_k ||
-        distributed.reduce_buffers_.try_resize(gpus) != status_t::success_k ||
-        distributed.subgraph_tables_.try_resize(gpus * subgraphs) != status_t::success_k ||
-        distributed.relations_.try_resize(gpus) != status_t::success_k ||
-        distributed.from_vertices_grads_.try_resize(gpus) != status_t::success_k)
+    if (distributed.losses_.resize(gpus) != status_t::success_k ||
+        distributed.reduce_buffers_.resize(gpus) != status_t::success_k ||
+        distributed.subgraph_tables_.resize(gpus * subgraphs) != status_t::success_k ||
+        distributed.relations_.resize(gpus) != status_t::success_k ||
+        distributed.from_vertices_grads_.resize(gpus) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "rank table allocation failed ({} ranks)", gpus);
     for (std::size_t rank = 0; rank != gpus; ++rank) {
         distributed.relations_[rank] = relations[rank];
         distributed.from_vertices_grads_[rank] = from_vertices_grads[rank];
     }
-    // The caller's tower views are stored once: in the subgraph tables in a single-domain world,
-    // in the gateway's gather-staging list across domains — never both.
-    if (domains > 1u) {
-        if (distributed.gather_sources_.try_resize(gpus) != status_t::success_k)
+    // The caller's tower views are stored once: in the subgraph tables when this process holds the whole world,
+    // in the staging list otherwise — never both.
+    bool const whole_world = gpus == subgraphs;
+    if (!whole_world) {
+        if (distributed.gather_sources_.resize(gpus) != status_t::success_k)
             return result_t::fail(status_t::bad_alloc_k, "gather source table allocation failed ({} ranks)", gpus);
         for (std::size_t rank = 0; rank != gpus; ++rank) distributed.gather_sources_[rank] = towers[rank];
     }
@@ -805,9 +793,15 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
                                       "rank {}'s arena is not visible to device {} — " //
                                       "construct it with `visible_to`",
                                       rank, peer);
-    expected<multimem_window_t> window = domain.reserve(payload_scalars_needed(config));
+    std::size_t const force_scalars = subgraphs * tower_scalars;
+    expected<multimem_window_t> window = domain.reserve(force_scalars);
     if (!window) return result_t::fail(std::move(window));
     distributed.window_ = window.value_;
+    if (!whole_world) {
+        expected<multimem_window_t> tower_window = domain.reserve(force_scalars * sizeof(bf16_t) / sizeof(f32_t));
+        if (!tower_window) return result_t::fail(std::move(tower_window));
+        distributed.world_tower_window_ = tower_window.value_;
+    }
 
     // Every rank: the loss object and the cross-domain reduce member, both on its own device —
     // entered through the context the rank's stream already owns.
@@ -817,40 +811,37 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
         expected<contrastive_segments_t> loss = contrastive_segments_t::make(arenas[rank], config, prefix_dims);
         if (!loss) return result_t::fail(std::move(loss));
         distributed.losses_[rank] = std::move(loss.value_);
+        u32_t const member = static_cast<u32_t>(domain.member_offset() + rank);
         expected<infiniband_all_reduce<f32_t>> reduce_buffer = infiniband_all_reduce<f32_t>::make(
-            colocated, static_cast<u32_t>(rank), arenas[rank], domains * tower_scalars, streams[rank], timeout_seconds);
+            colocated, member, arenas[rank], domains * tower_scalars, streams[rank], timeout_seconds);
         if (!reduce_buffer) return result_t::fail(std::move(reduce_buffer));
         distributed.reduce_buffers_[rank] = std::move(reduce_buffer.value_);
     }
 
-    // The gateway's gather member, the per-rank loss summands, and the gather-ready ordering token
-    // all live with the lead device.
+    // The gather member, wired only where member 0 lives, and the per-rank loss summands on the lead device.
     {
         switch_to_gpu_t gpu_scope {streams[0]};
         if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (rank=0)");
         expected<infiniband_all_gather<bf16_t>> gather_buffer = infiniband_all_gather<bf16_t>::make(
-            colocated, 0, arenas[0], gpus * tower_scalars, streams[0], timeout_seconds);
+            colocated, 0, arenas[0], members * tower_scalars, streams[0], timeout_seconds);
         if (!gather_buffer) return result_t::fail(std::move(gather_buffer));
         distributed.gather_buffer_ = std::move(gather_buffer.value_);
         gpu_arena_alloc<f32_t> f32_alloc {arenas[0]};
         distributed.loss_outs_ = f32r1_tensor_arena_t::uninitialized({gpus}, f32_alloc).value;
         if (!distributed.loss_outs_)
             return result_t::fail(status_t::bad_alloc_k, "scalar bookkeeping allocation failed");
-        expected<gpu_event_t> event = gpu_event_t::make();
-        if (!event) return result_t::fail(std::move(event));
-        distributed.gather_ready_ = std::move(event.value_);
     }
 
     // Bake every rank's subgraph table once — all the addresses are capture-stable by contract:
-    // caller towers/grads, the domain window, and the gather payload never move after construction.
-    bf16_t const *world_tower = domains > 1u ? distributed.gather_buffer_.payload().data() : nullptr;
+    // caller towers/grads and the domain windows never move after construction.
+    bf16_t const *world_tower = whole_world ? nullptr : distributed.world_tower_().data();
     for (std::size_t rank = 0; rank != gpus; ++rank) {
-        f32_t *const window_base = domain.payload(rank).data() + distributed.window_.offset;
+        f32_t *const window_base = domain.payload(domain.member_offset() + rank).data() + distributed.window_.offset;
         for (std::size_t subgraph = 0; subgraph != subgraphs; ++subgraph) {
             gpu_subgraph_t &entry = distributed.subgraph_at(rank, subgraph);
-            entry.to_vertices = domains > 1u ? bf16r2_view_t {world_tower + subgraph * tower_scalars,
-                                                              config.from_vertices_per_gpu, config.hidden}
-                                             : towers[subgraph];
+            entry.to_vertices = whole_world ? towers[subgraph]
+                                            : bf16r2_view_t {world_tower + subgraph * tower_scalars,
+                                                             config.from_vertices_per_gpu, config.hidden};
             entry.global_offset = subgraph * static_cast<std::size_t>(config.from_vertices_per_gpu);
             entry.to_vertices_grad = f32r2_span_t {window_base + subgraph * tower_scalars, config.from_vertices_per_gpu,
                                                    config.hidden};
@@ -870,42 +861,49 @@ expected_t distributed_contrastive_segments_t::operator()(std::size_t rank, cont
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed ({})", rank);
 
-    // The cross-domain gather rides the lead rank's slice — see the ordering contract.
-    if (rank == 0 && world_domains() > 1u)
-        if (expected_t gathered = gather_world_tower_(stream); !gathered) return gathered;
-    if (world_domains() > 1u)
-        if (CUresult result = cuStreamWaitEvent(stream.get(), gather_ready_.get(), 0); result != CUDA_SUCCESS)
-            return expected_t::fail(result, "gather wait failed (rank={})", rank);
+    std::size_t const member = domain_->member_offset() + rank;
+    std::size_t const members = domain_->member_count();
+    expected_t staged {};
+    if (world_tower_window_.scalars != 0) { // overwrites member 0's window, whose last readers passed the force barrier
+        std::size_t const world_gpu = home_domain_index_ * members + member;
+        staged = copy_device_to_device(bf16r1_view_t {gather_sources_[rank].data(), tower_scalars},
+                                       bf16r1_span_t {world_tower_().data() + world_gpu * tower_scalars, tower_scalars},
+                                       stream);
+        if (staged) staged = domain_->barrier(member, stream);
+        if (staged && member == 0 && world_domains() > 1u) staged = gather_world_tower_(stream);
+        if (staged && world_domains() > 1u) staged = domain_->barrier(member, stream);
+    }
 
     nk::tensor_view<gpu_subgraph_t, 1> const table {&subgraph_at(rank, 0), subgraphs};
     f32r1_span_t const loss_out {loss_outs_.data() + rank, 1};
     bf16r1_span_t const grad_flat {from_vertices_grads_[rank].data(), tower_scalars};
-    f32_t *const window_base = domain_->payload(rank).data() + window_.offset;
-    // The rank's own tower is stored once: across domains in the gather-staging list, in one
-    // domain as its own subgraph's table entry (subgraph index == rank in a one-domain world).
+    f32_t *const window_base = domain_->payload(member).data() + window_.offset;
+    // The rank's own tower is stored once: in the staging list when the world is staged, otherwise as its
+    // own subgraph's table entry (subgraph index == rank when this process holds the whole world).
+    bf16r2_view_t const own_tower = world_tower_window_.scalars != 0 ? gather_sources_[rank]
+                                                                     : subgraph_at(rank, rank).to_vertices;
 
-    bf16r2_view_t const own_tower = world_domains() > 1u ? gather_sources_[rank] : subgraph_at(rank, rank).to_vertices;
-
-    expected_t staged = losses_[rank](own_tower, table, relations_[rank], recipe, vertices_per_mesh, loss_out,
-                                      from_vertices_grads_[rank], stream);
-    if (staged) staged = domain_->barrier(rank, stream);
+    if (staged)
+        staged = losses_[rank](own_tower, table, relations_[rank], recipe, vertices_per_mesh, loss_out,
+                               from_vertices_grads_[rank], stream);
+    if (staged) staged = domain_->barrier(member, stream);
     // Level-1 reduce: in one domain, in place into this rank's own window shard (shards are
     // disjoint across ranks); across domains, into the rank's reduce member — one switch-reduced
     // window per domain, its own global shard in each — then the level-2 recursive-doubling sum.
 
     f32r1_view_t column_force {};
     if (world_domains() == 1u) {
-        f32r1_span_t const own_shard {window_base + rank * tower_scalars, tower_scalars};
-        if (staged) staged = domain_->reduce_scatter(rank, own_shard, window_.offset + rank * tower_scalars, stream);
+        f32r1_span_t const own_shard {window_base + member * tower_scalars, tower_scalars};
+        if (staged)
+            staged = domain_->reduce_scatter(member, own_shard, window_.offset + member * tower_scalars, stream);
         column_force = f32r1_view_t {own_shard};
     }
     else {
         if (staged) staged = reduce_world_columns_(rank, stream, column_force);
     }
     if (staged)
-        staged = launch_kernel(reinterpret_cast<void const *>(&contrastive_column_fold_kernel_),
-                               dim3 {grid_size_for(tower_scalars), 1u, 1u}, dim3 {kernel_block_size_default_k, 1u, 1u},
-                               stream, grad_flat, column_force);
+        staged = launch_kernel(&contrastive_column_fold_kernel_, dim3 {grid_size_for(tower_scalars), 1u, 1u},
+                               dim3 {kernel_block_size_default_k, 1u, 1u}, stream, grad_flat, column_force);
     return staged;
 }
 
@@ -920,33 +918,27 @@ expected_t distributed_contrastive_segments_t::operator()(contrastive_recipe_t r
 }
 
 expected_t distributed_contrastive_segments_t::gather_world_tower_(gpu_stream_t &stream) noexcept {
-    std::size_t const gpus = losses_.size();
-    std::size_t const tower_scalars = static_cast<std::size_t>(config_.from_vertices_per_gpu) * config_.hidden;
-    expected_t staged {};
-    CUdeviceptr const own_block = reinterpret_cast<CUdeviceptr>(gather_buffer_.own_block().data());
-    for (std::size_t rank = 0; rank != gpus && staged; ++rank)
-        if (CUresult result = cuMemcpyDtoDAsync(own_block + rank * tower_scalars * sizeof(bf16_t),
-                                                reinterpret_cast<CUdeviceptr>(gather_sources_[rank].data()),
-                                                tower_scalars * sizeof(bf16_t), stream.get());
-            result != CUDA_SUCCESS)
-            staged = expected_t::fail(result, "tower staging copy failed (rank={})", rank);
+    bf16r1_span_t const own_block = gather_buffer_.own_block();
+    bf16r1_span_t const world_tower = world_tower_();
+    expected_t staged = copy_device_to_device(
+        bf16r1_view_t {world_tower.data() + home_domain_index_ * own_block.extent(0), own_block.extent(0)}, own_block,
+        stream);
     if (staged) staged = gather_buffer_(stream);
-    if (staged)
-        if (CUresult result = cuEventRecord(gather_ready_.get(), stream.get()); result != CUDA_SUCCESS)
-            staged = expected_t::fail(result, "gather event record failed");
+    if (staged) staged = copy_device_to_device(bf16r1_view_t {gather_buffer_.payload()}, world_tower, stream);
     return staged;
 }
 
 expected_t distributed_contrastive_segments_t::reduce_world_columns_(std::size_t rank, gpu_stream_t &stream,
                                                                      f32r1_view_t &column_force) noexcept {
-    std::size_t const gpus = losses_.size();
+    std::size_t const members = domain_->member_count();
+    std::size_t const member = domain_->member_offset() + rank;
     std::size_t const tower_scalars = static_cast<std::size_t>(config_.from_vertices_per_gpu) * config_.hidden;
     f32_t *const shard = reduce_buffers_[rank].payload().data();
     for (u32_t domain = 0; domain != world_domains(); ++domain) {
         f32r1_span_t const domain_shard {shard + domain * tower_scalars, tower_scalars};
         std::size_t const grid_offset = window_.offset +
-                                        (static_cast<std::size_t>(domain) * gpus + rank) * tower_scalars;
-        if (expected_t reduced = domain_->reduce_scatter(rank, domain_shard, grid_offset, stream); !reduced)
+                                        (static_cast<std::size_t>(domain) * members + member) * tower_scalars;
+        if (expected_t reduced = domain_->reduce_scatter(member, domain_shard, grid_offset, stream); !reduced)
             return reduced;
     }
     if (expected_t summed = reduce_buffers_[rank](stream); !summed) return summed;

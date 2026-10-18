@@ -7,7 +7,9 @@
  *  The allocator template argument decides residency: a @c pinned_alloc_t instance is what a host packer
  *  writes, a @c gpu_arena_alloc_t instance is what the towers read, and one @c copy_from between the two is
  *  the whole transfer. Distribution across the multimem_domain and the colocated_domain is
- *  @ref multimodal_batch_mixer_t 's job; batches never know they are distributed.
+ *  @ref multimodal_batch_mixer_t 's job; batches never know they are distributed. This header is the contract
+ *  every build shares and compiles without CUDA; the NVIDIA residencies, the coordinate fill and the mixer live
+ *  in @c multimodal_batch.cuh .
  *
  *  @section multimodal_batch_rows Rectangular rows, segments of any modality
  *
@@ -81,16 +83,10 @@
 #include <cstddef> // `std::size_t`
 
 #include <memory> // `std::allocator_traits` — the batch's per-type rebinding
-#include <span>   // `std::span` — the mixer borrows the composition root's per-GPU tables as views
 
 #include <numkong/tensor.hpp> // `nk::tensor` — the owning storage
 
-#include "core/types.hpp"                  // the scalar aliases, `token_id_t`, `pixel_t`
-#include "core/array.hpp"                  // `per_gpu_array` — the composition root's per-GPU tables
-#include "core/gpu_allocators.hpp"         // `gpu_arena_alloc_t`, `pinned_alloc_t`
-#include "core/schedule.cuh"               // `gpu_stream_t` — the mixer's enqueue surface
-#include "core/multimem_collectives.cuh"   // `multimem_domain_t` — the barrier the exchange brackets
-#include "core/infiniband_collectives.cuh" // `colocated_domain_t` — the cross-host_domain lane
+#include "core/types.hpp" // the scalar aliases, `token_id_t`, `pixel_t`
 
 namespace unum::uform::core {
 
@@ -235,6 +231,20 @@ struct multimodal_batch_shape_t {
     }
 };
 
+/** A read-only borrow of one @ref multimodal_batch , whatever its residency — what a tower reads. Each field
+ *  views the batch tensor of the same name; an absent modality's content view is empty. */
+struct multimodal_batch_view_t {
+    nk::tensor_view<u32_t, 1> segment_offsets {};
+    nk::tensor_view<u32_t, 1> segment_lengths {};
+    nk::tensor_view<modality_t, 1> segment_modality {};
+    nk::tensor_view<token_id_t, 2> tokens {};
+    nk::tensor_view<pixel_t, 5> images {};
+    nk::tensor_view<u16_t, 2> image_shapes {};
+    nk::tensor_view<pixel_t, 6> videos {};
+    nk::tensor_view<u16_t, 2> video_shapes {};
+    nk::tensor_view<f32_t, 3> audio_samples {};
+};
+
 /**
  *  @brief The rectangular geometry and the raw inputs of one GPU's batch: one tensor per modality,
  *      each with its natural extents and dtype, sized by a single @ref multimodal_batch_shape_t — a
@@ -320,6 +330,13 @@ struct multimodal_batch {
      *  (not a per-modality row count) is the only axis with a batch-wide meaning. */
     std::size_t live_segments() const noexcept { return segment_lengths.extent(0); }
 
+    /** Every tensor, borrowed read-only. */
+    [[nodiscard]] multimodal_batch_view_t view() const noexcept {
+        return {segment_offsets.view(), segment_lengths.view(), segment_modality.view(),
+                tokens.view(),          images.view(),          image_shapes.view(),
+                videos.view(),          video_shapes.view(),    audio_samples.view()};
+    }
+
     /**
      *  @brief Allocate every tensor the shape names — once, at setup.
      *
@@ -398,12 +415,6 @@ struct multimodal_batch {
     }
 };
 
-/** The device-resident batch the towers read and the mixer routes. */
-using multimodal_batch_on_gpu_t = multimodal_batch<gpu_arena_alloc_t>;
-
-/** The pinned-host batch a host packer writes before one @c copy_from to the device twin. */
-using multimodal_batch_on_cpu_t = multimodal_batch<pinned_alloc_t>;
-
 /** Rank-5 pixel view of an image group, shaped @b [rows,columns,patch_side,patch_side,channels] —
  *  the patch-arranged content the tower entry peels ( @c reshape<2> ) and projects. */
 using pixel_patches_view_t = nk::tensor_view<pixel_t, 5>;
@@ -437,116 +448,5 @@ using video_shape_view_t = nk::tensor_view<u16_t, 2>;
 
 /** Mutable span twin of @ref video_shape_view_t — @b [max_segments_per_gpu,3] . */
 using video_shape_span_t = nk::tensor_span<u16_t, 2>;
-
-/**
- *  @brief Write every live segment's coordinate @c (t,h,w) into @p coords @b [tokens,3] , one CTA per
- *      segment, dispatching on @p segment_modality and reading the matching per-modality shape tensor.
- *
- *  It is one segment walk over every modality: a segment reads its @c (offset,length) , then threads stripe
- *  @c [0,length) writing @c coords[offset+k] as @c text_k / @c audio_k → (k,0,0) (both 1-D sequences — audio
- *  frames walk the same position axis as tokens, and read no shape descriptor); @c image_k →
- *  (0,k/patch_cols,k%patch_cols) with @c patch_cols=image_shapes[s,1] ; @c video_k →
- *  (k/gpf·tube_frames,(k%gpf)/pc,(k%gpf)%pc) with @c (tg,pr,pc)=video_shapes[s] and @c gpf=pr·pc . PAD
- *  segments ( @c length==0 ) write nothing, so the caller must pre-zero @p coords .
- *
- *  @param[in] tube_frames The video tube depth the temporal coordinate scales by — the batch's fixed value.
- */
-[[nodiscard]] expected_t fill_coords(u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
-                                     modality_span_t segment_modality, image_shape_view_t image_shapes,
-                                     video_shape_view_t video_shapes, u32_t tube_frames, i16r2_span_t coords,
-                                     gpu_stream_t &stream) noexcept;
-
-/**
- *  @brief Shuffles the loaded batches between the GPUs of one multimem_domain — and, once wired,
- *      across the colocated_domain via InfiniBand — so every step trains on a fresh cross-GPU mix.
- *      Borrows the composition root's single @c multimem_domain_t and @c colocated_domain_t .
- *
- *  A mix reads every member's @b loaded batch and writes each member's @b mixed batch — two distinct
- *  per-GPU instances, so no barrier separates reads from overwrites within one mix. Routing is a
- *  keyed bijection every member derives identically in-kernel (an implementation detail of the
- *  translation unit), so it needs no exchange; the multimem_domain's barrier brackets the exchange,
- *  and the ordering contract's cross-consumer sequence starts here. Runs eagerly, outside any
- *  captured graph, in the same phase as the loader fills.
- */
-struct multimodal_batch_mixer_t {
-
-    /**
-     *  @brief Validate the world, bake the routing key, and — when the world spans several multimem_domains —
-     *      wire one @c infiniband_all_to_all buffer per member for the cross-island full-batch exchange.
-     *
-     *  The mixer owns no per-route scratch (peer addresses travel as kernel arguments, bounded by
-     *  @ref max_gpus_per_host_k , and routes are re-derived in-register); the all-to-all buffers are its
-     *  only owned memory, and they exist only on a multi-island world. Every arena must be visible to every
-     *  member of the multimem_domain (validated, never granted here).
-     *
-     *  @param[in] streams Each member's stream — the all-to-all wiring seeds its round scalar on the member's
-     *      own stream, so one stream per member is required.
-     *  @param[in] timeout_seconds The coordinate-exchange deadline handed to each all-to-all wiring.
-     */
-    [[nodiscard]] static expected<multimodal_batch_mixer_t> make(multimem_domain_t &multimem,
-                                                                 colocated_domain_t &colocated,
-                                                                 std::span<gpu_arena_t> arenas,
-                                                                 multimodal_batch_shape_t shape, u64_t seed,
-                                                                 std::span<gpu_stream_t> streams,
-                                                                 f64_t timeout_seconds = 120.0) noexcept;
-
-    /**
-     *  @brief Member @p member_index 's slice of one mix — pure enqueue onto @p stream : gather its
-     *      incoming segments from all members' @p loaded batches into its own @p mixed batch.
-     *
-     *  Every member barriers (its own self-advancing round) before its peer reads, and members are
-     *  enqueued in order @c 0..members-1 within a step.
-     *
-     *  @param[in] member_index This GPU's index inside the borrowed @b multimem_domain —
-     *      @c [0,multimem_domain_t::member_count()) , the same axis @c member() and @c barrier()
-     *      take. Not a host_domain index and not a colocated_domain coordinate: the mixer's world is
-     *      one multimem_domain until the InfiniBand lane is wired.
-     *  @param[in] data_epoch The keyed-draw counter the routing bijection folds with the run's seed.
-     *  @param[in] loaded Every member's freshly loaded batch, in member order.
-     *  @param[out] mixed This member's destination batch — distinct storage from every @p loaded .
-     *  @param[in] stream This member's stream; the caller holds no context around the call.
-     */
-    [[nodiscard]] expected_t operator()(std::size_t member_index, data_epoch_t data_epoch,
-                                        std::span<multimodal_batch_on_gpu_t const> loaded,
-                                        multimodal_batch_on_gpu_t &mixed, gpu_stream_t &stream) noexcept;
-
-    /** The eager convenience: every member's slice in order over the per-GPU streams. */
-    [[nodiscard]] expected_t operator()(data_epoch_t data_epoch, std::span<multimodal_batch_on_gpu_t const> loaded,
-                                        std::span<multimodal_batch_on_gpu_t> mixed,
-                                        std::span<gpu_stream_t> streams) noexcept;
-
-  private:
-
-    /** The main-owned multimem_domain — borrowed; its barrier brackets every mix. */
-    multimem_domain_t *multimem_ = nullptr;
-
-    /** The run's routing seed; combined with the per-call data epoch inside the routing bijection. */
-    u64_t seed_ = 0;
-
-    /** The baked batch capacities every route and repack cursor is bounded by. */
-    multimodal_batch_shape_t shape_ {};
-
-    /** One cross-domain full-batch exchange buffer per member — empty on a single-multimem_domain
-     *  world, where @ref domains_ is 1 and the exchange path is skipped entirely. */
-    per_gpu_array<infiniband_all_to_all<b8_t>> alltoall_buffers_ {};
-
-    /** Per-member @b [max_segments_per_gpu] routing scratch — each mix's geometry pass records
-     *  every mixed segment's world source here and the gather pass reads it back (variable-degree bags
-     *  make a destination's source un-derivable per segment). On the member's own arena; never
-     *  exchanged, never part of a batch. */
-    per_gpu_array<u32r1_tensor_arena_t> mixed_sources_ {};
-
-    /** How many multimem_domains the world spans; 1 is the single-NVLink-domain fast path. */
-    u32_t domains_ = 1;
-
-    /** This process's multimem_domain index — the source of a segment whose source GPU sits here is
-     *  a direct NVLink peer read; any other domain's is read from that member's landing. */
-    u32_t multimem_domain_index_ = 0;
-
-    /** This multimem_domain's first member's world coordinate (the mesh's inverse mapping) — member
-     *  @c m 's routing destination is @c first+m , so the domains claim disjoint destination ranges in
-     *  the @c members·domains world. */
-    u32_t first_gpu_index_in_colocated_domain_ = 0;
-};
 
 } // namespace unum::uform::core
