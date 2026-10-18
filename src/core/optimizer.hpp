@@ -65,12 +65,13 @@ struct adafactor_config_t {
     f32_t clip_threshold = 1.0f;
 };
 
-/** One weight matrix's window into the optimizer's combined Float32 state — plain offsets,
- *  resolved once at construction. */
+/** One weight matrix's window into the optimizer's combined Float32 state — plain spans and
+ *  offsets, resolved once at construction, which the kernels take by value. */
 struct adafactor_state_t {
 
-    /** The weights themselves, borrowed from the tower. */
-    differentiable_weights_t weights {};
+    /** The weights and their gradients, borrowed from the tower. */
+    nk::tensor_span<bf16_t, 2> weights {};
+    nk::tensor_view<bf16_t, 2> weights_grad {};
 
     /** Offsets into the combined moments tensor: @b [rows] then @b [cols] . */
     std::size_t row_moment_offset = 0;
@@ -114,10 +115,7 @@ struct adafactor_t {
      *  from the live state extents rather than stored. */
     [[nodiscard]] std::size_t gradient_scalars() const noexcept {
         std::size_t scalars = 0;
-        for (std::size_t index = 0; index != states_.size(); ++index) {
-            differentiable_weights_t const &matrix = states_[index].weights;
-            scalars += matrix.weights.extent(0) * matrix.weights.extent(1);
-        }
+        for (adafactor_state_t const &state : states_) scalars += state.weights.extent(0) * state.weights.extent(1);
         return scalars;
     }
 

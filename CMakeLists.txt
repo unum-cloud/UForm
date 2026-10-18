@@ -45,14 +45,15 @@
 # build compiles by default.
 cmake_minimum_required(VERSION 3.27)
 
-# Must precede `project()` so `enable_language(CUDA)` uses our value instead of CMake's minimum-supported fallback.
-# Dual-arch by default: Hopper (sm_90a) and Blackwell (sm_100a).
-if (NOT CMAKE_CUDA_ARCHITECTURES OR CMAKE_CUDA_ARCHITECTURES STREQUAL "52")
-    set(CMAKE_CUDA_ARCHITECTURES
-        "90a;100a"
-        CACHE STRING "CUDA target architectures: 90a (Hopper), 100a (Blackwell)" FORCE
-    )
-endif ()
+# Every CUDA unit compiles one cubin per generation, as USearch's do: sm_86 runs Ampere's and B300 runs "100f", and PTX
+# would double every object for GPUs no build meets. Iterate on one card with its own code, like "89-real". Only the
+# Hopper and Blackwell codes reach the switch bundle, see `src/CMakeLists.txt`. Must precede `project()`, so
+# `enable_language(CUDA)` takes it over CMake's fallback.
+set(UFORM_CUDA_ARCHITECTURES
+    "80-real;89-real;90a-real;100f-real;120f-real"
+    CACHE STRING "GPU architectures every CUDA unit, NumKong's included, compiles for"
+)
+set(CMAKE_CUDA_ARCHITECTURES "${UFORM_CUDA_ARCHITECTURES}")
 
 # Leverage `ccache` for incremental compilation
 find_program(CCACHE_PROGRAM ccache)
@@ -76,12 +77,9 @@ if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     endif ()
 endif ()
 
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" _uform_version)
-# CMake versions are numeric, so the pre-release suffix of VERSION stays out of PROJECT_VERSION.
-string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" _uform_version_number "${_uform_version}")
 project(
     uform
-    VERSION ${_uform_version_number}
+    VERSION 4.0.0
     LANGUAGES C CXX
     DESCRIPTION "Pocket-sized multimodal AI for content understanding and generation"
     HOMEPAGE_URL "https://github.com/unum-cloud/UForm"
@@ -104,6 +102,8 @@ option(UFORM_BUILD_TOOLS "Compile the trainer in tools/" ${UFORM_IS_MAIN_PROJECT
 
 if (UFORM_BUILD_CUDA)
     enable_language(CUDA)
+    # The assembler embeds device-only bundles, see `uform_gpu_bundle`.
+    enable_language(ASM)
     find_package(CUDAToolkit REQUIRED)
 endif ()
 if (UFORM_BUILD_ROCM)
@@ -155,7 +155,7 @@ endfunction ()
 # UForm builds the compiled library, with the GPU vendors its own switches add, for its own architectures.
 set(NUMKONG_BUILD_CUDA ${UFORM_BUILD_CUDA})
 set(NUMKONG_BUILD_ROCM ${UFORM_BUILD_ROCM})
-set(NUMKONG_CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}")
+set(NUMKONG_CUDA_ARCHITECTURES "${UFORM_CUDA_ARCHITECTURES}")
 set(NUMKONG_BUILD_TEST OFF)
 set(NUMKONG_BUILD_BENCH OFF)
 uform_sibling(numkong https://github.com/ashvardanian/NumKong df1ab982a00b8aa97f39821cb5f371bd98caa43f)
@@ -284,7 +284,30 @@ if (UFORM_BUILD_TEST OR UFORM_BUILD_LIB_C)
     enable_testing()
 endif ()
 
+# The heaviest CUDA units peak near 4 GB each, so those of `src/`, `test/` and `tools/` queue in a pool of three, which
+# bounds a build's memory whatever `-j` asks.
+set_property(GLOBAL APPEND PROPERTY JOB_POOLS uform_cuda_units=3)
+
+# The suites precede `c/`, whose C tests load the checkpoint fixture `test/` writes.
 add_subdirectory(src)
+if (UFORM_BUILD_TEST)
+    add_subdirectory(test)
+endif ()
+if (UFORM_BUILD_TOOLS AND UFORM_BUILD_CUDA)
+    add_subdirectory(tools)
+endif ()
+# `uform_bundle` → a self-contained runtime tree (executables + their shared-library closure, glibc excepted) under
+# `runtime-bundle/`, for Slurm or K8s clusters where nodes are not package-identical: deploy the tree to the shared
+# filesystem and every node runs it, whatever it has installed natively. Each executable travels as its own argument.
+if (uform_bundled_files_)
+    add_custom_target(
+        uform_bundle
+        COMMAND ${CMAKE_COMMAND} "-DBUNDLE_DIR=${PROJECT_BINARY_DIR}/runtime-bundle" -P
+                "${PROJECT_SOURCE_DIR}/cmake/bundle_runtime.cmake" -- ${uform_bundled_files_}
+        COMMENT "Bundling executables with their runtime closure into runtime-bundle/"
+        VERBATIM
+    )
+endif ()
 if (UFORM_BUILD_LIB_C_STUB AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src_stub/CMakeLists.txt")
     add_subdirectory(src_stub)
 endif ()

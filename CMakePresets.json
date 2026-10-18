@@ -9,7 +9,7 @@
     {
       "name": "base",
       "hidden": true,
-      "description": "Ninja, a build tree named after the preset, and a compilation database for the language server, for the default Hopper and Blackwell architectures. Pin the compiler path or CMAKE_CUDA_ARCHITECTURES of one machine in a CMakeUserPresets.json on top.",
+      "description": "Ninja, a build tree named after the preset, and a compilation database for the language server, for the default Ampere-through-Blackwell architectures. Pin the compiler path or UFORM_CUDA_ARCHITECTURES of one machine in a CMakeUserPresets.json on top.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build_${presetName}",
       "cacheVariables": {

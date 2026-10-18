@@ -53,7 +53,7 @@
 
 #include <utility>     // `std::exchange`, `std::forward`
 #include <span>        // `std::span` — the multi-stream capture rank list
-#include <type_traits> // `std::type_identity_t` — kernel arguments convert to the parameters, never deduce
+#include <type_traits> // `std::type_identity_t`, `std::is_trivially_copyable_v` — kernels take arguments by bytes
 
 #include <cuda.h>      // `CUstream`, `CUgraph`, `CUgraphExec`, `CUevent`
 #include <cuda_bf16.h> // `__nv_bfloat16` — the training-currency scalar of the rank-1 aliases
@@ -298,6 +298,24 @@ inline constexpr unsigned kernel_grid_cap_k = 4096u;
     return grid > kernel_grid_cap_k ? kernel_grid_cap_k : static_cast<unsigned>(grid);
 }
 
+/** Launch @p function , a kernel resolved from a loaded module or by @ref launch_kernel , as one
+ *  checked @c cuLaunchKernel ; each argument's type must match its parameter's exactly, as the
+ *  driver copies raw bytes. */
+template <typename... arg_types_>
+[[nodiscard]] inline expected_t launch_function(CUfunction function, dim3 grid_size, dim3 block_size,
+                                                gpu_stream_t &stream, arg_types_... args) noexcept {
+    static_assert(sizeof...(arg_types_) != 0, "a kernel without arguments has nothing to compute");
+    static_assert((std::is_trivially_copyable_v<arg_types_> && ...), "kernels take their arguments by bytes");
+    if (function == nullptr) return expected_t::fail(status_t::invalid_input_k, "no kernel to launch");
+    void *argument_addresses[] = {&args...};
+    if (CUresult result = cuLaunchKernel(function, grid_size.x, grid_size.y, grid_size.z, block_size.x, block_size.y,
+                                         block_size.z, 0, stream.get(), argument_addresses, nullptr);
+        result != CUDA_SUCCESS)
+        return cuda_failure(result, "kernel launch failed (grid=[{},{},{}] block=[{},{},{}])", grid_size.x, grid_size.y,
+                            grid_size.z, block_size.x, block_size.y, block_size.z);
+    return {};
+}
+
 /**
  *  @brief Launch a compiled-in kernel through the Driver API — the checked replacement for the
  *      triple-chevron syntax, which returns no error code, fails silently on impossible configurations,
@@ -307,28 +325,22 @@ inline constexpr unsigned kernel_grid_cap_k = 4096u;
  *
  *  The kernel's entry address resolves to a @c CUfunction through @c cudaGetFuncBySymbol — the one
  *  sanctioned interop symbol, declared by nvcc's own implicit headers and serviced by the fatbin
- *  registration stub nvcc statically embeds into every kernel-carrying binary regardless — and the launch
- *  itself is one checked @c cuLaunchKernel . No dynamic @c libcudart enters the link.
+ *  registration stub nvcc statically embeds into every kernel-carrying binary regardless — and the
+ *  launch itself is one checked @c cuLaunchKernel . No dynamic @c libcudart enters the link.
  *
- *  Arguments bind by const reference (temporaries included — the driver copies their bytes out before
- *  returning), and every argument's type must match the kernel's parameter type @b exactly: the driver
- *  copies raw bytes, so the implicit conversions a triple-chevron call would perform do not apply —
- *  convert spans to views at the call site.
+ *  Arguments bind by const reference (temporaries included — the driver copies their bytes out
+ *  before returning), and every argument's type must match the kernel's parameter type @b exactly:
+ *  the driver copies raw bytes, so the implicit conversions a triple-chevron call would perform do
+ *  not apply — convert spans to views at the call site. @ref launch_function launches what a loaded
+ *  module resolved.
  */
 template <typename... arg_types_>
 [[nodiscard]] inline expected_t launch_kernel(void const *kernel_symbol, dim3 grid_size, dim3 block_size,
                                               gpu_stream_t &stream, arg_types_ const &...args) noexcept {
-    static_assert(sizeof...(arg_types_) != 0, "a kernel without arguments has nothing to compute");
     CUfunction function = nullptr;
     if (int result = static_cast<int>(cudaGetFuncBySymbol(&function, kernel_symbol)); result != 0)
         return expected_t::fail(status_t::cuda_error_k, "kernel symbol resolution failed (code={})", result);
-    void *argument_addresses[] = {const_cast<void *>(static_cast<void const *>(&args))...};
-    if (CUresult result = cuLaunchKernel(function, grid_size.x, grid_size.y, grid_size.z, block_size.x, block_size.y,
-                                         block_size.z, 0, stream.get(), argument_addresses, nullptr);
-        result != CUDA_SUCCESS)
-        return cuda_failure(result, "kernel launch failed (grid=[{},{},{}] block=[{},{},{}])", grid_size.x, grid_size.y,
-                            grid_size.z, block_size.x, block_size.y, block_size.z);
-    return {};
+    return launch_function(function, grid_size, block_size, stream, args...);
 }
 
 /** The typed spelling of @ref launch_kernel : takes the @c __global__ function itself, so every argument

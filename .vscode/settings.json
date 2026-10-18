@@ -92,7 +92,8 @@
   ],
   "files.associations": {
     "*.cu": "cuda-cpp",
-    "*.cuh": "cuda-cpp"
+    "*.cuh": "cuda-cpp",
+    "*.hip": "cuda-cpp"
   },
   "files.watcherExclude": {
     "**/.venv/**": true,

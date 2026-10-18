@@ -12,7 +12,7 @@
 #include <memory> // `std::unique_ptr` - a handle under construction
 #include <new>    // `std::nothrow`
 
-#include <cuda.h>      // `cuDeviceGetAttribute`, `cuMemcpyHtoD`
+#include <cuda.h>      // `cuMemcpyHtoD`
 #include <cuda_fp16.h> // `__float2half` - embeddings landing as Float16
 
 #include "lib.hpp"
@@ -234,19 +234,20 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t *arguments) {
     finish_calls_using(arguments->mesh);
     core::mesh_topology_t const &topology = arguments->mesh->mesh->topology;
     core::mesh_shape_t const &shape = topology.shape;
-    bool multicast = shape.gpus_per_multimem_domain > 1;
-    for (vram_device_t const &device : std::get<vram_executor_t>(arguments->mesh->executor->executor).devices) {
-        int supported = 0;
-        if (cuDeviceGetAttribute(&supported, CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED, device.ordinal) != CUDA_SUCCESS)
-            supported = 0;
-        multicast = multicast && supported != 0;
-    }
-    *arguments->description = {shape.gpus_per_host_domain,
-                               shape.gpus_per_multimem_domain,
-                               shape.gpus_per_colocated_domain,
-                               topology.host_domain_index,
-                               topology.first_gpu_index(),
-                               multicast ? uform_multimem_tier_switch_reduced_k : uform_multimem_tier_peer_read_k};
+    array<i32_t> devices;
+    if (!devices_of(arguments->mesh->executor, devices))
+        return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the devices"), void();
+    core::expected<core::multimem_tier_choice_t> tier = core::multimem_tier_choice_t::make(
+        shape.gpus_per_multimem_domain, devices.view());
+    if (!tier)
+        return propagate_error(status_of(tier.status_), outcome, "The multimem tier could not be probed"), void();
+    uform_mesh_description_t &description = *arguments->description;
+    description.gpus_per_host_domain = shape.gpus_per_host_domain;
+    description.gpus_per_multimem_domain = shape.gpus_per_multimem_domain;
+    description.gpus_per_colocated_domain = shape.gpus_per_colocated_domain;
+    description.host_domain_index = topology.host_domain_index;
+    description.first_gpu_index = topology.first_gpu_index();
+    description.multimem_tier = static_cast<uform_multimem_tier_t>(tier.value_.tier);
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 

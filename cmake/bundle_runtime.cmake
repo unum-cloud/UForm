@@ -1,9 +1,8 @@
 # bundle_runtime.cmake — build a self-contained runtime tree for heterogeneous clusters.
 #
-# Invoked at build time by the `uform_bundle` custom target (`cmake -P` script mode) with:
-#
-#   BUNDLE_EXECUTABLES — ;-list of built executables to bundle
-#   BUNDLE_DIR         — destination tree; executables land beside their shared-library closure
+# Invoked at build time by the `uform_bundle` custom target as
+# `cmake -DBUNDLE_DIR=<dir> -P bundle_runtime.cmake -- <executable>...`, where the destination tree takes every
+# executable beside its shared-library closure.
 #
 # Every executable is copied together with its resolved shared-library closure — everything except the
 # glibc core, which must come from the running node's own loader. Paired with the executables' `$ORIGIN`
@@ -11,12 +10,19 @@
 # installed natively (the gap that once meant "libcudnn.so.9: cannot open shared object file" on the one
 # node lacking the apt package). Unresolved dependencies fail the bundle loudly, naming each library.
 
-if (NOT DEFINED BUNDLE_EXECUTABLES OR NOT DEFINED BUNDLE_DIR)
-    message(FATAL_ERROR "bundle_runtime.cmake needs -DBUNDLE_EXECUTABLES=<|-list> and -DBUNDLE_DIR=<dir>")
+set(BUNDLE_EXECUTABLES)
+set(bundle_listing OFF)
+math(EXPR bundle_last_argument "${CMAKE_ARGC} - 1")
+foreach (bundle_argument RANGE ${bundle_last_argument})
+    if (bundle_listing)
+        list(APPEND BUNDLE_EXECUTABLES "${CMAKE_ARGV${bundle_argument}}")
+    elseif (CMAKE_ARGV${bundle_argument} STREQUAL "--")
+        set(bundle_listing ON)
+    endif ()
+endforeach ()
+if (NOT BUNDLE_EXECUTABLES OR NOT DEFINED BUNDLE_DIR)
+    message(FATAL_ERROR "bundle_runtime.cmake needs -DBUNDLE_DIR=<dir> and the executables after `--`")
 endif ()
-
-# The executable list arrives |-separated — a raw `;` cannot survive the custom-command argument path.
-string(REPLACE "|" ";" BUNDLE_EXECUTABLES "${BUNDLE_EXECUTABLES}")
 
 file(MAKE_DIRECTORY "${BUNDLE_DIR}")
 

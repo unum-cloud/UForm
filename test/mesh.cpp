@@ -1,9 +1,9 @@
 /**
- *  @brief Conformance test of the mesh bootstrap — the one job `mesh.hpp` exists for: minting each
- *      host_domain's facts and reconciling them over a shared filesystem into one agreed world.
  *  @file test/mesh.cpp
  *  @author Ash Vardanian
  *  @date July 5, 2026
+ *  @brief Conformance test of the mesh bootstrap — the one job `mesh.hpp` exists for: minting each
+ *      host_domain's facts and reconciling them over a shared filesystem into one agreed world.
  *
  *  Three cases, each proving an operation that must @b succeed — the integer accessors are one-line
  *  divisions and carry no test:
@@ -15,7 +15,7 @@
  *      - @ref world_reconciles — the substance: a lead reads a peer's facts, validates agreement, and
  *        assembles the world; a follower adopts the lead's manifest. Both are driven against a @b matching
  *        simulated peer planted with this box's real GPU identity, so agreement genuinely passes. Needs a
- *        P2P-capable GPU set (bootstrap front-loads `discover_mesh_shape`); a box without one SKIPs.
+ *        visible GPU (bootstrap front-loads `discover_mesh_shape`); a box without one SKIPs.
  *
  *  The genuine multi-node happy path is @ref run_cluster_exchange , driven by
  *  `scripts/slurm/test_mesh-4-8-16.sbatch`: every rank bootstraps for real and must assemble a @b byte-identical
@@ -246,7 +246,7 @@ int main() {
         return suite.finish();
     }
 
-    // Bootstrap front-loads `discover_mesh_shape`, so the assembly tiers need P2P-capable GPUs.
+    // Bootstrap front-loads `discover_mesh_shape`, so the assembly tiers need a visible GPU.
     auto discovered = discover_mesh_shape();
     if (discovered) {
         u32_t const local_devices = (*discovered).gpus_per_host_domain;

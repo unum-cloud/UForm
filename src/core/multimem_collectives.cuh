@@ -1,10 +1,10 @@
 /**
- *  @brief Collectives @b inside one multimem_domain: the domain's members reduce and broadcast through
- *      @c multimem PTX over one shared multicast object — the level-1 transport of the two-level
- *      contrastive step and the distributed optimizer.
  *  @file src/core/multimem_collectives.cuh
  *  @author Ash Vardanian
  *  @date July 3, 2026
+ *  @brief Collectives @b inside one multimem_domain: the domain's members reduce and broadcast
+ *      through @c multimem PTX over one shared multicast object — the level-1 transport of the
+ *      two-level contrastive step and the distributed optimizer.
  *
  *  The domain's replicas live in one @ref gpu_symmetric_arena_t : a single contiguous VA range whose
  *  per-member slices are physically resident on each member's device, so a peer's address is
@@ -23,10 +23,14 @@
  *  and write of a round happens on the stream that owns it, so no enqueue order can present a barrier
  *  with a stale round, and any number of barriers compose with no pairing discipline.
  *
- *  When the platform lacks multicast ( @c CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED off — pre-Hopper or
- *  fabric-disabled boxes), @ref multimem_domain_t::make still succeeds in the @b peer-read tier: the
- *  symmetric range is device-visible everywhere, and the reduce walks the members serially — the same
- *  fixed fold order on every member, bit-identical across ranks, just without the switch reduction.
+ *  The @c multimem PTX lives in its own unit, @c multimem_switch.cu , compiled only for the
+ *  multicast-capable codes of the build and embedded as a bundle the domain loads by name when it
+ *  picks the switch tier. When the platform lacks multicast (
+ *  @c CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED off — pre-Hopper or fabric-disabled boxes), or the
+ *  bundle carries no code the device runs, @ref multimem_domain_t::make still succeeds in the
+ *  @b peer-read tier: the symmetric range is device-visible everywhere, and the reduce walks the
+ *  members serially — the same fixed fold order on every member, bit-identical across ranks, just
+ *  without the switch reduction.
  */
 #pragma once
 
@@ -53,15 +57,19 @@ namespace unum::uform::core {
  *  Fixed-size, allocated once at @ref make ; no carving, no growth. Lives here, beside its one consumer
  *  @ref multimem_domain_t , not with the single-GPU allocators.
  *
- *  A multimem_domain may span @b more @b than @b one @b process — on an NVL72 the 72-GPU island is 18
- *  tray processes, and even a `{4,8,16}` HGX box runs two 4-GPU processes over one 8-GPU island. So the
- *  arena is @b per @b process: it reserves the whole @c member_count·stride VA, but each process
- *  @ref make -s only its @b local slices (physically resident on the GPUs it drives) and @ref adopt_peer -s
- *  every remote member's slice from the fabric handle its owner published. The slices' physical handles
- *  are created @c CU_MEM_HANDLE_TYPE_FABRIC — the NVLink-fabric shareable form NVL72 needs and a single
- *  passthrough box also honors — exported through @ref export_local_fabric_handle and exposed through
- *  @ref member_handle so a multicast object can bind them. Every local device is granted access to the
- *  whole range, so the peer-read tier reads every replica straight through it.
+ *  A multimem_domain may span @b more @b than @b one @b process — on an NVL72 the 72-GPU island is
+ *  18 tray processes, and even a `{4,8,16}` HGX box runs two 4-GPU processes over one 8-GPU island.
+ *  So the arena is @b per @b process: it reserves the whole @c member_count·stride VA, but each
+ *  process @ref make -s only its @b local slices (physically resident on the GPUs it drives) and
+ *  @ref adopt_peer -s every remote member's slice from the fabric handle its owner published. The
+ *  slices' physical handles are created shareable only when the domain spans processes:
+ *  @c CU_MEM_HANDLE_TYPE_FABRIC where every local device exports it, exported through
+ *  @ref export_fabric_handle , and POSIX file descriptors on a fabric-less box, whose handoff to
+ *  another process needs a Unix-socket exchange not implemented yet, so their export refuses. A
+ *  one-process domain shares no handle at all. Slices are RDMA-capable where the device registers
+ *  VMM memory with an adapter, and @ref member_handle exposes them so a multicast object can bind
+ *  them. Every local device is granted access to the whole range, so the peer-read tier reads every
+ *  replica straight through it.
  */
 struct gpu_symmetric_arena_t {
 
@@ -95,8 +103,16 @@ struct gpu_symmetric_arena_t {
                                                               u32_t member_offset, std::size_t bytes_per_member,
                                                               std::size_t alignment_granularity = 1) noexcept;
 
+    /** The shareable handle a domain of @p member_count members over @p local_devices creates its
+     *  slices with: none within one process, else fabric handles where every local device exports
+     *  them, else POSIX file descriptors. */
+    [[nodiscard]] static expected<CUmemAllocationHandleType> shareable_handle_type(std::span<i32_t const> local_devices,
+                                                                                   u32_t member_count) noexcept;
+
     /** Export domain member @p member 's slice as a fabric handle — what its owner publishes so the
-     *  domain's other processes can @ref adopt_peer it. @p member must be one this process created. */
+     *  domain's other processes can @ref adopt_peer it. @p member must be one this process created,
+     *  and slices shared as POSIX file descriptors refuse, as their cross-process handoff is not
+     *  implemented. */
     [[nodiscard]] expected<CUmemFabricHandle> export_fabric_handle(std::size_t member) const noexcept;
 
     /** Import a remote member's slice from the fabric @p handle its owner exported and map it at
@@ -129,17 +145,22 @@ struct gpu_symmetric_arena_t {
         return handles_[member];
     }
 
+    /** The shareable handle the slices were created with, see @ref shareable_handle_type . */
+    [[nodiscard]] CUmemAllocationHandleType handle_type() const noexcept { return handle_type_; }
+
   private:
 
-    /** Slice-creation properties: device-resident, pinned, RDMA-capable, and shareable — the
-     *  last one is what multicast binding requires. */
-    [[nodiscard]] static CUmemAllocationProp allocation_properties_(int device) noexcept {
+    /** Slice-creation properties: device-resident, pinned, RDMA-capable wherever the device
+     *  registers VMM memory with an adapter, and shareable as @ref handle_type_ . */
+    [[nodiscard]] CUmemAllocationProp allocation_properties_(int device) const noexcept {
+        int rdma_supported = 0;
+        cuDeviceGetAttribute(&rdma_supported, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device);
         CUmemAllocationProp properties {};
         properties.type = CU_MEM_ALLOCATION_TYPE_PINNED;
         properties.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
         properties.location.id = device;
-        properties.allocFlags.gpuDirectRDMACapable = 1;
-        properties.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
+        properties.allocFlags.gpuDirectRDMACapable = rdma_supported != 0;
+        properties.requestedHandleTypes = handle_type_;
         return properties;
     }
 
@@ -147,6 +168,7 @@ struct gpu_symmetric_arena_t {
         std::swap(base_, other.base_);
         std::swap(bytes_per_member_, other.bytes_per_member_);
         std::swap(member_stride_, other.member_stride_);
+        std::swap(handle_type_, other.handle_type_);
         std::swap(devices_, other.devices_);
         std::swap(handles_, other.handles_);
     }
@@ -175,6 +197,9 @@ struct gpu_symmetric_arena_t {
     /** Granularity-rounded slice stride; also each slice's physical size. */
     std::size_t member_stride_ = 0;
 
+    /** The shareable handle every local slice is created with. */
+    CUmemAllocationHandleType handle_type_ = CU_MEM_HANDLE_TYPE_NONE;
+
     /** This process's local devices, slice order — the slices it created (not the whole domain). */
     array<i32_t> devices_ {};
 
@@ -184,11 +209,89 @@ struct gpu_symmetric_arena_t {
 };
 
 /** Which reduction tier a @ref multimem_domain_t runs: NVSwitch-fused @c multimem loads, or the
- *  serial peer-read fold — decided once at @c make by @c CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED ,
- *  identical results either way (both tiers are bit-deterministic). */
+ *  serial peer-read fold — decided once at @c make by @ref multimem_tier_choice_t , identical
+ *  results either way (both tiers are bit-deterministic). */
 enum class multimem_tier_t : u32_t {
     switch_reduced_k = 0,
     peer_read_k = 1,
+};
+
+/** One device's switch-tier kernels, resolved by name from the switch bundle loaded into its
+ *  context. */
+struct multimem_switch_kernels_t {
+    CUfunction barrier = nullptr;
+    CUfunction reduce_scatter = nullptr;
+    CUfunction reduce_gradient = nullptr;
+};
+
+/**
+ *  @brief The switch bundle loaded into one device's primary context: the module, the context it
+ *      retains to unload it, and the kernels resolved from it.
+ *
+ *  The bundle is a fatbin of @c multimem_switch.cu for the multicast-capable codes this build
+ *  lists, empty when it lists none, so a device it carries no code for refuses the load and its
+ *  domain reads peers.
+ */
+struct multimem_switch_module_t {
+
+    multimem_switch_module_t() noexcept = default;
+    multimem_switch_module_t(multimem_switch_module_t const &) = delete;
+    multimem_switch_module_t &operator=(multimem_switch_module_t const &) = delete;
+    multimem_switch_module_t(multimem_switch_module_t &&other) noexcept { swap_(other); }
+    multimem_switch_module_t &operator=(multimem_switch_module_t &&other) noexcept {
+        if (this != &other) {
+            destroy_();
+            swap_(other);
+        }
+        return *this;
+    }
+    ~multimem_switch_module_t() noexcept { destroy_(); }
+
+    /** Load the switch bundle onto @p device and resolve its kernels; fails when the bundle is
+     *  empty or carries no code @p device runs. */
+    [[nodiscard]] static expected<multimem_switch_module_t> load(i32_t device) noexcept;
+
+    /** The kernels, valid in @p device 's primary context for the module's lifetime. */
+    [[nodiscard]] multimem_switch_kernels_t const &kernels() const noexcept { return kernels_; }
+
+  private:
+    void swap_(multimem_switch_module_t &other) noexcept {
+        std::swap(context_, other.context_);
+        std::swap(module_, other.module_);
+        std::swap(device_, other.device_);
+        std::swap(kernels_, other.kernels_);
+    }
+
+    void destroy_() noexcept;
+
+    /** The device's retained primary context, which the module lives in. */
+    CUcontext context_ = nullptr;
+    CUmodule module_ = nullptr;
+    i32_t device_ = -1;
+    multimem_switch_kernels_t kernels_ {};
+};
+
+/**
+ *  @brief The tier a domain runs, why, and the switch modules that tier needs.
+ *
+ *  The switch tier needs more than one member, multicast on every local device, and the switch
+ *  bundle loading on each of them; anything less falls back to the peer-read tier, and @ref reason
+ *  says which check failed.
+ */
+struct multimem_tier_choice_t {
+
+    multimem_tier_t tier = multimem_tier_t::peer_read_k;
+
+    /** Why the domain runs @ref tier , naming the device and the failure when it fell back. */
+    sz::string_t reason {};
+
+    /** One loaded bundle per local device, in local order, on the switch tier; empty otherwise. */
+    array<multimem_switch_module_t> modules {};
+
+    /** Probe @p local_devices for a domain of @p member_count members; fails only when a query
+     *  fails. */
+    [[nodiscard]] static expected<multimem_tier_choice_t> make(u32_t member_count,
+                                                               std::span<i32_t const> local_devices) noexcept;
 };
 
 /**
@@ -245,21 +348,6 @@ struct multimem_member_t {
 
 #if defined(__CUDACC__)
 
-/** One switch-reduced load: the sum of this address across every bound replica. */
-[[nodiscard]] __device__ inline f32_t multimem_load_reduce_add_(f32_t const *multimem_address) noexcept {
-    f32_t value;
-    asm volatile("multimem.ld_reduce.relaxed.sys.global.add.f32 %0, [%1];"
-                 : "=f"(value)
-                 : "l"(multimem_address)
-                 : "memory");
-    return value;
-}
-
-/** One multicast release-add on the arrival counter of every replica. */
-__device__ inline void multimem_red_add_release_(u32_t *multimem_address, u32_t value) noexcept {
-    asm volatile("multimem.red.release.sys.global.add.u32 [%0], %1;" : : "l"(multimem_address), "r"(value) : "memory");
-}
-
 /** System-scope acquire load of this member's own arrival counter. */
 [[nodiscard]] __device__ inline u32_t multimem_load_acquire_(u32_t const *own_address) noexcept {
     u32_t value;
@@ -294,8 +382,10 @@ struct multimem_window_t {
  *  never pair or count rounds. Violating the order is a hang (arrivals are monotonic, a mis-ordered
  *  barrier waits forever), never a silent corruption.
  *
- *  Falls back to the peer-read tier when multicast is unsupported — same API, same determinism, the
- *  reduce just walks members serially. @ref tier() names which one is live.
+ *  Falls back to the peer-read tier when multicast is unsupported or the switch kernels do not load
+ *  — same API, same determinism, the reduce just walks members serially. @ref tier() names which
+ *  one is live and @ref description says why. Every local pair of members must reach each other
+ *  over P2P, or @ref make refuses.
  */
 struct multimem_domain_t {
 
@@ -339,8 +429,16 @@ struct multimem_domain_t {
                                                           std::span<gpu_stream_t> local_streams) noexcept;
 
     /** The reduction tier this domain runs — see @ref multimem_tier_t . */
-    [[nodiscard]] multimem_tier_t tier() const noexcept {
-        return multimem_handle_ != 0 ? multimem_tier_t::switch_reduced_k : multimem_tier_t::peer_read_k;
+    [[nodiscard]] multimem_tier_t tier() const noexcept { return tier_.tier; }
+
+    /** Why the domain runs its @ref tier , naming the failed check when it fell back to reading
+     *  peers. */
+    [[nodiscard]] sz::string_view_t description() const noexcept { return tier_.reason.view(); }
+
+    /** Member @p member_index 's switch kernels, in its device's primary context; switch tier
+     *  only. */
+    [[nodiscard]] multimem_switch_kernels_t const &switch_kernels(std::size_t member_index) const noexcept {
+        return tier_.modules[member_index - member_offset_].kernels();
     }
 
     /** Domain member count. */
@@ -420,6 +518,7 @@ struct multimem_domain_t {
 
     void swap_(multimem_domain_t &other) noexcept {
         std::swap(replicas_, other.replicas_);
+        std::swap(tier_, other.tier_);
         std::swap(multimem_handle_, other.multimem_handle_);
         std::swap(multimem_pointer_, other.multimem_pointer_);
         std::swap(payload_scalars_, other.payload_scalars_);
@@ -449,6 +548,9 @@ struct multimem_domain_t {
 
     /** The one contiguous replica range — every member's slice, peer-addressable by arithmetic. */
     gpu_symmetric_arena_t replicas_ {};
+
+    /** The tier chosen at @ref make , with the switch modules it loaded. */
+    multimem_tier_choice_t tier_ {};
 
     /** The multicast object every slice is bound into; 0 on the peer-read tier. */
     CUmemGenericAllocationHandle multimem_handle_ = 0;

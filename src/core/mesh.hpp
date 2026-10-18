@@ -220,8 +220,9 @@ struct mesh_location_t {
 
 /**
  *  @brief Discover the single-host_domain shape: all three domains coincide with the visible device
- *      count, after verifying every pair is P2P-reachable — capabilities are probed and validated, never
- *      assumed. Multicast is not required: a @ref multimem_domain_t without it runs its peer-read tier.
+ *      count. Neither multicast nor P2P is required here: a @ref multimem_domain_t without
+ *      multicast runs its peer-read tier, and only a domain asks @ref peers_reach_each_other of its
+ *      own members.
  *
  *  Covers the common one-box world (an HGX box driven by one process); the multi-host_domain world builds
  *  on it through @ref mesh_topology_t::bootstrap . The probe sees @b only this process's devices — a wider
@@ -233,28 +234,33 @@ struct mesh_location_t {
     if (CUresult result = cuDeviceGetCount(&device_count); result != CUDA_SUCCESS)
         return cuda_failure<mesh_shape_t>(result, "device count query failed");
     if (device_count <= 0) return expected<mesh_shape_t>::fail(status_t::invalid_input_k, "no CUDA devices visible");
+    u32_t const gpus = static_cast<u32_t>(device_count);
+    return mesh_shape_t {gpus, gpus, gpus};
+}
 
-    for (int device_index = 0; device_index != device_count; ++device_index) {
+/** Whether every ordered pair of @p devices has a P2P path, failing with @c shape_unsupported_k on
+ *  the first pair without one — what the members of one domain need, since they read each other's
+ *  memory. */
+[[nodiscard]] inline expected_t peers_reach_each_other(std::span<i32_t const> devices) noexcept {
+    for (i32_t const device_index : devices) {
         CUdevice device = 0;
         if (CUresult result = cuDeviceGet(&device, device_index); result != CUDA_SUCCESS)
-            return cuda_failure<mesh_shape_t>(result, "device handle query failed (device={})", device_index);
-        for (int peer_index = 0; peer_index != device_count; ++peer_index) {
+            return cuda_failure(result, "device handle query failed (device={})", device_index);
+        for (i32_t const peer_index : devices) {
             if (peer_index == device_index) continue;
             CUdevice peer = 0;
             if (CUresult result = cuDeviceGet(&peer, peer_index); result != CUDA_SUCCESS)
-                return cuda_failure<mesh_shape_t>(result, "device handle query failed (device={})", peer_index);
+                return cuda_failure(result, "device handle query failed (device={})", peer_index);
             int can_access = 0;
             if (CUresult result = cuDeviceCanAccessPeer(&can_access, device, peer); result != CUDA_SUCCESS)
-                return cuda_failure<mesh_shape_t>(result, "P2P capability query failed (device={} peer={})",
-                                                  device_index, peer_index);
+                return cuda_failure(result, "P2P capability query failed (device={} peer={})", device_index,
+                                    peer_index);
             if (can_access == 0)
-                return expected<mesh_shape_t>::fail(status_t::shape_unsupported_k,
-                                                    "no P2P path between devices {} and {}", device_index, peer_index);
+                return expected_t::fail(status_t::shape_unsupported_k,
+                                        "devices {} and {} share a domain but no P2P path", device_index, peer_index);
         }
     }
-
-    u32_t const gpus = static_cast<u32_t>(device_count);
-    return mesh_shape_t {gpus, gpus, gpus};
+    return {};
 }
 
 /** Longest hostname (including the terminator) a @ref mesh_host_domain_t records. */
@@ -290,18 +296,19 @@ struct mesh_host_domain_t {
  *      peer host_domain's published facts, and the once-per-job exchange primitives later wiring phases
  *      reuse.
  *
- *  @ref bootstrap composes the two discovery levels: the local hardware probe ( @ref discover_mesh_shape —
- *  device count, multicast, P2P — plus the GPU model name) and a cross-host_domain fact exchange over a
- *  shared filesystem, the only medium a fresh multi-host_domain job can rely on before any transport
- *  exists. Every payload is a tiny line-oriented text file, atomically published (write-temp + @c fsync +
- *  @c rename , so a peer never reads a half-written file). The exchange is @b lead-aggregated and costs
- *  @b O(host_domain_count) file operations, never O(host_domain_count²): every host_domain publishes one
- *  facts file; the lead reads them all, validates agreement (identical GPU model and count, identical
- *  world size and multimem extent, identical job — a mismatch fails loudly naming both parties), and
- *  publishes @b one merged manifest; every follower reads only that manifest. The same @ref publish_text /
- *  @ref await_text / @ref barrier primitives then carry every later wiring phase — InfiniBand queue-pair
- *  coordinates, memory-region rkeys, symmetric-heap base addresses, multicast fabric handles — so the
- *  transport adds payloads, not machinery.
+ *  @ref bootstrap composes the two discovery levels: the local hardware probe (
+ *  @ref discover_mesh_shape — the device count — plus the GPU model name) and a cross-host_domain
+ *  fact exchange over a shared filesystem, the only medium a fresh multi-host_domain job can rely
+ *  on before any transport exists. Every payload is a tiny line-oriented text file, atomically
+ *  published (write-temp + @c fsync + @c rename , so a peer never reads a half-written file). The
+ *  exchange is @b lead-aggregated and costs @b O(host_domain_count) file operations, never
+ *  O(host_domain_count²): every host_domain publishes one facts file; the lead reads them all,
+ *  validates agreement (identical GPU model and count, identical world size and multimem extent,
+ *  identical job — a mismatch fails loudly naming both parties), and publishes @b one merged
+ *  manifest; every follower reads only that manifest. The same @ref publish_text / @ref await_text
+ *  / @ref barrier primitives then carry every later wiring phase — InfiniBand queue-pair
+ *  coordinates, memory-region rkeys, symmetric-heap base addresses, multicast fabric handles — so
+ *  the transport adds payloads, not machinery.
  *
  *  The exchange directory is @b explicit configuration ( @c bootstrap argument or @c $UFORM_EXCHANGE_DIR )
  *  — there is no default path, because a guessed directory that exists locally but is not actually shared

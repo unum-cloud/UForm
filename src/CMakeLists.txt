@@ -53,22 +53,63 @@ endif ()
 target_compile_features(uform_host PUBLIC cxx_std_23)
 target_compile_definitions(uform_host PRIVATE UFORM_EXPORTING)
 set_target_properties(
-    uform_host PROPERTIES C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN ON
+    uform_host
+    PROPERTIES C_VISIBILITY_PRESET hidden
+               CXX_VISIBILITY_PRESET hidden
+               VISIBILITY_INLINES_HIDDEN ON
 )
 
-# `test/` → the host tower's suites: `uform_tiny_checkpoint` writes the seeded checkpoint once per `ctest` run as a
-# fixture, which the parity test here and the C test in `c/` load.
-if (UFORM_BUILD_TEST)
-    add_executable(uform_tiny_checkpoint "${PROJECT_SOURCE_DIR}/test/tiny_checkpoint.cpp")
-    add_test(NAME uform_tiny_checkpoint COMMAND uform_tiny_checkpoint "${PROJECT_BINARY_DIR}/tiny.safetensors")
-    set_tests_properties(uform_tiny_checkpoint PROPERTIES FIXTURES_SETUP uform_tiny_checkpoint)
-    add_executable(uform_test_inference "${PROJECT_SOURCE_DIR}/test/inference.cpp")
-    target_link_libraries(uform_test_inference PRIVATE uform_host)
-    add_test(NAME uform_test_inference COMMAND uform_test_inference "${PROJECT_BINARY_DIR}/tiny.safetensors")
-    set_tests_properties(uform_test_inference PROPERTIES FIXTURES_REQUIRED uform_tiny_checkpoint)
-endif ()
-
 if (UFORM_BUILD_CUDA)
+    set(CMAKE_JOB_POOL_COMPILE uform_cuda_units)
+
+    # Compiles @p source device-only, with @p target's includes, definitions and options, into a fatbin of the CUDA
+    # architectures `CODES` lists, and links it into @p target in a read-only section through an assembler stub, under
+    # `<name>_bundle_start` and `<name>_bundle_end`, so it travels into archives too. With no codes the bundle is empty,
+    # and every device refuses to load it.
+    function (uform_gpu_bundle target name source)
+        cmake_parse_arguments(arg "" "" "CODES" ${ARGN})
+        set(bundle_ ${CMAKE_CURRENT_BINARY_DIR}/bundles/${name}.fatbin)
+        if (arg_CODES)
+            add_library(${name}_device OBJECT ${source})
+            set_target_properties(
+                ${name}_device PROPERTIES CUDA_ARCHITECTURES "${arg_CODES}" CUDA_FATBIN_COMPILATION ON
+            )
+            target_include_directories(${name}_device PRIVATE $<TARGET_PROPERTY:${target},INCLUDE_DIRECTORIES>)
+            target_compile_definitions(${name}_device PRIVATE $<TARGET_PROPERTY:${target},COMPILE_DEFINITIONS>)
+            target_compile_options(${name}_device PRIVATE $<TARGET_PROPERTY:${target},COMPILE_OPTIONS>)
+            add_dependencies(${target} ${name}_device)
+            # The fatbin lands at the one path the stub includes and depends on, as neither takes a generator
+            # expression.
+            add_custom_command(
+                OUTPUT ${bundle_}
+                COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_OBJECTS:${name}_device> ${bundle_}
+                DEPENDS $<TARGET_OBJECTS:${name}_device>
+                VERBATIM
+            )
+        else ()
+            file(WRITE ${bundle_} "")
+        endif ()
+        set(stub_ ${CMAKE_CURRENT_BINARY_DIR}/bundles/${name}_bundle.S)
+        file(
+            WRITE ${stub_}
+            ".section .rodata\n.balign 4096\n.globl ${name}_bundle_start\n${name}_bundle_start:\n"
+            ".incbin \"${bundle_}\"\n.globl ${name}_bundle_end\n${name}_bundle_end:\n"
+            ".section .note.GNU-stack,\"\",@progbits\n"
+        )
+        set_source_files_properties(${stub_} PROPERTIES LANGUAGE ASM OBJECT_DEPENDS ${bundle_})
+        target_sources(${target} PRIVATE ${stub_})
+    endfunction ()
+
+    # The configured generations that run `multimem`, Hopper and the Blackwell datacenter parts, each compiled for its own
+    # code alone, and both under "native".
+    set(uform_multicast_codes_)
+    if ("90a-real" IN_LIST UFORM_CUDA_ARCHITECTURES OR "native" IN_LIST UFORM_CUDA_ARCHITECTURES)
+        list(APPEND uform_multicast_codes_ 90a-real)
+    endif ()
+    if ("100f-real" IN_LIST UFORM_CUDA_ARCHITECTURES OR "native" IN_LIST UFORM_CUDA_ARCHITECTURES)
+        list(APPEND uform_multicast_codes_ 100f-real)
+    endif ()
+
     # `src/core` → `uform::core`: one static library for the whole core cell, compiled once, never per consumer.
     # Dependencies stay lean: NumKong, StringZilla, yyjson, the CUDA Driver API (no NCCL, no NVSHMEM; the runtime
     # arrives only through NumKong's kernel units), plus the fused-attention tier (nvrtc + cuDNN + cudnn-frontend) the
@@ -102,6 +143,8 @@ if (UFORM_BUILD_CUDA)
         target_include_directories(uform_core PUBLIC "${UFORM_IBVERBS_INCLUDE_DIR}")
         target_link_libraries(uform_core PUBLIC "${UFORM_IBVERBS_LIBRARY}" "${UFORM_MLX5_LIBRARY}")
     endif ()
+    # The `multimem` kernels compile for the multicast-capable codes alone, and a domain loads them by name.
+    uform_gpu_bundle(uform_core uform_multimem_switch core/multimem_switch.cu CODES ${uform_multicast_codes_})
 
     # `src/train` → `uform::train`: the training stack compiled once, linked by the `uform_base` tool and the
     # conformance suites alike.
@@ -122,8 +165,13 @@ if (UFORM_BUILD_CUDA)
     # `src/loaders` → `uform::loaders`: GPU-native data ingestion, one translation unit per format / modality cell,
     # over the vendor libraries the top-level file discovers.
     add_library(
-        uform_loaders STATIC loaders/dataset_shards.cpp loaders/direct_storage.cpp loaders/tokens_loader.cu
-                             loaders/image_loader.cu loaders/video_loader.cu loaders/audio_loader.cu
+        uform_loaders STATIC
+        loaders/dataset_shards.cpp
+        loaders/direct_storage.cpp
+        loaders/tokens_loader.cu
+        loaders/image_loader.cu
+        loaders/video_loader.cu
+        loaders/audio_loader.cu
     )
     add_library(uform::loaders ALIAS uform_loaders)
     target_link_libraries(uform_loaders PUBLIC uform::core)
@@ -163,63 +211,6 @@ if (UFORM_BUILD_CUDA)
 
     # The host-side media demux and decode thread pool, public because the loader headers expose `cpu_decode_pool_t`.
     target_link_libraries(uform_loaders PUBLIC forkunion::header)
-
-    # `tools/` → `uform_base`, the trainer binary.
-    if (UFORM_BUILD_TOOLS)
-        add_executable(uform_base "${PROJECT_SOURCE_DIR}/tools/base.cu")
-        target_link_libraries(uform_base PRIVATE uform::train)
-        list(APPEND _uform_executables uform_base)
-    endif ()
-
-    # `test/` → conformance binaries, one per cell.
-    if (UFORM_BUILD_TEST)
-        add_executable(uform_test_mesh "${PROJECT_SOURCE_DIR}/test/mesh.cpp")
-        target_link_libraries(uform_test_mesh PRIVATE uform::core)
-        add_executable(uform_test_mixer "${PROJECT_SOURCE_DIR}/test/mixer.cu")
-        target_link_libraries(uform_test_mixer PRIVATE uform::core)
-        add_executable(uform_test_contrastive "${PROJECT_SOURCE_DIR}/test/contrastive.cu")
-        target_link_libraries(uform_test_contrastive PRIVATE uform::core)
-        add_executable(uform_test_loaders "${PROJECT_SOURCE_DIR}/test/loaders.cu")
-        target_link_libraries(uform_test_loaders PRIVATE uform::loaders)
-        add_executable(uform_test_base "${PROJECT_SOURCE_DIR}/test/base.cu")
-        target_link_libraries(uform_test_base PRIVATE uform::train)
-        # The preflight probe every multi-node sbatch runs first: links the full training stack so merely starting
-        # on a node proves the runtime closure resolves there, then checks GPUDirect registration per GPU-NIC pair
-        # and the rendezvous directory — one named line per environment gap, before the real job spends a minute
-        # discovering it mid-suite.
-        add_executable(uform_test_env "${PROJECT_SOURCE_DIR}/test/env.cpp")
-        target_link_libraries(uform_test_env PRIVATE uform::train)
-        foreach (test_name IN ITEMS mesh mixer contrastive loaders base env)
-            add_test(NAME uform_test_${test_name} COMMAND uform_test_${test_name})
-            list(APPEND _uform_executables uform_test_${test_name})
-        endforeach ()
-    endif ()
-
-    if (_uform_executables)
-        # Every runnable resolves shared libraries beside itself first (`$ORIGIN`), so a `uform_bundle` tree on a
-        # shared filesystem runs on nodes whose native installs diverge from the build node's. The runnables stay
-        # at the build root, where the sbatch scripts and the launch configurations look for them.
-        set_target_properties(
-            ${_uform_executables} PROPERTIES BUILD_RPATH "$ORIGIN" RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}"
-        )
-
-        # `uform_bundle` → a self-contained runtime tree (executables + their shared-library closure, glibc
-        # excepted) under `runtime-bundle/`, for Slurm or K8s clusters where nodes are not package-identical:
-        # deploy the tree to the shared filesystem and every node runs it, whatever it has installed natively.
-        # The executable list travels |-separated — a raw `;` cannot survive the custom-command argument path.
-        list(TRANSFORM _uform_executables REPLACE "^(.+)$" "$<TARGET_FILE:\\1>" OUTPUT_VARIABLE _uform_bundle_files)
-        list(JOIN _uform_bundle_files "|" _uform_bundle_files)
-        add_custom_target(
-            uform_bundle
-            COMMAND
-                ${CMAKE_COMMAND} "-DBUNDLE_EXECUTABLES=${_uform_bundle_files}"
-                "-DBUNDLE_DIR=${PROJECT_BINARY_DIR}/runtime-bundle" -P
-                "${PROJECT_SOURCE_DIR}/cmake/bundle_runtime.cmake"
-            DEPENDS ${_uform_executables}
-            COMMENT "Bundling executables with their runtime closure into runtime-bundle/"
-            VERBATIM
-        )
-    endif ()
 endif ()
 
 # Each GPU vendor's inference kernels, one object library per vendor, which `c/` links into both library flavors beside
@@ -235,9 +226,6 @@ if (UFORM_BUILD_CUDA)
     target_compile_options(uform_nvidia_inference PRIVATE --expt-relaxed-constexpr)
     set_target_properties(uform_nvidia_inference PROPERTIES CUDA_VISIBILITY_PRESET hidden)
     set(UFORM_NVIDIA_INFERENCE_KERNELS &vram_nvidia_kernels_k)
-    if (UFORM_BUILD_TEST)
-        target_link_libraries(uform_test_inference PRIVATE uform_nvidia_inference)
-    endif ()
 endif ()
 if (UFORM_BUILD_ROCM)
     add_library(uform_amd_inference OBJECT inference/vram_amd_kernels.hip)
@@ -245,15 +233,13 @@ if (UFORM_BUILD_ROCM)
     target_link_libraries(uform_amd_inference PRIVATE numkong::static forkunion::header stringzilla::static)
     set_target_properties(uform_amd_inference PROPERTIES HIP_VISIBILITY_PRESET hidden)
     set(UFORM_AMD_INFERENCE_KERNELS &vram_amd_kernels_k)
-    if (UFORM_BUILD_TEST)
-        target_link_libraries(uform_test_inference PRIVATE uform_amd_inference)
-    endif ()
 endif ()
 file(
     CONFIGURE
-    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/inference/vram_vendors.cpp"
+    OUTPUT
+    "${CMAKE_CURRENT_BINARY_DIR}/inference/vram_vendors.cpp"
     CONTENT
-        [=[#include "inference/entries.hpp"
+    [=[#include "inference/entries.hpp"
 
 namespace ui = unum::uform::inference;
 ui::device_kernels_t const *const ui::device_kernels_k[2] = {@UFORM_NVIDIA_INFERENCE_KERNELS@, @UFORM_AMD_INFERENCE_KERNELS@};

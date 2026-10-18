@@ -47,6 +47,8 @@ jobs:
             Cargo.toml:^version = "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
             javascript/uform.test.js:version\(\), "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
             src_stub/types.cpp:return "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
+            src/types.cpp:return "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
+            CMakeLists.txt:VERSION (\d+\.\d+\.\d+(?:-rc\.\d+)?)
           dry-run: "true"
 
   lint:

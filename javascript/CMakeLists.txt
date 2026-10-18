@@ -12,32 +12,31 @@ else ()
 endif ()
 
 if (EMSCRIPTEN)
-    # Every verb the TypeScript side calls is a root of the link, so the archive members defining them are kept.
+    # Every verb the TypeScript side calls is a root of the link, so the archive members defining them are kept. The
+    # names are Emscripten's, with the leading underscore of a C symbol.
     set(UFORM_WASM_EXPORTS
-        malloc
-        free
-        uform_outcome_status
-        uform_executor_free
-        uform_arena_init
-        uform_arena_free
-        uform_status_name
-        uform_scalar_name
-        uform_modality_name
-        uform_objective_name
-        uform_negatives_name
-        uform_multimem_tier_name
-        uform_version_name
-        uform_capabilities_compiled
-        uform_capabilities_available
-        uform_model_load_ram_buffer
-        uform_model_describe
-        uform_model_free
-        uform_text_encode
-        uform_image_encode_pixels
-        uform_audio_encode_samples
+        _malloc
+        _free
+        _uform_outcome_status
+        _uform_executor_free
+        _uform_arena_init
+        _uform_arena_free
+        _uform_status_name
+        _uform_scalar_name
+        _uform_modality_name
+        _uform_objective_name
+        _uform_negatives_name
+        _uform_multimem_tier_name
+        _uform_version_name
+        _uform_capabilities_compiled
+        _uform_capabilities_available
+        _uform_model_load_ram_buffer
+        _uform_model_describe
+        _uform_model_free
+        _uform_text_encode
+        _uform_image_encode_pixels
+        _uform_audio_encode_samples
     )
-    list(TRANSFORM UFORM_WASM_EXPORTS PREPEND "_")
-    list(JOIN UFORM_WASM_EXPORTS "," UFORM_WASM_EXPORTS_JOINED)
 
     # An executable needs a source of its own; the module's whole content comes from the archive.
     file(
@@ -62,7 +61,7 @@ if (EMSCRIPTEN)
         "-sALLOW_MEMORY_GROWTH"
         "-sALLOW_TABLE_GROWTH"
         "-sENVIRONMENT=web,worker,node"
-        "-sEXPORTED_FUNCTIONS=${UFORM_WASM_EXPORTS_JOINED}"
+        "-sEXPORTED_FUNCTIONS=$<JOIN:${UFORM_WASM_EXPORTS},$<COMMA>>"
         "-sEXPORTED_RUNTIME_METHODS=HEAPU8,UTF8ToString,addFunction,removeFunction"
     )
     return()

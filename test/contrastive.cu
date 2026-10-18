@@ -430,8 +430,9 @@ static void run_distributed_case() {
     f64_t const oracle = host_loss(global_tower, global_tower, 2 * vertices_k, 2 * vertices_k, hidden_k, prefixes,
                                    host_relations, 1.0, 0.0, 2 * vertices_k);
     f64_t const relative = std::fabs(distributed_loss - oracle) / std::max(std::fabs(oracle), 1.0e-9);
-    std::printf("    loss distributed=%.6f oracle=%.6f relative=%.2e (tier=%s)\n", distributed_loss, oracle, relative,
-                domain.value_.tier() == multimem_tier_t::switch_reduced_k ? "switch_reduced" : "peer_read");
+    sz::string_view_t const tier = domain.value_.description();
+    std::printf("    loss distributed=%.6f oracle=%.6f relative=%.2e (tier %.*s)\n", distributed_loss, oracle, relative,
+                static_cast<int>(tier.size()), tier.data());
     check(relative < 5.0e-3, "distributed loss sum matches the global Float64 oracle");
 
     // Finite-difference one channel of rank 1's tower against the combined distributed force.
@@ -538,8 +539,9 @@ static int run_cross_domain_case() {
         check(false, "cross-domain make");
         return 1;
     }
-    std::printf("  fabric wired (domains=%u, tier=%s)\n", distributed.value_.world_domains(),
-                multimem.value_.tier() == multimem_tier_t::switch_reduced_k ? "switch_reduced" : "peer_read");
+    sz::string_view_t const tier = multimem.value_.description();
+    std::printf("  fabric wired (domains=%u, tier %.*s)\n", distributed.value_.world_domains(),
+                static_cast<int>(tier.size()), tier.data());
     auto ran = distributed.value_(contrastive_recipe_t {}, streams);
     if (!ran) {
         std::printf("  run: %s\n", ran.description_.c_str());

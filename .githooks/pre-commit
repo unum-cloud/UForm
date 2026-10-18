@@ -23,6 +23,37 @@ fail() { # fail <matches> <message-line>...
     rejection_count=$((rejection_count + 1))
 }
 
+# Blanks C-family comments to spaces, keeping every line and column in place, so a code check never fires
+# on a comment that merely names the construct it bans. String and character literals pass through.
+blank_c_comments_preserving_columns() { # blank_c_comments_preserving_columns < source
+    awk '
+        {
+            output = ""
+            for (position = 1; position <= length($0); ++position) {
+                character = substr($0, position, 1)
+                pair = substr($0, position, 2)
+                if (state == "block") {
+                    if (pair == "*/") { state = ""; output = output "  "; ++position }
+                    else output = output " "
+                    continue
+                }
+                if (state == "string" || state == "character") {
+                    output = output character
+                    if (character == "\\") { output = output substr($0, position + 1, 1); ++position }
+                    else if ((state == "string" && character == "\"") || (state == "character" && character == "\047")) state = ""
+                    continue
+                }
+                if (pair == "//") { tail = substr($0, position); gsub(/./, " ", tail); output = output tail; break }
+                if (pair == "/*") { state = "block"; output = output "  "; ++position; continue }
+                if (character == "\"") state = "string"
+                else if (character == "\047") state = "character"
+                output = output character
+            }
+            if (state != "block") state = ""
+            print output
+        }'
+}
+
 # Includes form groups in a fixed order with a blank line between them: the C library, the platform's own
 # headers, the C++ standard library, external libraries, sibling projects, then this project's own headers.
 # Only headers in this repository are quoted, found beside the including file or anywhere in the index, and
@@ -154,6 +185,170 @@ check_ascii_arrows_prose() {
         !fenced && / -> / && index(lines, " " FNR " ") { print }')
     [ -z "$arrows" ] || fail "$arrows" \
         "$file uses the ASCII '->' arrow - prose arrows are the Unicode →:"
+}
+
+# The abbreviation reads ID and IDs in prose, never id, ids, Id or Ids. Only comment text is weighed: code spans,
+# `@code` and `@verbatim` bodies, quoted strings, URLs, Doxygen parameter names and identifiers like `token_id`,
+# `.id` or `->id` keep their spelling.
+ids_miscased_pattern='(^|[^[:alnum:]_.:])(id|ids|Id|Ids)([^[:alnum:]_(]|$)'
+check_ids_capitalized() {
+    local miscased
+    miscased=$(printf '%s\n' "$added" | awk '
+        { line = substr($0, 2); gsub(/https?:\/\/[^[:space:]]*/, "", line) }
+        line ~ /@end(code|verbatim)/ { code = 0; next }
+        line ~ /@(code|verbatim)/ { code = 1; next }
+        code { next }
+        line ~ /^[[:space:]]*(\/\/|\/\*|\*)/ { print line; next }
+        { position = index(line, "//"); if (position) print substr(line, position) }' |
+        sed -E 's/`[^`]*`//g; s/"[^"]*"//g; s/->/ _arrow_/g; s/@(p|c|a|ref|param|tparam)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*//g' |
+        grep -E "$ids_miscased_pattern" || true)
+    [ -z "$miscased" ] || fail "$miscased" "$file writes id or ids in a comment - the abbreviation is ID, plural IDs:"
+}
+
+# The same rule for Markdown prose, skipping fenced and indented code the added lines open themselves.
+check_ids_capitalized_prose() {
+    local miscased
+    miscased=$(printf '%s\n' "$added" | awk '/^\+[[:space:]]*```/ { fenced = !fenced; next } !fenced && !/^\+(    |\t)/' |
+        sed -E 's#https?://[^[:space:]]*##g; s/`[^`]*`//g; s/"[^"]*"//g; s/->/ _arrow_/g; s/^\+//' |
+        grep -E "$ids_miscased_pattern" || true)
+    [ -z "$miscased" ] || fail "$miscased" "$file writes id or ids - the abbreviation is ID, plural IDs:"
+}
+
+# Prose reads at 100 columns while code runs to clang-format's 120, so a docblock line or a whole-line `//`
+# comment stops at 100. URLs, `@code` and `@verbatim` bodies are exempt, and a macro line is measured without
+# the padding clang-format adds before its trailing backslash.
+check_prose_comment_width() {
+    local wide
+    wide=$(awk '
+        FILENAME == ARGV[1] { added[$1 + 0]; next }
+        {
+            text = $0
+            if (!inside && text ~ /^[[:space:]]*\/\*([^*]|\*[^\/])*\*\/[[:space:]]*[^[:space:]\\]/) next
+            if (text ~ /^[[:space:]]*\/\*/) { inside = 1; in_code = 0 }
+            prose = inside || text ~ /^[[:space:]]*\/\//
+            if (inside && text ~ /@(code|verbatim)/) in_code = 1
+            if (inside && text ~ /@end(code|verbatim)/) in_code = 0
+            if (inside && text ~ /\*\//) inside = 0
+            if (!prose || in_code || !(FNR in added) || text ~ /https?:\/\//) next
+            characters = text
+            sub(/[[:space:]]*\\$/, "", characters)
+            gsub(/[\200-\277]/, "", characters)
+            if (length(characters) > 100) printf "line %d: %d columns\n", FNR, length(characters)
+        }' "$staged_lines_path" "$staged_blob")
+    [ -z "$wide" ] || fail "$wide" \
+        "$file writes prose past 100 columns - rewrap it, only code may reach 120:"
+}
+
+# A comment line that breaks a sentence while the next word would fit under the paragraph's widest line is an
+# edit nobody re-flowed. A colon ending, a URL, tags, bullets, code blocks, aligned rows and `Label:` lines start
+# a new paragraph, and the measure is the paragraph's own widest other line, capped at the 100-column prose.
+check_prose_paragraph_filled() {
+    local underfilled
+    underfilled=$(awk '
+        function characters(text) { gsub(/[\200-\277]/, "", text); return length(text) }
+        function first_word(text) {
+            if (text ~ /^`[^`]*`/) { match(text, /^`[^`]*`[^[:space:]]*/); return substr(text, 1, RLENGTH) }
+            # An inline tag moves with its argument, so the pair is what has to fit.
+            if (match(text, /^@(c|p|ref|b|a|e|em)[[:space:]]+[^[:space:]]+/)) return substr(text, 1, RLENGTH)
+            sub(/[[:space:]].*$/, "", text); return text
+        }
+        function hold_paragraph_line(line, body, width) { ++held; held_line[held] = line; held_body[held] = body; held_width[held] = width }
+        function report_paragraph_room(    index_, other, measure, word) {
+            for (index_ = 1; index_ < held; ++index_) {
+                if (held_body[index_] ~ /[.:;!?][])"`\047]*$/) continue
+                if (!((held_line[index_] in added) || (held_line[index_ + 1] in added))) continue
+                measure = 0
+                for (other = 1; other <= held; ++other) if (other != index_ && held_width[other] > measure) measure = held_width[other]
+                if (measure > 100) measure = 100
+                word = first_word(held_body[index_ + 1])
+                if (held_width[index_] + 1 + characters(word) <= measure) printf "line %d: room for `%s` from the next line\n", held_line[index_], word
+            }
+            held = 0
+        }
+        function previous_text_ok(text) { return text !~ /:[[:space:]]*(\*\/)?[[:space:]]*$/ && text !~ /https?:\/\// }
+        FILENAME == ARGV[1] { added[$1 + 0]; next }
+        {
+            text = $0
+            opens = (text ~ /^[[:space:]]*\/\*/)
+            if (opens) { inside = 1; in_code = 0 }
+            slashed = !inside && text ~ /^[[:space:]]*\/\//
+            if (inside && text ~ /@(code|verbatim)/) in_code = 1
+            body = text
+            sub(/[[:space:]]*\*\/[[:space:]]*$/, "", body)
+            sub(/^[[:space:]]*(\/\*\*?|\*|\/\/\/?)[[:space:]]*/, "", body)
+            flowing = (inside || slashed) && !in_code && body != "" && body !~ /^\||https?:\/\// &&
+                body !~ /[^[:space:]]   *[^[:space:]]/ && text !~ /@end(code|verbatim)/ && text !~ /^[[:space:]]*\/\/[[:space:]]{4,}/
+            block_tag = body ~ /^@[a-z]/ && body !~ /^@(c|p|ref|b|a|e|em)[[:space:]]/
+            continues = flowing && !block_tag && body !~ /^(- |[0-9]+\. |[A-Z][A-Za-z]*( [A-Za-z]+)?( [A-Za-z]+)?: )/ && !opens
+            if (!(continues && previous_flowing && previous_kind == (slashed ? "slashed" : "block")))
+                report_paragraph_room()
+            if (flowing) hold_paragraph_line(FNR, body, characters(text))
+            previous_flowing = flowing && text !~ /\*\// && previous_text_ok(text)
+            previous_kind = slashed ? "slashed" : "block"
+            if (inside && text ~ /@end(code|verbatim)/) in_code = 0
+            if (inside && text ~ /\*\//) inside = 0
+        }
+        END { report_paragraph_room() }' "$staged_lines_path" "$staged_blob")
+    [ -z "$underfilled" ] || fail "$underfilled" \
+        "$file leaves a comment line underfilled - it breaks a sentence while the next word fits under" \
+        "            the paragraph's widest line, so pull the word up or re-flow:"
+}
+
+# A `#pragma region` label must be letters, digits & spaces only. clang-format tokenises the label
+# as code, so a dash, ampersand, colon, or any other symbol makes it reflow the marker and the
+# regions drift out of place on the next format run. Keep the label a plain phrase:
+# `#pragma region Deferred Calls`.
+check_region_labels() {
+    local symbolic
+    symbolic=$(printf '%s\n' "$added" |
+        grep -E '^\+[[:space:]]*#pragma[[:space:]]+(end)?region[[:space:]]' |
+        grep -E '#pragma[[:space:]]+(end)?region[[:space:]]+.*[^A-Za-z0-9 ]' || true)
+    [ -z "$symbolic" ] || fail "$symbolic" \
+        "$file has a symbol in a #pragma region label - write \`#pragma region Deferred Calls\`;" \
+        "            clang-format reflows a label carrying anything but letters, digits & spaces:"
+}
+
+# A `#pragma region` earns its markers only around a stretch worth folding: one shorter than 30 lines
+# belongs in its neighbour, so the outline stays a few meaningful sections rather than many tiny ones.
+# Judged when either marker of the region is an added line.
+check_region_lengths() {
+    local short
+    short=$(awk '
+        NR == FNR { added[$1 + 0]; next }
+        /^[[:space:]]*#pragma[[:space:]]+region/ { opened[++depth] = FNR; name[depth] = $0 }
+        /^[[:space:]]*#pragma[[:space:]]+endregion/ && depth {
+            if (FNR - opened[depth] - 1 < 30 && ((opened[depth] in added) || (FNR in added)))
+                printf "line %d: %s\n", opened[depth], name[depth]
+            depth--
+        }' "$staged_lines_path" "$staged_blob")
+    [ -z "$short" ] || fail "$short" \
+        "$file has a #pragma region shorter than 30 lines - fold it into its neighbour:"
+}
+
+# Rust modules mirror files. An inline `mod name { .. }` or a `#[path = ..]` remap names a module no file
+# backs; only the unit tests, `#[cfg(test)] mod tests`, stay inline.
+check_rust_modules() {
+    local inline
+    inline=$(awk '
+        /^[[:space:]]*#\[cfg\(test\)\]/ { testing = NR; next }
+        /^[[:space:]]*#\[path[[:space:]]*=/ { printf "line %d: #[path] remap\n", NR }
+        /^[[:space:]]*(pub(\([a-z]+\))?[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\{/ {
+            name = $0; sub(/.*mod[[:space:]]+/, "", name); sub(/[[:space:]]*\{.*/, "", name)
+            if (!(name == "tests" && testing == NR - 1)) printf "line %d: inline mod %s\n", NR, name
+        }' "$staged_blob")
+    [ -z "$inline" ] || fail "$inline" \
+        "$file declares a module no file backs - move its items to the file root or into their own file:"
+}
+
+# Tests assert what a value is, not what its rendering happens to contain. A substring of a repr or a
+# message passes on a wrong value that spells the fragment and breaks on a harmless rewording; compare the
+# whole repr, the fields, the exception type or the very object raised instead.
+check_substring_assertions() {
+    local fragments
+    fragments=$(printf '%s\n' "$added" | grep -nE \
+        'pytest\.raises\([^)]*match=|["'"'"'] in (repr|str)\(|(repr|str)\([^)]*\)\.(startswith|endswith)\(|\.to_string\(\)\.(contains|starts_with|ends_with)\(|\.message\.(contains|starts_with|ends_with)\(' || true)
+    [ -z "$fragments" ] || fail "$fragments" \
+        "$file asserts on a fragment of a repr or a message - compare the whole value, its fields, or the exception:"
 }
 
 # A Unicode arrow glued to its neighbor - `key→id` - reads as one token to searchers and
@@ -294,6 +489,39 @@ check_sibling_justification() {
 
 # region Doxygen Blocks
 
+# A tag continuation hangs exactly 4 columns past its `@`, and a bullet or numbered-item continuation
+# aligns under the item's text, since anything else reads as a new paragraph or as ragged alignment.
+# Inline tags like `@c` or `@p` opening a line continue the prose; only block tags start an entry.
+check_continuation_hanging_indent() {
+    local ragged
+    ragged=$(awk '
+        FILENAME == ARGV[1] { added[$1 + 0]; next }
+        {
+            text = $0
+            if (text ~ /^[[:space:]]*\/\*\*/) { inside = 1; anchor = 0; in_code = 0 }
+            if (!inside) next
+            if (text ~ /@(code|verbatim)/) { in_code = 1; anchor = 0 }
+            if (text ~ /@end(code|verbatim)/) { in_code = 0; next }
+            if (text ~ /\*\//) { inside = 0; anchor = 0 }
+            if (in_code) next
+            if (text ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(brief|param|tparam|return|returns|retval|note|warning|sa|see|throws|pre|post)([^a-z]|$)/) {
+                anchor = index(text, "@") + 4; next
+            }
+            if (text ~ /^[[:space:]]*\*[[:space:]]+(-|[0-9]+\.) /) {
+                match(text, /^[[:space:]]*\*[[:space:]]+(-|[0-9]+\.)[[:space:]]+/); anchor = RLENGTH + 1; next
+            }
+            block_tag = text ~ /^[[:space:]]*\*[[:space:]]*@[a-z]/ && text !~ /^[[:space:]]*\*[[:space:]]*@(c|p|ref|b|a|e|em)[[:space:]]/
+            if (text ~ /^[[:space:]]*\*[[:space:]]*$/ || block_tag || text ~ /^[[:space:]]*\*\//) { anchor = 0; next }
+            if (anchor && (FNR in added)) {
+                match(text, /^[[:space:]]*\*[[:space:]]*/)
+                if (RLENGTH + 1 != anchor) printf "line %d: continuation starts at column %d, expected %d\n", FNR, RLENGTH + 1, anchor
+            }
+        }' "$staged_lines_path" "$staged_blob")
+    [ -z "$ragged" ] || fail "$ragged" \
+        "$file misaligns a continuation line - a tag continuation hangs 4 columns past its @, a bullet or" \
+        "            numbered-item continuation aligns under the item text:"
+}
+
 # Every @param declares its direction - [in]/[out]/[inout] - so a reader knows whether the callee
 # reads, writes, or mutates the argument. A bare @param and the comma form @param[in,out] are both
 # rejected; the one spelling for a mutated argument is @param[inout].
@@ -338,6 +566,15 @@ check_doxygen_in_line_comments() {
         grep -E '//[^/!].*[[:space:]]@(brief|param|tparam|returns?|ref|see|note|c|p|b)\b' || true)
     [ -z "$tagged" ] || fail "$tagged" \
         "$file uses a Doxygen command in a // comment, which Doxygen never parses - quote code in backticks:"
+}
+
+# A `//!` trailer documents nothing an editor shows on hover, and C and C++ have no use for it: a member
+# takes a `/** ... */` line above it, and a note on a statement is a plain `//` comment.
+check_doxygen_trailers() {
+    local trailers
+    trailers=$(printf '%s\n' "$added" | grep -nE '//!' || true)
+    [ -z "$trailers" ] || fail "$trailers" \
+        "$file documents with a //! trailer - write /** ... */ above a member, or // after a statement:"
 }
 
 # An `@section` line reads as a heading only when air surrounds it: the comment lines directly
@@ -431,6 +668,41 @@ check_brief_length() {
     [ -z "$sprawling" ] || fail "$sprawling" \
         "$file lets a @brief summary run past three lines - keep the summary short and move" \
         "            the rest into an unindented body paragraph below a blank comment line:"
+}
+
+# A file's own header names itself before it describes itself: @file, @author, @date, @brief, in that
+# order, contiguous, with any prose below them, as `c/uform/train.h` opens. The header is context, so the
+# staged file is read whole and judged when one of its header lines is added; a file with no header at
+# all is judged when its first line is.
+check_file_header() {
+    local header
+    header=$(awk '
+        NR == FNR { added[$1 + 0]; next }
+        { lines[FNR] = $0; last = FNR }
+        END {
+            for (i = 1; i <= last; ++i) if (lines[i] ~ /^[[:space:]]*\/\*\*/) break
+            if (i > last) { if (1 in added) print "line 1: no header docblock"; exit }
+            wanted = "file author date brief"; split(wanted, order, " ")
+            seen = 0; blank = 0; touched = 0; findings = ""
+            for (j = i; j <= last; ++j) {
+                if (j in added) touched = 1
+                if (lines[j] ~ /^[[:space:]]*\*[[:space:]]*$/) blank = 1
+                if (match(lines[j], /@(file|author|date|brief)/)) {
+                    tag = substr(lines[j], RSTART + 1, RLENGTH - 1)
+                    ++seen
+                    if (seen <= 4 && tag != order[seen])
+                        findings = findings sprintf("line %d: @%s where @%s belongs\n", j, tag, order[seen])
+                    if (blank) findings = findings sprintf("line %d: @%s sits below a blank line, outside the tag block\n", j, tag)
+                }
+                if (lines[j] ~ /\*\//) break
+            }
+            if (!touched) exit
+            printf "%s", findings
+            if (seen < 4) printf "line %d: the header names only %d of @file, @author, @date, @brief\n", i, seen
+        }' "$staged_lines_path" "$staged_blob")
+    [ -z "$header" ] || fail "$header" \
+        "$file misorders its file header - name the file, then the author, the date, and the summary," \
+        "            contiguously, with any prose below them:"
 }
 
 # A docblock's brackets say whether it is structured. With no block tag it is prose, so the text
@@ -818,6 +1090,135 @@ check_host_threads() {
         "            non-blocking CUstream + CUevent from one host thread:"
 }
 
+# CUDA's `atomicAdd`-family intrinsics never name their memory order - they are relaxed at device scope, and a
+# reader cannot tell whether that was chosen. Every shared word goes through `cuda::atomic_ref` from
+# `<cuda/atomic>` with an explicit order, as weak as the protocol allows.
+check_cuda_raw_atomics() {
+    local raw
+    raw=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+        grep -E '(^|[^A-Za-z0-9_])atomic(Add|Sub|Or|And|Xor|CAS|Exch|Min|Max|Inc|Dec)(_block|_system)?\(' || true)
+    [ -z "$raw" ] || fail "$raw" \
+        "$file calls a CUDA atomic intrinsic - write cuda::atomic_ref<u32_t, cuda::thread_scope_device> {word}" \
+        "            .fetch_add(1, cuda::std::memory_order_relaxed), naming the order at every access:"
+}
+
+# A const member that locks or writes hides a mutation behind its signature, and a `const_cast` launders a
+# read-only view into a writable one: such members are non-const, and a writer takes the mutable span.
+check_mutable_and_const_cast() {
+    local hits
+    hits=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns | sed -E 's/"([^"\\]|\\.)*"//g' |
+        grep -E '\bmutable\b|\bconst_cast\b' || true)
+    [ -z "$hits" ] || fail "$hits" \
+        "$file writes through const - make the member that locks or writes non-const, and pass the" \
+        "            writer the tensor's mutable span rather than casting the const one:"
+}
+
+# STL dynamic containers in the shipped library hide allocations and grow behind the caller's back; the
+# standard vector and string are already refused above, and the node-based maps, sets, lists and adaptors
+# go the same way. Use `core::array<T>`, kept sorted where a lookup needs it, or an `nk::tensor`; a vendor
+# API that demands one carries the `vendor-boundary` marker.
+check_stl_dynamic_containers() {
+    local owners
+    owners=$(printf '%s\n' "$added" | grep -v 'vendor-boundary' | blank_c_comments_preserving_columns |
+        grep -E '\bstd::(list|forward_list|map|multimap|set|multiset|unordered_[a-z_]+|basic_string|priority_queue|stack|queue)\b' || true)
+    [ -z "$owners" ] || fail "$owners" \
+        "$file uses an STL dynamic container - use core::array<T>, sorted where a lookup needs it, or nk::tensor:"
+}
+
+# A range rebuilt from its own parts - `{x.data(), x.size()}`, `{tokens.view().data(), tokens.view().size()}`
+# or `std::span<T const>(x.data(), x.size())` - means a conversion or an accessor is missing: a container
+# converts to `std::span`, NumKong tensors convert to views, and `sz::string` converts to its view. Pass the
+# range itself.
+check_range_reconstruction() {
+    local rebuilt
+    rebuilt=$(printf '%s\n' "$added" |
+        grep -E '(\{|(span|string_view|_view_t|_span_t)(<.*>)?( const)?( [a-z_]+)? *\() *([A-Za-z_][A-Za-z0-9_.()>-]*)(\.|->)data\(\), *\6(\.|->)size\(\) *[})]' || true)
+    [ -z "$rebuilt" ] || fail "$rebuilt" \
+        "$file rebuilds a range from its own .data()/.size() - pass the range itself," \
+        "            or add the missing accessor or conversion:"
+}
+
+# Preprocessor conditionals a reader can match by eye: two levels at most, not counting the include guard,
+# no `#elif` chain inside another chain, and an `#endif` that closes a pair names its condition, as in
+# `#endif // UFORM_WITH_INFINIBAND`. A conditional is judged when any of its directives, or those of a
+# conditional inside it, is an added line.
+check_preprocessor_nesting() {
+    local tangled
+    tangled=$(awk '
+        NR == FNR { added[$1 + 0]; next }
+        pending != "" && NF {
+            if ($1 == "#define" && $2 == pending) guarded = 1
+            pending = ""
+        }
+        !/^[[:space:]]*#/ { next }
+        {
+            directive = $0
+            sub(/^[[:space:]]*#[[:space:]]*/, "", directive)
+            keyword = directive; sub(/[^a-z].*$/, "", keyword)
+        }
+        keyword ~ /^if(def|ndef)?$/ {
+            ++level
+            chain[level] = holds[level] = inner_chain[level] = 0
+            touched[level] = (FNR in added)
+            if (level == 1 && keyword == "ifndef" && !opened_any) { pending = directive; sub(/^ifndef[[:space:]]+/, "", pending); sub(/[[:space:]].*$/, "", pending) }
+            opened_any = 1
+            if (level > 1) holds[level - 1] = 1
+            if (level - guarded > 2 && touched[level])
+                printf "line %d: opens a third conditional level - fold two conditions into one line\n", FNR
+            next
+        }
+        keyword == "elif" && level { chain[level] = 1; if (FNR in added) touched[level] = 1; next }
+        keyword == "else" && level { if (FNR in added) touched[level] = 1; next }
+        keyword == "endif" && level {
+            if (FNR in added) touched[level] = 1
+            is_guard = (level == 1 && guarded)
+            if (!is_guard && touched[level] && chain[level] && inner_chain[level])
+                printf "line %d: closes an #elif chain that holds another #elif chain\n", FNR
+            if (!is_guard && touched[level] && holds[level] && $0 !~ /\/\/[[:space:]]*[^[:space:]]/)
+                printf "line %d: closes a conditional that holds another - name it: #endif // <condition>\n", FNR
+            if (level > 1) {
+                if (chain[level]) inner_chain[level - 1] = 1
+                if (touched[level]) touched[level - 1] = 1
+            }
+            if (is_guard) guarded = 0
+            --level
+            next
+        }' "$staged_lines_path" "$staged_blob")
+    [ -z "$tangled" ] || fail "$tangled" \
+        "$file tangles its preprocessor conditionals - two levels at most, no #elif chain inside another," \
+        "            and an #endif closing a nested pair names its condition:"
+}
+
+# A requires-clause names what it admits. Parentheses wrap only what the grammar needs them for, a comparison,
+# a call or a negation, never names joined by && and ||; and a clause never opens with a negation: a fallback
+# beside `requires X` stays unconstrained, since the constrained overload already wins wherever X holds.
+check_requires_clauses() {
+    local negated wrapped name='[A-Za-z_][A-Za-z0-9_:]*(<[^()&|]*>)?'
+    negated=$(printf '%s\n' "$added" | grep -E '^\+[^/*]*requires[[:space:]]*\([[:space:]]*!' || true)
+    [ -z "$negated" ] || fail "$negated" \
+        "$file opens a requires-clause with a negation - leave the fallback unconstrained, name the" \
+        "            alternative as a concept of its own, or branch with if constexpr:"
+    wrapped=$(printf '%s\n' "$added" |
+        grep -E "^\+[^/*]*requires[[:space:]]*\([[:space:]]*$name([[:space:]]*(&&|\|\|)[[:space:]]*$name)*[[:space:]]*\)[[:space:]]*\$" ||
+        true)
+    [ -z "$wrapped" ] || fail "$wrapped" \
+        "$file wraps plain names in parentheses - write \`requires concept<type_> && other<type_>\`:"
+}
+
+# Rejects a print to stdout in a test body: the harness owns the output, a passing check is silent and a
+# failing one reports itself to stderr through `test_suite_t::check`, so a green run reads as one summary line.
+# Judges the suites that include `harness.hpp`; one still on its own `check` moves over whole.
+check_test_bodies_quiet() {
+    grep -q '^#include "harness.hpp"' "$staged_blob" || return 0
+    local prints
+    prints=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+        grep -nE '\b(fmt::println|fmt::print|printf|puts)[[:space:]]*\(|\bstd::cout\b|\bfprintf[[:space:]]*\([[:space:]]*stdout\b' |
+        grep -vE '\([[:space:]]*stderr\b' || true)
+    [ -z "$prints" ] || fail "$prints" \
+        "$file prints to stdout from a test body - report failures through suite.check(...), which writes" \
+        "            stderr, and leave the summary line to the harness:"
+}
+
 # endregion C++ Surface and Containers
 
 # region Build CI and Packaging
@@ -893,6 +1294,147 @@ check_workflow_names() {
     [ -z "$misnamed" ] || fail "$misnamed" \
         "$file misnames a CI workflow, job or step - each carries a \`name:\` the Actions UI and branch protection" \
         "            reference, a plain phrase like \`Test \${{ matrix.os }} on QEMU\` that spells every list-valued matrix axis:"
+}
+
+# CMake spells every target, source and flag it means at the call that means it. Deriving one by replacing, slicing or
+# matching out part of another string, or by editing a list in place, hides what the build compiles: pass each name as
+# an argument instead, under a keyword where several kinds travel together. Building a list with `list(APPEND)` and
+# testing a value with `if (... MATCHES ...)` stay free.
+check_cmake_string_surgery() {
+    local surgery
+    surgery=$(printf '%s\n' "$added" | grep -vE '^\+?[[:space:]]*#' |
+        grep -iE '(^|[^A-Za-z0-9_])(string[[:space:]]*\([[:space:]]*(REPLACE|REGEX|SUBSTRING|STRIP|TOLOWER|TOUPPER)[[:space:]]|list[[:space:]]*\([[:space:]]*(TRANSFORM|FILTER|REMOVE_ITEM|REMOVE_AT|REMOVE_DUPLICATES|SUBLIST|POP_BACK|POP_FRONT|INSERT|JOIN|SORT|REVERSE)[[:space:]]|(get_filename_component|cmake_path)[[:space:]]*\()' ||
+        true)
+    [ -z "$surgery" ] || fail "$surgery" \
+        "$file derives a name or flag by editing a string or a list - spell each one out at its call and pass it as" \
+        "            an argument, as \`uform_find_library(UFORM_AVCODEC_LIBRARY avcodec)\` takes both its names:"
+}
+
+# The CPython bindings parse arguments and build results by hand: `PyArg_Parse*` and `Py_BuildValue` interpret a
+# format string at runtime, so a wrong specifier is a crash rather than a compile error, and their error paths are
+# the interpreter's rather than ours.
+check_cpython_format_shortcuts() {
+    local shortcuts
+    shortcuts=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+        grep -E '\b(Py_BuildValue|PyArg_Parse[A-Za-z]*|PyArg_UnpackTuple)[[:space:]]*\(' || true)
+    [ -z "$shortcuts" ] || fail "$shortcuts" \
+        "$file calls a format-string shortcut of the C API - walk the arguments by hand and build results with" \
+        "            PyDict_New / PyLong_FromSize_t and uform_py_dict_steal_item:"
+}
+
+# `sys.version` is a display string whose shape is not contractual; every question about the
+# running interpreter has a structured answer.
+check_python_version_probe() {
+    local probes
+    probes=$(printf '%s\n' "$added" | grep -nE 'sys\.version[^_]' || true)
+    [ -z "$probes" ] || fail "$probes" \
+        "$file parses \`sys.version\`, a human-readable string - use \`sys.version_info\` for" \
+        "            comparisons or \`platform.python_version()\` for display:"
+}
+
+# A bare `np.ndarray` annotation hides the dtype a caller must pass or gets back.
+check_python_array_annotations() {
+    local bare
+    bare=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*#' |
+        grep -E '(->|:)[^=#]*\b(np|numpy)\.ndarray\b' || true)
+    [ -z "$bare" ] || fail "$bare" \
+        "$file annotates a bare np.ndarray - name the dtype, as npt.NDArray[np.float32], or take" \
+        "            npt.ArrayLike for inputs:"
+}
+
+# A module constant documents itself with a docstring on the line below, which documentation tools and
+# editors show on hover, rather than a comment above that none of them read.
+check_python_constant_comments() {
+    local commented
+    commented=$(awk '
+        NR == FNR { added[$1 + 0]; next }
+        /^[A-Z_][A-Z0-9_]*(: [^=]+)? *= / && previous ~ /^#/ && previous !~ /^# (region|endregion)/ &&
+            ((FNR in added) || ((FNR - 1) in added)) {
+            printf "line %d: %s\n", FNR, $0
+        }
+        { previous = $0 }' "$staged_lines_path" "$staged_blob")
+    [ -z "$commented" ] || fail "$commented" \
+        "$file documents a module constant with a comment above it - move the text into a docstring on" \
+        "            the line below the assignment:"
+}
+
+# Rejects Rust imports out of the standard library, external crates, own crate order, or without a blank line
+# between those groups and after the last one, which rustfmt leaves alone. It reads the whole source from stdin.
+check_rust_use_groups() { # check_rust_use_groups <own-crate> <path> < source
+    local findings
+    findings=$(awk -v own="$1" -v path="$2" -v quote="'" '
+        BEGIN { literal = "r#*\"|\"|" quote "(\\\\.|[^" quote "\\\\])" quote "|//|/\\*" }
+        function blanks(width) { return sprintf("%" width "s", "") }
+        function count(text, bracket) { return gsub(bracket, "", text) }
+        function group(root) {
+            if (root == "std" || root == "core" || root == "alloc") return 0
+            return root == own || root == "crate" || root == "self" || root == "super" ? 2 : 1
+        }
+        function blank(from, to,   line) {
+            for (line = from; line < to; ++line) if (source[line] ~ /[^[:space:]]/) return 0
+            return 1
+        }
+        {
+            source[NR] = $0
+            text = $0; masked = ""; plain = 0
+            while (text != "") {
+                if (depth) {
+                    if (!match(text, /\/\*|\*\//)) break
+                    depth += substr(text, RSTART, 2) == "/*" ? 1 : -1
+                    taken = RSTART + 1
+                } else if (closer != "" && !raw) {
+                    if (!match(text, /^([^"\\]|\\.)*"/)) break
+                    closer = ""; taken = RLENGTH
+                } else if (closer != "") {
+                    if (!(taken = index(text, closer))) break
+                    taken += length(closer) - 1; closer = ""
+                } else if (match(text, literal)) {
+                    masked = masked substr(text, 1, RSTART - 1)
+                    token = substr(text, RSTART, RLENGTH); text = substr(text, RSTART); taken = RLENGTH
+                    if (token == "//") break
+                    if (token == "/*") depth = 1
+                    else if (token ~ /"$/) { raw = token ~ /^r/; closer = "\"" substr(token, 2, RLENGTH - 2) }
+                } else { plain = 1; break }
+                masked = masked blanks(taken); text = substr(text, taken + 1)
+            }
+            code[NR] = masked (plain ? text : blanks(length(text)))
+        }
+        END {
+            for (line = 1; line <= NR; ++line) {
+                if (!match(code[line], /^ *(pub(\([^)]*\))? +)?use +(::)?[A-Za-z0-9_]+/)) continue
+                head = substr(code[line], 1, RLENGTH); rest = substr(code[line], RLENGTH + 1)
+                root = head; sub(/^.*[ :]/, "", root)
+                for (end = line; !index(rest, ";") && end < NR; rest = code[++end]) {}
+                start = line
+                while (start > 1 && code[start - 1] ~ /\][[:space:]]*$/) {
+                    candidate = start; nesting = 0
+                    while (candidate > 1) {
+                        --candidate
+                        nesting += count(code[candidate], "]") - count(code[candidate], "\\[")
+                        if (nesting == 0) break
+                    }
+                    if (code[candidate] !~ /^[[:space:]]*#\[/) break
+                    start = candidate
+                }
+                match(head, /^ */)
+                ++uses; starts[uses] = start; ends[uses] = end; indents[uses] = RLENGTH; roots[uses] = root
+            }
+            for (use = 1; use <= uses; ++use) {
+                category = group(roots[use]); after = source[ends[use] + 1]; gsub(/^[[:space:]]+|[[:space:]]+$/, "", after)
+                if (use < uses && indents[use + 1] == indents[use] && blank(ends[use] + 1, starts[use + 1])) {
+                    if (group(roots[use + 1]) < category)
+                        printf "%s:%d: order imports as standard library, external crates, own crate\n", path, starts[use]
+                    if (group(roots[use + 1]) != category && ends[use] + 1 == starts[use + 1])
+                        printf "%s:%d: separate import groups with a blank line\n", path, ends[use]
+                } else if (ends[use] < NR && after != "" && after != "}")
+                    printf "%s:%d: add a blank line after the last import\n", path, ends[use]
+            }
+        }')
+    [ -z "$findings" ] && return 0
+    echo "pre-commit: $2 breaks the Rust import groups - standard library, external crates, then the own crate," \
+        "a blank line apart:"
+    printf '%s\n' "$findings" | head -5
+    return 1
 }
 
 # endregion Build CI and Packaging
@@ -1127,16 +1669,25 @@ judge_path() {
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh)
         check_ascii_arrows
         check_glued_arrows
+        check_ids_capitalized
         check_backward_references
+        check_prose_comment_width
+        check_prose_paragraph_filled
+        check_region_labels
+        check_region_lengths
         check_param_directions
         check_markdown_doxygen
         check_doxygen_glued
         check_doxygen_in_line_comments
+        check_doxygen_trailers
         check_section_spacing
         check_docblock_spacing
+        check_continuation_hanging_indent
         check_lone_brief
         check_brief_length
+        check_file_header
         check_docblock_brackets
+        check_preprocessor_nesting
         check_hand_ceils
         check_trailing_returns
         check_iterator_laundering
@@ -1154,31 +1705,62 @@ judge_path() {
         check_c_limit_macros
         check_template_parameter_underscores
         check_template_type_suffixes
+        check_requires_clauses
         check_function_like_macros
         check_stl_streams
         check_deque
         check_memcpy
+        check_range_reconstruction
         check_data_null_probe
         check_call_chained_call
         check_gcc_atomics
+        check_mutable_and_const_cast
         check_clang_format_on_changed_lines
         ;;&
-    *.cu | *.cuh) check_host_threads ;;&
+    *.cu | *.cuh)
+        check_host_threads
+        check_cuda_raw_atomics
+        ;;&
     # The shipped library: the C ABI under c/uform/ and the headers under src/, never the tests.
     c/*.h | src/*.cuh | src/*.hpp)
         check_boolean_parameters
-        ;;
+        ;;&
+    src/*.cuh | src/*.hpp | src/*.cu | src/*.cpp)
+        check_stl_dynamic_containers
+        ;;&
+    # The suites' bodies, whose harness alone writes the summary line.
+    test/harness.hpp) ;;
+    test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh) check_test_bodies_quiet ;;
     esac
     case "$file" in
     *.md)
         check_ascii_arrows_prose
+        check_ids_capitalized_prose
         check_markdown_tables
         check_blank_line_runs
         check_glued_arrows
         check_sibling_justification
         ;;
-    *.py | *.pyi) check_sibling_justification ;;
+    *.py | *.pyi)
+        check_sibling_justification
+        check_python_version_probe
+        check_python_array_annotations
+        check_python_constant_comments
+        check_substring_assertions
+        ;;
+    *.rs)
+        check_ids_capitalized
+        check_rust_modules
+        check_substring_assertions
+        check_rust_use_groups uform "$file" < "$staged_blob" || rejection_count=$((rejection_count + 1))
+        ;;
+    # The bindings' comments follow the same prose rules as the core's.
+    *.swift | *.ts | *.js) check_ids_capitalized ;;
     .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
+    CMakeLists.txt | */CMakeLists.txt | *.cmake) check_cmake_string_surgery ;;
+    esac
+    case "$file" in
+    python/*.c | python/*.h) check_cpython_format_shortcuts ;;
     esac
     check_banners "$file" <<< "$added" || rejection_count=$((rejection_count + 1))
     # Turning a formatter off in-band is banned: the checked-in .clang-format and .cmake-format.py profiles are

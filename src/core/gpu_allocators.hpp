@@ -244,16 +244,27 @@ struct gpu_arena_t {
      *
      *  @param[in] device Device ordinal the arena's physical chunks will live on.
      *  @param[in] reserve_bytes Growth ceiling; rounded up to the device's allocation granularity.
-     *  @param[in] visible_to Peer device ordinals that must be able to read this arena over NVLink.
+     *  @param[in] visible_to Peer device ordinals that must be able to read this arena over NVLink:
+     *      the other members of its domain, each refused at once when it has no P2P path to
+     *      @p device .
      */
     [[nodiscard]] static expected<gpu_arena_t> make(int device, std::size_t reserve_bytes,
                                                     std::span<i32_t const> visible_to = {}) noexcept {
         gpu_arena_t arena;
         arena.device_ = device;
-        for (i32_t const peer : visible_to)
-            if (peer != device)
-                if (arena.visible_to_.push_back(peer) != status_t::success_k)
-                    return expected<gpu_arena_t>::fail(status_t::bad_alloc_k, "peer table allocation failed");
+        for (i32_t const peer : visible_to) {
+            if (peer == device) continue;
+            int can_access = 0;
+            if (CUresult result = cuDeviceCanAccessPeer(&can_access, peer, device); result != CUDA_SUCCESS)
+                return cuda_failure<gpu_arena_t>(result, "P2P capability query failed (device={} peer={})", device,
+                                                 peer);
+            if (can_access == 0)
+                return expected<gpu_arena_t>::fail(status_t::shape_unsupported_k,
+                                                   "device {} cannot read the arena of device {}: no P2P path", peer,
+                                                   device);
+            if (arena.visible_to_.push_back(peer) != status_t::success_k)
+                return expected<gpu_arena_t>::fail(status_t::bad_alloc_k, "peer table allocation failed");
+        }
         CUmemAllocationProp properties = allocation_properties_(device);
         if (CUresult result = cuMemGetAllocationGranularity(&arena.granularity_, &properties,
                                                             CU_MEM_ALLOC_GRANULARITY_MINIMUM);
