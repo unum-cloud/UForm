@@ -1,148 +1,192 @@
-# UForm Python SDK
+# UForm for Python
 
-UForm multimodal AI SDK offers a simple way to integrate multimodal AI capabilities into your Python applications.
-The SDK doesn't require any deep learning knowledge, PyTorch, or CUDA installation, and can run on almost any hardware.
+The bindings are pure CPython, with no PyBind11, no NanoBind, and no SWIG.
+They need CPython 3.12 or newer on Linux, macOS or Windows, free-threaded builds included, and the extension never requires NumPy.
+Every verb is a batch over buffer-protocol inputs, and every output whose length the call decides lands in an arena you reuse.
+
+- `uform.Model` encodes text, images, video and audio into pooled embeddings and per-token states.
+- `uform.Trainer` trains one on GPUs, joined across hosts by a `uform.Mesh`.
+- `uform.Executor` owns the threads or streams every call runs on, apart from any model.
 
 ## Installation
 
-There are several ways to install the UForm Python SDK, depending on the backend you want to use.
-PyTorch is by far the heaviest, but the most capable.
-ONNX is a lightweight alternative that can run on any CPU, and on some GPUs.
-
-```bash
-pip install "uform[torch]"       # For PyTorch
-pip install "uform[onnx]"        # For ONNX on CPU
-pip install "uform[onnx-gpu]"    # For ONNX on GPU, available for some platforms
-pip install "uform[torch,onnx]"  # For PyTorch and ONNX Python tests
+```sh
+pip install uform
 ```
 
-## Quick Start
-
-### Embeddings
-
-Load the model:
-
-```py
-from uform import get_model, Modality
-
-model_name = 'unum-cloud/uform3-image-text-english-small'
-modalities = [Modality.TEXT_ENCODER, Modality.IMAGE_ENCODER]
-processors, models = get_model(model_name, modalities=modalities)
-
-model_text = models[Modality.TEXT_ENCODER]
-model_image = models[Modality.IMAGE_ENCODER]
-processor_text = processors[Modality.TEXT_ENCODER]
-processor_image = processors[Modality.IMAGE_ENCODER]
-```
-
-Embed images:
-
-```py
-import requests
-from io import BytesIO
-from PIL import Image
-
-image_url = 'https://media-cdn.tripadvisor.com/media/photo-s/1b/28/6b/53/lovely-armenia.jpg'
-image_url = Image.open(BytesIO(requests.get(image_url).content))
-image_data = processor_image(image)
-image_features, image_embedding = model_image.encode(image_data, return_features=True)
-```
-
-Embed queries:
-
-```py
-text = 'a cityscape bathed in the warm glow of the sun, with varied architecture and a towering, snow-capped mountain rising majestically in the background'
-text_data = processor_text(text)
-text_features, text_embedding = model_text.encode(text_data, return_features=True)
-```
-
-### Generative Models
-
-UForm generative models are fully compatible with the Hugging Face Transformers library, and can be used without installing the UForm library.
-Those models can be used to caption images or power multimodal chat experiences.
-
-```python
-from transformers import AutoModel, AutoProcessor
-
-model = AutoModel.from_pretrained('unum-cloud/uform-gen2-dpo', trust_remote_code=True)
-processor = AutoProcessor.from_pretrained('unum-cloud/uform-gen2-dpo', trust_remote_code=True)
-
-prompt = 'Question or Instruction'
-image = Image.open('image.jpg')
-
-inputs = processor(text=[prompt], images=[image], return_tensors='pt')
-
-with torch.inference_mode():
-     output = model.generate(
-        **inputs,
-        do_sample=False,
-        use_cache=True,
-        max_new_tokens=256,
-        eos_token_id=151645,
-        pad_token_id=processor.tokenizer.pad_token_id
-    )
-prompt_len = inputs['input_ids'].shape[1]
-decoded_text = processor.batch_decode(output[:, prompt_len:])[0]
-```
-
-You can check examples of different prompts in our demo Gradio spaces on HuggingFace:
-
-- for [`uform-gen2-qwen-500m`](https://huggingface.co/spaces/unum-cloud/uform-gen2-qwen-500m-demo)
-- for [`uform-gen2-dpo`](https://huggingface.co/spaces/unum-cloud/uform-gen2-qwen-500m-dpo-demo)
-
-## Technical Details
-
-### Multi-GPU Parallelism
-
-To achieve higher throughput, you can launch UForm on multiple GPUs.
-For that pick the encoder of the model you want to run in parallel, and wrap it in `nn.DataParallel` (or `nn.DistributedDataParallel`).
-
-```python
-from uform import get_model, Modality
-import torch.nn as nn
-
-encoders, processors = uform.get_model('unum-cloud/uform-vl-english-small', backend='torch')
-
-model_text = models[Modality.TEXT_ENCODER]
-model_image = models[Modality.IMAGE_ENCODER]
-processor_text = processors[Modality.TEXT_ENCODER]
-processor_image = processors[Modality.IMAGE_ENCODER]
-
-model_text.return_features = False
-model_image.return_features = False
-model_text_parallel = nn.DataParallel(model_text)
-model_image_parallel = nn.DataParallel(model_image)
-```
-
-Since we are now dealing with the PyTorch wrapper, make sure to use the `forward` method (instead of `encode`) to get the embeddings, and the `.detach().cpu().numpy()` sequence to bring the data back to more Pythonic NumPy arrays.
-
-```python
-def get_image_embedding(images: List[Image]):
-    preprocessed = processor_image(images)
-    embedding = model_image_parallel.forward(preprocessed)
-    return embedding.detach().cpu().numpy()
-
-def get_text_embedding(texts: List[str]):
-    preprocessed = processor_text(texts)
-    embedding = model_text_parallel.forward(preprocessed)
-    return embedding.detach().cpu().numpy()
-```
-
-### ONNX and CUDA
-
-The configuration process may include a few additional steps, depending on the environment.
-When using the CUDA and TensorRT backends with CUDA 12 or newer make sure to [install the Nvidia toolkit][install-nvidia-toolkit] and the `onnxruntime-gpu` package from the custom repository.
+The wheels carry the CPU library.
+A build from source compiles the C library and the extension through `scikit-build-core`, and the suites run against the stub library alone:
 
 ```sh
-wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-sudo dpkg -i cuda-keyring_1.1-1_all.deb
-sudo apt-get update
-sudo apt-get -y install cuda-toolkit-12
-pip install onnxruntime-gpu --extra-index-url https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-12/pypi/simple/
-export CUDA_PATH="/usr/local/cuda-12/bin"
-export PATH="/usr/local/cuda-12/bin${PATH:+:${PATH}}"
-export LD_LIBRARY_PATH="/usr/local/cuda-12/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
-pytest python/scripts/ -s -x -Wd -v -k onnx
+pip install . -C cmake.define.UFORM_BUILD_LIB_C=OFF -C cmake.define.UFORM_BUILD_LIB_C_STUB=ON
+uv run pytest test/python
 ```
 
-[install-nvidia-toolkit]: https://docs.nvidia.com/cuda/cuda-installation-guide-linux/#network-repo-installation-for-ubuntu
+## Quickstart
+
+```python
+import numpy as np
+import uform
+
+executor = uform.Executor.for_ram()  # The threads every receiver names
+arena = uform.Arena(executor)  # The memory outputs land in, made where the executor computes
+model = uform.Model.load_ram("model.safetensors", quantization=uform.Scalar.BF16)
+
+encoded = model.on(executor).text_encode(["a cat on a mat", "a dog in the fog"], arena)
+embeddings = np.asarray(encoded.embeddings)  # (2, dimensions) float32, zero-copy
+assert embeddings.shape == (2, model.describe().dimensions)
+```
+
+## Receivers & Deferred Calls
+
+A receiver carries what every C argument structure puts before its inputs: the executor and the completion.
+The model runs a verb on the calling thread, `model.on(executor)` answers a `uform.On` whose verbs block on that executor, and `model.deferred(executor)` answers a `uform.DeferredOn` whose verbs submit there and answer a `uform.Deferred`.
+The receiver's type alone chooses the completion, so all three offer the same verbs with the same arguments.
+In a coroutine, `await` a deferred call; anywhere else, `wait()` blocks the thread with its state detached:
+
+```python
+call = model.deferred(executor).image_encode(files, uform.Arena(executor))
+encoded = await call  # or: call.wait()
+```
+
+`call.status` polls without waiting, reading `Status.DEFERRED` until the call is final.
+Dropping a `Deferred` waits for its call first, since the library still reads the inputs it holds.
+A trainer runs `step` and `save` blocking on the executor it was created on, and `trainer.on(...)` and `trainer.deferred(...)` choose another completion.
+
+## Executors
+
+`uform.Executor.for_ram(threads=0, *, memory_domains=None, deferred_limit=0)` spawns host threads, and `uform.Executor.for_vram(devices=None, *, scratch_limit=0, deferred_limit=0)` opens one stream per device.
+`uform.Executor.on_pool(pool)` mirrors the C verb that borrows a ForkUnion pool, and raises `UnsupportedError` until borrowing is designed.
+Calls on one executor run in submission order, and a deferred call finding its `deferred_limit` table full raises `ContendedError` once waited for.
+`executor.drain(uform.Mood.PARKED)` waits for every earlier call and sets what the executor does once idle.
+In a `with` block, it waits for its calls and closes on exit.
+
+## Arenas
+
+Every output whose length only the call knows, the embeddings, the states and their offsets, lands in a `uform.Arena` you pass, and the verb answers views over it without copying.
+`uform.Arena(executor)` places it where that executor computes, decided once, and `uform.Arena()` makes host pages for the calling thread.
+Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
+To keep a result past the next call, pass that call another arena; an arena serves one call at a time, so each deferred call needs its own.
+A NumPy array or `memoryview` over an output pins its arena as a `memoryview` pins a `bytearray`, so the next call naming that arena raises `ContendedError` until the export is released.
+A stale output raises `InvalidArgumentError` when read.
+An arena from a VRAM executor holds device memory: its views export `__cuda_array_interface__` for CuPy, PyTorch or Numba, and host reads raise `DeviceError`.
+
+```python
+arena = uform.Arena(executor)
+for batch in batches:
+    encoded = model.on(executor).text_encode(batch, arena)  # rewinds: the last batch's views are gone
+    index.add(np.array(encoded.embeddings))  # a copy, so nothing pins the arena
+```
+
+## Encoding
+
+One verb per input form, each spelled as in C:
+
+- `text_encode(texts, arena)` takes UTF-8 texts, a byte per token, since models are tokenizer-free.
+- `image_encode(files, arena)` takes JPEG, PNG or WebP files.
+- `image_encode_pixels(pixels, arena)` takes C-contiguous `[height, width, 3]` `uint8` buffers.
+- `video_encode(files, arena)` takes MP4 or WebM clips.
+- `audio_encode(files, arena)` takes WAV, FLAC, MP3 or Opus recordings.
+- `audio_encode_samples(samples, sample_rate, arena)` takes 1-D `float32` buffers.
+
+A batch is a sequence of separate objects, `str` or bytes-like for texts and bytes-like for files, gathered into one tape with one copy.
+A `(data, offsets)` tuple of buffers, the data and `count + 1` `size_t` offsets, is lent to the library as a tape without a copy:
+
+```python
+data = b"first documentthe second"
+offsets = np.array([0, 14, 24], dtype=np.uint64)
+encoded = model.text_encode((data, offsets), arena)
+```
+
+`outputs` names the surfaces a call keeps, and decides which C output pointers the binding passes:
+
+```python
+encoded = model.text_encode(texts, arena, outputs=uform.Outputs.EMBEDDINGS | uform.Outputs.STATES)
+embeddings, states = encoded  # an `ArenaBuffer` of (count, dimensions) and a `RowsTape` of (tokens, dimensions)
+offsets = np.asarray(states.offsets)  # item `i` spans rows `offsets[i]` up to `offsets[i + 1]`
+```
+
+`Outputs.EMBEDDINGS` is the default, and a surface left out answers `None` and costs nothing past the final norm.
+`outputs_scalar` picks the scalar every output lands as, `Scalar.F32` by default; `Scalar.BF16` outputs export as raw bytes, a `(count, row_bytes)` run of `'B'`.
+`stats=uform.TextEncodeStats()` and its siblings are overwritten with the truncated items and the encoded tokens.
+`progress=handler` is called with `(completed, total)` items, and a handler returning `False` stops the call, which raises `uform.CancelledError`; one that raises stops it too, and its own exception reaches the caller.
+
+## Models
+
+`uform.Model.load_ram(path)` and `uform.Model.load_vram(path, devices=[0])` copy a safetensors checkpoint into host memory or onto GPUs, and `load_ram_buffer` and `load_vram_buffer` take the checkpoint's bytes instead.
+Each takes `quantization`, `Scalar.BF16` as stored or `Scalar.E4M3` quantized at load, an optional `executor` the load runs on, and a `progress` handler.
+`model.describe()` answers a `uform.ModelDescription` of `dimensions`, `context`, `quantization`, `memory_usage` and `capabilities`.
+
+## Training
+
+Training is GPU-only.
+The configuration arrives as keyword-built structures mirroring the C ones field by field, so a field left out is zero, which the library derives:
+
+```python
+executor = uform.Executor.for_vram(devices=[0, 1])
+mesh = uform.Mesh.bootstrap(executor, uform.MeshOptions(host_domain_index=rank, host_domain_count=nodes,
+                                                        directory="/shared/exchange", job="run-17"))
+trainer = uform.Trainer.init_vram(executor, mesh=mesh, depth=12, hidden=512, objective=uform.Objective.JOINT,
+                                  batch=uform.BatchShape(max_rows_per_device=64, max_segments_per_device=256,
+                                                         max_columns_per_row=1024, max_bags_per_device=128,
+                                                         image=uform.ImageShape(patch_side=16)),
+                                  schedule=uform.Schedule(steps=100_000), seed=42)
+stats = uform.TrainerStepStats()
+trainer.step(modalities, contents, bags=bags, relations=uform.Relations(attract=(offsets, ids)), stats=stats)
+trainer.save("checkpoint.safetensors")
+```
+
+`BatchShape` nests an `ImageShape`, a `VideoShape` and an `AudioShape`, each also taken as a tuple of its fields in order.
+`Masking`, `Contrastive` and `Schedule` configure the objectives, and `Relations` holds three `Edges` sets of buffers: `size_t` offsets, `uint32` ids and optional `float32` weights.
+`trainer.step` answers the pooled embeddings the loss scored when given an `arena`, and `None` otherwise.
+`mesh.describe()` answers a `uform.MeshDescription`, its `multimem_tier` a `uform.MultimemTier`.
+
+## Errors
+
+Every failure raises a subclass of `uform.Error`, itself a `RuntimeError`, and each carries the status the C ABI reported as its `status` attribute, a `uform.Status` member:
+
+```python
+try:
+    model.on(executor).text_encode(texts, arena, progress=lambda completed, total: completed < 100)
+except uform.CancelledError:
+    ...  # The handler stopped the call, which published nothing
+except uform.Error as error:
+    print(error.status)  # Status.SHAPE_MISMATCH, Status.DEVICE, ...
+```
+
+`SUCCESS` and `DEFERRED` raise nothing, and every other member has its own class, which also derives the built-in naming the same fault where one exists:
+
+- `OUT_OF_MEMORY` → `OutOfMemoryError`, a `MemoryError`
+- `SHAPE_MISMATCH` → `ShapeMismatchError`, a `ValueError`
+- `UNSUPPORTED_LAYOUT` → `UnsupportedLayoutError`, a `ValueError`
+- `UNKNOWN_KIND` → `UnknownKindError`, a `ValueError`
+- `IO` → `InputOutputError`, an `OSError`
+- `DEVICE` → `DeviceError`
+- `MALFORMED` → `MalformedError`, a `ValueError`
+- `INTERNAL` → `InternalError`
+- `CONFIG_MISMATCH` → `ConfigMismatchError`, a `ValueError`
+- `CONTENDED` → `ContendedError`
+- `CANCELLED` → `CancelledError`
+- `UNSUPPORTED` → `UnsupportedError`, a `NotImplementedError`
+- `INVALID_ARGUMENT` → `InvalidArgumentError`, a `ValueError`
+
+A failure the binding catches before the boundary raises the class the library would have raised for the same fault.
+Arguments the binding refuses raise at the call, while the library's refusals of a deferred call raise at `await` or `wait()`.
+
+## Design
+
+- __A thin layer over the C ABI.__
+  One module per header, `types`, `model`, `encode` and `train`, one method per exported verb spelled as in C, and enums mirroring the C enums as `enum.IntEnum` classes built from the C name functions, never strings.
+- __The receiver chooses, the verb stays.__
+  The model runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
+- __Deferred calls use the language's own idioms.__
+  `status` polls through `uform_outcome_status`, `wait` blocks through `uform_outcome_wait`, and `await` hands `wait()` to the running event loop's default executor.
+- __No life of its own.__
+  The binding starts no threads and keeps no queues or caches; releasing a `Deferred` rides reference counting, which waits for the call first.
+- __Arenas are lent and reused, never shared.__
+  Every output verb takes an arena and answers views borrowing it; an exported buffer pins its arena until released, and a view over a rewound one refuses to be read.
+- __Nothing costs anything until it is used.__
+  Blocking calls take no deferred-table entry, a surface `outputs` leaves out is never computed, and an arena allocates only when a call writes into it.
+- __Blocking calls stay as simple as the language allows.__
+  `model.text_encode(texts, arena)` takes no executor, completion or receiver argument and returns its result.
+- __Suites run against the stub library__, and against the real one with the tiny checkpoint `UFORM_TEST_CHECKPOINT` names.
