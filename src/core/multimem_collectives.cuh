@@ -418,12 +418,13 @@ struct multimem_domain_t {
      *  member's barrier round is a scalar inside its @b own replica, zeroed here beside the arrival flag
      *  and self-advanced by its barrier kernels — consumers never allocate or upload rounds themselves.
      *
-     *  @param[in] topology The bootstrapped world (see @ref mesh_topology_t ).
+     *  @param[inout] topology The bootstrapped world (see @ref mesh_topology_t ); one wiring
+     *      generation is claimed from it, so a domain made twice in one job meets under fresh keys.
      *  @param[in] local_devices The device ordinals this process drives — the slices it creates and binds.
      *  @param[in] payload_scalars Float32 payload scalars per replica, sized for every consumer's window.
      *  @param[in] local_streams One stream per local device; @c local_streams[0] carries the host staging.
      */
-    [[nodiscard]] static expected<multimem_domain_t> make(mesh_topology_t const &topology,
+    [[nodiscard]] static expected<multimem_domain_t> make(mesh_topology_t &topology,
                                                           std::span<i32_t const> local_devices,
                                                           std::size_t payload_scalars,
                                                           std::span<gpu_stream_t> local_streams) noexcept;

@@ -243,6 +243,51 @@ struct contrastive_relations_view_t {
 #endif // defined(__CUDACC__)
 
 /**
+ *  @brief One GPU's bag relations, a pure host function: every live segment attracts the other
+ *      live segments of its bag, which the mixer lands whole and contiguous on one GPU, by global
+ *      vertex ID.
+ *
+ *  @param[in] bags The GPU's @b [segments] mixed bag column; @c ~0u names no bag.
+ *  @param[in] lengths The GPU's @b [segments] mixed length column; a zero length is PAD.
+ *  @param[in] vertex_base The global vertex of the GPU's segment 0, its world coordinate times the
+ *      segments.
+ *  @param[out] offsets The @b [segments+1] attract row offsets.
+ *  @param[out] partners The attract edges' global vertices, ascending per row.
+ *  @param[out] weights The unit weight of every attract edge.
+ *  @return The edge count.
+ *  @retval status_t::invalid_input_k Columns of other extents, or more edges than @p partners
+ *      holds.
+ */
+[[nodiscard]] inline expected<u32_t> relate_bags(u32r1_view_t bags, u32r1_view_t lengths, u32_t vertex_base,
+                                                 u32r1_span_t offsets, u32r1_span_t partners,
+                                                 f32r1_span_t weights) noexcept {
+    using result_t = expected<u32_t>;
+    u32_t const segments = static_cast<u32_t>(lengths.extent(0));
+    if (bags.extent(0) != segments || offsets.extent(0) != segments + 1u || weights.extent(0) < partners.extent(0))
+        return result_t::fail(status_t::invalid_input_k, "{} bags, {} lengths and {} offsets disagree", bags.extent(0),
+                              segments, offsets.extent(0));
+    u32_t written = 0;
+    offsets[0] = 0;
+    for (u32_t segment = 0; segment != segments; ++segment) {
+        u32_t begin = segment, end = segment + 1;
+        if (lengths[segment] != 0 && bags[segment] != ~0u) {
+            while (begin != 0 && bags[begin - 1] == bags[segment] && lengths[begin - 1] != 0) --begin;
+            while (end != segments && bags[end] == bags[segment] && lengths[end] != 0) ++end;
+        }
+        for (u32_t partner = begin; partner != end; ++partner) {
+            if (partner == segment || lengths[segment] == 0) continue;
+            if (written == partners.extent(0))
+                return result_t::fail(status_t::invalid_input_k, "a GPU's bags name over {} edges", partners.extent(0));
+            partners[written] = vertex_base + partner;
+            weights[written] = 1.0f;
+            ++written;
+        }
+        offsets[segment + 1] = written;
+    }
+    return result_t {written};
+}
+
+/**
  *  @brief The host owner of the relation graph — one memory-owning NumKong tensor per column, allocated
  *      through @ref gpu_arena_alloc at fixed capacity, re-uploaded per step, and viewed by kernels
  *      through @ref contrastive_relations_view_t windows over the live extents.

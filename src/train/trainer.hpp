@@ -83,9 +83,9 @@ struct envelope_t {
     /** The fewest bytes any of this process's devices had free before the run allocated. */
     std::size_t free_bytes = 0;
 
-    /** The device footprint @c fixed_bytes+rows·row_bytes fitted through the two probe
-     *  envelopes. */
-    std::size_t fixed_bytes = 0, row_bytes = 0;
+    /** The device footprint @c fixed_bytes+rows·row_bytes+rows²·pair_bytes fitted through the
+     *  probe envelopes, its curvature read off the arena, whose high-water mark is exact. */
+    std::size_t fixed_bytes = 0, row_bytes = 0, pair_bytes = 0;
 
     /** The headroom kept free: the footprint outside the arena the larger probe measured, again. */
     std::size_t margin_bytes = 0;
@@ -120,7 +120,8 @@ struct telemetry_t {
     /** Each live media head's mean normalized reconstruction error, weighted by its λ (zero when absent). */
     f32_t image_mse = 0.0f, video_mse = 0.0f, audio_mse = 0.0f;
 
-    /** This process's share of the contrastive per-vertex-mean potential (zero when absent). */
+    /** The world's contrastive per-vertex-mean potential, every process's summands added, or zero
+     *  when the objective has none. */
     f32_t contrastive = 0.0f;
 
     /** The domain's barrier round after this optimizer step. */
@@ -275,6 +276,10 @@ struct trainer_t {
 
     /** The mesh-wide contrastive loss — wired only when the objective contrasts. */
     distributed_contrastive_segments_t contrastive {};
+
+    /** One temperature step per replica over its learnable β and bias groups, present when the
+     *  objective contrasts. */
+    per_gpu_array<adafactor_temperatures_t> temperatures {};
 
     /** One captured forward and backward region per GPU under @c replayed_k ; empty runs the regions eagerly. */
     per_gpu_array<gpu_replay_graph_t> forward_graphs {}, backward_graphs {};

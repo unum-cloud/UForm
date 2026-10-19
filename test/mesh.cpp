@@ -5,11 +5,13 @@
  *  @brief Conformance test of the mesh bootstrap — the one job `mesh.hpp` exists for: minting each
  *      host_domain's facts and reconciling them over a shared filesystem into one agreed world.
  *
- *  Three cases, each proving an operation that must @b succeed — the integer accessors are one-line
- *  divisions and carry no test:
+ *  Four cases, each proving an operation that must @b succeed — the integer accessors are
+ *  one-line divisions and carry no test:
  *
  *      - @ref exchange_round_trips — the durable primitive every wiring phase reuses: `publish_text`
  *        writes atomically and `await_text` reads the bytes back verbatim. Hand-built topology, no GPU.
+ *      - @ref rendezvous_generations — two forked processes wire one phase three times over one
+ *        directory, and every round reads its own generation's payload. No GPU.
  *      - @ref single_box_world — the common one-box case: `bootstrap(0,1)` assembles the whole topology
  *        from the local probe and never opens the exchange directory.
  *      - @ref world_reconciles — the substance: a lead reads a peer's facts, validates agreement, and
@@ -24,7 +26,11 @@
 #include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fclose` — planting a simulated peer's exchange files
 #include <cstdlib> // `std::getenv`, `std::atoi`
 
-#include <unistd.h> // `::getpid`
+#include <unistd.h>   // `::getpid`, `::fork`, `::_exit`
+#include <sys/wait.h> // `::waitpid`, `WIFEXITED`, `WEXITSTATUS`
+
+#include <chrono> // `std::chrono::milliseconds`
+#include <thread> // `std::this_thread::sleep_for` — the lead's late publish
 
 #include <utility>      // `std::move`
 #include <system_error> // `std::error_code` — the out-param every `std::filesystem` call reports through
@@ -117,9 +123,66 @@ static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
     suite.check(again.view() == replacement, "republish should atomically replace: got {}", again);
 }
 
+/** A hand-built two-host_domain topology over @p directory , as host_domain @p index : what
+ *  `bootstrap` assembles, without the GPU probe the rendezvous itself never needs. */
+static bool two_host_topology(mesh_topology_t &topology, fs::path const &directory, u32_t index) {
+    if (topology.host_domains.resize(2) != status_t::success_k) return false;
+    topology.shape = mesh_shape_t {1u, 1u, 2u};
+    topology.host_domain_index = index;
+    return format_into(topology.exchange_directory, "{}", directory.c_str());
+}
+
+/** Wire @p rounds phases the way every transport does: claim a generation, publish a payload
+ *  naming the round under its key, read the peer's payload back, and cross the generation's
+ *  barrier. The lead publishes late in every round past the first, so a follower reading an
+ *  earlier generation's file would see the wrong round. */
+static bool wire_rounds(mesh_topology_t &topology, u32_t rounds) {
+    u32_t const peer = 1u - topology.host_domain_index;
+    for (u32_t round = 0; round != rounds; ++round) {
+        u32_t const collective_id = topology.next_collective_id();
+        sz::string_t key, barrier_key, payload, expected_payload, received;
+        if (!format_into(key, "multimem.{}.slice", collective_id) ||
+            !format_into(barrier_key, "multimem.{}", collective_id) ||
+            !format_into(payload, "round {} host {}", round, topology.host_domain_index) ||
+            !format_into(expected_payload, "round {} host {}", round, peer))
+            return false;
+        if (round != 0 && topology.is_lead()) std::this_thread::sleep_for(std::chrono::milliseconds {300});
+        if (!topology.publish_text(key.view(), payload.view())) return false;
+        if (!topology.await_text(peer, key.view(), received, 30.0) || received.view() != expected_payload.view())
+            return false;
+        if (!topology.barrier(barrier_key.view(), 30.0)) return false;
+    }
+    return true;
+}
+
+/** The probe-trainer pattern across two processes sharing one exchange directory: both wire one
+ *  phase three times, as the two measuring trainers and the real one each make a multimem domain,
+ *  and every round must read its own generation's payload, never the one before. Host-only: a
+ *  forked peer, no GPU. */
+static void rendezvous_generations(test_suite_t &suite, fs::path const &base) {
+    fs::path const directory = base / "generations";
+    std::error_code error;
+    fs::create_directories(directory, error);
+    constexpr u32_t rounds_k = 3;
+    pid_t const child = ::fork();
+    if (child < 0) return suite.check(false, "fork failed");
+    if (child == 0) {
+        mesh_topology_t follower;
+        ::_exit(two_host_topology(follower, directory, 1u) && wire_rounds(follower, rounds_k) ? 0 : 1);
+    }
+    mesh_topology_t lead;
+    bool const wired = two_host_topology(lead, directory, 0u) && wire_rounds(lead, rounds_k);
+    int status = 0;
+    ::waitpid(child, &status, 0);
+    suite.check(wired, "the lead should read every round's own payload");
+    suite.check(WIFEXITED(status) && WEXITSTATUS(status) == 0, "the follower should read every round's own payload");
+    suite.check(lead.next_collective_id() == rounds_k, "every round should claim one generation");
+}
+
 /** The single-host_domain world: `bootstrap(0,1)` assembles the whole topology from the local probe
  *  and never opens the exchange directory — the common one-box case. */
 static void single_box_world(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
+    if (local_devices == 0) return suite.skip(no_cuda_device_k);
     auto result = mesh_topology_t::bootstrap(0, 1, local_devices, base.c_str(), "single_box", 10.0);
     if (!result) return suite.check(false, "single-box bootstrap should succeed: {}", result.description_);
     mesh_topology_t topology = std::move(*result);
@@ -237,6 +300,7 @@ int main(int, char **argv) {
 
     // Host-only: the exchange primitive needs no driver.
     suite.run("exchange_round_trips", exchange_round_trips, base);
+    suite.run("rendezvous_generations", rendezvous_generations, base);
 
     // Bootstrap front-loads `discover_mesh_shape`, so the assembly tiers need a visible GPU.
     u32_t local_devices = 0;

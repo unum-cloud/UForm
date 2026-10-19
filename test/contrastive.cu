@@ -1,34 +1,35 @@
 /**
- *  @brief Conformance test of the contrastive force layout: the loss object against a Float64 host
- *      oracle, finite-difference force checks, capture-replay, relation-graph negatives, and the
- *      multi-GPU distributed step against the single-GPU global reference.
  *  @file test/contrastive.cu
  *  @author Ash Vardanian
  *  @date July 3, 2026
+ *  @brief Conformance test of the contrastive force layout: the loss object against a Float64 host
+ *      oracle, finite-difference force checks, capture-replay, relation-graph negatives, and the
+ *      multi-GPU distributed step against the single-GPU global reference.
  *
- *  Plain `int main`, labelled pass/fail lines, non-zero exit on any failure. Tiers scale with the
- *  visible hardware: the single-GPU oracle matrix always runs; the distributed-step tier joins when at
- *  least two GPUs are visible.
+ *  Tiers scale with the visible hardware: the single-GPU oracle matrix runs on one GPU; the
+ *  distributed-step tier joins when at least two GPUs are visible.
  */
-#include <cstdio>
-#include <cmath>
+#include <cmath>   // `std::fabs`, `std::sqrt`, `std::exp`, `std::log1p`
+#include <cstdlib> // `std::getenv`, `std::atoi`, `std::atof`
 
-#include <utility>
-#include <vector>
+#include <span>    // `std::span` — the oracle's borrowed towers
+#include <utility> // `std::move`
+#include <vector>  // `std::vector`
 
 #include <cuda.h> // `cuInit`, `cuCtxPushCurrent`, `cuMemcpyHtoD`, `cuMemsetD8` — the raw staging boundary
 
 #include "core/infiniband_collectives.cuh" // `infiniband_coordinates_t` — the corrupt-payload negative test
 #include "core/contrastive_segments.cuh"
 #include "core/encoder_tower.hpp" // `encoder_tower_bf16_t` — the pool + head the FP64 parity case gates
+#include "harness.hpp"            // `test_suite_t`
 
 using namespace unum::uform::core;
+using namespace unum::uform::test;
 
-static int failures = 0;
-
-static void check(bool condition, char const *label) {
-    std::printf("  [%s] %s\n", condition ? "pass" : "FAIL", label);
-    if (!condition) ++failures;
+/** Whether the driver shows at least @p wanted devices. */
+[[nodiscard]] static bool cuda_devices_visible_(int wanted) noexcept {
+    int device_count = 0;
+    return cuDeviceGetCount(&device_count) == CUDA_SUCCESS && device_count >= wanted;
 }
 
 /** Deterministic pseudo-random filler in roughly [-0.5, 0.5). */
@@ -73,10 +74,9 @@ struct host_relations_t {
 };
 
 /** The Float64 oracle: the exact per-header math of the segments loss over host BFloat16 towers. */
-static f64_t host_loss(std::vector<bf16_t> const &vertices, std::vector<bf16_t> const &neighbors,
-                       std::size_t num_vertices, std::size_t num_neighbors, std::size_t hidden,
-                       std::vector<u32_t> const &prefixes, host_relations_t const &relations, f64_t beta, f64_t bias,
-                       std::size_t vertices_per_mesh) {
+static f64_t host_loss(std::span<bf16_t const> vertices, std::span<bf16_t const> neighbors, std::size_t num_vertices,
+                       std::size_t num_neighbors, std::size_t hidden, std::span<u32_t const> prefixes,
+                       host_relations_t const &relations, f64_t beta, f64_t bias, std::size_t vertices_per_mesh) {
     f64_t loss = 0.0;
     for (std::size_t vertex = 0; vertex != num_vertices; ++vertex) {
         // Signed weight totals over the whole neighbor axis.
@@ -123,17 +123,16 @@ static f64_t host_loss(std::vector<bf16_t> const &vertices, std::vector<bf16_t> 
 
 /** One single-GPU oracle case: run the loss, compare to the host oracle, finite-difference the force on a few
  *  sampled channels, and check captured replays land where the eager run did. */
-static void run_oracle_case(char const *label, std::size_t num_vertices, std::size_t hidden,
+static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::size_t hidden,
                             std::vector<u32_t> const &prefixes, bool explicit_edges, bool with_pad,
                             f32_t ambient_weight) {
-    std::printf("case %s (V=%zu H=%zu K=%zu edges=%d pad=%d ambient=%g)\n", label, num_vertices, hidden,
-                prefixes.size(), int(explicit_edges), int(with_pad), ambient_weight);
+    if (!cuda_devices_visible_(1)) return suite.skip(no_cuda_device_k);
     auto stream_made = gpu_stream_t::make(0);
-    if (!stream_made) return check(false, "stream");
+    if (!stream_made) return suite.check(false, "stream: {}", stream_made.description_);
     gpu_stream_t stream = std::move(stream_made.value_);
     cuCtxPushCurrent(stream.context());
     auto arena_made = gpu_arena_t::make(0, 1ull << 30);
-    if (!arena_made) return check(false, "arena");
+    if (!arena_made) return suite.check(false, "arena: {}", arena_made.description_);
     gpu_arena_t arena = std::move(arena_made.value_);
 
     contrastive_segments_config_t config;
@@ -142,10 +141,7 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
     config.to_vertices_per_gpu = u32_t(num_vertices);
     config.gpu_subgraphs_per_step = 1;
     auto loss_made = contrastive_segments_t::make(arena, config, {prefixes.data(), prefixes.size()});
-    if (!loss_made) {
-        std::printf("    %s\n", loss_made.description_.c_str());
-        return check(false, "loss make");
-    }
+    if (!loss_made) return suite.check(false, "loss make: {}", loss_made.description_);
     contrastive_segments_t loss = std::move(loss_made.value_);
 
     // Towers, gradients, loss scalar.
@@ -165,7 +161,7 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
     host_relations_t host_relations;
     host_relations.ambient = ambient_weight;
     auto relations_made = contrastive_relations_t::make(arena, u32_t(num_vertices), 16);
-    if (!relations_made) return check(false, "relations make");
+    if (!relations_made) return suite.check(false, "relations make: {}", relations_made.description_);
     contrastive_relations_t relations = std::move(relations_made.value_);
     std::vector<u32_t> host_effective(num_vertices, 1u);
     if (with_pad) host_effective[num_vertices - 1] = 0u;
@@ -204,10 +200,7 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
     else
         staged = relations.upload_self_edges(u32_t(num_vertices), effective_view, effective_view, 0, ambient_weight,
                                              stream);
-    if (!staged) {
-        std::printf("    %s\n", staged.description_.c_str());
-        return check(false, "relations upload");
-    }
+    if (!staged) return suite.check(false, "relations upload: {}", staged.description_);
 
     gpu_subgraph_t subgraph;
     subgraph.to_vertices = bf16r2_view_t {tower, num_vertices, hidden};
@@ -217,23 +210,21 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
     recipe.ambient_repulsion_weight = ambient_weight;
 
     auto run_once = [&]() noexcept -> expected_t {
-        return loss(bf16r2_view_t {tower, num_vertices, hidden}, {&subgraph, 1}, relations.view(), recipe, num_vertices,
+        return loss(bf16r2_view_t {tower, num_vertices, hidden}, {&subgraph, 1}, relations.view(), recipe,
                     f32r1_span_t {loss_out, 1}, bf16r2_span_t {grad, num_vertices, hidden}, stream);
     };
-    if (expected_t ran = run_once(); !ran) {
-        std::printf("    %s\n", ran.description_.c_str());
-        return check(false, "loss enqueue");
-    }
+    if (expected_t ran = run_once(); !ran) return suite.check(false, "loss enqueue: {}", ran.description_);
     cuStreamSynchronize(stream.get());
     f32_t device_loss = 0;
     cuMemcpyDtoH(&device_loss, device_address(loss_out), sizeof(f32_t));
 
     std::vector<u32_t> host_prefixes(prefixes.begin(), prefixes.end());
+    std::size_t const live_vertices = with_pad ? num_vertices - 1u : num_vertices; // the mean skips PAD
     f64_t const oracle = host_loss(host_tower, host_tower, num_vertices, num_vertices, hidden, host_prefixes,
-                                   host_relations, 1.0, 0.0, num_vertices);
+                                   host_relations, 1.0, 0.0, live_vertices);
     f64_t const relative = std::fabs(f64_t(device_loss) - oracle) / std::max(std::fabs(oracle), 1.0e-9);
-    std::printf("    loss device=%.6f oracle=%.6f relative=%.2e\n", device_loss, oracle, relative);
-    check(relative < 5.0e-3, "loss matches the Float64 oracle");
+    suite.check(relative < 5.0e-3, "loss {:.6f} matches the Float64 oracle {:.6f}: relative {:.2e}", device_loss,
+                oracle, relative);
 
     // Finite-difference force check on a few sampled channels: the analytic BF16 gradient must sit
     // within BF16 resolution of (L(x+h) - L(x-h)) / 2h.
@@ -241,8 +232,7 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
     cuMemcpyDtoH(host_grad.data(), device_address(grad), scalars * sizeof(bf16_t));
     std::vector<f32_t> host_column(scalars);
     cuMemcpyDtoH(host_column.data(), device_address(grad_f32), scalars * sizeof(f32_t));
-    bool forces_ok = true;
-    for (std::size_t sample = 0; sample != 6 && forces_ok; ++sample) {
+    for (std::size_t sample = 0; sample != 6; ++sample) {
         std::size_t const index = (sample * 977ull + 13ull) % scalars;
         f64_t const step_size = 1.0e-2;
         std::vector<bf16_t> plus = host_tower, minus = host_tower;
@@ -250,30 +240,27 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
         minus[index] = __float2bfloat16(__bfloat162float(host_tower[index]) - f32_t(step_size));
         f64_t const h = f64_t(__bfloat162float(plus[index])) - f64_t(__bfloat162float(minus[index]));
         f64_t const numeric = (host_loss(plus, plus, num_vertices, num_vertices, hidden, host_prefixes, host_relations,
-                                         1.0, 0.0, num_vertices) -
+                                         1.0, 0.0, live_vertices) -
                                host_loss(minus, minus, num_vertices, num_vertices, hidden, host_prefixes,
-                                         host_relations, 1.0, 0.0, num_vertices)) /
+                                         host_relations, 1.0, 0.0, live_vertices)) /
                               h;
         // The full derivative sums the row-side (bf16 output) and column-side (f32 subgraph) forces.
         f64_t const analytic = f64_t(__bfloat162float(host_grad[index])) + f64_t(host_column[index]);
         f64_t const difference = std::fabs(numeric - analytic);
         if (difference > 5.0e-2 * std::max(std::fabs(numeric), 0.05)) {
-            std::printf("    force[%zu]: numeric=%.5f analytic=%.5f\n", index, numeric, analytic);
-            forces_ok = false;
+            suite.check(false, "force[{}] matches central finite differences: numeric {:.5f} analytic {:.5f}", index,
+                        numeric, analytic);
+            break;
         }
     }
-    check(forces_ok, "forces match central finite differences");
 
     // Capture once, replay twice: the replays land where the eager run did, up to reduction order.
     std::vector<bf16_t> const eager_grad = host_grad;
     auto graph_made = gpu_replay_graph_t::make(stream.get(), [&]() noexcept { return run_once(); });
-    if (!graph_made) {
-        std::printf("    %s\n", graph_made.description_.c_str());
-        return check(false, "capture");
-    }
+    if (!graph_made) return suite.check(false, "capture: {}", graph_made.description_);
     for (int replay = 0; replay != 2; ++replay)
         if (expected_t launched = graph_made.value_.launch(stream.get()); !launched)
-            return check(false, "replay launch");
+            return suite.check(false, "replay launch: {}", launched.description_);
     cuStreamSynchronize(stream.get());
     cuMemcpyDtoH(host_grad.data(), device_address(grad), scalars * sizeof(bf16_t));
     f32_t largest = 0.0f, worst = 0.0f;
@@ -282,13 +269,13 @@ static void run_oracle_case(char const *label, std::size_t num_vertices, std::si
         largest = std::max(largest, std::fabs(eager));
         worst = std::max(worst, std::fabs(eager - __bfloat162float(host_grad[index])));
     }
-    check(worst <= 1.0e-2f * largest, "captured replays match eager");
+    suite.check(worst <= 1.0e-2f * largest, "captured replays match eager: worst {} over largest {}", worst, largest);
     cuCtxPopCurrent(nullptr);
 }
 
 /** Negative tests: every invalid staging must fail loudly, never fall back. */
-static void run_negative_cases() {
-    std::printf("case negatives\n");
+static void run_negative_cases(test_suite_t &suite) {
+    if (!cuda_devices_visible_(1)) return suite.skip(no_cuda_device_k);
     auto stream = gpu_stream_t::make(0);
     cuCtxPushCurrent(stream.value_.context());
     auto arena = gpu_arena_t::make(0, 64ull << 20);
@@ -299,27 +286,169 @@ static void run_negative_cases() {
     u32_t empty_offsets[5] = {0, 0, 0, 0, 0};
     auto unsorted = relations.value_.upload({offsets, 5}, {unsorted_ids, 2}, {scores, 2}, {empty_offsets, 5}, {}, {},
                                             {}, {}, {}, {}, 8, 0, 1.0f, stream.value_);
-    check(!unsorted, "unsorted run is rejected loudly");
+    suite.check(!unsorted, "unsorted run is rejected loudly");
     u32_t overflowing_ids[6] = {0, 1, 2, 3, 4, 5};
     u32_t overflow_offsets[5] = {0, 6, 6, 6, 6};
     f32_t overflow_scores[6] = {1, 1, 1, 1, 1, 1};
     auto overflow = relations.value_.upload({overflow_offsets, 5}, {overflowing_ids, 6}, {overflow_scores, 6},
                                             {empty_offsets, 5}, {}, {}, {}, {}, {}, {}, 8, 0, 1.0f, stream.value_);
-    check(!overflow, "edge-capacity overflow is rejected loudly");
+    suite.check(!overflow, "edge-capacity overflow is rejected loudly");
     infiniband_coordinates_t coordinates;
-    check(!infiniband_coordinates_t::from_text("lid banana\n", coordinates), "corrupt coordinates are rejected");
+    suite.check(!infiniband_coordinates_t::from_text("lid banana\n", coordinates), "corrupt coordinates are rejected");
+    cuCtxPopCurrent(nullptr);
+}
+
+/** One loss call's three outputs read back: the loss summand and the first group's log-β and bias
+ *  gradients. */
+struct loss_readout_t {
+    f64_t loss = 0.0, log_inverse_temperature_grad = 0.0, bias_grad = 0.0;
+};
+
+/** The sharded oracle: one global batch split across a simulated two-host, eight-GPU world on one
+ *  device. Every simulated rank scores its rows against all sixteen subgraphs, and the per-rank
+ *  loss and temperature summands must add up to one global call and to the Float64 oracle, PAD
+ *  rows excluded from the mean. */
+static void run_sharded_oracle_case(test_suite_t &suite) {
+    if (!cuda_devices_visible_(1)) return suite.skip(no_cuda_device_k);
+    constexpr u32_t ranks_k = 16, vertices_k = 8, hidden_k = 64, world_k = ranks_k * vertices_k;
+    constexpr std::size_t tower_scalars_k = std::size_t {vertices_k} * hidden_k;
+    constexpr f32_t beta_k = 2.5f, bias_k = -1.5f;
+    u32_t const prefixes[1] = {hidden_k};
+    auto stream_made = gpu_stream_t::make(0);
+    if (!stream_made) return suite.check(false, "stream: {}", stream_made.description_);
+    gpu_stream_t stream = std::move(stream_made.value_);
+    cuCtxPushCurrent(stream.context());
+    auto arena_made = gpu_arena_t::make(0, 1ull << 30);
+    if (!arena_made) return suite.check(false, "arena: {}", arena_made.description_);
+    gpu_arena_t arena = std::move(arena_made.value_);
+
+    // Every third rank ends in a PAD row, which neither scores nor counts toward the mean.
+    bf16_t host_tower[world_k * hidden_k];
+    u32_t host_lengths[world_k];
+    for (std::size_t index = 0; index != world_k * hidden_k; ++index)
+        host_tower[index] = __float2bfloat16(hash_fill(index, 31));
+    u32_t live_vertices = 0;
+    for (u32_t vertex = 0; vertex != world_k; ++vertex) {
+        host_lengths[vertex] = (vertex / vertices_k) % 3u == 0u && vertex % vertices_k == vertices_k - 1u ? 0u : 4u;
+        live_vertices += host_lengths[vertex] != 0u;
+    }
+    bf16_t *tower = arena.allocate_object<bf16_t>(world_k * hidden_k);
+    bf16_t *row_grad = arena.allocate_object<bf16_t>(world_k * hidden_k);
+    f32_t *column_grad = arena.allocate_object<f32_t>(world_k * hidden_k);
+    u32_t *lengths = arena.allocate_object<u32_t>(world_k);
+    f32_t *temperatures = arena.allocate_object<f32_t>(2);
+    f32_t *outputs = arena.allocate_object<f32_t>(3 * (ranks_k + 1));
+    f32_t const host_temperatures[2] = {beta_k, bias_k};
+    cuMemcpyHtoD(device_address(tower), host_tower, sizeof(host_tower));
+    cuMemcpyHtoD(device_address(lengths), host_lengths, sizeof(host_lengths));
+    cuMemcpyHtoD(device_address(temperatures), host_temperatures, sizeof(host_temperatures));
+    contrastive_recipe_t recipe;
+    recipe.inverse_temperature_device = f32r1_view_t {temperatures, 1};
+    recipe.bias_device = f32r1_view_t {temperatures + 1, 1};
+    u32r1_view_t const world_lengths {lengths, world_k};
+
+    // One loss call over the rows from `first_vertex`, its three outputs at entry `call`.
+    auto run_call = [&](contrastive_segments_t &loss, contrastive_relations_t &relations, u32_t first_vertex,
+                        u32_t rows, nk::tensor_view<gpu_subgraph_t, 1> subgraphs, u32_t call) noexcept -> expected_t {
+        expected_t staged = relations.upload_self_edges(rows, u32r1_view_t {lengths + first_vertex, rows},
+                                                        world_lengths, first_vertex, 1.0f, stream);
+        if (staged)
+            staged = loss(bf16r2_view_t {tower + std::size_t {first_vertex} * hidden_k, rows, hidden_k}, subgraphs,
+                          relations.view(), recipe, f32r1_span_t {outputs + 3 * call, 1},
+                          bf16r2_span_t {row_grad + std::size_t {first_vertex} * hidden_k, rows, hidden_k}, stream,
+                          f32r1_span_t {outputs + 3 * call + 1, 1}, f32r1_span_t {outputs + 3 * call + 2, 1});
+        return staged;
+    };
+
+    contrastive_segments_config_t sharded_config;
+    sharded_config.from_vertices_per_gpu = vertices_k;
+    sharded_config.hidden = hidden_k;
+    sharded_config.to_vertices_per_gpu = vertices_k;
+    sharded_config.gpu_subgraphs_per_step = ranks_k;
+    contrastive_segments_config_t global_config = sharded_config;
+    global_config.from_vertices_per_gpu = world_k;
+    global_config.to_vertices_per_gpu = world_k;
+    global_config.gpu_subgraphs_per_step = 1;
+    auto sharded_loss = contrastive_segments_t::make(arena, sharded_config, {prefixes, 1});
+    auto global_loss = contrastive_segments_t::make(arena, global_config, {prefixes, 1});
+    auto sharded_relations = contrastive_relations_t::make(arena, vertices_k, 0);
+    auto global_relations = contrastive_relations_t::make(arena, world_k, 0);
+    if (!sharded_loss || !global_loss || !sharded_relations || !global_relations)
+        return suite.check(false, "sharded bring-up: {}{}", sharded_loss.description_, global_loss.description_);
+
+    gpu_subgraph_t subgraphs[ranks_k];
+    for (u32_t rank = 0; rank != ranks_k; ++rank) {
+        subgraphs[rank].to_vertices = bf16r2_view_t {tower + rank * tower_scalars_k, vertices_k, hidden_k};
+        subgraphs[rank].global_offset = std::size_t {rank} * vertices_k;
+        subgraphs[rank].to_vertices_grad = f32r2_span_t {column_grad + rank * tower_scalars_k, vertices_k, hidden_k};
+    }
+    gpu_subgraph_t const whole[1] = {
+        {bf16r2_view_t {tower, world_k, hidden_k}, 0, f32r2_span_t {column_grad, world_k, hidden_k}}};
+    expected_t ran {};
+    for (u32_t rank = 0; rank != ranks_k && ran; ++rank)
+        ran = run_call(sharded_loss.value_, sharded_relations.value_, rank * vertices_k, vertices_k,
+                       {subgraphs, ranks_k}, rank);
+    if (ran) ran = run_call(global_loss.value_, global_relations.value_, 0, world_k, {whole, 1}, ranks_k);
+    if (!ran) return suite.check(false, "sharded enqueue: {}", ran.description_);
+    cuStreamSynchronize(stream.get());
+    f32_t host_outputs[ranks_k + 1][3];
+    cuMemcpyDtoH(host_outputs, device_address(outputs), sizeof(host_outputs));
+    loss_readout_t sharded, global;
+    for (u32_t rank = 0; rank != ranks_k; ++rank) {
+        sharded.loss += host_outputs[rank][0];
+        sharded.log_inverse_temperature_grad += host_outputs[rank][1];
+        sharded.bias_grad += host_outputs[rank][2];
+    }
+    global.loss = host_outputs[ranks_k][0];
+    global.log_inverse_temperature_grad = host_outputs[ranks_k][1];
+    global.bias_grad = host_outputs[ranks_k][2];
+
+    // The Float64 oracle and its central differences in log-β and in the bias.
+    host_relations_t host_relations;
+    host_relations.vertex_effective.assign(host_lengths, host_lengths + world_k);
+    host_relations.neighbor_effective.assign(host_lengths, host_lengths + world_k);
+    std::span<bf16_t const> const host_view {host_tower, world_k * hidden_k};
+    auto oracle_at = [&](f64_t beta, f64_t bias) noexcept {
+        return host_loss(host_view, host_view, world_k, world_k, hidden_k, {prefixes, 1}, host_relations, beta, bias,
+                         live_vertices);
+    };
+    f64_t const step_size = 1.0e-4;
+    loss_readout_t oracle;
+    oracle.loss = oracle_at(beta_k, bias_k);
+    oracle.log_inverse_temperature_grad = (oracle_at(beta_k * std::exp(step_size), bias_k) -
+                                           oracle_at(beta_k * std::exp(-step_size), bias_k)) /
+                                          (2.0 * step_size);
+    oracle.bias_grad = (oracle_at(beta_k, bias_k + step_size) - oracle_at(beta_k, bias_k - step_size)) /
+                       (2.0 * step_size);
+
+    auto relative = [](f64_t got, f64_t want) noexcept {
+        return std::fabs(got - want) / std::max(std::fabs(want), 1.0e-9);
+    };
+    // The split moves the Float32 sums no further than rounding, and both land near Float64.
+    f64_t const tolerance = 1.0e-6, float64_tolerance = 1.0e-5;
+    suite.check(relative(sharded.loss, global.loss) < tolerance, "sharded loss {:.9f} vs global {:.9f}", sharded.loss,
+                global.loss);
+    suite.check(relative(sharded.log_inverse_temperature_grad, global.log_inverse_temperature_grad) < tolerance,
+                "sharded log-β gradient {:.9f} vs global {:.9f}", sharded.log_inverse_temperature_grad,
+                global.log_inverse_temperature_grad);
+    suite.check(relative(sharded.bias_grad, global.bias_grad) < tolerance,
+                "sharded bias gradient {:.9f} vs global {:.9f}", sharded.bias_grad, global.bias_grad);
+    suite.check(relative(sharded.loss, oracle.loss) < float64_tolerance,
+                "sharded loss {:.9f} vs Float64 {:.9f}: {:.2e}", sharded.loss, oracle.loss,
+                relative(sharded.loss, oracle.loss));
+    suite.check(relative(sharded.log_inverse_temperature_grad, oracle.log_inverse_temperature_grad) < float64_tolerance,
+                "sharded log-β gradient {:.9f} vs Float64 {:.9f}: {:.2e}", sharded.log_inverse_temperature_grad,
+                oracle.log_inverse_temperature_grad,
+                relative(sharded.log_inverse_temperature_grad, oracle.log_inverse_temperature_grad));
+    suite.check(relative(sharded.bias_grad, oracle.bias_grad) < float64_tolerance,
+                "sharded bias gradient {:.9f} vs Float64 {:.9f}: {:.2e}", sharded.bias_grad, oracle.bias_grad,
+                relative(sharded.bias_grad, oracle.bias_grad));
     cuCtxPopCurrent(nullptr);
 }
 
 /** The distributed tier: 2 GPUs vs the single-GPU global reference on identical data. */
-static void run_distributed_case() {
-    int device_count = 0;
-    cuDeviceGetCount(&device_count);
-    if (device_count < 2) {
-        std::printf("case distributed: SKIP (only %d GPU visible)\n", device_count);
-        return;
-    }
-    std::printf("case distributed (2 GPUs vs single-GPU global reference)\n");
+static void run_distributed_case(test_suite_t &suite) {
+    if (!cuda_devices_visible_(2)) return suite.skip("needs two CUDA devices");
     constexpr std::size_t gpus_k = 2;
     constexpr u32_t vertices_k = 8, hidden_k = 64;
     constexpr std::size_t scalars_k = std::size_t(vertices_k) * hidden_k;
@@ -346,16 +475,12 @@ static void run_distributed_case() {
     // multimem domain → the ONE colocated domain → the consumer, borrowing all of it.
     for (std::size_t rank = 0; rank != gpus_k; ++rank) {
         auto stream_made = gpu_stream_t::make(devices[rank]);
-        if (!stream_made || streams.push_back(std::move(stream_made.value_)) != status_t::success_k) {
-            check(false, "distributed stream make");
-            return;
-        }
+        if (!stream_made || streams.push_back(std::move(stream_made.value_)) != status_t::success_k)
+            return suite.check(false, "distributed stream make");
         cuCtxPushCurrent(streams[rank].context());
         auto arena_made = gpu_arena_t::make(devices[rank], 1ull << 30, {devices, gpus_k});
-        if (!arena_made || arenas.push_back(std::move(arena_made.value_)) != status_t::success_k) {
-            check(false, "distributed arena make");
-            return;
-        }
+        if (!arena_made || arenas.push_back(std::move(arena_made.value_)) != status_t::success_k)
+            return suite.check(false, "distributed arena make");
         bf16_t *tower = arenas[rank].allocate_object<bf16_t>(scalars_k);
         bf16_t *grad = arenas[rank].allocate_object<bf16_t>(scalars_k);
         cuMemcpyHtoD(device_address(tower), global_tower.data() + rank * scalars_k, scalars_k * sizeof(bf16_t));
@@ -364,49 +489,26 @@ static void run_distributed_case() {
         owners[rank] = std::move(contrastive_relations_t::make(arenas[rank], vertices_k, 0).value_);
         auto staged = owners[rank].upload_self_edges(vertices_k, {}, {}, rank * std::size_t(vertices_k), 1.0f,
                                                      streams[rank]);
-        if (!staged) {
-            check(false, "distributed relations");
-            return;
-        }
+        if (!staged) return suite.check(false, "distributed relations: {}", staged.description_);
         relations[rank] = owners[rank].view();
         cuCtxPopCurrent(nullptr);
     }
     // A one-process world: the whole box is one host_domain and one multimem_domain (D=1), so the
     // colocated domain is the trivial identity and no exchange happens.
     auto topology = mesh_topology_t::bootstrap(0, 1, 0, "/tmp/uform_exchange_local", "distributed_case");
-    if (!topology) {
-        std::printf("    %s\n", topology.description_.c_str());
-        check(false, "single-domain bootstrap");
-        return;
-    }
+    if (!topology) return suite.check(false, "single-domain bootstrap: {}", topology.description_);
     auto domain = multimem_domain_t::make(
         topology.value_, {devices, gpus_k},
         distributed_contrastive_segments_t::payload_scalars_needed(config, topology.value_.shape), streams);
-    if (!domain) {
-        std::printf("    %s\n", domain.description_.c_str());
-        check(false, "multimem domain make");
-        return;
-    }
+    if (!domain) return suite.check(false, "multimem domain make: {}", domain.description_);
     auto colocated = colocated_domain_t::make(topology.value_);
-    if (!colocated) {
-        std::printf("    %s\n", colocated.description_.c_str());
-        check(false, "colocated domain make");
-        return;
-    }
+    if (!colocated) return suite.check(false, "colocated domain make: {}", colocated.description_);
     auto distributed = distributed_contrastive_segments_t::make(domain.value_, colocated.value_, arenas, streams,
                                                                 {towers, gpus_k}, {relations, gpus_k}, {grads, gpus_k},
                                                                 config, {prefix_dims, 1});
-    if (!distributed) {
-        std::printf("    %s\n", distributed.description_.c_str());
-        check(false, "distributed make");
-        return;
-    }
+    if (!distributed) return suite.check(false, "distributed make: {}", distributed.description_);
     auto ran = distributed.value_(contrastive_recipe_t {}, streams);
-    if (!ran) {
-        std::printf("    %s\n", ran.description_.c_str());
-        check(false, "distributed run");
-        return;
-    }
+    if (!ran) return suite.check(false, "distributed run: {}", ran.description_);
     for (std::size_t rank = 0; rank != gpus_k; ++rank) {
         cuCtxPushCurrent(streams[rank].context());
         cuStreamSynchronize(streams[rank].get());
@@ -431,9 +533,9 @@ static void run_distributed_case() {
                                    host_relations, 1.0, 0.0, 2 * vertices_k);
     f64_t const relative = std::fabs(distributed_loss - oracle) / std::max(std::fabs(oracle), 1.0e-9);
     sz::string_view_t const tier = domain.value_.description();
-    std::printf("    loss distributed=%.6f oracle=%.6f relative=%.2e (tier %.*s)\n", distributed_loss, oracle, relative,
-                static_cast<int>(tier.size()), tier.data());
-    check(relative < 5.0e-3, "distributed loss sum matches the global Float64 oracle");
+    suite.check(relative < 5.0e-3,
+                "distributed loss sum {:.6f} matches the global Float64 oracle {:.6f}: relative {:.2e} over {}",
+                distributed_loss, oracle, relative, tier);
 
     // Finite-difference one channel of rank 1's tower against the combined distributed force.
     std::size_t const probe_index = scalars_k + 321; // Inside rank 1's rows.
@@ -448,29 +550,25 @@ static void run_distributed_case() {
                                      1.0, 0.0, 2 * vertices_k)) /
                           h;
     f64_t const analytic = f64_t(__bfloat162float(distributed_grad[probe_index]));
-    std::printf("    force probe: numeric=%.5f distributed=%.5f\n", numeric, analytic);
-    check(std::fabs(numeric - analytic) < 5.0e-2 * std::max(std::fabs(numeric), 0.05),
-          "distributed force matches the global finite difference");
+    suite.check(std::fabs(numeric - analytic) < 5.0e-2 * std::max(std::fabs(numeric), 0.05),
+                "distributed force matches the global finite difference: numeric {:.5f} distributed {:.5f}", numeric,
+                analytic);
 }
 
 /** The cross-domain tier: one process per multimem_domain, GDAKI gather + all-reduce over the
  *  local HCAs, verified against the same global Float64 oracle each process computes independently.
  *  Activated by UFORM_HOST_DOMAIN_INDEX in the environment. */
-static int run_cross_domain_case() {
+static void run_cross_domain_case(test_suite_t &suite) {
 #if !defined(UFORM_WITH_INFINIBAND)
-    std::printf("cross-domain: SKIP (built without UFORM_WITH_INFINIBAND)\n");
-    return 0;
+    suite.skip("built without UFORM_WITH_INFINIBAND");
 #else
+    if (!cuda_devices_visible_(1)) return suite.skip(no_cuda_device_k);
     int device_count = 0;
     cuDeviceGetCount(&device_count);
     u32_t const gpus = u32_t(device_count);
     u32_t const domain = u32_t(std::atoi(std::getenv("UFORM_HOST_DOMAIN_INDEX")));
-    std::printf("case cross-domain (domain %u, %u local GPUs, 2 domains over GDAKI)\n", domain, gpus);
     auto topology_made = mesh_topology_t::bootstrap(domain, 2, gpus);
-    if (!topology_made) {
-        std::printf("  bootstrap: %s\n", topology_made.description_.c_str());
-        return 1;
-    }
+    if (!topology_made) return suite.check(false, "bootstrap: {}", topology_made.description_);
     mesh_topology_t topology = std::move(topology_made.value_);
 
     constexpr u32_t vertices_k = 8, hidden_k = 64;
@@ -496,10 +594,12 @@ static int run_cross_domain_case() {
     for (u32_t rank = 0; rank != gpus; ++rank) devices[rank] = i32_t(rank);
     for (u32_t rank = 0; rank != gpus; ++rank) {
         auto stream_made = gpu_stream_t::make(i32_t(rank));
-        if (!stream_made || streams.push_back(std::move(stream_made.value_)) != status_t::success_k) return 1;
+        if (!stream_made || streams.push_back(std::move(stream_made.value_)) != status_t::success_k)
+            return suite.check(false, "cross-domain stream make on GPU {}", rank);
         cuCtxPushCurrent(streams[rank].context());
         auto arena_made = gpu_arena_t::make(i32_t(rank), 1ull << 30, {devices.data(), gpus});
-        if (!arena_made || arenas.push_back(std::move(arena_made.value_)) != status_t::success_k) return 1;
+        if (!arena_made || arenas.push_back(std::move(arena_made.value_)) != status_t::success_k)
+            return suite.check(false, "cross-domain arena make on GPU {}", rank);
         bf16_t *tower = arenas[rank].allocate_object<bf16_t>(scalars_k);
         bf16_t *grad = arenas[rank].allocate_object<bf16_t>(scalars_k);
         std::size_t const global_rank = std::size_t(domain) * gpus + rank;
@@ -509,10 +609,7 @@ static int run_cross_domain_case() {
         owners[rank] = std::move(contrastive_relations_t::make(arenas[rank], vertices_k, 0).value_);
         auto staged = owners[rank].upload_self_edges(vertices_k, {}, {}, global_rank * std::size_t(vertices_k), 1.0f,
                                                      streams[rank]);
-        if (!staged) {
-            check(false, "cross-domain relations");
-            return 1;
-        }
+        if (!staged) return suite.check(false, "cross-domain relations: {}", staged.description_);
         relations[rank] = owners[rank].view();
         cuCtxPopCurrent(nullptr);
     }
@@ -520,43 +617,24 @@ static int run_cross_domain_case() {
     auto multimem = multimem_domain_t::make(
         topology, {devices.data(), gpus},
         distributed_contrastive_segments_t::payload_scalars_needed(config, topology.shape), streams);
-    if (!multimem) {
-        std::printf("  multimem: %s\n", multimem.description_.c_str());
-        check(false, "multimem domain make");
-        return 1;
-    }
+    if (!multimem) return suite.check(false, "multimem domain make: {}", multimem.description_);
     auto colocated = colocated_domain_t::make(topology);
-    if (!colocated) {
-        std::printf("  colocated: %s\n", colocated.description_.c_str());
-        check(false, "colocated domain make");
-        return 1;
-    }
+    if (!colocated) return suite.check(false, "colocated domain make: {}", colocated.description_);
     auto distributed = distributed_contrastive_segments_t::make(multimem.value_, colocated.value_, arenas, streams,
                                                                 {towers.data(), gpus}, {relations.data(), gpus},
                                                                 {grads.data(), gpus}, config, {prefix_dims, 1});
-    if (!distributed) {
-        std::printf("  make: %s\n", distributed.description_.c_str());
-        check(false, "cross-domain make");
-        return 1;
-    }
+    if (!distributed) return suite.check(false, "cross-domain make: {}", distributed.description_);
     sz::string_view_t const tier = multimem.value_.description();
-    std::printf("  fabric wired (domains=%u, tier %.*s)\n", distributed.value_.world_domains(),
-                static_cast<int>(tier.size()), tier.data());
+    u32_t const world_domains = distributed.value_.world_domains();
     auto ran = distributed.value_(contrastive_recipe_t {}, streams);
-    if (!ran) {
-        std::printf("  run: %s\n", ran.description_.c_str());
-        check(false, "cross-domain run");
-        return 1;
-    }
+    if (!ran)
+        return suite.check(false, "cross-domain run over {} domains on {}: {}", world_domains, tier, ran.description_);
     for (u32_t rank = 0; rank != gpus; ++rank) {
         cuCtxPushCurrent(streams[rank].context());
         CUresult const synchronized = cuStreamSynchronize(streams[rank].get());
         cuCtxPopCurrent(nullptr);
-        if (synchronized != CUDA_SUCCESS) {
-            std::printf("  sync failed (rank=%u result=%d)\n", rank, synchronized);
-            check(false, "cross-domain sync");
-            return 1;
-        }
+        if (synchronized != CUDA_SUCCESS)
+            return suite.check(false, "cross-domain sync on GPU {}: result {}", rank, static_cast<int>(synchronized));
     }
 
     // Combine the two domains' loss sums over the mesh exchange; each process checks the global oracle.
@@ -569,10 +647,12 @@ static int run_cross_domain_case() {
         for (f32_t const summand : summands) domain_loss += summand;
     }
     sz::string_t loss_text;
-    if (!format_into(loss_text, "{}", domain_loss)) return 1;
-    if (!topology.publish_text("loss", loss_text.view())) return 1;
+    if (!format_into(loss_text, "{}", domain_loss)) return suite.check(false, "loss text formatting");
+    if (expected_t published = topology.publish_text("loss", loss_text.view()); !published)
+        return suite.check(false, "loss publish: {}", published.description_);
     sz::string_t peer_text;
-    if (!topology.await_text(1u - domain, "loss", peer_text, 60.0)) return 1;
+    if (expected_t awaited = topology.await_text(1u - domain, "loss", peer_text, 60.0); !awaited)
+        return suite.check(false, "peer loss await: {}", awaited.description_);
     f64_t const global_loss = domain_loss + std::atof(peer_text.c_str());
 
     host_relations_t host_relations;
@@ -580,8 +660,9 @@ static int run_cross_domain_case() {
     f64_t const oracle = host_loss(global_tower, global_tower, world_gpus * vertices_k, world_gpus * vertices_k,
                                    hidden_k, prefixes, host_relations, 1.0, 0.0, world_gpus * vertices_k);
     f64_t const relative = std::fabs(global_loss - oracle) / std::max(std::fabs(oracle), 1.0e-9);
-    std::printf("  loss global=%.6f oracle=%.6f relative=%.2e\n", global_loss, oracle, relative);
-    check(relative < 5.0e-3, "cross-domain loss sum matches the global Float64 oracle");
+    suite.check(relative < 5.0e-3,
+                "cross-domain loss sum {:.6f} matches the global Float64 oracle {:.6f}: relative {:.2e} over {}",
+                global_loss, oracle, relative, tier);
 
     // Finite-difference one locally-owned channel against the fully-reduced force.
     std::size_t const probe_index = (std::size_t(domain) * gpus + 1) * scalars_k + 321;
@@ -600,12 +681,11 @@ static int run_cross_domain_case() {
                                      host_relations, 1.0, 0.0, world_gpus * vertices_k)) /
                           h;
     f64_t const analytic = f64_t(__bfloat162float(local_grad[probe_index % scalars_k]));
-    std::printf("  force probe: numeric=%.5f distributed=%.5f\n", numeric, analytic);
-    check(std::fabs(numeric - analytic) < 5.0e-2 * std::max(std::fabs(numeric), 0.05),
-          "cross-domain force matches the global finite difference");
-    if (!topology.barrier("done", 60.0)) return 1;
-    std::printf("%s: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL", failures);
-    return failures == 0 ? 0 : 1;
+    suite.check(std::fabs(numeric - analytic) < 5.0e-2 * std::max(std::fabs(numeric), 0.05),
+                "cross-domain force matches the global finite difference: numeric {:.5f} distributed {:.5f}", numeric,
+                analytic);
+    expected_t closed = topology.barrier("done", 60.0);
+    suite.check(static_cast<bool>(closed), "the closing barrier should complete: {}", closed.description_);
 #endif
 }
 
@@ -615,19 +695,16 @@ static int run_cross_domain_case() {
  *  double-precision host replica of exactly the new math — the softmax pool over the tower's own
  *  final-norm states, then RMSNorm → fc1 → SiLU → fc2. The backward runs the same chain in reverse, and
  *  the pool's own state and query gradients must match the host softmax backward to the BFloat16 floor. */
-static void run_pool_parity_case() {
-    std::printf("case pool-parity (FP64 host oracle over the pool + head)\n");
+static void run_pool_parity_case(test_suite_t &suite) {
+    if (!cuda_devices_visible_(1)) return suite.skip(no_cuda_device_k);
     constexpr u32_t rows_k = 2, segments_k = 4, columns_k = 8, hidden_k = 256, tokens_k = rows_k * columns_k;
     constexpr u32_t heads_k = hidden_k / transformer_head_dim_k;
     auto stream = gpu_stream_t::make(0);
-    if (!stream) {
-        check(false, "pool-parity stream make");
-        return;
-    }
+    if (!stream) return suite.check(false, "pool-parity stream make: {}", stream.description_);
     cuCtxPushCurrent(stream.value_.context());
     auto arena = gpu_arena_t::make(0, 1ull << 30, {});
     if (!arena) {
-        check(false, "pool-parity bring-up");
+        suite.check(false, "pool-parity bring-up: {}", arena.description_);
         cuCtxPopCurrent(nullptr);
         return;
     }
@@ -643,8 +720,7 @@ static void run_pool_parity_case() {
     multimodal_batch_shape_t shape {rows_k, segments_k, columns_k};
     auto tower = encoder_tower_bf16_t::make(arena.value_, config, shape);
     if (!tower) {
-        std::printf("    %s\n", tower.description_.c_str());
-        check(false, "pool-parity tower make");
+        suite.check(false, "pool-parity tower make: {}", tower.description_);
         cuCtxPopCurrent(nullptr);
         return;
     }
@@ -652,7 +728,7 @@ static void run_pool_parity_case() {
     // Keyed weight seeding through the registration list — the same values the host replica reads back.
     array<differentiable_weights_t> weights;
     if (!tower.value_.fill(weights)) {
-        check(false, "pool-parity registration");
+        suite.check(false, "pool-parity registration");
         cuCtxPopCurrent(nullptr);
         return;
     }
@@ -670,7 +746,7 @@ static void run_pool_parity_case() {
     // counts).
     auto batch = multimodal_batch_on_gpu_t::make(gpu_arena_alloc<b8_t> {arena.value_}, shape);
     if (!batch) {
-        check(false, "pool-parity batch make");
+        suite.check(false, "pool-parity batch make: {}", batch.description_);
         cuCtxPopCurrent(nullptr);
         return;
     }
@@ -693,7 +769,7 @@ static void run_pool_parity_case() {
     bf16r2_tensor_arena_t vertices_grad_tensor =
         bf16r2_tensor_arena_t::uninitialized({segments_k, hidden_k}, gpu_arena_alloc<bf16_t> {arena.value_}).value;
     if (!vertices_tensor || !vertices_grad_tensor) {
-        check(false, "pool-parity vertices alloc");
+        suite.check(false, "pool-parity vertices alloc");
         cuCtxPopCurrent(nullptr);
         return;
     }
@@ -701,8 +777,7 @@ static void run_pool_parity_case() {
     cuMemsetD8(device_address(vertices_grad_tensor.data()), 0, std::size_t(segments_k) * hidden_k * sizeof(bf16_t));
     auto ran = tower.value_.pack_weights(stream.value_);
     if (ran) ran = tower.value_.forward(batch.value_, vertices_tensor.span(), stream.value_);
-    if (!ran) std::printf("    %s\n", ran.description_.c_str());
-    check(static_cast<bool>(ran), "pool-parity forward");
+    suite.check(static_cast<bool>(ran), "pool-parity forward: {}", ran.description_);
     if (!ran) {
         cuCtxPopCurrent(nullptr);
         return;
@@ -817,15 +892,14 @@ static void run_pool_parity_case() {
                                         (std::abs(vertices_host[index]) + 1.0));
         }
     }
-    std::printf("    forward parity worst relative error %.3e\n", worst);
-    check(worst < 3e-2, "pool + head forward matches the FP64 oracle to the BFloat16 floor");
+    suite.check(worst < 3e-2,
+                "pool + head forward matches the FP64 oracle to the BFloat16 floor: worst relative {:.3e}", worst);
 
     // Backward smoke over the same chain: the keyed vertices force, then every pool / head gradient finite
     // and the query gradient nonzero (the pool actually differentiated).
     cuMemcpyHtoD(device_address(vertices_grad_tensor.data()), force_host.data(), force_host.size() * sizeof(bf16_t));
     auto propagated = tower.value_.backward(vertices_grad_tensor.view(), bf16r2_view_t {}, batch.value_, stream.value_);
-    if (!propagated) std::printf("    %s\n", propagated.description_.c_str());
-    check(static_cast<bool>(propagated), "pool-parity backward");
+    suite.check(static_cast<bool>(propagated), "pool-parity backward: {}", propagated.description_);
     if (propagated) {
         cuStreamSynchronize(stream.value_.get());
         bool all_finite = true;
@@ -840,8 +914,8 @@ static void run_pool_parity_case() {
                 if (matrix == query_index) query_grad_energy += std::abs(double(value));
             }
         }
-        check(all_finite, "every pool / head gradient is finite");
-        check(query_grad_energy > 0.0, "the pool query gradient is nonzero");
+        suite.check(all_finite, "every pool / head gradient is finite");
+        suite.check(query_grad_energy > 0.0, "the pool query gradient is nonzero");
     }
 
     // The tower's d(normalized) is overwritten by the block stack's backward before it returns, so a second
@@ -854,7 +928,7 @@ static void run_pool_parity_case() {
     bf16r1_tensor_arena_t query_grad =
         bf16r1_tensor_arena_t::uninitialized({hidden_k}, gpu_arena_alloc<bf16_t> {arena.value_}).value;
     if (!pool || !states_grad || !value_grad || !query_grad) {
-        check(false, "pool-parity pool make");
+        suite.check(false, "pool-parity pool make: {}", pool.description_);
         cuCtxPopCurrent(nullptr);
         return;
     }
@@ -864,8 +938,7 @@ static void run_pool_parity_case() {
     if (pooled)
         pooled = pool.value_.backward(query, vertices_grad_tensor.view(), states_grad.span(), value_grad.span(),
                                       query_grad.span(), stream.value_);
-    if (!pooled) std::printf("    %s\n", pooled.description_.c_str());
-    check(static_cast<bool>(pooled), "pool-parity pool backward");
+    suite.check(static_cast<bool>(pooled), "pool-parity pool backward: {}", pooled.description_);
     if (pooled) {
         cuStreamSynchronize(stream.value_.get());
         std::vector<f32_t> states_grad_device(states_grad_host.size());
@@ -895,30 +968,31 @@ static void run_pool_parity_case() {
         }
         states_worst /= states_peak;
         query_worst /= query_peak;
-        std::printf("    pool backward worst relative error: states %.3e, query %.3e\n", states_worst, query_worst);
         // NumKong rounds P and dS to BFloat16 for its tensor-core products, and the query gradient lands in
         // BFloat16: a few 2⁻⁹ unit roundoffs over F32 sums.
-        check(states_worst < 1e-2, "pool d(states) matches the FP64 oracle on live rows to the BFloat16 floor");
-        check(gaps_zero, "pool d(states) is exactly zero on gap rows");
-        check(query_worst < 1e-2, "pool query gradient matches the FP64 oracle to the BFloat16 floor");
+        suite.check(states_worst < 1e-2,
+                    "pool d(states) matches the FP64 oracle on live rows to the BFloat16 floor: worst relative {:.3e}",
+                    states_worst);
+        suite.check(gaps_zero, "pool d(states) is exactly zero on gap rows");
+        suite.check(query_worst < 1e-2,
+                    "pool query gradient matches the FP64 oracle to the BFloat16 floor: worst relative {:.3e}",
+                    query_worst);
     }
 
     // The quarter-precision twin: quantize the same tower and require every live vertex to stay on the
     // BFloat16 tower's direction — the blocks carry the E4M3 error, the tail is a BFloat16 snapshot.
     auto twin = tower.value_.quantize_weights(arena.value_, stream.value_);
-    if (!twin) std::printf("    %s\n", twin.description_.c_str());
-    check(static_cast<bool>(twin), "twin quantization");
+    suite.check(static_cast<bool>(twin), "twin quantization: {}", twin.description_);
     if (twin) {
         bf16r2_tensor_arena_t twin_vertices =
             bf16r2_tensor_arena_t::uninitialized({segments_k, hidden_k}, gpu_arena_alloc<bf16_t> {arena.value_}).value;
         if (!twin_vertices) {
-            check(false, "twin vertices alloc");
+            suite.check(false, "twin vertices alloc");
             cuCtxPopCurrent(nullptr);
             return;
         }
         auto twin_ran = twin.value_.forward(batch.value_, twin_vertices.span(), stream.value_);
-        if (!twin_ran) std::printf("    %s\n", twin_ran.description_.c_str());
-        check(static_cast<bool>(twin_ran), "twin forward");
+        suite.check(static_cast<bool>(twin_ran), "twin forward: {}", twin_ran.description_);
         if (twin_ran) {
             cuStreamSynchronize(stream.value_.get());
             std::vector<bf16_t> twin_host(std::size_t(segments_k) * hidden_k);
@@ -937,36 +1011,32 @@ static void run_pool_parity_case() {
                 }
                 worst_cosine = std::min(worst_cosine, dot / (std::sqrt(norm_bf16 * norm_twin) + 1e-30));
             }
-            std::printf("    twin vertex cosine worst %.4f\n", worst_cosine);
             // Keyed-random weights are the quantizer's worst case (trained weights are smoother), and
             // this observed 0.979 at depth 1 already beats the R&D's FP8 embedding acceptance gates.
-            check(worst_cosine > 0.95, "twin vertices stay on the BFloat16 tower's direction");
+            suite.check(worst_cosine > 0.95,
+                        "twin vertices stay on the BFloat16 tower's direction: worst cosine {:.4f}", worst_cosine);
         }
     }
     cuCtxPopCurrent(nullptr);
 }
 
-int main() {
-    cuInit(0);
-    int device_count = 0;
-    cuDeviceGetCount(&device_count);
-    std::printf("contrastive conformance: %d visible GPU(s)\n", device_count);
-    if (device_count == 0) {
-        std::printf("no GPUs — cannot run\n");
-        return 1;
+int main(int, char **argv) {
+    test_suite_t suite = test_suite_t::make(argv[0]);
+    [[maybe_unused]] CUresult const initialized = cuInit(0); // a failure leaves no device to count, so each case skips
+    if (std::getenv("UFORM_HOST_DOMAIN_INDEX") != nullptr) {
+        suite.run("cross_domain", run_cross_domain_case);
+        return suite.finish();
     }
-    if (std::getenv("UFORM_HOST_DOMAIN_INDEX") != nullptr) return run_cross_domain_case();
 
-    run_pool_parity_case();
-    run_oracle_case("self-edges", 8, 64, {64}, false, false, 1.0f);
-    run_oracle_case("matryoshka", 8, 64, {32, 64}, false, false, 1.0f);
-    run_oracle_case("explicit-edges", 8, 64, {64}, true, false, 0.5f);
-    run_oracle_case("pad-rows", 8, 64, {64}, false, true, 1.0f);
-    run_oracle_case("no-ambient", 8, 64, {64}, false, false, 0.0f);
-    run_oracle_case("odd-rows-wide", 33, 256, {32, 256}, false, false, 1.0f);
-    run_negative_cases();
-    run_distributed_case();
-
-    std::printf("%s: %d failure(s)\n", failures == 0 ? "PASS" : "FAIL", failures);
-    return failures == 0 ? 0 : 1;
+    suite.run("pool_parity", run_pool_parity_case);
+    suite.run("oracle/self-edges", run_oracle_case, 8, 64, {64}, false, false, 1.0f);
+    suite.run("oracle/matryoshka", run_oracle_case, 8, 64, {32, 64}, false, false, 1.0f);
+    suite.run("oracle/explicit-edges", run_oracle_case, 8, 64, {64}, true, false, 0.5f);
+    suite.run("oracle/pad-rows", run_oracle_case, 8, 64, {64}, false, true, 1.0f);
+    suite.run("oracle/no-ambient", run_oracle_case, 8, 64, {64}, false, false, 0.0f);
+    suite.run("oracle/odd-rows-wide", run_oracle_case, 33, 256, {32, 256}, false, false, 1.0f);
+    suite.run("negatives", run_negative_cases);
+    suite.run("sharded_oracle", run_sharded_oracle_case);
+    suite.run("distributed", run_distributed_case);
+    return suite.finish();
 }

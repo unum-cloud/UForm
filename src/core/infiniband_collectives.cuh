@@ -1248,7 +1248,7 @@ struct colocated_domain_t {
     /** Open each local GPU's adapter — @c mlx5_<d> for local ordinal @c d , the box's GPU↔HCA
      *  pairing — once for the process: one per local GPU, however many processes share the
      *  multimem_domain. */
-    [[nodiscard]] static expected<colocated_domain_t> make(mesh_topology_t const &topology) noexcept;
+    [[nodiscard]] static expected<colocated_domain_t> make(mesh_topology_t &topology) noexcept;
 
     /** The bootstrapped world this domain was wired against. */
     [[nodiscard]] mesh_topology_t const &topology() const noexcept { return *topology_; }
@@ -1275,10 +1275,10 @@ struct colocated_domain_t {
      *      recursive-doubling rounds from the world's domain span, and build @p layout 's heap,
      *      endpoints, and links over the member's shared adapter.
      *
-     *  The namespace is a monotonic per-domain id, rank-consistent because every rank constructs its
-     *  collectives in the same SPMD order — keys never appear in any API. Single-domain worlds return the
-     *  zero-round identity without touching InfiniBand. Runs once, at setup, outside any capture; the
-     *  calling thread must hold the member's context.
+     *  The namespace is the topology's next wiring generation, rank-consistent because every rank
+     *  constructs its transports in the same SPMD order — keys never appear in any API.
+     *  Single-domain worlds return the zero-round identity without touching InfiniBand. Runs once,
+     *  at setup, outside any capture; the calling thread must hold the member's context.
      *
      *  @param[in] member_index This GPU's index inside its multimem_domain; the partner domain's same-index
      *      GPU pairs with it, wherever its process sits. A member another process drives still mints its id
@@ -1293,14 +1293,12 @@ struct colocated_domain_t {
                                                       infiniband_reach_t::heap_layout_t layout,
                                                       f64_t timeout_seconds) noexcept;
 
-    /** The bootstrapped world — borrowed; main owns it for the process lifetime. */
-    mesh_topology_t const *topology_ = nullptr;
+    /** The bootstrapped world — borrowed; main owns it for the process lifetime, and every wired
+     *  handle claims its rendezvous generation from it. */
+    mesh_topology_t *topology_ = nullptr;
 
     /** One opened adapter per local GPU, local order: entry @c d serves domain member @c member_offset+d . */
     per_gpu_array<infiniband_nic_t> nics_ {};
-
-    /** Monotonic id minted per wired handle — the auto-derived rendezvous namespace. */
-    u32_t next_collective_id_ = 0;
 };
 
 /** Cross-domain Float32 all-reduce-sum in place — the typed op-handle over @ref colocated_domain_t . Wires
@@ -1478,7 +1476,7 @@ struct infiniband_reach_t {
 /** The build-gate stub of the colocated domain: single-domain topologies work (nothing to
  *  wire); multi-domain worlds fail loudly naming the gate. */
 struct colocated_domain_t {
-    [[nodiscard]] static expected<colocated_domain_t> make(mesh_topology_t const &topology) noexcept {
+    [[nodiscard]] static expected<colocated_domain_t> make(mesh_topology_t &topology) noexcept {
         if (topology.shape.multimem_domain_count() != 1)
             return expected<colocated_domain_t>::fail(
                 status_t::other_k,
@@ -1492,7 +1490,7 @@ struct colocated_domain_t {
     [[nodiscard]] u32_t multimem_domain_count() const noexcept { return 1u; }
 
   private:
-    mesh_topology_t const *topology_ = nullptr;
+    mesh_topology_t *topology_ = nullptr;
 };
 
 /** Build-gate stubs of the typed collective handles — the zero-round identity: @c make succeeds with a

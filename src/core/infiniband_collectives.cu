@@ -611,7 +611,7 @@ expected_t infiniband_reach_t::alltoall(gpu_stream_t &stream) noexcept {
     return {};
 }
 
-expected<colocated_domain_t> colocated_domain_t::make(mesh_topology_t const &topology) noexcept {
+expected<colocated_domain_t> colocated_domain_t::make(mesh_topology_t &topology) noexcept {
     using result_t = expected<colocated_domain_t>;
     colocated_domain_t domain;
     domain.topology_ = &topology;
@@ -633,7 +633,7 @@ expected<infiniband_reach_t> colocated_domain_t::reach_(u32_t member_index, gpu_
                                                         f64_t timeout_seconds) noexcept {
     // The single-domain identity: no partners exist, every collective is a no-op — but the rendezvous id
     // still advances, so every rank's key sequence stays aligned whatever the world's shape.
-    u32_t const collective_id = next_collective_id_++;
+    u32_t const collective_id = topology_->next_collective_id();
     if (multimem_domain_count() == 1) return expected<infiniband_reach_t> {infiniband_reach_t {}};
     sz::string_t key;
     if (!format_into(key, "collective.{}", collective_id))

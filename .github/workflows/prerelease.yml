@@ -91,6 +91,19 @@ jobs:
       - name: Test Data Scripts
         run: python -X faulthandler -m pytest -x scripts/data
 
+  verify_protocols:
+    name: Verify protocol models with Spin
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Spin
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y spin
+      - name: Verify every model
+        run: verification/check.sh
+
   test_ubuntu_cpu:
     name: Test C and Python on Ubuntu with the CPU library
     runs-on: ubuntu-26.04

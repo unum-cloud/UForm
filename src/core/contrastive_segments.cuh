@@ -1,9 +1,9 @@
 /**
- *  @brief Sharded sigmoid-pairwise (SigLIP-BCE) contrastive loss over pooled @b segment embeddings — the
- *      Embedder objective, as a function object with owned scratch and tensor-core matmuls.
  *  @file src/core/contrastive_segments.cuh
  *  @author Ash Vardanian
  *  @date July 2, 2026
+ *  @brief Sharded sigmoid-pairwise (SigLIP-BCE) contrastive loss over pooled @b segment embeddings
+ *      — the Embedder objective, as a function object with owned scratch and tensor-core matmuls.
  *
  *  The loss is best read as a @b force-directed @b graph @b layout relaxing in embedding space: every
  *  pooled embedding is a vertex, the relation graph's attract edges are springs pulling matched pairs
@@ -55,9 +55,9 @@
  *
  *  @section balanced Balanced per-vertex reduction
  *
- *  Attractive and repulsive contributions are normalised @b separately by their own per-vertex weight
- *  totals @c Σw⁺(i) / @c Σw⁻(i) and averaged over the @b global vertex count:
- *  @c loss = Σ_i (pos_i/Σw⁺(i) + neg_i/Σw⁻(i)) / vertices_per_mesh .
+ *  Attractive and repulsive contributions are normalised @b separately by their own per-vertex
+ *  weight totals @c Σw⁺(i) / @c Σw⁻(i) and averaged over the @b live global vertex count, PAD
+ *  excluded: @c loss = Σ_i (pos_i/Σw⁺(i) + neg_i/Σw⁻(i)) / live_vertices_per_mesh .
  *
  *  @section distributed Distributed contract — rank-local object, collectives at the boundaries
  *
@@ -225,6 +225,9 @@ struct contrastive_segments_config_t {
 
     /** Subgraphs scored per step — the world's GPU count when fully gathered. */
     u32_t gpu_subgraphs_per_step = 0;
+
+    /** Learnable β and bias entries the recipe selects by group, sizing the temperature grads. */
+    u32_t temperature_groups = 1;
 };
 
 /** The segments contrastive loss as a function object: shapes, Matryoshka prefixes, and every
@@ -254,8 +257,8 @@ struct contrastive_segments_t {
      *      rows.
      *  @param[in] recipe β / bias / ambient-repulsion weight, host scalars or per-temperature-group device
      *      entries.
-     *  @param[in] vertices_per_mesh Global vertex-row count across the world — the mean divisor.
-     *  @param[out] loss_out @b [1] Float32 rank-local per-vertex-mean potential summand. Overwritten.
+     *  @param[out] loss_out @b [1] Float32 rank-local summand of the mean over the live vertices of
+     *      the global axis, which the relations' to-vertex lengths count. Overwritten.
      *  @param[out] from_vertices_grad @b [rows,hidden] BFloat16 force on the owned from-vertices. Overwritten.
      *  @param[in] stream The stream every kernel and matmul is enqueued on.
      *  @param[out] log_inverse_temperature_grad Optional @b [temperature_group_count] summands; empty disables.
@@ -263,8 +266,7 @@ struct contrastive_segments_t {
      */
     [[nodiscard]] expected_t operator()(bf16r2_view_t from_vertices, nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
                                         contrastive_relations_view_t relations, contrastive_recipe_t recipe,
-                                        std::size_t vertices_per_mesh, f32r1_span_t loss_out,
-                                        bf16r2_span_t from_vertices_grad, gpu_stream_t &stream,
+                                        f32r1_span_t loss_out, bf16r2_span_t from_vertices_grad, gpu_stream_t &stream,
                                         f32r1_span_t log_inverse_temperature_grad = {},
                                         f32r1_span_t bias_grad = {}) noexcept;
 
@@ -291,6 +293,9 @@ struct contrastive_segments_t {
      *  positive and negative softplus mass, bias and log-β gradient summands — one @b [6,rows] tensor,
      *  one memset covers them all. */
     f32r2_tensor_arena_t from_vertex_accumulator_ {};
+
+    /** @b [1] live vertices of the global axis, counted every call — the mean divisor. */
+    f32r1_tensor_arena_t live_vertices_ {};
 
     /** @b [prefixes,rows] / @b [prefixes,neighbors] deterministic cosine self-coefficients. */
     f32r2_tensor_arena_t from_vertex_self_coefficients_ {}, to_vertex_self_coefficients_ {};
@@ -336,14 +341,16 @@ struct contrastive_segments_t {
 struct distributed_contrastive_segments_t {
 
     /** How many Float32 payload scalars this consumer will @c reserve from the shared
-     *  @ref multimem_domain_t over @p shape — for main's domain sizing. Beside the column forces, a world no single
-     *  process holds whole also needs the BFloat16 world tower, staged in member 0's window. */
+     *  @ref multimem_domain_t over @p shape — for main's domain sizing. The column forces and the
+     *  temperature gradients share one window, and a world no single process holds whole also needs
+     *  the BFloat16 world tower, staged in member 0's window. */
     [[nodiscard]] static constexpr std::size_t payload_scalars_needed(contrastive_segments_config_t config,
                                                                       mesh_shape_t const &shape) noexcept {
         std::size_t const forces = static_cast<std::size_t>(config.gpu_subgraphs_per_step) *
                                    config.from_vertices_per_gpu * config.hidden;
-        if (shape.gpus_per_host_domain == shape.gpus_per_colocated_domain) return forces;
-        return forces + forces * sizeof(bf16_t) / sizeof(f32_t);
+        std::size_t const window = forces + world_scalar_count_(config);
+        if (shape.gpus_per_host_domain == shape.gpus_per_colocated_domain) return window;
+        return window + forces * sizeof(bf16_t) / sizeof(f32_t);
     }
 
     /**
@@ -378,6 +385,19 @@ struct distributed_contrastive_segments_t {
     /** The @b [gpus] rank-local loss summands of the last call — sum for the global mean. */
     [[nodiscard]] f32r1_view_t loss_outs() const noexcept { return loss_outs_.view(); }
 
+    /** Local rank @p rank 's world-summed temperature gradients of the last call, on its device:
+     *  @b [2·temperature_groups] , the log-β gradient of every group, then its bias gradient.
+     *  Identical on every rank, so every replica takes the identical temperature step. */
+    [[nodiscard]] f32r1_view_t temperature_grads(std::size_t rank) const noexcept {
+        return {world_scalars_[rank].data(), 2u * std::size_t {config_.temperature_groups}};
+    }
+
+    /** Local rank @p rank 's @b [1] world loss of the last call, every process's summands
+     *  added, on its own device. */
+    [[nodiscard]] f32r1_view_t world_loss(std::size_t rank) const noexcept {
+        return {world_scalars_[rank].data() + 2u * std::size_t {config_.temperature_groups}, 1u};
+    }
+
     /** How many multimem_domains this object spans — 1 means the members are identities. Derived
      *  from the retained @ref colocated_domain_t topology, never a stored copy. */
     [[nodiscard]] u32_t world_domains() const noexcept { return colocated_->multimem_domain_count(); }
@@ -403,6 +423,12 @@ struct distributed_contrastive_segments_t {
     }
 
   private:
+
+    /** The scalars riding the force window's tail into the world reduce: the log-β and bias
+     *  gradients of every temperature group, then the loss summand. */
+    [[nodiscard]] static constexpr std::size_t world_scalar_count_(contrastive_segments_config_t config) noexcept {
+        return 2u * std::size_t {config.temperature_groups} + 1u;
+    }
 
     /** Copy this domain's staged towers into the gather member's own block, all-gather the remote
      *  domains' blocks, and copy the world tower back into member 0's window. Gateway stream only,
@@ -449,6 +475,9 @@ struct distributed_contrastive_segments_t {
 
     /** @b [gpus] rank-local loss summands on the lead device, peer-written by each rank. */
     f32r1_tensor_arena_t loss_outs_ {};
+
+    /** Per-rank world-summed window tails, @b [2·temperature_groups+1] on each rank's arena. */
+    per_gpu_array<f32r1_tensor_arena_t> world_scalars_ {};
 
     /** This process's own multimem_domain coordinate — the recursive-doubling home index. Genuinely
      *  baked: not recoverable from the retained topology. */

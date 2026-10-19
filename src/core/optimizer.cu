@@ -499,3 +499,80 @@ expected_t distributed_adafactor_t::world_gradient_step_(std::size_t rank, f32_t
     if (staged) staged = ranks_[rank].state.step(learning_rate, stream, f32r1_view_t {world_mean});
     return staged;
 }
+
+/**
+ *  @brief One Adafactor step of the temperature scalars: the full second moment, the RMS clip
+ *      over all @b [2·groups] updates, then β in log space and the bias additively — one CTA,
+ *      fixed order.
+ *
+ *  __grid_size__ @c [1,1,1] ; threads stripe the scalars; no dynamic shared memory.
+ */
+static __global__ void adafactor_temperatures_kernel_(f32r1_span_t inverse_temperatures, f32r1_span_t biases,
+                                                      f32r1_view_t gradients, f32r1_span_t moments,
+                                                      adafactor_config_t config, f32_t learning_rate) {
+    std::size_t const groups = inverse_temperatures.extent(0), scalars = 2u * groups;
+    f32_t thread_update_energy = 0.0f;
+    for (std::size_t index = threadIdx.x; index < scalars; index += blockDim.x) {
+        f32_t const gradient = gradients[index];
+        f32_t const moment = config.beta2 * moments[index] +
+                             (1.0f - config.beta2) * (gradient * gradient + config.epsilon1);
+        moments[index] = moment;
+        f32_t const update = gradient * rsqrtf(moment);
+        thread_update_energy += update * update;
+    }
+    f32_t const update_rms = std::sqrt(block_reduce_broadcast<kernel_block_size_default_k>(thread_update_energy) /
+                                       f32_t(scalars));
+    f32_t const clip_scale = 1.0f / std::fmax(1.0f, update_rms / config.clip_threshold);
+    for (std::size_t index = threadIdx.x; index < scalars; index += blockDim.x) {
+        f32_t const step = learning_rate * clip_scale * gradients[index] * rsqrtf(moments[index]);
+        if (index < groups) inverse_temperatures[index] *= std::exp(-step);
+        else biases[index - groups] -= step;
+    }
+}
+
+expected<adafactor_temperatures_t> adafactor_temperatures_t::make(gpu_arena_t &arena, u32_t groups,
+                                                                  adafactor_config_t config,
+                                                                  gpu_stream_t &stream) noexcept {
+    using result_t = expected<adafactor_temperatures_t>;
+    adafactor_temperatures_t optimizer;
+    optimizer.config_ = config;
+    optimizer.moments_ =
+        f32r1_tensor_arena_t::uninitialized({2u * std::size_t {groups}}, gpu_arena_alloc<f32_t> {arena}).value;
+    if (groups == 0 || !optimizer.moments_)
+        return result_t::fail(status_t::bad_alloc_k, "temperature moments allocation failed ({} groups)", groups);
+    if (expected_t zeroed = zero_async(optimizer.moments_.span(), stream); !zeroed)
+        return result_t::fail(std::move(zeroed));
+    return result_t {std::move(optimizer)};
+}
+
+expected_t adafactor_temperatures_t::step(f32r1_span_t inverse_temperatures, f32r1_span_t biases,
+                                          f32r1_view_t gradients, f32_t learning_rate, gpu_stream_t &stream) noexcept {
+    std::size_t const scalars = moments_.numel();
+    if (inverse_temperatures.extent(0) * 2u != scalars || biases.extent(0) * 2u != scalars ||
+        gradients.extent(0) != scalars)
+        return expected_t::fail(status_t::shape_unsupported_k,
+                                "temperatures [{}], biases [{}] and gradients [{}] disagree with {} moments",
+                                inverse_temperatures.extent(0), biases.extent(0), gradients.extent(0), scalars);
+    return launch_kernel(&adafactor_temperatures_kernel_, dim3 {1u, 1u, 1u}, dim3 {kernel_block_size_default_k, 1u, 1u},
+                         stream, inverse_temperatures, biases, gradients, moments_.span(), config_, learning_rate);
+}
+
+expected_t adafactor_temperatures_t::save(checkpoint_to_save_t &checkpoint, gpu_stream_t &stream) const noexcept {
+    array<f32_t> moments;
+    if (moments.resize_uninitialized(moments_.numel()) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "temperature moments staging failed");
+    if (expected_t copied = copy_device_to_host(moments_.view(), moments.span(), stream); !copied) return copied;
+    if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
+        return cuda_failure(result, "temperature moments download failed");
+    return checkpoint.insert("contrastive.temperature_moments", f32r2_view_t {moments.data(), 1, moments.size()});
+}
+
+expected_t adafactor_temperatures_t::load(checkpoint_to_load_t const &checkpoint, gpu_stream_t &stream) noexcept {
+    f32r2_view_t const saved = checkpoint.float32("contrastive.temperature_moments");
+    if (saved.empty()) return zero_async(moments_.span(), stream);
+    if (saved.extent(0) != 1u || saved.extent(1) != moments_.numel())
+        return expected_t::fail(status_t::shape_unsupported_k,
+                                "contrastive.temperature_moments holds [{},{}], the run [1,{}]", saved.extent(0),
+                                saved.extent(1), moments_.numel());
+    return copy_host_to_device(saved.flatten<1>(), moments_.span(), stream);
+}

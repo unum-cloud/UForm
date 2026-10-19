@@ -283,8 +283,8 @@ expected_t gpu_symmetric_arena_t::adopt_peer(std::size_t member, CUmemFabricHand
     return grant_local_access_(slice, member_stride_, devices_.view(), static_cast<u32_t>(member));
 }
 
-expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topology,
-                                                    std::span<i32_t const> local_devices, std::size_t payload_scalars,
+expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, std::span<i32_t const> local_devices,
+                                                    std::size_t payload_scalars,
                                                     std::span<gpu_stream_t> local_streams) noexcept {
     using result_t = expected<multimem_domain_t>;
     std::size_t const local_count = local_devices.size();
@@ -304,6 +304,12 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
     u32_t const domain_first_host = topology.multimem_domain_index() * host_domains_per_domain;
     bool const is_lead = member_offset == 0;
     f64_t const timeout_seconds = 120.0;
+    u32_t const collective_id = topology.next_collective_id();
+    sz::string_t slice_key, multicast_key, barrier_key;
+    if (!format_into(slice_key, "multimem.{}.slice", collective_id) ||
+        !format_into(multicast_key, "multimem.{}.mc", collective_id) ||
+        !format_into(barrier_key, "multimem.{}", collective_id))
+        return result_t::fail(status_t::bad_alloc_k, "rendezvous key formatting failed");
 
     // Host-side staging (creates, binds, memsets) needs a current context; the lead local stream owns
     // one — every VMM call names its device explicitly, so one context serves all. No stream is
@@ -359,13 +365,13 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
             if ((local != 0 && !format_into(slices_text, " ")) || !format_fabric_handle_(slices_text, exported.value_))
                 return result_t::fail(status_t::bad_alloc_k, "slice handle payload assembly failed");
         }
-        if (expected_t published = topology.publish_text("multimem.slice", slices_text.view()); !published)
+        if (expected_t published = topology.publish_text(slice_key.view(), slices_text.view()); !published)
             return result_t::fail(std::move(published));
         for (u32_t peer_host = domain_first_host; peer_host != domain_first_host + host_domains_per_domain;
              ++peer_host) {
             if (peer_host == topology.host_domain_index) continue;
             sz::string_t peer_text;
-            if (expected_t awaited = topology.await_text(peer_host, "multimem.slice", peer_text, timeout_seconds);
+            if (expected_t awaited = topology.await_text(peer_host, slice_key.view(), peer_text, timeout_seconds);
                 !awaited)
                 return result_t::fail(std::move(awaited));
             u32_t const peer_member_base = (peer_host - domain_first_host) * gpus_per_host;
@@ -409,13 +415,14 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
                 sz::string_t mc_text;
                 if (!format_fabric_handle_(mc_text, fabric))
                     return result_t::fail(status_t::bad_alloc_k, "multicast handle payload assembly failed");
-                if (expected_t published = topology.publish_text("multimem.mc", mc_text.view()); !published)
+                if (expected_t published = topology.publish_text(multicast_key.view(), mc_text.view()); !published)
                     return result_t::fail(std::move(published));
             }
         }
         else {
             sz::string_t mc_text;
-            if (expected_t awaited = topology.await_text(domain_first_host, "multimem.mc", mc_text, timeout_seconds);
+            if (expected_t awaited = topology.await_text(domain_first_host, multicast_key.view(), mc_text,
+                                                         timeout_seconds);
                 !awaited)
                 return result_t::fail(std::move(awaited));
             CUmemFabricHandle fabric {};
@@ -472,7 +479,7 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t const &topol
     }
 
     // 5. Every process has finished binding before the first collective runs.
-    if (expected_t synchronized = topology.barrier("multimem", timeout_seconds); !synchronized)
+    if (expected_t synchronized = topology.barrier(barrier_key.view(), timeout_seconds); !synchronized)
         return result_t::fail(std::move(synchronized));
     return result_t {std::move(domain)};
 }

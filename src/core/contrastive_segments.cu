@@ -34,6 +34,23 @@ expected<matryoshka_prefixes_t> matryoshka_prefixes_t::make(u32r1_view_t prefix_
 }
 
 /**
+ *  @brief Count the live vertices of the global axis, the mean divisor: the nonzero entries of the
+ *      relations' to-vertex lengths, or the whole @p to_vertices_per_mesh when every vertex is
+ *      live, floored at one so an all-PAD step divides its zero sums by one.
+ *
+ *  __grid_size__ @c [1,1,1] ; one CTA stripes the axis; no dynamic shared memory.
+ */
+static __global__ void contrastive_live_vertices_kernel_(contrastive_relations_view_t relations,
+                                                         std::size_t to_vertices_per_mesh, f32r1_span_t live_vertices) {
+    u32r1_view_t const lengths = relations.to_vertex_effective_length;
+    f32_t thread_live = 0.0f;
+    for (std::size_t vertex = threadIdx.x; vertex < to_vertices_per_mesh; vertex += blockDim.x)
+        thread_live += lengths.empty() || lengths[vertex] != 0u ? 1.0f : 0.0f;
+    f32_t const live = block_reduce_broadcast<kernel_block_size_default_k>(thread_live);
+    if (threadIdx.x == 0u) live_vertices[0] = std::fmax(live, 1.0f);
+}
+
+/**
  *  @brief Per-row L2 norms of every Matryoshka prefix in @b one pass over the hidden axis: the running
  *      sum-of-squares is block-reduced at each prefix boundary, so @c norms[prefix,row] = ‖row[:D_p]‖ .
  *
@@ -133,14 +150,14 @@ static __global__ void contrastive_bce_balanced_kernel_(
     f32r3_view_t scaled_cosine, f32r3_span_t logit_grad, f32r1_view_t pos_weight_row, f32r1_view_t neg_weight_row,
     f32r1_span_t pos_loss_row, f32r1_span_t neg_loss_row, f32r1_span_t bias_grad_row,
     f32r1_span_t log_inverse_temperature_grad_row, contrastive_relations_view_t relations, contrastive_recipe_t recipe,
-    f32_t vertices_per_mesh, std::size_t neighbor_base) {
+    f32r1_view_t live_vertices, std::size_t neighbor_base) {
     std::size_t const num_vertices = pos_loss_row.extent(0);
     std::size_t const num_neighbors = scaled_cosine.extent(2);
     std::size_t const prefix_count = scaled_cosine.extent(0);
     std::size_t const vertex_index = blockIdx.x;
     if (vertex_index >= num_vertices) return;
-    f32_t const pos_scale = 1.0f / (fmaxf(pos_weight_row[vertex_index], weight_sum_floor_k) * vertices_per_mesh);
-    f32_t const neg_scale = 1.0f / (fmaxf(neg_weight_row[vertex_index], weight_sum_floor_k) * vertices_per_mesh);
+    f32_t const pos_scale = 1.0f / (std::fmax(pos_weight_row[vertex_index], weight_sum_floor_k) * live_vertices[0]);
+    f32_t const neg_scale = 1.0f / (std::fmax(neg_weight_row[vertex_index], weight_sum_floor_k) * live_vertices[0]);
     f32_t const bias = contrastive_from_vertex_bias_(recipe, static_cast<u32_t>(vertex_index));
     f32_t thread_pos_loss = 0.0f, thread_neg_loss = 0.0f;
     f32_t thread_bias_grad = 0.0f, thread_log_inverse_temperature_grad = 0.0f;
@@ -351,16 +368,19 @@ static __global__ void contrastive_to_vertex_self_fold_kernel_(bf16r2_view_t nei
  *  __grid_size__ @c [1,1,1] ; one CTA, threads stripe the vertex rows once per pair type; no dynamic
  *  shared memory.
  */
-static __global__ void contrastive_finalize_kernel_(
-    f32r1_view_t pos_loss_row, f32r1_view_t neg_loss_row, f32r1_view_t pos_weight_row, f32r1_view_t neg_weight_row,
-    f32r1_view_t bias_grad_row, f32r1_view_t log_inverse_temperature_grad_row, contrastive_recipe_t recipe,
-    f32r1_span_t loss_out, f32r1_span_t bias_grad, f32r1_span_t log_inverse_temperature_grad, f32_t vertices_per_mesh) {
+static __global__ void contrastive_finalize_kernel_(f32r1_view_t pos_loss_row, f32r1_view_t neg_loss_row,
+                                                    f32r1_view_t pos_weight_row, f32r1_view_t neg_weight_row,
+                                                    f32r1_view_t bias_grad_row,
+                                                    f32r1_view_t log_inverse_temperature_grad_row,
+                                                    contrastive_recipe_t recipe, f32r1_span_t loss_out,
+                                                    f32r1_span_t bias_grad, f32r1_span_t log_inverse_temperature_grad,
+                                                    f32r1_view_t live_vertices) {
     std::size_t const num_vertices = pos_loss_row.extent(0);
     f32_t thread_loss = 0.0f;
     for (std::size_t vertex_index = threadIdx.x; vertex_index < num_vertices; vertex_index += blockDim.x)
         thread_loss += (pos_loss_row[vertex_index] / fmaxf(pos_weight_row[vertex_index], weight_sum_floor_k) +
                         neg_loss_row[vertex_index] / fmaxf(neg_weight_row[vertex_index], weight_sum_floor_k)) /
-                       vertices_per_mesh;
+                       live_vertices[0];
     f32_t const total_loss = block_reduce_broadcast<kernel_block_size_default_k>(thread_loss);
     if (threadIdx.x == 0u) loss_out[0] = total_loss;
 
@@ -452,6 +472,7 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
     loss.raw_dot_grad_bf16_ =
         bf16r2_tensor_arena_t::uninitialized({prefix_count * rows, padded_neighbors}, bf16_alloc).value;
     loss.from_vertex_accumulator_ = f32r2_tensor_arena_t::uninitialized({6, rows}, f32_alloc).value;
+    loss.live_vertices_ = f32r1_tensor_arena_t::uninitialized({1}, f32_alloc).value;
     loss.from_vertex_self_coefficients_ = f32r2_tensor_arena_t::uninitialized({prefix_count, rows}, f32_alloc).value;
     loss.to_vertex_self_coefficients_ =
         f32r2_tensor_arena_t::uninitialized({prefix_count, to_vertices_per_gpu}, f32_alloc).value;
@@ -463,9 +484,9 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
         bf16r1_tensor_arena_t::uninitialized({to_vertices_per_gpu * padded_rows}, bf16_alloc).value;
     if (!loss.from_vertex_norms_ || !loss.to_vertex_norms_ || !loss.raw_dot_ || !loss.scaled_cosine_ ||
         !loss.logit_grad_ || !loss.raw_dot_grad_ || !loss.raw_dot_grad_bf16_ || !loss.from_vertex_accumulator_ ||
-        !loss.from_vertex_self_coefficients_ || !loss.to_vertex_self_coefficients_ || !loss.from_vertices_grad_f32_ ||
-        !loss.from_vertices_grad_products_ || !loss.vertices_transposed_ || !loss.to_vertices_transposed_ ||
-        !loss.gradient_transposed_)
+        !loss.live_vertices_ || !loss.from_vertex_self_coefficients_ || !loss.to_vertex_self_coefficients_ ||
+        !loss.from_vertices_grad_f32_ || !loss.from_vertices_grad_products_ || !loss.vertices_transposed_ ||
+        !loss.to_vertices_transposed_ || !loss.gradient_transposed_)
         return expected<contrastive_segments_t>::fail(status_t::bad_alloc_k,
                                                       "loss scratch allocation failed ({} cells, arena_used={})",
                                                       block_cells, arena.used());
@@ -491,9 +512,8 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
 
 expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
                                               contrastive_relations_view_t relations, contrastive_recipe_t recipe,
-                                              std::size_t vertices_per_mesh, f32r1_span_t loss_out,
-                                              bf16r2_span_t from_vertices_grad, gpu_stream_t &stream,
-                                              f32r1_span_t log_inverse_temperature_grad,
+                                              f32r1_span_t loss_out, bf16r2_span_t from_vertices_grad,
+                                              gpu_stream_t &stream, f32r1_span_t log_inverse_temperature_grad,
                                               f32r1_span_t bias_grad) noexcept {
 
     if (vertices.extent(0) != config_.from_vertices_per_gpu || vertices.extent(1) != config_.hidden)
@@ -507,8 +527,6 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
         return expected_t::fail(status_t::shape_unsupported_k,
                                 "from_vertices_grad shape disagrees with the baked [{}x{}]",
                                 config_.from_vertices_per_gpu, config_.hidden);
-    if (vertices_per_mesh == 0)
-        return expected_t::fail(status_t::invalid_input_k, "vertices_per_mesh must be non-zero");
     if (relations.from_vertices_per_gpu() != config_.from_vertices_per_gpu)
         return expected_t::fail(status_t::shape_unsupported_k,
                                 "the relation graph describes {} vertices, the loss was baked for {}",
@@ -550,7 +568,7 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
     for (f32r2_tensor_arena_t *const zeroed : {&from_vertices_grad_f32_, &from_vertices_grad_products_})
         if (expected_t reset = zero_async(zeroed->span(), stream); !reset) return reset;
 
-    f32_t const vertices_per_mesh_float = static_cast<f32_t>(vertices_per_mesh);
+    f32r1_view_t const live_vertices = live_vertices_.view();
     u32_t const prefix_count = prefixes_.size();
     std::size_t const cells_per_prefix = static_cast<std::size_t>(config_.from_vertices_per_gpu) *
                                          config_.to_vertices_per_gpu;
@@ -599,8 +617,11 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
 
     // Per-prefix owned-vertex norms, once; each subgraph recomputes only its own vertex norms.
 
-    expected_t launched = launch_kernel(&contrastive_prefix_norms_kernel_, vertex_grid, block_shape, stream, vertices,
-                                        from_vertex_norms_.span(), prefixes_);
+    expected_t launched = launch_kernel(&contrastive_live_vertices_kernel_, dim3 {1u, 1u, 1u}, block_shape, stream,
+                                        relations, to_vertices_per_mesh, live_vertices_.span());
+    if (launched)
+        launched = launch_kernel(&contrastive_prefix_norms_kernel_, vertex_grid, block_shape, stream, vertices,
+                                 from_vertex_norms_.span(), prefixes_);
     if (launched) launched = transpose_bf16(vertices, vertices_transposed, stream);
     if (!launched) return launched;
 
@@ -644,7 +665,7 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
             launched = launch_kernel(&contrastive_bce_balanced_kernel_, vertex_grid, block_shape, stream,
                                      scaled_cosine_view, logit_grad_.span(), f32r1_view_t {pos_weight_row},
                                      f32r1_view_t {neg_weight_row}, pos_loss_row, neg_loss_row, bias_grad_row,
-                                     log_inverse_temperature_grad_row, relations, recipe, vertices_per_mesh_float,
+                                     log_inverse_temperature_grad_row, relations, recipe, live_vertices,
                                      subgraph.global_offset);
         if (launched)
             launched = launch_kernel(&contrastive_raw_dot_grad_kernel_, block_grid, block_shape, stream,
@@ -713,7 +734,7 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
                              f32r1_view_t {pos_loss_row}, f32r1_view_t {neg_loss_row}, f32r1_view_t {pos_weight_row},
                              f32r1_view_t {neg_weight_row}, f32r1_view_t {bias_grad_row},
                              f32r1_view_t {log_inverse_temperature_grad_row}, recipe, loss_out, bias_grad,
-                             log_inverse_temperature_grad, vertices_per_mesh_float);
+                             log_inverse_temperature_grad, live_vertices);
     if (!launched) return launched;
 
     // Cast the owned-vertex force to BFloat16 — every vertex is owned by exactly one rank.
@@ -769,7 +790,8 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
         distributed.reduce_buffers_.resize(gpus) != status_t::success_k ||
         distributed.subgraph_tables_.resize(gpus * subgraphs) != status_t::success_k ||
         distributed.relations_.resize(gpus) != status_t::success_k ||
-        distributed.from_vertices_grads_.resize(gpus) != status_t::success_k)
+        distributed.from_vertices_grads_.resize(gpus) != status_t::success_k ||
+        distributed.world_scalars_.resize(gpus) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "rank table allocation failed ({} ranks)", gpus);
     for (std::size_t rank = 0; rank != gpus; ++rank) {
         distributed.relations_[rank] = relations[rank];
@@ -794,7 +816,8 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
                                       "construct it with `visible_to`",
                                       rank, peer);
     std::size_t const force_scalars = subgraphs * tower_scalars;
-    expected<multimem_window_t> window = domain.reserve(force_scalars);
+    std::size_t const world_scalars = world_scalar_count_(config);
+    expected<multimem_window_t> window = domain.reserve(force_scalars + world_scalars);
     if (!window) return result_t::fail(std::move(window));
     distributed.window_ = window.value_;
     if (!whole_world) {
@@ -811,9 +834,13 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
         expected<contrastive_segments_t> loss = contrastive_segments_t::make(arenas[rank], config, prefix_dims);
         if (!loss) return result_t::fail(std::move(loss));
         distributed.losses_[rank] = std::move(loss.value_);
+        distributed.world_scalars_[rank] =
+            f32r1_tensor_arena_t::uninitialized({world_scalars}, gpu_arena_alloc<f32_t> {arenas[rank]}).value;
+        if (!distributed.world_scalars_[rank])
+            return result_t::fail(status_t::bad_alloc_k, "world scalars allocation failed (rank={})", rank);
         u32_t const member = static_cast<u32_t>(domain.member_offset() + rank);
         expected<infiniband_all_reduce<f32_t>> reduce_buffer = infiniband_all_reduce<f32_t>::make(
-            colocated, member, arenas[rank], domains * tower_scalars, streams[rank], timeout_seconds);
+            colocated, member, arenas[rank], domains * tower_scalars + world_scalars, streams[rank], timeout_seconds);
         if (!reduce_buffer) return result_t::fail(std::move(reduce_buffer));
         distributed.reduce_buffers_[rank] = std::move(reduce_buffer.value_);
     }
@@ -855,8 +882,11 @@ expected_t distributed_contrastive_segments_t::operator()(std::size_t rank, cont
     std::size_t const gpus = losses_.size();
     std::size_t const subgraphs = config_.gpu_subgraphs_per_step;
     std::size_t const tower_scalars = static_cast<std::size_t>(config_.from_vertices_per_gpu) * config_.hidden;
-    std::size_t const vertices_per_mesh = static_cast<std::size_t>(config_.from_vertices_per_gpu) * subgraphs;
+    std::size_t const force_scalars = subgraphs * tower_scalars, groups = config_.temperature_groups;
     if (rank >= gpus) return expected_t::fail(status_t::invalid_input_k, "rank {} of {}", rank, gpus);
+    if (recipe.temperature_group_count() > groups)
+        return expected_t::fail(status_t::shape_unsupported_k, "the recipe selects {} temperature groups of {}",
+                                recipe.temperature_group_count(), groups);
 
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed ({})", rank);
@@ -883,9 +913,15 @@ expected_t distributed_contrastive_segments_t::operator()(std::size_t rank, cont
     bf16r2_view_t const own_tower = world_tower_window_.scalars != 0 ? gather_sources_[rank]
                                                                      : subgraph_at(rank, rank).to_vertices;
 
+    // The window's tail past the column forces carries this rank's log-β, bias and loss summands,
+    // so one reduce sums them across the world beside the forces.
+    f32r1_span_t const log_inverse_temperature_grad {window_base + force_scalars, groups};
+    f32r1_span_t const bias_grad {window_base + force_scalars + groups, groups};
+    f32r1_span_t const window_loss {window_base + force_scalars + 2u * groups, 1u};
     if (staged)
-        staged = losses_[rank](own_tower, table, relations_[rank], recipe, vertices_per_mesh, loss_out,
-                               from_vertices_grads_[rank], stream);
+        staged = losses_[rank](own_tower, table, relations_[rank], recipe, window_loss, from_vertices_grads_[rank],
+                               stream, log_inverse_temperature_grad, bias_grad);
+    if (staged) staged = copy_device_to_device(f32r1_view_t {window_loss}, loss_out, stream);
     if (staged) staged = domain_->barrier(member, stream);
     // Level-1 reduce: in one domain, in place into this rank's own window shard (shards are
     // disjoint across ranks); across domains, into the rank's reduce member — one switch-reduced
@@ -896,11 +932,16 @@ expected_t distributed_contrastive_segments_t::operator()(std::size_t rank, cont
         f32r1_span_t const own_shard {window_base + member * tower_scalars, tower_scalars};
         if (staged)
             staged = domain_->reduce_scatter(member, own_shard, window_.offset + member * tower_scalars, stream);
+        if (staged)
+            staged = domain_->reduce_scatter(member, world_scalars_[rank].span(), window_.offset + force_scalars,
+                                             stream);
         column_force = f32r1_view_t {own_shard};
     }
     else {
         if (staged) staged = reduce_world_columns_(rank, stream, column_force);
     }
+    // Every member has read every peer's window before any member's next call writes its own again.
+    if (staged) staged = domain_->barrier(member, stream);
     if (staged)
         staged = launch_kernel(&contrastive_column_fold_kernel_, dim3 {grid_size_for(tower_scalars), 1u, 1u},
                                dim3 {kernel_block_size_default_k, 1u, 1u}, stream, grad_flat, column_force);
@@ -941,7 +982,16 @@ expected_t distributed_contrastive_segments_t::reduce_world_columns_(std::size_t
         if (expected_t reduced = domain_->reduce_scatter(member, domain_shard, grid_offset, stream); !reduced)
             return reduced;
     }
+    std::size_t const world_columns = world_domains() * tower_scalars;
+    std::size_t const force_scalars = static_cast<std::size_t>(config_.gpu_subgraphs_per_step) * tower_scalars;
+    f32r1_span_t const scalars_shard {shard + world_columns, world_scalar_count_(config_)};
+    if (expected_t reduced = domain_->reduce_scatter(member, scalars_shard, window_.offset + force_scalars, stream);
+        !reduced)
+        return reduced;
     if (expected_t summed = reduce_buffers_[rank](stream); !summed) return summed;
+    if (expected_t copied = copy_device_to_device(f32r1_view_t {scalars_shard}, world_scalars_[rank].span(), stream);
+        !copied)
+        return copied;
     column_force = f32r1_view_t {shard + static_cast<std::size_t>(home_domain_index_) * tower_scalars, tower_scalars};
     return {};
 }

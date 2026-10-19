@@ -113,9 +113,14 @@ struct multimodal_batch_mixer_t {
                                         std::span<multimodal_batch_on_gpu_t> mixed,
                                         std::span<gpu_stream_t> streams) noexcept;
 
-    /** Local member @p local 's @b [max_segments_per_gpu] world sources of the last mix, as
-     *  @c source_gpu·max_segments_per_gpu+source_segment , and @c ~0u for a PAD segment. */
-    [[nodiscard]] u32r1_view_t mixed_sources(std::size_t local) const noexcept { return mixed_sources_[local].view(); }
+    /** Local member @p local 's @b [world_gpus·max_segments_per_gpu] mixed lengths of every world
+     *  GPU's last mix, zero for a PAD segment, indexed by the global vertex as the contrastive
+     *  relations read them. */
+    [[nodiscard]] u32r1_view_t world_lengths(std::size_t local) const noexcept { return world_lengths_[local].view(); }
+
+    /** Local member @p local 's @b [world_gpus·max_segments_per_gpu] world sources of every world
+     *  GPU's last mix, each @c source_gpu·max_segments_per_gpu+source_segment , @c ~0u for PAD. */
+    [[nodiscard]] u32r1_view_t world_sources(std::size_t local) const noexcept { return world_sources_[local].view(); }
 
   private:
 
@@ -136,11 +141,12 @@ struct multimodal_batch_mixer_t {
      *  empty on a single-multimem_domain world. */
     per_gpu_array<infiniband_all_gather<b8_t>> gather_buffers_ {};
 
-    /** Per-member @b [max_segments_per_gpu] routing scratch — each mix's geometry pass records
-     *  every mixed segment's world source here and the gather pass reads it back (variable-degree bags
-     *  make a destination's source un-derivable per segment). On the member's own arena; never
+    /** Per-member @b [world_gpus·max_segments_per_gpu] routing tables of every world GPU's mix,
+     *  which each member derives alone from the same loaded batches. The geometry pass records the
+     *  member's own slice of the sources and the gather pass reads it back, since variable-degree
+     *  bags make a destination's source un-derivable per segment. On the member's own arena; never
      *  exchanged, never part of a batch. */
-    per_gpu_array<u32r1_tensor_arena_t> mixed_sources_ {};
+    per_gpu_array<u32r1_tensor_arena_t> world_lengths_ {}, world_sources_ {};
 
     /** How many multimem_domains the world spans; 1 is the single-NVLink-domain fast path. */
     u32_t domains_ = 1;

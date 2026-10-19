@@ -48,6 +48,12 @@ if (UFORM_BUILD_CUDA)
         list(APPEND uform_bundled_files_ $<TARGET_FILE:uform_test_${test_name}>)
     endforeach ()
     set_tests_properties(uform_test_env PROPERTIES LABELS "cuda;cluster")
+    # The world relations, every process's slice against the single-process construction, on the host alone.
+    add_executable(uform_test_relations relations.cpp)
+    target_link_libraries(uform_test_relations PRIVATE uform::train fmt::fmt)
+    target_include_directories(uform_test_relations PRIVATE "${PROJECT_SOURCE_DIR}/c")
+    add_test(NAME uform_test_relations COMMAND uform_test_relations)
+    set_tests_properties(uform_test_relations PROPERTIES LABELS host)
     set(uform_bundled_files_
         ${uform_bundled_files_}
         PARENT_SCOPE

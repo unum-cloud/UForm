@@ -104,8 +104,8 @@ struct dataset_source_t final : batch_source_t {
 
   private:
 
-    /** Rebuild every replica's relations: the segments of a bag attract each other, and text alone
-     *  keeps self-edges. */
+    /** Rebuild every replica's relations over the world's vertices, PAD read off the mixer's world
+     *  lengths: the segments of a bag attract each other, and text alone keeps self-edges. */
     [[nodiscard]] expected_t relate_(trainer_t &trainer) noexcept;
 
     using loader_t = std::variant<loaders::tokens_loader_parquet_t, loaders::tokens_loader_jsonl_t,

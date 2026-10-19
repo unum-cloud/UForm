@@ -5,7 +5,6 @@
  *  @brief The mixture reader and the dataset source declared in @c src/train/datasets.hpp .
  */
 #include <algorithm> // `std::upper_bound`, `std::min`
-#include <limits>    // `std::numeric_limits`
 
 #include <cuda.h> // `cuStreamSynchronize`
 
@@ -17,9 +16,6 @@ namespace fu = ashvardanian::forkunion;
 using namespace unum::uform::core;
 using namespace unum::uform::loaders;
 using namespace unum::uform::train;
-
-/** A segment index or a bag that names nothing. */
-static constexpr u32_t absent_k = std::numeric_limits<u32_t>::max();
 
 /** The media column names each modality goes by: the Hugging Face feature names and the WebDataset
  *  extensions. */
@@ -145,10 +141,6 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer, 
     std::span<mixture_entry_t const> const entries = placed.mixture_.datasets.view();
     bool const pairs = !entries.empty() && !entries[0].anchor.empty();
     if (pairs) shape.max_bags_per_gpu = std::min(shape.max_rows_per_gpu, shape.max_segments_per_gpu) / 2u;
-    if (config.contrasts() && trainer.mesh->topology.host_domain_count() > 1)
-        return expected_t::fail(status_t::shape_unsupported_k,
-                                "relations are built within one process; a mesh of several processes contrasts " //
-                                "datasets once the mixer reports its routes across hosts");
 
     if (pairs && fu::failed(placed.pool_.spawn(fu::allowed_cores_count())))
         return expected_t::fail(status_t::bad_alloc_k, "the decode pool did not spawn");
@@ -285,7 +277,7 @@ expected_t dataset_source_t::relate_(trainer_t &trainer) noexcept {
     trainer_config_t const &config = trainer.config;
     std::size_t const gpus = trainer.replicas.size();
     u32_t const segments = config.batch.max_segments_per_gpu;
-    std::size_t const total_segments = gpus * segments;
+    std::size_t const world_segments = std::size_t {segments} * trainer.mesh->topology.shape.gpus_per_colocated_domain;
     u32_t const first = trainer.mesh->topology.first_gpu_index();
     bool const pairs = !mixture_.datasets[0].anchor.empty();
     if (!pairs) {
@@ -294,8 +286,9 @@ expected_t dataset_source_t::relate_(trainer_t &trainer) noexcept {
             if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
             base_replica_t &replica = trainer.replicas[member];
             if (expected_t related = replica.relations.upload_self_edges(
-                    segments, {}, {}, std::size_t {first + member} * segments,
-                    config.contrastive.ambient_repulsion_weight, trainer.streams[member]);
+                    segments, replica.batch.segment_lengths.view(), mixer_.world_lengths(member),
+                    std::size_t {first + member} * segments, config.contrastive.ambient_repulsion_weight,
+                    trainer.streams[member]);
                 !related)
                 return related;
             trainer.contrastive.rebind_relations(member, replica.relations.view());
@@ -318,48 +311,25 @@ expected_t dataset_source_t::relate_(trainer_t &trainer) noexcept {
     }
     if (expected_t drained = trainer.synchronize(); !drained) return drained;
 
-    // A bag lands whole and contiguous on one GPU, so a segment's partners are the rest of its run
-    // of equal bags.
-    u32_t *const attract_offsets = offsets_.data(), *const repel_offsets = offsets_.data() + segments + 1;
+    std::size_t const rows = segments + 1u;
+    u32r1_span_t const attract_offsets {offsets_.data(), rows}, repel_offsets {offsets_.data() + rows, rows};
+    for (std::size_t row = 0; row != rows; ++row) repel_offsets[row] = 0;
     for (std::size_t member = 0; member != gpus; ++member) {
-        u32_t const *const bags = bags_.data() + member * segments;
-        u32_t const *const lengths = lengths_.data() + member * segments;
         u32_t const vertex_base = (first + static_cast<u32_t>(member)) * segments;
-        u32_t written = 0;
-        attract_offsets[0] = 0;
-        for (u32_t segment = 0; segment != segments; ++segment) {
-            u32_t begin = segment, end = segment + 1;
-            if (lengths[segment] != 0 && bags[segment] != absent_k) {
-                while (begin != 0 && bags[begin - 1] == bags[segment] && lengths[begin - 1] != 0) --begin;
-                while (end != segments && bags[end] == bags[segment] && lengths[end] != 0) ++end;
-            }
-            for (u32_t partner = begin; partner != end; ++partner) {
-                if (partner == segment || lengths[segment] == 0) continue;
-                if (written == ids_.size())
-                    return expected_t::fail(status_t::invalid_input_k, "a GPU's bags name over {} edges", ids_.size());
-                ids_[written] = vertex_base + partner;
-                weights_[written] = 1.0f;
-                ++written;
-            }
-            attract_offsets[segment + 1] = written;
-            repel_offsets[segment] = 0;
-        }
-        repel_offsets[segments] = 0;
+        expected<u32_t> written = relate_bags(u32r1_view_t {bags_.data() + member * segments, segments},
+                                              u32r1_view_t {lengths_.data() + member * segments, segments}, vertex_base,
+                                              attract_offsets, ids_.span(), weights_.span());
+        if (!written) return expected_t::fail(std::move(written));
 
         base_replica_t &replica = trainer.replicas[member];
         gpu_stream_t &stream = trainer.streams[member];
         switch_to_gpu_t gpu_scope {stream};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-        std::size_t const rows = segments + 1u;
-        expected_t staged = copy_host_to_device(u32r1_view_t {lengths_.data(), total_segments},
-                                                replica.to_vertex_lengths.span(), stream);
-        if (staged)
-            staged = replica.relations.upload(u32r1_view_t {attract_offsets, rows}, u32r1_view_t {ids_.data(), written},
-                                              f32r1_view_t {weights_.data(), written},
-                                              u32r1_view_t {repel_offsets, rows}, u32r1_view_t {}, f32r1_view_t {},
-                                              u32r1_view_t {}, u32r1_view_t {}, replica.batch.segment_lengths.view(),
-                                              replica.to_vertex_lengths.view(), total_segments, vertex_base,
-                                              config.contrastive.ambient_repulsion_weight, stream);
+        expected_t staged = replica.relations.upload(
+            attract_offsets, u32r1_view_t {ids_.data(), *written}, f32r1_view_t {weights_.data(), *written},
+            repel_offsets, u32r1_view_t {}, f32r1_view_t {}, u32r1_view_t {}, u32r1_view_t {},
+            replica.batch.segment_lengths.view(), mixer_.world_lengths(member), world_segments, vertex_base,
+            config.contrastive.ambient_repulsion_weight, stream);
         if (staged) // the host columns are reused for the next GPU, so their copies land first
             if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
                 staged = cuda_failure(result, "relation staging drain failed (member={})", member);

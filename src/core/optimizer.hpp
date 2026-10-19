@@ -253,4 +253,44 @@ struct distributed_adafactor_t {
     telemetry_ledger_t *ledger_ = nullptr;
 };
 
+/**
+ *  @brief Adafactor over the learnable scalars of the contrastive loss: every temperature group's
+ *      inverse temperature β and logit bias, Float32 already, so a full second moment and no
+ *      master copy.
+ *
+ *  The β step runs in log space, @c β ← β·exp(−lr·u) , so β stays positive and the update reads
+ *  the log-β gradient the loss reports; the bias steps additively. The RMS clip spans both halves
+ *  at once. Every rank steps its own replica's scalars against the same world-summed gradients, so
+ *  the replicas stay bitwise identical.
+ */
+struct adafactor_temperatures_t {
+
+    /** Allocate and zero the @b [2·groups] second moment off @p arena on @p stream . */
+    [[nodiscard]] static expected<adafactor_temperatures_t> make(gpu_arena_t &arena, u32_t groups,
+                                                                 adafactor_config_t config,
+                                                                 gpu_stream_t &stream) noexcept;
+
+    /** One step of the @b [groups] @p inverse_temperatures and @p biases in place, from the
+     *  @b [2·groups] @p gradients : every group's log-β gradient, then its bias gradient. */
+    [[nodiscard]] expected_t step(f32r1_span_t inverse_temperatures, f32r1_span_t biases, f32r1_view_t gradients,
+                                  f32_t learning_rate, gpu_stream_t &stream) noexcept;
+
+    /** Insert the second moment into @p checkpoint as @c contrastive.temperature_moments , draining
+     *  @p stream . */
+    [[nodiscard]] expected_t save(checkpoint_to_save_t &checkpoint, gpu_stream_t &stream) const noexcept;
+
+    /**
+     *  @brief Upload the second moment @p checkpoint holds on @p stream ; a file without one
+     *      restarts it at zero.
+     *  @retval status_t::shape_unsupported_k A saved moment of another group count.
+     */
+    [[nodiscard]] expected_t load(checkpoint_to_load_t const &checkpoint, gpu_stream_t &stream) noexcept;
+
+  private:
+    adafactor_config_t config_ {};
+
+    /** @b [2·groups] second moments, the log-β ones first. */
+    f32r1_tensor_arena_t moments_ {};
+};
+
 } // namespace unum::uform::core

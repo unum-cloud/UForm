@@ -485,6 +485,12 @@ struct mesh_topology_t {
         return expected<mesh_topology_t> {std::move(topology)};
     }
 
+    /** Claim the next wiring generation: every process makes its transports in one order, so
+     *  the @c N th claim names the same phase everywhere, and a phase that runs twice in one
+     *  job, like the multimem domain of a probe trainer and of the real one, never reads the
+     *  earlier phase's files. */
+    [[nodiscard]] u32_t next_collective_id() noexcept { return next_collective_id_++; }
+
     /** Durably publish this host_domain's @p text under the exchange @p key : written to a
      *  temporary file, @c fsync -ed, then atomically @c rename -d into place, so a peer never reads a
      *  half-written payload. The primitive every wiring phase reuses to add payloads, not machinery. */
@@ -887,6 +893,9 @@ struct mesh_topology_t {
     /** The 50 ms exchange poll interval — long enough to spare the shared filesystem, short enough
      *  that a once-per-job wait never registers. */
     static void sleep_briefly_() noexcept { std::this_thread::sleep_for(std::chrono::milliseconds {50}); }
+
+    /** The generation the next wiring phase keys its payloads and barriers with. */
+    u32_t next_collective_id_ = 0;
 };
 
 /** This host_domain's index in the world, read from whichever launcher spawned the process —

@@ -14,6 +14,8 @@
  *  resolved, and each device's relations are rebuilt over the vertices it holds, their ids rebased onto the
  *  vertices the referenced items landed on.
  */
+#include <cmath> // `std::sqrt` — the rows a curved footprint fits
+
 #include <algorithm> // `std::max`, `std::min`, `std::sort`
 #include <charconv>  // `std::from_chars` — the rows peers measured
 #include <limits>    // `std::numeric_limits`
@@ -90,10 +92,27 @@ expected_t mesh_t::make(mesh_t &placed, mesh_options_t const &options, std::span
 
 #pragma region Envelope
 
-/** The two envelopes the measuring pass fits through, in rows per GPU: small enough that any model
- *  that trains at all can be measured, and far enough apart that the driver's allocation
- *  granularity can't flatten the slope. */
-static constexpr u32_t smaller_probe_rows_k = 1u, larger_probe_rows_k = 4u;
+/** The three envelopes the measuring pass fits through, in rows per GPU: small enough that any
+ *  model that trains at all can be measured, and far enough apart that the driver's allocation
+ *  granularity can't flatten the slope, while the middle one exposes the growth by rows². */
+static constexpr u32_t smaller_probe_rows_k = 1u, middle_probe_rows_k = 4u, larger_probe_rows_k = 16u;
+
+/** A footprint @c fixed+rows·row+rows²·pair in bytes. */
+struct footprint_fit_t {
+    f64_t fixed = 0.0, row = 0.0, pair = 0.0;
+
+    [[nodiscard]] f64_t at(f64_t rows) const noexcept { return fixed + rows * row + rows * rows * pair; }
+
+    /** The most rows whose footprint stays within @p budget bytes, zero when none does. */
+    [[nodiscard]] u64_t rows_within(f64_t budget) const noexcept {
+        if (at(1.0) > budget) return 0u;
+        f64_t const rows = pair > 0.0 ? (std::sqrt(row * row + 4.0 * pair * (budget - fixed)) - row) / (2.0 * pair)
+                                      : (budget - fixed) / row;
+        u64_t fitting = static_cast<u64_t>(rows);
+        while (fitting != 0u && at(static_cast<f64_t>(fitting)) > budget) --fitting; // the rounding's last row
+        return fitting;
+    }
+};
 
 /** One device's footprint after a probe step: the bytes the driver handed out since the run began,
  *  and the arena's share of them. */
@@ -149,6 +168,21 @@ struct footprint_t {
     step_report_t report;
     if (expected_t stepped = probe.step(source, optimizer_step_t {0}, report); !stepped) return stepped;
     if (expected_t drained = probe.synchronize(); !drained) return drained;
+    // A data source loads every GPU's batch and mixes it from the arenas after the trainer, so
+    // the probe allocates the same, and the fit carries them per row.
+    per_gpu_array<multimodal_batch_on_gpu_t> loaded;
+    for (std::size_t member = 0; member != devices.size(); ++member) {
+        switch_to_gpu_t gpu_scope {probe.streams[member]};
+        if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
+        expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(
+            gpu_arena_alloc_t {probe.arenas[member]}, config.batch);
+        if (!batch) return expected_t::fail(std::move(batch));
+        if (loaded.push_back(std::move(batch.value_)) != status_t::success_k)
+            return expected_t::fail(status_t::bad_alloc_k, "batch table full");
+    }
+    expected<multimodal_batch_mixer_t> mixer = multimodal_batch_mixer_t::make(
+        probe.domain, mesh.colocated, probe.arenas, config.batch, config.seed, probe.streams);
+    if (!mixer) return expected_t::fail(std::move(mixer));
     for (std::size_t member = 0; member != devices.size(); ++member) {
         switch_to_gpu_t gpu_scope {probe.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
@@ -162,19 +196,23 @@ struct footprint_t {
 
 /** Agree on the fewest @p rows any process measured: the lead collects every peer's count and
  *  publishes the minimum, which every peer adopts. */
-[[nodiscard]] static expected<u32_t> agree_on_rows_(mesh_t const &mesh, u32_t rows) noexcept {
+[[nodiscard]] static expected<u32_t> agree_on_rows_(mesh_t &mesh, u32_t rows) noexcept {
     using result_t = expected<u32_t>;
-    mesh_topology_t const &topology = mesh.topology;
+    mesh_topology_t &topology = mesh.topology;
     if (topology.host_domain_count() <= 1) return result_t {rows};
-    sz::string_t text;
+    sz::string_t text, measured_key, agreed_key;
+    u32_t const collective_id = topology.next_collective_id();
+    if (!format_into(measured_key, "envelope.{}", collective_id) ||
+        !format_into(agreed_key, "envelope.{}.agreed", collective_id))
+        return result_t::fail(status_t::bad_alloc_k, "envelope key formatting failed");
     auto parsed = [&](u32_t &value) noexcept {
         return std::from_chars(text.data(), text.data() + text.size(), value).ec == std::errc {};
     };
     if (!topology.is_lead()) {
         u32_t agreed = 0;
         if (!format_into(text, "{}", rows)) return result_t::fail(status_t::bad_alloc_k, "rows formatting failed");
-        expected_t exchanged = topology.publish_text("envelope", text.view());
-        if (exchanged) exchanged = topology.await_text(0u, "envelope.agreed", text, mesh.timeout_seconds);
+        expected_t exchanged = topology.publish_text(measured_key.view(), text.view());
+        if (exchanged) exchanged = topology.await_text(0u, agreed_key.view(), text, mesh.timeout_seconds);
         if (!exchanged) return result_t::fail(std::move(exchanged));
         if (!parsed(agreed))
             return result_t::fail(status_t::invalid_input_k, "the lead agreed on {} rows", text.view());
@@ -183,7 +221,7 @@ struct footprint_t {
     u32_t agreed = rows;
     for (u32_t peer = 1; peer != topology.host_domain_count(); ++peer) {
         u32_t peer_rows = 0;
-        if (expected_t awaited = topology.await_text(peer, "envelope", text, mesh.timeout_seconds); !awaited)
+        if (expected_t awaited = topology.await_text(peer, measured_key.view(), text, mesh.timeout_seconds); !awaited)
             return result_t::fail(std::move(awaited));
         if (!parsed(peer_rows))
             return result_t::fail(status_t::invalid_input_k, "host domain {} measured {} rows", peer, text.view());
@@ -191,7 +229,7 @@ struct footprint_t {
     }
     text.clear();
     if (!format_into(text, "{}", agreed)) return result_t::fail(status_t::bad_alloc_k, "rows formatting failed");
-    if (expected_t published = topology.publish_text("envelope.agreed", text.view()); !published)
+    if (expected_t published = topology.publish_text(agreed_key.view(), text.view()); !published)
         return result_t::fail(std::move(published));
     return result_t {agreed};
 }
@@ -200,12 +238,12 @@ struct footprint_t {
  *  @brief The rows per GPU at @p config 's columns — the configured ones, or the most every device
  *      of every process holds — and the arena reservation they need.
  *
- *  Each device's footprint is fitted as @c fixed+rows·row through the two probes, and the margin
- *  is the footprint outside the arena at the larger probe, the decoders' workspaces, graphs and
- *  the symmetric heap, held free once more as the part a larger envelope may grow nonlinearly.
- *  The arena's own high-water mark is fitted the same way, and the reservation is that line one
- *  row past the envelope: the batch sources allocate their loaded batches from the arena after
- *  the trainer, and one row of the trainer's own growth holds them.
+ *  The arena's high-water mark is exact, so it is fitted as @c fixed+rows·row+rows²·pair through
+ *  the three probes, each of which also allocates a data source's loaded batch and mixer. Each
+ *  device's footprint takes the arena's curvature and is fitted through the smaller and the larger
+ *  probe, and the margin is the footprint outside the arena at the larger probe — the decoders'
+ *  workspaces, graphs, the symmetric heap — held free once more. The reservation is the arena's
+ *  curve one row past the envelope.
  *  @retval status_t::bad_alloc_k The configured rows do not fit, with the measured numbers.
  */
 [[nodiscard]] static expected<envelope_t> measure_envelope_(mesh_t &mesh, trainer_config_t const &config,
@@ -213,12 +251,25 @@ struct footprint_t {
                                                             std::span<std::size_t const> free_bytes) noexcept {
     using result_t = expected<envelope_t>;
     std::size_t const gpus = devices.size();
-    footprint_t smaller[max_gpus_per_host_k] = {}, larger[max_gpus_per_host_k] = {};
+    footprint_t smaller[max_gpus_per_host_k] = {}, middle[max_gpus_per_host_k] = {}, larger[max_gpus_per_host_k] = {};
     expected_t probed = probe_footprint_(mesh, config, devices, smaller_probe_rows_k, free_bytes, {smaller, gpus});
+    if (probed) probed = probe_footprint_(mesh, config, devices, middle_probe_rows_k, free_bytes, {middle, gpus});
     if (probed) probed = probe_footprint_(mesh, config, devices, larger_probe_rows_k, free_bytes, {larger, gpus});
     if (!probed) return result_t::fail(std::move(probed));
 
-    u32_t const probe_span = larger_probe_rows_k - smaller_probe_rows_k;
+    f64_t const low_rows = smaller_probe_rows_k, middle_rows = middle_probe_rows_k, high_rows = larger_probe_rows_k;
+    auto arena_fit = [&](std::size_t member) noexcept {
+        f64_t const low = static_cast<f64_t>(smaller[member].arena_bytes);
+        f64_t const lower_slope = (static_cast<f64_t>(middle[member].arena_bytes) - low) / (middle_rows - low_rows);
+        f64_t const upper_slope = (static_cast<f64_t>(larger[member].arena_bytes) -
+                                   static_cast<f64_t>(middle[member].arena_bytes)) /
+                                  (high_rows - middle_rows);
+        footprint_fit_t fit;
+        fit.pair = std::max((upper_slope - lower_slope) / (high_rows - low_rows), 0.0);
+        fit.row = lower_slope - fit.pair * (low_rows + middle_rows);
+        fit.fixed = low - fit.row * low_rows - fit.pair * low_rows * low_rows;
+        return fit;
+    };
     u32_t const configured_rows = config.batch.max_rows_per_gpu;
     u64_t const representable_rows = std::numeric_limits<u32_t>::max() / config.batch.max_columns_per_row;
     envelope_t envelope; // the device holding the fewest rows decides
@@ -227,15 +278,19 @@ struct footprint_t {
         if (high.device_bytes <= low.device_bytes || high.arena_bytes < low.arena_bytes)
             return result_t::fail(status_t::other_k, "device {} took {} bytes at {} rows and {} at {}", devices[member],
                                   low.device_bytes, smaller_probe_rows_k, high.device_bytes, larger_probe_rows_k);
+        footprint_fit_t device = arena_fit(member);
+        device.row = (static_cast<f64_t>(high.device_bytes) - static_cast<f64_t>(low.device_bytes) -
+                      device.pair * (high_rows * high_rows - low_rows * low_rows)) /
+                     (high_rows - low_rows);
+        device.fixed = static_cast<f64_t>(low.device_bytes) - device.row * low_rows - device.pair * low_rows * low_rows;
         envelope_t measured;
         measured.free_bytes = free_bytes[member];
-        measured.row_bytes = (high.device_bytes - low.device_bytes) / probe_span;
-        measured.fixed_bytes = low.device_bytes - std::min(low.device_bytes, measured.row_bytes * smaller_probe_rows_k);
+        measured.row_bytes = static_cast<std::size_t>(std::max(device.row, 0.0));
+        measured.pair_bytes = static_cast<std::size_t>(device.pair);
+        measured.fixed_bytes = static_cast<std::size_t>(std::max(device.fixed, 0.0));
         measured.margin_bytes = high.device_bytes - std::min(high.device_bytes, high.arena_bytes);
-        std::size_t const kept_bytes = measured.fixed_bytes + measured.margin_bytes;
-        u64_t const fitting_rows = measured.free_bytes > kept_bytes
-                                       ? (measured.free_bytes - kept_bytes) / measured.row_bytes
-                                       : 0u;
+        u64_t const fitting_rows = device.rows_within(static_cast<f64_t>(measured.free_bytes) -
+                                                      static_cast<f64_t>(measured.margin_bytes));
         measured.rows = configured_rows ? configured_rows
                                         : static_cast<u32_t>(std::min(fitting_rows, representable_rows));
         if (measured.rows == 0 || measured.rows > fitting_rows)
@@ -252,12 +307,9 @@ struct footprint_t {
         if (!agreed) return result_t::fail(std::move(agreed));
         envelope.rows = *agreed;
     }
-    for (std::size_t member = 0; member != gpus; ++member) {
-        std::size_t const arena_row_bytes = (larger[member].arena_bytes - smaller[member].arena_bytes) / probe_span;
-        std::size_t const arena_fixed_bytes = smaller[member].arena_bytes - arena_row_bytes * smaller_probe_rows_k;
+    for (std::size_t member = 0; member != gpus; ++member)
         envelope.reserve_bytes = std::max(envelope.reserve_bytes,
-                                          arena_fixed_bytes + arena_row_bytes * (std::size_t {envelope.rows} + 1u));
-    }
+                                          static_cast<std::size_t>(arena_fit(member).at(f64_t(envelope.rows) + 1.0)));
     return result_t {envelope};
 }
 
@@ -350,12 +402,13 @@ struct footprint_t {
     contrastive_config.hidden = config.hidden;
     contrastive_config.to_vertices_per_gpu = static_cast<u32_t>(segments);
     contrastive_config.gpu_subgraphs_per_step = topology.shape.gpus_per_colocated_domain;
+    contrastive_config.temperature_groups = std::max(config.contrastive.temperature_groups, 1u);
     std::size_t const force_scalars = config.contrasts() ? distributed_contrastive_segments_t::payload_scalars_needed(
                                                                contrastive_config, topology.shape)
                                                          : 0u;
     std::size_t const mixer_scalars = multimodal_batch_mixer_t::payload_scalars_needed(config.batch, topology.shape);
     expected<multimem_domain_t> domain = multimem_domain_t::make(
-        topology, placed.devices.view(), gradient_scalars + force_scalars + mixer_scalars, placed.streams);
+        mesh.topology, placed.devices.view(), gradient_scalars + force_scalars + mixer_scalars, placed.streams);
     if (!domain) return expected_t::fail(std::move(domain));
     placed.domain = std::move(domain.value_);
     {
@@ -393,6 +446,16 @@ struct footprint_t {
             forces.view(), contrastive_config, prefixes);
         if (!contrastive) return expected_t::fail(std::move(contrastive));
         placed.contrastive = std::move(contrastive.value_);
+        for (u32_t member = 0; member != gpus; ++member) {
+            switch_to_gpu_t gpu_scope {placed.streams[member]};
+            if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
+            expected<adafactor_temperatures_t> temperatures = adafactor_temperatures_t::make(
+                placed.arenas[member], contrastive_config.temperature_groups, adafactor_config_t {},
+                placed.streams[member]);
+            if (!temperatures) return expected_t::fail(std::move(temperatures));
+            if (placed.temperatures.push_back(std::move(temperatures.value_)) != status_t::success_k)
+                return expected_t::fail(status_t::bad_alloc_k, "temperature optimizer table full");
+        }
     }
     if (config.capture == replayed_k) return placed.capture();
     return {};
@@ -461,6 +524,7 @@ expected_t trainer_t::resume(sz::string_view_t path) noexcept {
         expected_t restored = restore_vector_(*loaded, "contrastive.inverse_temperatures",
                                               replica.inverse_temperatures.span(), streams[member]);
         if (restored) restored = restore_vector_(*loaded, "contrastive.biases", replica.biases.span(), streams[member]);
+        if (restored) restored = temperatures[member].load(*loaded, streams[member]);
         if (!restored) return restored;
     }
     // After the weights, since every state the file misses restarts from them.
@@ -514,6 +578,10 @@ expected_t trainer_t::step(batch_source_t &source, optimizer_step_t optimizer_st
         expected_t stepped = backward_graphs.size() ? backward_graphs[member].launch(streams[member].get())
                                                     : replicas[member].backward_region(streams[member]);
         if (stepped) stepped = optimizer.step(member, report.learning_rate, streams[member]);
+        if (stepped && config.contrasts())
+            stepped = temperatures[member].step(replicas[member].inverse_temperatures.span(),
+                                                replicas[member].biases.span(), contrastive.temperature_grads(member),
+                                                report.learning_rate, streams[member]);
         if (!stepped) return stepped;
     }
     completed_steps = optimizer_step.ordinal + 1u;
@@ -585,13 +653,11 @@ telemetry_t trainer_t::telemetry(optimizer_step_t optimizer_step) noexcept {
     switch_to_gpu_t gpu_scope {streams[0]};
     if (!gpu_scope.ok()) return telemetry;
     if (config.contrasts()) {
-        f32r1_tensor_pinned_t staging = f32r1_tensor_pinned_t::uninitialized({gpus}, pinned_alloc<f32_t> {}).value;
-        if (staging && copy_device_to_host(contrastive.loss_outs(), staging.span(), streams[0])) {
+        f32r1_tensor_pinned_t staging = f32r1_tensor_pinned_t::uninitialized({1}, pinned_alloc<f32_t> {}).value;
+        if (staging && copy_device_to_host(contrastive.world_loss(0), staging.span(), streams[0])) {
             cuStreamSynchronize(streams[0].get());
-            f64_t sum = 0.0;
-            for (std::size_t member = 0; member != gpus; ++member) sum += staging[member];
-            telemetry.contrastive = static_cast<f32_t>(sum);
-            ledger.scalar(probes.contrastive, sum, 1.0);
+            telemetry.contrastive = staging[0];
+            ledger.scalar(probes.contrastive, staging[0], 1.0);
         }
     }
     if (u32_t const *const round = domain.member(domain.member_offset()).round; round != nullptr) {
@@ -616,6 +682,7 @@ expected_t trainer_t::save(sz::string_view_t path) noexcept {
                                streams[0]);
     if (saved && config.contrasts())
         saved = insert_vector_(checkpoint, "contrastive.biases", replicas[0].biases.view(), streams[0]);
+    if (saved && config.contrasts()) saved = temperatures[0].save(checkpoint, streams[0]);
     if (saved) saved = save_weights(checkpoint, config, replicas[0].weights, completed_steps, streams[0]);
     if (saved) saved = checkpoint.save(path);
     return saved;
@@ -691,8 +758,8 @@ expected_t items_source_t::make(items_source_t &placed, trainer_t &trainer) noex
     std::size_t const gpus = trainer.replicas.size(), segments = shape.max_segments_per_gpu;
     if (config.contrasts() && trainer.mesh->topology.host_domain_count() > 1)
         return expected_t::fail(status_t::shape_unsupported_k,
-                                "relations rebase within one process; a mesh of several processes contrasts caller " //
-                                "items once the mixer reports its routes across hosts");
+                                "every process passes its own items, and the edges of an item the mixer routes to " //
+                                "another host stay with the process that passed it");
     if (shape.contains(modality_t::image_k) && shape.image.channels != um::image_channels_k)
         return expected_t::fail(status_t::shape_unsupported_k, "decoded images are RGBA, not {} channels",
                                 shape.image.channels);
@@ -963,8 +1030,8 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
         switch_to_gpu_t gpu_scope {trainer.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
         u32r1_span_t const landing {sources_.data() + member * segments, segments};
-        if (expected_t copied = copy_device_to_host(mixer_.mixed_sources(member), landing, trainer.streams[member]);
-            !copied)
+        u32r1_view_t const own_sources {mixer_.world_sources(member).data() + member * segments, segments};
+        if (expected_t copied = copy_device_to_host(own_sources, landing, trainer.streams[member]); !copied)
             return copied;
     }
     if (expected_t drained = trainer.synchronize(); !drained) return drained;

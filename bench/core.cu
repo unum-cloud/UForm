@@ -147,8 +147,8 @@ static void contrastive_loss(loop_t &loop, u64_t seed) {
 
     time_windows(loop, stream->get(), [&]() noexcept -> expected_t {
         return (*loss)(bf16r2_view_t {tower, segments_k, hidden_k}, {&subgraph, 1}, relations->view(),
-                       contrastive_recipe_t {}, segments_k, f32r1_span_t {loss_out, 1},
-                       bf16r2_span_t {grad, segments_k, hidden_k}, *stream);
+                       contrastive_recipe_t {}, f32r1_span_t {loss_out, 1}, bf16r2_span_t {grad, segments_k, hidden_k},
+                       *stream);
     });
 }
 
