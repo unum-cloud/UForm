@@ -1,21 +1,17 @@
 /**
- *  @brief Preflight probe for distributed runs — the first `srun` step of every multi-node sbatch, so an
- *      environment gap fails in one named line on the offending node before the real job spends a minute
- *      discovering it mid-suite. Three classes of gap it names:
- *
- *        1. Runtime closure — the binary links the full `uform_train` stack, so merely starting on a node
- *           proves every shared library (cuDNN, NumKong, the verbs providers) resolves there.
- *        2. GPUDirect RDMA — for every local GPU, an arena's registrable allocation must MR-register with
- *           the same-index NIC: the exact single-chunk contract the InfiniBand collectives' symmetric heaps
- *           rely on ( @c nvidia_peermem rejects handle-spanning ranges with @c EFAULT ). The probe first
- *           bumps the arena so the mapped prefix has a used tail — replaying the growth shape that once
- *           straddled a chunk boundary — before allocating the heap-like range.
- *        3. Rendezvous filesystem — when the mesh contract names an exchange directory, it must be writable
- *           from this node.
- *
  *  @file test/env.cpp
  *  @author Ash Vardanian
  *  @date July 6, 2026
+ *  @brief The preflight every multi-node sbatch runs first, naming each environment gap in one line
+ *      on the node that has it, before the real job finds it mid-suite.
+ *
+ *  1. Runtime closure: the binary links the whole `uform_train` stack, so starting at all proves
+ *     every shared library resolves on the node.
+ *  2. GPUDirect RDMA: an arena allocation of every local GPU must register with the NIC of the same
+ *     index, in the single chunk the InfiniBand heaps rely on, since @c nvidia_peermem refuses a
+ *     range spanning handles with @c EFAULT . The arena is grown first, so the range sits past a
+ *     used tail.
+ *  3. Rendezvous filesystem: the exchange directory the mesh names must be writable from the node.
  */
 #include <cstdlib> // `std::getenv`
 #include <cstdio>  // `std::fopen`, `std::remove`

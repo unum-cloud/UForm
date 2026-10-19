@@ -53,8 +53,6 @@ static void tower_forward_backward(loop_t &loop, u64_t seed) {
     if (!gpu_scope.ok()) return loop.fail("context entry failed");
     expected<gpu_arena_t> arena = gpu_arena_t::make(0, 1ull << 30);
     if (!arena) return loop.fail(arena.description_.view());
-    expected<cudnn_session_t> cudnn = cudnn_session_t::make(algo_pick_t::heuristic_k);
-    if (!cudnn) return loop.fail(cudnn.description_.view());
 
     encoder_tower_config_t config;
     config.vocabulary = 258;
@@ -65,7 +63,7 @@ static void tower_forward_backward(loop_t &loop, u64_t seed) {
     config.block.max_segment_tokens = columns_k;
     config.rope_max_positions = columns_k;
     multimodal_batch_shape_t const shape {rows_k, segments_k, columns_k};
-    expected<encoder_tower_bf16_t> tower = encoder_tower_bf16_t::make(*arena, *cudnn, config, shape);
+    expected<encoder_tower_bf16_t> tower = encoder_tower_bf16_t::make(*arena, config, shape);
     if (!tower) return loop.fail(tower.description_.view());
     array<differentiable_weights_t> weights;
     if (expected_t filled = tower->fill(weights); !filled) return loop.fail(filled.description_.view());

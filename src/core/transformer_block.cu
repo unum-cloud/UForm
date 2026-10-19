@@ -220,6 +220,23 @@ static __global__ void transformer_rope_kernel_(bf16r2_span_t values, rope_angle
 }
 
 /**
+ *  @brief Zero the rows of @p rows past each segment's length and before the next segment's start:
+ *      NumKong attends from those gap rows as from any query, so the forward output and the output
+ *      gradient keep them at zero, and no gradient leaks from a gap into the keys it attended.
+ *
+ *  __grid_size__ @c [segments,1,1] , threads stripe the cells of their segment's gap.
+ */
+static __global__ void transformer_zero_gaps_kernel_(f32r2_span_t rows, u32r1_view_t segment_offsets,
+                                                     u32r1_view_t segment_lengths) {
+    u32_t const segment = blockIdx.x;
+    std::size_t const columns = rows.extent(1);
+    std::size_t const first = static_cast<std::size_t>(segment_offsets[segment]) + segment_lengths[segment];
+    std::size_t const cells = (static_cast<std::size_t>(segment_offsets[segment + 1u]) - first) * columns;
+    for (std::size_t cell = threadIdx.x; cell < cells; cell += blockDim.x)
+        rows[first + cell / columns, cell % columns] = 0.0f;
+}
+
+/**
  *  @brief SwiGLU activation backward over the Float32 gate|up product, writing the packed @b [tokens,2·ffn]
  *      BFloat16 gate|up gradient: @c d_up = dy·SiLU(gate) and @c d_gate = dy·up·σ(gate)·(1+gate·(1−σ(gate))) .
  *
@@ -335,89 +352,6 @@ static __global__ void transformer_token_rescale_kernel_(f32r2_view_t products, 
                          static_cast<std::size_t>(gridDim.x) * blockDim.x, tower_scalars_t {});
 }
 
-/**
- *  @brief The one cuDNN Int32 boundary: scale the batch's flat @c u32 segment starts (gapped —
- *      cuDNN's ragged prefix supports gaps; batch stride 0, the prefix supplies each segment's
- *      base) into the per-operand @b element offsets, and cast the stored lengths for the padding mask.
- *
- *  One launch fills the block's whole Int32 staging; nothing outside it sees Int32. vendor-boundary.
- *
- *  __grid_size__ @c [1,1,1] , threads stripe @c segments+1 entries; no dynamic shared memory.
- */
-static __global__ void transformer_ragged_offsets_kernel_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                                          i32r1_span_t qkv_offsets, i32r1_span_t hidden_offsets,
-                                                          i32r1_span_t seq_lens, u32_t hidden) {
-    std::size_t const entries = segment_offsets.extent(0);
-    for (std::size_t entry = threadIdx.x; entry < entries; entry += blockDim.x) {
-        i32_t const start = static_cast<i32_t>(segment_offsets[entry]);
-        qkv_offsets[entry] = start * static_cast<i32_t>(3u * hidden);
-        hidden_offsets[entry] = start * static_cast<i32_t>(hidden);
-        if (entry + 1u < entries) seq_lens[entry] = static_cast<i32_t>(segment_lengths[entry]);
-    }
-}
-
-/** Mark one SDPA-backward gradient output ( @c dQ / @c dK / @c dV ): the packed-QKV THD @p dims
- *  and @p strides of its operand, plus the ragged offset under @p ragged_uid . */
-static void configure_sdpa_grad_output(std::shared_ptr<fe::graph::Tensor_attributes> const &node, // vendor-boundary
-                                       fe::graph::Graph &graph, i64_t uid, i64_t ragged_uid,
-                                       std::vector<i64_t> const &dims,    // vendor-boundary
-                                       std::vector<i64_t> const &strides, // vendor-boundary
-                                       i64_t segments) {
-    node->set_output(true).set_uid(uid).set_dim(dims).set_stride(strides);
-    node->set_ragged_offset(sdpa_ragged_offset(graph, ragged_uid, segments));
-}
-
-expected_t sdpa_graph_t::verify_raw_bindings(i64_t const *uids, u32_t count) noexcept {
-    if (variant_pack_uids.size() != count)
-        return expected_t::fail(status_t::other_k,
-                                "SDPA graph binds {} tensors, the raw table names {} — a frontend-internal tensor " //
-                                "(pass-by-value scalar or workspace) slipped into the variant pack",
-                                variant_pack_uids.size(), count);
-    for (i64_t const uid : variant_pack_uids) {
-        bool named = false;
-        for (u32_t entry = 0; entry != count && !named; ++entry) named = uids[entry] == uid;
-        if (!named)
-            return expected_t::fail(status_t::other_k, "SDPA graph demands uid {} the raw table never names", uid);
-    }
-    i64_t total_workspace = 0;
-    if (get_workspace_size(total_workspace).is_bad())
-        return expected_t::fail(status_t::cuda_error_k, "SDPA workspace query failed");
-    if (total_workspace != plan_workspace_bytes())
-        return expected_t::fail(status_t::other_k,
-                                "the frontend reserves {} workspace bytes beyond the plan's {} — raw execution " //
-                                "would skip its auxiliary kernels",
-                                total_workspace - plan_workspace_bytes(), plan_workspace_bytes());
-    return {};
-}
-
-expected_t sdpa_plan_t::execute(cudnnHandle_t handle, void *workspace) noexcept {
-    if (!raw) {
-        for (u32_t entry = 0; entry != binding_count; ++entry) fallback_bindings[uids[entry]] = pointers[entry];
-        if (auto status = graph.execute(handle, fallback_bindings, workspace); status.is_bad())
-            return expected_t::fail(status_t::cuda_error_k, "SDPA fallback execute failed: {}",
-                                    status.get_message().c_str()); // vendor-boundary
-        return {};
-    }
-    cudnnBackendDescriptor_t pack = nullptr;
-    if (cudnnStatus_t status = cudnnBackendCreateDescriptor(CUDNN_BACKEND_VARIANT_PACK_DESCRIPTOR, &pack);
-        status != CUDNN_STATUS_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "variant pack creation failed ({})",
-                                cudnnGetErrorString(status));
-    cudnnStatus_t status = cudnnBackendSetAttribute(pack, CUDNN_ATTR_VARIANT_PACK_UNIQUE_IDS, CUDNN_TYPE_INT64,
-                                                    binding_count, uids.data());
-    if (status == CUDNN_STATUS_SUCCESS)
-        status = cudnnBackendSetAttribute(pack, CUDNN_ATTR_VARIANT_PACK_DATA_POINTERS, CUDNN_TYPE_VOID_PTR,
-                                          binding_count, const_cast<void **>(pointers.data()));
-    if (status == CUDNN_STATUS_SUCCESS)
-        status = cudnnBackendSetAttribute(pack, CUDNN_ATTR_VARIANT_PACK_WORKSPACE, CUDNN_TYPE_VOID_PTR, 1, &workspace);
-    if (status == CUDNN_STATUS_SUCCESS) status = cudnnBackendFinalize(pack);
-    if (status == CUDNN_STATUS_SUCCESS) status = cudnnBackendExecute(handle, graph.raw_plan(), pack);
-    cudnnBackendDestroyDescriptor(pack);
-    if (status != CUDNN_STATUS_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "SDPA raw execute failed ({})", cudnnGetErrorString(status));
-    return {};
-}
-
 expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
                                                             transformer_block_config_t const &config,
                                                             std::size_t entry_inputs) noexcept {
@@ -450,6 +384,12 @@ expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
         if (!shape_bytes) return result_t::fail(std::move(shape_bytes));
         packed_bytes = std::max(packed_bytes, shape_bytes.value_);
     }
+    nk_size_t packed_keys_values_bytes = 0;
+    if (nk_status_t const status = nk_attention_pack_size_bf16_best(hidden / transformer_head_dim_k,
+                                                                    transformer_head_dim_k, tokens, config.max_segments,
+                                                                    capabilities, &packed_keys_values_bytes);
+        status != nk_success_k)
+        return result_t::fail(status_t::cuda_error_k, "attention pack sizing failed: {}", nk_status_name(status));
     transformer_scratch_t scratch;
     scratch.products = f32r1_tensor_arena_t::uninitialized({tokens * ffn}, f32_alloc).value;
     scratch.residual_grad = f32r2_tensor_arena_t::uninitialized({tokens, hidden}, f32_alloc).value;
@@ -458,19 +398,21 @@ expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
     scratch.transposed_grad = bf16r1_tensor_arena_t::uninitialized({widest * padded_tokens}, bf16_alloc).value;
     scratch.transposed_input = bf16r1_tensor_arena_t::uninitialized({inputs * padded_tokens}, bf16_alloc).value;
     scratch.transposed_weight = bf16r1_tensor_arena_t::uninitialized({widest * hidden}, bf16_alloc).value;
-    scratch.qkv_grad = bf16r2_tensor_arena_t::uninitialized({tokens, 3 * hidden}, bf16_alloc).value;
+    scratch.packed_qkv = bf16r2_tensor_arena_t::uninitialized({tokens, 3 * hidden}, bf16_alloc).value;
+    scratch.qkv_grad = f32r2_tensor_arena_t::uninitialized({tokens, 3 * hidden}, f32_alloc).value;
+    scratch.packed_keys_values =
+        b8r1_tensor_arena_t::uninitialized({static_cast<std::size_t>(packed_keys_values_bytes)}, b8_alloc).value;
     scratch.weight_grad_products =
         f32r1_tensor_arena_t::uninitialized({std::max(widest, inputs) * hidden}, f32_alloc).value;
     scratch.packed_input = b8r1_tensor_arena_t::uninitialized({packed_bytes}, b8_alloc).value;
     if (!scratch.products || !scratch.residual_grad || !scratch.inverse_rms || !scratch.narrowed_grad ||
-        !scratch.transposed_grad || !scratch.transposed_input || !scratch.transposed_weight || !scratch.qkv_grad ||
-        !scratch.weight_grad_products || !scratch.packed_input)
+        !scratch.transposed_grad || !scratch.transposed_input || !scratch.transposed_weight || !scratch.packed_qkv ||
+        !scratch.qkv_grad || !scratch.packed_keys_values || !scratch.weight_grad_products || !scratch.packed_input)
         return result_t::fail(status_t::bad_alloc_k, "scratch allocation failed (arena_used={})", arena.used());
     return result_t {std::move(scratch)};
 }
 
-expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &arena, cudnn_session_t &cudnn,
-                                                                  transformer_scratch_t &scratch,
+expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &arena, transformer_scratch_t &scratch,
                                                                   transformer_block_config_t config) noexcept {
     if (config.hidden == 0 || config.hidden % transformer_head_dim_k != 0)
         return expected<transformer_block_bf16_t>::fail(status_t::shape_unsupported_k,
@@ -482,7 +424,6 @@ expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &a
             config.max_tokens, config.max_segments, config.max_segment_tokens);
     transformer_block_bf16_t block;
     block.config_ = config;
-    block.cudnn_ = &cudnn;
     block.scratch_ = &scratch;
     if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
                                                                 &block.capabilities_);
@@ -496,7 +437,6 @@ expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &a
     std::size_t const heads = hidden / transformer_head_dim_k;
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
-    gpu_arena_alloc<b8_t> b8_alloc {arena};
     // Plain `uninitialized` allocations, checked in named groups so a failure names the arena pressure.
 
     // Weights and their per-block gradient buffers, `[out,in]` row-major.
@@ -526,28 +466,16 @@ expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &a
     block.gate_up_products_ = f32r2_tensor_arena_t::uninitialized({tokens, 2 * ffn}, f32_alloc).value;
     block.normalized_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
     block.qkv_ = bf16r2_tensor_arena_t::uninitialized({tokens, 3 * hidden}, bf16_alloc).value;
+    block.attention_products_ = f32r2_tensor_arena_t::uninitialized({tokens, hidden}, f32_alloc).value;
     block.attn_output_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
     block.mlp_normalized_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
     block.silu_up_ = bf16r2_tensor_arena_t::uninitialized({tokens, ffn}, bf16_alloc).value;
-    block.softmax_log_sum_exp_ =
-        f32r1_tensor_arena_t::uninitialized(
-            {static_cast<std::size_t>(config.max_segments) * heads * config.max_segment_tokens}, f32_alloc)
-            .value;
+    block.softmax_log_sum_exp_ = f32r1_tensor_arena_t::uninitialized({tokens * heads}, f32_alloc).value;
     if (!block.input_stash_ || !block.qkv_products_ || !block.attn_residual_ || !block.gate_up_products_ ||
-        !block.normalized_ || !block.qkv_ || !block.attn_output_ || !block.mlp_normalized_ || !block.silu_up_ ||
-        !block.softmax_log_sum_exp_)
+        !block.normalized_ || !block.qkv_ || !block.attention_products_ || !block.attn_output_ ||
+        !block.mlp_normalized_ || !block.silu_up_ || !block.softmax_log_sum_exp_)
         return expected<transformer_block_bf16_t>::fail(status_t::bad_alloc_k,
                                                         "stashes allocation failed (arena_used={})", arena.used());
-    block.attn_scale_ = f32r1_tensor_arena_t::uninitialized({1}, f32_alloc).value;
-    // cuDNN's ragged offsets are per-operand element offsets; two stride families cover all nine
-    // SDPA operands (the packed QKV block's and the dense hidden buffers').
-    gpu_arena_alloc<i32_t> i32_alloc {arena};
-    block.ragged_qkv_offsets_ = i32r1_tensor_arena_t::uninitialized({config.max_segments + 1u}, i32_alloc).value;
-    block.ragged_hidden_offsets_ = i32r1_tensor_arena_t::uninitialized({config.max_segments + 1u}, i32_alloc).value;
-    block.ragged_seq_lens_ = i32r1_tensor_arena_t::uninitialized({config.max_segments}, i32_alloc).value;
-    if (!block.attn_scale_ || !block.ragged_qkv_offsets_ || !block.ragged_hidden_offsets_ || !block.ragged_seq_lens_)
-        return expected<transformer_block_bf16_t>::fail(status_t::bad_alloc_k,
-                                                        "transients allocation failed (arena_used={})", arena.used());
 
     // Each weight packs as the forward's B operand [out,in] and, transposed, as the data gradient's [in,out].
     bf16r2_tensor_arena_t const *const weights[] = {&block.qkv_weight_, &block.out_weight_, &block.gate_up_weight_,
@@ -561,16 +489,6 @@ expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &a
         block.packed_weights_[product] = std::move(packed.value_);
         block.packed_weights_transposed_[product] = std::move(transposed.value_);
     }
-
-    // Seed the device SDPA scale — a synchronous setup-path upload, once, outside any capture.
-    f32_t const attention_scale = 1.0f / sqrtf(static_cast<f32_t>(transformer_head_dim_k));
-    if (CUresult result = cuMemcpyHtoD(device_address(block.attn_scale_.data()), &attention_scale,
-                                       sizeof(attention_scale));
-        result != CUDA_SUCCESS)
-        return cuda_failure<transformer_block_bf16_t>(result, "SDPA scale upload failed");
-
-    if (expected_t built = block.build_sdpa_(arena, b8_alloc); !built)
-        return expected<transformer_block_bf16_t>::fail(std::move(built));
     return expected<transformer_block_bf16_t> {std::move(block)};
 }
 
@@ -603,6 +521,7 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
                          nk::succeeded(gate_up_products_.resize({tokens, 2 * ffn})) &&
                          nk::succeeded(normalized_.resize({tokens, hidden})) &&
                          nk::succeeded(qkv_.resize({tokens, 3 * hidden})) &&
+                         nk::succeeded(attention_products_.resize({tokens, hidden})) &&
                          nk::succeeded(attn_output_.resize({tokens, hidden})) &&
                          nk::succeeded(mlp_normalized_.resize({tokens, hidden})) &&
                          nk::succeeded(silu_up_.resize({tokens, ffn}));
@@ -621,6 +540,7 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
     f32_t *const pre_scale = widened_norm_scales_.data();
     f32_t *const post_scale = pre_scale + hidden;
     std::size_t const qkv_stride = 3 * hidden * sizeof(f32_t), qkv_narrow_stride = 3 * hidden * sizeof(bf16_t);
+    bf16r2_span_t const packed_qkv = qkv_.span();
 
     // The norms read Float32 γ, widened from the trained BFloat16 scales every step.
     expected_t staged = numkong_result(
@@ -642,12 +562,12 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
                                capabilities_, stream);
     // `nk_cast` has no row stride, so narrowing V narrows whole rows; the QK-norm then overwrites the Q|K slices.
     if (staged)
-        staged = numkong_result(nk_cast_best(qkv_products_.data(), nk_f32_k, qkv_.data(), nk_bf16_k,
+        staged = numkong_result(nk_cast_best(qkv_products_.data(), nk_f32_k, packed_qkv.data(), nk_bf16_k,
                                              tokens * 3 * hidden, capabilities_, stream.numkong()),
                                 "QKV narrowing");
     if (staged)
         staged = numkong_result(
-            nk_each_rmscast_bf16_best(qkv_products_.data(), NUMKONG_NULL, numkong_scalars(qkv_.data()), tokens,
+            nk_each_rmscast_bf16_best(qkv_products_.data(), NUMKONG_NULL, numkong_scalars(packed_qkv.data()), tokens,
                                       2 * heads, transformer_head_dim_k, qkv_stride, qkv_narrow_stride, epsilon,
                                       capabilities_, stream.numkong()),
             "QK-norm");
@@ -657,15 +577,31 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
     f32_t const forward_sign = 1.0f;
     std::size_t const rope_pairs = head_vectors * (transformer_head_dim_k >> 1u);
     dim3 const rope_grid {static_cast<u32_t>(divide_round_up(rope_pairs, kernel_block_size_default_k)), 1u, 1u};
-    staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, qkv_.span(), angles, coords,
-                           heads, query_offset, forward_sign);
+    staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, packed_qkv, angles, coords, heads,
+                           query_offset, forward_sign);
     if (staged)
-        staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, qkv_.span(), angles, coords,
+        staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, packed_qkv, angles, coords,
                                heads, key_offset, forward_sign);
-    if (!staged) return staged;
 
-    // Fused SDPA over the packed segments, stashing the log-sum-exp for the backward.
-    if (expected_t attended = run_sdpa_forward_(segment_offsets, segment_lengths, stream); !attended) return attended;
+    // Attention over the segments, stashing its Float32 output and log-sum-exp for the backward.
+    if (staged) staged = pack_keys_values_(segment_offsets, segment_lengths, stream);
+    if (staged)
+        staged = numkong_result(
+            nk_attention_packed_bf16_best(
+                heads, heads, transformer_head_dim_k, segment_offsets.data(), tokens, transformer_attention_scale(),
+                NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, numkong_scalars(qkv_.data()), qkv_narrow_stride,
+                scratch_->packed_keys_values.data(), attention_products_.data(), hidden * sizeof(f32_t),
+                softmax_log_sum_exp_.data(), 0, NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, capabilities_, stream.numkong()),
+            "attention");
+    dim3 const segment_grid {static_cast<u32_t>(segment_lengths.extent(0)), 1u, 1u};
+    if (staged)
+        staged = launch_kernel(&transformer_zero_gaps_kernel_, segment_grid, block_shape, stream,
+                               attention_products_.span(), segment_offsets, segment_lengths);
+    if (staged)
+        staged = numkong_result(nk_cast_best(attention_products_.data(), nk_f32_k, attn_output_.data(), nk_bf16_k,
+                                             tokens * hidden, capabilities_, stream.numkong()),
+                                "attention narrowing");
+    if (!staged) return staged;
 
     // Out-projection, the residual into the Float32 stream, and the post-attention norm narrowing it.
     staged = multiply_bf16(attn_output_.view(), packed_weights_[product_out_k].view(), attn_residual_.span(),
@@ -722,7 +658,7 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
     // this step's token count (the stashes above already carry it from the paired forward call).
 
     transformer_scratch_t &scratch = *scratch_;
-    bool const resized = nk::succeeded(scratch.qkv_grad.resize({tokens, 3 * hidden})) &&
+    bool const resized = nk::succeeded(scratch.packed_qkv.resize({tokens, 3 * hidden})) &&
                          nk::succeeded(scratch.residual_grad.resize({tokens, hidden}));
     if (!resized)
         return expected_t::fail(status_t::shape_unsupported_k, "gradient transients cannot hold {} tokens (baked {})",
@@ -772,7 +708,7 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
                                scratch.inverse_rms.view(), f32r2_view_t {hidden_products},
                                post_norm_scale_grad_.span());
 
-    // Out-projection backward, then the attention-output gradient narrows into SDPA's dO.
+    // Out-projection backward, whose Float32 data gradient is the attention's output gradient.
     if (staged)
         staged = numkong_result(nk_cast_best(scratch.residual_grad.data(), nk_f32_k, hidden_narrowed.data(), nk_bf16_k,
                                              tokens * hidden, capabilities_, stream.numkong()),
@@ -781,14 +717,32 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
         staged = multiply_bf16(hidden_narrowed, packed_weights_transposed_[product_out_k].view(), hidden_products,
                                capabilities_, stream);
     if (staged) staged = weight_gradient(hidden_narrowed, attn_output_.view(), out_weight_grad_.span());
-    if (staged)
-        staged = numkong_result(nk_cast_best(hidden_products.data(), nk_f32_k, hidden_narrowed.data(), nk_bf16_k,
-                                             tokens * hidden, capabilities_, stream.numkong()),
-                                "attention output gradient narrowing");
-    if (!staged) return staged;
 
-    // SDPA backward into the packed d_qkv block, then inverse rotation and QK-norm backward.
-    if (expected_t attended = run_sdpa_backward_(segment_offsets, segment_lengths, stream); !attended) return attended;
+    // Attention backward into the zeroed Float32 dQ|dK|dV rows, narrowed into the packed gradient,
+    // then the inverse rotation and the QK-norm backward.
+    f32r2_span_t const qkv_grad {scratch.qkv_grad.data(), tokens, 3 * hidden};
+    std::size_t const qkv_grad_stride = 3 * hidden * sizeof(f32_t);
+    if (staged) staged = zero_async(qkv_grad, stream);
+    if (staged)
+        staged = launch_kernel(&transformer_zero_gaps_kernel_,
+                               dim3 {static_cast<u32_t>(segment_lengths.extent(0)), 1u, 1u}, block_shape, stream,
+                               hidden_products, segment_offsets, segment_lengths);
+    if (staged) staged = pack_keys_values_(segment_offsets, segment_lengths, stream);
+    if (staged)
+        staged = numkong_result(
+            nk_attention_packed_gradients_bf16_best(
+                heads, heads, transformer_head_dim_k, segment_offsets.data(), tokens, transformer_attention_scale(),
+                NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, numkong_scalars(qkv_.data()), 3 * hidden * sizeof(bf16_t),
+                scratch.packed_keys_values.data(), attention_products_.data(), hidden_products.data(),
+                hidden * sizeof(f32_t), softmax_log_sum_exp_.data(), qkv_grad.data(), qkv_grad_stride,
+                qkv_grad.data() + hidden, qkv_grad.data() + 2 * hidden, qkv_grad_stride, 0, NUMKONG_SIZE_MAX,
+                NUMKONG_NULL, 0, capabilities_, stream.numkong()),
+            "attention backward");
+    if (staged)
+        staged = numkong_result(nk_cast_best(qkv_grad.data(), nk_f32_k, scratch.packed_qkv.data(), nk_bf16_k,
+                                             tokens * 3 * hidden, capabilities_, stream.numkong()),
+                                "attention gradient narrowing");
+    if (!staged) return staged;
     f32_t const inverse_sign = -1.0f;
     std::size_t const head_vectors = tokens * heads;
     std::size_t const rope_pairs = head_vectors * (transformer_head_dim_k >> 1u);
@@ -796,20 +750,20 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
     dim3 const vector_grid {
         static_cast<u32_t>(divide_round_up(2 * head_vectors * warp_size_k, kernel_block_size_default_k)), 1u, 1u};
     u32_t const query_offset = 0u, key_offset = hidden;
-    staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, scratch.qkv_grad.span(), angles,
+    staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, scratch.packed_qkv.span(), angles,
                            coords, heads, query_offset, inverse_sign);
     if (staged)
-        staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, scratch.qkv_grad.span(),
+        staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, scratch.packed_qkv.span(),
                                angles, coords, heads, key_offset, inverse_sign);
     if (staged)
         staged = launch_kernel(&transformer_qk_norm_backward_kernel_, vector_grid, block_shape, stream,
-                               scratch.qkv_grad.span(), qkv_products_.view(), 2u * heads, epsilon);
+                               scratch.packed_qkv.span(), qkv_products_.view(), 2u * heads, epsilon);
 
     // QKV projection backward, then the pre-attention norm backward adding the residual-stream gradient.
     if (staged)
-        staged = multiply_bf16(scratch.qkv_grad.view(), packed_weights_transposed_[product_qkv_k].view(),
+        staged = multiply_bf16(scratch.packed_qkv.view(), packed_weights_transposed_[product_qkv_k].view(),
                                hidden_products, capabilities_, stream);
-    if (staged) staged = weight_gradient(scratch.qkv_grad.view(), normalized_.view(), qkv_weight_grad_.span());
+    if (staged) staged = weight_gradient(scratch.packed_qkv.view(), normalized_.view(), qkv_weight_grad_.span());
     if (staged)
         staged = launch_kernel(&rmscast_backward_kernel, token_grid, block_shape, stream, input_stash_.view(),
                                pre_norm_scale_.view(), f32r2_view_t {hidden_products}, scratch.residual_grad.view(),
@@ -831,183 +785,16 @@ expected_t transformer_block_bf16_t::pack_weights(gpu_stream_t &stream) noexcept
     return {};
 }
 
-expected_t transformer_block_bf16_t::build_sdpa_(gpu_arena_t &arena, gpu_arena_alloc<b8_t> b8_alloc) noexcept {
-    i64_t const segments = config_.max_segments;
-    i64_t const seq = config_.max_segment_tokens;
-    i64_t const heads = config_.hidden / transformer_head_dim_k;
-    i64_t const dim = transformer_head_dim_k;
-    i64_t const hidden_stride = static_cast<i64_t>(config_.hidden);
-    i64_t const token_stride = 3 * hidden_stride;
-    u32_t const hidden = config_.hidden;
-    auto const strides = sdpa_thd_strides(heads, token_stride);
-    auto const log_sum_exp_strides = std::vector<i64_t> {heads * seq, seq, 1, 1}; // vendor-boundary
-    // The scale rides a device scalar tensor we own (bound via `sdpa_scalar`) — never the frontend's
-    // pass-by-value cache, which lives behind private members the raw execution path cannot reach.
-
-    // Forward graph: owned bindings pinned now, per-call entries recorded for the dispatch stores.
-    {
-        fe::graph::Graph &graph = forward_sdpa_.graph;
-        graph.set_io_data_type(fe::DataType_t::BFLOAT16)
-            .set_intermediate_data_type(fe::DataType_t::FLOAT)
-            .set_compute_data_type(fe::DataType_t::FLOAT);
-        auto make_operand = [&](i64_t uid, char const *name) {
-            return graph.tensor(fe::graph::Tensor_attributes()
-                                    .set_name(name)
-                                    .set_uid(uid)
-                                    .set_dim({segments, heads, seq, dim})
-                                    .set_stride(strides));
-        };
-        auto queries = make_operand(sdpa_uid_query_k, "Q");
-        auto keys = make_operand(sdpa_uid_key_k, "K");
-        auto values = make_operand(sdpa_uid_value_k, "V");
-        queries->set_ragged_offset(sdpa_ragged_offset(graph, sdpa_uid_ragged_base_k + 0, segments));
-        keys->set_ragged_offset(sdpa_ragged_offset(graph, sdpa_uid_ragged_base_k + 1, segments));
-        values->set_ragged_offset(sdpa_ragged_offset(graph, sdpa_uid_ragged_base_k + 2, segments));
-        auto seq_q = sdpa_seq_lengths(graph, sdpa_uid_seq_len_q_k, "seq_len_q", segments);
-        auto seq_kv = sdpa_seq_lengths(graph, sdpa_uid_seq_len_kv_k, "seq_len_kv", segments);
-        auto options = fe::graph::SDPA_attributes()
-                           .set_name("uform_block_sdpa_fwd")
-                           .set_generate_stats(true)
-                           .set_attn_scale(sdpa_scalar(graph, sdpa_uid_attn_scale_k, "attn_scale"))
-                           .set_padding_mask(true)
-                           .set_seq_len_q(seq_q)
-                           .set_seq_len_kv(seq_kv);
-        auto [output, stats] = graph.sdpa(queries, keys, values, options);
-        // The attention output is a dense [tokens, hidden] buffer of its own (token stride = hidden).
-        output->set_output(true)
-            .set_uid(sdpa_uid_output_k)
-            .set_dim({segments, heads, seq, dim})
-            .set_stride(sdpa_thd_strides(heads, hidden_stride));
-        output->set_ragged_offset(sdpa_ragged_offset(graph, sdpa_uid_ragged_base_k + 3, segments));
-        stats->set_output(true)
-            .set_uid(sdpa_uid_stats_k)
-            .set_dim({segments, heads, seq, 1})
-            .set_stride(log_sum_exp_strides)
-            .set_data_type(fe::DataType_t::FLOAT);
-        if (auto status = graph.build(cudnn_->get(), {fe::HeurMode_t::A}); status.is_bad())
-            return expected_t::fail(status_t::cuda_error_k, "SDPA forward graph build failed: {}",
-                                    status.get_message().c_str()); // vendor-boundary
-        forward_sdpa_.bind(sdpa_uid_query_k, qkv_.data());
-        forward_sdpa_.bind(sdpa_uid_key_k, qkv_.data() + hidden);
-        forward_sdpa_.bind(sdpa_uid_value_k, qkv_.data() + 2u * hidden);
-        forward_sdpa_.bind(sdpa_uid_output_k, attn_output_.data());
-        forward_sdpa_.bind(sdpa_uid_stats_k, softmax_log_sum_exp_.data());
-        forward_sdpa_.bind(sdpa_uid_attn_scale_k, attn_scale_.data());
-        forward_seq_entry_ = forward_sdpa_.bind(sdpa_uid_seq_len_q_k);
-        forward_sdpa_.bind(sdpa_uid_seq_len_kv_k);
-        forward_ragged_entry_ = forward_sdpa_.bind(sdpa_uid_ragged_base_k + 0);
-        forward_sdpa_.bind(sdpa_uid_ragged_base_k + 1);
-        forward_sdpa_.bind(sdpa_uid_ragged_base_k + 2);
-        forward_sdpa_.bind(sdpa_uid_ragged_base_k + 3);
-        if (expected_t finalized = forward_sdpa_.finalize_dispatch(); !finalized) return finalized;
-    }
-    // Backward graph.
-    {
-        fe::graph::Graph &graph = backward_sdpa_.graph;
-        graph.set_io_data_type(fe::DataType_t::BFLOAT16)
-            .set_intermediate_data_type(fe::DataType_t::FLOAT)
-            .set_compute_data_type(fe::DataType_t::FLOAT);
-        auto make_operand = [&](i64_t uid, char const *name, i64_t operand_token_stride, i64_t ragged_uid) {
-            auto node = graph.tensor(fe::graph::Tensor_attributes()
-                                         .set_name(name)
-                                         .set_uid(uid)
-                                         .set_dim({segments, heads, seq, dim})
-                                         .set_stride(sdpa_thd_strides(heads, operand_token_stride)));
-            node->set_ragged_offset(sdpa_ragged_offset(graph, ragged_uid, segments));
-            return node;
-        };
-        auto queries = make_operand(sdpa_uid_query_k, "Q", token_stride, sdpa_uid_ragged_base_k + 0);
-        auto keys = make_operand(sdpa_uid_key_k, "K", token_stride, sdpa_uid_ragged_base_k + 1);
-        auto values = make_operand(sdpa_uid_value_k, "V", token_stride, sdpa_uid_ragged_base_k + 2);
-        auto output = make_operand(sdpa_uid_output_k, "O", hidden_stride, sdpa_uid_ragged_base_k + 3);
-        auto output_grad = make_operand(sdpa_uid_output_grad_k, "dO", hidden_stride, sdpa_uid_ragged_base_k + 4);
-        auto stats = graph.tensor(fe::graph::Tensor_attributes()
-                                      .set_name("Stats")
-                                      .set_uid(sdpa_uid_stats_k)
-                                      .set_dim({segments, heads, seq, 1})
-                                      .set_stride(log_sum_exp_strides)
-                                      .set_data_type(fe::DataType_t::FLOAT));
-        auto seq_q = sdpa_seq_lengths(graph, sdpa_uid_seq_len_q_k, "seq_len_q", segments);
-        auto seq_kv = sdpa_seq_lengths(graph, sdpa_uid_seq_len_kv_k, "seq_len_kv", segments);
-        auto options = fe::graph::SDPA_backward_attributes()
-                           .set_name("uform_block_sdpa_bwd")
-                           .set_attn_scale(sdpa_scalar(graph, sdpa_uid_attn_scale_k, "attn_scale"))
-                           .set_padding_mask(true)
-                           .set_seq_len_q(seq_q)
-                           .set_seq_len_kv(seq_kv);
-        auto [query_grad, key_grad, value_grad] = graph.sdpa_backward(queries, keys, values, output, output_grad, stats,
-                                                                      options);
-        std::vector<i64_t> const grad_dims {segments, heads, seq, dim}; // vendor-boundary
-        configure_sdpa_grad_output(query_grad, graph, sdpa_uid_query_grad_k, sdpa_uid_ragged_base_k + 5, grad_dims,
-                                   strides, segments);
-        configure_sdpa_grad_output(key_grad, graph, sdpa_uid_key_grad_k, sdpa_uid_ragged_base_k + 6, grad_dims, strides,
-                                   segments);
-        configure_sdpa_grad_output(value_grad, graph, sdpa_uid_value_grad_k, sdpa_uid_ragged_base_k + 7, grad_dims,
-                                   strides, segments);
-        if (auto status = graph.build(cudnn_->get(), {fe::HeurMode_t::A}); status.is_bad())
-            return expected_t::fail(status_t::cuda_error_k, "SDPA backward graph build failed: {}",
-                                    status.get_message().c_str()); // vendor-boundary
-        backward_sdpa_.bind(sdpa_uid_query_k, qkv_.data());
-        backward_sdpa_.bind(sdpa_uid_key_k, qkv_.data() + hidden);
-        backward_sdpa_.bind(sdpa_uid_value_k, qkv_.data() + 2u * hidden);
-        backward_sdpa_.bind(sdpa_uid_output_k, attn_output_.data());
-        backward_sdpa_.bind(sdpa_uid_output_grad_k, scratch_->narrowed_grad.data());
-        backward_sdpa_.bind(sdpa_uid_stats_k, softmax_log_sum_exp_.data());
-        backward_sdpa_.bind(sdpa_uid_query_grad_k, scratch_->qkv_grad.data());
-        backward_sdpa_.bind(sdpa_uid_key_grad_k, scratch_->qkv_grad.data() + hidden);
-        backward_sdpa_.bind(sdpa_uid_value_grad_k, scratch_->qkv_grad.data() + 2u * hidden);
-        backward_sdpa_.bind(sdpa_uid_attn_scale_k, attn_scale_.data());
-        backward_seq_entry_ = backward_sdpa_.bind(sdpa_uid_seq_len_q_k);
-        backward_sdpa_.bind(sdpa_uid_seq_len_kv_k);
-        backward_ragged_entry_ = backward_sdpa_.bind(sdpa_uid_ragged_base_k + 0);
-        for (i64_t ragged = 1; ragged != 8; ++ragged) backward_sdpa_.bind(sdpa_uid_ragged_base_k + ragged);
-        if (expected_t finalized = backward_sdpa_.finalize_dispatch(); !finalized) return finalized;
-    }
-    i64_t const sdpa_workspace = forward_sdpa_.workspace_bytes > backward_sdpa_.workspace_bytes
-                                     ? forward_sdpa_.workspace_bytes
-                                     : backward_sdpa_.workspace_bytes;
-    if (sdpa_workspace > 0) {
-        sdpa_workspace_ =
-            b8r1_tensor_arena_t::uninitialized({static_cast<std::size_t>(sdpa_workspace)}, b8_alloc).value;
-        if (!sdpa_workspace_)
-            return expected_t::fail(status_t::bad_alloc_k, "SDPA workspace allocation failed ({} bytes)",
-                                    sdpa_workspace);
-    }
-    return {};
-}
-
-expected_t transformer_block_bf16_t::stage_ragged_offsets_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                                           gpu_stream_t &stream) noexcept {
-    return launch_kernel(&transformer_ragged_offsets_kernel_, dim3 {1u, 1u, 1u}, dim3 {warp_size_k, 1u, 1u}, stream,
-                         segment_offsets, segment_lengths, ragged_qkv_offsets_.span(), ragged_hidden_offsets_.span(),
-                         ragged_seq_lens_.span(), config_.hidden);
-}
-
-expected_t transformer_block_bf16_t::run_sdpa_forward_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
+expected_t transformer_block_bf16_t::pack_keys_values_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
                                                        gpu_stream_t &stream) noexcept {
-    if (expected_t bound = cudnn_->bind(stream); !bound) return bound;
-    if (expected_t staged = stage_ragged_offsets_(segment_offsets, segment_lengths, stream); !staged) return staged;
-    forward_sdpa_.pointers[forward_seq_entry_] = ragged_seq_lens_.data();
-    forward_sdpa_.pointers[forward_seq_entry_ + 1u] = ragged_seq_lens_.data();
-    for (u32_t ragged = 0; ragged != 3u; ++ragged)
-        forward_sdpa_.pointers[forward_ragged_entry_ + ragged] = ragged_qkv_offsets_.data();
-    forward_sdpa_.pointers[forward_ragged_entry_ + 3u] = ragged_hidden_offsets_.data();
-    return forward_sdpa_.execute(cudnn_->get(), sdpa_workspace_.data());
-}
-
-expected_t transformer_block_bf16_t::run_sdpa_backward_(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                                        gpu_stream_t &stream) noexcept {
-    if (expected_t bound = cudnn_->bind(stream); !bound) return bound;
-    if (expected_t staged = stage_ragged_offsets_(segment_offsets, segment_lengths, stream); !staged) return staged;
-    backward_sdpa_.pointers[backward_seq_entry_] = ragged_seq_lens_.data();
-    backward_sdpa_.pointers[backward_seq_entry_ + 1u] = ragged_seq_lens_.data();
-    i32_t *const qkv_offsets = ragged_qkv_offsets_.data();
-    i32_t *const hidden_offsets = ragged_hidden_offsets_.data();
-    i32_t *const per_operand[8] = {qkv_offsets,    qkv_offsets, qkv_offsets, hidden_offsets,
-                                   hidden_offsets, qkv_offsets, qkv_offsets, qkv_offsets};
-    for (u32_t ragged = 0; ragged != 8u; ++ragged)
-        backward_sdpa_.pointers[backward_ragged_entry_ + ragged] = per_operand[ragged];
-    return backward_sdpa_.execute(cudnn_->get(), sdpa_workspace_.data());
+    u32_t const hidden = config_.hidden, heads = hidden / transformer_head_dim_k;
+    std::size_t const segments = segment_lengths.extent(0), stride = 3 * hidden * sizeof(bf16_t);
+    nk_bf16_t const *const qkv = numkong_scalars(qkv_.data());
+    return numkong_result(nk_attention_pack_bf16_best(heads, transformer_head_dim_k, segment_offsets.data(),
+                                                      segment_lengths.data(), segments, qkv + hidden, stride,
+                                                      qkv + 2 * hidden, stride, scratch_->packed_keys_values.data(), 0,
+                                                      segments * heads, capabilities_, stream.numkong()),
+                          "attention key-value pack");
 }
 
 expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t output, u32r1_view_t segment_offsets,
@@ -1090,11 +877,11 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
                                                      qkv_e4m3 + 2 * hidden, qkv_bytes, packed_keys_values_.data(), 0,
                                                      segments * heads, capabilities_, stream.numkong());
     if (status == nk_success_k)
-        status = nk_attention_packed_e4m3_best(
-            heads, heads, transformer_head_dim_k, segment_offsets.data(), tokens,
-            1.0f / sqrtf(static_cast<f32_t>(transformer_head_dim_k)), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, qkv_e4m3,
-            qkv_bytes, packed_keys_values_.data(), products_.data(), hidden * sizeof(f32_t), NUMKONG_NULL, 0,
-            NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, capabilities_, stream.numkong());
+        status = nk_attention_packed_e4m3_best(heads, heads, transformer_head_dim_k, segment_offsets.data(), tokens,
+                                               transformer_attention_scale(), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX,
+                                               qkv_e4m3, qkv_bytes, packed_keys_values_.data(), products_.data(),
+                                               hidden * sizeof(f32_t), NUMKONG_NULL, 0, NUMKONG_SIZE_MAX, NUMKONG_NULL,
+                                               0, capabilities_, stream.numkong());
     if (status != nk_success_k)
         return expected_t::fail(status_t::cuda_error_k, "E4M3 attention failed: {}", nk_status_name(status));
 

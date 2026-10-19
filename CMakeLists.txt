@@ -10,7 +10,7 @@
 # symlink; repoint that symlink to switch toolkits globally. Then the once-per-machine native set:
 #
 #   sudo apt install -y \
-#     libcudnn9-dev-cuda-13 libnpp-dev-13-3 libnvjpeg-dev-13-3 libcufile-dev-13-3 \
+#     libnpp-dev-13-3 libnvjpeg-dev-13-3 libcufile-dev-13-3 \
 #     libavformat-dev libavcodec-dev libavutil-dev libswresample-dev \
 #     libjpeg-turbo8-dev libturbojpeg0-dev libpng-dev libwebp-dev \
 #     libibverbs-dev ccache
@@ -135,9 +135,8 @@ include(FetchContent)
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/find_library.cmake")
 
 # Source dependencies. NumKong spans the tensor substrate, StringZilla parses exchange payloads, ForkUnion is the
-# host-side demux and decode thread pool, yyjson reads checkpoint headers, cudnn-frontend is the fused-attention graph
-# DSL. The first three are submodules: a recursive clone builds them in place, any other clone fetches the pins below,
-# which match the submodule commits. `FETCHCONTENT_SOURCE_DIR_<NAME>` points any of them at a local checkout.
+# host-side demux and decode thread pool, yyjson reads checkpoint headers. The first three are submodules: a recursive
+# clone builds them in place, any other clone fetches the pins below, which match the submodule commits. `FETCHCONTENT_SOURCE_DIR_<NAME>` points any of them at a local checkout.
 function (uform_sibling NAME REPOSITORY TAG)
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${NAME}/CMakeLists.txt")
         add_subdirectory(${NAME})
@@ -208,19 +207,6 @@ set_property(CACHE UFORM_WITH_INFINIBAND PROPERTY STRINGS ON OFF AUTO)
 if (UFORM_BUILD_CUDA)
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/probe_infiniband.cmake")
     uform_probe_infiniband()
-
-    # Header-only: a `SOURCE_SUBDIR` without a `CMakeLists.txt` populates the sources without configuring them.
-    FetchContent_Declare(
-        cudnn_frontend
-        GIT_REPOSITORY https://github.com/NVIDIA/cudnn-frontend.git
-        GIT_TAG v1.19.1
-        SOURCE_SUBDIR include
-    )
-    FetchContent_MakeAvailable(cudnn_frontend)
-
-    # cuDNN powers the fused scaled-dot-product-attention graphs of the transformer blocks — available on every NVIDIA
-    # GPU, so hard-required alongside the frontend header DSL fetched above.
-    find_library(UFORM_CUDNN_LIBRARY cudnn REQUIRED)
 
     # The loaders' vendor dependencies below are available on every NVIDIA target and are hard-required, discovered
     # through the layered `uform_find_library` search (the RAPIDS / NVIDIA cu13 Python wheels, then system paths). A

@@ -193,8 +193,7 @@ struct encoder_tower_bf16_t {
     /** Allocate and plan the whole tower off @p arena — token / media entries, @c depth blocks,
      *  the attention pool, and the head — validating each present modality's patch count against
      *  @p shape 's @c max_columns_per_row . */
-    [[nodiscard]] static expected<encoder_tower_bf16_t> make(gpu_arena_t &arena, cudnn_session_t &cudnn,
-                                                             encoder_tower_config_t config,
+    [[nodiscard]] static expected<encoder_tower_bf16_t> make(gpu_arena_t &arena, encoder_tower_config_t config,
                                                              multimodal_batch_shape_t shape) noexcept;
 
     /** One tower forward over @p batch — pure enqueue; every stash the backward reads is written

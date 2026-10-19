@@ -111,10 +111,9 @@ if (UFORM_BUILD_CUDA)
     endif ()
 
     # `src/core` → `uform::core`: one static library for the whole core cell, compiled once, never per consumer.
-    # Dependencies stay lean: NumKong, StringZilla, yyjson, the CUDA Driver API (no NCCL, no NVSHMEM; the runtime
-    # arrives only through NumKong's kernel units), plus the fused-attention tier (nvrtc + cuDNN + cudnn-frontend) the
-    # transformer / tower cells need. `src/` is the one include root of all three libraries, so sources include
-    # `"core/types.hpp"`.
+    # Dependencies stay lean: NumKong, StringZilla, yyjson and the CUDA Driver API, with no NCCL or NVSHMEM; the runtime
+    # arrives only through NumKong's kernel units. `src/` is the one include root of all three libraries, so sources
+    # include `"core/types.hpp"`.
     add_library(
         uform_core STATIC
         core/schedule.cu
@@ -130,11 +129,8 @@ if (UFORM_BUILD_CUDA)
         core/encoder_tower.cu
     )
     add_library(uform::core ALIAS uform_core)
-    target_include_directories(uform_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${cudnn_frontend_SOURCE_DIR}/include")
-    target_link_libraries(
-        uform_core PUBLIC numkong::static stringzilla::static yyjson CUDA::cuda_driver CUDA::nvrtc
-                          "${UFORM_CUDNN_LIBRARY}"
-    )
+    target_include_directories(uform_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_link_libraries(uform_core PUBLIC numkong::static stringzilla::static yyjson CUDA::cuda_driver)
     target_compile_features(uform_core PUBLIC cxx_std_23)
     # NumKong accessors are `constexpr` for device-callability; `nvcc` needs the (long-stable) flag to allow it.
     target_compile_options(uform_core PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)

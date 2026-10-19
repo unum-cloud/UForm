@@ -180,12 +180,6 @@ static __global__ void tower_audio_segment_kernel_(nk::tensor_view<f32_t, 2> con
     stage_frames_segment(content, offset, offset, length, patches, threadIdx.x, blockDim.x, tower_scalars_t {});
 }
 
-/** The attention pool's softmax scale @c 1/√head_dim — one derivation for the device upload and
- *  the backward kernel argument. */
-[[nodiscard]] static f32_t tower_pool_scale_() noexcept {
-    return 1.0f / sqrtf(static_cast<f32_t>(transformer_head_dim_k));
-}
-
 /** The head's biasless fc1 → SiLU → fc2 over the normalized pooled rows into @p vertices — raw, never
  *  L2-normalized here, since the loss owns the cosine geometry. Each product lands in the Float32 @p products
  *  and narrows into its BFloat16 destination. Shared verbatim by both towers' forwards. */
@@ -401,8 +395,7 @@ static expected_t project_media_weight_grads(multimodal_batch_on_gpu_t const &ba
     return staged;
 }
 
-expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cudnn_session_t &cudnn,
-                                                          encoder_tower_config_t config,
+expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, encoder_tower_config_t config,
                                                           multimodal_batch_shape_t shape) noexcept {
     using result_t = expected<encoder_tower_bf16_t>;
     if (config.depth == 0) return result_t::fail(status_t::invalid_input_k, "a tower needs at least one block");
@@ -596,8 +589,7 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, cu
     if (!scratch) return result_t::fail(std::move(scratch));
     tower.scratch_ = std::make_unique<transformer_scratch_t>(std::move(scratch.value_));
     for (u32_t layer_index = 0; layer_index != config.depth; ++layer_index) {
-        expected<transformer_block_bf16_t> block = transformer_block_bf16_t::make(arena, cudnn, *tower.scratch_,
-                                                                                  config.block);
+        expected<transformer_block_bf16_t> block = transformer_block_bf16_t::make(arena, *tower.scratch_, config.block);
         if (!block) return result_t::fail(std::move(block));
         tower.blocks_[layer_index] = std::move(block.value_);
     }
@@ -657,7 +649,7 @@ expected_t tower_pool_t::forward(bf16r1_view_t query, bf16r2_view_t states, u32r
         capabilities_, stream.numkong());
     if (status == nk_success_k)
         status = nk_attention_packed_bf16_best(heads, heads, transformer_head_dim_k, query_offsets_.data(), segments,
-                                               tower_pool_scale_(), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX,
+                                               transformer_attention_scale(), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX,
                                                numkong_scalars(query.data()), 0, packed_.data(), pooled_.data(),
                                                hidden * sizeof(f32_t), log_sum_exp_.data(), 0, NUMKONG_SIZE_MAX,
                                                NUMKONG_NULL, 0, capabilities_, stream.numkong());
@@ -683,7 +675,7 @@ expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad
                                       capabilities_, stream.numkong());
     if (status == nk_success_k)
         status = nk_attention_packed_gradients_bf16_best(
-            heads, heads, transformer_head_dim_k, query_offsets_.data(), segments, tower_pool_scale_(),
+            heads, heads, transformer_head_dim_k, query_offsets_.data(), segments, transformer_attention_scale(),
             NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, numkong_scalars(query.data()), 0, packed_.data(), pooled_.data(),
             pooled_grad_.data(), hidden * sizeof(f32_t), log_sum_exp_.data(), query_partials_.data(),
             hidden * sizeof(f32_t), key_grad.data(), value_grad.data(), key_grad.stride_bytes(0), 0, NUMKONG_SIZE_MAX,

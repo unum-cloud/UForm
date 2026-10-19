@@ -284,15 +284,15 @@ jobs:
         uses: actions/checkout@v7
       - name: Free Disk Space
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
-      - name: Install CUDA, cuDNN and the Codecs
+      - name: Install CUDA and the Codecs
         run: |
           curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i cuda-keyring_1.1-1_all.deb
           sudo apt-get update
           sudo apt-get install -y ninja-build libibverbs-dev $UBUNTU_CODECS \
-            cuda-minimal-build-"$CUDA_VERSION" cuda-driver-dev-"$CUDA_VERSION" cuda-nvrtc-dev-"$CUDA_VERSION" \
+            cuda-minimal-build-"$CUDA_VERSION" cuda-driver-dev-"$CUDA_VERSION" \
             cuda-nvtx-"$CUDA_VERSION" libcufile-dev-"$CUDA_VERSION" libnvjpeg-dev-"$CUDA_VERSION" libnpp-dev-"$CUDA_VERSION" \
-            libcudnn9-dev-cuda-13 libnvidia-decode-580
+            libnvidia-decode-580
           echo "/usr/local/cuda-${CUDA_VERSION/-/.}/bin" >> "$GITHUB_PATH"
       - name: Install ROCm
         run: |

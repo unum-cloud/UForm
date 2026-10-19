@@ -58,7 +58,6 @@ train = [
     "pyarrow>=24.0.0",
     "safetensors>=0.4.5",
     "cuda-toolkit[cccl,cublas,cudart,cufft,cufile,curand,cusparse,nvcc,nvjitlink,nvrtc,nvtx,nvvm]>=13.0.2",
-    "nvidia-cudnn-cu13>=9.20",
     "nvidia-nvimgcodec-cu13>=0.8",
     "zstandard>=0.23.0",
     "usearch>=2.16.0",

@@ -540,9 +540,6 @@ static void mixture_sweep(test_suite_t &suite, world_health_t &health, tier_t wi
               sweep_config_(7u, 5u, 64u));
     suite.run("sweep/1gpu/omni/rows=2,columns=96", run_sweep_cell_, health, cheap, "sweep/1gpu/omni/rows=2,columns=96",
               sweep_config_(7u, 2u, 96u));
-    trainer_config_t tuned = sweep_config_(7u, 2u, 64u);
-    tuned.algo_pick = algo_pick_t::benchmarked_k;
-    suite.run("sweep/1gpu/omni/rows=2,tuned", run_sweep_cell_, health, cheap, "sweep/1gpu/omni/rows=2,tuned", tuned);
     for (u32_t subset = 0; subset != 8u; ++subset) {
         sz::string_t label;
         if (!format_into(label, "sweep/wide/tokens{}{}{}/rows=2", (subset & 1u) ? ",image" : "",

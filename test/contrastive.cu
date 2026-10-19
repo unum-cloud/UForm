@@ -626,8 +626,7 @@ static void run_pool_parity_case() {
     }
     cuCtxPushCurrent(stream.value_.context());
     auto arena = gpu_arena_t::make(0, 1ull << 30, {});
-    auto cudnn = cudnn_session_t::make(algo_pick_t::heuristic_k);
-    if (!arena || !cudnn) {
+    if (!arena) {
         check(false, "pool-parity bring-up");
         cuCtxPopCurrent(nullptr);
         return;
@@ -642,7 +641,7 @@ static void run_pool_parity_case() {
     config.block.max_segment_tokens = columns_k;
     config.rope_max_positions = columns_k;
     multimodal_batch_shape_t shape {rows_k, segments_k, columns_k};
-    auto tower = encoder_tower_bf16_t::make(arena.value_, cudnn.value_, config, shape);
+    auto tower = encoder_tower_bf16_t::make(arena.value_, config, shape);
     if (!tower) {
         std::printf("    %s\n", tower.description_.c_str());
         check(false, "pool-parity tower make");

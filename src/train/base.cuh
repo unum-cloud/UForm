@@ -27,18 +27,13 @@
  *  one shared @c d(normalized) buffer; the eager contrastive collective, when the objective has one, writes the
  *  pooled vertices' forces; the @b captured backward region folds both through the tower; the collective
  *  @c optimizer.step stays eager.
- *
- *  @section base_ownership Sessions placed, replicas borrowing them
- *
- *  The tower borrows its cuDNN session by pointer, so the sessions live in address-stable @ref per_gpu_array
- *  tables of the composition that is built where it lives and never moved.
  */
 #pragma once
 
 #include "core/array.hpp"                // `array`, `per_gpu_array`
 #include "core/checkpoint.hpp"           // `checkpoint_to_load_t`
 #include "core/gpu_allocators.hpp"       // `gpu_arena_t`
-#include "core/schedule.cuh"             // `gpu_stream_t`, `cudnn_session_t`, replay graphs
+#include "core/schedule.cuh"             // `gpu_stream_t`, replay graphs
 #include "core/introspect.cuh"           // `telemetry_losses_k` and the other ledger channels
 #include "core/multimodal_batch.cuh"     // `multimodal_batch_shape_t`, `multimodal_batch_on_gpu_t`, `modality_t`
 #include "core/multimodal_masking.hpp"   // `masking_recipe_t`, the masked heads
@@ -154,10 +149,6 @@ struct trainer_config_t {
     /** The run's model-region mode — @ref replayed_k in production, @ref eager_k under @c --eager ; the
      *  parity test drives both over identical seeds. */
     capture_t capture = replayed_k;
-
-    /** The cuDNN sessions' engine policy — the library's own heuristic pick by default,
-     *  @ref algo_pick_t::benchmarked_k under @c --tune . */
-    algo_pick_t algo_pick = algo_pick_t::heuristic_k;
 
     /** Checkpoint path; empty writes none. Borrows the argv storage it was parsed from. */
     sz::string_view_t checkpoint {};
@@ -278,12 +269,10 @@ struct base_replica_t {
      */
     array<differentiable_weights_t> weights {};
 
-    /** Build the replica over the world-owned @p arena and the placed @p dnn session (borrowed by pointer
-     *  for the replica's lifetime), publishing its parameter matrices into @ref weights — the identical order
-     *  on every replica. @p vertices_per_mesh sizes the contrastive to-vertex column. Constructs no stream,
-     *  arena, or session, and seeds nothing. */
-    [[nodiscard]] static expected<base_replica_t> make(gpu_arena_t &arena, cudnn_session_t &dnn,
-                                                       trainer_config_t const &config,
+    /** Build the replica over the world-owned @p arena , publishing its parameter matrices into
+     *  @ref weights in the same order on every replica. @p vertices_per_mesh sizes the contrastive
+     *  to-vertex column. Constructs no stream or arena, and seeds nothing. */
+    [[nodiscard]] static expected<base_replica_t> make(gpu_arena_t &arena, trainer_config_t const &config,
                                                        std::size_t vertices_per_mesh) noexcept;
 
     /** Draw the keyed synthetic mixture into @ref batch — row partition and contents, pure functions of

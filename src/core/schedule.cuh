@@ -57,7 +57,6 @@
 
 #include <cuda.h>      // `CUstream`, `CUgraph`, `CUgraphExec`, `CUevent`
 #include <cuda_bf16.h> // `__nv_bfloat16` — the training-currency scalar of the rank-1 aliases
-#include <cudnn.h>     // `cudnnHandle_t` — the fused-attention session (graphs live with their consumers)
 
 #include <numkong/cast.h>     // `nk_cast_best` — narrowing a weight gradient's Float32 product
 #include <numkong/dots.h>     // `nk_dots_pack_bf16_best`, `nk_dots_packed_bf16_best` — every matrix product
@@ -475,15 +474,6 @@ template <unsigned block_size_>
 
 #endif // defined(__CUDACC__)
 
-/** How the cuDNN sessions pin their per-shape engines. The default takes the library's own first
- *  heuristic pick — zero construction cost, the production behavior. The benchmarked mode will time the
- *  candidates at construction and pin the fastest; picks measured on this machine at this moment make
- *  tuned multi-host runs a profiling tool, never a bitwise-parity conformance one. */
-enum class algo_pick_t : u8_t {
-    heuristic_k = 0,
-    benchmarked_k = 1,
-};
-
 /** How a §10 model region runs: captured once into a @ref gpu_replay_graph_t and replayed every step
  *  (the production default), or re-enqueued eagerly each step — the bring-up / debugging path, and the
  *  other half of every capture-vs-eager parity test. A trainer carries it as a run knob; the two modes must
@@ -811,69 +801,6 @@ struct switch_to_gpu_t {
 
   private:
     bool ok_ = false;
-};
-
-/**
- *  @brief A shared cuDNN session: one handle per device, owned once and borrowed by every fused-graph
- *      consumer — the fused-attention entry point.
- *
- *  The graphs themselves live with their consumers (e.g. the transformer block owns its SDPA plans);
- *  this owner carries only the handle, bound to the caller's stream at execute time.
- */
-struct cudnn_session_t {
-
-  private:
-    cudnn_session_t() noexcept = default;
-
-  public:
-    cudnn_session_t(cudnn_session_t const &) = delete;
-    cudnn_session_t &operator=(cudnn_session_t const &) = delete;
-    cudnn_session_t(cudnn_session_t &&other) noexcept
-        : handle_(std::exchange(other.handle_, nullptr)), algo_pick_(other.algo_pick_) {}
-    cudnn_session_t &operator=(cudnn_session_t &&other) noexcept {
-        if (this != &other) {
-            destroy_();
-            handle_ = std::exchange(other.handle_, nullptr);
-            algo_pick_ = other.algo_pick_;
-        }
-        return *this;
-    }
-    ~cudnn_session_t() noexcept { destroy_(); }
-
-    /** Create the handle — once per device, outside any capture. @p algo_pick carries the run's
-     *  algorithm policy; the SDPA plans keep their heuristic engine under both values today, and
-     *  @ref algo_pick_t::benchmarked_k will iterate the frontend's engine configs in a later wave. */
-    [[nodiscard]] static expected<cudnn_session_t> make(algo_pick_t algo_pick) noexcept {
-        cudnn_session_t session;
-        session.algo_pick_ = algo_pick;
-        if (cudnnStatus_t status = cudnnCreate(&session.handle_); status != CUDNN_STATUS_SUCCESS)
-            return expected<cudnn_session_t>::fail(status_t::cuda_error_k, "cuDNN handle creation failed ({})",
-                                                   cudnnGetErrorString(status));
-        return expected<cudnn_session_t> {std::move(session)};
-    }
-
-    /** Bind the handle to @p stream — cuDNN executes on whatever stream the handle carries, so
-     *  every consumer re-binds before its enqueue. */
-    [[nodiscard]] expected_t bind(gpu_stream_t &stream) noexcept {
-        if (cudnnStatus_t status = cudnnSetStream(handle_, stream.get()); status != CUDNN_STATUS_SUCCESS)
-            return expected_t::fail(status_t::cuda_error_k, "cuDNN stream binding failed ({})",
-                                    cudnnGetErrorString(status));
-        return {};
-    }
-
-    /** The wrapped handle, borrowed by graph builders and executes. */
-    [[nodiscard]] cudnnHandle_t get() const noexcept { return handle_; }
-
-    /** The run's algorithm policy — carried for the later engine-config benchmarking wave. */
-    [[nodiscard]] algo_pick_t algo_pick() const noexcept { return algo_pick_; }
-
-  private:
-    void destroy_() noexcept {
-        if (handle_ != nullptr) cudnnDestroy(std::exchange(handle_, nullptr));
-    }
-
-    cudnnHandle_t handle_ = nullptr;
-    algo_pick_t algo_pick_ = algo_pick_t::heuristic_k;
 };
 
 /** The unifying shape across the collective tiers — a typed handle bundling specialized symmetric memory

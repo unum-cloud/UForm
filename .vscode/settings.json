@@ -36,7 +36,6 @@
     "cpublas",
     "cublasLt",
     "cudf",
-    "cudnn",
     "cufile",
     "cumsum",
     "cuvid",

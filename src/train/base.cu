@@ -377,10 +377,6 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
             config.capture = eager_k;
             continue;
         }
-        if (flag == "--tune") {
-            config.algo_pick = algo_pick_t::benchmarked_k;
-            continue;
-        }
         if (arg + 1 == argc) return result_t::fail(status_t::invalid_input_k, "{} takes a value", flag);
         ++arg;
         sz::string_view_t const value {argv[arg], std::strlen(argv[arg])};
@@ -434,7 +430,7 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
     return result_t {std::move(config)};
 }
 
-expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cudnn_session_t &dnn, trainer_config_t const &config,
+expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config_t const &config,
                                               std::size_t vertices_per_mesh) noexcept {
     using result_t = expected<base_replica_t>;
     multimodal_batch_shape_t const &shape = config.batch;
@@ -449,7 +445,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cudnn_session_
             shape.video.tube_frames, shape.video.frame_stride);
 
     base_replica_t replica;
-    expected<encoder_tower_bf16_t> tower = encoder_tower_bf16_t::make(arena, dnn, tower_config, shape);
+    expected<encoder_tower_bf16_t> tower = encoder_tower_bf16_t::make(arena, tower_config, shape);
     if (!tower) return result_t::fail(std::move(tower));
     replica.tower = std::move(tower.value_);
     expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {arena}, shape);

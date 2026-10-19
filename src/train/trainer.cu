@@ -200,12 +200,12 @@ struct footprint_t {
  *  @brief The rows per GPU at @p config 's columns — the configured ones, or the most every device
  *      of every process holds — and the arena reservation they need.
  *
- *  Each device's footprint is fitted as @c fixed+rows·row through the two probes, and the margin is
- *  the footprint outside the arena at the larger probe — cuDNN workspaces, graphs, the symmetric
- *  heap — held free once more, as the part a larger envelope may grow other than linearly. The
- *  arena's own high-water mark is fitted the same way, and the reservation is that line one row
- *  past the envelope: the batch sources allocate their loaded batches from the arena after the
- *  trainer, and one row of the trainer's own growth holds them.
+ *  Each device's footprint is fitted as @c fixed+rows·row through the two probes, and the margin
+ *  is the footprint outside the arena at the larger probe, the decoders' workspaces, graphs and
+ *  the symmetric heap, held free once more as the part a larger envelope may grow nonlinearly.
+ *  The arena's own high-water mark is fitted the same way, and the reservation is that line one
+ *  row past the envelope: the batch sources allocate their loaded batches from the arena after
+ *  the trainer, and one row of the trainer's own growth holds them.
  *  @retval status_t::bad_alloc_k The configured rows do not fit, with the measured numbers.
  */
 [[nodiscard]] static expected<envelope_t> measure_envelope_(mesh_t &mesh, trainer_config_t const &config,
@@ -279,10 +279,6 @@ struct footprint_t {
         if (!arena) return expected_t::fail(std::move(arena));
         if (placed.arenas.push_back(std::move(arena.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "arena table full");
-        expected<cudnn_session_t> session = cudnn_session_t::make(config.algo_pick);
-        if (!session) return expected_t::fail(std::move(session));
-        if (placed.sessions.push_back(std::move(session.value_)) != status_t::success_k)
-            return expected_t::fail(status_t::bad_alloc_k, "session table full");
     }
 
     { // rows stay inert zero handles when the channel is dark or the head absent, so feeding never branches
@@ -333,8 +329,7 @@ struct footprint_t {
     for (u32_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {placed.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-        expected<base_replica_t> replica = base_replica_t::make(placed.arenas[member], placed.sessions[member], config,
-                                                                vertices_per_mesh);
+        expected<base_replica_t> replica = base_replica_t::make(placed.arenas[member], config, vertices_per_mesh);
         if (!replica) return expected_t::fail(std::move(replica));
         if (placed.replicas.push_back(std::move(replica.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "replica table full");

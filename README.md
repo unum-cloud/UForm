@@ -55,7 +55,7 @@ There is not even NCCL or NVSHMEM, no dynamic memory allcoations on the hot path
 
 Every UForm 4 model is a __uniform byte encoder__: bytes in, same-width transformer blocks, pooled embedding out.
 The encoder stage consists of N transformer blocks, all at one fixed width — there is no sequence narrowing between them.
-Each block contains RMSNorm, QKV attention with SDPA, and a SwiGLU MLP, with rotary position information supplied by a multi-axis M-RoPE so the same block serves one-dimensional text, two-dimensional image, and three-dimensional video coordinates.
+Each block contains RMSNorm, QKV attention, and a SwiGLU MLP, with rotary position information supplied by a multi-axis M-RoPE so the same block serves one-dimensional text, two-dimensional image, and three-dimensional video coordinates.
 An __attention-pooled embedding__ is read from the encoder output for retrieval and cross-modal matching; the __reranker__ and __MLM__ heads read the per-byte encoder output directly.
 The subsections below trace it end to end.
 
@@ -245,17 +245,17 @@ Cross-node training would still need NCCL or NVSHMEM with IBGDA — UForm target
 ### Mixed Precision by Design
 
 __Training is BF16.__
-Weights and activations are BFloat16 throughout — the forward and backward GEMMs (FP32-accumulated on the tensor cores), RMSNorm, SDPA, SwiGLU, embedding lookups, and the loss kernels.
+Weights and activations are BFloat16 throughout — the forward and backward GEMMs (FP32-accumulated on the tensor cores), RMSNorm, attention, SwiGLU, embedding lookups, and the loss kernels.
 The optimizer is Adafactor, which carries no first moment: a BF16 master weight plus a Float32 factored second moment — one per-row and one per-col vector per matrix rather than a full variance.
 Most norm scales are the exception, keeping a Float32 master with a BF16 mirror: initialized at magnitude 1.0, their updates fall below the BF16 ULP of \~7.8e-3 and would round to zero in pure BF16.
 
 Float32 is not rare — it lives wherever values accumulate or reduce.
-Gradients accumulate in Float32 before being cast to BF16 for the optimizer step, and the Adafactor second moments, the SDPA softmax statistics and RMSNorm inverse-variances, the TCR and Lipschitz Gram matrices, and the sharded-loss partial-gradient slabs are all Float32.
+Gradients accumulate in Float32 before being cast to BF16 for the optimizer step, and the Adafactor second moments, the attention outputs and log-sum-exps, the RMSNorm inverse-variances, the TCR and Lipschitz Gram matrices, and the sharded-loss partial-gradient slabs are all Float32.
 The rule is simple: store and compute in BF16, accumulate and normalize in Float32.
 
 __Inference is BF16 or E4M3 (FP8), fixed per model at load time.__
 The compute mode is a single flag set at construction — `infer_bf16` or `infer_fp8`, not a per-layer toggle; an FP8 model keeps each weight's BF16 master alongside an E4M3 quantized copy used at runtime, while a BF16 model leaves the E4M3 copy empty.
-cuDNN runs the BF16 attention graphs, [NumKong](https://github.com/ashvardanian/NumKong) runs every matrix product — BF16 and E4M3 alike, against weights packed once per step — and [CUB](https://github.com/NVIDIA/cccl) supplies the device-wide scans and reductions inside the custom kernels.
+[NumKong](https://github.com/ashvardanian/NumKong) runs every matrix product and every attention, forward and backward — BF16 and E4M3 alike, against weights packed once per step — and [CUB](https://github.com/NVIDIA/cccl) supplies the device-wide scans and reductions inside the custom kernels.
 
 ### Optimizing via Adafactor (the Sole Optimizer)
 
@@ -372,13 +372,14 @@ Only VICReg's covariance kernels survive — repurposed as the effective-rank me
 
 ### Why attention pooling instead of mean pooling?
 
-Mean pooling is the uniform-attention special case of a cuDNN cross-SDPA attention pool, so attention pooling is strictly more expressive at no extra asymptotic cost.
+Mean pooling is the uniform-attention special case of an attention pool, so attention pooling is strictly more expressive at no extra asymptotic cost.
 The pool query is a single learned encoder-width vector, broadcast across the batch as $Q$ with sequence length one; the per-byte encoder outputs serve as $K$ and $V$.
-cuDNN's fused scale-softmax-matmul makes the expressive route as cheap as the mean, so there is one pool path and no toggle.
+NumKong's ragged attention makes the expressive route as cheap as the mean, so there is one pool path and no toggle.
 
-### Why no FlashAttention, xformers, or FA3?
+### Why no cuDNN, FlashAttention, xformers, or FA3?
 
-cuDNN on sm\_100 already calls a [FlashAttention](https://arxiv.org/abs/2205.14135)-style fused softmax-matmul for SDPA internally, so we get the same gates with far less external surface to maintain across driver and architecture bumps.
+[NumKong](https://github.com/ashvardanian/NumKong) already runs a [FlashAttention](https://arxiv.org/abs/2205.14135)-style ragged attention, forward and backward, on every GPU generation and on the CPU, with each segment and head summed in a fixed order.
+One kernel library behind the products and the attention keeps the external surface small across driver and architecture bumps.
 The banned-backends list in STYLE.md — ThunderKittens, FA3, CUTLASS, TransformerEngine — exists for this reason.
 
 ### Why hand-roll PTX instead of NCCL and NVSHMEM?

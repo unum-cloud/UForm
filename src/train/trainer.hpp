@@ -1,24 +1,18 @@
 /**
- *  @brief The composition of a training run: @ref mesh_t , the process-wide transport every trainer borrows, and
- *      @ref trainer_t , everything one run owns, driven one @ref trainer_t::step at a time from a
- *      @ref batch_source_t .
  *  @file src/train/trainer.hpp
  *  @author Ash Vardanian
  *  @date October 18, 2026
+ *  @brief A training run: @ref mesh_t , the transport every trainer of a process borrows, and
+ *      @ref trainer_t , what one run owns, stepped from a @ref batch_source_t .
  *
- *  @section trainer_ownership Who owns what
+ *  The mesh owns the bootstrapped topology and the InfiniBand domain joining the NVLink domains.
+ *  The trainer owns the multimem domain, sized by the sum of its consumers'
+ *  @c payload_scalars_needed() . Both are placed and never moved, since the colocated domain
+ *  borrows the topology.
  *
- *  Transport the whole process shares goes to the mesh: the bootstrapped topology and the InfiniBand domain joining
- *  the NVLink domains, so no consumer wires its own adapters. Transport sized by its consumers goes to the trainer:
- *  the multimem domain is made with the sum of its consumers' @c payload_scalars_needed() , which only the trainer
- *  knows. Both are built where they live and never moved, since the colocated domain borrows the topology and the
- *  towers borrow the sessions.
- *
- *  @section trainer_order Declaration order is the wire order
- *
- *  Every process constructs its collectives and issues its barriers in the same order — the colocated domain mints
- *  rendezvous ids in construction order, and the multimem flags count barriers. The trainer's members are declared
- *  in that order, so @ref trainer_t::make reads top to bottom and the teardown runs in reverse.
+ *  Every process builds its collectives and issues its barriers in one order, since rendezvous
+ *  IDs and multimem flags count them. The trainer declares its members in that order, so
+ *  @ref trainer_t::make reads top to bottom and teardown runs in reverse.
  */
 #pragma once
 
@@ -233,8 +227,8 @@ struct items_source_t final : batch_source_t {
     nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> pooled_ {};
 };
 
-/** Everything one run owns on this process's devices, in wire order. Placed and never moved: the towers borrow the
- *  sessions, the consumers borrow the domain. */
+/** Everything one run owns on this process's devices, in wire order, placed and never moved
+ *  because its consumers borrow the domain. */
 struct trainer_t {
 
     /** The run description every method reads — the single copy. */
@@ -254,9 +248,6 @@ struct trainer_t {
 
     /** One owning arena per GPU, visible to every local peer — the allocation budget its replica draws from. */
     per_gpu_array<gpu_arena_t> arenas {};
-
-    /** One fused-attention session per GPU, placed address-stable so the towers may point into it. */
-    per_gpu_array<cudnn_session_t> sessions {};
 
     /** The run's one telemetry ledger, its rows in the lead arena. */
     telemetry_ledger_t ledger {};

@@ -7,8 +7,7 @@
 # Every executable is copied together with its resolved shared-library closure — everything except the
 # glibc core, which must come from the running node's own loader. Paired with the executables' `$ORIGIN`
 # build RPATH, the tree runs from a shared filesystem on any node regardless of what that node has
-# installed natively (the gap that once meant "libcudnn.so.9: cannot open shared object file" on the one
-# node lacking the apt package). Unresolved dependencies fail the bundle loudly, naming each library.
+# installed natively. Unresolved dependencies fail the bundle loudly, naming each library.
 
 set(BUNDLE_EXECUTABLES)
 set(bundle_listing OFF)
