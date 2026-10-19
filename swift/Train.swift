@@ -363,9 +363,9 @@ public struct Schedule: Sendable {
     public var learningRate: Float
     /// The floor the cosine settles at; zero derives 1e-5.
     public var minLearningRate: Float
-    /// Steps from zero to the peak; zero derives 400.
+    /// Steps from zero to the peak; zero derives a tenth of `steps`, at most 400.
     public var warmupSteps: Int
-    /// Steps the run takes, which the cosine spans; zero is refused.
+    /// Steps the run takes across resumes, which the cosine spans; zero is refused.
     public var steps: Int
 
     public init(learningRate: Float = 0, minLearningRate: Float = 0, warmupSteps: Int = 0, steps: Int = 0) {

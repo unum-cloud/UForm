@@ -65,6 +65,9 @@ struct mesh_t {
     /** The InfiniBand adapters and collective ids every trainer's handles wire through. */
     colocated_domain_t colocated {};
 
+    /** Seconds any later wait for a peer lasts, from @ref mesh_options_t::timeout_seconds . */
+    f64_t timeout_seconds = 120.0;
+
     /**
      *  @brief Bootstrap @p placed from @p options over @p devices , this process's members.
      *
@@ -74,6 +77,28 @@ struct mesh_t {
      */
     [[nodiscard]] static expected_t make(mesh_t &placed, mesh_options_t const &options,
                                          std::span<i32_t const> devices) noexcept;
+};
+
+/** The rows a run's batch envelope holds per GPU, and the device measurements they were derived
+ *  from or, for configured rows, checked against. */
+struct envelope_t {
+
+    /** Rows per GPU, with as many segments. */
+    u32_t rows = 0;
+
+    /** The fewest bytes any of this process's devices had free before the run allocated. */
+    std::size_t free_bytes = 0;
+
+    /** The device footprint @c fixed_bytes+rows·row_bytes fitted through the two probe
+     *  envelopes. */
+    std::size_t fixed_bytes = 0, row_bytes = 0;
+
+    /** The headroom kept free: the footprint outside the arena the larger probe measured, again. */
+    std::size_t margin_bytes = 0;
+
+    /** Every arena's reservation: its measured high-water line one row past @ref rows , the row of
+     *  headroom the batch sources allocate their loaded batches from. */
+    std::size_t reserve_bytes = 0;
 };
 
 /** What one step reports without a readback. */
@@ -221,6 +246,9 @@ struct trainer_t {
     /** The device ordinals this process drives. */
     array<i32_t> devices {};
 
+    /** The measured envelope @ref config 's batch was sized from. */
+    envelope_t envelope {};
+
     /** One owning stream per GPU — the ordered chain a replica's whole step enqueues onto. */
     per_gpu_array<gpu_stream_t> streams {};
 
@@ -263,16 +291,29 @@ struct trainer_t {
     /** Optimizer steps taken, counted across resumes — the step a checkpoint records. */
     u32_t completed_steps = 0;
 
-    /** Build @p placed over @p mesh in wire order: per GPU a stream, an arena and a session, the ledger, the
-     *  replicas seeded identically, the domain, the world all-reduce, the optimizer and the contrastive loss, then
-     *  the replay graphs unless the config runs eagerly. */
-    [[nodiscard]] static expected_t make(trainer_t &placed, mesh_t &mesh, trainer_config_t const &config,
+    /**
+     *  @brief Build @p placed over @p mesh in wire order.
+     *
+     *  Per GPU a stream, an arena and a session, then the ledger, the replicas seeded identically,
+     *  the domain, the world all-reduce, the optimizer and the contrastive loss, then the replay
+     *  graphs unless the config runs eagerly.
+     *
+     *  The envelope is measured first: a trainer at one and at two rows per GPU takes one step
+     *  each, and every device's footprint and arena high-water mark are fitted linearly in rows.
+     *  Zero rows in @p requested take the most rows that leave the margin free on every device of
+     *  every process; configured rows are honoured or refused, never shrunk. The arenas reserve the
+     *  fitted high-water mark, see @ref envelope_t .
+     *  @retval status_t::bad_alloc_k The envelope does not fit, with the measured numbers.
+     */
+    [[nodiscard]] static expected_t make(trainer_t &placed, mesh_t &mesh, trainer_config_t const &requested,
                                          std::span<i32_t const> devices) noexcept;
 
     /**
-     *  @brief Load every replica from the checkpoint at @p path and continue from its saved step.
+     *  @brief Load every replica from the checkpoint at @p path and continue from its saved step,
+     *      with the optimizer's moments and masters and the contrastive temperatures it holds; the
+     *      state it misses restarts, the masters re-seeded from the loaded weights.
      *  @retval status_t::invalid_input_k A matrix the checkpoint misses.
-     *  @retval status_t::shape_unsupported_k A matrix of another shape.
+     *  @retval status_t::shape_unsupported_k A matrix or a state of another shape.
      */
     [[nodiscard]] expected_t resume(sz::string_view_t path) noexcept;
 
@@ -291,15 +332,12 @@ struct trainer_t {
      *  member. */
     [[nodiscard]] telemetry_t telemetry(optimizer_step_t optimizer_step) noexcept;
 
-    /** Write the lead replica to @p path with @ref completed_steps ; only host domain 0 writes. */
+    /** Write the lead replica to @p path with @ref completed_steps : the @c model. weights, the
+     *  @c optimizer. state and the @c contrastive. temperatures; only host domain 0 writes. */
     [[nodiscard]] expected_t save(sz::string_view_t path) noexcept;
 
     /** Wait until every replica's stream drains. */
     [[nodiscard]] expected_t synchronize() noexcept;
-
-    /** The training binary: bootstrap the mesh, make the trainer, step @c config.steps synthetic batches with
-     *  telemetry on cadence, and optionally checkpoint. Returns @c 0 on success, @c 1 on the first failure. */
-    [[nodiscard]] static int run(trainer_config_t const &config, mesh_options_t const &options) noexcept;
 };
 
 } // namespace unum::uform::train

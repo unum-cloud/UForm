@@ -215,7 +215,7 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
     if (count == 0) return result_t::fail(status_t::invalid_input_k, "an optimizer needs weights");
     adafactor_t optimizer;
     optimizer.config_ = config;
-    if (optimizer.states_.resize(count) != status_t::success_k)
+    if (optimizer.states_.resize(count) != status_t::success_k || optimizer.names_.resize(count) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "state table allocation failed ({})", count);
     std::size_t moment_scalars = 0, master_scalars = 0, gradient_scalars = 0;
     for (std::size_t index = 0; index != count; ++index) {
@@ -224,6 +224,8 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
         if (rows == 0 || cols == 0 || matrix.weights_grad.extent(0) != rows || matrix.weights_grad.extent(1) != cols)
             return result_t::fail(status_t::shape_unsupported_k, "weights {} [{}x{}] disagree with grads [{}x{}]",
                                   index, rows, cols, matrix.weights_grad.extent(0), matrix.weights_grad.extent(1));
+        if (sz::failed(optimizer.names_[index].assign(matrix.name.view())))
+            return result_t::fail(status_t::bad_alloc_k, "weight name copy failed: {}", matrix.name.view());
         adafactor_state_t &state = optimizer.states_[index];
         state.weights = matrix.weights;
         state.weights_grad = matrix.weights_grad;
@@ -253,6 +255,64 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
             if (expected_t seeded = seed_master_(state, optimizer.masters_, stream); !seeded)
                 return result_t::fail(std::move(seeded));
     return result_t {std::move(optimizer)};
+}
+
+expected_t adafactor_t::save(checkpoint_to_save_t &checkpoint, gpu_stream_t &stream) const noexcept {
+    array<f32_t> moments, masters;
+    if (moments.resize_uninitialized(moments_.numel()) != status_t::success_k ||
+        masters.resize_uninitialized(masters_.numel()) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "optimizer state staging failed");
+    expected_t staged = copy_device_to_host(moments_.view(), moments.span(), stream);
+    if (staged) staged = copy_device_to_host(masters_.view(), masters.span(), stream);
+    if (!staged) return staged;
+    if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
+        return cuda_failure(result, "optimizer state download failed");
+    for (std::size_t index = 0; index != states_.size(); ++index) {
+        adafactor_state_t const &state = states_[index];
+        auto insert = [&](char const *part, f32_t const *values, std::size_t count) noexcept {
+            sz::string_t name;
+            if (!format_into(name, "optimizer.{}.{}", names_[index].view(), part))
+                return expected_t::fail(status_t::bad_alloc_k, "optimizer state name format failed");
+            return checkpoint.insert(name.view(), f32r2_view_t {values, 1, count});
+        };
+        std::size_t const rows = state.weights.extent(0), cols = state.weights.extent(1);
+        expected_t inserted = insert("row_moments", moments.data() + state.row_moment_offset, rows);
+        if (inserted) inserted = insert("column_moments", moments.data() + state.column_moment_offset, cols);
+        if (inserted && rows == 1u) inserted = insert("master", masters.data() + state.master_offset, cols);
+        if (!inserted) return inserted;
+    }
+    return {};
+}
+
+expected_t adafactor_t::load(checkpoint_to_load_t const &checkpoint, gpu_stream_t &stream) noexcept {
+    for (std::size_t index = 0; index != states_.size(); ++index) {
+        adafactor_state_t const &state = states_[index];
+        // Upload the saved part into `destination`, or `restart` it when the file misses that part.
+        auto restore = [&](char const *part, f32r1_span_t destination, auto const &restart) noexcept {
+            sz::string_t name;
+            if (!format_into(name, "optimizer.{}.{}", names_[index].view(), part))
+                return expected_t::fail(status_t::bad_alloc_k, "optimizer state name format failed");
+            f32r2_view_t const saved = checkpoint.float32(name.view());
+            if (saved.empty()) return restart();
+            if (saved.extent(0) != 1u || saved.extent(1) != destination.extent(0))
+                return expected_t::fail(status_t::shape_unsupported_k, "{} holds [{},{}], the live state [1,{}]",
+                                        name.view(), saved.extent(0), saved.extent(1), destination.extent(0));
+            return copy_host_to_device(saved.flatten<1>(), destination, stream);
+        };
+        std::size_t const rows = state.weights.extent(0), cols = state.weights.extent(1);
+        f32r1_span_t const row_moments {moments_.data() + state.row_moment_offset, rows};
+        f32r1_span_t const column_moments {moments_.data() + state.column_moment_offset, cols};
+        f32r1_span_t const master {masters_.data() + state.master_offset, cols};
+        expected_t restored = restore("row_moments", row_moments,
+                                      [&]() noexcept { return zero_async(row_moments, stream); });
+        if (restored)
+            restored = restore("column_moments", column_moments,
+                               [&]() noexcept { return zero_async(column_moments, stream); });
+        if (restored && rows == 1u)
+            restored = restore("master", master, [&]() noexcept { return seed_master_(state, masters_, stream); });
+        if (!restored) return restored;
+    }
+    return {};
 }
 
 expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_view_t reduced_gradients) noexcept {
@@ -382,6 +442,9 @@ expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, 
     if (world_reduce_->identity()) {
         // Materialise the domain mean locally; the world IS the domain.
         staged = reduce_gradient_(*domain_, member, ranks_[rank].reduced.span(), window_.offset, world_scale, stream);
+        // Every peer reads this member's window in its reduce, so no member stages the next step
+        // until all have.
+        if (staged) staged = domain_->barrier(member, stream);
         if (staged) staged = ledger_->probe_signal(ranks_[rank].world_payload, ranks_[rank].reduced.view(), stream);
         if (staged) staged = ranks_[rank].state.step(learning_rate, stream, ranks_[rank].reduced.view());
         return staged;
@@ -395,6 +458,19 @@ expected_t distributed_adafactor_t::step(f32_t learning_rate, std::span<gpu_stre
         return expected_t::fail(status_t::invalid_input_k, "every rank needs its stream ({} ranks)", gpus);
     for (std::size_t rank = 0; rank != gpus; ++rank)
         if (expected_t staged = step(rank, learning_rate, streams[rank]); !staged) return staged;
+    return {};
+}
+
+expected_t distributed_adafactor_t::load(checkpoint_to_load_t const &checkpoint,
+                                         std::span<gpu_stream_t> streams) noexcept {
+    std::size_t const gpus = ranks_.size();
+    if (streams.size() != gpus)
+        return expected_t::fail(status_t::invalid_input_k, "every rank needs its stream ({} ranks)", gpus);
+    for (std::size_t rank = 0; rank != gpus; ++rank) {
+        switch_to_gpu_t gpu_scope {streams[rank]};
+        if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed ({})", rank);
+        if (expected_t loaded = ranks_[rank].state.load(checkpoint, streams[rank]); !loaded) return loaded;
+    }
     return {};
 }
 

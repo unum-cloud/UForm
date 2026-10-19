@@ -96,6 +96,9 @@ class array {
     [[nodiscard]] value_type &operator[](size_type index) noexcept { return data_[index]; }
     [[nodiscard]] value_type const &operator[](size_type index) const noexcept { return data_[index]; }
 
+    /** The whole live range as a writable `std::span`, the sibling of @ref view . */
+    [[nodiscard]] std::span<value_type> span() noexcept { return {data_, size_}; }
+
     /** The whole live range as a read-only `std::span` — the hand-off shape for bulk consumers. */
     [[nodiscard]] std::span<value_type const> view() const noexcept { return {data_, size_}; }
 

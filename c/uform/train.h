@@ -266,10 +266,10 @@ typedef struct uform_schedule_t {
     /** The floor the cosine settles at; zero derives 1e-5. */
     float min_learning_rate;
 
-    /** Steps from zero to the peak; zero derives 400. */
+    /** Steps from zero to the peak; zero derives a tenth of @c steps, at most 400. */
     size_t warmup_steps;
 
-    /** Steps the run takes, which the cosine spans; zero is refused. */
+    /** Steps the run takes across resumes, which the cosine spans; zero is refused. */
     size_t steps;
 } uform_schedule_t;
 

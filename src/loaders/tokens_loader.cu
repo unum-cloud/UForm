@@ -14,9 +14,7 @@
 
 using namespace unum::uform::core;
 using namespace unum::uform::loaders;
-
-/** Rank-2 token span — a batch's [rows, columns] token rectangle; its extents ARE the shape. */
-using tokens_matrix_span_t = nk::tensor_span<token_id_t, 2>;
+namespace ul = unum::uform::loaders;
 
 /** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row permutation
  *  stay decorrelated under one @c (seed, epoch, rank) . */
@@ -109,6 +107,27 @@ static __global__ void tokens_gather_kernel_(b8r1_view_t reservoir_payload, u64r
             static_cast<u8_t>(reservoir_payload[source_begin + column]));
 }
 
+expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, tokens_matrix_span_t tokens,
+                           u32r1_span_t segment_offsets, u32r1_span_t segment_lengths, modality_span_t segment_modality,
+                           gpu_stream_t &gpu_stream) noexcept {
+    if (elements.extent(0) > segment_lengths.extent(0) || segment_offsets.extent(0) != segment_lengths.extent(0) + 1u ||
+        segment_modality.extent(0) != segment_lengths.extent(0))
+        return expected_t::fail(status_t::shape_unsupported_k, "{} documents exceed a table of {} segments",
+                                elements.extent(0), segment_lengths.extent(0));
+    if (elements.empty()) return {};
+    switch_to_gpu_t gpu_scope {gpu_stream};
+    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
+    dim3 const one_block {1u, 1u, 1u};
+    expected_t packed = launch_kernel(&tokens_geometry_kernel_, one_block, one_block, gpu_stream, texts.offsets,
+                                      elements, segment_offsets, segment_lengths, segment_modality, tokens);
+    if (packed)
+        packed = launch_kernel(&tokens_gather_kernel_, dim3 {static_cast<u32_t>(elements.extent(0)), 1u, 1u},
+                               dim3 {kernel_block_size_default_k, 1u, 1u}, gpu_stream, texts.payload, texts.offsets,
+                               elements, u32r1_view_t {segment_offsets.data(), segment_offsets.extent(0)},
+                               u32r1_view_t {segment_lengths.data(), segment_lengths.extent(0)}, tokens);
+    return packed;
+}
+
 /** The format-agnostic pack: draw the whole fill's rows over @p reservoir_column on the GPU
  *  (a keyed permutation of @p pool_rows , without replacement) and pack @b every batch from it. Both
  *  the Parquet and JSONL loaders share this once they hold a decoded reservoir — only how the
@@ -135,31 +154,15 @@ static __global__ void tokens_gather_kernel_(b8r1_view_t reservoir_payload, u64r
         !drawn)
         return drawn;
 
-    u64r1_view_t const reservoir_offsets = reservoir_column.offsets;
-    b8r1_view_t const reservoir_payload = reservoir_column.payload;
-    dim3 const one_block {1u, 1u, 1u};
-    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
-    dim3 const document_grid {static_cast<u32_t>(documents), 1u, 1u};
-
     // Each batch packs its own document slice of the permutation; the rectangle carries its own shape.
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t &loaded = batches[batch];
-        if (documents > loaded.segment_lengths.extent(0))
-            return expected_t::fail(status_t::shape_unsupported_k, "{} documents exceed batch {}'s segment capacity",
-                                    documents, batch);
         u64r1_view_t const batch_records {record_indices.data() + batch * documents, documents};
-        u32r1_span_t const segment_offsets = loaded.segment_offsets.span();
-        u32r1_span_t const segment_lengths = loaded.segment_lengths.span();
-        modality_span_t const segment_modality = loaded.segment_modality.span();
-        tokens_matrix_span_t const tokens = loaded.tokens.span();
-        expected_t staged = launch_kernel(&tokens_geometry_kernel_, one_block, one_block, gpu_stream, reservoir_offsets,
-                                          batch_records, segment_offsets, segment_lengths, segment_modality, tokens);
-        if (staged)
-            staged = launch_kernel(&tokens_gather_kernel_, document_grid, block_shape, gpu_stream, reservoir_payload,
-                                   reservoir_offsets, batch_records,
-                                   u32r1_view_t {segment_offsets.data(), segment_offsets.extent(0)},
-                                   u32r1_view_t {segment_lengths.data(), segment_lengths.extent(0)}, tokens);
-        if (!staged) return staged;
+        if (expected_t packed = pack_tokens(reservoir_column, batch_records, loaded.tokens.span(),
+                                            loaded.segment_offsets.span(), loaded.segment_lengths.span(),
+                                            loaded.segment_modality.span(), gpu_stream);
+            !packed)
+            return packed;
     }
     return {};
 }

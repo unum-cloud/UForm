@@ -1,32 +1,150 @@
 /**
- *  @brief The Base training binary — a thin @c main over the training library in @c src/train/trainer.hpp .
  *  @file tools/base.cu
  *  @author Ash Vardanian
  *  @date July 6, 2026
+ *  @brief The Base training binary — a thin @c main over the training library in
+ *      @c src/train/trainer.hpp .
  *
- *  It parses the command line into a @ref trainer_config_t , maps the launcher's environment onto the mesh options,
- *  and hands the whole run to @ref trainer_t::run , which owns the mesh, the trainer, the steady loop over synthetic
- *  batches, and the checkpoint.
+ *  It parses the command line into a @ref trainer_config_t , maps the launcher's environment onto
+ *  the mesh options, bootstraps the mesh, makes the trainer and its batch source, and steps until
+ *  @c config.steps with telemetry and checkpoints on cadence.
  *
- *  The same library backs @c test/base.cu 's conformance test and the C verbs, so the driver lives in one place.
- *
- *  The modality mixture is the batch envelope itself: @c --mixture @c tokens (the default) trains the byte
- *  token head alone — span-masked byte pretraining, the "Uniform Byte Models" root the Reranker and Embedder
- *  warm-start from — and @c --mixture @c omni adds the raw-media masked-autoencoder heads (image /
- *  video patches, 1-D audio frames) over one heterogeneous batch. @c --eager drops the model-region capture.
+ *  The batch source is the mixture: @c --mixture @c tokens (the default) trains the byte token head
+ *  alone on the synthetic draw — span-masked byte pretraining, the "Uniform Byte Models" root the
+ *  Reranker and Embedder warm-start from — and @c --mixture @c omni adds the raw-media
+ *  masked-autoencoder heads (image / video patches, 1-D audio frames) over one heterogeneous batch.
+ *  A @c --mixture path to a mixture JSON in @c scripts/data trains on its datasets instead,
+ *  lighting the media slices its entries name. @c --eager drops the model-region capture.
  */
 #include <cstdlib> // `::setenv`, `std::getenv` — the launcher-contract boundary
 #include <cstring> // `std::strlen`
 
-#include "train/trainer.hpp"
+#include <unistd.h> // `::write`, `STDERR_FILENO`
 
+#include <cuda.h> // `cuInit`, `cuDeviceGetCount`
+
+#include "train/datasets.hpp" // `mixture_t`, `dataset_source_t`, and the trainer
+
+namespace ul = unum::uform::loaders;
 using namespace unum::uform::train;
+
+/** Tag @p message with the binary name, write it to standard error, and hand back main's failure
+ *  code. */
+[[nodiscard]] static int fail_out_(sz::string_view_t message) noexcept {
+    sz::string_t line;
+    if (format_into(line, "uform_base: {}\n", message)) ::write(STDERR_FILENO, line.data(), line.size());
+    return 1;
+}
+
+/** Step @p trainer from its completed steps to @c config.steps over @p source , with telemetry and
+ *  checkpoints on cadence and a checkpoint at the end. */
+[[nodiscard]] static int step_(trainer_t &trainer, trainer_config_t const &config, batch_source_t &source) noexcept {
+    auto checkpoint = [&]() noexcept {
+        expected_t saved = trainer.save(config.checkpoint);
+        sz::string_t line;
+        if (saved && format_into(line, "uform_base: checkpoint written to {} at step {}", config.checkpoint,
+                                 trainer.completed_steps))
+            report_line(line.view());
+        return saved;
+    };
+    step_report_t report;
+    for (u32_t ordinal = trainer.completed_steps; ordinal < config.steps; ++ordinal) {
+        if (expected_t stepped = trainer.step(source, optimizer_step_t {ordinal}, report); !stepped) {
+            sz::string_t line;
+            if (!format_into(line, "step {} failed: {}", ordinal, stepped.description_.view())) return 1;
+            return fail_out_(line.view());
+        }
+        u32_t const completed = ordinal + 1u;
+        if (config.report_every && completed % config.report_every == 0u)
+            trainer.telemetry(optimizer_step_t {ordinal}).report();
+        if (!config.checkpoint.empty() && config.checkpoint_every && completed % config.checkpoint_every == 0u &&
+            completed != config.steps)
+            if (expected_t saved = checkpoint(); !saved) return fail_out_(saved.description_.view());
+    }
+    if (!config.checkpoint.empty())
+        if (expected_t saved = checkpoint(); !saved) return fail_out_(saved.description_.view());
+    if (expected_t drained = trainer.synchronize(); !drained) return fail_out_(drained.description_.view());
+    {
+        switch_to_gpu_t gpu_scope {trainer.streams[0]};
+        if (expected_t reported = trainer.ledger.report(trainer.streams[0]); !reported)
+            report_line(reported.description_.view());
+    }
+    report_line("uform_base: done");
+    return 0;
+}
+
+/** Bootstrap the mesh over every visible device, make the trainer and the source @p mixture names,
+ *  and step. */
+[[nodiscard]] static int train_(trainer_config_t const &config, mesh_options_t const &options,
+                                mixture_t mixture) noexcept {
+    if (cuInit(0) != CUDA_SUCCESS) return fail_out_("cuInit failed");
+    int device_count = 0;
+    if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) return fail_out_("no CUDA devices");
+    array<i32_t> devices;
+    for (int device = 0; device != device_count; ++device)
+        if (devices.push_back(static_cast<i32_t>(device)) != status_t::success_k)
+            return fail_out_("device table allocation failed");
+
+    mesh_t mesh;
+    if (expected_t joined = mesh_t::make(mesh, options, devices.view()); !joined)
+        return fail_out_(joined.description_.view());
+    sz::string_t banner;
+    if (format_into(banner, "uform_base: tokens{}{}{} mixture, {} GPU(s), host_domain {} of {}",
+                    config.batch.contains(modality_t::image_k) ? "+image" : "",
+                    config.batch.contains(modality_t::video_k) ? "+video" : "",
+                    config.batch.contains(modality_t::audio_k) ? "+audio" : "", device_count, options.host_domain_index,
+                    options.host_domain_count))
+        report_line(banner.view());
+
+    trainer_t trainer;
+    if (expected_t built = trainer_t::make(trainer, mesh, config, devices.view()); !built)
+        return fail_out_(built.description_.view());
+    envelope_t const &envelope = trainer.envelope;
+    f64_t const mebibyte = 1024.0 * 1024.0;
+    banner.clear();
+    if (format_into(banner,
+                    "uform_base: {} rows of {} columns per GPU: {:.1f} MiB free, {:.1f} MiB fixed + {:.1f} MiB " //
+                    "per row, {:.1f} MiB margin, the arena reserves {:.1f} MiB",
+                    envelope.rows, config.batch.max_columns_per_row, envelope.free_bytes / mebibyte,
+                    envelope.fixed_bytes / mebibyte, envelope.row_bytes / mebibyte, envelope.margin_bytes / mebibyte,
+                    envelope.reserve_bytes / mebibyte))
+        report_line(banner.view());
+    if (!config.resume.empty()) {
+        if (expected_t resumed = trainer.resume(config.resume); !resumed) return fail_out_(resumed.description_.view());
+        sz::string_t line;
+        if (format_into(line, "uform_base: resumed from {} at step {}", config.resume, trainer.completed_steps))
+            report_line(line.view());
+    }
+    if (config.mixture.empty()) {
+        synthetic_source_t synthetic;
+        return step_(trainer, config, synthetic);
+    }
+    expected<ul::gpu_direct_storage_session_t> storage = ul::gpu_direct_storage_session_t::make();
+    if (!storage) return fail_out_(storage.description_.view());
+    dataset_source_t datasets;
+    if (expected_t made = dataset_source_t::make(datasets, trainer, *storage, std::move(mixture)); !made)
+        return fail_out_(made.description_.view());
+    return step_(trainer, config, datasets);
+}
 
 int main(int argc, char **argv) {
     // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins (see the mixer
     // and base conformance suites); eager loading before `cuInit` front-loads every module.
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
-    trainer_config_t config = trainer_config_t::parse(argc, argv);
+    expected<trainer_config_t> parsed = trainer_config_t::parse(argc, argv);
+    if (!parsed) return fail_out_(parsed.description_.view());
+    trainer_config_t config = std::move(parsed.value_);
+    mixture_t mixture;
+    if (!config.mixture.empty()) {
+        expected<mixture_t> read = mixture_t::read(config.mixture);
+        if (!read) return fail_out_(read.description_.view());
+        mixture = std::move(read.value_);
+        config.batch = mixture.shape(config.batch);
+        sz::string_t line;
+        if (format_into(line, "uform_base: mixture {} of {} datasets from {}", mixture.name.view(),
+                        mixture.datasets.size(), config.mixture))
+            report_line(line.view());
+    }
     // The library never reads the environment, so the launcher contract maps onto the config and the mesh here:
     // UFORM_DEBUG_ASSERTS arms the gradient-boundary signal probes, the rest place this process in the run.
     if (std::getenv("UFORM_DEBUG_ASSERTS") != nullptr) config.telemetry_channels |= telemetry_signals_k;
@@ -39,5 +157,5 @@ int main(int argc, char **argv) {
         options.directory = sz::string_view_t {directory, std::strlen(directory)};
     if (char const *job = std::getenv("UFORM_JOB_ID"); job != nullptr)
         options.job = sz::string_view_t {job, std::strlen(job)};
-    return trainer_t::run(config, options);
+    return train_(config, options, std::move(mixture));
 }

@@ -489,9 +489,9 @@ pub struct Schedule {
     pub learning_rate: f32,
     /// The floor the cosine settles at; zero derives 1e-5.
     pub min_learning_rate: f32,
-    /// Steps from zero to the peak; zero derives 400.
+    /// Steps from zero to the peak; zero derives a tenth of `steps`, at most 400.
     pub warmup_steps: usize,
-    /// Steps the run takes, which the cosine spans; zero is refused.
+    /// Steps the run takes across resumes, which the cosine spans; zero is refused.
     pub steps: usize,
 }
 

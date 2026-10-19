@@ -93,9 +93,11 @@ struct contrastive_config_t {
  *  present whenever the objective reconstructs. */
 struct trainer_config_t {
 
-    /** The batch envelope — the aggregate row / segment / column budgets plus each modality's own shape
-     *  slice; a zero slice keeps that modality's tensors, tower entry, and head out of the composition. */
-    multimodal_batch_shape_t batch {4, 4, 256};
+    /** The batch envelope — the aggregate row / segment / column budgets plus each modality's own
+     *  shape slice; a zero slice keeps that modality's tensors, tower entry, and head out of the
+     *  composition. Zero rows derive the rows and segments per GPU from a measuring pass at the
+     *  configured columns; given rows are honoured as they are. */
+    multimodal_batch_shape_t batch {0, 0, 256};
 
     /** Transformer blocks stacked. */
     u32_t depth = 12;
@@ -103,7 +105,8 @@ struct trainer_config_t {
     /** Embedding width — a multiple of the block's head dimension. */
     u32_t hidden = 512;
 
-    /** Optimizer steps to run. */
+    /** The run's length in optimizer steps, counted across resumes; the cosine spans all of
+     *  them. */
     u32_t steps = 100;
 
     /** The peak Adafactor learning rate the warmup ramps to and the cosine decays from. */
@@ -112,8 +115,9 @@ struct trainer_config_t {
     /** The cosine-decay floor the learning rate settles at over the run's tail. */
     f32_t min_learning_rate = 1.0e-5f;
 
-    /** Linear warmup steps from zero to @ref learning_rate before the cosine decay begins. */
-    u32_t warmup_steps = 400;
+    /** Linear warmup steps from zero to @ref learning_rate before the cosine decay begins; zero
+     *  derives a tenth of @ref steps , at most 400. */
+    u32_t warmup_steps = 0;
 
     /** Which losses a step relaxes. */
     objective_t objective = objective_t::masked_k;
@@ -158,6 +162,12 @@ struct trainer_config_t {
     /** Checkpoint path; empty writes none. Borrows the argv storage it was parsed from. */
     sz::string_view_t checkpoint {};
 
+    /** Steps between checkpoints, beside the one at the run's end; zero writes only that one. */
+    u32_t checkpoint_every = 0;
+
+    /** Steps between telemetry lines. */
+    u32_t report_every = 10;
+
     /** Warm-start path; empty starts from the keyed seed. Every replica loads the same file and the run
      *  continues from the file's saved step. Borrows the storage it was parsed from. */
     sz::string_view_t resume {};
@@ -167,14 +177,28 @@ struct trainer_config_t {
      *  also arm channels from its launcher contract; the library itself never reads environment. */
     u32_t telemetry_channels = telemetry_losses_k | telemetry_rounds_k;
 
-    /** Fold the @c --flag value pairs into a config; unknown flags keep their default. The
-     *  @c --mixture @c tokens|omni preset fills the media slices of @ref batch (omni: 8-pixel RGB image
-     *  patches, 2-frame video tubes, 256-sample audio frames); every other flag adjusts one knob. */
-    [[nodiscard]] static trainer_config_t parse(int argc, char **argv) noexcept;
+    /** The mixture JSON the run loads its data from; empty trains on the synthetic draw. Borrows
+     *  the storage it was parsed from. */
+    sz::string_view_t mixture {};
+
+    /** The NVDEC engines a GPU carries, which no query reports; a mixture with video needs it. */
+    u32_t nvdec_engines = 0;
+
+    /**
+     *  @brief Fold the @c --flag value pairs into a config, each flag adjusting one knob.
+     *
+     *  @c --mixture takes a @c .json path, or the synthetic @c tokens|omni preset, where omni fills
+     *  the media slices of @ref batch with 8-pixel RGB image patches, 2-frame video tubes and
+     *  256-sample audio frames.
+     *  @retval status_t::invalid_input_k An unknown flag, a flag without its value, or a value it
+     *      does not take.
+     */
+    [[nodiscard]] static expected<trainer_config_t> parse(int argc, char **argv) noexcept;
 
     /** Step @p optimizer_step 's scheduled learning rate: the linear warmup to @ref learning_rate over
-     *  @ref warmup_steps , then the cosine decay to @ref min_learning_rate over the run's remainder. Host
-     *  math, bitwise-stable across runs — replicas step in lockstep on it. */
+     *  @ref warmup_steps , then the cosine decay to @ref min_learning_rate over the rest of
+     *  @ref steps . The ordinal is absolute, so a resumed run continues the same curve. Host math,
+     *  bitwise-stable across runs — replicas step in lockstep on it. */
     [[nodiscard]] f32_t learning_rate_for(optimizer_step_t optimizer_step) const noexcept;
 
     /** Whether the objective reconstructs masked inputs. */
@@ -298,8 +322,9 @@ struct base_replica_t {
 [[nodiscard]] expected_t load_weights(checkpoint_to_load_t const &checkpoint,
                                       array<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept;
 
-/** Snapshot @p weights to @p path with @p steps and the geometry a reader rebuilds the tower from. */
-[[nodiscard]] expected_t save_weights(sz::string_view_t path, trainer_config_t const &config,
+/** Snapshot @p weights into @p checkpoint as @c model.* , with @p steps and the geometry a reader
+ *  rebuilds the tower from. */
+[[nodiscard]] expected_t save_weights(checkpoint_to_save_t &checkpoint, trainer_config_t const &config,
                                       array<differentiable_weights_t> const &weights, u32_t steps,
                                       gpu_stream_t &stream) noexcept;
 

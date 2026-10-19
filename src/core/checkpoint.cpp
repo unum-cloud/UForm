@@ -5,7 +5,8 @@
  *  @author Ash Vardanian
  *  @date July 3, 2026
  */
-#include <cstring> // `std::memcpy` — the length prefix and the header bytes
+#include <cstdio>  // `std::rename` — the written file replaces the previous checkpoint at once
+#include <cstring> // `std::memcpy` — the length prefix, the header and the tensor bytes
 
 #include <unistd.h>   // `pwrite`, `close`
 #include <fcntl.h>    // `open`
@@ -21,6 +22,16 @@
 
 namespace uc = unum::uform::core;
 using namespace uc;
+
+/** Bytes one scalar of @p dtype occupies. */
+[[nodiscard]] static std::size_t scalar_bytes_(checkpoint_dtype_t dtype) noexcept {
+    return dtype == checkpoint_dtype_t::f32_k ? sizeof(f32_t) : sizeof(nk_bf16_t);
+}
+
+/** The safetensors spelling of @p dtype . */
+[[nodiscard]] static char const *dtype_name_(checkpoint_dtype_t dtype) noexcept {
+    return dtype == checkpoint_dtype_t::f32_k ? "F32" : "BF16";
+}
 
 /** A move-only owning wrapper over a POSIX file descriptor. */
 struct checkpoint_file_t {
@@ -42,7 +53,7 @@ struct checkpoint_file_t {
     /** Open @p path with the POSIX @p flags , creating it @c 0644 when they ask to. */
     [[nodiscard]] static expected<checkpoint_file_t> make(sz::string_view_t path, int flags) noexcept {
         sz::string_t path_text; // `open` needs a NUL-terminated `c_str`; short paths stay inline
-        if (sz::failed(path_text.assign({path.data(), path.size()})))
+        if (sz::failed(path_text.assign(path)))
             return expected<checkpoint_file_t>::fail(status_t::bad_alloc_k, "path staging failed");
         checkpoint_file_t file;
         file.descriptor_ = ::open(path_text.c_str(), flags, 0644);
@@ -101,13 +112,13 @@ struct checkpoint_file_t {
     std::size_t data_cursor = 0;
     for (std::size_t index = 0; built && index != entries.size(); ++index) {
         checkpoint_entry_t const &entry = entries[index];
-        std::size_t const bytes = entry.rows * entry.cols * sizeof(nk_bf16_t);
+        std::size_t const bytes = entry.rows * entry.cols * scalar_bytes_(entry.dtype);
         yyjson_mut_val *key = yyjson_mut_strn(document, entry.name.data(), entry.name.size());
         yyjson_mut_val *tensor = yyjson_mut_obj(document);
         yyjson_mut_val *shape = yyjson_mut_arr(document);
         yyjson_mut_val *offsets = yyjson_mut_arr(document);
         built = key != nullptr && tensor != nullptr && shape != nullptr && offsets != nullptr &&
-                yyjson_mut_obj_add_str(document, tensor, "dtype", "BF16") &&
+                yyjson_mut_obj_add_str(document, tensor, "dtype", dtype_name_(entry.dtype)) &&
                 yyjson_mut_arr_add_uint(document, shape, entry.rows) &&
                 yyjson_mut_arr_add_uint(document, shape, entry.cols) &&
                 yyjson_mut_obj_add_val(document, tensor, "shape", shape) &&
@@ -125,15 +136,14 @@ struct checkpoint_file_t {
 
 /** Copy @p text into an owned string. */
 [[nodiscard]] static expected_t own_text_(sz::string_t &owned, sz::string_view_t text) noexcept {
-    if (sz::failed(owned.assign({text.data(), text.size()})))
-        return expected_t::fail(status_t::bad_alloc_k, "text staging failed: {}", text);
+    if (sz::failed(owned.assign(text))) return expected_t::fail(status_t::bad_alloc_k, "text staging failed: {}", text);
     return {};
 }
 
-/** The mirror of @ref write_header_ : parse the @p header text inside @p pool , index every BF16 record into
- *  @p entries — shapes tolerated as rank-1 @c [cols] or rank-2 @c [rows,cols] , offsets validated against
- *  @p payload_bytes — and every string metadata pair into @p pairs . Records of other dtypes are skipped: this
- *  cell stores BFloat16 only, and a lookup treats them exactly like absent names. */
+/** The mirror of @ref write_header_ : parse the @p header text inside @p pool , index every BF16
+ *  and F32 record into @p entries — shapes tolerated as rank-1 @c [cols] or rank-2 @c [rows,cols] ,
+ *  offsets validated against @p payload_bytes — and every string metadata pair into @p pairs .
+ *  Records of other dtypes are skipped, and a lookup treats them exactly like absent names. */
 [[nodiscard]] static expected_t read_header_(std::span<char> header, yyjson_alc *pool, u64_t payload_bytes,
                                              array<checkpoint_entry_t> &entries,
                                              array<checkpoint_metadata_t> &pairs) noexcept {
@@ -169,7 +179,11 @@ struct checkpoint_file_t {
         yyjson_val *dtype = yyjson_obj_get(value, "dtype");
         char const *dtype_chars = yyjson_get_str(dtype);
         if (dtype_chars == nullptr) return expected_t::fail(status_t::invalid_input_k, "{} misses its dtype", key_text);
-        if (sz::string_view_t {dtype_chars, yyjson_get_len(dtype)} != "BF16") continue;
+        sz::string_view_t const dtype_text {dtype_chars, yyjson_get_len(dtype)};
+        checkpoint_dtype_t scalar_type = checkpoint_dtype_t::bf16_k;
+        if (dtype_text == "F32") scalar_type = checkpoint_dtype_t::f32_k;
+        else if (dtype_text != "BF16") continue;
+        std::size_t const scalar_size = scalar_bytes_(scalar_type);
 
         yyjson_val *shape = yyjson_obj_get(value, "shape");
         std::size_t const rank = yyjson_arr_size(shape);
@@ -182,52 +196,69 @@ struct checkpoint_file_t {
         yyjson_val *offsets = yyjson_obj_get(value, "data_offsets");
         u64_t const begin = yyjson_get_uint(yyjson_arr_get(offsets, 0));
         u64_t const end = yyjson_get_uint(yyjson_arr_get(offsets, 1));
-        bool const in_bounds = begin <= end && end <= payload_bytes && begin % sizeof(nk_bf16_t) == 0;
-        if (!in_bounds || end - begin != rows * cols * sizeof(nk_bf16_t))
+        bool const in_bounds = begin <= end && end <= payload_bytes && begin % scalar_size == 0;
+        if (!in_bounds || end - begin != rows * cols * scalar_size)
             return expected_t::fail(status_t::invalid_input_k, "{} holds bytes [{}, {}), its shape [{},{}] disagrees",
                                     key_text, begin, end, rows, cols);
 
         checkpoint_entry_t entry;
         if (expected_t owned = own_text_(entry.name, key_text); !owned) return owned;
+        entry.dtype = scalar_type;
         entry.rows = static_cast<std::size_t>(rows); // In bounds of a mapped payload, so 32-bit wasm fits it too.
         entry.cols = static_cast<std::size_t>(cols);
-        entry.scalar_offset = static_cast<std::size_t>(begin / sizeof(nk_bf16_t));
+        entry.byte_offset = static_cast<std::size_t>(begin);
         if (entries.push_back(std::move(entry)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "entry table growth failed");
     }
     return {};
 }
 
-expected_t checkpoint_to_save_t::reserve(u64_t total_scalars, u64_t tensor_count) noexcept {
-    if (payload_.reserve(total_scalars) != status_t::success_k)
-        return expected_t::fail(status_t::bad_alloc_k, "payload reservation failed ({} scalars)", total_scalars);
+expected_t checkpoint_to_save_t::reserve(u64_t total_bytes, u64_t tensor_count) noexcept {
+    if (payload_.reserve(total_bytes) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "payload reservation failed ({} bytes)", total_bytes);
     if (entries_.reserve(tensor_count) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "entry table reservation failed ({} tensors)", tensor_count);
     return {};
 }
 
 expected_t checkpoint_to_save_t::insert(sz::string_view_t name, nk::tensor_view<nk_bf16_t, 2> data) noexcept {
-    if (name.empty() || data.empty())
-        return expected_t::fail(status_t::invalid_input_k, "an entry needs a name and data");
     if (data.stride_bytes(1) != sizeof(nk_bf16_t) ||
         data.stride_bytes(0) != static_cast<std::ptrdiff_t>(data.extent(1) * sizeof(nk_bf16_t)))
         return expected_t::fail(status_t::shape_unsupported_k, "{} must be contiguous", name);
+    return insert_(name, checkpoint_dtype_t::bf16_k, data.data(), data.extent(0), data.extent(1));
+}
+
+expected_t checkpoint_to_save_t::insert(sz::string_view_t name, nk::tensor_view<f32_t, 2> data) noexcept {
+    if (data.stride_bytes(1) != sizeof(f32_t) ||
+        data.stride_bytes(0) != static_cast<std::ptrdiff_t>(data.extent(1) * sizeof(f32_t)))
+        return expected_t::fail(status_t::shape_unsupported_k, "{} must be contiguous", name);
+    return insert_(name, checkpoint_dtype_t::f32_k, data.data(), data.extent(0), data.extent(1));
+}
+
+expected_t checkpoint_to_save_t::insert_(sz::string_view_t name, checkpoint_dtype_t dtype, void const *data,
+                                         std::size_t rows, std::size_t cols) noexcept {
+    if (name.empty() || rows * cols == 0)
+        return expected_t::fail(status_t::invalid_input_k, "an entry needs a name and data");
+    std::size_t const scalar_size = scalar_bytes_(dtype);
+    if (payload_.size() % scalar_size != 0)
+        return expected_t::fail(status_t::invalid_input_k, "{} would start at byte {}, unaligned for {}", name,
+                                payload_.size(), dtype_name_(dtype));
     for (checkpoint_entry_t const &existing : entries_)
         if (existing.name.view() == name)
             return expected_t::fail(status_t::invalid_input_k, "duplicate entry: {}", name);
 
     checkpoint_entry_t entry;
     if (expected_t owned = own_text_(entry.name, name); !owned) return owned;
-    entry.rows = data.extent(0);
-    entry.cols = data.extent(1);
-    entry.scalar_offset = payload_.size();
-    std::size_t const scalars = data.numel();
-    if (payload_.resize_uninitialized(entry.scalar_offset + scalars) != status_t::success_k)
-        return expected_t::fail(status_t::bad_alloc_k, "payload growth failed ({} scalars)",
-                                entry.scalar_offset + scalars);
-    std::memcpy(payload_.data() + entry.scalar_offset, data.data(), scalars * sizeof(nk_bf16_t));
+    entry.dtype = dtype;
+    entry.rows = rows;
+    entry.cols = cols;
+    entry.byte_offset = payload_.size();
+    std::size_t const bytes = rows * cols * scalar_size;
+    if (payload_.resize_uninitialized(entry.byte_offset + bytes) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "payload growth failed ({} bytes)", entry.byte_offset + bytes);
+    std::memcpy(payload_.data() + entry.byte_offset, data, bytes);
     if (entries_.push_back(std::move(entry)) != status_t::success_k) {
-        (void)payload_.resize(payload_.size() - scalars); // a shrink never fails
+        (void)payload_.resize(payload_.size() - bytes); // a shrink never fails
         return expected_t::fail(status_t::bad_alloc_k, "entry table growth failed");
     }
     return {};
@@ -272,17 +303,27 @@ expected_t checkpoint_to_save_t::save(sz::string_view_t path) noexcept {
     u64_t const header_length = divide_round_up(header.size(), 8) * 8;
     char const padding[8] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '};
 
-    expected<checkpoint_file_t> file = checkpoint_file_t::make(path, O_WRONLY | O_CREAT | O_TRUNC);
-    if (!file) return expected_t::fail(std::move(file));
-    expected_t written = write_at_(*file, 0, &header_length, sizeof(header_length));
-    if (written) written = write_at_(*file, sizeof(header_length), header.data(), header.size());
-    if (written && header_length != header.size())
-        written = write_at_(*file, sizeof(header_length) + header.size(), padding, header_length - header.size());
-    if (!written) return written;
+    sz::string_t final_path, partial_path;
+    if (sz::failed(final_path.assign(path)) || !format_into(partial_path, "{}.partial", path))
+        return expected_t::fail(status_t::bad_alloc_k, "path staging failed");
+    {
+        expected<checkpoint_file_t> file = checkpoint_file_t::make(partial_path.view(), O_WRONLY | O_CREAT | O_TRUNC);
+        if (!file) return expected_t::fail(std::move(file));
+        expected_t written = write_at_(*file, 0, &header_length, sizeof(header_length));
+        if (written) written = write_at_(*file, sizeof(header_length), header.data(), header.size());
+        if (written && header_length != header.size())
+            written = write_at_(*file, sizeof(header_length) + header.size(), padding, header_length - header.size());
 
-    // The payload is already contiguous in insertion order — one write moves all of it.
-    std::size_t const payload_base = sizeof(header_length) + header_length;
-    return write_at_(*file, payload_base, payload_.data(), payload_.size() * sizeof(nk_bf16_t));
+        // The payload is already contiguous in insertion order — one write moves all of it.
+        std::size_t const payload_base = sizeof(header_length) + header_length;
+        if (written) written = write_at_(*file, payload_base, payload_.data(), payload_.size());
+        if (written && ::fsync(file->get()) != 0)
+            written = expected_t::fail(status_t::io_error_k, "fsync failed: {}", partial_path.view());
+        if (!written) return written;
+    }
+    if (std::rename(partial_path.c_str(), final_path.c_str()) != 0)
+        return expected_t::fail(status_t::io_error_k, "renaming {} over {} failed", partial_path.view(), path);
+    return {};
 }
 
 void checkpoint_to_save_t::clear() noexcept {
@@ -360,16 +401,29 @@ expected<checkpoint_to_load_t> checkpoint_to_load_t::view(std::span<b8_t const> 
     std::span<char> const header {scratch.data(), static_cast<std::size_t>(header_length)};
     if (expected_t parsed = read_header_(header, &pool, payload_bytes, loaded.entries_, loaded.metadata_); !parsed)
         return loaded_t::fail(std::move(parsed));
-    loaded.payload_ = static_cast<nk_bf16_t const *>(
-        static_cast<void const *>(buffer.data() + sizeof(header_length) + header_length));
+    loaded.payload_ = buffer.data() + sizeof(header_length) + header_length;
     return loaded_t {std::move(loaded)};
 }
 
-nk::tensor_view<nk_bf16_t, 2> checkpoint_to_load_t::operator[](sz::string_view_t name) const noexcept {
+checkpoint_entry_t const *checkpoint_to_load_t::find_(sz::string_view_t name, checkpoint_dtype_t dtype) const noexcept {
     for (checkpoint_entry_t const &entry : entries_)
-        if (entry.name.view() == name)
-            return nk::tensor_view<nk_bf16_t, 2> {payload_ + entry.scalar_offset, entry.rows, entry.cols};
-    return {};
+        if (entry.name.view() == name) return entry.dtype == dtype ? &entry : nullptr;
+    return nullptr;
+}
+
+nk::tensor_view<nk_bf16_t, 2> checkpoint_to_load_t::operator[](sz::string_view_t name) const noexcept {
+    checkpoint_entry_t const *entry = find_(name, checkpoint_dtype_t::bf16_k);
+    if (entry == nullptr) return {};
+    return nk::tensor_view<nk_bf16_t, 2> {
+        static_cast<nk_bf16_t const *>(static_cast<void const *>(payload_ + entry->byte_offset)), entry->rows,
+        entry->cols};
+}
+
+nk::tensor_view<f32_t, 2> checkpoint_to_load_t::float32(sz::string_view_t name) const noexcept {
+    checkpoint_entry_t const *entry = find_(name, checkpoint_dtype_t::f32_k);
+    if (entry == nullptr) return {};
+    return nk::tensor_view<f32_t, 2> {
+        static_cast<f32_t const *>(static_cast<void const *>(payload_ + entry->byte_offset)), entry->rows, entry->cols};
 }
 
 sz::string_view_t checkpoint_to_load_t::metadata(sz::string_view_t key) const noexcept {

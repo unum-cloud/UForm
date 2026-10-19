@@ -440,7 +440,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
         entry.destination.channel[0] = rgb_base + entry.rgb_offset;
         entry.destination.pitch[0] = static_cast<std::size_t>(plan.decoded.width) * rgb_channels_k;
     }
-    if (expected_t decoded = jpeg.decode_jpeg_batch({entries.data(), entries.size()}, stream); !decoded) {
+    if (expected_t decoded = jpeg.decode_jpeg_batch(entries.view(), stream); !decoded) {
         // Route every JPEG to the CPU pool but keep its scaled `decoded` extent and `scale`, so the CPU
         // decode shrinks to fit the `decoded`-sized scratch region triage laid out for it.
         for (std::size_t index = 0; index != entries.size(); ++index)

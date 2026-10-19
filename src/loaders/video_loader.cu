@@ -905,7 +905,7 @@ struct engine_cursor_t {
         context.codec = decoded.codec;
         context.stream = drive.stream;
         engine.current = &context;
-        std::span<b8_t const> const bytes {decoded.annex_b.data(), decoded.annex_b.size()};
+        std::span<b8_t const> const bytes = decoded.annex_b.view();
         if (decoded.codec != video_codec_t::av1_k) return clip_feed_t {feed_state_::opened, bytes}; // chunk-fed
         CUvideoparser const parser = engine.entries[static_cast<std::size_t>(decoded.codec)].parser;
         if (feed_av1_temporal_units(engine.cuvid, parser, bytes) != CUDA_SUCCESS &&
@@ -1158,7 +1158,7 @@ expected_t ul::decode_videos(nvdec_session_t &nvdec, cpu_decode_pool_t &pool, co
     offsets[0] = 0;
     for (std::size_t index = 0; index != clips; ++index) {
         auto const blob = tape[drawn_rows[index]];
-        if (expected_t hopped = copy_device_to_host(b8r1_view_t {blob.data(), blob.size()},
+        if (expected_t hopped = copy_device_to_host(b8r1_view_t {blob},
                                                     b8r1_span_t {encoded.data() + cursor, blob.size()}, stream);
             !hopped)
             return hopped;

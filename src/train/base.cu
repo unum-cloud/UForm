@@ -25,12 +25,12 @@
  *  the run's remainder — the validated draft envelope's shape.
  */
 #include <cmath>   // `std::cos` — the cosine decay
-#include <cstdlib> // `std::atoi`
 #include <cstring> // `std::strlen`
 
 #include <unistd.h> // `::write`, `STDOUT_FILENO` — the host diagnostic channel
 
 #include <algorithm> // `std::max`, `std::min`
+#include <charconv>  // `std::from_chars` — the command line's numbers
 #include <limits>    // `std::numeric_limits` — the i16 coordinate ceiling
 #include <numbers>   // `std::numbers::pi_v` — the decay's half-period
 
@@ -188,10 +188,11 @@ expected_t ut::seed_weights(array<differentiable_weights_t> const &weights, gpu_
 }
 
 f32_t trainer_config_t::learning_rate_for(optimizer_step_t optimizer_step) const noexcept {
-    if (optimizer_step.ordinal < warmup_steps)
-        return learning_rate * static_cast<f32_t>(optimizer_step.ordinal + 1u) / static_cast<f32_t>(warmup_steps);
-    u32_t const decay_steps = steps > warmup_steps ? steps - warmup_steps : 1u;
-    f32_t const progress = static_cast<f32_t>(optimizer_step.ordinal - warmup_steps) / static_cast<f32_t>(decay_steps);
+    u32_t const warmup = warmup_steps ? warmup_steps : std::min(400u, steps / 10u);
+    if (optimizer_step.ordinal < warmup)
+        return learning_rate * static_cast<f32_t>(optimizer_step.ordinal + 1u) / static_cast<f32_t>(warmup);
+    u32_t const decay_steps = steps > warmup ? steps - warmup : 1u;
+    f32_t const progress = static_cast<f32_t>(optimizer_step.ordinal - warmup) / static_cast<f32_t>(decay_steps);
     f32_t const cosine = 0.5f * (1.0f + std::cos(std::numbers::pi_v<f32_t> * std::min(progress, 1.0f)));
     return min_learning_rate + (learning_rate - min_learning_rate) * cosine;
 }
@@ -307,19 +308,15 @@ expected_t ut::load_weights(checkpoint_to_load_t const &checkpoint, array<differ
     return {};
 }
 
-expected_t ut::save_weights(sz::string_view_t path, trainer_config_t const &config,
+expected_t ut::save_weights(checkpoint_to_save_t &checkpoint, trainer_config_t const &config,
                             array<differentiable_weights_t> const &weights, u32_t steps,
                             gpu_stream_t &stream) noexcept {
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
     std::span<differentiable_weights_t const> const list {weights.view().data(), weights.size()};
-    u64_t total_scalars = 0, largest_scalars = 0;
-    for (differentiable_weights_t const &matrix : list) {
-        total_scalars += matrix.weights.numel();
+    u64_t largest_scalars = 0;
+    for (differentiable_weights_t const &matrix : list)
         if (matrix.weights.numel() > largest_scalars) largest_scalars = matrix.weights.numel();
-    }
-    checkpoint_to_save_t checkpoint;
-    if (expected_t reserved = checkpoint.reserve(total_scalars, list.size()); !reserved) return reserved;
     array<nk_bf16_t> staging;
     if (staging.resize_uninitialized(largest_scalars) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "checkpoint staging failed ({} scalars)", largest_scalars);
@@ -368,13 +365,13 @@ expected_t ut::save_weights(sz::string_view_t path, trainer_config_t const &conf
         record("audio_chunk_samples", tower.audio_chunk_samples) &&
         record("audio_sample_rate", config.batch.audio.sample_rate);
     if (!recorded) return expected_t::fail(status_t::bad_alloc_k, "checkpoint metadata staging failed");
-    return checkpoint.save(path);
+    return {};
 }
 
-trainer_config_t trainer_config_t::parse(int argc, char **argv) noexcept {
+expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexcept {
+    using result_t = expected<trainer_config_t>;
     trainer_config_t config;
-    u32_t const count = static_cast<u32_t>(argc);
-    for (u32_t arg = 1; arg < count; ++arg) {
+    for (int arg = 1; arg < argc; ++arg) {
         sz::string_view_t const flag {argv[arg], std::strlen(argv[arg])};
         if (flag == "--eager") {
             config.capture = eager_k;
@@ -384,32 +381,57 @@ trainer_config_t trainer_config_t::parse(int argc, char **argv) noexcept {
             config.algo_pick = algo_pick_t::benchmarked_k;
             continue;
         }
-        if (arg + 1 >= count) break;
+        if (arg + 1 == argc) return result_t::fail(status_t::invalid_input_k, "{} takes a value", flag);
         ++arg;
         sz::string_view_t const value {argv[arg], std::strlen(argv[arg])};
-        if (flag == "--steps") config.steps = std::atoi(argv[arg]);
-        else if (flag == "--hidden") config.hidden = std::atoi(argv[arg]);
-        else if (flag == "--depth") config.depth = std::atoi(argv[arg]);
+        auto number = [&](auto &into) noexcept {
+            std::from_chars_result const read = std::from_chars(value.data(), value.data() + value.size(), into);
+            return read.ec == std::errc {} && read.ptr == value.data() + value.size();
+        };
+        bool taken = true;
+        if (flag == "--steps") taken = number(config.steps);
+        else if (flag == "--hidden") taken = number(config.hidden);
+        else if (flag == "--depth") taken = number(config.depth);
         else if (flag == "--rows") {
-            // One segment per row in the synthetic corpus, so the segment budget tracks the row budget.
-            config.batch.max_rows_per_gpu = std::atoi(argv[arg]);
+            // One segment per row, so the segment budget tracks the row budget.
+            taken = number(config.batch.max_rows_per_gpu);
             config.batch.max_segments_per_gpu = config.batch.max_rows_per_gpu;
         }
-        else if (flag == "--columns") config.batch.max_columns_per_row = std::atoi(argv[arg]);
-        else if (flag == "--mixture" && value == "omni") {
-            // The omni preset: 8-pixel RGB image patches, 2-frame RGB video tubes, 256-sample audio frames.
-            config.batch.image = image_batch_shape_t {8u, 3u};
-            config.batch.video = video_batch_shape_t {8u, 3u, 2u, 1u};
-            config.batch.audio = audio_batch_shape_t {256u, 16000u};
+        else if (flag == "--columns") taken = number(config.batch.max_columns_per_row);
+        else if (flag == "--learning-rate") taken = number(config.learning_rate) && config.learning_rate > 0.0f;
+        else if (flag == "--warmup-steps") taken = number(config.warmup_steps);
+        else if (flag == "--seed") taken = number(config.seed);
+        else if (flag == "--nvdec-engines") taken = number(config.nvdec_engines);
+        else if (flag == "--objective") {
+            if (value == "masked") config.objective = objective_t::masked_k;
+            else if (value == "contrastive") config.objective = objective_t::contrastive_k;
+            else if (value == "joint") config.objective = objective_t::joint_k;
+            else taken = false;
+        }
+        else if (flag == "--mixture") {
+            if (value.ends_with(".json")) config.mixture = value;
+            else if (value == "omni") {
+                // The omni preset: 8-pixel RGB image patches, 2-frame RGB video tubes, 256-sample
+                // audio frames.
+                config.batch.image = image_batch_shape_t {8u, 3u};
+                config.batch.video = video_batch_shape_t {8u, 3u, 2u, 1u};
+                config.batch.audio = audio_batch_shape_t {256u, 16000u};
+            }
+            else taken = value == "tokens";
         }
         else if (flag == "--checkpoint") config.checkpoint = value;
+        else if (flag == "--checkpoint-every") taken = number(config.checkpoint_every);
+        else if (flag == "--report-every") taken = number(config.report_every);
         else if (flag == "--resume") config.resume = value;
         else if (flag == "--telemetry") {
             if (value == "signals") config.telemetry_channels |= telemetry_signals_k;
             else if (value == "timings") config.telemetry_channels |= telemetry_timings_k;
+            else taken = false;
         }
+        else return result_t::fail(status_t::invalid_input_k, "unknown flag {}", flag);
+        if (!taken) return result_t::fail(status_t::invalid_input_k, "{} does not take {}", flag, value);
     }
-    return config;
+    return result_t {std::move(config)};
 }
 
 expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, cudnn_session_t &dnn, trainer_config_t const &config,

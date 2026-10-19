@@ -159,7 +159,7 @@ struct uform_trainer_handle_t {
 
     config.learning_rate = chosen(arguments.schedule.learning_rate, 5.0e-3f);
     config.min_learning_rate = chosen(arguments.schedule.min_learning_rate, 1.0e-5f);
-    config.warmup_steps = arguments.schedule.warmup_steps ? static_cast<u32_t>(arguments.schedule.warmup_steps) : 400u;
+    config.warmup_steps = static_cast<u32_t>(arguments.schedule.warmup_steps);
     config.steps = static_cast<u32_t>(arguments.schedule.steps);
     config.seed = arguments.seed;
     return nullptr;

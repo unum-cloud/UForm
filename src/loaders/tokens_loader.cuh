@@ -40,6 +40,30 @@
 
 namespace unum::uform::loaders {
 
+/** A batch's @b [rows,columns] token rectangle; its extents are the shape. */
+using tokens_matrix_span_t = nk::tensor_span<token_id_t, 2>;
+
+/**
+ *  @brief Pack @p elements of @p texts into @p tokens as one text segment each — the byte packing
+ *      every tokens loader shares, and the text half of a paired fill.
+ *
+ *  A serial cursor walks the segments from position zero of @p tokens , cutting each document at
+ *  the row width and never crossing a row; the segments past @p elements are PAD. Pure enqueue on
+ *  @p gpu_stream .
+ *
+ *  @param[in] texts A text column, its payload and offsets both on device.
+ *  @param[in] elements The device indices of the elements to pack, one per segment.
+ *  @param[out] tokens The rectangle the bytes land in, as token IDs.
+ *  @param[out] segment_offsets @b [segments+1] start positions in @p tokens , the cursor's end at
+ *      the back.
+ *  @param[out] segment_lengths @b [segments] the bytes each segment kept.
+ *  @param[out] segment_modality @b [segments] @c text_k throughout.
+ *  @param[inout] gpu_stream The stream the geometry and the gather run on.
+ */
+[[nodiscard]] expected_t pack_tokens(column_view_t texts, u64r1_view_t elements, tokens_matrix_span_t tokens,
+                                     u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
+                                     modality_span_t segment_modality, gpu_stream_t &gpu_stream) noexcept;
+
 /** The Parquet tokens loader's baked knobs — a different config is a different loader. */
 struct tokens_base_loader_parquet_config_t {
 

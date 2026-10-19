@@ -196,10 +196,11 @@ struct gpu_stream_t {
 /** Enqueue a host → device copy of a rank-1 view into a same-typed device span on @p stream — the
  *  typed spelling of @c cuMemcpyHtoDAsync , with the arguments in the order the name reads: host
  *  source, device destination. Extents and element sizes travel with the views, never as
- *  hand-multiplied @c sizeof operands. An empty @p host_source is a no-op; a source longer than the
- *  destination is a loud failure. */
+ *  hand-multiplied @c sizeof operands. The device side names the scalar type, so a host `std::span`
+ *  converts. An empty @p host_source is a no-op; a source longer than the destination is a loud
+ *  failure. */
 template <typename value_type_>
-[[nodiscard]] inline expected_t copy_host_to_device(nk::tensor_view<value_type_, 1> host_source,
+[[nodiscard]] inline expected_t copy_host_to_device(std::type_identity_t<nk::tensor_view<value_type_, 1>> host_source,
                                                     nk::tensor_span<value_type_, 1> device_destination,
                                                     gpu_stream_t &stream) noexcept {
     if (host_source.empty()) return {};
@@ -216,12 +217,13 @@ template <typename value_type_>
 
 /** The mirror of @ref copy_host_to_device : enqueue a device → host copy of a rank-1 view into a
  *  same-typed host span on @p stream — the typed spelling of @c cuMemcpyDtoHAsync , device source
- *  first, host destination second. An empty @p device_source is a no-op; a source longer than the
- *  destination is a loud failure. The host span must stay alive until the stream reaches the copy. */
+ *  first, host destination second, which converts from a `std::span` as the source names the type.
+ *  An empty @p device_source is a no-op; a source longer than the destination is a loud failure.
+ *  The host span must stay alive until the stream reaches the copy. */
 template <typename value_type_>
-[[nodiscard]] inline expected_t copy_device_to_host(nk::tensor_view<value_type_, 1> device_source,
-                                                    nk::tensor_span<value_type_, 1> host_destination,
-                                                    gpu_stream_t &stream) noexcept {
+[[nodiscard]] inline expected_t copy_device_to_host(
+    nk::tensor_view<value_type_, 1> device_source,
+    std::type_identity_t<nk::tensor_span<value_type_, 1>> host_destination, gpu_stream_t &stream) noexcept {
     if (device_source.empty()) return {};
     if (host_destination.extent(0) < device_source.extent(0))
         return expected_t::fail(status_t::invalid_input_k,

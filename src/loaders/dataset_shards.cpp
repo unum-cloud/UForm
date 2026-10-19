@@ -61,7 +61,7 @@ struct column_span_t {
 
 /** The @ref column_view_t over @p column 's leaf payload and its @b [elements+1] offsets. */
 [[nodiscard]] static column_view_t view_of_(column_span_t const &column) noexcept {
-    return {{column.payload.data(), column.payload.size()}, {column.offsets.data(), column.offsets.size()}};
+    return {column.payload, column.offsets};
 }
 
 /** What a decoded Parquet file owns and lends: the cuDF table (every column's payload + native

@@ -99,7 +99,7 @@ struct rope_angles_t {
                                                       f32_t base) noexcept;
 
     /** Every angle, the three grids back to back, for a copy into the memory a tower runs from. */
-    [[nodiscard]] std::span<f32_t const> scalars() const noexcept { return {angles_.data(), angles_.size()}; }
+    [[nodiscard]] std::span<f32_t const> scalars() const noexcept { return angles_.view(); }
 
     /** The three grids over @p copy , a copy of @ref scalars in any memory. */
     [[nodiscard]] rope_grids_t grids(f32_t const *copy) const noexcept {

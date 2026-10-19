@@ -79,9 +79,7 @@ struct fabricated_tape_t {
 
     /** The Arrow packed view a loader decodes: the device buffer with 64-bit host offsets, so
      *  @c tape[row] is a device slice computed on the host. */
-    [[nodiscard]] column_view_t view() const noexcept {
-        return column_view_t {device_bytes.view(), {offsets.data(), offsets.size()}};
-    }
+    [[nodiscard]] column_view_t view() const noexcept { return column_view_t {device_bytes.view(), offsets.view()}; }
 
     /**
      *  @brief Pack @p blobs into a fresh device tape on @p arena , staging the host accumulator through
@@ -112,8 +110,7 @@ struct fabricated_tape_t {
         if (!tape.device_bytes) return result_t::fail(status_t::bad_alloc_k, "tape device buffer alloc failed");
         if (CUresult reset = cuMemsetD8(device_address(tape.device_bytes.data()), 0, total); reset != CUDA_SUCCESS)
             return cuda_failure<fabricated_tape_t>(reset, "tape device buffer reset failed");
-        nk::tensor_view<b8_t, 1> const host_view {host.data(), host.size()};
-        if (expected_t staged = copy_host_to_device(host_view, tape.device_bytes.span(), stream); !staged)
+        if (expected_t staged = copy_host_to_device(host.view(), tape.device_bytes.span(), stream); !staged)
             return result_t::fail(std::move(staged));
         if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
             return cuda_failure<fabricated_tape_t>(synced, "tape staging sync failed");

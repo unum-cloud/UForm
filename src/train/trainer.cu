@@ -14,12 +14,11 @@
  *  resolved, and each device's relations are rebuilt over the vertices it holds, their ids rebased onto the
  *  vertices the referenced items landed on.
  */
-#include <unistd.h> // `::write`, `STDERR_FILENO`
-
 #include <algorithm> // `std::max`, `std::min`, `std::sort`
+#include <charconv>  // `std::from_chars` — the rows peers measured
 #include <limits>    // `std::numeric_limits`
 
-#include <cuda.h> // `cuInit`, `cuDeviceGetCount`, `cuStreamSynchronize`
+#include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
 #include "media/audio.hpp"    // `decode_audio`
 #include "media/image.hpp"    // `plan_image`, `decode_image`, `image_channels_k`
@@ -48,13 +47,6 @@ struct summand_pair_t {
     if (!copy_device_to_host(summands.view(), staging.span(), stream)) return {};
     cuStreamSynchronize(stream.get());
     return summand_pair_t {static_cast<f64_t>(staging[0]), static_cast<f64_t>(staging[1])};
-}
-
-/** Tag @p message with the binary name, write it to standard error, and hand back main's failure code. */
-[[nodiscard]] static int fail_out_(sz::string_view_t message) noexcept {
-    sz::string_t line;
-    if (format_into(line, "uform_base: {}\n", message)) ::write(STDERR_FILENO, line.data(), line.size());
-    return 1;
 }
 
 #pragma region Mesh
@@ -90,15 +82,30 @@ expected_t mesh_t::make(mesh_t &placed, mesh_options_t const &options, std::span
     expected<colocated_domain_t> colocated = colocated_domain_t::make(placed.topology);
     if (!colocated) return expected_t::fail(std::move(colocated));
     placed.colocated = std::move(colocated.value_);
+    placed.timeout_seconds = options.timeout_seconds;
     return {};
 }
 
 #pragma endregion Mesh
 
-#pragma region Trainer
+#pragma region Envelope
 
-expected_t trainer_t::make(trainer_t &placed, mesh_t &mesh, trainer_config_t const &config,
-                           std::span<i32_t const> devices) noexcept {
+/** The two envelopes the measuring pass fits through, in rows per GPU: small enough that any model
+ *  that trains at all can be measured, and far enough apart that the driver's allocation
+ *  granularity can't flatten the slope. */
+static constexpr u32_t smaller_probe_rows_k = 1u, larger_probe_rows_k = 4u;
+
+/** One device's footprint after a probe step: the bytes the driver handed out since the run began,
+ *  and the arena's share of them. */
+struct footprint_t {
+    std::size_t device_bytes = 0, arena_bytes = 0;
+};
+
+/** Bind @p placed to @p mesh , @p config and @p devices , make one stream per device, and record
+ *  what each device has free into @p free_bytes — the part of @ref trainer_t::make before the
+ *  envelope is known. */
+[[nodiscard]] static expected_t prepare_(trainer_t &placed, mesh_t &mesh, trainer_config_t const &config,
+                                         std::span<i32_t const> devices, std::span<std::size_t> free_bytes) noexcept {
     mesh_topology_t const &topology = mesh.topology;
     u32_t const gpus = static_cast<u32_t>(devices.size());
     if (gpus == 0 || gpus != topology.shape.gpus_per_host_domain)
@@ -108,7 +115,6 @@ expected_t trainer_t::make(trainer_t &placed, mesh_t &mesh, trainer_config_t con
     placed.mesh = &mesh;
     if (placed.devices.assign(devices) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "device table allocation failed");
-
     for (u32_t member = 0; member != gpus; ++member) {
         expected<gpu_stream_t> stream = gpu_stream_t::make(devices[member]);
         if (!stream) return expected_t::fail(std::move(stream));
@@ -116,7 +122,160 @@ expected_t trainer_t::make(trainer_t &placed, mesh_t &mesh, trainer_config_t con
             return expected_t::fail(status_t::bad_alloc_k, "stream table full");
         switch_to_gpu_t gpu_scope {placed.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-        expected<gpu_arena_t> arena = gpu_arena_t::make(devices[member], 8ull << 30, placed.devices.view());
+        expected<gpu_memory_report_t> memory = gpu_memory_report(devices[member]);
+        if (!memory) return expected_t::fail(std::move(memory));
+        free_bytes[member] = memory->free_bytes;
+    }
+    placed.envelope.free_bytes = *std::min_element(free_bytes.begin(), free_bytes.end());
+    return {};
+}
+
+[[nodiscard]] static expected_t assemble_(trainer_t &placed, mesh_t &mesh, std::size_t reserve_bytes) noexcept;
+
+/** Build a trainer over @p config at @p rows rows and segments per GPU, its arenas reserving all
+ *  the free memory, take one synthetic step, and read every device's footprint against
+ *  @p free_bytes , what it had free before the first probe. */
+[[nodiscard]] static expected_t probe_footprint_(mesh_t &mesh, trainer_config_t config, std::span<i32_t const> devices,
+                                                 u32_t rows, std::span<std::size_t const> free_bytes,
+                                                 std::span<footprint_t> footprints) noexcept {
+    config.batch.max_rows_per_gpu = rows;
+    config.batch.max_segments_per_gpu = rows;
+    trainer_t probe;
+    std::size_t probe_free_bytes[max_gpus_per_host_k] = {};
+    expected_t built = prepare_(probe, mesh, config, devices, {probe_free_bytes, devices.size()});
+    if (built) built = assemble_(probe, mesh, probe.envelope.free_bytes);
+    if (!built) return built;
+    synthetic_source_t source;
+    step_report_t report;
+    if (expected_t stepped = probe.step(source, optimizer_step_t {0}, report); !stepped) return stepped;
+    if (expected_t drained = probe.synchronize(); !drained) return drained;
+    for (std::size_t member = 0; member != devices.size(); ++member) {
+        switch_to_gpu_t gpu_scope {probe.streams[member]};
+        if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
+        expected<gpu_memory_report_t> memory = gpu_memory_report(devices[member]);
+        if (!memory) return expected_t::fail(std::move(memory));
+        footprints[member].device_bytes = free_bytes[member] - std::min(memory->free_bytes, free_bytes[member]);
+        footprints[member].arena_bytes = probe.arenas[member].used(); // exact, where mapped() moves whole chunks
+    }
+    return {};
+}
+
+/** Agree on the fewest @p rows any process measured: the lead collects every peer's count and
+ *  publishes the minimum, which every peer adopts. */
+[[nodiscard]] static expected<u32_t> agree_on_rows_(mesh_t const &mesh, u32_t rows) noexcept {
+    using result_t = expected<u32_t>;
+    mesh_topology_t const &topology = mesh.topology;
+    if (topology.host_domain_count() <= 1) return result_t {rows};
+    sz::string_t text;
+    auto parsed = [&](u32_t &value) noexcept {
+        return std::from_chars(text.data(), text.data() + text.size(), value).ec == std::errc {};
+    };
+    if (!topology.is_lead()) {
+        u32_t agreed = 0;
+        if (!format_into(text, "{}", rows)) return result_t::fail(status_t::bad_alloc_k, "rows formatting failed");
+        expected_t exchanged = topology.publish_text("envelope", text.view());
+        if (exchanged) exchanged = topology.await_text(0u, "envelope.agreed", text, mesh.timeout_seconds);
+        if (!exchanged) return result_t::fail(std::move(exchanged));
+        if (!parsed(agreed))
+            return result_t::fail(status_t::invalid_input_k, "the lead agreed on {} rows", text.view());
+        return result_t {agreed};
+    }
+    u32_t agreed = rows;
+    for (u32_t peer = 1; peer != topology.host_domain_count(); ++peer) {
+        u32_t peer_rows = 0;
+        if (expected_t awaited = topology.await_text(peer, "envelope", text, mesh.timeout_seconds); !awaited)
+            return result_t::fail(std::move(awaited));
+        if (!parsed(peer_rows))
+            return result_t::fail(status_t::invalid_input_k, "host domain {} measured {} rows", peer, text.view());
+        agreed = std::min(agreed, peer_rows);
+    }
+    text.clear();
+    if (!format_into(text, "{}", agreed)) return result_t::fail(status_t::bad_alloc_k, "rows formatting failed");
+    if (expected_t published = topology.publish_text("envelope.agreed", text.view()); !published)
+        return result_t::fail(std::move(published));
+    return result_t {agreed};
+}
+
+/**
+ *  @brief The rows per GPU at @p config 's columns — the configured ones, or the most every device
+ *      of every process holds — and the arena reservation they need.
+ *
+ *  Each device's footprint is fitted as @c fixed+rows·row through the two probes, and the margin is
+ *  the footprint outside the arena at the larger probe — cuDNN workspaces, graphs, the symmetric
+ *  heap — held free once more, as the part a larger envelope may grow other than linearly. The
+ *  arena's own high-water mark is fitted the same way, and the reservation is that line one row
+ *  past the envelope: the batch sources allocate their loaded batches from the arena after the
+ *  trainer, and one row of the trainer's own growth holds them.
+ *  @retval status_t::bad_alloc_k The configured rows do not fit, with the measured numbers.
+ */
+[[nodiscard]] static expected<envelope_t> measure_envelope_(mesh_t &mesh, trainer_config_t const &config,
+                                                            std::span<i32_t const> devices,
+                                                            std::span<std::size_t const> free_bytes) noexcept {
+    using result_t = expected<envelope_t>;
+    std::size_t const gpus = devices.size();
+    footprint_t smaller[max_gpus_per_host_k] = {}, larger[max_gpus_per_host_k] = {};
+    expected_t probed = probe_footprint_(mesh, config, devices, smaller_probe_rows_k, free_bytes, {smaller, gpus});
+    if (probed) probed = probe_footprint_(mesh, config, devices, larger_probe_rows_k, free_bytes, {larger, gpus});
+    if (!probed) return result_t::fail(std::move(probed));
+
+    u32_t const probe_span = larger_probe_rows_k - smaller_probe_rows_k;
+    u32_t const configured_rows = config.batch.max_rows_per_gpu;
+    u64_t const representable_rows = std::numeric_limits<u32_t>::max() / config.batch.max_columns_per_row;
+    envelope_t envelope; // the device holding the fewest rows decides
+    for (std::size_t member = 0; member != gpus; ++member) {
+        footprint_t const &low = smaller[member], &high = larger[member];
+        if (high.device_bytes <= low.device_bytes || high.arena_bytes < low.arena_bytes)
+            return result_t::fail(status_t::other_k, "device {} took {} bytes at {} rows and {} at {}", devices[member],
+                                  low.device_bytes, smaller_probe_rows_k, high.device_bytes, larger_probe_rows_k);
+        envelope_t measured;
+        measured.free_bytes = free_bytes[member];
+        measured.row_bytes = (high.device_bytes - low.device_bytes) / probe_span;
+        measured.fixed_bytes = low.device_bytes - std::min(low.device_bytes, measured.row_bytes * smaller_probe_rows_k);
+        measured.margin_bytes = high.device_bytes - std::min(high.device_bytes, high.arena_bytes);
+        std::size_t const kept_bytes = measured.fixed_bytes + measured.margin_bytes;
+        u64_t const fitting_rows = measured.free_bytes > kept_bytes
+                                       ? (measured.free_bytes - kept_bytes) / measured.row_bytes
+                                       : 0u;
+        measured.rows = configured_rows ? configured_rows
+                                        : static_cast<u32_t>(std::min(fitting_rows, representable_rows));
+        if (measured.rows == 0 || measured.rows > fitting_rows)
+            return result_t::fail(
+                status_t::bad_alloc_k,
+                "device {} holds {} rows, not {}: {} bytes fixed, {} per row and a {}-byte margin, " //
+                "{} free",
+                devices[member], fitting_rows, measured.rows, measured.fixed_bytes, measured.row_bytes,
+                measured.margin_bytes, measured.free_bytes);
+        if (member == 0 || measured.rows < envelope.rows) envelope = measured;
+    }
+    if (!configured_rows) {
+        expected<u32_t> agreed = agree_on_rows_(mesh, envelope.rows);
+        if (!agreed) return result_t::fail(std::move(agreed));
+        envelope.rows = *agreed;
+    }
+    for (std::size_t member = 0; member != gpus; ++member) {
+        std::size_t const arena_row_bytes = (larger[member].arena_bytes - smaller[member].arena_bytes) / probe_span;
+        std::size_t const arena_fixed_bytes = smaller[member].arena_bytes - arena_row_bytes * smaller_probe_rows_k;
+        envelope.reserve_bytes = std::max(envelope.reserve_bytes,
+                                          arena_fixed_bytes + arena_row_bytes * (std::size_t {envelope.rows} + 1u));
+    }
+    return result_t {envelope};
+}
+
+#pragma endregion Envelope
+
+#pragma region Trainer
+
+/** Everything @ref trainer_t::make builds after the streams and the envelope, over @p placed 's
+ *  sized config, each arena reserving @p reserve_bytes . */
+[[nodiscard]] static expected_t assemble_(trainer_t &placed, mesh_t &mesh, std::size_t reserve_bytes) noexcept {
+    trainer_config_t const &config = placed.config;
+    mesh_topology_t const &topology = mesh.topology;
+    std::span<i32_t const> const devices = placed.devices.view();
+    u32_t const gpus = static_cast<u32_t>(devices.size());
+    for (u32_t member = 0; member != gpus; ++member) {
+        switch_to_gpu_t gpu_scope {placed.streams[member]};
+        if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
+        expected<gpu_arena_t> arena = gpu_arena_t::make(devices[member], reserve_bytes, devices);
         if (!arena) return expected_t::fail(std::move(arena));
         if (placed.arenas.push_back(std::move(arena.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "arena table full");
@@ -244,6 +403,55 @@ expected_t trainer_t::make(trainer_t &placed, mesh_t &mesh, trainer_config_t con
     return {};
 }
 
+expected_t trainer_t::make(trainer_t &placed, mesh_t &mesh, trainer_config_t const &requested,
+                           std::span<i32_t const> devices) noexcept {
+    std::size_t free_bytes[max_gpus_per_host_k] = {};
+    if (expected_t prepared = prepare_(placed, mesh, requested, devices, {free_bytes, devices.size()}); !prepared)
+        return prepared;
+    expected<envelope_t> measured = measure_envelope_(mesh, requested, devices, {free_bytes, devices.size()});
+    if (!measured) return expected_t::fail(std::move(measured));
+    placed.envelope = *measured;
+    if (!requested.batch.max_rows_per_gpu) {
+        placed.config.batch.max_rows_per_gpu = placed.envelope.rows;
+        placed.config.batch.max_segments_per_gpu = placed.envelope.rows;
+    }
+
+    expected_t assembled = assemble_(placed, mesh, placed.envelope.reserve_bytes);
+    if (assembled || assembled.status_ != status_t::bad_alloc_k) return assembled;
+    std::size_t committed_bytes = 0;
+    for (gpu_arena_t const &arena : placed.arenas.view()) committed_bytes = std::max(committed_bytes, arena.mapped());
+    return expected_t::fail(status_t::bad_alloc_k,
+                            "{}: {} rows of {} columns per GPU outgrew the device, its arena committed {} of the {} " //
+                            "bytes free",
+                            assembled.description_.view(), placed.config.batch.max_rows_per_gpu,
+                            placed.config.batch.max_columns_per_row, committed_bytes, placed.envelope.free_bytes);
+}
+
+/** Upload the saved Float32 vector @p name into @p destination when @p checkpoint holds it, on
+ *  @p stream . */
+[[nodiscard]] static expected_t restore_vector_(checkpoint_to_load_t const &checkpoint, sz::string_view_t name,
+                                                f32r1_span_t destination, gpu_stream_t &stream) noexcept {
+    f32r2_view_t const saved = checkpoint.float32(name);
+    if (saved.empty()) return {};
+    if (saved.extent(0) != 1u || saved.extent(1) != destination.extent(0))
+        return expected_t::fail(status_t::shape_unsupported_k, "{} holds [{},{}], the run [1,{}]", name,
+                                saved.extent(0), saved.extent(1), destination.extent(0));
+    return copy_host_to_device(saved.flatten<1>(), destination, stream);
+}
+
+/** Download the device vector @p values into @p checkpoint as the @b [1,n] Float32 entry
+ *  @p name . */
+[[nodiscard]] static expected_t insert_vector_(checkpoint_to_save_t &checkpoint, sz::string_view_t name,
+                                               f32r1_view_t values, gpu_stream_t &stream) noexcept {
+    array<f32_t> staging;
+    if (staging.resize_uninitialized(values.extent(0)) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "{} staging failed", name);
+    if (expected_t copied = copy_device_to_host(values, staging.span(), stream); !copied) return copied;
+    if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
+        return cuda_failure(result, "{} download failed", name);
+    return checkpoint.insert(name, f32r2_view_t {staging.data(), 1, staging.size()});
+}
+
 expected_t trainer_t::resume(sz::string_view_t path) noexcept {
     switch_to_gpu_t lead_scope {streams[0]};
     if (!lead_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
@@ -253,7 +461,15 @@ expected_t trainer_t::resume(sz::string_view_t path) noexcept {
         switch_to_gpu_t gpu_scope {streams[member]};
         if (expected_t warmed = load_weights(loaded.value_, replicas[member].weights, streams[member]); !warmed)
             return warmed;
+        if (!config.contrasts()) continue;
+        base_replica_t &replica = replicas[member];
+        expected_t restored = restore_vector_(*loaded, "contrastive.inverse_temperatures",
+                                              replica.inverse_temperatures.span(), streams[member]);
+        if (restored) restored = restore_vector_(*loaded, "contrastive.biases", replica.biases.span(), streams[member]);
+        if (!restored) return restored;
     }
+    // After the weights, since every state the file misses restarts from them.
+    if (expected_t restored = optimizer.load(*loaded, streams); !restored) return restored;
     if (expected_t drained = synchronize(); !drained) return drained; // the uploads read the payload `loaded` maps
     completed_steps = static_cast<u32_t>(loaded.value_.step());
     return {};
@@ -396,7 +612,18 @@ telemetry_t trainer_t::telemetry(optimizer_step_t optimizer_step) noexcept {
 
 expected_t trainer_t::save(sz::string_view_t path) noexcept {
     if (!mesh->topology.is_lead()) return {};
-    return save_weights(path, config, replicas[0].weights, completed_steps, streams[0]);
+    switch_to_gpu_t gpu_scope {streams[0]};
+    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
+    checkpoint_to_save_t checkpoint; // the Float32 state goes first, so every entry lands aligned
+    expected_t saved = optimizer.save(checkpoint, streams[0]);
+    if (saved && config.contrasts())
+        saved = insert_vector_(checkpoint, "contrastive.inverse_temperatures", replicas[0].inverse_temperatures.view(),
+                               streams[0]);
+    if (saved && config.contrasts())
+        saved = insert_vector_(checkpoint, "contrastive.biases", replicas[0].biases.view(), streams[0]);
+    if (saved) saved = save_weights(checkpoint, config, replicas[0].weights, completed_steps, streams[0]);
+    if (saved) saved = checkpoint.save(path);
+    return saved;
 }
 
 expected_t trainer_t::synchronize() noexcept {
@@ -423,62 +650,6 @@ void telemetry_t::report() const noexcept {
     term("video MSE", video_mse);
     term("audio MSE", audio_mse);
     term("contrastive", contrastive);
-}
-
-int trainer_t::run(trainer_config_t const &config, mesh_options_t const &options) noexcept {
-    if (cuInit(0) != CUDA_SUCCESS) return fail_out_("cuInit failed");
-    int device_count = 0;
-    if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) return fail_out_("no CUDA devices");
-    array<i32_t> devices;
-    for (int device = 0; device != device_count; ++device)
-        if (devices.push_back(static_cast<i32_t>(device)) != status_t::success_k)
-            return fail_out_("device table allocation failed");
-
-    mesh_t mesh;
-    if (expected_t joined = mesh_t::make(mesh, options, devices.view()); !joined)
-        return fail_out_(joined.description_.view());
-    sz::string_t banner;
-    if (format_into(banner, "uform_base: tokens{}{}{} mixture, {} GPU(s), host_domain {} of {}",
-                    config.batch.contains(modality_t::image_k) ? "+image" : "",
-                    config.batch.contains(modality_t::video_k) ? "+video" : "",
-                    config.batch.contains(modality_t::audio_k) ? "+audio" : "", device_count, options.host_domain_index,
-                    options.host_domain_count))
-        report_line(banner.view());
-
-    trainer_t trainer;
-    if (expected_t built = make(trainer, mesh, config, devices.view()); !built)
-        return fail_out_(built.description_.view());
-    if (!config.resume.empty()) {
-        if (expected_t resumed = trainer.resume(config.resume); !resumed) return fail_out_(resumed.description_.view());
-        sz::string_t line;
-        if (format_into(line, "uform_base: resumed from {} at step {}", config.resume, trainer.completed_steps))
-            report_line(line.view());
-    }
-
-    synthetic_source_t source;
-    step_report_t report;
-    u32_t const first = trainer.completed_steps;
-    for (u32_t ordinal = first; ordinal != first + config.steps; ++ordinal) {
-        if (expected_t stepped = trainer.step(source, optimizer_step_t {ordinal}, report); !stepped) {
-            sz::string_t line;
-            if (!format_into(line, "step {} failed: {}", ordinal, stepped.description_.view())) return 1;
-            return fail_out_(line.view());
-        }
-        if ((ordinal + 1u) % 10u == 0u) trainer.telemetry(optimizer_step_t {ordinal}).report();
-    }
-    if (!config.checkpoint.empty()) {
-        if (expected_t saved = trainer.save(config.checkpoint); !saved) return fail_out_(saved.description_.view());
-        sz::string_t line;
-        if (format_into(line, "uform_base: checkpoint written to {}", config.checkpoint)) report_line(line.view());
-    }
-    if (expected_t drained = trainer.synchronize(); !drained) return fail_out_(drained.description_.view());
-    {
-        switch_to_gpu_t gpu_scope {trainer.streams[0]};
-        if (expected_t reported = trainer.ledger.report(trainer.streams[0]); !reported)
-            report_line(reported.description_.view());
-    }
-    report_line("uform_base: done");
-    return 0;
 }
 
 #pragma endregion Trainer
@@ -625,7 +796,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
                       divide_round_up(clip->extent.height, video.patch_side);
         }
         else {
-            f32r1_span_t const window {window_.data(), window_.size()};
+            f32r1_span_t const window = window_.span();
             if (expected_t decoded = um::decode_audio(bytes, shape.audio.sample_rate, window); !decoded) return decoded;
             std::size_t heard = window_.size(); // the decoder pads a short clip with exact silence
             while (heard && window_[heard - 1] == 0.0f) --heard;

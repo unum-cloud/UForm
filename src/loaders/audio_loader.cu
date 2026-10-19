@@ -106,7 +106,7 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, std::s
     for (std::size_t index = 0; index != clips; ++index) {
         auto const blob = tape[drawn_rows[index]];
         encoded_offsets[index] = cursor;
-        if (expected_t hopped = copy_device_to_host(b8r1_view_t {blob.data(), blob.size()},
+        if (expected_t hopped = copy_device_to_host(b8r1_view_t {blob},
                                                     b8r1_span_t {encoded.data() + cursor, blob.size()}, stream);
             !hopped)
             return hopped;

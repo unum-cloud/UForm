@@ -119,7 +119,7 @@ static bool encode(uc::checkpoint_to_load_t const &checkpoint, geometry_t const 
         shared_states.resize_uninitialized(tokens * geometry.hidden) != uc::status_t::success_k ||
         shared_embeddings.resize_uninitialized(items_k * geometry.hidden) != uc::status_t::success_k)
         return std::printf("scratch and outputs allocation failed\n"), false;
-    placement.scratch = {scratch.data(), scratch.size()};
+    placement.scratch = scratch.span();
     outputs_t const outputs {shared_embeddings.data(), shared_states.data(), nk_f32_k};
     uc::expected_t encoded = on_device ? tower->encode(batch->view(), outputs, placement)
                                        : tower->encode(batch->view(), outputs, placement, pool);

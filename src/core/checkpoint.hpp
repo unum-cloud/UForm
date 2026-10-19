@@ -1,33 +1,37 @@
 /**
- *  @brief Safetensors checkpoints: one file, a yyjson-built JSON header of names / dtypes / shapes /
- *      offsets, then the raw little-endian tensor bytes — readable by the whole Python ecosystem,
- *      written and read here through NumKong views with no exceptions and no vendor containers.
  *  @file src/core/checkpoint.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
+ *  @brief Safetensors checkpoints: one file, a yyjson-built JSON header of names / dtypes / shapes
+ *      / offsets, then the raw little-endian tensor bytes — readable by the whole Python ecosystem,
+ *      written and read here through NumKong views with no exceptions and no vendor containers.
  *
  *  @section checkpoint_containers Two containers, two directions
  *
- *  The checkpoint types are the containers — no caller-side table of views to materialize. Both are host-only:
- *  a device-resident model downloads into @ref checkpoint_to_save_t and uploads out of
- *  @ref checkpoint_to_load_t with its own copies. @ref checkpoint_to_save_t snapshots each inserted tensor into
- *  its payload immediately, so training may keep mutating the source; @ref checkpoint_to_save_t::save is then
- *  pure host I/O. @ref checkpoint_to_load_t maps a whole file once and hands out zero-copy by-name views into the
- *  mapping — the caller copies what it wants and decides what a missing name means, which is the whole
- *  warm-start policy: a masked-pretraining checkpoint fills the shared encoder, the objective heads come back
- *  empty, and the caller re-seeds them.
+ *  The checkpoint types are the containers — no caller-side table of views to materialize. Both are
+ *  host-only: a device-resident model downloads into @ref checkpoint_to_save_t and uploads out of
+ *  @ref checkpoint_to_load_t with its own copies. @ref checkpoint_to_save_t snapshots each inserted
+ *  tensor into its payload immediately, so training may keep mutating the source;
+ *  @ref checkpoint_to_save_t::save is then pure host I/O. @ref checkpoint_to_load_t maps a whole
+ *  file once and hands out zero-copy by-name views into the mapping — the caller copies what it
+ *  wants and decides what a missing name means, which is the whole warm-start policy: a
+ *  masked-pretraining checkpoint fills the shared encoder, the objective heads come back empty, and
+ *  the caller re-seeds them.
  *
  *  Each cell's @c fill spells its own weights' names — the tower its structure ( @c embedding ,
- *  @c blocks.{i}.qkv , … ), each objective head its instance name — and the composition root adds only
- *  its @c model. prefix at both ends. Shapes are the true @b [rows,cols] extents of the rank-2 views;
- *  BFloat16 is the only training dtype; weights only — optimizer moments restart fresh on resume.
+ *  @c blocks.{i}.qkv , … ), each objective head its instance name — and the composition root adds
+ *  only its @c model. prefix at both ends. Shapes are the true @b [rows,cols] extents of the rank-2
+ *  views. Weights are BFloat16; the training state a resume continues from — the @c optimizer.
+ *  moments and masters and the @c contrastive. temperatures — is Float32 beside them, and inference
+ *  reads only @c model. names.
  *
  *  @section checkpoint_metadata Metadata is the geometry
  *
- *  Every value of the header's metadata object is a string, as the format demands. Training writes the step and the whole
- *  geometry a reader needs to rebuild the model — @c depth , @c hidden , @c ffn_expansion , @c head_width ,
- *  @c rms_epsilon , the rotary split and base, the @c context , and each modality's patch and pixel
- *  statistics, lists comma-separated — so inference derives everything from the file alone.
+ *  Every value of the header's metadata object is a string, as the format demands. Training writes
+ *  the step and the whole geometry a reader needs to rebuild the model — @c depth , @c hidden ,
+ *  @c ffn_expansion , @c head_width , @c rms_epsilon , the rotary split and base, the @c context ,
+ *  and each modality's patch and pixel statistics, lists comma-separated — so inference derives
+ *  everything from the file alone.
  */
 #pragma once
 
@@ -42,12 +46,23 @@
 
 namespace unum::uform::core {
 
-/** One indexed checkpoint entry: the owned name, the logical @b [rows,cols] extents (vectors
- *  are @b [1,cols] ), and where the tensor's scalars start inside the owner's payload. */
+/** The scalar types a checkpoint stores: BFloat16 weights, and the Float32 training state beside
+ *  them. */
+enum class checkpoint_dtype_t : u32_t {
+    bf16_k = 0,
+    f32_k = 1,
+};
+
+/** One indexed checkpoint entry: the owned name, its scalar type, the logical @b [rows,cols]
+ *  extents (vectors are @b [1,cols] ), and where the tensor's bytes start inside the owner's
+ *  payload. */
 struct checkpoint_entry_t {
 
     /** The owned name text — short names ride StringZilla's inline buffer. */
     sz::string_t name {};
+
+    /** The scalar type the payload holds this tensor in. */
+    checkpoint_dtype_t dtype = checkpoint_dtype_t::bf16_k;
 
     /** Leading extent; @c 1 for vector parameters. */
     std::size_t rows = 0;
@@ -55,8 +70,8 @@ struct checkpoint_entry_t {
     /** Trailing extent. */
     std::size_t cols = 0;
 
-    /** Scalar (not byte) offset inside the owner's payload. */
-    std::size_t scalar_offset = 0;
+    /** Byte offset inside the owner's payload, a multiple of the scalar size. */
+    std::size_t byte_offset = 0;
 };
 
 /** One pair of the header's metadata object, both strings as the format stores them. */
@@ -81,20 +96,26 @@ struct checkpoint_to_save_t {
     checkpoint_to_save_t &operator=(checkpoint_to_save_t &&) noexcept = default;
     ~checkpoint_to_save_t() noexcept = default;
 
-    /** Optional hoist: pre-size the payload to @p total_scalars and the entry table to
+    /** Optional hoist: pre-size the payload to @p total_bytes and the entry table to
      *  @p tensor_count , so no @ref insert ever reallocates. */
-    [[nodiscard]] expected_t reserve(u64_t total_scalars, u64_t tensor_count) noexcept;
+    [[nodiscard]] expected_t reserve(u64_t total_bytes, u64_t tensor_count) noexcept;
 
     /** Append one entry, copying @p data into the payload @b now . @p name is copied into owned text;
      *  duplicates are rejected loudly. */
     [[nodiscard]] expected_t insert(sz::string_view_t name, nk::tensor_view<nk_bf16_t, 2> data) noexcept;
 
+    /** Append one Float32 entry like the BFloat16 one. The payload packs entries without gaps, so a
+     *  Float32 entry following an odd count of BFloat16 scalars is refused: insert the Float32
+     *  state first. */
+    [[nodiscard]] expected_t insert(sz::string_view_t name, nk::tensor_view<f32_t, 2> data) noexcept;
+
     /** Record the metadata value of @p key , replacing an earlier one. */
     [[nodiscard]] expected_t metadata(sz::string_view_t key, sz::string_view_t value) noexcept;
 
-    /** Write the accumulated entries and metadata to @p path in the safetensors layout — the JSON header
-     *  space-padded to an 8-byte boundary like Hugging Face's own writer, then the whole contiguous payload
-     *  in one shot. */
+    /** Write the accumulated entries and metadata to @p path in the safetensors layout — the JSON
+     *  header space-padded to an 8-byte boundary like Hugging Face's own writer, then the whole
+     *  contiguous payload in one shot. The file is written beside @p path and renamed over it, so a
+     *  run killed mid-write keeps its previous checkpoint. */
     [[nodiscard]] expected_t save(sz::string_view_t path) noexcept;
 
     /** Drop the entries and metadata, keep every buffer's backing — the next cadence re-inserts and
@@ -106,9 +127,13 @@ struct checkpoint_to_save_t {
 
   private:
 
-    /** Every inserted tensor's scalars back-to-back in insertion order — `save` streams them to disk in a
-     *  single write. */
-    array<nk_bf16_t> payload_ {};
+    /** The shared body of both @ref insert overloads. */
+    [[nodiscard]] expected_t insert_(sz::string_view_t name, checkpoint_dtype_t dtype, void const *data,
+                                     std::size_t rows, std::size_t cols) noexcept;
+
+    /** Every inserted tensor's bytes back-to-back in insertion order — `save` streams them to disk
+     *  in a single write. */
+    array<b8_t> payload_ {};
 
     /** The name / shape / offset record per inserted tensor. */
     array<checkpoint_entry_t> entries_ {};
@@ -167,6 +192,10 @@ struct checkpoint_to_load_t {
      *  @p name (or holds it in a dtype other than BFloat16) — check @c .empty() and decide. */
     [[nodiscard]] nk::tensor_view<nk_bf16_t, 2> operator[](sz::string_view_t name) const noexcept;
 
+    /** The Float32 twin of @ref operator[] , empty when the file misses @p name or holds it in
+     *  another dtype. */
+    [[nodiscard]] nk::tensor_view<f32_t, 2> float32(sz::string_view_t name) const noexcept;
+
     /** The metadata value of @p key , or an empty view when the file carries none. */
     [[nodiscard]] sz::string_view_t metadata(sz::string_view_t key) const noexcept;
 
@@ -181,11 +210,14 @@ struct checkpoint_to_load_t {
     /** The file mapping when @ref make opened one; empty for @ref view . */
     checkpoint_mapping_t mapping_ {};
 
-    /** The first payload scalar, inside the mapping or the caller's image. */
-    nk_bf16_t const *payload_ = nullptr;
+    /** The first payload byte, inside the mapping or the caller's image. */
+    b8_t const *payload_ = nullptr;
 
-    /** The name / shape / offset record per indexed BF16 tensor. */
+    /** The name / dtype / shape / offset record per indexed tensor. */
     array<checkpoint_entry_t> entries_ {};
+
+    /** The entry named @p name in @p dtype , or null. */
+    [[nodiscard]] checkpoint_entry_t const *find_(sz::string_view_t name, checkpoint_dtype_t dtype) const noexcept;
 
     /** The metadata pairs. */
     array<checkpoint_metadata_t> metadata_ {};

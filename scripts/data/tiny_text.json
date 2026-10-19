@@ -1,0 +1,17 @@
+{
+  "mixture": "tiny_text",
+  "datasets": [
+    {
+      "name": "xlsum",
+      "weight": 0.5,
+      "glob": "data/xlsum/xlsum_256m.csv",
+      "text": "text"
+    },
+    {
+      "name": "leipzig_1m",
+      "weight": 0.5,
+      "glob": "data/leipzig-1m/leipzig1M_*.txt",
+      "text": "0"
+    }
+  ]
+}

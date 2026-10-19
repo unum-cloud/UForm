@@ -494,25 +494,20 @@ static void mixer_routes_segments(test_suite_t &suite) {
 
     auto multimem_made = multimem_domain_t::make(
         topology, members.devices.view(),
-        1024u + multimodal_batch_mixer_t::payload_scalars_needed(shape, topology.shape),
-        std::span<gpu_stream_t> {members.streams.data(), members.streams.size()});
+        1024u + multimodal_batch_mixer_t::payload_scalars_needed(shape, topology.shape), members.streams.span());
     if (!multimem_made)
         return suite.check(false, "multimem_domain make (needs multicast capability): {}", multimem_made.description_);
     multimem_domain_t multimem = std::move(multimem_made.value_);
     auto colocated_made = colocated_domain_t::make(topology);
     if (!colocated_made) return suite.check(false, "colocated_domain make: {}", colocated_made.description_);
     colocated_domain_t colocated = std::move(colocated_made.value_);
-    auto mixer_made = multimodal_batch_mixer_t::make(
-        multimem, colocated, std::span<gpu_arena_t> {members.arenas.data(), members.arenas.size()}, shape, seed,
-        std::span<gpu_stream_t> {members.streams.data(), members.streams.size()});
+    auto mixer_made = multimodal_batch_mixer_t::make(multimem, colocated, members.arenas.span(), shape, seed,
+                                                     members.streams.span());
     if (!mixer_made) return suite.check(false, "mixer make: {}", mixer_made.description_);
     multimodal_batch_mixer_t mixer = std::move(mixer_made.value_);
 
-    std::span<multimodal_batch_on_gpu_t const> const loaded_view {members.loaded.data(), members.loaded.size()};
-    if (expected_t mixed_ok = mixer(epoch, loaded_view,
-                                    std::span<multimodal_batch_on_gpu_t> {members.mixed.data(), members.mixed.size()},
-                                    std::span<gpu_stream_t> {members.streams.data(), members.streams.size()});
-        !mixed_ok)
+    std::span<multimodal_batch_on_gpu_t const> const loaded_view = members.loaded.view();
+    if (expected_t mixed_ok = mixer(epoch, loaded_view, members.mixed.span(), members.streams.span()); !mixed_ok)
         return suite.check(false, "the mix should run: {}", mixed_ok.description_);
 
     for (u32_t member = 0; member != member_count; ++member)
@@ -565,25 +560,20 @@ static void mixer_routes_bags(test_suite_t &suite, u32_t rows, u32_t columns_per
 
     auto multimem_made = multimem_domain_t::make(
         topology, members.devices.view(),
-        1024u + multimodal_batch_mixer_t::payload_scalars_needed(shape, topology.shape),
-        std::span<gpu_stream_t> {members.streams.data(), members.streams.size()});
+        1024u + multimodal_batch_mixer_t::payload_scalars_needed(shape, topology.shape), members.streams.span());
     if (!multimem_made)
         return suite.check(false, "multimem_domain make (needs multicast capability): {}", multimem_made.description_);
     multimem_domain_t multimem = std::move(multimem_made.value_);
     auto colocated_made = colocated_domain_t::make(topology);
     if (!colocated_made) return suite.check(false, "colocated_domain make: {}", colocated_made.description_);
     colocated_domain_t colocated = std::move(colocated_made.value_);
-    auto mixer_made = multimodal_batch_mixer_t::make(
-        multimem, colocated, std::span<gpu_arena_t> {members.arenas.data(), members.arenas.size()}, shape, seed,
-        std::span<gpu_stream_t> {members.streams.data(), members.streams.size()});
+    auto mixer_made = multimodal_batch_mixer_t::make(multimem, colocated, members.arenas.span(), shape, seed,
+                                                     members.streams.span());
     if (!mixer_made) return suite.check(false, "mixer make: {}", mixer_made.description_);
     multimodal_batch_mixer_t mixer = std::move(mixer_made.value_);
 
-    std::span<multimodal_batch_on_gpu_t const> const loaded_view {members.loaded.data(), members.loaded.size()};
-    if (expected_t mixed_ok = mixer(epoch, loaded_view,
-                                    std::span<multimodal_batch_on_gpu_t> {members.mixed.data(), members.mixed.size()},
-                                    std::span<gpu_stream_t> {members.streams.data(), members.streams.size()});
-        !mixed_ok)
+    std::span<multimodal_batch_on_gpu_t const> const loaded_view = members.loaded.view();
+    if (expected_t mixed_ok = mixer(epoch, loaded_view, members.mixed.span(), members.streams.span()); !mixed_ok)
         return suite.check(false, "the bagged mix should run: {}", mixed_ok.description_);
 
     for (u32_t member = 0; member != member_count; ++member)

@@ -1,10 +1,10 @@
 /**
- *  @brief Adafactor, the memory-frugal optimizer of the uniform towers: factored Float32 second moments
- *      (one row and one column vector per matrix instead of a full moment), RMS-clipped updates, no
- *      momentum.
  *  @file src/core/optimizer.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
+ *  @brief Adafactor, the memory-frugal optimizer of the uniform towers: factored Float32 second
+ *      moments (one row and one column vector per matrix instead of a full moment), RMS-clipped
+ *      updates, no momentum.
  *
  *  The sibling @ref distributed_adafactor_t reduces the gradients over the same two-level mesh transports
  *  the loss uses and keeps every rank's weight replica bitwise identical.
@@ -23,14 +23,17 @@
  *
  *  @section optimizer_distributed Distributed replicas stay bitwise identical
  *
- *  Weights are data-parallel replicas. Each rank casts its BFloat16 gradient buffers into its multicast
- *  replica, one generation barrier proves every replica complete, and every rank materialises the @b same
- *  Float32 gradient @b mean (the switch sum scaled by @c 1/gpus_per_colocated_domain , so learning-rate
- *  semantics are world-size-invariant) through @c multimem.ld_reduce — deterministic by construction — so
- *  identical Adafactor states receive identical inputs and every replica takes the identical step. Across
- *  multimem_domains the gateway, domain member 0 wherever its process sits, rides its pre-scaled domain term
- *  through the GDAKI all-reduce and writes the world mean back into its own symmetric window, and every member
- *  reads it there over NVLink after one more domain barrier.
+ *  Weights are data-parallel replicas. Each rank casts its BFloat16 gradient buffers into its
+ *  multicast replica, one generation barrier proves every replica complete, and every rank
+ *  materialises the @b same Float32 gradient @b mean (the switch sum scaled by
+ *  @c 1/gpus_per_colocated_domain , so learning-rate semantics are world-size-invariant) through
+ *  @c multimem.ld_reduce — deterministic by construction — so identical Adafactor states receive
+ *  identical inputs and every replica takes the identical step. In a single-domain world a second
+ *  barrier after the reduce keeps every window intact until all members read it, since the next
+ *  step stages into the same windows. Across multimem_domains the gateway, domain member 0 wherever
+ *  its process sits, rides its pre-scaled domain term through the GDAKI all-reduce and writes the
+ *  world mean back into its own symmetric window, and every member reads it there over NVLink after
+ *  one more domain barrier.
  */
 #pragma once
 
@@ -42,6 +45,7 @@
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
 #include "core/types.hpp"                  // `expected`, `expected_t`, `status_t`, the scalar aliases
+#include "core/checkpoint.hpp"             // `checkpoint_to_save_t`, `checkpoint_to_load_t` — the state a resume reads
 #include "core/schedule.cuh"               // `gpu_stream_t`, `launch_kernel`, `grid_size_for`
 #include "core/gpu_allocators.hpp"         // `gpu_arena_t`
 #include "core/introspect.cuh"             // `telemetry_ledger_t` — the borrowed signal-probe ledger
@@ -106,6 +110,21 @@ struct adafactor_t {
     [[nodiscard]] expected_t step(f32_t learning_rate, gpu_stream_t &stream,
                                   f32r1_view_t reduced_gradients = {}) noexcept;
 
+    /** Insert every state's moments into @p checkpoint as @c optimizer.{name}.row_moments and
+     *  @c optimizer.{name}.column_moments , and each vector weight's master as
+     *  @c optimizer.{name}.master ; drains @p stream . */
+    [[nodiscard]] expected_t save(checkpoint_to_save_t &checkpoint, gpu_stream_t &stream) const noexcept;
+
+    /**
+     *  @brief Continue from @p checkpoint : the moments and masters it holds are uploaded on
+     *      @p stream , the rest restart — moments at zero, masters re-seeded from the live weights,
+     *      which the caller loads first.
+     *
+     *  The caller drains @p stream before releasing @p checkpoint .
+     *  @retval status_t::shape_unsupported_k A saved state of another shape.
+     */
+    [[nodiscard]] expected_t load(checkpoint_to_load_t const &checkpoint, gpu_stream_t &stream) noexcept;
+
   private:
 
     /** The distributed sibling reads @ref gradient_scalars over the shared states. */
@@ -123,6 +142,9 @@ struct adafactor_t {
 
     /** One optimizer state per weight matrix, resolved once at @ref make . */
     array<adafactor_state_t> states_ {};
+
+    /** Each state's weight name, in state order, which its checkpoint entries carry. */
+    array<sz::string_t> names_ {};
 
     /** Every state's row + column moments, back to back in state order. */
     f32r1_tensor_arena_t moments_ {};
@@ -184,18 +206,27 @@ struct distributed_adafactor_t {
      *  @brief Local rank @p rank 's slice of one world step — pure enqueue onto @p stream , the shape a
      *      fork/join capture body composes directly.
      *
-     *  Stage the rank's BFloat16 grads into its window, barrier, materialise the
-     *  switch-reduced world gradient, and take the identical Adafactor step; across
-     *  multimem_domains the gateway stages after the barrier, all-reduces and publishes the world mean in its
-     *  window, and a second barrier lets every rank read it. Ordering contract: this consumer's
-     *  advance/barrier phase must follow the same cross-consumer order on every rank (see
-     *  @ref multimem_domain_t ); ranks are enqueued in order @c 0..gpus-1 within a step. The scheduled
-     *  @p learning_rate must be identical on every rank of the step — replicas step in lockstep.
+     *  Stage the rank's BFloat16 grads into its window, barrier, materialise the switch-reduced
+     *  world gradient, barrier again so no member restages its window while a peer still reads it,
+     *  and take the identical Adafactor step; across multimem_domains the gateway stages after the
+     *  barrier, all-reduces and publishes the world mean in its window, and a second barrier lets
+     *  every rank read it. Ordering contract: this consumer's advance/barrier phase must follow the
+     *  same cross-consumer order on every rank (see @ref multimem_domain_t ); ranks are enqueued in
+     *  order @c 0..gpus-1 within a step. The scheduled @p learning_rate must be identical on every
+     *  rank of the step — replicas step in lockstep.
      */
     [[nodiscard]] expected_t step(std::size_t rank, f32_t learning_rate, gpu_stream_t &stream) noexcept;
 
     /** The eager convenience: every rank's slice in order over the per-rank streams. */
     [[nodiscard]] expected_t step(f32_t learning_rate, std::span<gpu_stream_t> streams) noexcept;
+
+    /** Insert the first rank's state into @p checkpoint — the ranks are identical. */
+    [[nodiscard]] expected_t save(checkpoint_to_save_t &checkpoint, gpu_stream_t &stream) const noexcept {
+        return ranks_[0].state.save(checkpoint, stream);
+    }
+
+    /** Continue every rank from @p checkpoint on its stream; see @ref adafactor_t::load . */
+    [[nodiscard]] expected_t load(checkpoint_to_load_t const &checkpoint, std::span<gpu_stream_t> streams) noexcept;
 
   private:
 

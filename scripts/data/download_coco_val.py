@@ -54,6 +54,10 @@ def _try_huggingface(out_dir: Path) -> bool:
     except Exception as exc:  # noqa: BLE001
         print(f"download_coco_val: HuggingFace path failed ({exc}); falling back to direct URLs")
         return False
+    fetched = [path for path in out_dir.rglob("*") if path.is_file() and ".cache" not in path.parts]
+    if not fetched:
+        print(f"download_coco_val: {_HF_REPO_ID} holds no val2017 files; falling back to direct URLs")
+        return False
     return True
 
 

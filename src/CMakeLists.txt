@@ -172,6 +172,7 @@ if (UFORM_BUILD_CUDA)
         loaders/image_loader.cu
         loaders/video_loader.cu
         loaders/audio_loader.cu
+        loaders/paired_loader.cu
     )
     add_library(uform::loaders ALIAS uform_loaders)
     target_link_libraries(uform_loaders PUBLIC uform::core)
@@ -211,6 +212,12 @@ if (UFORM_BUILD_CUDA)
 
     # The host-side media demux and decode thread pool, public because the loader headers expose `cpu_decode_pool_t`.
     target_link_libraries(uform_loaders PUBLIC forkunion::header)
+
+    # `train/datasets.cu` → `uform::datasets`: the mixtures and the batch source over the loaders, kept out of
+    # `uform::train`, which the C library links without the loaders or cuDF.
+    add_library(uform_datasets STATIC train/datasets.cu)
+    add_library(uform::datasets ALIAS uform_datasets)
+    target_link_libraries(uform_datasets PUBLIC uform::train uform::loaders)
 endif ()
 
 # Each GPU vendor's inference kernels, one object library per vendor, which `c/` links into both library flavors beside

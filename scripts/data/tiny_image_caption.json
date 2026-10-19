@@ -1,0 +1,21 @@
+{
+  "mixture": "tiny_image_caption",
+  "datasets": [
+    {
+      "name": "rsicd_train",
+      "weight": 0.7,
+      "glob": "data/rsicd/rsicd-data-train-*.parquet",
+      "anchor": "captions",
+      "positive": "image",
+      "media": "image"
+    },
+    {
+      "name": "coco_captions",
+      "weight": 0.3,
+      "glob": "data/coco_captions/data/*.parquet",
+      "anchor": "sentences_raw",
+      "positive": "image",
+      "media": "image"
+    }
+  ]
+}

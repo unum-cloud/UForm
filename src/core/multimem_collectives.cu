@@ -207,7 +207,7 @@ expected<gpu_symmetric_arena_t> gpu_symmetric_arena_t::make(std::span<i32_t cons
     gpu_symmetric_arena_t arena;
     arena.handle_type_ = handle_type.value_;
     arena.bytes_per_member_ = bytes_per_member;
-    if (arena.devices_.assign({local_devices.data(), local_devices.size()}) != status_t::success_k ||
+    if (arena.devices_.assign(local_devices) != status_t::success_k ||
         arena.handles_.resize(member_count) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "member table allocation failed ({} of {})", local_devices.size(),
                               member_count);

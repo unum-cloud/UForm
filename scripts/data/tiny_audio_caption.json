@@ -1,0 +1,13 @@
+{
+  "mixture": "tiny_audio_caption",
+  "datasets": [
+    {
+      "name": "clotho_train",
+      "weight": 1.0,
+      "glob": "data/clotho/clotho-data-train-*.parquet",
+      "anchor": "captions",
+      "positive": "audio",
+      "media": "audio"
+    }
+  ]
+}
