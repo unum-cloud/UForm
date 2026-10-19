@@ -45,6 +45,7 @@
 using namespace unum::uform::core;
 using namespace unum::uform::loaders;
 using namespace unum::uform::test;
+namespace um = unum::uform::media;
 
 /** The loaders' file-local keyed-draw salts, pinned here as a frozen copy (like Tier A's finalize
  *  golden): a changed loader salt diverges these host oracles, catching a silent reshuffle of the draw. */
@@ -207,6 +208,30 @@ static void draw_primitives_are_stable(test_suite_t &suite) {
                   epoch_permutation(hash(seed, 3u, row_draw_salt_k), data_epoch_t {7u}, index, draw_count) !=
                       epoch_permutation(hash(seed, 4u, row_draw_salt_k), data_epoch_t {7u}, index, draw_count);
     suite.check(differs, "a different rank must reshuffle the draw");
+}
+
+/** A JPEG whose APP1 metadata pushes its start-of-frame past a 4 KiB window probes to a zero extent
+ *  and the next marker's offset, the window there resumes the walk to the frame, and the whole blob
+ *  probes in one window. */
+static void jpeg_probe_resumes_past_metadata(test_suite_t &suite) {
+    constexpr std::size_t app1_length_k = 6000, frame_offset_k = 4 + app1_length_k, window_k = 4096;
+    array<b8_t> blob;
+    if (blob.resize(frame_offset_k + 19) != status_t::success_k) return suite.check(false, "blob alloc failed");
+    u8_t const head[6] = {0xFF, 0xD8, 0xFF, 0xE1, app1_length_k >> 8, app1_length_k & 0xFF};
+    u8_t const frame[9] = {0xFF, 0xC0, 0x00, 0x11, 8, 480 >> 8, 480 & 0xFF, 640 >> 8, 640 & 0xFF};
+    for (std::size_t index = 0; index != 6; ++index) blob[index] = b8_t {head[index]};
+    for (std::size_t index = 0; index != 9; ++index) blob[frame_offset_k + index] = b8_t {frame[index]};
+
+    std::span<b8_t const> const bytes = blob.view();
+    auto const prefix = um::probe_image(bytes.first(window_k));
+    suite.check(prefix && prefix->extent.width == 0 && prefix->resume_offset == frame_offset_k,
+                "a prefix short of the frame resumes at offset {} (got {})", frame_offset_k,
+                prefix ? prefix->resume_offset : 0);
+    auto const resumed = um::probe_image(bytes.subspan(frame_offset_k), frame_offset_k);
+    suite.check(resumed && resumed->extent.width == 640 && resumed->extent.height == 480,
+                "the resumed window finds the 640x480 frame");
+    auto const whole = um::probe_image(bytes);
+    suite.check(whole && whole->extent.width == 640, "the whole blob probes in one window");
 }
 
 /** The weighted file pick is row-proportional, distinct, and floored at two shards. */
@@ -905,6 +930,7 @@ int main(int, char **argv) {
     test_suite_t suite = test_suite_t::make(argv[0]);
 
     suite.run("draw_primitives_are_stable", draw_primitives_are_stable);
+    suite.run("jpeg_probe_resumes_past_metadata", jpeg_probe_resumes_past_metadata);
     suite.run("file_pick_is_weighted_and_distinct", file_pick_is_weighted_and_distinct);
     suite.run("segment_geometry_packs_multiple_per_row", segment_geometry_packs_multiple_per_row);
 

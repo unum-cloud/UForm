@@ -289,66 +289,99 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
  *  JPEG — its decode scale, and lay out the @c decoded -sized RGBA scratch regions (a scaled hardware JPEG
  *  needs only its shrunk pixels; a CPU-fallback plan's @c decoded equals its native size). @p tape slices
  *  the reservoir (device bytes, host offsets) via @c tape[row] . Returns the scratch byte total. One
- *  header-prefix hop, one sync. */
+ *  header hop and one sync per round, a round per JPEG metadata segment past the first window. */
 [[nodiscard]] static expected<std::size_t> triage_images_(bool hardware, column_view_t tape, u64r1_view_t drawn_rows,
                                                           u32_t patch_size, u32_t max_columns, u32_t max_segments,
                                                           std::span<image_plan_t> plans,
                                                           gpu_stream_t &stream) noexcept {
     using result_t = expected<std::size_t>;
     std::size_t const images = drawn_rows.size();
-    // Build the per-image gather descriptors on the host — a device source pointer and a capped header length
-    // straight from each tape slice — then lift every header in one kernel + one D2H, not one copy per image.
+    // Each round lifts one header window per pending image, a device source pointer and a capped
+    // length straight from its tape slice, in one kernel and one D2H. A JPEG whose start-of-frame
+    // lies past its window stays pending at the marker its walk reached, a round per EXIF or ICC
+    // segment.
     array<gather_entry_t> host_entries;
     array<gather_entry_t, gpu_alloc<gather_entry_t>> device_entries {gpu_alloc<gather_entry_t> {stream.get()}};
     array<b8_t, gpu_alloc<b8_t>> staging {gpu_alloc<b8_t> {stream.get()}};
     array<b8_t, pinned_alloc<b8_t>> probe;
+    array<um::image_probe_t> probes;
+    array<std::size_t> pending;
     if (host_entries.resize(images) != status_t::success_k ||
         device_entries.resize_uninitialized(images) != status_t::success_k ||
         staging.resize_uninitialized(images * header_probe_bytes_k) != status_t::success_k ||
-        probe.resize_uninitialized(images * header_probe_bytes_k) != status_t::success_k)
+        probe.resize_uninitialized(images * header_probe_bytes_k) != status_t::success_k ||
+        probes.resize(images) != status_t::success_k || pending.resize(images) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "header gather staging allocation failed");
-    for (std::size_t index = 0; index != images; ++index) {
-        auto const blob = tape[drawn_rows[index]];
-        host_entries[index] = gather_entry_t {blob.data(),
-                                              static_cast<u32_t>(std::min(blob.size(), header_probe_bytes_k))};
+    for (std::size_t index = 0; index != images; ++index) pending[index] = index;
+    // Web-scale shards carry the occasional unprobeable blob — one bad row PADs its segment loudly
+    // instead of failing the whole fill, the same containment the overflow drop has.
+    auto const warn_dropped = [&](std::size_t index, sz::string_view_t reason) noexcept {
+        sz::string_t warning;
+        if (format_into(warning, "uform: image row {} dropped at triage: {}\n", drawn_rows[index], reason)) {
+            sz::string_view_t const text = warning.view();
+            ssize_t const written = ::write(STDERR_FILENO, text.data(), text.size());
+            (void)written;
+        }
+    };
+    for (std::size_t count = images; count != 0;) {
+        for (std::size_t entry = 0; entry != count; ++entry) {
+            std::size_t const index = pending[entry], window_offset = probes[index].resume_offset;
+            auto const blob = tape[drawn_rows[index]];
+            host_entries[entry] = gather_entry_t {
+                blob.data() + window_offset,
+                static_cast<u32_t>(std::min(blob.size() - window_offset, header_probe_bytes_k))};
+        }
+        if (expected_t uploaded = copy_host_to_device<gather_entry_t>(host_entries.view().first(count),
+                                                                      device_entries.span(), stream);
+            !uploaded)
+            return result_t::fail(std::move(uploaded));
+        if (expected_t launched = launch_kernel(&gather_headers_kernel_, dim3 {grid_size_for(count, 1u), 1u, 1u},
+                                                dim3 {kernel_block_size_default_k, 1u, 1u}, stream,
+                                                device_entries.data(), staging.data(),
+                                                static_cast<u32_t>(header_probe_bytes_k), static_cast<u32_t>(count));
+            !launched)
+            return result_t::fail(std::move(launched));
+        if (expected_t read = copy_device_to_host<b8_t>(staging.view().first(count * header_probe_bytes_k),
+                                                        probe.span(), stream);
+            !read)
+            return result_t::fail(std::move(read));
+        if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+            return result_t::fail(status_t::cuda_error_k, "header gather readback failed");
+        std::size_t still_pending = 0;
+        for (std::size_t entry = 0; entry != count; ++entry) {
+            std::size_t const index = pending[entry], window_offset = probes[index].resume_offset;
+            std::span<b8_t const> const window = probe.view().subspan(entry * header_probe_bytes_k,
+                                                                      host_entries[entry].length);
+            expected<um::image_probe_t> probed = um::probe_image(window, window_offset);
+            if (!probed) {
+                warn_dropped(index, probed.description_.view());
+                probes[index] = um::image_probe_t {};
+                continue;
+            }
+            probes[index] = probed.value_;
+            if (probed->extent.width != 0) continue;
+            // A walk that cannot advance past its window, or runs off the blob, finds no frame.
+            if (probed->resume_offset <= window_offset || probed->resume_offset >= tape[drawn_rows[index]].size()) {
+                warn_dropped(index, "no JPEG start-of-frame in the blob");
+                probes[index] = um::image_probe_t {};
+                continue;
+            }
+            pending[still_pending++] = index;
+        }
+        count = still_pending;
     }
-    if (expected_t uploaded = copy_host_to_device<gather_entry_t>(host_entries.view(), device_entries.span(), stream);
-        !uploaded)
-        return result_t::fail(std::move(uploaded));
-    if (expected_t launched = launch_kernel(&gather_headers_kernel_, dim3 {grid_size_for(images, 1u), 1u, 1u},
-                                            dim3 {kernel_block_size_default_k, 1u, 1u}, stream, device_entries.data(),
-                                            staging.data(), static_cast<u32_t>(header_probe_bytes_k),
-                                            static_cast<u32_t>(images));
-        !launched)
-        return result_t::fail(std::move(launched));
-    if (expected_t read = copy_device_to_host<b8_t>(staging.view(), probe.span(), stream); !read)
-        return result_t::fail(std::move(read));
-    if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
-        return result_t::fail(status_t::cuda_error_k, "header gather readback failed");
 
     std::size_t scratch_bytes = 0;
     for (std::size_t index = 0; index != images; ++index) {
-        std::span<b8_t const> const header = probe.view().subspan(index * header_probe_bytes_k,
-                                                                  host_entries[index].length);
-        auto probed = um::probe_image(header);
         image_plan_t &plan = plans[index];
-        if (!probed) {
-            // Web-scale shards carry the occasional unprobeable blob — one bad row PADs its segment
-            // loudly instead of failing the whole fill, the same containment the overflow drop has.
-            sz::string_t warning;
-            if (format_into(warning, "uform: image row {} dropped at triage: {}\n", drawn_rows[index],
-                            probed.description_.view())) {
-                sz::string_view_t const text = warning.view();
-                ssize_t const written = ::write(STDERR_FILENO, text.data(), text.size());
-                (void)written;
-            }
+        if (probes[index].extent.width == 0) {
             plan = image_plan_t {};
             plan.route = route_t::dropped_k;
             plan.scratch_offset = scratch_bytes;
             continue;
         }
-        plan.format = probed.value_.format;
-        plan.native = probed.value_.extent;
+        plan.format = probes[index].format;
+        plan.native = probes[index].extent;
         // The image's column budget is native-resolution driven, then factored toward its aspect. The grid
         // lands in `image_shapes` on the device (via the segment kernel), never host-written to arena memory.
         u32_t const budget = um::image_patch_budget(plan.native, patch_size, max_columns, max_segments);

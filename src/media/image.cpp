@@ -47,13 +47,17 @@ template <typename integer_type_>
     return format_unknown_k;
 }
 
-/** A JPEG's pixel extent, scanned from its markers for a start-of-frame (SOFn): after the 2-byte segment length
- *  come precision, then height and width as big-endian UInt16. Only the frame headers carry them ( @c C0..CF
- *  except DHT @c C4 , JPG @c C8 , DAC @c CC ). */
-[[nodiscard]] static expected<image_extent_t> jpeg_dimensions_(std::span<b8_t const> encoded) noexcept {
-    b8_t const *const bytes = encoded.data();
-    std::size_t const size = encoded.size();
-    for (std::size_t offset = 2; offset + 9 < size;) { // start past the SOI marker (FFD8)
+/** A JPEG's marker walk over @p window , the blob's bytes from @p window_offset on, for a
+ *  start-of-frame (SOFn): after the 2-byte segment length come precision, then height and width as
+ *  big-endian UInt16. Only the frame headers carry them ( @c C0..CF except DHT @c C4 , JPG @c C8 ,
+ *  DAC @c CC ). The walk starts past the SOI marker at the blob's head and at the window's first
+ *  marker otherwise, and a walk leaving the window returns the offset it resumes at. */
+[[nodiscard]] static expected<image_probe_t> jpeg_probe_(std::span<b8_t const> window,
+                                                         std::size_t window_offset) noexcept {
+    b8_t const *const bytes = window.data();
+    std::size_t const size = window.size();
+    std::size_t offset = window_offset == 0 ? 2 : 0;
+    while (offset + 9 < size) {
         if (std::to_integer<u8_t>(bytes[offset]) != 0xFF) {
             ++offset;
             continue;
@@ -63,12 +67,13 @@ template <typename integer_type_>
         if (is_frame) {
             u32_t const height = load_big_endian_<u16_t>(bytes + offset + 5);
             u32_t const width = load_big_endian_<u16_t>(bytes + offset + 7);
-            if (width == 0 || height == 0) break;
-            return image_extent_t {width, height};
+            if (width == 0 || height == 0)
+                return expected<image_probe_t>::fail(status_t::invalid_input_k, "JPEG start-of-frame has no extent");
+            return image_probe_t {format_jpeg_k, image_extent_t {width, height}, 0};
         }
         offset += 2 + load_big_endian_<u16_t>(bytes + offset + 2); // skip this marker segment
     }
-    return expected<image_extent_t>::fail(status_t::invalid_input_k, "no JPEG start-of-frame in the header prefix");
+    return image_probe_t {format_jpeg_k, image_extent_t {}, window_offset + offset};
 }
 
 /** A PNG's pixel extent from its IHDR — width and height are big-endian UInt32 at byte offsets 16 and 20 of the
@@ -91,21 +96,23 @@ template <typename integer_type_>
     return image_extent_t {static_cast<u32_t>(width), static_cast<u32_t>(height)};
 }
 
-expected<image_probe_t> um::probe_image(std::span<b8_t const> encoded) noexcept {
+expected<image_probe_t> um::probe_image(std::span<b8_t const> encoded, std::size_t window_offset) noexcept {
+    if (window_offset != 0) return jpeg_probe_(encoded, window_offset);
     image_format_t const format = sniff_format_(encoded);
     if (format == format_unknown_k)
         return expected<image_probe_t>::fail(status_t::invalid_input_k, "unrecognized image format");
-    expected<image_extent_t> extent = format == format_jpeg_k  ? jpeg_dimensions_(encoded)
-                                      : format == format_png_k ? png_dimensions_(encoded)
-                                                               : webp_dimensions_(encoded);
+    if (format == format_jpeg_k) return jpeg_probe_(encoded, 0);
+    expected<image_extent_t> extent = format == format_png_k ? png_dimensions_(encoded) : webp_dimensions_(encoded);
     if (!extent) return expected<image_probe_t>::fail(std::move(extent));
-    return image_probe_t {format, extent.value_};
+    return image_probe_t {format, extent.value_, 0};
 }
 
 expected<image_plan_t> um::plan_image(std::span<b8_t const> encoded, u32_t patch_side, u32_t columns,
                                       u32_t segments) noexcept {
     expected<image_probe_t> probed = probe_image(encoded);
     if (!probed) return expected<image_plan_t>::fail(std::move(probed));
+    if (probed->extent.width == 0)
+        return expected<image_plan_t>::fail(status_t::invalid_input_k, "no JPEG start-of-frame in the blob");
     image_plan_t plan;
     plan.format = probed->format;
     plan.native = probed->extent;

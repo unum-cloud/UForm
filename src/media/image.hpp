@@ -51,8 +51,12 @@ struct image_probe_t {
     /** The compressed format decided by the blob's magic bytes. */
     image_format_t format = format_unknown_k;
 
-    /** The native pixel extent parsed from the blob's header. */
+    /** The native pixel extent parsed from the blob's header, zero while a JPEG's start-of-frame
+     *  lies past the bytes probed. */
     image_extent_t extent {};
+
+    /** The blob offset a JPEG's marker walk resumes at while @ref extent is zero. */
+    std::size_t resume_offset = 0;
 };
 
 /** Everything the host path decides about one image before decoding it. */
@@ -77,12 +81,16 @@ struct image_plan_t {
 /**
  *  @brief Sniff a blob's format from its magic bytes and parse its native extent from its header.
  *
- *  A prefix suffices: the JPEG start-of-frame, the PNG IHDR or the WebP VP8 header, all within the first few KB
- *  unless metadata pushes a JPEG frame header further.
+ *  A window of the blob suffices. The PNG IHDR and the WebP VP8 header sit in the first bytes,
+ *  while EXIF and ICC segments can push a JPEG's start-of-frame hundreds of KB in: when it lies
+ *  past the window, the probe returns a zero extent and the @ref image_probe_t::resume_offset of
+ *  the next marker, and a probe of the window starting there with that @p window_offset continues
+ *  the walk.
  *
  *  @retval status_t::invalid_input_k Unrecognized magic, a truncated header or a zero extent.
  */
-[[nodiscard]] expected<image_probe_t> probe_image(std::span<b8_t const> encoded) noexcept;
+[[nodiscard]] expected<image_probe_t> probe_image(std::span<b8_t const> encoded,
+                                                  std::size_t window_offset = 0) noexcept;
 
 /**
  *  @brief Plan one image the way the NVIDIA loader plans it: probe, budget, factor, and the DCT scale toward the
