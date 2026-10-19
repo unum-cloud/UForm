@@ -396,6 +396,8 @@ void encode_items(arguments_type_ &arguments, packer_type_ &packer, site_type_ &
     if (!segment_offsets || !segment_lengths || !segment_modality || !image_shapes || !video_shapes || !cells ||
         !zero_row)
         return fail({uform_status_out_of_memory_k, "Failed to allocate the batch"});
+    nk::tensor_span<u16_t, 2> const image_shape_rows {image_shapes, widest_items + 1, 2};
+    nk::tensor_span<u16_t, 2> const video_shape_rows {video_shapes, widest_items + 1, 3};
     std::memset(zero_row, 0, row_bytes);
     ui::outputs_t const surfaces {embeddings, states, output_dtype(arguments.outputs_scalar)};
     if (widest_tokens)
@@ -411,8 +413,8 @@ void encode_items(arguments_type_ &arguments, packer_type_ &packer, site_type_ &
             segment_offsets[item] = static_cast<u32_t>(offsets[slice.begin + item] - first_row);
             segment_lengths[item] = plan.tokens;
             segment_modality[item] = packer_type_::modality_k;
-            image_shapes[item * 2] = plan.shape[0], image_shapes[item * 2 + 1] = plan.shape[1];
-            for (std::size_t axis = 0; axis != 3; ++axis) video_shapes[item * 3 + axis] = plan.shape[axis];
+            for (std::size_t axis = 0; axis != 2; ++axis) image_shape_rows[item, axis] = plan.shape[axis];
+            for (std::size_t axis = 0; axis != 3; ++axis) video_shape_rows[item, axis] = plan.shape[axis];
         }
         segment_offsets[items] = static_cast<u32_t>(slice_tokens);
         failure_t const staged = for_items(

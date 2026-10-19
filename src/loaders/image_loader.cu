@@ -372,18 +372,14 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
     return result_t {scratch_bytes};
 }
 
-/** One JPEG entry's RGB → RGBA expansion: the packed @b [pixels,3] nvJPEG output and its @b [pixels,4]
- *  destination in the RGBA scratch, both contiguous (packed per row), so pixel @c p maps @c 3p → 4p . */
+/** One JPEG entry's RGB → RGBA expansion: the nvJPEG output and its RGBA scratch destination. */
 struct rgba_expand_entry_t {
 
-    /** The packed @b [pixels,3] nvJPEG RGB output to widen. */
-    u8_t const *rgb;
+    /** The @b [pixels,3] nvJPEG RGB output to widen. */
+    nk::tensor_view<u8_t, 2> rgb;
 
-    /** The packed @b [pixels,4] RGBA scratch destination. */
-    u8_t *rgba;
-
-    /** The pixel count shared by both, so pixel @c p maps @c 3p → 4p . */
-    u32_t pixels;
+    /** The @b [pixels,4] RGBA scratch destination. */
+    nk::tensor_span<u8_t, 2> rgba;
 };
 
 /**
@@ -396,11 +392,9 @@ struct rgba_expand_entry_t {
 static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u32_t count) {
     for (u32_t index = blockIdx.x; index < count; index += gridDim.x) {
         rgba_expand_entry_t const entry = entries[index];
-        for (u32_t pixel = threadIdx.x; pixel < entry.pixels; pixel += blockDim.x) {
-            entry.rgba[pixel * 4u + 0u] = entry.rgb[pixel * 3u + 0u];
-            entry.rgba[pixel * 4u + 1u] = entry.rgb[pixel * 3u + 1u];
-            entry.rgba[pixel * 4u + 2u] = entry.rgb[pixel * 3u + 2u];
-            entry.rgba[pixel * 4u + 3u] = 255u;
+        for (std::size_t pixel = threadIdx.x; pixel < entry.rgb.extent(0); pixel += blockDim.x) {
+            for (u32_t channel = 0; channel != 3u; ++channel) entry.rgba[pixel, channel] = entry.rgb[pixel, channel];
+            entry.rgba[pixel, 3] = 255u;
         }
     }
 }
@@ -458,8 +452,9 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
     for (std::size_t index = 0; index != entries.size(); ++index) {
         jpeg_entry_t const &entry = entries[index];
         image_plan_t const &plan = plans[entry.plan_index];
-        host_expand[index] = rgba_expand_entry_t {rgb_base + entry.rgb_offset, scratch + plan.scratch_offset,
-                                                  static_cast<u32_t>(plan.decoded.width) * plan.decoded.height};
+        std::size_t const pixels = static_cast<std::size_t>(plan.decoded.width) * plan.decoded.height;
+        host_expand[index] = rgba_expand_entry_t {{rgb_base + entry.rgb_offset, pixels, 3},
+                                                  {scratch + plan.scratch_offset, pixels, 4}};
     }
     if (expected_t uploaded = copy_host_to_device(
             nk::tensor_view<rgba_expand_entry_t, 1> {host_expand.data(), entries.size()},

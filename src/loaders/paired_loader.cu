@@ -37,11 +37,11 @@ using segment_shapes_span_t = nk::tensor_span<u16_t, 2>;
  *  @b grid_size grid-stride over the batch's segments; no dynamic shared memory.
  */
 static __global__ void pair_segments_kernel_(u32r1_view_t media_offsets, u32r1_view_t media_lengths,
-                                             modality_view_t media_modality, u16_t const *media_shapes,
+                                             modality_view_t media_modality, nk::tensor_view<u16_t, 2> media_shapes,
                                              u32r1_view_t text_offsets, u32r1_view_t text_lengths, u32_t text_begin,
                                              u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
-                                             modality_span_t segment_modality, u32r1_span_t segment_bag, u16_t *shapes,
-                                             u32_t shape_width, u32_t end, u32_t absent_bag) {
+                                             modality_span_t segment_modality, u32r1_span_t segment_bag,
+                                             segment_shapes_span_t shapes, u32_t end, u32_t absent_bag) {
     u32_t const segments = static_cast<u32_t>(segment_lengths.extent(0));
     u32_t const pairs = static_cast<u32_t>(media_lengths.extent(0));
     u32_t const stride = gridDim.x * blockDim.x;
@@ -58,8 +58,8 @@ static __global__ void pair_segments_kernel_(u32r1_view_t media_offsets, u32r1_v
             segment_lengths[segment] = media_lengths[pair];
             segment_modality[segment] = media_modality[pair];
             segment_bag[segment] = pair;
-            for (u32_t axis = 0; axis != shape_width; ++axis)
-                shapes[segment * shape_width + axis] = media_shapes[pair * shape_width + axis];
+            for (std::size_t axis = 0; axis != shapes.extent(1); ++axis)
+                shapes[segment, axis] = media_shapes[pair, axis];
         }
         else {
             segment_offsets[segment] = text_begin + text_offsets[pair];
@@ -242,9 +242,9 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
         modality_span_t const text_modality {modalities.data() + pairs, pairs};
 
         std::span<u64_t const> const drawn {drawn_rows.data() + first_pair, pairs};
-        if (expected_t decoded = decode(loaded, media_rows, media_tape, drawn,
-                                        segment_shapes_span_t {media_shapes.data(), {pairs, std::size_t {shape_width}}},
-                                        media_offsets_table, media_lengths_table, media_modality);
+        segment_shapes_span_t const media_shape_rows {media_shapes.data(), {pairs, std::size_t {shape_width}}};
+        if (expected_t decoded = decode(loaded, media_rows, media_tape, drawn, media_shape_rows, media_offsets_table,
+                                        media_lengths_table, media_modality);
             !decoded)
             return decoded;
         tokens_matrix_span_t const caption_rows {loaded.tokens.data() + media_rows * columns, {text_rows, columns}};
@@ -254,18 +254,18 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
             !packed)
             return packed;
 
-        u16_t *const shapes = modality_ == modality_t::image_k   ? loaded.image_shapes.data()
-                              : modality_ == modality_t::video_k ? loaded.video_shapes.data()
-                                                                 : nullptr;
+        segment_shapes_span_t const shapes = modality_ == modality_t::image_k   ? loaded.image_shapes.span()
+                                             : modality_ == modality_t::video_k ? loaded.video_shapes.span()
+                                                                                : segment_shapes_span_t {};
         u32_t const text_begin = static_cast<u32_t>(media_rows * columns);
         if (expected_t paired = launch_kernel(
                 &pair_segments_kernel_, dim3 {grid_size_for(segments), 1u, 1u},
                 dim3 {kernel_block_size_default_k, 1u, 1u}, gpu_stream,
                 u32r1_view_t {media_offsets_table.data(), pairs + 1}, u32r1_view_t {media_lengths_table.data(), pairs},
-                modality_view_t {media_modality.data(), pairs}, media_shapes.data(),
+                modality_view_t {media_modality.data(), pairs}, nk::tensor_view<u16_t, 2> {media_shape_rows},
                 u32r1_view_t {text_offsets_table.data(), pairs + 1}, u32r1_view_t {text_lengths_table.data(), pairs},
                 text_begin, loaded.segment_offsets.span(), loaded.segment_lengths.span(),
-                loaded.segment_modality.span(), loaded.segment_bag.span(), shapes, shape_width,
+                loaded.segment_modality.span(), loaded.segment_bag.span(), shapes,
                 static_cast<u32_t>(text_begin + cursor), static_cast<u32_t>(pairs));
             !paired)
             return paired;

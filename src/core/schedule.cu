@@ -70,8 +70,9 @@ __global__ void __launch_bounds__(256) uc::transpose_bf16_kernel(bf16r2_view_t s
     u32_t const second[4] = {lower.x, lower.y, lower.z, lower.w};
 #pragma unroll
     for (u32_t word = 0; word != 4u; ++word) {
-        tile[quad * 8u + 2u * word][pair] = __byte_perm(first[word], second[word], 0x5410);
-        tile[quad * 8u + 2u * word + 1u][pair] = __byte_perm(first[word], second[word], 0x7632);
+        u32_t const tile_row = quad * 8u + 2u * word; // the two transposed rows this word's columns become
+        tile[tile_row][pair] = __byte_perm(first[word], second[word], 0x5410);
+        tile[tile_row + 1u][pair] = __byte_perm(first[word], second[word], 0x7632);
     }
     __syncthreads();
 

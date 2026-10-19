@@ -74,6 +74,7 @@ void ui::stage_patches(segment_layout_t const &layout, modality_t target, nk::te
                        f32r1_view_t mean, f32r1_view_t inverse_std, bf16r2_span_t patches,
                        fu::flat_pool_t &pool) noexcept {
     std::size_t const spatial = grid_pixels.extent(1), channels = grid_pixels.extent(2);
+    auto const cells = patches.reshape<3>({patches.extent(0), spatial, channels});
     f32_t const inverse_byte_max = 1.0f / 255.0f;
     pool.for_n(layout.lengths.extent(0), [&](std::size_t segment, auto) noexcept {
         if (layout.modality[segment] != target) return;
@@ -84,7 +85,7 @@ void ui::stage_patches(segment_layout_t const &layout, modality_t target, nk::te
                 for (std::size_t channel = 0; channel != channels; ++channel) {
                     f32_t const byte = static_cast<f32_t>(grid_pixels[source, position, channel]);
                     f32_t const value = (byte * inverse_byte_max - mean[channel]) * inverse_std[channel];
-                    patches[row, position * channels + channel] = narrow_(value);
+                    cells[row, position, channel] = narrow_(value);
                 }
         }
     });

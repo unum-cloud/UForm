@@ -104,12 +104,13 @@ struct pixels_packer_t {
                     std::size_t thread) const noexcept {
         if (!plan.tokens) return {};
         std::size_t const height = heights[item], width = widths[item], pixels = height * width;
-        std::span<b8_t const> const rgb = entry_of(tape, item, 1);
+        nk::tensor_view<b8_t, 2> const rgb {entry_of(tape, item, 1).data(), pixels, 3};
         pixel_t *const rgba = expanded + thread * expanded_stride;
+        nk::tensor_span<pixel_t, 2> const rgba_pixels {rgba, pixels, 4};
         for (std::size_t pixel = 0; pixel != pixels; ++pixel) {
             for (std::size_t channel = 0; channel != 3; ++channel)
-                rgba[pixel * 4 + channel] = static_cast<pixel_t>(rgb[pixel * 3 + channel]);
-            rgba[pixel * 4 + 3] = 255;
+                rgba_pixels[pixel, channel] = static_cast<pixel_t>(rgb[pixel, channel]);
+            rgba_pixels[pixel, 3] = 255;
         }
         std::size_t const side = geometry.image_patch_side;
         core::expected_t const resized = um::resize_image(

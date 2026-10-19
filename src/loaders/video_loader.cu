@@ -688,6 +688,7 @@ struct cursor_plan_t {
         plan.prefix.resize(job_count + 1u) != status_t::success_k || job_group.resize(job_count) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "video geometry scratch allocation failed ({} segments)",
                               max_segments);
+    nk::tensor_span<u16_t, 2> const shapes {plan.shapes.data(), job_count, 3};
 
     u32_t const columns = geometry.columns;
     u32_t const capacity = geometry.rows * geometry.columns;
@@ -722,9 +723,9 @@ struct cursor_plan_t {
                 }
                 length = 0;
             }
-            plan.shapes[segment * 3u + 0u] = grid.temporal_groups;
-            plan.shapes[segment * 3u + 1u] = grid.patch_rows;
-            plan.shapes[segment * 3u + 2u] = grid.patch_columns;
+            shapes[segment, 0] = grid.temporal_groups;
+            shapes[segment, 1] = grid.patch_rows;
+            shapes[segment, 2] = grid.patch_columns;
             tile_job_t job;
             job.frames_offset = 0; // resolved in pass 3, once the group buffers have addresses
             job.length = length;

@@ -89,14 +89,14 @@ expected_t um::resize_image(pixel_image_view_t source, pixel_patches_span_t out)
         return expected_t::fail(status_t::bad_alloc_k, "resize scratch allocation failed ({}x{})", target.width,
                                 crop.height);
 
+    nk::tensor_span<f32_t, 3> const staged_rows {staged.data(), {crop.height, target.width, image_channels_k}};
     for (u32_t y = 0; y != crop.height; ++y)
         for (u32_t x = 0; x != target.width; ++x) {
             lanczos_tap_t const &tap = horizontal[x];
-            f32_t *const sums = staged.data() + (static_cast<std::size_t>(y) * target.width + x) * image_channels_k;
-            for (u32_t channel = 0; channel != image_channels_k; ++channel) sums[channel] = 0.0f;
+            for (u32_t channel = 0; channel != image_channels_k; ++channel) staged_rows[y, x, channel] = 0.0f;
             for (u32_t k = 0; k != lanczos_taps_k; ++k)
                 for (u32_t channel = 0; channel != image_channels_k; ++channel)
-                    sums[channel] += tap.weight[k] * source[crop.y + y, crop.x + tap.index[k], channel];
+                    staged_rows[y, x, channel] += tap.weight[k] * source[crop.y + y, crop.x + tap.index[k], channel];
         }
 
     for (u32_t y = 0; y != target.height; ++y) {
@@ -104,10 +104,8 @@ expected_t um::resize_image(pixel_image_view_t source, pixel_patches_span_t out)
         for (u32_t x = 0; x != target.width; ++x)
             for (u32_t channel = 0; channel != image_channels_k; ++channel) {
                 f32_t sum = 0.0f;
-                for (u32_t k = 0; k != lanczos_taps_k; ++k) {
-                    std::size_t const cell = static_cast<std::size_t>(tap.index[k]) * target.width + x;
-                    sum += tap.weight[k] * staged[cell * image_channels_k + channel];
-                }
+                for (u32_t k = 0; k != lanczos_taps_k; ++k)
+                    sum += tap.weight[k] * staged_rows[tap.index[k], x, channel];
                 out[y / patch_side, x / patch_side, y % patch_side, x % patch_side, channel] = static_cast<pixel_t>(
                     std::lround(std::clamp(sum, 0.0f, 255.0f)));
             }

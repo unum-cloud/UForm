@@ -166,10 +166,11 @@ class array {
     }
 
     /** @ref resize without touching the new tail — no memset, no constructors — so the first
-     *  writer can be a GPU kernel and a device-resident buffer is never touched from the host. Only
-     *  trivially-constructible elements qualify; a shrink behaves exactly like @ref resize . */
+     *  writer can be a GPU kernel or a byte copy, and a device-resident buffer is never touched
+     *  from the host. Elements the bytes alone describe qualify, trivially copyable and trivially
+     *  destructible ones; a shrink behaves exactly like @ref resize . */
     [[nodiscard]] status_t resize_uninitialized(size_type new_size) noexcept
-        requires(std::is_trivially_default_constructible_v<value_type_>)
+        requires std::is_trivially_copyable_v<value_type_> && std::is_trivially_destructible_v<value_type_>
     {
         if (new_size <= size_) return resize(new_size);
         if (status_t status = reserve(new_size); status != status_t::success_k) return status;
