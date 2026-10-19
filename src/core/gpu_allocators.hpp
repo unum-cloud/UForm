@@ -59,6 +59,8 @@ using bf16r1_view_t = nk::tensor_view<bf16_t, 1>;
 using bf16r1_span_t = nk::tensor_span<bf16_t, 1>;
 using bf16r2_view_t = nk::tensor_view<bf16_t, 2>;
 using bf16r2_span_t = nk::tensor_span<bf16_t, 2>;
+using bf16r3_view_t = nk::tensor_view<bf16_t, 3>;
+using bf16r3_span_t = nk::tensor_span<bf16_t, 3>;
 using e4m3r1_view_t = nk::tensor_view<e4m3_t, 1>;
 using e4m3r1_span_t = nk::tensor_span<e4m3_t, 1>;
 using e4m3r2_view_t = nk::tensor_view<e4m3_t, 2>;
@@ -635,6 +637,7 @@ using b8r1_tensor_registrable_t = nk::tensor<b8_t, gpu_registrable_alloc<b8_t>, 
 using i16r2_tensor_arena_t = nk::tensor<i16_t, gpu_arena_alloc<i16_t>, 2>;
 using i32r1_tensor_arena_t = nk::tensor<i32_t, gpu_arena_alloc<i32_t>, 1>;
 using u32r1_tensor_arena_t = nk::tensor<u32_t, gpu_arena_alloc<u32_t>, 1>;
+using u32r2_tensor_arena_t = nk::tensor<u32_t, gpu_arena_alloc<u32_t>, 2>;
 using f32r1_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 1>;
 using f32r2_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 2>;
 using f32r3_tensor_arena_t = nk::tensor<f32_t, gpu_arena_alloc<f32_t>, 3>;
@@ -645,6 +648,7 @@ using e4m3r1_tensor_arena_t = nk::tensor<e4m3_t, gpu_arena_alloc<e4m3_t>, 1>;
 using e4m3r2_tensor_arena_t = nk::tensor<e4m3_t, gpu_arena_alloc<e4m3_t>, 2>;
 
 using u32r1_tensor_pinned_t = nk::tensor<u32_t, pinned_alloc<u32_t>, 1>;
+using u32r2_tensor_pinned_t = nk::tensor<u32_t, pinned_alloc<u32_t>, 2>;
 using f32r1_tensor_pinned_t = nk::tensor<f32_t, pinned_alloc<f32_t>, 1>;
 
 } // namespace unum::uform::core

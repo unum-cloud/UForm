@@ -236,10 +236,10 @@ template <typename value_type_>
 }
 
 /** The device-only sibling of @ref copy_host_to_device : enqueue a device → device copy of a rank-1 view
- *  into a same-typed device span on @p stream . An empty @p source is a no-op; a source longer than the
- *  destination is a loud failure. */
+ *  into a same-typed device span on @p stream , which names the type, so a span source converts. An
+ *  empty @p source is a no-op; a source longer than the destination is a loud failure. */
 template <typename value_type_>
-[[nodiscard]] inline expected_t copy_device_to_device(nk::tensor_view<value_type_, 1> source,
+[[nodiscard]] inline expected_t copy_device_to_device(std::type_identity_t<nk::tensor_view<value_type_, 1>> source,
                                                       nk::tensor_span<value_type_, 1> destination,
                                                       gpu_stream_t &stream) noexcept {
     if (source.empty()) return {};

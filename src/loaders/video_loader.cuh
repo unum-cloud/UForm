@@ -169,11 +169,10 @@ struct nvdec_session_t {
  *  @param[inout] stream The stream the staging and tiling enqueue on.
  */
 [[nodiscard]] expected_t decode_videos(nvdec_session_t &nvdec, cpu_decode_pool_t &pool, column_view_t tape,
-                                       std::span<u64_t const> drawn_rows,
-                                       std::span<video_batch_shape_t const> representations, pixel_tubes_span_t videos,
-                                       video_shape_span_t video_shapes, u32r1_span_t segment_offsets,
-                                       u32r1_span_t segment_lengths, modality_span_t segment_modality,
-                                       gpu_stream_t &stream) noexcept;
+                                       u64r1_view_t drawn_rows, std::span<video_batch_shape_t const> representations,
+                                       pixel_tubes_span_t videos, video_shape_span_t video_shapes,
+                                       u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
+                                       modality_span_t segment_modality, gpu_stream_t &stream) noexcept;
 
 /** The Parquet video loader's baked knob — just which column; the video geometry travels on the loader's
  *  @c video_batch_shape_t (fixed at @ref video_loader_parquet_t::make ), not here, so the shape stays the single

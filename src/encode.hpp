@@ -243,15 +243,18 @@ struct vram_site_t {
             };
             std::size_t const begin = packed_offsets[first] - origin, end = packed_offsets[last] - origin;
             std::size_t const items = last - first;
+            auto const shard_items = nk::range(first, last);
+            nk::tensor_view<u16_t, 2> const image_shapes = batch.image_shapes[shard_items, nk::slice];
+            nk::tensor_view<u16_t, 2> const video_shapes = batch.video_shapes[shard_items, nk::slice];
             if (!copied(shard.cells + begin * cell_bytes, cells + begin * cell_bytes, (end - begin) * cell_bytes) ||
-                !copied(shard.image_shapes, batch.image_shapes.data() + first * 2, items * 2 * sizeof(u16_t)) ||
-                !copied(shard.video_shapes, batch.video_shapes.data() + first * 3, items * 3 * sizeof(u16_t)))
+                !copied(shard.image_shapes, image_shapes.data(), image_shapes.numel() * sizeof(u16_t)) ||
+                !copied(shard.video_shapes, video_shapes.data(), video_shapes.numel() * sizeof(u16_t)))
                 return moved;
 
             core::multimodal_batch_view_t shard_batch = batch;
-            shard_batch.segment_offsets = {batch.segment_offsets.data() + first, items + 1};
-            shard_batch.segment_lengths = {batch.segment_lengths.data() + first, items};
-            shard_batch.segment_modality = {batch.segment_modality.data() + first, items};
+            shard_batch.segment_offsets = batch.segment_offsets[nk::range(first, last + 1), nk::slice];
+            shard_batch.segment_lengths = batch.segment_lengths[shard_items, nk::slice];
+            shard_batch.segment_modality = batch.segment_modality[shard_items, nk::slice];
             shard_batch.image_shapes = {shard.image_shapes, items, 2};
             shard_batch.video_shapes = {shard.video_shapes, items, 3};
             shard_batch.tokens = rebased(batch.tokens, shard.cells);

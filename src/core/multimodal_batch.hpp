@@ -231,6 +231,12 @@ struct multimodal_batch_shape_t {
     }
 };
 
+/** @p content viewed as @b [rows,scalars] , one row per grid cell or per segment, so a run of
+ *  cells is a range of whole rows; an absent modality's empty view stays empty. */
+[[nodiscard]] constexpr auto as_rows(auto &&content, std::size_t rows) noexcept {
+    return content.template reshape<2>({rows, content.numel() / rows});
+}
+
 /** A read-only borrow of one @ref multimodal_batch , whatever its residency — what a tower reads. Each field
  *  views the batch tensor of the same name; an absent modality's content view is empty. */
 struct multimodal_batch_view_t {

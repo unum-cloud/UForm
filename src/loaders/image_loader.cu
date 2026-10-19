@@ -290,9 +290,8 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
  *  needs only its shrunk pixels; a CPU-fallback plan's @c decoded equals its native size). @p tape slices
  *  the reservoir (device bytes, host offsets) via @c tape[row] . Returns the scratch byte total. One
  *  header-prefix hop, one sync. */
-[[nodiscard]] static expected<std::size_t> triage_images_(bool hardware, column_view_t tape,
-                                                          std::span<u64_t const> drawn_rows, u32_t patch_size,
-                                                          u32_t max_columns, u32_t max_segments,
+[[nodiscard]] static expected<std::size_t> triage_images_(bool hardware, column_view_t tape, u64r1_view_t drawn_rows,
+                                                          u32_t patch_size, u32_t max_columns, u32_t max_segments,
                                                           std::span<image_plan_t> plans,
                                                           gpu_stream_t &stream) noexcept {
     using result_t = expected<std::size_t>;
@@ -313,9 +312,7 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
         host_entries[index] = gather_entry_t {blob.data(),
                                               static_cast<u32_t>(std::min(blob.size(), header_probe_bytes_k))};
     }
-    if (expected_t uploaded = copy_host_to_device(nk::tensor_view<gather_entry_t, 1> {host_entries.data(), images},
-                                                  nk::tensor_span<gather_entry_t, 1> {device_entries.data(), images},
-                                                  stream);
+    if (expected_t uploaded = copy_host_to_device<gather_entry_t>(host_entries.view(), device_entries.span(), stream);
         !uploaded)
         return result_t::fail(std::move(uploaded));
     if (expected_t launched = launch_kernel(&gather_headers_kernel_, dim3 {grid_size_for(images, 1u), 1u, 1u},
@@ -324,16 +321,15 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
                                             static_cast<u32_t>(images));
         !launched)
         return result_t::fail(std::move(launched));
-    if (expected_t read = copy_device_to_host(b8r1_view_t {staging.data(), images * header_probe_bytes_k},
-                                              b8r1_span_t {probe.data(), images * header_probe_bytes_k}, stream);
-        !read)
+    if (expected_t read = copy_device_to_host<b8_t>(staging.view(), probe.span(), stream); !read)
         return result_t::fail(std::move(read));
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
         return result_t::fail(status_t::cuda_error_k, "header gather readback failed");
 
     std::size_t scratch_bytes = 0;
     for (std::size_t index = 0; index != images; ++index) {
-        std::span<b8_t const> const header {probe.data() + index * header_probe_bytes_k, host_entries[index].length};
+        std::span<b8_t const> const header = probe.view().subspan(index * header_probe_bytes_k,
+                                                                  host_entries[index].length);
         auto probed = um::probe_image(header);
         image_plan_t &plan = plans[index];
         if (!probed) {
@@ -404,7 +400,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
  *  not fatal: every JPEG entry flips to @c route_t::cpu_fallback_k keeping its scaled @c decoded extent, so
  *  the CPU fallback shrinks to the same @c decoded -sized scratch region it would have filled. */
 [[nodiscard]] static expected_t decode_jpeg_plans_(nvjpeg_session_t &jpeg, std::span<image_plan_t> plans, u8_t *scratch,
-                                                   column_view_t tape, std::span<u64_t const> drawn_rows,
+                                                   column_view_t tape, u64r1_view_t drawn_rows,
                                                    gpu_stream_t &stream) noexcept {
     constexpr u32_t rgb_channels_k = 3u; // nvJPEG's interleaved-RGB output, widened to RGBA afterward
     array<jpeg_entry_t> entries;
@@ -456,9 +452,8 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
         host_expand[index] = rgba_expand_entry_t {{rgb_base + entry.rgb_offset, pixels, 3},
                                                   {scratch + plan.scratch_offset, pixels, 4}};
     }
-    if (expected_t uploaded = copy_host_to_device(
-            nk::tensor_view<rgba_expand_entry_t, 1> {host_expand.data(), entries.size()},
-            nk::tensor_span<rgba_expand_entry_t, 1> {device_expand.data(), entries.size()}, stream);
+    if (expected_t uploaded = copy_host_to_device<rgba_expand_entry_t>(host_expand.view(), device_expand.span(),
+                                                                       stream);
         !uploaded)
         return uploaded;
     if (expected_t widened = launch_kernel(&rgb_to_rgba_kernel_, dim3 {grid_size_for(entries.size(), 1u), 1u, 1u},
@@ -477,7 +472,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
  *  hop in, an RGBA decode per worker at the plan's @c decoded extent (native for PNG / WebP, the scaled
  *  size for a rejected hardware JPEG), then one bulk host-to-device copy into each scratch region. */
 [[nodiscard]] static expected_t decode_cpu_plans_(cpu_decode_pool_t &pool, std::span<image_plan_t> plans, u8_t *scratch,
-                                                  column_view_t tape, std::span<u64_t const> drawn_rows,
+                                                  column_view_t tape, u64r1_view_t drawn_rows,
                                                   gpu_stream_t &stream) noexcept {
     struct cpu_task_t {
 
@@ -521,9 +516,8 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
     for (std::size_t index = 0; index != tasks.size(); ++index) {
         cpu_task_t const &task = tasks[index];
         auto const blob = tape[drawn_rows[task.plan_index]];
-        if (expected_t copied = copy_device_to_host(b8r1_view_t {blob.data(), task.blob_length},
-                                                    b8r1_span_t {blobs.data() + task.blob_offset, task.blob_length},
-                                                    stream);
+        if (expected_t copied = copy_device_to_host<b8_t>(
+                blob, blobs.span().subspan(task.blob_offset, task.blob_length), stream);
             !copied)
             return copied;
     }
@@ -670,8 +664,8 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
     array<u32_t, gpu_alloc<u32_t>> device_resized_offsets {gpu_alloc<u32_t> {stream.get()}};
     if (device_resized_offsets.resize_uninitialized(images) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "resize offset device allocation failed");
-    if (expected_t uploaded = copy_host_to_device(u32r1_view_t {host_resized_offsets.data(), images},
-                                                  u32r1_span_t {device_resized_offsets.data(), images}, stream);
+    if (expected_t uploaded = copy_host_to_device<u32_t>(host_resized_offsets.view(), device_resized_offsets.span(),
+                                                         stream);
         !uploaded)
         return uploaded;
 
@@ -688,7 +682,7 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
 }
 
 expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, column_view_t tape,
-                             std::span<u64_t const> drawn_rows, std::span<image_batch_shape_t const> representations,
+                             u64r1_view_t drawn_rows, std::span<image_batch_shape_t const> representations,
                              pixel_patches_span_t pixels, image_shape_span_t shapes, u32r1_span_t segment_offsets,
                              u32r1_span_t segment_lengths, modality_span_t segment_modality,
                              gpu_stream_t &stream) noexcept {
@@ -732,9 +726,7 @@ expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, co
         device_grids.resize_uninitialized(images) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "segment grid staging allocation failed");
     for (std::size_t index = 0; index != images; ++index) host_grids[index] = plans[index].grid;
-    if (expected_t uploaded = copy_host_to_device(nk::tensor_view<patch_grid_t, 1> {host_grids.data(), images},
-                                                  nk::tensor_span<patch_grid_t, 1> {device_grids.data(), images},
-                                                  stream);
+    if (expected_t uploaded = copy_host_to_device<patch_grid_t>(host_grids.view(), device_grids.span(), stream);
         !uploaded)
         return uploaded;
     if (expected_t segmented = launch_kernel(&image_segments_kernel_, dim3 {1u, 1u, 1u}, dim3 {1u, 1u, 1u}, stream,
@@ -755,10 +747,7 @@ expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, co
 
     if (expected_t r = decode_jpeg_plans_(jpeg, plan_span, scratch_base, tape, drawn_rows, stream); !r) return r;
     if (expected_t r = decode_cpu_plans_(pool, plan_span, scratch_base, tape, drawn_rows, stream); !r) return r;
-    return resize_plans_(plan_span, scratch_base, pixels,
-                         image_shape_view_t {shapes.data(), {shapes.extent(0), shapes.extent(1)}},
-                         u32r1_view_t {segment_offsets.data(), segment_offsets.extent(0)},
-                         u32r1_view_t {segment_lengths.data(), segment_lengths.extent(0)}, stream);
+    return resize_plans_(plan_span, scratch_base, pixels, shapes, segment_offsets, segment_lengths, stream);
 }
 
 expected<image_loader_parquet_t> image_loader_parquet_t::make(gpu_direct_storage_session_t &session,
@@ -853,14 +842,13 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
     array<u64_t> reservoir_offsets;
     if (reservoir_offsets.resize_uninitialized(offsets_count) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "reservoir offsets landing failed ({} rows)", pooled_rows);
-    if (expected_t landed = copy_device_to_host(column.offsets, {reservoir_offsets.data(), offsets_count}, gpu_stream);
-        !landed)
+    if (expected_t landed = copy_device_to_host(column.offsets, reservoir_offsets.span(), gpu_stream); !landed)
         return landed;
     if (cuStreamSynchronize(gpu_stream.get()) != CUDA_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "reservoir offsets readback failed");
 
-    // Draw the whole fill's rows on the host — a keyed bijection over the pool, so each batch's slice is a
-    // distinct scatter of rows across the pooled files.
+    // Draw the whole fill's rows on the host — a keyed bijection over the pool, so each batch
+    // draws a distinct scatter of rows across the pooled files.
     u64_t const row_key = hash(seed_, gpu_rank, row_draw_salt_k);
     array<u64_t> record_indices;
     if (record_indices.resize_uninitialized(total_images) != status_t::success_k)
@@ -869,7 +857,8 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
         record_indices[index] = epoch_permutation(row_key, data_epoch_t {training_step}, index, pooled_rows);
 
     // The blob column re-viewed with its offsets on host: device bytes, host-indexable via `tape[row]`.
-    column_view_t const tape {column.payload, {reservoir_offsets.data(), offsets_count}};
+    column_view_t const tape {column.payload, reservoir_offsets.view()};
+    u64r2_view_t const batch_records {record_indices.data(), unroll, images_per_batch};
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t &loaded = batches[batch];
         if (images_per_batch > loaded.image_shapes.extent(0) || images_per_batch > loaded.segment_lengths.extent(0))
@@ -877,19 +866,11 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
                                     images_per_batch);
         // The batch's [rows,columns,P,P,C] image tensor names the whole grid directly: extent(2) is the square
         // patch side and extent(4) the RGBA channels — no arithmetic from a flattened run.
-        std::span<u64_t const> const drawn {record_indices.data() + batch * images_per_batch, images_per_batch};
-
-        pixel_patches_span_t const pixels {loaded.images.data(),
-                                           {loaded.images.extent(0), loaded.images.extent(1), loaded.images.extent(2),
-                                            loaded.images.extent(3), loaded.images.extent(4)}};
-        image_shape_span_t const shapes {loaded.image_shapes.data(),
-                                         {loaded.image_shapes.extent(0), loaded.image_shapes.extent(1)}};
-        u32r1_span_t const segment_offsets {loaded.segment_offsets.data(), loaded.segment_offsets.extent(0)};
-        u32r1_span_t const segment_lengths {loaded.segment_lengths.data(), loaded.segment_lengths.extent(0)};
-        modality_span_t const segment_modality {loaded.segment_modality.data(), loaded.segment_modality.extent(0)};
         std::span<image_batch_shape_t const> const representations {&image_, 1}; // one representation today
-        if (expected_t decoded = decode_images(decoder, *pool_, tape, drawn, representations, pixels, shapes,
-                                               segment_offsets, segment_lengths, segment_modality, gpu_stream);
+        if (expected_t decoded = decode_images(decoder, *pool_, tape, draws[batch, nk::slice], representations,
+                                               loaded.images.span(), loaded.image_shapes.span(),
+                                               loaded.segment_offsets.span(), loaded.segment_lengths.span(),
+                                               loaded.segment_modality.span(), gpu_stream);
             !decoded)
             return decoded;
     }

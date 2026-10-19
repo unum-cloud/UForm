@@ -268,7 +268,7 @@ expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t c
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const row_grid {static_cast<u32_t>(tokens), 1u, 1u};
     bf16r2_span_t const padded_logit_grad = logit_grad_.span();
-    bf16r2_span_t const logit_grad = padded_logit_grad(nk::all, nk::range(0, config_.vocabulary), nk::slice);
+    bf16r2_span_t const logit_grad = padded_logit_grad[nk::all, nk::range(0, config_.vocabulary), nk::slice];
     f32r2_span_t const normalized_products {products_.data(), tokens, hidden};
     expected_t staged = launch_kernel(&masked_count_kernel_, one_block, block_shape, stream, loss_weights,
                                       gradient_scale_.span(), config_.weight);

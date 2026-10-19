@@ -1121,6 +1121,17 @@ check_flat_subscripts() {
         "            \`f32r2_view_t const rows {data, tokens, hidden};\` then \`rows[token, channel]\`:"
 }
 
+# A view slices through the subscript, `t[nk::range(0, rows), nk::slice]`, the same operator that
+# reads its scalars; the call form `t(nk::range(0, rows), nk::slice)` reads as a function call.
+check_call_slicing() {
+    local calls
+    calls=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+        grep -E '[[:alnum:]_\])][[:space:]]*\((nk::range[[:space:]]*\(|nk::all\b|nk::slice\b)' || true)
+    [ -z "$calls" ] || fail "$calls" \
+        "$file slices a view through call syntax - write the subscript," \
+        "            \`rows[nk::range(0, live), nk::slice]\`:"
+}
+
 # Tests and benchmarks reduce through NumKong, which accumulates in a fixed order and compensates
 # Float64, instead of loops widening BFloat16 one element at a time: widen a buffer once with
 # `nk::cast`, then reduce it with `nk::dot`, `nk::dots_unpacked` or `nk::reduce_moments`.
@@ -1221,14 +1232,14 @@ check_stl_dynamic_containers() {
         "$file uses an STL dynamic container - use core::array<T>, sorted where a lookup needs it, or nk::tensor:"
 }
 
-# A range rebuilt from its own parts - `{x.data(), x.size()}`, `{tokens.view().data(), tokens.view().size()}`
-# or `std::span<T const>(x.data(), x.size())` - means a conversion or an accessor is missing: a container
-# converts to `std::span`, NumKong tensors convert to views, and `sz::string` converts to its view. Pass the
-# range itself.
+# A range rebuilt from its own parts - `{x.data(), x.size()}`, `{rows.data(), rows.extent(0)}`,
+# `{tokens.view().data(), tokens.view().size()}` or `std::span<T const>(x.data(), x.size())` - means a
+# conversion or an accessor is missing: a container converts to `std::span`, NumKong tensors convert to
+# views, and `sz::string` converts to its view. Pass the range itself.
 check_range_reconstruction() {
     local rebuilt
     rebuilt=$(printf '%s\n' "$added" |
-        grep -E '(\{|(span|string_view|_view_t|_span_t)(<.*>)?( const)?( [a-z_]+)? *\() *([A-Za-z_][A-Za-z0-9_.()>-]*)(\.|->)data\(\), *\6(\.|->)size\(\) *[})]' || true)
+        grep -E '(\{|(span|string_view|_view_t|_span_t)(<.*>)?( const)?( [a-z_]+)? *\() *([A-Za-z_][A-Za-z0-9_.()>-]*)(\.|->)data\(\), *\6(\.|->)(size\(\)|numel\(\)|extent\(0\)) *[})]' || true)
     [ -z "$rebuilt" ] || fail "$rebuilt" \
         "$file rebuilds a range from its own .data()/.size() - pass the range itself," \
         "            or add the missing accessor or conversion:"
@@ -1818,6 +1829,7 @@ judge_path() {
         check_memcpy
         check_libc_qualified
         check_flat_subscripts
+        check_call_slicing
         check_range_reconstruction
         check_data_null_probe
         check_call_chained_call

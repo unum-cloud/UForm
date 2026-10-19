@@ -211,21 +211,27 @@ struct items_source_t final : batch_source_t {
     per_gpu_array<multimodal_batch_on_cpu_t> staged_ {};
     multimodal_batch_mixer_t mixer_ {};
 
-    /** Per item: its tokens and the device segment it was packed into; per routed segment: its world source. */
+    /** Per item: its tokens and the device segment it was packed into. */
     array<u32_t> tokens_ {}, placements_ {}, destinations_ {}, order_ {};
-    u32r1_tensor_pinned_t sources_ {};
 
-    /** Per device segment of the mesh: the item packed there, or @c ~0u . */
-    array<u32_t> packed_items_ {};
+    /** @b [gpus,segments] per routed segment: its world source, then the item it carries. */
+    u32r2_tensor_pinned_t sources_ {};
 
-    /** One device's relations rebuilt on host, and the live length of every mesh vertex. */
-    array<u32_t> offsets_ {}, ids_ {}, lengths_ {};
-    array<f32_t> weights_ {};
+    /** @b [gpus,segments] the item packed into each device segment of the mesh, or @c ~0u . */
+    u32r2_tensor_pinned_t packed_items_ {};
+
+    /** One device's relations rebuilt on host: @b [3,segments+1] offsets and @b [3,edges] IDs of
+     *  the attract, repel and ignore sets, @b [2,edges] weights of the first two, and the live
+     *  length of every mesh vertex. */
+    u32r2_tensor_pinned_t offsets_ {}, ids_ {};
+    nk::tensor<f32_t, pinned_alloc<f32_t>, 2> weights_ {};
+    array<u32_t> lengths_ {};
     array<temperature_group_t> groups_ {};
 
-    /** The decode window of one recording, and the pooled vertices downloaded for the embeddings. */
+    /** The decode window of one recording, and the @b [gpus,segments,hidden] pooled vertices
+     *  downloaded for the embeddings. */
     array<f32_t> window_ {};
-    nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> pooled_ {};
+    nk::tensor<bf16_t, pinned_alloc<bf16_t>, 3> pooled_ {};
 };
 
 /** Everything one run owns on this process's devices, in wire order, placed and never moved

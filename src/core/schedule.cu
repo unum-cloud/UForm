@@ -139,7 +139,7 @@ expected_t uc::pack_weight_bf16(bf16r2_view_t weight, bf16r1_span_t transposed, 
                                 gpu_stream_t &stream) noexcept {
     std::size_t const outputs = weight.extent(0), inputs = weight.extent(1);
     bf16r2_span_t const padded {transposed.data(), inputs, round_up_to_multiple(outputs, std::size_t {8})};
-    bf16r2_span_t const weight_transposed = padded(nk::all, nk::range(0, outputs), nk::slice);
+    bf16r2_span_t const weight_transposed = padded[nk::all, nk::range(0, outputs), nk::slice];
     expected_t staged = pack_bf16(weight, packed, capabilities, stream);
     if (staged) staged = transpose_bf16(weight, weight_transposed, stream);
     if (staged) staged = pack_bf16(weight_transposed, packed_transposed, capabilities, stream);
@@ -154,8 +154,8 @@ expected_t uc::weight_gradient_bf16(bf16r2_view_t output_grad, bf16r2_view_t inp
     std::size_t const padded_tokens = round_up_to_multiple(tokens, std::size_t {8});
     bf16r2_span_t const output_grad_padded {transposed_grad.data(), outputs, padded_tokens};
     bf16r2_span_t const input_padded {transposed_input.data(), inputs, padded_tokens};
-    bf16r2_span_t const output_grad_transposed = output_grad_padded(nk::all, nk::range(0, tokens), nk::slice);
-    bf16r2_span_t const input_transposed = input_padded(nk::all, nk::range(0, tokens), nk::slice);
+    bf16r2_span_t const output_grad_transposed = output_grad_padded[nk::all, nk::range(0, tokens), nk::slice];
+    bf16r2_span_t const input_transposed = input_padded[nk::all, nk::range(0, tokens), nk::slice];
     f32r2_span_t const weight_grad_wide {product.data(), outputs, inputs};
     expected_t staged = transpose_bf16(output_grad, output_grad_transposed, stream);
     if (staged) staged = transpose_bf16(input, input_transposed, stream);

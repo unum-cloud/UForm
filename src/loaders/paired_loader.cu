@@ -200,24 +200,25 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
     array<u64_t, gpu_alloc<u64_t>> caption_elements {gpu_alloc<u64_t> {gpu_stream.get()}};
     if (caption_elements.resize_uninitialized(total_pairs) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "caption index allocation failed ({} pairs)", total_pairs);
-    if (expected_t uploaded = copy_host_to_device(u64r1_view_t {drawn_captions.data(), total_pairs},
-                                                  u64r1_span_t {caption_elements.data(), total_pairs}, gpu_stream);
+    if (expected_t uploaded = copy_host_to_device<u64_t>(drawn_captions.view(), caption_elements.span(), gpu_stream);
         !uploaded)
         return uploaded;
 
     column_view_t const media_tape {media.payload, media_offsets.view()};
     u32_t const shape_width = modality_ == modality_t::image_k ? 2u : modality_ == modality_t::video_k ? 3u : 0u;
+    u64r2_view_t const drawn_row_tables {drawn_rows.data(), unroll, pairs};
+    u64r2_view_t const drawn_caption_tables {drawn_captions.data(), unroll, pairs};
+    u64r2_view_t const caption_element_tables {caption_elements.data(), unroll, pairs};
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t &loaded = batches[batch];
         if (loaded.tokens.extent(0) != rows || loaded.segment_lengths.extent(0) != segments)
             return expected_t::fail(status_t::shape_unsupported_k, "batch {} differs from the first", batch);
-        std::size_t const first_pair = batch * pairs;
 
         // The captions' rows, walked the way the packing kernel will: cut at the row width, never
         // crossing a row.
         std::size_t cursor = 0;
         for (std::size_t pair = 0; pair != pairs; ++pair) {
-            u64_t const caption = drawn_captions[first_pair + pair];
+            u64_t const caption = drawn_caption_tables[batch, pair];
             std::size_t const kept = std::min<std::size_t>(caption_offsets[caption + 1] - caption_offsets[caption],
                                                            columns);
             if (kept > columns - cursor % columns) cursor = round_up_to_multiple(cursor, columns);
@@ -225,32 +226,34 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
         }
         std::size_t const text_rows = divide_round_up(cursor, columns), media_rows = rows - text_rows;
 
-        // One scratch table per half: offsets, lengths, modalities and, for images and videos,
-        // shapes.
-        array<u32_t, gpu_alloc<u32_t>> tables {gpu_alloc<u32_t> {gpu_stream.get()}};
+        // One scratch table row per half, media then text: offsets, lengths, modalities and, for
+        // images and videos, the media shapes.
+        array<u32_t, gpu_alloc<u32_t>> offsets {gpu_alloc<u32_t> {gpu_stream.get()}};
+        array<u32_t, gpu_alloc<u32_t>> lengths {gpu_alloc<u32_t> {gpu_stream.get()}};
         array<modality_t, gpu_alloc<modality_t>> modalities {gpu_alloc<modality_t> {gpu_stream.get()}};
         array<u16_t, gpu_alloc<u16_t>> media_shapes {gpu_alloc<u16_t> {gpu_stream.get()}};
-        if (tables.resize_uninitialized(4 * pairs + 2) != status_t::success_k ||
+        if (offsets.resize_uninitialized(2 * (pairs + 1)) != status_t::success_k ||
+            lengths.resize_uninitialized(2 * pairs) != status_t::success_k ||
             modalities.resize_uninitialized(2 * pairs) != status_t::success_k ||
             media_shapes.resize_uninitialized(std::max<std::size_t>(pairs * shape_width, 1u)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "pair table allocation failed ({} pairs)", pairs);
-        u32r1_span_t const media_offsets_table {tables.data(), pairs + 1};
-        u32r1_span_t const media_lengths_table {tables.data() + pairs + 1, pairs};
-        u32r1_span_t const text_offsets_table {tables.data() + 2 * pairs + 1, pairs + 1};
-        u32r1_span_t const text_lengths_table {tables.data() + 3 * pairs + 2, pairs};
-        modality_span_t const media_modality {modalities.data(), pairs};
-        modality_span_t const text_modality {modalities.data() + pairs, pairs};
+        u32r2_span_t const offset_tables {offsets.data(), 2, pairs + 1}, length_tables {lengths.data(), 2, pairs};
+        nk::tensor_span<modality_t, 2> const modality_tables {modalities.data(), 2, pairs};
+        u32r1_span_t const media_offsets_table = offset_tables[0, nk::slice],
+                           text_offsets_table = offset_tables[1, nk::slice];
+        u32r1_span_t const media_lengths_table = length_tables[0, nk::slice],
+                           text_lengths_table = length_tables[1, nk::slice];
+        modality_span_t const media_modality = modality_tables[0, nk::slice],
+                              text_modality = modality_tables[1, nk::slice];
 
-        std::span<u64_t const> const drawn {drawn_rows.data() + first_pair, pairs};
         segment_shapes_span_t const media_shape_rows {media_shapes.data(), {pairs, std::size_t {shape_width}}};
-        if (expected_t decoded = decode(loaded, media_rows, media_tape, drawn, media_shape_rows, media_offsets_table,
-                                        media_lengths_table, media_modality);
+        if (expected_t decoded = decode(loaded, media_rows, media_tape, drawn_row_tables[batch, nk::slice],
+                                        media_shape_rows, media_offsets_table, media_lengths_table, media_modality);
             !decoded)
             return decoded;
-        tokens_matrix_span_t const caption_rows {loaded.tokens.data() + media_rows * columns, {text_rows, columns}};
-        if (expected_t packed = pack_tokens(captions, u64r1_view_t {caption_elements.data() + first_pair, pairs},
-                                            caption_rows, text_offsets_table, text_lengths_table, text_modality,
-                                            gpu_stream);
+        tokens_matrix_span_t const caption_rows = loaded.tokens[nk::range(media_rows, rows), nk::slice];
+        if (expected_t packed = pack_tokens(captions, caption_element_tables[batch, nk::slice], caption_rows,
+                                            text_offsets_table, text_lengths_table, text_modality, gpu_stream);
             !packed)
             return packed;
 
@@ -260,13 +263,10 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
         u32_t const text_begin = static_cast<u32_t>(media_rows * columns);
         if (expected_t paired = launch_kernel(
                 &pair_segments_kernel_, dim3 {grid_size_for(segments), 1u, 1u},
-                dim3 {kernel_block_size_default_k, 1u, 1u}, gpu_stream,
-                u32r1_view_t {media_offsets_table.data(), pairs + 1}, u32r1_view_t {media_lengths_table.data(), pairs},
-                modality_view_t {media_modality.data(), pairs}, nk::tensor_view<u16_t, 2> {media_shape_rows},
-                u32r1_view_t {text_offsets_table.data(), pairs + 1}, u32r1_view_t {text_lengths_table.data(), pairs},
-                text_begin, loaded.segment_offsets.span(), loaded.segment_lengths.span(),
-                loaded.segment_modality.span(), loaded.segment_bag.span(), shapes,
-                static_cast<u32_t>(text_begin + cursor), static_cast<u32_t>(pairs));
+                dim3 {kernel_block_size_default_k, 1u, 1u}, gpu_stream, media_offsets_table, media_lengths_table,
+                media_modality, media_shape_rows, text_offsets_table, text_lengths_table, text_begin,
+                loaded.segment_offsets.span(), loaded.segment_lengths.span(), loaded.segment_modality.span(),
+                loaded.segment_bag.span(), shapes, static_cast<u32_t>(text_begin + cursor), static_cast<u32_t>(pairs));
             !paired)
             return paired;
     }
@@ -282,12 +282,10 @@ expected_t paired_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_sessio
     if (modality_ != modality_t::image_k)
         return expected_t::fail(status_t::invalid_input_k, "the {} column holds no images", media_.view());
     return fill_(gpu_stream, gpu_rank, training_step, batches,
-                 [&](multimodal_batch_on_gpu_t &loaded, std::size_t media_rows, column_view_t tape,
-                     std::span<u64_t const> drawn, segment_shapes_span_t shapes, u32r1_span_t offsets,
-                     u32r1_span_t lengths, modality_span_t modalities) noexcept {
-                     pixel_patches_span_t const pixels {loaded.images.data(),
-                                                        {media_rows, loaded.images.extent(1), loaded.images.extent(2),
-                                                         loaded.images.extent(3), loaded.images.extent(4)}};
+                 [&](multimodal_batch_on_gpu_t &loaded, std::size_t media_rows, column_view_t tape, u64r1_view_t drawn,
+                     segment_shapes_span_t shapes, u32r1_span_t offsets, u32r1_span_t lengths,
+                     modality_span_t modalities) noexcept {
+                     pixel_patches_span_t const pixels = loaded.images[nk::range(0, media_rows), nk::slice];
                      return decode_images(decoder, *pool_, tape, drawn, {&shape_.image, 1}, pixels, shapes, offsets,
                                           lengths, modalities, gpu_stream);
                  });
@@ -300,13 +298,10 @@ expected_t paired_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session
     video_batch_shape_t video = shape_.video;
     video.frame_stride = std::max(video.frame_stride, 1u);
     return fill_(gpu_stream, gpu_rank, training_step, batches,
-                 [&](multimodal_batch_on_gpu_t &loaded, std::size_t media_rows, column_view_t tape,
-                     std::span<u64_t const> drawn, segment_shapes_span_t shapes, u32r1_span_t offsets,
-                     u32r1_span_t lengths, modality_span_t modalities) noexcept {
-                     pixel_tubes_span_t const tubes {
-                         loaded.videos.data(),
-                         {media_rows, loaded.videos.extent(1), loaded.videos.extent(2), loaded.videos.extent(3),
-                          loaded.videos.extent(4), loaded.videos.extent(5)}};
+                 [&](multimodal_batch_on_gpu_t &loaded, std::size_t media_rows, column_view_t tape, u64r1_view_t drawn,
+                     segment_shapes_span_t shapes, u32r1_span_t offsets, u32r1_span_t lengths,
+                     modality_span_t modalities) noexcept {
+                     pixel_tubes_span_t const tubes = loaded.videos[nk::range(0, media_rows), nk::slice];
                      return decode_videos(decoder, *pool_, tape, drawn, {&video, 1}, tubes, shapes, offsets, lengths,
                                           modalities, gpu_stream);
                  });
@@ -318,11 +313,9 @@ expected_t paired_loader_parquet_t::fill(gpu_stream_t &gpu_stream, u32_t gpu_ran
         return expected_t::fail(status_t::invalid_input_k, "the {} column holds no recordings", media_.view());
     return fill_(
         gpu_stream, gpu_rank, training_step, batches,
-        [&](multimodal_batch_on_gpu_t &loaded, std::size_t media_rows, column_view_t tape, std::span<u64_t const> drawn,
+        [&](multimodal_batch_on_gpu_t &loaded, std::size_t media_rows, column_view_t tape, u64r1_view_t drawn,
             segment_shapes_span_t, u32r1_span_t offsets, u32r1_span_t lengths, modality_span_t modalities) noexcept {
-            audio_samples_span_t const samples {
-                loaded.audio_samples.data(),
-                {media_rows, loaded.audio_samples.extent(1), loaded.audio_samples.extent(2)}};
+            audio_samples_span_t const samples = loaded.audio_samples[nk::range(0, media_rows), nk::slice];
             return decode_audios(*pool_, tape, drawn, {&shape_.audio, 1}, samples, offsets, lengths, modalities,
                                  gpu_stream);
         });

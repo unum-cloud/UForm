@@ -113,14 +113,14 @@ struct multimodal_batch_mixer_t {
                                         std::span<multimodal_batch_on_gpu_t> mixed,
                                         std::span<gpu_stream_t> streams) noexcept;
 
-    /** Local member @p local 's @b [world_gpus·max_segments_per_gpu] mixed lengths of every world
-     *  GPU's last mix, zero for a PAD segment, indexed by the global vertex as the contrastive
-     *  relations read them. */
-    [[nodiscard]] u32r1_view_t world_lengths(std::size_t local) const noexcept { return world_lengths_[local].view(); }
+    /** Local member @p local 's @b [world_gpus,max_segments_per_gpu] mixed lengths of every world
+     *  GPU's last mix, zero for a PAD segment; flattened, the global vertex indexes them as the
+     *  contrastive relations read them. */
+    [[nodiscard]] u32r2_view_t world_lengths(std::size_t local) const noexcept { return world_lengths_[local].view(); }
 
-    /** Local member @p local 's @b [world_gpus·max_segments_per_gpu] world sources of every world
+    /** Local member @p local 's @b [world_gpus,max_segments_per_gpu] world sources of every world
      *  GPU's last mix, each @c source_gpu·max_segments_per_gpu+source_segment , @c ~0u for PAD. */
-    [[nodiscard]] u32r1_view_t world_sources(std::size_t local) const noexcept { return world_sources_[local].view(); }
+    [[nodiscard]] u32r2_view_t world_sources(std::size_t local) const noexcept { return world_sources_[local].view(); }
 
   private:
 
@@ -141,12 +141,12 @@ struct multimodal_batch_mixer_t {
      *  empty on a single-multimem_domain world. */
     per_gpu_array<infiniband_all_gather<b8_t>> gather_buffers_ {};
 
-    /** Per-member @b [world_gpus·max_segments_per_gpu] routing tables of every world GPU's mix,
+    /** Per-member @b [world_gpus,max_segments_per_gpu] routing tables of every world GPU's mix,
      *  which each member derives alone from the same loaded batches. The geometry pass records the
      *  member's own slice of the sources and the gather pass reads it back, since variable-degree
      *  bags make a destination's source un-derivable per segment. On the member's own arena; never
      *  exchanged, never part of a batch. */
-    per_gpu_array<u32r1_tensor_arena_t> world_lengths_ {}, world_sources_ {};
+    per_gpu_array<u32r2_tensor_arena_t> world_lengths_ {}, world_sources_ {};
 
     /** How many multimem_domains the world spans; 1 is the single-NVLink-domain fast path. */
     u32_t domains_ = 1;

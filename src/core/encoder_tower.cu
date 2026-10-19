@@ -921,7 +921,7 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     // The caller's BFloat16 masked force widens into token_grad_a_ alone, or beside the pooled force and adds
     // onto it: the co-trained join. The caller's hidden_grad may carry a wider capacity than the live extent.
     if (masked_present) {
-        bf16r2_view_t const masked_grad = hidden_grad(nk::range(0, live_tokens), nk::slice);
+        bf16r2_view_t const masked_grad = hidden_grad[nk::range(0, live_tokens), nk::slice];
         f32_t *const widened = pooled_present ? token_grad_b_.data() : token_grad_a_.data();
         nk_status_t status = nk_cast_best(masked_grad.data(), nk_bf16_k, widened, nk_f32_k, live_tokens * hidden,
                                           capabilities_, stream.numkong());
@@ -970,10 +970,10 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     // The sort scratch is one arena split into two halves, max_tokens apart: [0,live) and [max,max+live).
 
     std::size_t const max_tokens = config_.block.max_tokens;
-    tokens_span_t const keys_in = sort_keys_(nk::range(0, live_tokens), nk::slice);
-    tokens_span_t const keys_out = sort_keys_(nk::range(max_tokens, max_tokens + live_tokens), nk::slice);
-    u32r1_span_t const values_in = sort_values_(nk::range(0, live_tokens), nk::slice);
-    u32r1_span_t const values_out = sort_values_(nk::range(max_tokens, max_tokens + live_tokens), nk::slice);
+    tokens_span_t const keys_in = sort_keys_[nk::range(0, live_tokens), nk::slice];
+    tokens_span_t const keys_out = sort_keys_[nk::range(max_tokens, max_tokens + live_tokens), nk::slice];
+    u32r1_span_t const values_in = sort_values_[nk::range(0, live_tokens), nk::slice];
+    u32r1_span_t const values_out = sort_values_[nk::range(max_tokens, max_tokens + live_tokens), nk::slice];
     if (CUresult result = cuMemsetD8Async(device_address(keys_in.data()), 0xFF, live_tokens * sizeof(token_id_t),
                                           stream.get());
         result != CUDA_SUCCESS)

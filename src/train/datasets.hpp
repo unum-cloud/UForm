@@ -131,9 +131,9 @@ struct dataset_source_t final : batch_source_t {
     per_gpu_array<multimodal_batch_on_gpu_t> loaded_ {};
     multimodal_batch_mixer_t mixer_ {};
 
-    /** Every mixed segment's bag and length across this process's GPUs, landed for the
-     *  relations. */
-    u32r1_tensor_pinned_t bags_ {}, lengths_ {};
+    /** @b [gpus,segments] every mixed segment's bag and length across this process's GPUs, landed
+     *  for the relations. */
+    u32r2_tensor_pinned_t bags_ {}, lengths_ {};
 
     /** One GPU's attract and repel offset rows, its attract IDs and their weights. */
     array<u32_t> offsets_ {}, ids_ {};

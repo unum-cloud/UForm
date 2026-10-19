@@ -123,8 +123,7 @@ expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, tokens_ma
     if (packed)
         packed = launch_kernel(&tokens_gather_kernel_, dim3 {static_cast<u32_t>(elements.extent(0)), 1u, 1u},
                                dim3 {kernel_block_size_default_k, 1u, 1u}, gpu_stream, texts.payload, texts.offsets,
-                               elements, u32r1_view_t {segment_offsets.data(), segment_offsets.extent(0)},
-                               u32r1_view_t {segment_lengths.data(), segment_lengths.extent(0)}, tokens);
+                               elements, segment_offsets, segment_lengths, tokens);
     return packed;
 }
 
@@ -147,18 +146,17 @@ expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, tokens_ma
 
     switch_to_gpu_t gpu_scope {gpu_stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
+    nk::tensor_span<u64_t, 2> const batch_records {record_indices.data(), unroll, documents};
     if (expected_t drawn = launch_kernel(&sample_rows_kernel_, dim3 {grid_size_for(total_segments), 1u, 1u},
                                          dim3 {kernel_block_size_default_k, 1u, 1u}, gpu_stream,
-                                         u64r1_span_t {record_indices.data(), total_segments}, row_key, data_epoch,
-                                         pool_rows);
+                                         batch_records.flatten<1>(), row_key, data_epoch, pool_rows);
         !drawn)
         return drawn;
 
-    // Each batch packs its own document slice of the permutation; the rectangle carries its own shape.
+    // Each batch packs its own row of the permutation; the rectangle carries its shape.
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t &loaded = batches[batch];
-        u64r1_view_t const batch_records {record_indices.data() + batch * documents, documents};
-        if (expected_t packed = pack_tokens(reservoir_column, batch_records, loaded.tokens.span(),
+        if (expected_t packed = pack_tokens(reservoir_column, batch_records[batch, nk::slice], loaded.tokens.span(),
                                             loaded.segment_offsets.span(), loaded.segment_lengths.span(),
                                             loaded.segment_modality.span(), gpu_stream);
             !packed)

@@ -788,22 +788,24 @@ expected_t items_source_t::make(items_source_t &placed, trainer_t &trainer) noex
     bool allocated = placed.tokens_.resize(total_segments) == status_t::success_k &&
                      placed.placements_.resize(total_segments) == status_t::success_k &&
                      placed.destinations_.resize(total_segments) == status_t::success_k &&
-                     placed.order_.resize(total_segments) == status_t::success_k &&
-                     placed.packed_items_.resize(total_segments) == status_t::success_k;
+                     placed.order_.resize(total_segments) == status_t::success_k;
+    placed.packed_items_ = u32r2_tensor_pinned_t::uninitialized({gpus, segments}, pinned_alloc<u32_t> {}).value;
+    allocated = allocated && placed.packed_items_;
     if (shape.contains(modality_t::audio_k))
         allocated = allocated && placed.window_.resize(std::size_t {shape.max_columns_per_row} *
                                                        shape.audio.chunk_samples) == status_t::success_k;
     if (config.contrasts()) {
-        allocated = allocated && placed.offsets_.resize(3 * (segments + 1)) == status_t::success_k &&
-                    placed.ids_.resize(3 * edges) == status_t::success_k &&
-                    placed.weights_.resize(2 * edges) == status_t::success_k &&
-                    placed.lengths_.resize(total_segments) == status_t::success_k &&
-                    placed.groups_.resize(segments) == status_t::success_k;
-        placed.sources_ = u32r1_tensor_pinned_t::uninitialized({total_segments}, pinned_alloc<u32_t> {}).value;
-        placed.pooled_ = nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::uninitialized({total_segments * config.hidden},
+        placed.offsets_ = u32r2_tensor_pinned_t::uninitialized({3, segments + 1}, pinned_alloc<u32_t> {}).value;
+        placed.ids_ = u32r2_tensor_pinned_t::uninitialized({3, edges}, pinned_alloc<u32_t> {}).value;
+        placed.weights_ =
+            nk::tensor<f32_t, pinned_alloc<f32_t>, 2>::uninitialized({2, edges}, pinned_alloc<f32_t> {}).value;
+        placed.sources_ = u32r2_tensor_pinned_t::uninitialized({gpus, segments}, pinned_alloc<u32_t> {}).value;
+        placed.pooled_ = nk::tensor<bf16_t, pinned_alloc<bf16_t>, 3>::uninitialized({gpus, segments, config.hidden},
                                                                                     pinned_alloc<bf16_t> {})
                              .value;
-        allocated = allocated && placed.sources_ && placed.pooled_;
+        allocated = allocated && placed.offsets_ && placed.ids_ && placed.weights_ && placed.sources_ &&
+                    placed.pooled_ && placed.lengths_.resize(total_segments) == status_t::success_k &&
+                    placed.groups_.resize(segments) == status_t::success_k;
     }
     if (!allocated) return expected_t::fail(status_t::bad_alloc_k, "item routing scratch allocation failed");
     return {};
@@ -878,7 +880,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
 
     u32_t cursors[max_gpus_per_host_k] = {}, used_segments[max_gpus_per_host_k] = {},
           used_bags[max_gpus_per_host_k] = {};
-    for (std::size_t segment = 0; segment != packed_items_.size(); ++segment) packed_items_[segment] = absent_k;
+    for (std::size_t index = 0; index != packed_items_.numel(); ++index) packed_items_[index] = absent_k;
     std::size_t group = 0;
     for (std::size_t begin = 0, end = 0; begin != count; begin = end, ++group) {
         end = begin + 1;
@@ -918,44 +920,42 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
             staged.segment_modality[segment] = modality;
             staged.segment_bag[segment] = used_bags[device];
             placements_[item] = static_cast<u32_t>(device * segments + segment);
-            packed_items_[device * segments + segment] = item;
+            packed_items_[device, segment] = item;
+            std::size_t const cells = staged.tokens.numel();
+            auto const run = nk::range(offset, offset + kept);
             if (modality == modality_t::text_k) {
-                token_id_t *const tokens = staged.tokens.data() + offset;
+                tokens_span_t const cell_tokens = staged.tokens.flatten<1>();
+                tokens_span_t const tokens = cell_tokens[run, nk::slice];
                 for (u32_t token = 0; token != kept; ++token) tokens[token] = static_cast<token_id_t>(bytes[token]);
             }
             else if (modality == modality_t::image_k) {
                 expected<um::image_plan_t> planned = um::plan_image(bytes, shape.image.patch_side, columns, 1u);
                 if (!planned) return expected_t::fail(std::move(planned));
                 std::size_t const side = shape.image.patch_side;
-                std::size_t const cell = patch_scalars(shape.image.patch_side, shape.image.channels);
-                image_shape_span_t const shapes = staged.image_shapes.span();
-                shapes[segment, 0] = planned->grid.rows;
-                shapes[segment, 1] = planned->grid.columns;
-                um::pixel_patches_span_t const cells {
-                    staged.images.data() + std::size_t {offset} * cell,
-                    {planned->grid.rows, planned->grid.columns, side, side, std::size_t {um::image_channels_k}}};
-                if (expected_t decoded = um::decode_image(bytes, *planned, cells); !decoded) return decoded;
+                staged.image_shapes[segment, 0] = planned->grid.rows;
+                staged.image_shapes[segment, 1] = planned->grid.columns;
+                nk::tensor_span<pixel_t, 2> const image_cells = as_rows(staged.images, cells);
+                um::pixel_patches_span_t const patches = image_cells[run, nk::slice].reshape<5>(
+                    {planned->grid.rows, planned->grid.columns, side, side, std::size_t {um::image_channels_k}});
+                if (expected_t decoded = um::decode_image(bytes, *planned, patches); !decoded) return decoded;
             }
             else if (modality == modality_t::video_k) {
                 expected<um::demuxed_t> clip = um::demux_video(bytes);
                 if (!clip) return expected_t::fail(std::move(clip));
                 um::video_grid_t const grid = um::video_tube_grid(clip->frames, clip->extent, video, columns);
                 std::size_t const side = video.patch_side;
-                std::size_t const cell = tube_scalars(video.tube_frames, video.patch_side, video.channels);
-                video_shape_span_t const shapes = staged.video_shapes.span();
-                shapes[segment, 0] = grid.temporal_groups;
-                shapes[segment, 1] = grid.patch_rows;
-                shapes[segment, 2] = grid.patch_columns;
-                um::pixel_tubes_span_t const tubes {
-                    staged.videos.data() + std::size_t {offset} * cell,
+                staged.video_shapes[segment, 0] = grid.temporal_groups;
+                staged.video_shapes[segment, 1] = grid.patch_rows;
+                staged.video_shapes[segment, 2] = grid.patch_columns;
+                nk::tensor_span<pixel_t, 2> const video_cells = as_rows(staged.videos, cells);
+                um::pixel_tubes_span_t const tubes = video_cells[run, nk::slice].reshape<6>(
                     {grid.temporal_groups, std::size_t {grid.patch_rows} * grid.patch_columns, video.tube_frames, side,
-                     side, std::size_t {um::video_channels_k}}};
+                     side, std::size_t {um::video_channels_k}});
                 if (expected_t decoded = um::decode_video_frames(*clip, grid, video, tubes); !decoded) return decoded;
             }
             else {
-                f32r1_span_t const frames {
-                    staged.audio_samples.data() + std::size_t {offset} * shape.audio.chunk_samples,
-                    std::size_t {kept} * shape.audio.chunk_samples};
+                f32r2_span_t const audio_cells = as_rows(staged.audio_samples, cells);
+                f32r1_span_t const frames = audio_cells[run, nk::slice].flatten<1>();
                 if (expected_t decoded = um::decode_audio(bytes, shape.audio.sample_rate, frames); !decoded)
                     return decoded;
             }
@@ -1003,17 +1003,18 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
 
 /** Sort one row's edges ascending by id, carrying the weights along, and drop repeated ids — the order the
  *  relation columns' binary search reads. Rows are short, so an insertion sort without scratch. */
-[[nodiscard]] static u32_t sort_row_(u32_t *ids, f32_t *weights, u32_t count) noexcept {
-    for (u32_t index = 1; index < count; ++index)
-        for (u32_t back = index; back != 0 && ids[back - 1] > ids[back]; --back) {
+[[nodiscard]] static u32_t sort_row_(u32r1_span_t ids, f32r1_span_t weights) noexcept {
+    std::size_t const count = ids.extent(0);
+    for (std::size_t index = 1; index < count; ++index)
+        for (std::size_t back = index; back != 0 && ids[back - 1] > ids[back]; --back) {
             std::swap(ids[back - 1], ids[back]);
-            if (weights) std::swap(weights[back - 1], weights[back]);
+            if (!weights.empty()) std::swap(weights[back - 1], weights[back]);
         }
     u32_t kept = 0;
-    for (u32_t index = 0; index != count; ++index) {
+    for (std::size_t index = 0; index != count; ++index) {
         if (kept && ids[kept - 1] == ids[index]) continue;
         ids[kept] = ids[index];
-        if (weights) weights[kept] = weights[index];
+        if (!weights.empty()) weights[kept] = weights[index];
         ++kept;
     }
     return kept;
@@ -1023,23 +1024,25 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
     trainer_config_t const &config = trainer.config;
     std::size_t const gpus = trainer.replicas.size(), count = items.modalities.size();
     u32_t const segments = config.batch.max_segments_per_gpu;
-    std::size_t const total_segments = gpus * segments, edges = ids_.size() / 3;
+    std::size_t const total_segments = gpus * segments, edges = ids_.extent(1);
     u32_t const groups = std::max(config.contrastive.temperature_groups, 1u);
 
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {trainer.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-        u32r1_span_t const landing {sources_.data() + member * segments, segments};
-        u32r1_view_t const own_sources {mixer_.world_sources(member).data() + member * segments, segments};
-        if (expected_t copied = copy_device_to_host(own_sources, landing, trainer.streams[member]); !copied)
+        u32r2_view_t const world_sources = mixer_.world_sources(member);
+        if (expected_t copied = copy_device_to_host(world_sources[member, nk::slice], sources_[member, nk::slice],
+                                                    trainer.streams[member]);
+            !copied)
             return copied;
     }
     if (expected_t drained = trainer.synchronize(); !drained) return drained;
     for (std::size_t item = 0; item != count; ++item) destinations_[item] = absent_k;
+    u32r1_span_t const vertex_items = sources_.flatten<1>();
     for (std::size_t vertex = 0; vertex != total_segments; ++vertex) {
-        u32_t const source = sources_[vertex];
+        u32_t const source = vertex_items[vertex];
         u32_t const item = source < total_segments ? packed_items_[source] : absent_k;
-        sources_[vertex] = item;
+        vertex_items[vertex] = item;
         lengths_[vertex] = item != absent_k ? tokens_[item] : 0u;
         if (item != absent_k) destinations_[item] = static_cast<u32_t>(vertex);
     }
@@ -1049,13 +1052,12 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
         u32_t edge_counts[3] = {};
         for (std::size_t set = 0; set != 3; ++set) {
             item_edges_t const &edges_of = *sets[set];
-            u32_t *const offsets = offsets_.data() + set * (segments + 1);
-            u32_t *const ids = ids_.data() + set * edges;
-            f32_t *const weights = set != 2 ? weights_.data() + set * edges : nullptr;
+            u32r1_span_t const offsets = offsets_[set, nk::slice], ids = ids_[set, nk::slice];
+            f32r1_span_t const weights = set != 2 ? weights_[set, nk::slice] : f32r1_span_t {};
             u32_t written = 0;
             offsets[0] = 0;
             for (u32_t row = 0; row != segments; ++row) {
-                u32_t const item = sources_[member * segments + row];
+                u32_t const item = sources_[member, row];
                 u32_t const row_begin = written;
                 if (item != absent_k && edges_of.offsets)
                     for (std::size_t edge = edges_of.offsets[item]; edge != edges_of.offsets[item + 1]; ++edge) {
@@ -1068,17 +1070,19 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
                             return expected_t::fail(status_t::invalid_input_k,
                                                     "a device's edges exceed the {} it holds per set", edges);
                         ids[written] = destinations_[target];
-                        if (weights) weights[written] = edges_of.weights ? edges_of.weights[edge] : 1.0f;
+                        if (!weights.empty()) weights[written] = edges_of.weights ? edges_of.weights[edge] : 1.0f;
                         ++written;
                     }
-                written = row_begin +
-                          sort_row_(ids + row_begin, weights ? weights + row_begin : nullptr, written - row_begin);
+                auto const row_edges = nk::range(row_begin, written);
+                if (written != row_begin)
+                    written = row_begin + sort_row_(ids[row_edges, nk::slice],
+                                                    weights.empty() ? f32r1_span_t {} : weights[row_edges, nk::slice]);
                 offsets[row + 1] = written;
             }
             edge_counts[set] = written;
         }
         for (u32_t row = 0; row != segments; ++row) {
-            u32_t const item = sources_[member * segments + row];
+            u32_t const item = sources_[member, row];
             u32_t const group = item != absent_k && items.temperature_groups ? items.temperature_groups[item] : 0u;
             if (group >= groups)
                 return expected_t::fail(status_t::invalid_input_k, "item {} selects group {} of {}", item, group,
@@ -1090,23 +1094,23 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
         gpu_stream_t &stream = trainer.streams[member];
         switch_to_gpu_t gpu_scope {stream};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-        std::size_t const rows = segments + 1u;
         bool const ignores = items.ignore.offsets != nullptr;
-        expected_t staged = copy_host_to_device(u32r1_view_t {lengths_.data(), total_segments},
-                                                replica.to_vertex_lengths.span(), stream);
-        if (staged)
-            staged = copy_host_to_device(nk::tensor_view<temperature_group_t, 1> {groups_.data(), segments},
-                                         replica.temperature_groups.span(), stream);
+        // An empty range slices to an empty view, which uploads as a set with no edges.
+        auto const set_ids = [&](std::size_t set) noexcept -> u32r1_view_t {
+            return ids_[set, nk::range(0, edge_counts[set]), nk::slice];
+        };
+        auto const set_weights = [&](std::size_t set) noexcept -> f32r1_view_t {
+            return weights_[set, nk::range(0, edge_counts[set]), nk::slice];
+        };
+        expected_t staged = copy_host_to_device(lengths_.view(), replica.to_vertex_lengths.span(), stream);
+        if (staged) staged = copy_host_to_device(groups_.view(), replica.temperature_groups.span(), stream);
         if (staged)
             staged = replica.relations.upload(
-                u32r1_view_t {offsets_.data(), rows}, u32r1_view_t {ids_.data(), edge_counts[0]},
-                f32r1_view_t {weights_.data(), edge_counts[0]}, u32r1_view_t {offsets_.data() + rows, rows},
-                u32r1_view_t {ids_.data() + edges, edge_counts[1]},
-                f32r1_view_t {weights_.data() + edges, edge_counts[1]},
-                ignores ? u32r1_view_t {offsets_.data() + 2 * rows, rows} : u32r1_view_t {},
-                ignores ? u32r1_view_t {ids_.data() + 2 * edges, edge_counts[2]} : u32r1_view_t {},
-                replica.batch.segment_lengths.view(), replica.to_vertex_lengths.view(), total_segments,
-                member * segments, config.contrastive.ambient_repulsion_weight, stream);
+                offsets_[0, nk::slice], set_ids(0), set_weights(0), offsets_[1, nk::slice], set_ids(1), set_weights(1),
+                ignores ? u32r1_view_t {offsets_[2, nk::slice]} : u32r1_view_t {},
+                ignores ? set_ids(2) : u32r1_view_t {}, replica.batch.segment_lengths.view(),
+                replica.to_vertex_lengths.view(), total_segments, member * segments,
+                config.contrastive.ambient_repulsion_weight, stream);
         if (staged) // the host columns are reused for the next device, so their copies land first
             if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
                 staged = cuda_failure(result, "relation staging drain failed (member={})", member);
@@ -1124,14 +1128,14 @@ expected<bf16r2_view_t> items_source_t::pooled(trainer_t &trainer) noexcept {
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {trainer.streams[member]};
         if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed");
-        bf16r1_span_t const landing {pooled_.data() + member * segments * hidden, segments * hidden};
-        if (expected_t copied = copy_device_to_host(trainer.replicas[member].vertices.view().flatten<1>(), landing,
-                                                    trainer.streams[member]);
+        if (expected_t copied = copy_device_to_host(trainer.replicas[member].vertices.view().flatten<1>(),
+                                                    pooled_[member, nk::slice].flatten<1>(), trainer.streams[member]);
             !copied)
             return result_t::fail(std::move(copied));
     }
     if (expected_t drained = trainer.synchronize(); !drained) return result_t::fail(std::move(drained));
-    return result_t {bf16r2_view_t {pooled_.data(), gpus * segments, hidden}};
+    bf16r2_view_t const pooled = pooled_.reshape<2>({gpus * segments, hidden});
+    return result_t {pooled};
 }
 
 #pragma endregion Sources

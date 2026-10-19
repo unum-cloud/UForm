@@ -285,9 +285,9 @@ struct contrastive_segments_t {
      *  logit gradient, and raw-dot gradient of one subgraph block. */
     f32r3_tensor_arena_t raw_dot_ {}, scaled_cosine_ {}, logit_grad_ {}, raw_dot_grad_ {};
 
-    /** @b [prefixes·rows,neighbors] BFloat16 cast of @ref raw_dot_grad_ — the gradient products'
+    /** @b [prefixes,rows,neighbors] BFloat16 cast of @ref raw_dot_grad_ — the gradient products'
      *  operand, its rows padded to 8 for NumKong's 16-byte stride rule. */
-    bf16r2_tensor_arena_t raw_dot_grad_bf16_ {};
+    bf16r3_tensor_arena_t raw_dot_grad_bf16_ {};
 
     /** The six @b [rows] accumulator rows indexed by @ref from_vertex_accumulator_t : Σw⁺, Σw⁻,
      *  positive and negative softplus mass, bias and log-β gradient summands — one @b [6,rows] tensor,
@@ -389,13 +389,14 @@ struct distributed_contrastive_segments_t {
      *  @b [2·temperature_groups] , the log-β gradient of every group, then its bias gradient.
      *  Identical on every rank, so every replica takes the identical temperature step. */
     [[nodiscard]] f32r1_view_t temperature_grads(std::size_t rank) const noexcept {
-        return {world_scalars_[rank].data(), 2u * std::size_t {config_.temperature_groups}};
+        return world_scalars_[rank][nk::range(0, 2u * std::size_t {config_.temperature_groups}), nk::slice];
     }
 
     /** Local rank @p rank 's @b [1] world loss of the last call, every process's summands
      *  added, on its own device. */
     [[nodiscard]] f32r1_view_t world_loss(std::size_t rank) const noexcept {
-        return {world_scalars_[rank].data() + 2u * std::size_t {config_.temperature_groups}, 1u};
+        std::size_t const gradients = 2u * std::size_t {config_.temperature_groups};
+        return world_scalars_[rank][nk::range(gradients, gradients + 1u), nk::slice];
     }
 
     /** How many multimem_domains this object spans — 1 means the members are identities. Derived
@@ -435,9 +436,31 @@ struct distributed_contrastive_segments_t {
      *  caller already inside its context. */
     [[nodiscard]] expected_t gather_world_tower_(gpu_stream_t &stream) noexcept;
 
-    /** Member 0's window as the @b [subgraphs·rows·hidden] BFloat16 world tower every member reads. */
-    [[nodiscard]] bf16r1_span_t world_tower_() noexcept {
-        return typed_span<bf16_t>(domain_->window_bytes(0, world_tower_window_));
+    /** Member 0's window as the @b [subgraphs,rows,hidden] BFloat16 world tower every member
+     *  reads. */
+    [[nodiscard]] bf16r3_span_t world_tower_() noexcept {
+        std::size_t const subgraphs = config_.gpu_subgraphs_per_step, rows = config_.from_vertices_per_gpu;
+        std::size_t const hidden = config_.hidden;
+        bf16r1_span_t const window = typed_span<bf16_t>(domain_->window_bytes(0, world_tower_window_));
+        return window[nk::range(0, subgraphs * rows * hidden), nk::slice].reshape<3>({subgraphs, rows, hidden});
+    }
+
+    /** Member @p member 's replica of this consumer's window up to its scalar tail: the
+     *  @b [subgraphs,rows,hidden] column forces. */
+    [[nodiscard]] f32r3_span_t window_forces_(std::size_t member) noexcept {
+        std::size_t const subgraphs = config_.gpu_subgraphs_per_step, rows = config_.from_vertices_per_gpu;
+        std::size_t const hidden = config_.hidden;
+        f32r1_span_t const payload = domain_->payload(member);
+        f32r1_span_t const window = payload[nk::range(window_.offset, window_.offset + window_.scalars), nk::slice];
+        return window[nk::range(0, subgraphs * rows * hidden), nk::slice].reshape<3>({subgraphs, rows, hidden});
+    }
+
+    /** The @ref world_scalar_count_ tail past @ref window_forces_ : every temperature group's log-β
+     *  summand, then its bias summand, then the loss. */
+    [[nodiscard]] f32r1_span_t window_tail_(std::size_t member) noexcept {
+        std::size_t const tail_begin = window_.offset + window_forces_(member).numel();
+        f32r1_span_t const payload = domain_->payload(member);
+        return payload[nk::range(tail_begin, window_.offset + window_.scalars), nk::slice];
     }
 
     /** Level-1 reduce of @p rank 's world columns — one switch-reduced window per domain into
@@ -445,13 +468,6 @@ struct distributed_contrastive_segments_t {
      *  the rank's own reduced window. Caller holds the rank's context. */
     [[nodiscard]] expected_t reduce_world_columns_(std::size_t rank, gpu_stream_t &stream,
                                                    f32r1_view_t &column_force) noexcept;
-
-    /** The subgraph at rank-major position (@p rank , @p subgraph ) of the flat
-     *  @b [ranks,subgraphs] @ref subgraph_tables_ concatenation — the one home of the
-     *  @c rank·subgraphs+subgraph arithmetic. */
-    [[nodiscard]] gpu_subgraph_t &subgraph_at(std::size_t rank, std::size_t subgraph) noexcept {
-        return subgraph_tables_[rank * config_.gpu_subgraphs_per_step + subgraph];
-    }
 
     /** The baked world geometry every capacity check keys on. */
     contrastive_segments_config_t config_ {};
@@ -490,8 +506,8 @@ struct distributed_contrastive_segments_t {
     /** The gateway's cross-domain all-gather buffer — its typed payload is the world tower. */
     infiniband_all_gather<bf16_t> gather_buffer_ {};
 
-    /** All ranks' subgraph tables in one rank-major table, baked at @ref make . */
-    array<gpu_subgraph_t> subgraph_tables_ {};
+    /** Every rank's @b [subgraphs] subgraph table, baked at @ref make . */
+    per_gpu_array<array<gpu_subgraph_t>> subgraph_tables_ {};
 
     /** @b [gpus] tower views each rank stages into the world tower — populated only with
      *  @ref world_tower_window_ ; otherwise the tables read the same views in place. */

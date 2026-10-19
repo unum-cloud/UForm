@@ -470,7 +470,7 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
     loss.raw_dot_grad_ =
         f32r3_tensor_arena_t::uninitialized({prefix_count, rows, to_vertices_per_gpu}, f32_alloc).value;
     loss.raw_dot_grad_bf16_ =
-        bf16r2_tensor_arena_t::uninitialized({prefix_count * rows, padded_neighbors}, bf16_alloc).value;
+        bf16r3_tensor_arena_t::uninitialized({prefix_count, rows, padded_neighbors}, bf16_alloc).value;
     loss.from_vertex_accumulator_ = f32r2_tensor_arena_t::uninitialized({6, rows}, f32_alloc).value;
     loss.live_vertices_ = f32r1_tensor_arena_t::uninitialized({1}, f32_alloc).value;
     loss.from_vertex_self_coefficients_ = f32r2_tensor_arena_t::uninitialized({prefix_count, rows}, f32_alloc).value;
@@ -604,11 +604,13 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
     bf16r2_span_t const vertices_padded {vertices_transposed_.data(), hidden, padded_rows};
     bf16r2_span_t const to_vertices_padded {to_vertices_transposed_.data(), hidden, padded_neighbors};
     bf16r2_span_t const gradient_padded {gradient_transposed_.data(), num_neighbors, padded_rows};
-    bf16r2_span_t const raw_dot_grad_padded {raw_dot_grad_bf16_.data(), prefix_count * rows, padded_neighbors};
-    bf16r2_span_t const vertices_transposed = vertices_padded(nk::all, nk::range(0, rows), nk::slice);
-    bf16r2_span_t const to_vertices_transposed = to_vertices_padded(nk::all, nk::range(0, num_neighbors), nk::slice);
-    bf16r2_span_t const gradient_transposed = gradient_padded(nk::all, nk::range(0, rows), nk::slice);
-    bf16r2_span_t const raw_dot_grad_bf16 = raw_dot_grad_padded(nk::all, nk::range(0, num_neighbors), nk::slice);
+    bf16r2_span_t const raw_dot_grad_padded = raw_dot_grad_bf16_.reshape<2>({prefix_count * rows, padded_neighbors});
+    bf16r2_span_t const vertices_transposed = vertices_padded[nk::all, nk::range(0, rows), nk::slice];
+    bf16r2_span_t const to_vertices_transposed = to_vertices_padded[nk::all, nk::range(0, num_neighbors), nk::slice];
+    bf16r2_span_t const gradient_transposed = gradient_padded[nk::all, nk::range(0, rows), nk::slice];
+    bf16r2_span_t const raw_dot_grad_bf16 = raw_dot_grad_padded[nk::all, nk::range(0, num_neighbors), nk::slice];
+    bf16r3_span_t const raw_dot_grad_planes =
+        raw_dot_grad_bf16_[nk::all, nk::all, nk::range(0, num_neighbors), nk::slice];
     auto multiply = [&](bf16r2_view_t a, bf16r2_view_t b, f32r2_span_t c) noexcept {
         expected_t multiplied = pack_bf16(b, packed_.span(), capabilities_, stream);
         if (multiplied) multiplied = multiply_bf16(a, packed_.view(), c, capabilities_, stream);
@@ -649,8 +651,8 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
             u32_t const segment_width = prefixes_.segment_width(segment);
             auto const band = nk::range(segment_begin, segment_begin + segment_width);
             f32r2_span_t const raw_dot_plane {raw_dot_.row(segment).data(), rows, num_neighbors};
-            expected_t product = multiply(vertices(nk::all, band, nk::slice),
-                                          subgraph.to_vertices(nk::all, band, nk::slice), raw_dot_plane);
+            expected_t product = multiply(vertices[nk::all, band, nk::slice],
+                                          subgraph.to_vertices[nk::all, band, nk::slice], raw_dot_plane);
             if (product && segment != 0)
                 product = numkong_result(
                     nk_each_sum_f32_best(raw_dot_plane.data(), raw_dot_.row(segment - 1).data(), cells_per_prefix,
@@ -685,7 +687,7 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
                                      raw_dot_grad_.span());
         if (launched)
             launched = launch_kernel(&contrastive_cast_f32_to_bf16_kernel_, block_grid, block_shape, stream,
-                                     f32r2_view_t {raw_dot_grad_.data(), prefix_count * rows, num_neighbors},
+                                     raw_dot_grad_.view().reshape<2>({prefix_count * rows, num_neighbors}),
                                      raw_dot_grad_bf16);
         if (!launched) return launched;
 
@@ -703,15 +705,14 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
             u32_t const segment_begin = prefixes_.segment_begin(segment);
             u32_t const segment_width = prefixes_.segment_width(segment);
             auto const band = nk::range(segment_begin, segment_begin + segment_width);
-            bf16r2_view_t const gradient = raw_dot_grad_bf16(nk::range(segment * rows, (segment + 1) * rows),
-                                                             nk::slice);
+            bf16r2_view_t const gradient = raw_dot_grad_planes[segment, nk::slice];
             expected_t product = transpose_bf16(gradient, gradient_transposed, stream);
             if (product)
-                product = multiply(gradient, to_vertices_transposed(band, nk::slice),
-                                   from_vertices_grad_products(nk::all, band, nk::slice));
+                product = multiply(gradient, to_vertices_transposed[band, nk::slice],
+                                   from_vertices_grad_products[nk::all, band, nk::slice]);
             if (product)
-                product = multiply(gradient_transposed, vertices_transposed(band, nk::slice),
-                                   subgraph.to_vertices_grad(nk::all, band, nk::slice));
+                product = multiply(gradient_transposed, vertices_transposed[band, nk::slice],
+                                   subgraph.to_vertices_grad[nk::all, band, nk::slice]);
             if (!product) return product;
         }
         launched = numkong_result(
@@ -788,7 +789,7 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     std::size_t const tower_scalars = static_cast<std::size_t>(config.from_vertices_per_gpu) * config.hidden;
     if (distributed.losses_.resize(gpus) != status_t::success_k ||
         distributed.reduce_buffers_.resize(gpus) != status_t::success_k ||
-        distributed.subgraph_tables_.resize(gpus * subgraphs) != status_t::success_k ||
+        distributed.subgraph_tables_.resize(gpus) != status_t::success_k ||
         distributed.relations_.resize(gpus) != status_t::success_k ||
         distributed.from_vertices_grads_.resize(gpus) != status_t::success_k ||
         distributed.world_scalars_.resize(gpus) != status_t::success_k)
@@ -861,17 +862,17 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
 
     // Bake every rank's subgraph table once — all the addresses are capture-stable by contract:
     // caller towers/grads and the domain windows never move after construction.
-    bf16_t const *world_tower = whole_world ? nullptr : distributed.world_tower_().data();
+    bf16r3_span_t const world_tower = whole_world ? bf16r3_span_t {} : distributed.world_tower_();
     for (std::size_t rank = 0; rank != gpus; ++rank) {
-        f32_t *const window_base = domain.payload(domain.member_offset() + rank).data() + distributed.window_.offset;
+        array<gpu_subgraph_t> &table = distributed.subgraph_tables_[rank];
+        if (table.resize(subgraphs) != status_t::success_k)
+            return result_t::fail(status_t::bad_alloc_k, "subgraph table allocation failed (rank={})", rank);
+        f32r3_span_t const forces = distributed.window_forces_(domain.member_offset() + rank);
         for (std::size_t subgraph = 0; subgraph != subgraphs; ++subgraph) {
-            gpu_subgraph_t &entry = distributed.subgraph_at(rank, subgraph);
-            entry.to_vertices = whole_world ? towers[subgraph]
-                                            : bf16r2_view_t {world_tower + subgraph * tower_scalars,
-                                                             config.from_vertices_per_gpu, config.hidden};
-            entry.global_offset = subgraph * static_cast<std::size_t>(config.from_vertices_per_gpu);
-            entry.to_vertices_grad = f32r2_span_t {window_base + subgraph * tower_scalars, config.from_vertices_per_gpu,
-                                                   config.hidden};
+            table[subgraph].to_vertices = whole_world ? towers[subgraph]
+                                                      : bf16r2_view_t {world_tower[subgraph, nk::slice]};
+            table[subgraph].global_offset = subgraph * static_cast<std::size_t>(config.from_vertices_per_gpu);
+            table[subgraph].to_vertices_grad = forces[subgraph, nk::slice];
         }
     }
     return result_t {std::move(distributed)};
@@ -896,32 +897,33 @@ expected_t distributed_contrastive_segments_t::operator()(std::size_t rank, cont
     expected_t staged {};
     if (world_tower_window_.scalars != 0) { // overwrites member 0's window, whose last readers passed the force barrier
         std::size_t const world_gpu = home_domain_index_ * members + member;
-        staged = copy_device_to_device(bf16r1_view_t {gather_sources_[rank].data(), tower_scalars},
-                                       bf16r1_span_t {world_tower_().data() + world_gpu * tower_scalars, tower_scalars},
-                                       stream);
+        bf16r3_span_t const world_tower = world_tower_();
+        staged = copy_device_to_device(gather_sources_[rank].flatten<1>(),
+                                       world_tower[world_gpu, nk::slice].flatten<1>(), stream);
         if (staged) staged = domain_->barrier(member, stream);
         if (staged && member == 0 && world_domains() > 1u) staged = gather_world_tower_(stream);
         if (staged && world_domains() > 1u) staged = domain_->barrier(member, stream);
     }
 
-    nk::tensor_view<gpu_subgraph_t, 1> const table {&subgraph_at(rank, 0), subgraphs};
-    f32r1_span_t const loss_out {loss_outs_.data() + rank, 1};
-    bf16r1_span_t const grad_flat {from_vertices_grads_[rank].data(), tower_scalars};
-    f32_t *const window_base = domain_->payload(member).data() + window_.offset;
+    nk::tensor_view<gpu_subgraph_t, 1> const table = subgraph_tables_[rank].view();
+    f32r1_span_t const loss_out = loss_outs_[nk::range(rank, rank + 1), nk::slice];
+    bf16r1_span_t const grad_flat = from_vertices_grads_[rank].flatten<1>();
     // The rank's own tower is stored once: in the staging list when the world is staged, otherwise as its
     // own subgraph's table entry (subgraph index == rank when this process holds the whole world).
     bf16r2_view_t const own_tower = world_tower_window_.scalars != 0 ? gather_sources_[rank]
-                                                                     : subgraph_at(rank, rank).to_vertices;
+                                                                     : subgraph_tables_[rank][rank].to_vertices;
 
     // The window's tail past the column forces carries this rank's log-β, bias and loss summands,
     // so one reduce sums them across the world beside the forces.
-    f32r1_span_t const log_inverse_temperature_grad {window_base + force_scalars, groups};
-    f32r1_span_t const bias_grad {window_base + force_scalars + groups, groups};
-    f32r1_span_t const window_loss {window_base + force_scalars + 2u * groups, 1u};
+    f32r1_span_t const tail = window_tail_(member);
+    std::size_t const gradients = 2u * groups;
+    f32r1_span_t const log_inverse_temperature_grad = tail[nk::range(0, groups), nk::slice];
+    f32r1_span_t const bias_grad = tail[nk::range(groups, gradients), nk::slice];
+    f32r1_span_t const window_loss = tail[nk::range(gradients, gradients + 1), nk::slice];
     if (staged)
         staged = losses_[rank](own_tower, table, relations_[rank], recipe, window_loss, from_vertices_grads_[rank],
                                stream, log_inverse_temperature_grad, bias_grad);
-    if (staged) staged = copy_device_to_device(f32r1_view_t {window_loss}, loss_out, stream);
+    if (staged) staged = copy_device_to_device(window_loss, loss_out, stream);
     if (staged) staged = domain_->barrier(member, stream);
     // Level-1 reduce: in one domain, in place into this rank's own window shard (shards are
     // disjoint across ranks); across domains, into the rank's reduce member — one switch-reduced
@@ -929,7 +931,8 @@ expected_t distributed_contrastive_segments_t::operator()(std::size_t rank, cont
 
     f32r1_view_t column_force {};
     if (world_domains() == 1u) {
-        f32r1_span_t const own_shard {window_base + member * tower_scalars, tower_scalars};
+        f32r3_span_t const forces = window_forces_(member);
+        f32r1_span_t const own_shard = forces[member, nk::slice].flatten<1>();
         if (staged)
             staged = domain_->reduce_scatter(member, own_shard, window_.offset + member * tower_scalars, stream);
         if (staged)
@@ -960,12 +963,11 @@ expected_t distributed_contrastive_segments_t::operator()(contrastive_recipe_t r
 
 expected_t distributed_contrastive_segments_t::gather_world_tower_(gpu_stream_t &stream) noexcept {
     bf16r1_span_t const own_block = gather_buffer_.own_block();
-    bf16r1_span_t const world_tower = world_tower_();
-    expected_t staged = copy_device_to_device(
-        bf16r1_view_t {world_tower.data() + home_domain_index_ * own_block.extent(0), own_block.extent(0)}, own_block,
-        stream);
+    bf16r1_span_t const world_tower = world_tower_().flatten<1>();
+    bf16r2_span_t const world_tower_rows = world_tower.reshape<2>({std::size_t {world_domains()}, own_block.extent(0)});
+    expected_t staged = copy_device_to_device(world_tower_rows[home_domain_index_, nk::slice], own_block, stream);
     if (staged) staged = gather_buffer_(stream);
-    if (staged) staged = copy_device_to_device(bf16r1_view_t {gather_buffer_.payload()}, world_tower, stream);
+    if (staged) staged = copy_device_to_device(gather_buffer_.payload(), world_tower, stream);
     return staged;
 }
 
@@ -974,24 +976,26 @@ expected_t distributed_contrastive_segments_t::reduce_world_columns_(std::size_t
     std::size_t const members = domain_->member_count();
     std::size_t const member = domain_->member_offset() + rank;
     std::size_t const tower_scalars = static_cast<std::size_t>(config_.from_vertices_per_gpu) * config_.hidden;
-    f32_t *const shard = reduce_buffers_[rank].payload().data();
+    f32r1_span_t const shard = reduce_buffers_[rank].payload();
+    std::size_t const world_columns = world_domains() * tower_scalars;
+    f32r2_span_t const shard_rows = shard[nk::range(0, world_columns), nk::slice].reshape<2>(
+        {std::size_t {world_domains()}, tower_scalars});
     for (u32_t domain = 0; domain != world_domains(); ++domain) {
-        f32r1_span_t const domain_shard {shard + domain * tower_scalars, tower_scalars};
         std::size_t const grid_offset = window_.offset +
                                         (static_cast<std::size_t>(domain) * members + member) * tower_scalars;
-        if (expected_t reduced = domain_->reduce_scatter(member, domain_shard, grid_offset, stream); !reduced)
+        if (expected_t reduced = domain_->reduce_scatter(member, shard_rows[domain, nk::slice], grid_offset, stream);
+            !reduced)
             return reduced;
     }
-    std::size_t const world_columns = world_domains() * tower_scalars;
     std::size_t const force_scalars = static_cast<std::size_t>(config_.gpu_subgraphs_per_step) * tower_scalars;
-    f32r1_span_t const scalars_shard {shard + world_columns, world_scalar_count_(config_)};
+    f32r1_span_t const scalars_shard =
+        shard[nk::range(world_columns, world_columns + world_scalar_count_(config_)), nk::slice];
     if (expected_t reduced = domain_->reduce_scatter(member, scalars_shard, window_.offset + force_scalars, stream);
         !reduced)
         return reduced;
     if (expected_t summed = reduce_buffers_[rank](stream); !summed) return summed;
-    if (expected_t copied = copy_device_to_device(f32r1_view_t {scalars_shard}, world_scalars_[rank].span(), stream);
-        !copied)
+    if (expected_t copied = copy_device_to_device(scalars_shard, world_scalars_[rank].span(), stream); !copied)
         return copied;
-    column_force = f32r1_view_t {shard + static_cast<std::size_t>(home_domain_index_) * tower_scalars, tower_scalars};
+    column_force = shard_rows[home_domain_index_, nk::slice];
     return {};
 }

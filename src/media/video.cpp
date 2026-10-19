@@ -334,15 +334,16 @@ static void keep_frame_(video_decoder_ &decoder, frame_sampler_ &sampler, AVFram
     std::size_t const tube_frames = out.extent(2), patch_side = out.extent(3);
     std::size_t const patch_columns = sampler.width / patch_side, cells = out.extent(1);
     std::size_t const temporal_group = sampler.kept / tube_frames, tube_frame = sampler.kept % tube_frames;
+    nk::tensor_view<pixel_t, 5> const patches {
+        sampler.rgb.data(),
+        {sampler.height / patch_side, patch_side, patch_columns, patch_side, std::size_t {video_channels_k}}};
     for (std::size_t cell = 0; cell != cells; ++cell) {
         std::size_t const patch_row = cell / patch_columns, patch_column = cell % patch_columns;
         for (std::size_t y = 0; y != patch_side; ++y)
-            for (std::size_t x = 0; x != patch_side; ++x) {
-                std::size_t const source_y = patch_row * patch_side + y, source_x = patch_column * patch_side + x;
-                pixel_t const *const pixel = sampler.rgb.data() + (source_y * sampler.width + source_x) * 3u;
+            for (std::size_t x = 0; x != patch_side; ++x)
                 for (std::size_t channel = 0; channel != video_channels_k; ++channel)
-                    out[temporal_group, cell, tube_frame, y, x, channel] = pixel[channel];
-            }
+                    out[temporal_group, cell, tube_frame, y, x, channel] =
+                        patches[patch_row, y, patch_column, x, channel];
     }
     ++sampler.kept;
 }

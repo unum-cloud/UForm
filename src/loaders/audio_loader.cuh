@@ -76,7 +76,7 @@ using cpu_decode_pool_t = ashvardanian::forkunion::flat_pool_t;
  *  @param[out] segment_modality The @b [max_segments] per-segment tag — @c audio_k live, @c text_k on PAD.
  *  @param[inout] stream The stream the staging, the copy, and every kernel enqueue on.
  */
-[[nodiscard]] expected_t decode_audios(cpu_decode_pool_t &pool, column_view_t tape, std::span<u64_t const> drawn_rows,
+[[nodiscard]] expected_t decode_audios(cpu_decode_pool_t &pool, column_view_t tape, u64r1_view_t drawn_rows,
                                        std::span<audio_batch_shape_t const> representations,
                                        audio_samples_span_t audio_samples, u32r1_span_t segment_offsets,
                                        u32r1_span_t segment_lengths, modality_span_t segment_modality,

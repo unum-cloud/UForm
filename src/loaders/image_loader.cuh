@@ -178,8 +178,7 @@ struct nvjpeg_session_t {
  *  @param[inout] stream The stream the staging, decode, resize, and copies run on.
  */
 [[nodiscard]] expected_t decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, column_view_t tape,
-                                       std::span<u64_t const> drawn_rows,
-                                       std::span<image_batch_shape_t const> representations,
+                                       u64r1_view_t drawn_rows, std::span<image_batch_shape_t const> representations,
                                        pixel_patches_span_t pixels, image_shape_span_t shapes,
                                        u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
                                        modality_span_t segment_modality, gpu_stream_t &stream) noexcept;

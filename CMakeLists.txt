@@ -158,7 +158,7 @@ set(NUMKONG_BUILD_ROCM ${UFORM_BUILD_ROCM})
 set(NUMKONG_CUDA_ARCHITECTURES "${UFORM_CUDA_ARCHITECTURES}")
 set(NUMKONG_BUILD_TEST OFF)
 set(NUMKONG_BUILD_BENCH OFF)
-uform_sibling(numkong https://github.com/ashvardanian/NumKong 51c49c4904b3d606a4b47725170d4d876d04f13f)
+uform_sibling(numkong https://github.com/ashvardanian/NumKong f9375dbfad6652d705b6792aeb21fae997a934ea)
 uform_sibling(stringzilla https://github.com/ashvardanian/StringZilla afac5997e3fb15fd1586eca6724f9dacea152cb0)
 uform_sibling(forkunion https://github.com/ashvardanian/ForkUnion 606eb35bad36e720116f9ab0b83299543b50c3b1)
 
