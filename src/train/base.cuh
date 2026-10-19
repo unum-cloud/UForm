@@ -30,6 +30,8 @@
  */
 #pragma once
 
+#include <array> // `std::array` — the summand pairs
+
 #include "core/array.hpp"                // `array`, `per_gpu_array`
 #include "core/checkpoint.hpp"           // `checkpoint_to_load_t`
 #include "core/gpu_allocators.hpp"       // `gpu_arena_t`
@@ -237,7 +239,9 @@ struct base_replica_t {
     /** Per-position weights the token corruptor emits and the token cross-entropy reads. */
     u32r1_tensor_arena_t token_loss_weights {};
 
-    /** @c {λ·Σ, count} Float32 pairs per head — the running loss readouts telemetry divides. */
+    /** @c {λ·Σ, count} Float32 pairs per head — the running loss readouts telemetry divides, summed
+     *  over the steps since the last report: @ref prepare zeroes them on every step after a
+     *  multiple of @c report_every . */
     f32r1_tensor_arena_t tokens_summands {}, image_summands {}, video_summands {}, audio_summands {};
 
     /** The one shared @c d(normalized) @b [max_tokens, hidden] every live head accumulates into (the
@@ -296,10 +300,18 @@ struct base_replica_t {
 
     /** The contrastive recipe over this replica's device temperatures and vertex groups. */
     [[nodiscard]] contrastive_recipe_t recipe(trainer_config_t const &config) const noexcept;
+
+  private:
+
+    /** The four summand pairs in @ref modality_t order, the absent heads' empty. */
+    [[nodiscard]] std::array<f32r1_tensor_arena_t *, 4> summand_pairs_() noexcept {
+        return {&tokens_summands, &image_summands, &video_summands, &audio_summands};
+    }
 };
 
-/** Re-seed every matrix of @p weights to the identical deterministic init: full matrices from a keyed hash fill,
- *  vector scales exactly one. Identical on every replica. */
+/** Re-seed every matrix of @p weights to the identical deterministic init: full matrices from a
+ *  keyed hash fill of standard deviation @c 1/√fan_in , the blocks' output projections further by
+ *  @c 1/√(2·depth) , and vector scales exactly one. Identical on every replica. */
 [[nodiscard]] expected_t seed_weights(array<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept;
 
 /**

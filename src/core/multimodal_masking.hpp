@@ -66,9 +66,10 @@ struct masking_recipe_t {
 
 /** The domain-separation salts that keep the independent draws at one corruption position from
  *  correlating: each purpose re-keys the hash so the span-open coin, the span-continue coin, the
- *  token-action coin, the random byte, the patch-mask coin, and the audio-frame-mask coin are
- *  statistically distinct streams. The @ref masked_frames_t frame path keys @c frame_mask_k rather
- *  than reusing the 2-D @c patch_mask_k salt. */
+ *  token-action coin, the random byte, the patch-mask coin, the audio-frame-mask coin, and the
+ *  anchor of the span an otherwise unmasked row gets are statistically distinct streams. The
+ *  @ref masked_frames_t frame path keys @c frame_mask_k rather than reusing the 2-D @c patch_mask_k
+ *  salt. */
 enum class masking_draw_purpose_t : u32_t {
     span_open_k = 0,
     span_continue_k = 1,
@@ -76,6 +77,7 @@ enum class masking_draw_purpose_t : u32_t {
     random_byte_k = 3,
     patch_mask_k = 4,
     frame_mask_k = 5,
+    span_anchor_k = 6,
 };
 
 /** One counter-based draw in @b [0,1) , keyed through the one @ref splitmix64_hash_t — pure,
@@ -129,6 +131,9 @@ struct masked_patches_config_t {
     /** One for per-patch random masking; the video temporal-group count for tube masking, where a
      *  masked spatial cell stays masked across all its time groups. @c max_patches must divide evenly. */
     u32_t temporal_groups = 1;
+
+    /** The modality whose cells the head masks and scores, @c image_k or @c video_k . */
+    modality_t modality = modality_t::image_k;
 
     /** λ — the objective's weight inside the composite loss, folded into the gradient scale. */
     f32_t weight = 1.0f;
@@ -188,8 +193,9 @@ struct masked_tokens_t {
      *  routes on the tag rather than trusting media positions to hold PAD). Each text segment's tokens
      *  are walked left-to-right: geometric spans open at @c token_mask_probability/token_mean_span and
      *  continue at @c 1-1/token_mean_span ; a covered position is shown MASK / a random byte / its clean
-     *  self per the recipe fractions, and carries a loss weight of one. PAD is never eligible; uncovered
-     *  positions copy clean with weight zero.
+     *  self per the recipe fractions, and carries a loss weight of one. PAD is never eligible;
+     *  uncovered positions copy clean with weight zero. A segment with bytes the walk leaves
+     *  uncovered gets one span from a keyed anchor, so every text row is scored.
      *
      *  @param[in] clean The clean token stream @b [tokens] in flat @c segment_offsets space.
      *  @param[out] distorted The tower's input @b [tokens] — clean elsewhere, corrupted at covered spans.
@@ -209,8 +215,9 @@ struct masked_tokens_t {
      *  @param[in] normalized The tower's final-norm token states @b [tokens,hidden] .
      *  @param[in] clean_targets The clean bytes @b [tokens] the cross-entropy scores against.
      *  @param[in] loss_weights @b [tokens] from @ref corrupt — a zero weight skips the position entirely.
-     *  @param[out] loss_summands @b [2] Float32: @c {λ·Σ CE, live count} — the global mean is
-     *      @c Σ_ranks summand / Σ_ranks count ; the gradient uses the rank-local mean.
+     *  @param[inout] loss_summands @b [2] Float32 the call adds @c {λ·Σ CE, live count} onto, so
+     *      the pair runs over every step since the caller zeroed it — the global mean is
+     *      @c Σ_ranks summand / Σ_ranks count ; the gradient uses this step's rank-local mean.
      *  @param[out] normalized_grad @b [tokens,hidden] @c d(normalized) — the tower's backward ADDS it.
      */
     [[nodiscard]] expected_t operator()(bf16r2_view_t normalized, tokens_view_t clean_targets,
@@ -269,14 +276,11 @@ struct masked_tokens_t {
  *  raw row is zeroed — no @c d(patches) is needed from the tower, so the objective stays fully orthogonal to
  *  the entry projection.
  *
- *  The per-patch MSE z-scores both the prediction and the target by their own per-patch mean and
- *  standard deviation — deliberately, not He-et-al. MAE (which normalizes the target only). Two
- *  independent zero-mean unit-variance patches give @c E[(pred_norm-targ_norm)^2]=1+1=2 , so the loss has
- *  a closed-form chance baseline of @c 2.0 . That constant lets the multi-objective composer divide this
- *  term by its baseline onto the same @c [0,1] scale as the MLM ( @c ln256 ) and contrastive ( @c ln2 )
- *  losses, so weighted multi-loss training stays balanced. Target-only normalization would leave the
- *  prediction's scale unbounded and init-dependent, with no closed-form baseline — do not "fix" it to
- *  target-only.
+ *  The per-patch MSE normalizes the target by its own per-patch mean and standard deviation and
+ *  regresses the raw prediction onto it, as He et al.'s MAE does. Predicting the patch mean scores
+ *  @c E[targ_norm^2]=1 , a closed-form chance baseline of @c 1.0 the multi-objective composer
+ *  divides by, onto the same @c [0,1] scale as the MLM ( @c ln256 ) and contrastive ( @c ln2 )
+ *  losses. Only cells of the configured modality are masked.
  */
 struct masked_patches_t {
 
@@ -290,10 +294,13 @@ struct masked_patches_t {
     /**
      *  @brief Sample the patch mask into @c mask_ — pure enqueue, nothing else.
      *
-     *  A patch is masked with probability @c mask_ratio , tubed across time groups when
-     *  @c temporal_groups > 1 so a masked spatial cell stays masked across all its time groups.
+     *  A cell of a segment whose @p segment_modality is the configured one is masked with
+     *  probability @c mask_ratio , tubed across time groups when @c temporal_groups > 1 so a masked
+     *  spatial cell stays masked across all its time groups; every other cell stays visible and
+     *  unscored.
      */
-    [[nodiscard]] expected_t sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch,
+    [[nodiscard]] expected_t sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch, u32r1_view_t segment_offsets,
+                                         u32r1_view_t segment_lengths, modality_view_t segment_modality,
                                          gpu_stream_t &stream) noexcept;
 
     /**
@@ -311,8 +318,10 @@ struct masked_patches_t {
      *
      *  @param[in] normalized The tower's final-norm patch states @b [patches,hidden] .
      *  @param[in] clean_patches The reconstruction target @b [patches,patch_pixels] .
-     *  @param[out] loss_summands @b [2] Float32: @c {λ·Σ per-patch normalized-MSE, masked count} .
-     *  @param[out] normalized_grad @b [patches,hidden] @c d(normalized) — the tower's backward ADDS it.
+     *  @param[inout] loss_summands @b [2] Float32 the call adds @c {λ·Σ per-patch normalized-MSE,
+     *      masked count} onto.
+     *  @param[out] normalized_grad @b [patches,hidden] @c d(normalized) — the tower's backward ADDS
+     *      it.
      */
     [[nodiscard]] expected_t operator()(bf16r2_view_t normalized, bf16r2_view_t clean_patches,
                                         f32r1_span_t loss_summands, bf16r2_span_t normalized_grad,
@@ -372,13 +381,9 @@ struct masked_patches_t {
  *  pre-norm is repeated here, and a masked frame's raw row is zeroed, so the objective stays orthogonal to
  *  the entry projection.
  *
- *  The per-frame MSE z-scores both the prediction and the target by their own per-frame mean and standard
- *  deviation — identical to @ref masked_patches_t and deliberately not target-only MAE. Two independent
- *  zero-mean unit-variance frames give @c E[(pred_norm-targ_norm)^2]=1+1=2 , a closed-form chance baseline
- *  of @c 2.0 that puts audio on the same @c [0,1] scale as the image / video MAE, the MLM ( @c ln256 ), and
- *  the contrastive ( @c ln2 ) losses, so weighted multi-loss training stays balanced. The raw waveform (not
- *  a mel spectrogram) is the target, but the loss is still the z-score-both normalized MSE — do not "fix" it
- *  to target-only.
+ *  The per-frame MSE normalizes the raw waveform target by its own per-frame mean and standard
+ *  deviation and regresses the raw prediction onto it, identical to @ref masked_patches_t , with
+ *  the same chance baseline of @c 1.0 . Only cells of audio segments are masked.
  */
 struct masked_frames_t {
 
@@ -392,9 +397,11 @@ struct masked_frames_t {
     /**
      *  @brief Sample the frame mask into @c mask_ — pure enqueue, nothing else.
      *
-     *  A frame is masked with probability @c mask_ratio , drawn independently per frame.
+     *  A frame of an audio segment is masked with probability @c mask_ratio , drawn independently
+     *  per frame; every other cell stays visible and unscored.
      */
-    [[nodiscard]] expected_t sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch,
+    [[nodiscard]] expected_t sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch, u32r1_view_t segment_offsets,
+                                         u32r1_view_t segment_lengths, modality_view_t segment_modality,
                                          gpu_stream_t &stream) noexcept;
 
     /**
@@ -412,8 +419,10 @@ struct masked_frames_t {
      *
      *  @param[in] normalized The tower's final-norm frame states @b [frames,hidden] .
      *  @param[in] clean_frames The reconstruction target @b [frames,chunk_samples] Float32.
-     *  @param[out] loss_summands @b [2] Float32: @c {λ·Σ per-frame normalized-MSE, masked count} .
-     *  @param[out] normalized_grad @b [frames,hidden] @c d(normalized) — the tower's backward ADDS it.
+     *  @param[inout] loss_summands @b [2] Float32 the call adds @c {λ·Σ per-frame normalized-MSE,
+     *      masked count} onto.
+     *  @param[out] normalized_grad @b [frames,hidden] @c d(normalized) — the tower's backward ADDS
+     *      it.
      */
     [[nodiscard]] expected_t operator()(bf16r2_view_t normalized, f32r2_view_t clean_frames, f32r1_span_t loss_summands,
                                         bf16r2_span_t normalized_grad, gpu_stream_t &stream) noexcept;

@@ -39,12 +39,32 @@ template <unsigned block_size_>
     return block_total;
 }
 
+/** Cover one token at @p column of @p segment : write its keyed distortion (MASK / random / kept
+ *  clean) and a loss weight of one. */
+static __device__ void mask_token_(tokens_span_t distorted, u32r1_span_t loss_weights, u32_t position, u64_t seed,
+                                   data_epoch_t data_epoch, u32_t segment, u32_t column, f32_t replace_fraction,
+                                   f32_t random_fraction) {
+    f32_t const action = masking_draw(seed, data_epoch, segment, column,
+                                      static_cast<u32_t>(masking_draw_purpose_t::token_action_k));
+    if (action < replace_fraction) { distorted[position] = byte_mask_k; }
+    else if (action < replace_fraction + random_fraction)
+        distorted[position] = static_cast<token_id_t>(
+            masking_draw(seed, data_epoch, segment, column, static_cast<u32_t>(masking_draw_purpose_t::random_byte_k)) *
+            256.0f);
+    loss_weights[position] = 1u; // the remaining fraction keeps the clean byte, still scored
+}
+
 /**
- *  @brief Corrupt one segment in place: walk its tokens left-to-right, open geometric spans, and at each
- *      covered position write the distorted byte (MASK / random / kept clean) and a loss weight of one.
- *      PAD breaks and never opens a span; uncovered positions were already copied clean with weight zero.
+ *  @brief Corrupt one segment in place: walk its tokens left-to-right, open geometric spans, and at
+ *      each covered position write the distorted byte (MASK / random / kept clean) and a loss
+ *      weight of one.
  *
- *  A non- @c text_k segment is skipped outright — media rows keep their clean tokens and zero weight.
+ *  PAD breaks and never opens a span; uncovered positions were already copied clean with weight
+ *  zero.
+ *
+ *  A segment the walk leaves uncovered gets one span from a keyed anchor, at its first byte that is
+ *  not PAD, so every text row with bytes is scored. A non- @c text_k segment is skipped outright —
+ *  media rows keep their clean tokens and zero weight.
  *
  *  __grid_size__ @c [grid_size_for(segments),1,1] , one thread per segment; no dynamic shared memory.
  */
@@ -59,7 +79,7 @@ static __global__ void masked_token_corrupt_kernel_(tokens_view_t clean, tokens_
     if (segment_modality[segment] != modality_t::text_k) return; // media segments stay clean, weight zero
     u32_t const base = segment_offsets[segment];
     u32_t const length = segment_lengths[segment];
-    bool in_span = false;
+    bool in_span = false, covered = false;
     for (u32_t column = 0; column != length; ++column) {
         u32_t const position = base + column;
         if (clean[position] == byte_pad_k) {
@@ -73,16 +93,26 @@ static __global__ void masked_token_corrupt_kernel_(tokens_view_t clean, tokens_
             in_span = masking_draw(seed, data_epoch, segment, column,
                                    static_cast<u32_t>(masking_draw_purpose_t::span_open_k)) < open_rate;
         if (!in_span) continue;
-        f32_t const action = masking_draw(seed, data_epoch, segment, column,
-                                          static_cast<u32_t>(masking_draw_purpose_t::token_action_k));
-        if (action < replace_fraction) { distorted[position] = byte_mask_k; }
-        else if (action < replace_fraction + random_fraction)
-            distorted[position] = static_cast<token_id_t>(
-                masking_draw(seed, data_epoch, segment, column,
-                             static_cast<u32_t>(masking_draw_purpose_t::random_byte_k)) *
-                256.0f);
-        loss_weights[position] = 1u; // the remaining fraction keeps the clean byte, still scored
+        mask_token_(distorted, loss_weights, position, seed, data_epoch, segment, column, replace_fraction,
+                    random_fraction);
+        covered = true;
     }
+    if (covered || length == 0u) return;
+    u32_t const anchor = static_cast<u32_t>(
+        masking_draw(seed, data_epoch, segment, 0u, static_cast<u32_t>(masking_draw_purpose_t::span_anchor_k)) *
+        static_cast<f32_t>(length));
+    u32_t column = anchor;
+    while (clean[base + column] == byte_pad_k) {
+        column = (column + 1u) % length;
+        if (column == anchor) return; // all PAD
+    }
+    do {
+        mask_token_(distorted, loss_weights, base + column, seed, data_epoch, segment, column, replace_fraction,
+                    random_fraction);
+        ++column;
+    } while (column != length && clean[base + column] != byte_pad_k &&
+             masking_draw(seed, data_epoch, segment, column,
+                          static_cast<u32_t>(masking_draw_purpose_t::span_continue_k)) < continue_rate);
 }
 
 /**
@@ -137,7 +167,8 @@ static __global__ void masked_cross_entropy_kernel_(f32r2_view_t logits, tokens_
 }
 
 /**
- *  @brief Fold the per-position CE summands into @c {λ·Σ, count} — the rank's loss surface.
+ *  @brief Fold the per-position summands and add @c {λ·Σ, count} onto the rank's running loss
+ *      surface.
  *
  *  __grid_size__ @c [1,1,1] , one block, fixed-order tree; no dynamic shared memory.
  */
@@ -148,8 +179,8 @@ static __global__ void masked_finalize_kernel_(f32r1_view_t position_loss, f32r1
         thread_sum += position_loss[index];
     f32_t const total = block_reduce_broadcast<kernel_block_size_default_k>(thread_sum);
     if (threadIdx.x != 0u) return;
-    loss_summands[0] = weight * total;
-    loss_summands[1] = scale_and_count[1];
+    loss_summands[0] += weight * total;
+    loss_summands[1] += scale_and_count[1];
 }
 
 /** Allocate off @p arena one linear head's NumKong packs and transients: its @b [outputs,hidden] weight packed
@@ -304,26 +335,47 @@ expected_t masked_tokens_t::fill(sz::string_view_t name, array<differentiable_we
     return {};
 }
 
-/** The variance floor of the per-patch z-scoring — the MAE loss normalizes both the prediction and
- *  the target by their own mean and standard deviation. */
+/** The variance floor of the per-patch target normalization, MAE's own. */
 inline constexpr f32_t patch_variance_epsilon_k = 1.0e-6f;
 
 /**
- *  @brief Sample the patch mask: a patch is masked when its draw falls under @p mask_ratio .
+ *  @brief Sample the mask over the cells of every segment of @p modality : a cell is masked when
+ *      its draw under the @p purpose salt falls under @p mask_ratio . Cells of other segments keep
+ *      the zero the caller wrote.
  *
- *  Tube masking keys only the spatial index when @p temporal_groups > 1 , so a masked cell stays masked
- *  across time.
+ *  Tube masking keys only the spatial index when @p spatial_cells is below the cell count, so a
+ *  masked cell stays masked across time.
  *
- *  __grid_size__ @c [grid_size_for(patches),1,1] , one thread per patch; no dynamic shared memory.
+ *  __grid_size__ @c [segments,1,1] , threads stripe the segment's cells; no dynamic shared memory.
  */
-static __global__ void patch_mask_sample_kernel_(u32r1_span_t mask, u64_t seed, data_epoch_t data_epoch,
-                                                 f32_t mask_ratio, u32_t spatial_patches) {
-    u32_t const patch = blockIdx.x * blockDim.x + threadIdx.x;
-    if (patch >= mask.extent(0)) return;
-    u32_t const key = patch % spatial_patches; // == patch when spatial_patches == max_patches (random)
-    f32_t const draw = masking_draw(seed, data_epoch, key, 0u,
-                                    static_cast<u32_t>(masking_draw_purpose_t::patch_mask_k));
-    mask[patch] = draw < mask_ratio ? 1u : 0u;
+static __global__ void media_mask_sample_kernel_(u32r1_span_t mask, u32r1_view_t segment_offsets,
+                                                 u32r1_view_t segment_lengths, modality_view_t segment_modality,
+                                                 modality_t modality, u64_t seed, data_epoch_t data_epoch,
+                                                 f32_t mask_ratio, u32_t spatial_cells,
+                                                 masking_draw_purpose_t purpose) {
+    u32_t const segment = blockIdx.x;
+    if (segment_modality[segment] != modality) return;
+    u32_t const offset = segment_offsets[segment], length = segment_lengths[segment];
+    for (u32_t column = threadIdx.x; column < length; column += blockDim.x) {
+        u32_t const cell = offset + column;
+        f32_t const draw = masking_draw(seed, data_epoch, cell % spatial_cells, 0u, static_cast<u32_t>(purpose));
+        mask[cell] = draw < mask_ratio ? 1u : 0u;
+    }
+}
+
+/** Zero @p mask and sample it over the cells of every @p modality segment, the one sampler both
+ *  media heads share. */
+[[nodiscard]] static expected_t sample_media_mask_(u32r1_span_t mask, u32r1_view_t segment_offsets,
+                                                   u32r1_view_t segment_lengths, modality_view_t segment_modality,
+                                                   modality_t modality, masking_recipe_t recipe,
+                                                   data_epoch_t data_epoch, f32_t mask_ratio, u32_t spatial_cells,
+                                                   masking_draw_purpose_t purpose, gpu_stream_t &stream) noexcept {
+    if (expected_t zeroed = zero_async(mask, stream); !zeroed) return zeroed;
+    dim3 const segment_grid {static_cast<u32_t>(segment_lengths.extent(0)), 1u, 1u};
+    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
+    return launch_kernel(&media_mask_sample_kernel_, segment_grid, block_shape, stream, mask, segment_offsets,
+                         segment_lengths, segment_modality, modality, recipe.seed, data_epoch, mask_ratio,
+                         spatial_cells, purpose);
 }
 
 /**
@@ -359,9 +411,9 @@ static __global__ void patch_count_kernel_(u32r1_view_t mask, f32r1_span_t scale
 }
 
 /**
- *  @brief Per-patch normalized-MSE over one masked patch: z-score the prediction and the target by their
- *      own mean / standard deviation, accumulate the squared difference, and write the pre-scaled
- *      gradient — visible patches write zeros and score nothing.
+ *  @brief Per-patch normalized-MSE over one masked patch: z-score the target by its own mean /
+ *      standard deviation, accumulate the squared difference to the raw prediction, and write the
+ *      pre-scaled gradient — visible patches write zeros and score nothing.
  *
  *  __grid_size__ @c [max_patches,1,1] , one block per patch; no dynamic shared memory.
  */
@@ -373,25 +425,21 @@ static __global__ void patch_mae_loss_kernel_(bf16r2_view_t predicted, bf16r2_vi
     u32_t const patch_pixels = predicted.extent(1);
     f32_t const inverse_pixels = 1.0f / static_cast<f32_t>(patch_pixels);
 
-    f32_t sum_pred = 0.0f, sumsq_pred = 0.0f, sum_target = 0.0f, sumsq_target = 0.0f;
+    f32_t sum_target = 0.0f, sumsq_target = 0.0f;
     for (u32_t index = threadIdx.x; index < patch_pixels; index += blockDim.x) {
-        f32_t const p = __bfloat162float(predicted[row, index]), t = __bfloat162float(targets[row, index]);
-        sum_pred += p, sumsq_pred += p * p, sum_target += t, sumsq_target += t * t;
+        f32_t const target = __bfloat162float(targets[row, index]);
+        sum_target += target, sumsq_target += target * target;
     }
-    f32_t const mean_pred = block_reduce_broadcast<kernel_block_size_default_k>(sum_pred) * inverse_pixels;
-    f32_t const mean_sq_pred = block_reduce_broadcast<kernel_block_size_default_k>(sumsq_pred) * inverse_pixels;
     f32_t const mean_target = block_reduce_broadcast<kernel_block_size_default_k>(sum_target) * inverse_pixels;
     f32_t const mean_sq_target = block_reduce_broadcast<kernel_block_size_default_k>(sumsq_target) * inverse_pixels;
-    f32_t const inverse_std_pred = rsqrtf(fmaxf(mean_sq_pred - mean_pred * mean_pred, 0.0f) + patch_variance_epsilon_k);
     f32_t const inverse_std_target = rsqrtf(fmaxf(mean_sq_target - mean_target * mean_target, 0.0f) +
                                             patch_variance_epsilon_k);
 
-    f32_t const scale = live ? scale_and_count[0] * inverse_std_pred : 0.0f;
+    f32_t const scale = live ? scale_and_count[0] : 0.0f;
     f32_t thread_loss = 0.0f;
     for (u32_t index = threadIdx.x; index < patch_pixels; index += blockDim.x) {
-        f32_t const pred_norm = (__bfloat162float(predicted[row, index]) - mean_pred) * inverse_std_pred;
         f32_t const target_norm = (__bfloat162float(targets[row, index]) - mean_target) * inverse_std_target;
-        f32_t const difference = pred_norm - target_norm;
+        f32_t const difference = __bfloat162float(predicted[row, index]) - target_norm;
         thread_loss += difference * difference;
         predicted_grad[row, index] = __float2bfloat16(scale * difference);
     }
@@ -448,14 +496,12 @@ expected_t masked_patches_t::pack_weights(gpu_stream_t &stream) noexcept {
                             packed_recon_transposed_.span(), capabilities_, stream);
 }
 
-expected_t masked_patches_t::sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch,
+expected_t masked_patches_t::sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch, u32r1_view_t segment_offsets,
+                                         u32r1_view_t segment_lengths, modality_view_t segment_modality,
                                          gpu_stream_t &stream) noexcept {
-    u32_t const patches = config_.max_patches;
-    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
-    dim3 const patch_grid {grid_size_for(patches), 1u, 1u};
-    u32_t const spatial_patches = patches / config_.temporal_groups;
-    return launch_kernel(&patch_mask_sample_kernel_, patch_grid, block_shape, stream, mask_.span(), recipe.seed,
-                         data_epoch, config_.mask_ratio, spatial_patches);
+    return sample_media_mask_(mask_.span(), segment_offsets, segment_lengths, segment_modality, config_.modality,
+                              recipe, data_epoch, config_.mask_ratio, config_.max_patches / config_.temporal_groups,
+                              masking_draw_purpose_t::patch_mask_k, stream);
 }
 
 expected_t masked_patches_t::corrupt_raw(nk::tensor_span<pixel_t, 2> raw_patches, gpu_stream_t &stream) noexcept {
@@ -534,22 +580,6 @@ expected_t masked_patches_t::fill(sz::string_view_t name, array<differentiable_w
 }
 
 /**
- *  @brief Sample the frame mask: a frame is masked when its independent per-frame draw falls under
- *      @p mask_ratio . Keyed on the frame index alone with the @c frame_mask_k salt — no tube concept, so
- *      whole waveform frames are masked i.i.d.
- *
- *  __grid_size__ @c [grid_size_for(frames),1,1] , one thread per frame; no dynamic shared memory.
- */
-static __global__ void frame_mask_sample_kernel_(u32r1_span_t mask, u64_t seed, data_epoch_t data_epoch,
-                                                 f32_t mask_ratio) {
-    u32_t const frame = blockIdx.x * blockDim.x + threadIdx.x;
-    if (frame >= mask.extent(0)) return;
-    f32_t const draw = masking_draw(seed, data_epoch, frame, 0u,
-                                    static_cast<u32_t>(masking_draw_purpose_t::frame_mask_k));
-    mask[frame] = draw < mask_ratio ? 1u : 0u;
-}
-
-/**
  *  @brief Zero the raw waveform frames the mask selects, in place; visible frames keep their Float32
  *      samples. The driver calls this on the live batch audio so the tower re-projects the corrupted samples.
  *
@@ -582,12 +612,12 @@ static __global__ void frame_count_kernel_(u32r1_view_t mask, f32r1_span_t scale
 }
 
 /**
- *  @brief Per-frame normalized-MSE over one masked audio frame: z-score the prediction and the raw Float32
- *      target by their own mean / standard deviation, accumulate the squared difference, and write the
- *      pre-scaled gradient — visible frames write zeros and score nothing.
+ *  @brief Per-frame normalized-MSE over one masked audio frame: z-score the raw Float32 target by
+ *      its own mean / standard deviation, accumulate the squared difference to the raw prediction,
+ *      and write the pre-scaled gradient — visible frames write zeros and score nothing.
  *
- *  The prediction rides BFloat16 off the decode matmul; the target is the raw waveform frame, read as
- *  Float32.
+ *  The prediction rides BFloat16 off the decode matmul; the target is the raw waveform frame, read
+ *  as Float32.
  *
  *  __grid_size__ @c [max_frames,1,1] , one block per frame; no dynamic shared memory.
  */
@@ -599,25 +629,21 @@ static __global__ void frame_mae_loss_kernel_(bf16r2_view_t predicted, f32r2_vie
     u32_t const chunk_samples = predicted.extent(1);
     f32_t const inverse_samples = 1.0f / static_cast<f32_t>(chunk_samples);
 
-    f32_t sum_pred = 0.0f, sumsq_pred = 0.0f, sum_target = 0.0f, sumsq_target = 0.0f;
+    f32_t sum_target = 0.0f, sumsq_target = 0.0f;
     for (u32_t index = threadIdx.x; index < chunk_samples; index += blockDim.x) {
-        f32_t const p = __bfloat162float(predicted[row, index]), t = targets[row, index];
-        sum_pred += p, sumsq_pred += p * p, sum_target += t, sumsq_target += t * t;
+        f32_t const target = targets[row, index];
+        sum_target += target, sumsq_target += target * target;
     }
-    f32_t const mean_pred = block_reduce_broadcast<kernel_block_size_default_k>(sum_pred) * inverse_samples;
-    f32_t const mean_sq_pred = block_reduce_broadcast<kernel_block_size_default_k>(sumsq_pred) * inverse_samples;
     f32_t const mean_target = block_reduce_broadcast<kernel_block_size_default_k>(sum_target) * inverse_samples;
     f32_t const mean_sq_target = block_reduce_broadcast<kernel_block_size_default_k>(sumsq_target) * inverse_samples;
-    f32_t const inverse_std_pred = rsqrtf(fmaxf(mean_sq_pred - mean_pred * mean_pred, 0.0f) + patch_variance_epsilon_k);
     f32_t const inverse_std_target = rsqrtf(fmaxf(mean_sq_target - mean_target * mean_target, 0.0f) +
                                             patch_variance_epsilon_k);
 
-    f32_t const scale = live ? scale_and_count[0] * inverse_std_pred : 0.0f;
+    f32_t const scale = live ? scale_and_count[0] : 0.0f;
     f32_t thread_loss = 0.0f;
     for (u32_t index = threadIdx.x; index < chunk_samples; index += blockDim.x) {
-        f32_t const pred_norm = (__bfloat162float(predicted[row, index]) - mean_pred) * inverse_std_pred;
         f32_t const target_norm = (targets[row, index] - mean_target) * inverse_std_target;
-        f32_t const difference = pred_norm - target_norm;
+        f32_t const difference = __bfloat162float(predicted[row, index]) - target_norm;
         thread_loss += difference * difference;
         predicted_grad[row, index] = __float2bfloat16(scale * difference);
     }
@@ -673,13 +699,12 @@ expected_t masked_frames_t::pack_weights(gpu_stream_t &stream) noexcept {
                             packed_recon_transposed_.span(), capabilities_, stream);
 }
 
-expected_t masked_frames_t::sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch,
+expected_t masked_frames_t::sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch, u32r1_view_t segment_offsets,
+                                        u32r1_view_t segment_lengths, modality_view_t segment_modality,
                                         gpu_stream_t &stream) noexcept {
-    u32_t const frames = config_.max_frames;
-    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
-    dim3 const frame_grid {grid_size_for(frames), 1u, 1u};
-    return launch_kernel(&frame_mask_sample_kernel_, frame_grid, block_shape, stream, mask_.span(), recipe.seed,
-                         data_epoch, config_.mask_ratio);
+    return sample_media_mask_(mask_.span(), segment_offsets, segment_lengths, segment_modality, modality_t::audio_k,
+                              recipe, data_epoch, config_.mask_ratio, config_.max_frames,
+                              masking_draw_purpose_t::frame_mask_k, stream);
 }
 
 expected_t masked_frames_t::corrupt_raw(f32r2_span_t raw_frames, gpu_stream_t &stream) noexcept {

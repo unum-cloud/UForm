@@ -73,10 +73,11 @@ struct host_relations_t {
     }
 };
 
-/** The Float64 oracle: the exact per-header math of the segments loss over host BFloat16 towers. */
-static f64_t host_loss(std::span<bf16_t const> vertices, std::span<bf16_t const> neighbors, std::size_t num_vertices,
-                       std::size_t num_neighbors, std::size_t hidden, std::span<u32_t const> prefixes,
+/** The Float64 oracle: the exact per-header math of the segments loss over the @b [vertices,hidden]
+ *  and @b [neighbors,hidden] towers, held on the BFloat16 grid. */
+static f64_t host_loss(f64r2_view_t vertices, f64r2_view_t neighbors, std::span<u32_t const> prefixes,
                        host_relations_t const &relations, f64_t beta, f64_t bias, std::size_t vertices_per_mesh) {
+    std::size_t const num_vertices = vertices.extent(0), num_neighbors = neighbors.extent(0);
     f64_t loss = 0.0;
     for (std::size_t vertex = 0; vertex != num_vertices; ++vertex) {
         // Signed weight totals over the whole neighbor axis.
@@ -90,24 +91,14 @@ static f64_t host_loss(std::span<bf16_t const> vertices, std::span<bf16_t const>
         f64_t const neg_scale = 1.0 / std::max(neg_weight, f64_t(1.0e-12));
         f64_t vertex_loss = 0.0;
         for (std::size_t prefix_index = 0; prefix_index != prefixes.size(); ++prefix_index) {
-            std::size_t const width = prefixes[prefix_index];
-            f64_t vertex_norm = 0.0;
-            for (std::size_t channel = 0; channel != width; ++channel) {
-                f64_t const value = f64_t(__bfloat162float(vertices[vertex * hidden + channel]));
-                vertex_norm += value * value;
-            }
-            vertex_norm = std::sqrt(vertex_norm);
+            auto const prefix = nk::range(0, prefixes[prefix_index]);
+            f64r1_view_t const ours = vertices[vertex, prefix, nk::slice];
+            f64_t const vertex_norm = std::sqrt(dot(ours, ours));
             for (std::size_t neighbor = 0; neighbor != num_neighbors; ++neighbor) {
                 auto [target, weight] = relations.resolve(u32_t(vertex), u32_t(neighbor));
                 if (weight == 0.0) continue;
-                f64_t raw = 0.0, neighbor_norm = 0.0;
-                for (std::size_t channel = 0; channel != width; ++channel) {
-                    f64_t const ours = f64_t(__bfloat162float(vertices[vertex * hidden + channel]));
-                    f64_t const theirs = f64_t(__bfloat162float(neighbors[neighbor * hidden + channel]));
-                    raw += ours * theirs;
-                    neighbor_norm += theirs * theirs;
-                }
-                neighbor_norm = std::sqrt(neighbor_norm);
+                f64r1_view_t const theirs = neighbors[neighbor, prefix, nk::slice];
+                f64_t const raw = dot(ours, theirs), neighbor_norm = std::sqrt(dot(theirs, theirs));
                 f64_t const denominator = vertex_norm * neighbor_norm;
                 f64_t const cosine = denominator > 1.0e-2 ? raw / denominator : 0.0;
                 f64_t const logit = beta * cosine + bias;
@@ -140,21 +131,22 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
     config.hidden = u32_t(hidden);
     config.to_vertices_per_gpu = u32_t(num_vertices);
     config.gpu_subgraphs_per_step = 1;
-    auto loss_made = contrastive_segments_t::make(arena, config, {prefixes.data(), prefixes.size()});
+    auto loss_made = contrastive_segments_t::make(arena, config, std::span {prefixes});
     if (!loss_made) return suite.check(false, "loss make: {}", loss_made.description_);
     contrastive_segments_t loss = std::move(loss_made.value_);
 
-    // Towers, gradients, loss scalar.
+    // The tower on the BFloat16 grid in Float64 for the oracle, its bit patterns for the device.
     std::size_t const scalars = num_vertices * hidden;
-    std::vector<bf16_t> host_tower(scalars);
-    for (std::size_t index = 0; index != scalars; ++index)
-        host_tower[index] = __float2bfloat16(hash_fill(index, num_vertices + hidden));
+    std::vector<f64_t> host_tower(scalars);
+    std::vector<nk_bf16_t> staging(scalars);
+    for (std::size_t index = 0; index != scalars; ++index) host_tower[index] = hash_fill(index, num_vertices + hidden);
+    if (!narrow_to_bf16(host_tower, staging)) return suite.check(false, "tower rounding failed");
     bf16_t *tower = arena.allocate_object<bf16_t>(scalars);
     bf16_t *grad = arena.allocate_object<bf16_t>(scalars);
     f32_t *grad_f32 = arena.allocate_object<f32_t>(scalars);
     f32_t *loss_out = arena.allocate_object<f32_t>(1);
     u32_t *effective = arena.allocate_object<u32_t>(num_vertices);
-    cuMemcpyHtoD(device_address(tower), host_tower.data(), scalars * sizeof(bf16_t));
+    cuMemcpyHtoD(device_address(tower), staging.data(), scalars * sizeof(nk_bf16_t));
 
     // Relations: self-edge default, or explicit attract/repel with an ignore override; PAD via the
     // effective-length columns.
@@ -187,15 +179,11 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
             if (vertex >= 2) host_relations.repel_offsets.push_back(u32_t(host_relations.repel_ids.size()));
             host_relations.ignore_offsets.push_back(u32_t(host_relations.ignore_ids.size()));
         }
-        staged = relations.upload({host_relations.attract_offsets.data(), host_relations.attract_offsets.size()},
-                                  {host_relations.attract_ids.data(), host_relations.attract_ids.size()},
-                                  {host_relations.attract_scores.data(), host_relations.attract_scores.size()},
-                                  {host_relations.repel_offsets.data(), host_relations.repel_offsets.size()},
-                                  {host_relations.repel_ids.data(), host_relations.repel_ids.size()},
-                                  {host_relations.repel_scores.data(), host_relations.repel_scores.size()},
-                                  {host_relations.ignore_offsets.data(), host_relations.ignore_offsets.size()},
-                                  {host_relations.ignore_ids.data(), host_relations.ignore_ids.size()}, effective_view,
-                                  effective_view, num_vertices, 0, ambient_weight, stream);
+        staged = relations.upload(std::span {host_relations.attract_offsets}, std::span {host_relations.attract_ids},
+                                  std::span {host_relations.attract_scores}, std::span {host_relations.repel_offsets},
+                                  std::span {host_relations.repel_ids}, std::span {host_relations.repel_scores},
+                                  std::span {host_relations.ignore_offsets}, std::span {host_relations.ignore_ids},
+                                  effective_view, effective_view, num_vertices, 0, ambient_weight, stream);
     }
     else
         staged = relations.upload_self_edges(u32_t(num_vertices), effective_view, effective_view, 0, ambient_weight,
@@ -218,34 +206,33 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
     f32_t device_loss = 0;
     cuMemcpyDtoH(&device_loss, device_address(loss_out), sizeof(f32_t));
 
-    std::vector<u32_t> host_prefixes(prefixes.begin(), prefixes.end());
     std::size_t const live_vertices = with_pad ? num_vertices - 1u : num_vertices; // the mean skips PAD
-    f64_t const oracle = host_loss(host_tower, host_tower, num_vertices, num_vertices, hidden, host_prefixes,
-                                   host_relations, 1.0, 0.0, live_vertices);
+    auto const oracle_of = [&](std::vector<f64_t> const &towers) noexcept {
+        f64r2_view_t const rows {towers.data(), num_vertices, hidden};
+        return host_loss(rows, rows, prefixes, host_relations, 1.0, 0.0, live_vertices);
+    };
+    f64_t const oracle = oracle_of(host_tower);
     f64_t const relative = std::fabs(f64_t(device_loss) - oracle) / std::max(std::fabs(oracle), 1.0e-9);
     suite.check(relative < 5.0e-3, "loss {:.6f} matches the Float64 oracle {:.6f}: relative {:.2e}", device_loss,
                 oracle, relative);
 
     // Finite-difference force check on a few sampled channels: the analytic BF16 gradient must sit
     // within BF16 resolution of (L(x+h) - L(x-h)) / 2h.
-    std::vector<bf16_t> host_grad(scalars);
-    cuMemcpyDtoH(host_grad.data(), device_address(grad), scalars * sizeof(bf16_t));
+    std::vector<f64_t> host_grad(scalars);
+    cuMemcpyDtoH(staging.data(), device_address(grad), scalars * sizeof(nk_bf16_t));
+    if (!widen_from_bf16(staging, host_grad)) return suite.check(false, "gradient widening failed");
     std::vector<f32_t> host_column(scalars);
     cuMemcpyDtoH(host_column.data(), device_address(grad_f32), scalars * sizeof(f32_t));
     for (std::size_t sample = 0; sample != 6; ++sample) {
         std::size_t const index = (sample * 977ull + 13ull) % scalars;
         f64_t const step_size = 1.0e-2;
-        std::vector<bf16_t> plus = host_tower, minus = host_tower;
-        plus[index] = __float2bfloat16(__bfloat162float(host_tower[index]) + f32_t(step_size));
-        minus[index] = __float2bfloat16(__bfloat162float(host_tower[index]) - f32_t(step_size));
-        f64_t const h = f64_t(__bfloat162float(plus[index])) - f64_t(__bfloat162float(minus[index]));
-        f64_t const numeric = (host_loss(plus, plus, num_vertices, num_vertices, hidden, host_prefixes, host_relations,
-                                         1.0, 0.0, live_vertices) -
-                               host_loss(minus, minus, num_vertices, num_vertices, hidden, host_prefixes,
-                                         host_relations, 1.0, 0.0, live_vertices)) /
-                              h;
+        std::vector<f64_t> plus = host_tower, minus = host_tower;
+        plus[index] += step_size, minus[index] -= step_size;
+        if (!narrow_to_bf16(plus, staging) || !narrow_to_bf16(minus, staging))
+            return suite.check(false, "perturbation rounding failed");
+        f64_t const numeric = (oracle_of(plus) - oracle_of(minus)) / (plus[index] - minus[index]);
         // The full derivative sums the row-side (bf16 output) and column-side (f32 subgraph) forces.
-        f64_t const analytic = f64_t(__bfloat162float(host_grad[index])) + f64_t(host_column[index]);
+        f64_t const analytic = host_grad[index] + host_column[index];
         f64_t const difference = std::fabs(numeric - analytic);
         if (difference > 5.0e-2 * std::max(std::fabs(numeric), 0.05)) {
             suite.check(false, "force[{}] matches central finite differences: numeric {:.5f} analytic {:.5f}", index,
@@ -255,21 +242,21 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
     }
 
     // Capture once, replay twice: the replays land where the eager run did, up to reduction order.
-    std::vector<bf16_t> const eager_grad = host_grad;
+    std::vector<f64_t> const eager_grad = host_grad;
     auto graph_made = gpu_replay_graph_t::make(stream.get(), [&]() noexcept { return run_once(); });
     if (!graph_made) return suite.check(false, "capture: {}", graph_made.description_);
     for (int replay = 0; replay != 2; ++replay)
         if (expected_t launched = graph_made.value_.launch(stream.get()); !launched)
             return suite.check(false, "replay launch: {}", launched.description_);
     cuStreamSynchronize(stream.get());
-    cuMemcpyDtoH(host_grad.data(), device_address(grad), scalars * sizeof(bf16_t));
-    f32_t largest = 0.0f, worst = 0.0f;
+    cuMemcpyDtoH(staging.data(), device_address(grad), scalars * sizeof(nk_bf16_t));
+    if (!widen_from_bf16(staging, host_grad)) return suite.check(false, "gradient widening failed");
+    f64_t largest = 0.0, worst = 0.0;
     for (std::size_t index = 0; index != scalars; ++index) {
-        f32_t const eager = __bfloat162float(eager_grad[index]);
-        largest = std::max(largest, std::fabs(eager));
-        worst = std::max(worst, std::fabs(eager - __bfloat162float(host_grad[index])));
+        largest = std::max(largest, std::fabs(eager_grad[index]));
+        worst = std::max(worst, std::fabs(eager_grad[index] - host_grad[index]));
     }
-    suite.check(worst <= 1.0e-2f * largest, "captured replays match eager: worst {} over largest {}", worst, largest);
+    suite.check(worst <= 1.0e-2 * largest, "captured replays match eager: worst {} over largest {}", worst, largest);
     cuCtxPopCurrent(nullptr);
 }
 
@@ -311,7 +298,6 @@ struct loss_readout_t {
 static void run_sharded_oracle_case(test_suite_t &suite) {
     if (!cuda_devices_visible_(1)) return suite.skip(no_cuda_device_k);
     constexpr u32_t ranks_k = 16, vertices_k = 8, hidden_k = 64, world_k = ranks_k * vertices_k;
-    constexpr std::size_t tower_scalars_k = std::size_t {vertices_k} * hidden_k;
     constexpr f32_t beta_k = 2.5f, bias_k = -1.5f;
     u32_t const prefixes[1] = {hidden_k};
     auto stream_made = gpu_stream_t::make(0);
@@ -323,40 +309,40 @@ static void run_sharded_oracle_case(test_suite_t &suite) {
     gpu_arena_t arena = std::move(arena_made.value_);
 
     // Every third rank ends in a PAD row, which neither scores nor counts toward the mean.
-    bf16_t host_tower[world_k * hidden_k];
+    std::vector<f64_t> host_tower(world_k * hidden_k);
+    std::vector<nk_bf16_t> staging(world_k * hidden_k);
     u32_t host_lengths[world_k];
-    for (std::size_t index = 0; index != world_k * hidden_k; ++index)
-        host_tower[index] = __float2bfloat16(hash_fill(index, 31));
+    for (std::size_t index = 0; index != host_tower.size(); ++index) host_tower[index] = hash_fill(index, 31);
+    if (!narrow_to_bf16(host_tower, staging)) return suite.check(false, "tower rounding failed");
     u32_t live_vertices = 0;
     for (u32_t vertex = 0; vertex != world_k; ++vertex) {
         host_lengths[vertex] = (vertex / vertices_k) % 3u == 0u && vertex % vertices_k == vertices_k - 1u ? 0u : 4u;
         live_vertices += host_lengths[vertex] != 0u;
     }
-    bf16_t *tower = arena.allocate_object<bf16_t>(world_k * hidden_k);
-    bf16_t *row_grad = arena.allocate_object<bf16_t>(world_k * hidden_k);
-    f32_t *column_grad = arena.allocate_object<f32_t>(world_k * hidden_k);
-    u32_t *lengths = arena.allocate_object<u32_t>(world_k);
-    f32_t *temperatures = arena.allocate_object<f32_t>(2);
-    f32_t *outputs = arena.allocate_object<f32_t>(3 * (ranks_k + 1));
+    bf16r2_span_t const tower {arena.allocate_object<bf16_t>(world_k * hidden_k), world_k, hidden_k};
+    bf16r2_span_t const row_grad {arena.allocate_object<bf16_t>(world_k * hidden_k), world_k, hidden_k};
+    f32r2_span_t const column_grad {arena.allocate_object<f32_t>(world_k * hidden_k), world_k, hidden_k};
+    u32r1_span_t const world_lengths {arena.allocate_object<u32_t>(world_k), world_k};
+    f32r1_span_t const temperatures {arena.allocate_object<f32_t>(2), 2};
+    f32r2_span_t const outputs {arena.allocate_object<f32_t>(3 * (ranks_k + 1)), ranks_k + 1, 3};
     f32_t const host_temperatures[2] = {beta_k, bias_k};
-    cuMemcpyHtoD(device_address(tower), host_tower, sizeof(host_tower));
-    cuMemcpyHtoD(device_address(lengths), host_lengths, sizeof(host_lengths));
-    cuMemcpyHtoD(device_address(temperatures), host_temperatures, sizeof(host_temperatures));
+    cuMemcpyHtoD(device_address(tower.data()), staging.data(), staging.size() * sizeof(nk_bf16_t));
+    cuMemcpyHtoD(device_address(world_lengths.data()), host_lengths, sizeof(host_lengths));
+    cuMemcpyHtoD(device_address(temperatures.data()), host_temperatures, sizeof(host_temperatures));
     contrastive_recipe_t recipe;
-    recipe.inverse_temperature_device = f32r1_view_t {temperatures, 1};
-    recipe.bias_device = f32r1_view_t {temperatures + 1, 1};
-    u32r1_view_t const world_lengths {lengths, world_k};
+    recipe.inverse_temperature_device = temperatures[nk::range(0, 1), nk::slice];
+    recipe.bias_device = temperatures[nk::range(1, 2), nk::slice];
 
-    // One loss call over the rows from `first_vertex`, its three outputs at entry `call`.
+    // One loss call over the rows from `first_vertex`, its three outputs in row `call`.
     auto run_call = [&](contrastive_segments_t &loss, contrastive_relations_t &relations, u32_t first_vertex,
                         u32_t rows, nk::tensor_view<gpu_subgraph_t, 1> subgraphs, u32_t call) noexcept -> expected_t {
-        expected_t staged = relations.upload_self_edges(rows, u32r1_view_t {lengths + first_vertex, rows},
-                                                        world_lengths, first_vertex, 1.0f, stream);
+        auto const owned = nk::range(first_vertex, first_vertex + rows);
+        expected_t staged = relations.upload_self_edges(rows, world_lengths[owned, nk::slice], world_lengths,
+                                                        first_vertex, 1.0f, stream);
         if (staged)
-            staged = loss(bf16r2_view_t {tower + std::size_t {first_vertex} * hidden_k, rows, hidden_k}, subgraphs,
-                          relations.view(), recipe, f32r1_span_t {outputs + 3 * call, 1},
-                          bf16r2_span_t {row_grad + std::size_t {first_vertex} * hidden_k, rows, hidden_k}, stream,
-                          f32r1_span_t {outputs + 3 * call + 1, 1}, f32r1_span_t {outputs + 3 * call + 2, 1});
+            staged = loss(tower[owned, nk::slice], subgraphs, relations.view(), recipe,
+                          outputs[call, nk::range(0, 1), nk::slice], row_grad[owned, nk::slice], stream,
+                          outputs[call, nk::range(1, 2), nk::slice], outputs[call, nk::range(2, 3), nk::slice]);
         return staged;
     };
 
@@ -376,14 +362,15 @@ static void run_sharded_oracle_case(test_suite_t &suite) {
     if (!sharded_loss || !global_loss || !sharded_relations || !global_relations)
         return suite.check(false, "sharded bring-up: {}{}", sharded_loss.description_, global_loss.description_);
 
+    bf16r3_span_t const tower_planes = tower.reshape<3>({ranks_k, vertices_k, hidden_k});
+    f32r3_span_t const column_grad_planes = column_grad.reshape<3>({ranks_k, vertices_k, hidden_k});
     gpu_subgraph_t subgraphs[ranks_k];
     for (u32_t rank = 0; rank != ranks_k; ++rank) {
-        subgraphs[rank].to_vertices = bf16r2_view_t {tower + rank * tower_scalars_k, vertices_k, hidden_k};
+        subgraphs[rank].to_vertices = tower_planes[rank, nk::slice];
         subgraphs[rank].global_offset = std::size_t {rank} * vertices_k;
-        subgraphs[rank].to_vertices_grad = f32r2_span_t {column_grad + rank * tower_scalars_k, vertices_k, hidden_k};
+        subgraphs[rank].to_vertices_grad = column_grad_planes[rank, nk::slice];
     }
-    gpu_subgraph_t const whole[1] = {
-        {bf16r2_view_t {tower, world_k, hidden_k}, 0, f32r2_span_t {column_grad, world_k, hidden_k}}};
+    gpu_subgraph_t const whole[1] = {{tower, 0, column_grad}};
     expected_t ran {};
     for (u32_t rank = 0; rank != ranks_k && ran; ++rank)
         ran = run_call(sharded_loss.value_, sharded_relations.value_, rank * vertices_k, vertices_k,
@@ -392,7 +379,7 @@ static void run_sharded_oracle_case(test_suite_t &suite) {
     if (!ran) return suite.check(false, "sharded enqueue: {}", ran.description_);
     cuStreamSynchronize(stream.get());
     f32_t host_outputs[ranks_k + 1][3];
-    cuMemcpyDtoH(host_outputs, device_address(outputs), sizeof(host_outputs));
+    cuMemcpyDtoH(host_outputs, device_address(outputs.data()), sizeof(host_outputs));
     loss_readout_t sharded, global;
     for (u32_t rank = 0; rank != ranks_k; ++rank) {
         sharded.loss += host_outputs[rank][0];
@@ -407,10 +394,9 @@ static void run_sharded_oracle_case(test_suite_t &suite) {
     host_relations_t host_relations;
     host_relations.vertex_effective.assign(host_lengths, host_lengths + world_k);
     host_relations.neighbor_effective.assign(host_lengths, host_lengths + world_k);
-    std::span<bf16_t const> const host_view {host_tower, world_k * hidden_k};
+    f64r2_view_t const host_rows {host_tower.data(), world_k, hidden_k};
     auto oracle_at = [&](f64_t beta, f64_t bias) noexcept {
-        return host_loss(host_view, host_view, world_k, world_k, hidden_k, {prefixes, 1}, host_relations, beta, bias,
-                         live_vertices);
+        return host_loss(host_rows, host_rows, prefixes, host_relations, beta, bias, live_vertices);
     };
     f64_t const step_size = 1.0e-4;
     loss_readout_t oracle;
@@ -455,10 +441,12 @@ static void run_distributed_case(test_suite_t &suite) {
     i32_t devices[gpus_k] = {0, 1};
     u32_t prefix_dims[1] = {hidden_k};
 
-    // Global data: 16 vertices; rank r owns rows [8r, 8r+8).
-    std::vector<bf16_t> global_tower(2 * scalars_k);
-    for (std::size_t index = 0; index != global_tower.size(); ++index)
-        global_tower[index] = __float2bfloat16(hash_fill(index, 7));
+    // Global data on the BFloat16 grid: 16 vertices; rank r owns rows [8r, 8r+8).
+    std::vector<f64_t> global_tower(gpus_k * scalars_k);
+    std::vector<nk_bf16_t> staging(global_tower.size());
+    for (std::size_t index = 0; index != global_tower.size(); ++index) global_tower[index] = hash_fill(index, 7);
+    if (!narrow_to_bf16(global_tower, staging)) return suite.check(false, "tower rounding failed");
+    nk::tensor_span<nk_bf16_t, 2> const staging_rows {staging.data(), gpus_k, scalars_k};
 
     per_gpu_array<gpu_stream_t> streams;
     per_gpu_array<gpu_arena_t> arenas;
@@ -483,7 +471,7 @@ static void run_distributed_case(test_suite_t &suite) {
             return suite.check(false, "distributed arena make");
         bf16_t *tower = arenas[rank].allocate_object<bf16_t>(scalars_k);
         bf16_t *grad = arenas[rank].allocate_object<bf16_t>(scalars_k);
-        cuMemcpyHtoD(device_address(tower), global_tower.data() + rank * scalars_k, scalars_k * sizeof(bf16_t));
+        cuMemcpyHtoD(device_address(tower), staging_rows[rank, nk::slice].data(), scalars_k * sizeof(nk_bf16_t));
         towers[rank] = bf16r2_view_t {tower, vertices_k, hidden_k};
         grads[rank] = bf16r2_span_t {grad, vertices_k, hidden_k};
         owners[rank] = std::move(contrastive_relations_t::make(arenas[rank], vertices_k, 0).value_);
@@ -515,22 +503,26 @@ static void run_distributed_case(test_suite_t &suite) {
         cuCtxPopCurrent(nullptr);
     }
     f64_t distributed_loss = 0.0;
-    std::vector<bf16_t> distributed_grad(2 * scalars_k);
+    std::vector<f64_t> distributed_grad(gpus_k * scalars_k);
     cuCtxPushCurrent(streams[0].context());
     f32_t summands[gpus_k] = {};
     cuMemcpyDtoH(summands, device_address(distributed.value_.loss_outs().data()), sizeof(summands));
     for (std::size_t rank = 0; rank != gpus_k; ++rank) {
         distributed_loss += summands[rank];
-        cuMemcpyDtoH(distributed_grad.data() + rank * scalars_k, device_address(grads[rank].data()),
-                     scalars_k * sizeof(bf16_t));
+        cuMemcpyDtoH(staging_rows[rank, nk::slice].data(), device_address(grads[rank].data()),
+                     scalars_k * sizeof(nk_bf16_t));
     }
     cuCtxPopCurrent(nullptr);
+    if (!widen_from_bf16(staging, distributed_grad)) return suite.check(false, "gradient widening failed");
 
     // The Float64 oracle over the SAME global grid — the sum of rank summands must match it.
     host_relations_t host_relations;
-    std::vector<u32_t> prefixes = {hidden_k};
-    f64_t const oracle = host_loss(global_tower, global_tower, 2 * vertices_k, 2 * vertices_k, hidden_k, prefixes,
-                                   host_relations, 1.0, 0.0, 2 * vertices_k);
+    u32_t const prefixes[1] = {hidden_k};
+    auto const oracle_of = [&](std::vector<f64_t> const &towers) noexcept {
+        f64r2_view_t const rows {towers.data(), gpus_k * vertices_k, hidden_k};
+        return host_loss(rows, rows, prefixes, host_relations, 1.0, 0.0, gpus_k * vertices_k);
+    };
+    f64_t const oracle = oracle_of(global_tower);
     f64_t const relative = std::fabs(distributed_loss - oracle) / std::max(std::fabs(oracle), 1.0e-9);
     sz::string_view_t const tier = domain.value_.description();
     suite.check(relative < 5.0e-3,
@@ -540,16 +532,12 @@ static void run_distributed_case(test_suite_t &suite) {
     // Finite-difference one channel of rank 1's tower against the combined distributed force.
     std::size_t const probe_index = scalars_k + 321; // Inside rank 1's rows.
     f64_t const step_size = 1.0e-2;
-    std::vector<bf16_t> plus = global_tower, minus = global_tower;
-    plus[probe_index] = __float2bfloat16(__bfloat162float(global_tower[probe_index]) + f32_t(step_size));
-    minus[probe_index] = __float2bfloat16(__bfloat162float(global_tower[probe_index]) - f32_t(step_size));
-    f64_t const h = f64_t(__bfloat162float(plus[probe_index])) - f64_t(__bfloat162float(minus[probe_index]));
-    f64_t const numeric = (host_loss(plus, plus, 2 * vertices_k, 2 * vertices_k, hidden_k, prefixes, host_relations,
-                                     1.0, 0.0, 2 * vertices_k) -
-                           host_loss(minus, minus, 2 * vertices_k, 2 * vertices_k, hidden_k, prefixes, host_relations,
-                                     1.0, 0.0, 2 * vertices_k)) /
-                          h;
-    f64_t const analytic = f64_t(__bfloat162float(distributed_grad[probe_index]));
+    std::vector<f64_t> plus = global_tower, minus = global_tower;
+    plus[probe_index] += step_size, minus[probe_index] -= step_size;
+    if (!narrow_to_bf16(plus, staging) || !narrow_to_bf16(minus, staging))
+        return suite.check(false, "perturbation rounding failed");
+    f64_t const numeric = (oracle_of(plus) - oracle_of(minus)) / (plus[probe_index] - minus[probe_index]);
+    f64_t const analytic = distributed_grad[probe_index];
     suite.check(std::fabs(numeric - analytic) < 5.0e-2 * std::max(std::fabs(numeric), 0.05),
                 "distributed force matches the global finite difference: numeric {:.5f} distributed {:.5f}", numeric,
                 analytic);
@@ -575,9 +563,11 @@ static void run_cross_domain_case(test_suite_t &suite) {
     std::size_t const scalars_k = std::size_t(vertices_k) * hidden_k;
     u32_t const world_gpus = 2 * gpus;
     u32_t prefix_dims[1] = {hidden_k};
-    std::vector<bf16_t> global_tower(world_gpus * scalars_k);
-    for (std::size_t index = 0; index != global_tower.size(); ++index)
-        global_tower[index] = __float2bfloat16(hash_fill(index, 7));
+    std::vector<f64_t> global_tower(world_gpus * scalars_k);
+    std::vector<nk_bf16_t> staging(global_tower.size());
+    for (std::size_t index = 0; index != global_tower.size(); ++index) global_tower[index] = hash_fill(index, 7);
+    if (!narrow_to_bf16(global_tower, staging)) return suite.check(false, "tower rounding failed");
+    nk::tensor_span<nk_bf16_t, 2> const staging_rows {staging.data(), world_gpus, scalars_k};
 
     per_gpu_array<gpu_stream_t> streams;
     per_gpu_array<gpu_arena_t> arenas;
@@ -603,7 +593,7 @@ static void run_cross_domain_case(test_suite_t &suite) {
         bf16_t *tower = arenas[rank].allocate_object<bf16_t>(scalars_k);
         bf16_t *grad = arenas[rank].allocate_object<bf16_t>(scalars_k);
         std::size_t const global_rank = std::size_t(domain) * gpus + rank;
-        cuMemcpyHtoD(device_address(tower), global_tower.data() + global_rank * scalars_k, scalars_k * sizeof(bf16_t));
+        cuMemcpyHtoD(device_address(tower), staging_rows[global_rank, nk::slice].data(), scalars_k * sizeof(nk_bf16_t));
         towers[rank] = bf16r2_view_t {tower, vertices_k, hidden_k};
         grads[rank] = bf16r2_span_t {grad, vertices_k, hidden_k};
         owners[rank] = std::move(contrastive_relations_t::make(arenas[rank], vertices_k, 0).value_);
@@ -656,9 +646,11 @@ static void run_cross_domain_case(test_suite_t &suite) {
     f64_t const global_loss = domain_loss + std::atof(peer_text.c_str());
 
     host_relations_t host_relations;
-    std::vector<u32_t> prefixes = {hidden_k};
-    f64_t const oracle = host_loss(global_tower, global_tower, world_gpus * vertices_k, world_gpus * vertices_k,
-                                   hidden_k, prefixes, host_relations, 1.0, 0.0, world_gpus * vertices_k);
+    auto const oracle_of = [&](std::vector<f64_t> const &towers) noexcept {
+        f64r2_view_t const rows {towers.data(), world_gpus * vertices_k, hidden_k};
+        return host_loss(rows, rows, prefix_dims, host_relations, 1.0, 0.0, world_gpus * vertices_k);
+    };
+    f64_t const oracle = oracle_of(global_tower);
     f64_t const relative = std::fabs(global_loss - oracle) / std::max(std::fabs(oracle), 1.0e-9);
     suite.check(relative < 5.0e-3,
                 "cross-domain loss sum {:.6f} matches the global Float64 oracle {:.6f}: relative {:.2e} over {}",
@@ -666,21 +658,19 @@ static void run_cross_domain_case(test_suite_t &suite) {
 
     // Finite-difference one locally-owned channel against the fully-reduced force.
     std::size_t const probe_index = (std::size_t(domain) * gpus + 1) * scalars_k + 321;
-    std::vector<bf16_t> local_grad(scalars_k);
+    std::vector<nk_bf16_t> local_staging(scalars_k);
+    std::vector<f64_t> local_grad(scalars_k);
     cuCtxPushCurrent(streams[1 % gpus].context());
-    cuMemcpyDtoH(local_grad.data(), device_address(grads[1 % gpus].data()), scalars_k * sizeof(bf16_t));
+    cuMemcpyDtoH(local_staging.data(), device_address(grads[1 % gpus].data()), scalars_k * sizeof(nk_bf16_t));
     cuCtxPopCurrent(nullptr);
+    if (!widen_from_bf16(local_staging, local_grad)) return suite.check(false, "gradient widening failed");
     f64_t const step_size = 1.0e-2;
-    std::vector<bf16_t> plus = global_tower, minus = global_tower;
-    plus[probe_index] = __float2bfloat16(__bfloat162float(global_tower[probe_index]) + f32_t(step_size));
-    minus[probe_index] = __float2bfloat16(__bfloat162float(global_tower[probe_index]) - f32_t(step_size));
-    f64_t const h = f64_t(__bfloat162float(plus[probe_index])) - f64_t(__bfloat162float(minus[probe_index]));
-    f64_t const numeric = (host_loss(plus, plus, world_gpus * vertices_k, world_gpus * vertices_k, hidden_k, prefixes,
-                                     host_relations, 1.0, 0.0, world_gpus * vertices_k) -
-                           host_loss(minus, minus, world_gpus * vertices_k, world_gpus * vertices_k, hidden_k, prefixes,
-                                     host_relations, 1.0, 0.0, world_gpus * vertices_k)) /
-                          h;
-    f64_t const analytic = f64_t(__bfloat162float(local_grad[probe_index % scalars_k]));
+    std::vector<f64_t> plus = global_tower, minus = global_tower;
+    plus[probe_index] += step_size, minus[probe_index] -= step_size;
+    if (!narrow_to_bf16(plus, staging) || !narrow_to_bf16(minus, staging))
+        return suite.check(false, "perturbation rounding failed");
+    f64_t const numeric = (oracle_of(plus) - oracle_of(minus)) / (plus[probe_index] - minus[probe_index]);
+    f64_t const analytic = local_grad[probe_index % scalars_k];
     suite.check(std::fabs(numeric - analytic) < 5.0e-2 * std::max(std::fabs(numeric), 0.05),
                 "cross-domain force matches the global finite difference: numeric {:.5f} distributed {:.5f}", numeric,
                 analytic);
@@ -725,20 +715,28 @@ static void run_pool_parity_case(test_suite_t &suite) {
         return;
     }
 
-    // Keyed weight seeding through the registration list — the same values the host replica reads back.
+    // Keyed weight seeding through the registration list, each matrix kept on the BFloat16 grid in
+    // Float64 for the host replica.
     array<differentiable_weights_t> weights;
     if (!tower.value_.fill(weights)) {
         suite.check(false, "pool-parity registration");
         cuCtxPopCurrent(nullptr);
         return;
     }
-    std::vector<bf16_t> staging;
+    std::vector<std::vector<f64_t>> host_weights(weights.size());
+    std::vector<nk_bf16_t> staging;
     for (std::size_t matrix = 0; matrix != weights.size(); ++matrix) {
-        std::size_t const scalars = weights[matrix].weights.extent(0) * weights[matrix].weights.extent(1);
+        std::size_t const scalars = weights[matrix].weights.numel();
+        host_weights[matrix].resize(scalars);
         staging.resize(scalars);
         for (std::size_t index = 0; index != scalars; ++index)
-            staging[index] = __float2bfloat16(hash_fill(index, matrix + 101));
-        cuMemcpyHtoD(device_address(weights[matrix].weights.data()), staging.data(), scalars * sizeof(bf16_t));
+            host_weights[matrix][index] = hash_fill(index, matrix + 101);
+        if (!narrow_to_bf16(host_weights[matrix], staging)) {
+            suite.check(false, "pool-parity weight rounding");
+            cuCtxPopCurrent(nullptr);
+            return;
+        }
+        cuMemcpyHtoD(device_address(weights[matrix].weights.data()), staging.data(), scalars * sizeof(nk_bf16_t));
     }
 
     // A fabricated ragged batch: three live text segments of lengths {8, 5, 2}, a gap token closing the
@@ -750,20 +748,19 @@ static void run_pool_parity_case(test_suite_t &suite) {
         cuCtxPopCurrent(nullptr);
         return;
     }
-    u32_t const offsets_host[segments_k + 1] = {0, 8, 13, 15, 15};
-    u32_t const lengths_host[segments_k] = {8, 5, 2, 0};
-    modality_t const modality_host[segments_k] = {modality_t::text_k, modality_t::text_k, modality_t::text_k,
+    u32_t const host_offsets[segments_k + 1] = {0, 8, 13, 15, 15};
+    u32_t const host_lengths[segments_k] = {8, 5, 2, 0};
+    modality_t const host_modality[segments_k] = {modality_t::text_k, modality_t::text_k, modality_t::text_k,
                                                   modality_t::text_k};
-    std::vector<token_id_t> tokens_host(tokens_k);
-    for (u32_t token = 0; token != tokens_k; ++token) tokens_host[token] = static_cast<token_id_t>(token % 251u);
-    cuMemcpyHtoD(device_address(batch.value_.segment_offsets.data()), offsets_host, sizeof(offsets_host));
-    cuMemcpyHtoD(device_address(batch.value_.segment_lengths.data()), lengths_host, sizeof(lengths_host));
-    cuMemcpyHtoD(device_address(batch.value_.segment_modality.data()), modality_host, sizeof(modality_host));
-    cuMemcpyHtoD(device_address(batch.value_.tokens.data()), tokens_host.data(), tokens_k * sizeof(token_id_t));
+    std::vector<token_id_t> host_tokens(tokens_k);
+    for (u32_t token = 0; token != tokens_k; ++token) host_tokens[token] = static_cast<token_id_t>(token % 251u);
+    cuMemcpyHtoD(device_address(batch.value_.segment_offsets.data()), host_offsets, sizeof(host_offsets));
+    cuMemcpyHtoD(device_address(batch.value_.segment_lengths.data()), host_lengths, sizeof(host_lengths));
+    cuMemcpyHtoD(device_address(batch.value_.segment_modality.data()), host_modality, sizeof(host_modality));
+    cuMemcpyHtoD(device_address(batch.value_.tokens.data()), host_tokens.data(), tokens_k * sizeof(token_id_t));
 
     // Forward with vertices, then read back the tower's own final-norm states — the oracle's input, so
     // the parity isolates exactly the new pool + head math.
-    std::vector<bf16_t> vertices_device(std::size_t(segments_k) * hidden_k);
     bf16r2_tensor_arena_t vertices_tensor =
         bf16r2_tensor_arena_t::uninitialized({segments_k, hidden_k}, gpu_arena_alloc<bf16_t> {arena.value_}).value;
     bf16r2_tensor_arena_t vertices_grad_tensor =
@@ -784,135 +781,125 @@ static void run_pool_parity_case(test_suite_t &suite) {
     }
     cuStreamSynchronize(stream.value_.get());
 
-    std::vector<bf16_t> states_host(std::size_t(tokens_k) * hidden_k);
-    cuMemcpyDtoH(states_host.data(), device_address(tower.value_.normalized().data()),
-                 states_host.size() * sizeof(bf16_t));
-    cuMemcpyDtoH(vertices_device.data(), device_address(vertices_tensor.data()),
-                 vertices_device.size() * sizeof(bf16_t));
+    // The tower's states and vertices, widened once.
+    std::vector<f64_t> host_states(std::size_t(tokens_k) * hidden_k),
+        device_vertices(std::size_t(segments_k) * hidden_k);
+    staging.resize(host_states.size());
+    cuMemcpyDtoH(staging.data(), device_address(tower.value_.normalized().data()), staging.size() * sizeof(nk_bf16_t));
+    bool widened = widen_from_bf16(staging, host_states);
+    staging.resize(device_vertices.size());
+    cuMemcpyDtoH(staging.data(), device_address(vertices_tensor.data()), staging.size() * sizeof(nk_bf16_t));
+    widened = widened && widen_from_bf16(staging, device_vertices);
 
     // Host replica in double precision: per-(segment,head) softmax pool, then RMSNorm → fc1 → SiLU → fc2.
     // Weight order in the registration list: ... final_norm, pool_query, head.norm, head.fc1, head.fc2.
     std::size_t const query_index = weights.size() - 4, head_norm_index = weights.size() - 3;
     std::size_t const fc1_index = weights.size() - 2, fc2_index = weights.size() - 1;
-    auto weight_at = [&](std::size_t matrix, std::size_t index) {
-        return double(__bfloat162float(__float2bfloat16(hash_fill(index, matrix + 101))));
-    };
+    f64r2_view_t const host_query_rows {host_weights[query_index].data(), heads_k, transformer_head_dim_k};
+    f64r1_view_t const host_head_norm {host_weights[head_norm_index].data(), hidden_k};
+    f64r2_view_t const host_fc1_rows {host_weights[fc1_index].data(), hidden_k, hidden_k};
+    f64r2_view_t const host_fc2_rows {host_weights[fc2_index].data(), hidden_k, hidden_k};
+    f64r3_view_t const host_state_planes {host_states.data(), {tokens_k, heads_k, transformer_head_dim_k}};
     double const scale = 1.0 / std::sqrt(double(transformer_head_dim_k));
-    std::vector<double> pooled_host(std::size_t(segments_k) * hidden_k, 0.0);
+    std::vector<double> host_pooled(std::size_t(segments_k) * hidden_k, 0.0);
+    f64r3_span_t const host_pooled_planes {host_pooled.data(), {segments_k, heads_k, transformer_head_dim_k}};
     // The pool's backward rides the same softmax with the keyed force as d(pooled) and K = V = the states:
     // dS = P∘(dO·Vᵀ − dO·O), d(states) = P·dO + scale·dS·q, d(query) = scale·Σ dS·K.
-    std::vector<bf16_t> force_host(std::size_t(segments_k) * hidden_k);
-    for (std::size_t index = 0; index != force_host.size(); ++index)
-        force_host[index] = __float2bfloat16(hash_fill(index, 777) * 0.1f);
-    std::vector<double> states_grad_host(std::size_t(tokens_k) * hidden_k, 0.0), query_grad_host(hidden_k, 0.0);
+    std::vector<f64_t> host_force(std::size_t(segments_k) * hidden_k);
+    std::vector<nk_bf16_t> host_force_staging(host_force.size());
+    for (std::size_t index = 0; index != host_force.size(); ++index) host_force[index] = hash_fill(index, 777) * 0.1;
+    widened = widened && narrow_to_bf16(host_force, host_force_staging);
+    if (!widened) {
+        suite.check(false, "pool-parity staging conversions");
+        cuCtxPopCurrent(nullptr);
+        return;
+    }
+    f64r3_view_t const host_force_planes {host_force.data(), {segments_k, heads_k, transformer_head_dim_k}};
+    std::vector<double> host_states_grad(std::size_t(tokens_k) * hidden_k, 0.0), host_query_grad(hidden_k, 0.0);
+    f64r3_span_t const host_states_grad_planes {host_states_grad.data(), {tokens_k, heads_k, transformer_head_dim_k}};
+    f64r2_span_t const host_query_grad_rows {host_query_grad.data(), heads_k, transformer_head_dim_k};
     for (u32_t segment = 0; segment != segments_k; ++segment) {
-        u32_t const length = lengths_host[segment];
+        u32_t const length = host_lengths[segment];
         if (length == 0u) continue; // a PAD vertex is don't-care — the loss PADs it out, so no oracle here
-        u32_t const offset = offsets_host[segment];
-        u32_t const pool_length = length;
+        u32_t const offset = host_offsets[segment];
         for (u32_t head = 0; head != heads_k; ++head) {
-            double score_max = -1e300;
-            std::vector<double> scores(pool_length);
-            for (u32_t token = 0; token != pool_length; ++token) {
-                double dot = 0.0;
-                for (u32_t channel = 0; channel != transformer_head_dim_k; ++channel) {
-                    u32_t const base = head * transformer_head_dim_k + channel;
-                    dot += weight_at(query_index, base) *
-                           double(__bfloat162float(states_host[std::size_t(offset + token) * hidden_k + base]));
-                }
-                scores[token] = dot * scale;
-                score_max = std::max(score_max, scores[token]);
+            f64r1_view_t const query_head = host_query_rows[head, nk::slice];
+            f64r1_view_t const force_head = host_force_planes[segment, head, nk::slice];
+            std::vector<double> probabilities(length);
+            double score_max = -1e300, denominator = 0.0;
+            for (u32_t token = 0; token != length; ++token) {
+                probabilities[token] = dot(query_head, host_state_planes[offset + token, head, nk::slice]) * scale;
+                score_max = std::max(score_max, probabilities[token]);
             }
-            double denominator = 0.0;
-            for (u32_t token = 0; token != pool_length; ++token) denominator += std::exp(scores[token] - score_max);
+            for (u32_t token = 0; token != length; ++token)
+                denominator += probabilities[token] = std::exp(probabilities[token] - score_max);
+            for (u32_t token = 0; token != length; ++token) probabilities[token] /= denominator;
             for (u32_t channel = 0; channel != transformer_head_dim_k; ++channel) {
-                u32_t const base = head * transformer_head_dim_k + channel;
                 double value = 0.0;
-                for (u32_t token = 0; token != pool_length; ++token)
-                    value += std::exp(scores[token] - score_max) / denominator *
-                             double(__bfloat162float(states_host[std::size_t(offset + token) * hidden_k + base]));
-                pooled_host[std::size_t(segment) * hidden_k + base] = value;
+                for (u32_t token = 0; token != length; ++token)
+                    value += probabilities[token] * host_state_planes[offset + token, head, channel];
+                host_pooled_planes[segment, head, channel] = value;
             }
-            std::size_t const pooled_row = std::size_t(segment) * hidden_k + head * transformer_head_dim_k;
-            double output_dot = 0.0;
-            for (u32_t channel = 0; channel != transformer_head_dim_k; ++channel)
-                output_dot += double(__bfloat162float(force_host[pooled_row + channel])) *
-                              pooled_host[pooled_row + channel];
-            for (u32_t token = 0; token != pool_length; ++token) {
-                std::size_t const state_row = std::size_t(offset + token) * hidden_k + head * transformer_head_dim_k;
-                double const probability = std::exp(scores[token] - score_max) / denominator;
-                double probability_grad = 0.0;
-                for (u32_t channel = 0; channel != transformer_head_dim_k; ++channel)
-                    probability_grad += double(__bfloat162float(force_host[pooled_row + channel])) *
-                                        double(__bfloat162float(states_host[state_row + channel]));
-                double const score_grad = probability * (probability_grad - output_dot);
+            double const output_dot = dot(force_head, host_pooled_planes[segment, head, nk::slice]);
+            for (u32_t token = 0; token != length; ++token) {
+                f64r1_view_t const state = host_state_planes[offset + token, head, nk::slice];
+                double const score_grad = probabilities[token] * (dot(force_head, state) - output_dot);
                 for (u32_t channel = 0; channel != transformer_head_dim_k; ++channel) {
-                    u32_t const base = head * transformer_head_dim_k + channel;
-                    states_grad_host[state_row + channel] +=
-                        probability * double(__bfloat162float(force_host[pooled_row + channel])) +
-                        scale * score_grad * weight_at(query_index, base);
-                    query_grad_host[base] += scale * score_grad *
-                                             double(__bfloat162float(states_host[state_row + channel]));
+                    host_states_grad_planes[offset + token, head, channel] +=
+                        probabilities[token] * force_head[channel] + scale * score_grad * query_head[channel];
+                    host_query_grad_rows[head, channel] += scale * score_grad * state[channel];
                 }
             }
         }
     }
-    std::vector<double> vertices_host(std::size_t(segments_k) * hidden_k, 0.0);
+    f64r2_view_t const host_pooled_rows {host_pooled.data(), segments_k, hidden_k};
+    f64r2_view_t const device_vertices_rows {device_vertices.data(), segments_k, hidden_k};
+    std::vector<double> host_vertices(std::size_t(segments_k) * hidden_k, 0.0);
+    f64r2_span_t const host_vertices_rows {host_vertices.data(), segments_k, hidden_k};
     for (u32_t segment = 0; segment != segments_k; ++segment) {
-        if (lengths_host[segment] == 0u) continue; // PAD vertices stay outside the parity
-        double sum_squares = 0.0;
-        for (u32_t channel = 0; channel != hidden_k; ++channel) {
-            double const value = pooled_host[std::size_t(segment) * hidden_k + channel];
-            sum_squares += value * value;
-        }
-        double const inverse_rms = 1.0 / std::sqrt(sum_squares / hidden_k + 1e-6);
+        if (host_lengths[segment] == 0u) continue; // PAD vertices stay outside the parity
+        f64r1_view_t const pooled_row = host_pooled_rows[segment, nk::slice];
+        double const inverse_rms = 1.0 / std::sqrt(dot(pooled_row, pooled_row) / hidden_k + 1e-6);
         std::vector<double> normalized(hidden_k), activated(hidden_k);
         for (u32_t channel = 0; channel != hidden_k; ++channel)
-            normalized[channel] = pooled_host[std::size_t(segment) * hidden_k + channel] * inverse_rms *
-                                  weight_at(head_norm_index, channel);
+            normalized[channel] = pooled_row[channel] * inverse_rms * host_head_norm[channel];
         for (u32_t out = 0; out != hidden_k; ++out) {
-            double fc1 = 0.0;
-            for (u32_t in = 0; in != hidden_k; ++in)
-                fc1 += weight_at(fc1_index, std::size_t(out) * hidden_k + in) * normalized[in];
-            activated[out] = fc1 / (1.0 + std::exp(-fc1));
+            double const projected = dot(host_fc1_rows.row(out), normalized);
+            activated[out] = projected / (1.0 + std::exp(-projected));
         }
-        for (u32_t out = 0; out != hidden_k; ++out) {
-            double fc2 = 0.0;
-            for (u32_t in = 0; in != hidden_k; ++in)
-                fc2 += weight_at(fc2_index, std::size_t(out) * hidden_k + in) * activated[in];
-            vertices_host[std::size_t(segment) * hidden_k + out] = fc2;
-        }
+        for (u32_t out = 0; out != hidden_k; ++out)
+            host_vertices_rows[segment, out] = dot(host_fc2_rows.row(out), activated);
     }
     double worst = 0.0;
     for (u32_t segment = 0; segment != segments_k; ++segment) {
-        if (lengths_host[segment] == 0u) continue; // PAD vertices stay outside the parity
-        for (u32_t channel = 0; channel != hidden_k; ++channel) {
-            std::size_t const index = std::size_t(segment) * hidden_k + channel;
-            worst = std::max(worst, std::abs(vertices_host[index] - double(__bfloat162float(vertices_device[index]))) /
-                                        (std::abs(vertices_host[index]) + 1.0));
-        }
+        if (host_lengths[segment] == 0u) continue; // PAD vertices stay outside the parity
+        for (u32_t channel = 0; channel != hidden_k; ++channel)
+            worst = std::max(worst,
+                             std::abs(host_vertices_rows[segment, channel] - device_vertices_rows[segment, channel]) /
+                                 (std::abs(host_vertices_rows[segment, channel]) + 1.0));
     }
     suite.check(worst < 3e-2,
                 "pool + head forward matches the FP64 oracle to the BFloat16 floor: worst relative {:.3e}", worst);
 
     // Backward smoke over the same chain: the keyed vertices force, then every pool / head gradient finite
     // and the query gradient nonzero (the pool actually differentiated).
-    cuMemcpyHtoD(device_address(vertices_grad_tensor.data()), force_host.data(), force_host.size() * sizeof(bf16_t));
+    cuMemcpyHtoD(device_address(vertices_grad_tensor.data()), host_force_staging.data(),
+                 host_force_staging.size() * sizeof(nk_bf16_t));
     auto propagated = tower.value_.backward(vertices_grad_tensor.view(), bf16r2_view_t {}, batch.value_, stream.value_);
     suite.check(static_cast<bool>(propagated), "pool-parity backward: {}", propagated.description_);
     if (propagated) {
         cuStreamSynchronize(stream.value_.get());
         bool all_finite = true;
         double query_grad_energy = 0.0;
+        std::vector<f64_t> gradient;
         for (std::size_t matrix = query_index; matrix != weights.size(); ++matrix) {
-            std::size_t const scalars = weights[matrix].weights_grad.extent(0) * weights[matrix].weights_grad.extent(1);
-            staging.resize(scalars);
-            cuMemcpyDtoH(staging.data(), device_address(weights[matrix].weights_grad.data()), scalars * sizeof(bf16_t));
-            for (std::size_t index = 0; index != scalars; ++index) {
-                f32_t const value = __bfloat162float(staging[index]);
-                all_finite = all_finite && std::isfinite(value);
-                if (matrix == query_index) query_grad_energy += std::abs(double(value));
-            }
+            std::size_t const scalars = weights[matrix].weights_grad.numel();
+            staging.resize(scalars), gradient.resize(scalars);
+            cuMemcpyDtoH(staging.data(), device_address(weights[matrix].weights_grad.data()),
+                         scalars * sizeof(nk_bf16_t));
+            all_finite = all_finite && widen_from_bf16(staging, gradient);
+            for (f64_t const value : gradient) all_finite = all_finite && std::isfinite(value);
+            if (matrix == query_index) query_grad_energy = dot(gradient, gradient);
         }
         suite.check(all_finite, "every pool / head gradient is finite");
         suite.check(query_grad_energy > 0.0, "the pool query gradient is nonzero");
@@ -941,31 +928,36 @@ static void run_pool_parity_case(test_suite_t &suite) {
     suite.check(static_cast<bool>(pooled), "pool-parity pool backward: {}", pooled.description_);
     if (pooled) {
         cuStreamSynchronize(stream.value_.get());
-        std::vector<f32_t> states_grad_device(states_grad_host.size());
-        cuMemcpyDtoH(states_grad_device.data(), device_address(states_grad.data()),
-                     states_grad_device.size() * sizeof(f32_t));
+        std::vector<f32_t> device_states_grad(host_states_grad.size());
+        cuMemcpyDtoH(device_states_grad.data(), device_address(states_grad.data()),
+                     device_states_grad.size() * sizeof(f32_t));
+        std::vector<f64_t> device_query_grad(hidden_k);
         staging.resize(hidden_k);
-        cuMemcpyDtoH(staging.data(), device_address(query_grad.data()), hidden_k * sizeof(bf16_t));
+        cuMemcpyDtoH(staging.data(), device_address(query_grad.data()), hidden_k * sizeof(nk_bf16_t));
+        bool const query_widened = widen_from_bf16(staging, device_query_grad);
         std::vector<bool> live_rows(tokens_k, false);
         for (u32_t segment = 0; segment != segments_k; ++segment)
-            for (u32_t token = 0; token != lengths_host[segment]; ++token)
-                live_rows[offsets_host[segment] + token] = true;
+            for (u32_t token = 0; token != host_lengths[segment]; ++token)
+                live_rows[host_offsets[segment] + token] = true;
+        f32r2_view_t const device_states_grad_rows {device_states_grad.data(), tokens_k, hidden_k};
+        f64r2_view_t const host_states_grad_rows {host_states_grad.data(), tokens_k, hidden_k};
         double states_peak = 0.0, states_worst = 0.0, query_peak = 0.0, query_worst = 0.0;
         bool gaps_zero = true;
-        for (std::size_t index = 0; index != states_grad_host.size(); ++index) {
-            if (!live_rows[index / hidden_k]) {
-                gaps_zero = gaps_zero && states_grad_device[index] == 0.0f;
-                continue;
+        for (u32_t token = 0; token != tokens_k; ++token)
+            for (u32_t channel = 0; channel != hidden_k; ++channel) {
+                f64_t const device_value = device_states_grad_rows[token, channel];
+                if (!live_rows[token]) {
+                    gaps_zero = gaps_zero && device_value == 0.0;
+                    continue;
+                }
+                states_peak = std::max(states_peak, std::abs(host_states_grad_rows[token, channel]));
+                states_worst = std::max(states_worst, std::abs(host_states_grad_rows[token, channel] - device_value));
             }
-            states_peak = std::max(states_peak, std::abs(states_grad_host[index]));
-            states_worst = std::max(states_worst,
-                                    std::abs(states_grad_host[index] - double(states_grad_device[index])));
-        }
         for (u32_t channel = 0; channel != hidden_k; ++channel) {
-            query_peak = std::max(query_peak, std::abs(query_grad_host[channel]));
-            query_worst = std::max(query_worst,
-                                   std::abs(query_grad_host[channel] - double(__bfloat162float(staging[channel]))));
+            query_peak = std::max(query_peak, std::abs(host_query_grad[channel]));
+            query_worst = std::max(query_worst, std::abs(host_query_grad[channel] - device_query_grad[channel]));
         }
+        suite.check(query_widened, "the query gradient widens");
         states_worst /= states_peak;
         query_worst /= query_peak;
         // NumKong rounds P and dS to BFloat16 for its tensor-core products, and the query gradient lands in
@@ -995,21 +987,19 @@ static void run_pool_parity_case(test_suite_t &suite) {
         suite.check(static_cast<bool>(twin_ran), "twin forward: {}", twin_ran.description_);
         if (twin_ran) {
             cuStreamSynchronize(stream.value_.get());
-            std::vector<bf16_t> twin_host(std::size_t(segments_k) * hidden_k);
-            cuMemcpyDtoH(twin_host.data(), device_address(twin_vertices.data()), twin_host.size() * sizeof(bf16_t));
+            std::vector<f64_t> device_twin_vertices(std::size_t(segments_k) * hidden_k);
+            staging.resize(device_twin_vertices.size());
+            cuMemcpyDtoH(staging.data(), device_address(twin_vertices.data()), staging.size() * sizeof(nk_bf16_t));
+            suite.check(widen_from_bf16(staging, device_twin_vertices), "the twin vertices widen");
+            f64r2_view_t const device_twin_vertices_rows {device_twin_vertices.data(), segments_k, hidden_k};
             double worst_cosine = 1.0;
             for (u32_t segment = 0; segment != segments_k; ++segment) {
-                if (lengths_host[segment] == 0u) continue; // PAD vertices stay outside the parity
-                double dot = 0.0, norm_bf16 = 0.0, norm_twin = 0.0;
-                for (u32_t channel = 0; channel != hidden_k; ++channel) {
-                    std::size_t const index = std::size_t(segment) * hidden_k + channel;
-                    double const reference = double(__bfloat162float(vertices_device[index]));
-                    double const quantized = double(__bfloat162float(twin_host[index]));
-                    dot += reference * quantized;
-                    norm_bf16 += reference * reference;
-                    norm_twin += quantized * quantized;
-                }
-                worst_cosine = std::min(worst_cosine, dot / (std::sqrt(norm_bf16 * norm_twin) + 1e-30));
+                if (host_lengths[segment] == 0u) continue; // PAD vertices stay outside the parity
+                f64r1_view_t const reference = device_vertices_rows[segment, nk::slice];
+                f64r1_view_t const quantized = device_twin_vertices_rows[segment, nk::slice];
+                worst_cosine = std::min(worst_cosine,
+                                        dot(reference, quantized) /
+                                            (std::sqrt(dot(reference, reference) * dot(quantized, quantized)) + 1e-30));
             }
             // Keyed-random weights are the quantizer's worst case (trained weights are smoother), and
             // this observed 0.979 at depth 1 already beats the R&D's FP8 embedding acceptance gates.

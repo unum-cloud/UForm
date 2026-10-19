@@ -6,7 +6,9 @@
  *  @author Ash Vardanian
  *  @date July 4, 2026
  */
-#include <cmath> // `sqrtf`, `rsqrtf`
+#include <cmath> // `sqrtf`, `rsqrtf`, `expf`, `std::pow` — the decay schedule
+
+#include <algorithm> // `std::min` — the decay ceiling
 
 #include <cuda.h> // `cuMemsetD8`, `cuEventRecord`, `cuStreamWaitEvent`
 
@@ -101,15 +103,25 @@ static __global__ void adafactor_scale_kernel_(adafactor_state_t state, f32r1_sp
     }
 }
 
+/** Round the finite @p value into BFloat16 up in magnitude with the probability the dropped 16 bits
+ *  weigh, against the keyed uniform draw of @p index under @p key , so the rounding is unbiased and
+ *  identical on every replica. */
+[[nodiscard]] __device__ inline bf16_t round_stochastically_(f32_t value, u64_t key, std::size_t index) noexcept {
+    u32_t const noise = static_cast<u32_t>(splitmix64_hash_t {}(key, index)) & 0xFFFFu;
+    return __ushort_as_bfloat16(static_cast<unsigned short>((__float_as_uint(value) + noise) >> 16));
+}
+
 /**
  *  @brief Apply the clipped update @c W -= @c lr·scale·G/√v , through the Float32 master for vector
- *      weights (the norm scales) and straight into BFloat16 otherwise.
+ *      weights (the norm scales) and straight into BFloat16 otherwise, rounded stochastically under
+ *      @p rounding_key .
  *
  *  __grid_size__ grid-stride over the state's scalars; no dynamic shared memory.
  */
 static __global__ void adafactor_apply_kernel_(adafactor_state_t state, f32r1_span_t moments,
                                                f32r1_view_t reduced_gradients, f32r2_view_t state_scales,
-                                               u32_t state_index, f32r1_span_t masters, f32_t learning_rate) {
+                                               u32_t state_index, f32r1_span_t masters, f32_t learning_rate,
+                                               u64_t rounding_key) {
     u32_t const rows = static_cast<u32_t>(state.weights.extent(0));
     u32_t const cols = static_cast<u32_t>(state.weights.extent(1));
     f32_t const row_mean = state_scales[state_index, 0];
@@ -130,7 +142,9 @@ static __global__ void adafactor_apply_kernel_(adafactor_state_t state, f32r1_sp
             masters[state.master_offset + index] = updated;
             state.weights[row, column] = __float2bfloat16_rn(updated);
         }
-        else state.weights[row, column] = __float2bfloat16_rn(__bfloat162float(state.weights[row, column]) - step);
+        else
+            state.weights[row, column] = round_stochastically_(__bfloat162float(state.weights[row, column]) - step,
+                                                               rounding_key, index);
     }
 }
 
@@ -312,19 +326,21 @@ expected_t adafactor_t::load(checkpoint_to_load_t const &checkpoint, gpu_stream_
             restored = restore("master", master, [&]() noexcept { return seed_master_(state, masters_, stream); });
         if (!restored) return restored;
     }
+    steps_ = checkpoint.step();
     return {};
 }
 
 expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_view_t reduced_gradients) noexcept {
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
+    ++steps_;
+    f32_t const decay = std::min(config_.beta2, 1.0f - std::pow(static_cast<f32_t>(steps_), -config_.decay_exponent));
     for (std::size_t index = 0; index != states_.size(); ++index) {
         adafactor_state_t const &state = states_[index];
         u32_t const rows = static_cast<u32_t>(state.weights.extent(0));
         std::size_t const cols = state.weights.extent(1);
         u32_t const column_blocks = static_cast<u32_t>(divide_round_up(cols, kernel_block_size_default_k));
         expected_t staged = launch_kernel(&adafactor_moments_kernel_, dim3 {rows + column_blocks, 1u, 1u}, block_shape,
-                                          stream, state, moments_.span(), reduced_gradients, config_.beta2,
-                                          config_.epsilon1);
+                                          stream, state, moments_.span(), reduced_gradients, decay, config_.epsilon1);
         if (staged)
             staged = launch_kernel(&adafactor_scale_kernel_, dim3 {1u, 1u, 1u}, block_shape, stream, state,
                                    moments_.span(), reduced_gradients, state_scales_.span(), static_cast<u32_t>(index),
@@ -332,7 +348,8 @@ expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_vi
         if (staged)
             staged = launch_kernel(&adafactor_apply_kernel_, dim3 {grid_size_for(rows * cols), 1u, 1u}, block_shape,
                                    stream, state, moments_.span(), reduced_gradients, state_scales_.view(),
-                                   static_cast<u32_t>(index), masters_.span(), learning_rate);
+                                   static_cast<u32_t>(index), masters_.span(), learning_rate,
+                                   splitmix64_hash_t {}(steps_, index));
         if (!staged) return staged;
     }
     return {};

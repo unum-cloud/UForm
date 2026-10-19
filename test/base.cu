@@ -67,6 +67,7 @@ using namespace unum::uform::test;
     config.hidden = 256;
     config.steps = 16;
     config.warmup_steps = 2;
+    config.report_every = 1; // the cases read telemetry after every step, so the summands hold that step alone
     config.telemetry_channels = telemetry_losses_k | telemetry_signals_k | telemetry_rounds_k;
     return config;
 }

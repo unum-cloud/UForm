@@ -59,3 +59,13 @@ if (UFORM_BUILD_CUDA)
         PARENT_SCOPE
     )
 endif ()
+
+# The backpropagation suite: finite differences against every analytic gradient of the masked replica, the masking
+# and initialization invariants, and Adafactor against a host replay.
+if (UFORM_BUILD_CUDA)
+    add_executable(uform_test_gradients gradients.cu)
+    target_link_libraries(uform_test_gradients PRIVATE uform::train fmt::fmt)
+    target_include_directories(uform_test_gradients PRIVATE "${PROJECT_SOURCE_DIR}/c")
+    add_test(NAME uform_test_gradients COMMAND uform_test_gradients)
+    set_tests_properties(uform_test_gradients PROPERTIES LABELS cuda)
+endif ()

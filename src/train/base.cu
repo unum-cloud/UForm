@@ -24,7 +24,7 @@
  *  a linear ramp from zero to the peak over @c warmup_steps , then a cosine decay to @c min_learning_rate over
  *  the run's remainder — the validated draft envelope's shape.
  */
-#include <cmath>   // `std::cos` — the cosine decay
+#include <cmath>   // `std::cos` — the cosine decay, `std::sqrt` — the initialization's fan-in scale
 #include <cstring> // `std::strlen`
 
 #include <unistd.h> // `::write`, `STDOUT_FILENO` — the host diagnostic channel
@@ -34,7 +34,7 @@
 #include <limits>    // `std::numeric_limits` — the i16 coordinate ceiling
 #include <numbers>   // `std::numbers::pi_v` — the decay's half-period
 
-#include <cuda.h> // `cuMemcpyHtoDAsync`, `cuMemcpyDtoHAsync`, `cuStreamSynchronize`
+#include <cuda.h> // `cuMemcpyHtoDAsync`, `cuMemcpyDtoHAsync`, `cuStreamSynchronize`, `cuMemsetD8`
 
 #include "train/base.cuh"
 
@@ -167,18 +167,30 @@ struct grid_factor_t {
     return (uniform - 0.5f) * 3.4641016f * std;
 }
 
+/** Whether @p matrix projects back into the residual stream: each block's attention and MLP
+ *  output. */
+[[nodiscard]] static bool writes_residual_(differentiable_weights_t const &matrix) noexcept {
+    return matrix.name.view().ends_with(".out") || matrix.name.view().ends_with(".down");
+}
+
 expected_t ut::seed_weights(array<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept {
     std::span<differentiable_weights_t const> const list {weights.view().data(), weights.size()};
+    std::size_t residual_writers = 0;
+    for (differentiable_weights_t const &matrix : list) residual_writers += writes_residual_(matrix) ? 1u : 0u;
     for (std::size_t weight_index = 0; weight_index != list.size(); ++weight_index) {
         differentiable_weights_t const &matrix = list[weight_index];
         std::size_t const rows = matrix.weights.extent(0), columns = matrix.weights.extent(1);
+        // Matrices are [outputs,inputs]; the residual writers split one unit of variance across the
+        // stack.
+        f32_t const deviation =
+            1.0f / std::sqrt(static_cast<f32_t>(writes_residual_(matrix) ? columns * residual_writers : columns));
         nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging =
             nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::uninitialized({rows * columns}, pinned_alloc<bf16_t> {}).value;
         if (!staging) return expected_t::fail(status_t::bad_alloc_k, "weight staging failed (matrix={})", weight_index);
         bf16r1_span_t const host = staging.span();
         for (std::size_t index = 0; index != host.extent(0); ++index)
             host[index] = __float2bfloat16( //
-                rows == 1 ? 1.0f : hash_fill_(index, static_cast<u32_t>(weight_index) + 11u, 0.2f));
+                rows == 1 ? 1.0f : hash_fill_(index, static_cast<u32_t>(weight_index) + 11u, deviation));
         if (expected_t copied = copy_host_to_device(staging.view(), matrix.weights.flatten<1>(), stream); !copied)
             return copied;
         // The staging tensor dies this iteration — the enqueued copy must land first.
@@ -485,6 +497,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
         head_config.max_patches = max_tokens;
         head_config.mask_ratio = config.image_mask_ratio;
         head_config.weight = config.image_weight;
+        head_config.modality = modality_t::image_k;
         expected<masked_patches_t> head = masked_patches_t::make(arena, head_config);
         if (!head) return result_t::fail(std::move(head));
         replica.image = std::move(head.value_);
@@ -502,6 +515,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
         head_config.max_patches = max_tokens;
         head_config.mask_ratio = config.video_mask_ratio;
         head_config.weight = config.video_weight;
+        head_config.modality = modality_t::video_k;
         expected<masked_patches_t> head = masked_patches_t::make(arena, head_config);
         if (!head) return result_t::fail(std::move(head));
         replica.video = std::move(head.value_);
@@ -564,6 +578,11 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
     if (audio_live)
         if (expected_t listed = replica.audio.fill("masked_audio", replica.weights); !listed)
             return result_t::fail(std::move(listed));
+    for (f32r1_tensor_arena_t const *pair : replica.summand_pairs_())
+        if (!pair->empty())
+            if (CUresult result = cuMemsetD8(device_address(pair->data()), 0, pair->numel() * sizeof(f32_t));
+                result != CUDA_SUCCESS)
+                return cuda_failure<base_replica_t>(result, "loss summands reset failed");
     return result_t {std::move(replica)};
 }
 
@@ -623,6 +642,10 @@ expected_t base_replica_t::draw(trainer_config_t const &config, u32_t gpu_index_
 expected_t base_replica_t::prepare(trainer_config_t const &config, data_epoch_t data_epoch,
                                    gpu_stream_t &stream) noexcept {
     if (tokens_summands.empty()) return {}; // masked heads exist only where make allocated the token head's summands
+    if (config.report_every != 0 && data_epoch.ordinal % config.report_every == 0) // the step after a report
+        for (f32r1_tensor_arena_t *pair : summand_pairs_())
+            if (!pair->empty())
+                if (expected_t zeroed = zero_async(pair->span(), stream); !zeroed) return zeroed;
     multimodal_batch_shape_t const &shape = config.batch;
     bool const image_live = image_summands.data() != nullptr;
     bool const video_live = video_summands.data() != nullptr;
@@ -656,21 +679,33 @@ expected_t base_replica_t::prepare(trainer_config_t const &config, data_epoch_t 
 
     // The media masks and the in-place raw corruption — sampled eagerly so the masks persist into the
     // captured forward region.
+    u32r1_view_t const segment_offsets = batch.segment_offsets.view();
+    u32r1_view_t const segment_lengths = batch.segment_lengths.view();
+    modality_view_t const segment_modality = batch.segment_modality.view();
     if (image_live) {
-        if (expected_t sampled = image.sample_mask(recipe, data_epoch, stream); !sampled) return sampled;
+        if (expected_t sampled = image.sample_mask(recipe, data_epoch, segment_offsets, segment_lengths,
+                                                   segment_modality, stream);
+            !sampled)
+            return sampled;
         u32_t const patch_pixels = patch_scalars(shape.image.patch_side, shape.image.channels);
         nk::tensor_span<pixel_t, 2> const raw = batch.images.span().reshape<2>({max_tokens, patch_pixels});
         if (expected_t corrupted = image.corrupt_raw(raw, stream); !corrupted) return corrupted;
     }
     if (video_live) {
-        if (expected_t sampled = video.sample_mask(recipe, data_epoch, stream); !sampled) return sampled;
+        if (expected_t sampled = video.sample_mask(recipe, data_epoch, segment_offsets, segment_lengths,
+                                                   segment_modality, stream);
+            !sampled)
+            return sampled;
         u32_t const patch_pixels = tube_scalars(shape.video.tube_frames, shape.video.patch_side, //
                                                 shape.video.channels);
         nk::tensor_span<pixel_t, 2> const raw = batch.videos.span().reshape<2>({max_tokens, patch_pixels});
         if (expected_t corrupted = video.corrupt_raw(raw, stream); !corrupted) return corrupted;
     }
     if (audio_live) {
-        if (expected_t sampled = audio.sample_mask(recipe, data_epoch, stream); !sampled) return sampled;
+        if (expected_t sampled = audio.sample_mask(recipe, data_epoch, segment_offsets, segment_lengths,
+                                                   segment_modality, stream);
+            !sampled)
+            return sampled;
         f32r2_span_t const raw = batch.audio_samples.span().reshape<2>({max_tokens, shape.audio.chunk_samples});
         if (expected_t corrupted = audio.corrupt_raw(raw, stream); !corrupted) return corrupted;
     }

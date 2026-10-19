@@ -83,7 +83,7 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
         offsets[s] = s * L;
         lengths[s] = L;
         modality[s] = modality_t::text_k;
-        for (u32_t j = 0; j != L; ++j) tokens[s * L + j] = signature_token_(member, s, j);
+        for (u32_t j = 0; j != L; ++j) tokens[offsets[s] + j] = signature_token_(member, s, j);
     }
     offsets[S] = S * L;
 
@@ -230,7 +230,7 @@ inline constexpr u32_t pad_bag_k = bags_per_member_k;
             lengths[segment] = L;
             modality[segment] = modality_t::text_k;
             bags[segment] = bag;
-            for (u32_t j = 0; j != L; ++j) tokens[segment * L + j] = signature_token_(member, segment, j);
+            for (u32_t j = 0; j != L; ++j) tokens[offsets[segment] + j] = signature_token_(member, segment, j);
         }
     for (u32_t pad = segment; pad != S; ++pad) {
         offsets[pad] = segment * L;

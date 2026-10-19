@@ -9,17 +9,21 @@
  *  The sibling @ref distributed_adafactor_t reduces the gradients over the same two-level mesh transports
  *  the loss uses and keeps every rank's weight replica bitwise identical.
  *
- *  Per weight matrix @c W[rows,cols] with gradient @c G :
+ *  Per weight matrix @c W[rows,cols] with gradient @c G at step @c t counted from one:
  *
- *      r_i ← β₂·r_i + (1−β₂)·(mean_j G²_ij + ε₁)        — the row moment,
- *      c_j ← β₂·c_j + (1−β₂)·(mean_i G²_ij + ε₁)        — the column moment,
+ *      β₂ₜ = min(β₂, 1 − t^−0.8)                         — the paper's decay, unbiased from the
+ *                                                          first step,
+ *      r_i ← β₂ₜ·r_i + (1−β₂ₜ)·(mean_j G²_ij + ε₁)      — the row moment,
+ *      c_j ← β₂ₜ·c_j + (1−β₂ₜ)·(mean_i G²_ij + ε₁)      — the column moment,
  *      v_ij = r_i·c_j / mean(r)                          — the factored second-moment estimate,
  *      u = G/√v,   u ← u / max(1, rms(u)/d)              — the RMS-clipped update,
  *      W ← W − lr·u .
  *
+ *  Matrices round the new weight into BFloat16 stochastically, keyed on the step, the state and the
+ *  scalar, so a step far below the BFloat16 spacing still moves the weight by itself on average.
  *  Vector weights (the norm scales, @c rows==1 ) fall out of the same formulas as a full second
- *  moment, and additionally keep a Float32 @b master copy — a magnitude-1 BFloat16 scale would swallow
- *  small updates in its ULP. Every reduction is a fixed-order tree; the update is bit-reproducible.
+ *  moment, and keep a Float32 @b master copy instead. Every reduction is a fixed-order tree; the
+ *  update is bit-reproducible.
  *
  *  @section optimizer_distributed Distributed replicas stay bitwise identical
  *
@@ -59,8 +63,13 @@ namespace unum::uform::core {
  *  a @ref adafactor_t::step argument — legal because the optimizer region is eager, never captured. */
 struct adafactor_config_t {
 
-    /** The second-moment decay — how much of the running row / column moments each step retains. */
+    /** The ceiling of the second-moment decay — how much of the running row / column moments a late
+     *  step retains. */
     f32_t beta2 = 0.999f;
+
+    /** The exponent of the decay schedule @c 1−t^−e , the paper's 0.8, which reaches @ref beta2
+     *  after 5623 steps. */
+    f32_t decay_exponent = 0.8f;
 
     /** The moment floor added before the running average, keeping @c 1/√v finite for a zero gradient. */
     f32_t epsilon1 = 1.0e-30f;
@@ -118,7 +127,7 @@ struct adafactor_t {
     /**
      *  @brief Continue from @p checkpoint : the moments and masters it holds are uploaded on
      *      @p stream , the rest restart — moments at zero, masters re-seeded from the live weights,
-     *      which the caller loads first.
+     *      which the caller loads first. The step count continues from the checkpoint's step.
      *
      *  The caller drains @p stream before releasing @p checkpoint .
      *  @retval status_t::shape_unsupported_k A saved state of another shape.
@@ -139,6 +148,9 @@ struct adafactor_t {
     }
 
     adafactor_config_t config_ {};
+
+    /** Steps taken, which the decay schedule and the rounding keys read. */
+    u64_t steps_ = 0;
 
     /** One optimizer state per weight matrix, resolved once at @ref make . */
     array<adafactor_state_t> states_ {};

@@ -30,10 +30,14 @@
 #include <format>      // `std::vformat_to`, `std::make_format_args`
 #include <random>      // `std::random_device`
 #include <regex>       // `std::regex`, `std::regex_search`
+#include <span>        // `std::span` — the oracles' host staging
 #include <string_view> // `std::string_view`
 #include <type_traits> // `std::type_identity_t`
 
 #include <fmt/format.h> // `fmt::println`
+
+#include <numkong/cast.hpp> // `nk::cast` — the oracles' BFloat16 rounding and widening
+#include <numkong/dot.hpp>  // `nk::dot` — the oracles' products
 
 #include "uform/types.h" // `uform_version_name`, `uform_capabilities_compiled`, `uform_capabilities_available`
 
@@ -273,5 +277,29 @@ struct test_suite_t {
                      site.location.line(), text);
     }
 };
+
+/** The Float64 borrows the host oracles read, beside the core's Float32 ones. */
+using f64r1_view_t = nk::tensor_view<f64_t, 1>;
+using f64r2_view_t = nk::tensor_view<f64_t, 2>;
+using f64r2_span_t = nk::tensor_span<f64_t, 2>;
+using f64r3_view_t = nk::tensor_view<f64_t, 3>;
+using f64r3_span_t = nk::tensor_span<f64_t, 3>;
+using f64r4_view_t = nk::tensor_view<f64_t, 4>;
+using f64r4_span_t = nk::tensor_span<f64_t, 4>;
+
+/** ⟨a,b⟩ of two equally long contiguous Float64 runs, compensated by NumKong. */
+[[nodiscard]] inline f64_t dot(auto const &a, auto const &b) noexcept { return nk::dot<nk::f64_t>(a, b).value; }
+
+/** Narrow @p values onto the BFloat16 grid in place, leaving their bit patterns in @p staging for a
+ *  device upload. */
+[[nodiscard]] inline bool narrow_to_bf16(std::span<f64_t> values, std::span<nk_bf16_t> staging) noexcept {
+    return nk::cast<nk::f64_t, nk::bf16_t>(values, staging) == nk::status_t::success_k &&
+           nk::cast<nk::bf16_t, nk::f64_t>(std::span<nk_bf16_t const> {staging}, values) == nk::status_t::success_k;
+}
+
+/** Widen the BFloat16 bit patterns of a device download in @p staging into @p values . */
+[[nodiscard]] inline bool widen_from_bf16(std::span<nk_bf16_t const> staging, std::span<f64_t> values) noexcept {
+    return nk::cast<nk::bf16_t, nk::f64_t>(staging, values) == nk::status_t::success_k;
+}
 
 } // namespace unum::uform::test

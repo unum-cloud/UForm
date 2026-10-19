@@ -45,13 +45,13 @@ struct agreement_t {
     double relative = 0, cosine = 1;
 };
 
-static agreement_t compare(float const *tower, float const *reference, std::size_t rows, std::size_t width) {
+static agreement_t compare(f32r2_view_t tower, f32r2_view_t reference) {
     agreement_t agreement;
     double largest_difference = 0, largest_reference = 0;
-    for (std::size_t row = 0; row != rows; ++row) {
+    for (std::size_t row = 0; row != tower.extent(0); ++row) {
         double dot = 0, tower_norm = 0, reference_norm = 0;
-        for (std::size_t column = 0; column != width; ++column) {
-            double const t = tower[row * width + column], r = reference[row * width + column];
+        for (std::size_t column = 0; column != tower.extent(1); ++column) {
+            double const t = tower[row, column], r = reference[row, column];
             largest_difference = std::fmax(largest_difference, std::fabs(t - r));
             largest_reference = std::fmax(largest_reference, std::fabs(r));
             dot += t * r, tower_norm += t * t, reference_norm += r * r;
@@ -154,8 +154,10 @@ static void device_parity(test_suite_t &suite, uc::checkpoint_to_load_t const &c
     if (nk_stream_init_cuda(0, &stream) != nk_success_k) return suite.check(false, "device stream init");
     std::vector<float> device_states, device_embeddings;
     if (encode(suite, checkpoint, geometry, precision, capabilities, stream, pool, device_states, device_embeddings)) {
-        agreement_t const states_agreement = compare(device_states.data(), states.data(), tokens, hidden);
-        agreement_t const embeddings_agreement = compare(device_embeddings.data(), embeddings.data(), items_k, hidden);
+        agreement_t const states_agreement = compare({device_states.data(), tokens, hidden},
+                                                     {states.data(), tokens, hidden});
+        agreement_t const embeddings_agreement = compare({device_embeddings.data(), items_k, hidden},
+                                                         {embeddings.data(), items_k, hidden});
         suite.check(states_agreement.relative < tolerance && embeddings_agreement.relative < tolerance,
                     "device matches the CPU: states max relative {:.4e} worst cosine {:.6f}, embeddings max " //
                     "relative {:.4e} worst cosine {:.6f}",
@@ -174,8 +176,11 @@ static void rust_parity(test_suite_t &suite, char const *states_path, char const
     if (rust_states.size() != states.size() || rust_embeddings.size() != embeddings.size())
         return suite.check(false, "rust dumps hold {} and {} floats, expected {} and {}", rust_states.size(),
                            rust_embeddings.size(), states.size(), embeddings.size());
-    agreement_t const states_agreement = compare(states.data(), rust_states.data(), states.size() / hidden, hidden);
-    agreement_t const embeddings_agreement = compare(embeddings.data(), rust_embeddings.data(), items_k, hidden);
+    std::size_t const state_rows = states.size() / hidden;
+    agreement_t const states_agreement = compare({states.data(), state_rows, hidden},
+                                                 {rust_states.data(), state_rows, hidden});
+    agreement_t const embeddings_agreement = compare({embeddings.data(), items_k, hidden},
+                                                     {rust_embeddings.data(), items_k, hidden});
     suite.check(states_agreement.relative < 5e-2 && embeddings_agreement.relative < 5e-2,
                 "bf16 matches the Rust crate: states max relative {:.4e} worst cosine {:.6f}, embeddings max " //
                 "relative {:.4e} worst cosine {:.6f}",
