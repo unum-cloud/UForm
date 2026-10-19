@@ -121,6 +121,9 @@ struct world_health_t {
     u32_t consecutive_setup_failures = 0;
 };
 
+/** The reason every case after the first unhealthy detection skips with. */
+inline constexpr char const *world_unhealthy_k = "an earlier case found the world unhealthy";
+
 /**
  *  @brief Probe @p health before a case: report the first poisoned-context or unresponsive-peer detection
  *      once, and tell every later case to return immediately.
@@ -309,7 +312,7 @@ static void check_weight_naming_(test_suite_t &suite, char const *label, trainer
  *  ledger's running loss statistics — every local member's sample mass, not a lead-only coin flip. */
 static void run_base_conformance(test_suite_t &suite, world_health_t &health, char const *label,
                                  trainer_config_t const &config, tier_t tier) {
-    if (!world_still_healthy_(suite, health)) return;
+    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
     mesh_topology_t const &topology = tier.mesh.topology;
     array<bf16_t> captured_lead;
     {
@@ -473,8 +476,7 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
  *  head reconstructs against. */
 static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t tier, sz::string_view_t label,
                             trainer_config_t config) {
-    if (!test_filter_accepts(label)) return;
-    if (!world_still_healthy_(suite, health)) return;
+    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
     config.capture = eager_k;
     trainer_t trainer;
     if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
@@ -529,29 +531,31 @@ static void mixture_sweep(test_suite_t &suite, world_health_t &health, tier_t wi
     for (u32_t subset = 0; subset != 8u; ++subset)
         for (u32_t rows = 1; rows != 3u; ++rows) {
             sz::string_t label;
-            if (!format_into(label, "1gpu:tokens{}{}{} rows={}", (subset & 1u) ? "+image" : "",
-                             (subset & 2u) ? "+video" : "", (subset & 4u) ? "+audio" : "", rows))
+            if (!format_into(label, "sweep/1gpu/tokens{}{}{}/rows={}", (subset & 1u) ? ",image" : "",
+                             (subset & 2u) ? ",video" : "", (subset & 4u) ? ",audio" : "", rows))
                 return suite.check(false, "sweep label format failed");
-            run_sweep_cell_(suite, health, cheap, label.view(), sweep_config_(subset, rows, 64u));
+            suite.run(label.view(), run_sweep_cell_, health, cheap, label.view(), sweep_config_(subset, rows, 64u));
         }
-    run_sweep_cell_(suite, health, cheap, "1gpu:omni rows=5", sweep_config_(7u, 5u, 64u));
-    run_sweep_cell_(suite, health, cheap, "1gpu:omni rows=2 columns=96", sweep_config_(7u, 2u, 96u));
+    suite.run("sweep/1gpu/omni/rows=5", run_sweep_cell_, health, cheap, "sweep/1gpu/omni/rows=5",
+              sweep_config_(7u, 5u, 64u));
+    suite.run("sweep/1gpu/omni/rows=2,columns=96", run_sweep_cell_, health, cheap, "sweep/1gpu/omni/rows=2,columns=96",
+              sweep_config_(7u, 2u, 96u));
     trainer_config_t tuned = sweep_config_(7u, 2u, 64u);
     tuned.algo_pick = algo_pick_t::benchmarked_k;
-    run_sweep_cell_(suite, health, cheap, "1gpu:omni rows=2 tuned", tuned);
+    suite.run("sweep/1gpu/omni/rows=2,tuned", run_sweep_cell_, health, cheap, "sweep/1gpu/omni/rows=2,tuned", tuned);
     for (u32_t subset = 0; subset != 8u; ++subset) {
         sz::string_t label;
-        if (!format_into(label, "wide:tokens{}{}{} rows=2", (subset & 1u) ? "+image" : "",
-                         (subset & 2u) ? "+video" : "", (subset & 4u) ? "+audio" : ""))
+        if (!format_into(label, "sweep/wide/tokens{}{}{}/rows=2", (subset & 1u) ? ",image" : "",
+                         (subset & 2u) ? ",video" : "", (subset & 4u) ? ",audio" : ""))
             return suite.check(false, "sweep label format failed");
-        run_sweep_cell_(suite, health, wide, label.view(), sweep_config_(subset, 2u, 64u));
+        suite.run(label.view(), run_sweep_cell_, health, wide, label.view(), sweep_config_(subset, 2u, 64u));
     }
 }
 
 /** The capture contract holds, one forward and one backward replay graph per replica build, and two forward replays
  *  over one fixed eager preamble produce the same shared @c d(normalized) up to reduction order. */
 static void graph_capture(test_suite_t &suite, world_health_t &health, tier_t tier) {
-    if (!world_still_healthy_(suite, health)) return;
+    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
     trainer_config_t const config = test_geometry_(false);
     trainer_t trainer;
     if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
@@ -578,20 +582,23 @@ static void graph_capture(test_suite_t &suite, world_health_t &health, tier_t ti
                 "two captured replays agree");
 }
 
-int main() {
+int main(int, char **argv) {
     // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins: the spinning
     // wait blocks its context, the peer's next launch blocks on module loading behind it, and neither
     // side progresses. Eager loading before `cuInit` front-loads every module — the mixer suite's fix.
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
 
-    test_suite_t suite {"base"};
+    test_suite_t suite = test_suite_t::make(argv[0]);
 
     // The schedule's properties are pure host math — asserted before any GPU work.
-    learning_rate_schedule(suite);
+    suite.run("learning_rate_schedule", learning_rate_schedule);
 
     int device_count = 0;
     if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) {
-        suite.check(false, "no CUDA device answers");
+        suite.skip("capture/replay", no_cuda_device_k);
+        suite.skip("conformance/tokens", no_cuda_device_k);
+        suite.skip("conformance/omni", no_cuda_device_k);
+        suite.skip("sweep", no_cuda_device_k);
         return suite.finish();
     }
     array<i32_t> devices;
@@ -625,15 +632,9 @@ int main() {
     tier_t const cheap {cheap_mesh, devices.view().first(1)};
 
     world_health_t health;
-    if (test_filter_accepts("capture/replay")) graph_capture(suite, health, cheap);
-
-    // Targeted runs: UFORM_TEST_FILTER is a regular expression against each case's name (the
-    // NumKong / StringZilla convention), so a wire-run question about one cell answers in a couple of
-    // minutes instead of re-running the whole matrix.
-    if (test_filter_accepts("conformance/tokens"))
-        run_base_conformance(suite, health, "tokens", test_geometry_(false), wide);
-    if (test_filter_accepts("conformance/omni"))
-        run_base_conformance(suite, health, "omni", test_geometry_(true), wide);
+    suite.run("capture/replay", graph_capture, health, cheap);
+    suite.run("conformance/tokens", run_base_conformance, health, "tokens", test_geometry_(false), wide);
+    suite.run("conformance/omni", run_base_conformance, health, "omni", test_geometry_(true), wide);
     mixture_sweep(suite, health, wide, cheap);
     return suite.finish();
 }

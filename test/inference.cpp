@@ -16,7 +16,7 @@
  *  Usage: `uform_test_inference <tiny.safetensors> [<rust_states.f32> <rust_embeddings.f32>]`.
  */
 #include <cmath>   // `std::fabs`, `std::sqrt`
-#include <cstdio>  // `std::printf`, `std::fopen`, `std::fread`
+#include <cstdio>  // `std::fopen`, `std::fread`
 #include <cstring> // `std::strlen`, `std::memset`
 
 #include <vector> // `std::vector`
@@ -30,8 +30,10 @@
 #include "core/multimodal_batch.hpp"
 #include "inference/geometry.hpp"
 #include "inference/tower.hpp"
+#include "harness.hpp" // `test_suite_t`
 
 using namespace unum::uform::inference;
+using namespace unum::uform::test;
 namespace fu = ashvardanian::forkunion;
 namespace nk = ashvardanian::numkong;
 
@@ -72,12 +74,12 @@ static std::vector<float> read_floats(char const *path) {
 
 /** Encodes the texts in @p precision into @p states and @p embeddings , both Float32: on @p pool 's threads for a
  *  CPU mask, or on @p stream for a GPU one, with the batch and the outputs in memory both sides address. */
-static bool encode(uc::checkpoint_to_load_t const &checkpoint, geometry_t const &geometry, precision_t precision,
-                   nk_capability_t capabilities, nk_stream_t stream, fu::flat_pool_t &pool, std::vector<float> &states,
-                   std::vector<float> &embeddings) {
+static bool encode(test_suite_t &suite, uc::checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
+                   precision_t precision, nk_capability_t capabilities, nk_stream_t stream, fu::flat_pool_t &pool,
+                   std::vector<float> &states, std::vector<float> &embeddings) {
     placement_t placement {capabilities, stream, {}};
     uc::expected<tower_t> tower = tower_t::make(checkpoint, geometry, precision, placement);
-    if (!tower) return std::printf("tower: %s\n", tower.description_.c_str()), false;
+    if (!tower) return suite.check(false, "tower: {}", tower.description_), false;
 
     bool const on_device = (capabilities & nk_cap_gpus_k) != 0;
     nk_allocator_t shared {}, scratch_policy {};
@@ -85,7 +87,7 @@ static bool encode(uc::checkpoint_to_load_t const &checkpoint, geometry_t const 
                                               : nk_allocator_init_heap(&shared, 64);
     if (initialized != nk_success_k || (on_device ? nk_allocator_init_device_best(&scratch_policy, capabilities)
                                                   : nk_allocator_init_heap(&scratch_policy, 64)) != nk_success_k)
-        return std::printf("allocators: %s\n", nk_status_name(initialized)), false;
+        return suite.check(false, "allocators: {}", nk_status_name(initialized)), false;
     nk::allocator<uc::b8_t> const allocator {shared, stream};
 
     using batch_t = uc::multimodal_batch<nk::allocator<uc::b8_t>>;
@@ -93,7 +95,7 @@ static bool encode(uc::checkpoint_to_load_t const &checkpoint, geometry_t const 
     shape.max_rows_per_gpu = items_k, shape.max_segments_per_gpu = items_k,
     shape.max_columns_per_row = geometry.context;
     uc::expected<batch_t> batch = batch_t::make(allocator, shape);
-    if (!batch) return std::printf("batch: %s\n", batch.description_.c_str()), false;
+    if (!batch) return suite.check(false, "batch: {}", batch.description_), false;
     auto offsets = batch->segment_offsets.span();
     auto lengths = batch->segment_lengths.span();
     auto modalities = batch->segment_modality.span();
@@ -111,122 +113,101 @@ static bool encode(uc::checkpoint_to_load_t const &checkpoint, geometry_t const 
     offsets[items_k] = static_cast<uc::u32_t>(items_k * geometry.context);
 
     uc::expected<std::size_t> bytes = tower->scratch_bytes(tokens, items_k, capabilities);
-    if (!bytes) return std::printf("scratch: %s\n", bytes.description_.c_str()), false;
+    if (!bytes) return suite.check(false, "scratch: {}", bytes.description_), false;
     uc::array<uc::b8_t, nk::allocator<uc::b8_t>> scratch {nk::allocator<uc::b8_t> {scratch_policy, stream}};
     uc::array<float, nk::allocator<float>> shared_states {nk::allocator<float> {allocator}},
         shared_embeddings {nk::allocator<float> {allocator}};
     if (scratch.resize_uninitialized(*bytes) != uc::status_t::success_k ||
         shared_states.resize_uninitialized(tokens * geometry.hidden) != uc::status_t::success_k ||
         shared_embeddings.resize_uninitialized(items_k * geometry.hidden) != uc::status_t::success_k)
-        return std::printf("scratch and outputs allocation failed\n"), false;
+        return suite.check(false, "scratch and outputs allocation failed"), false;
     placement.scratch = scratch.span();
     outputs_t const outputs {shared_embeddings.data(), shared_states.data(), nk_f32_k};
     uc::expected_t encoded = on_device ? tower->encode(batch->view(), outputs, placement)
                                        : tower->encode(batch->view(), outputs, placement, pool);
-    if (!encoded) return std::printf("encode: %s\n", encoded.description_.c_str()), false;
+    if (!encoded) return suite.check(false, "encode: {}", encoded.description_), false;
     nk_status_t const finished = nk_stream_synchronize_best(capabilities, stream);
-    if (finished != nk_success_k) return std::printf("encode: %s\n", nk_status_name(finished)), false;
+    if (finished != nk_success_k) return suite.check(false, "encode: {}", nk_status_name(finished)), false;
     states.assign(shared_states.data(), shared_states.data() + shared_states.size());
     embeddings.assign(shared_embeddings.data(), shared_embeddings.data() + shared_embeddings.size());
     return true;
 }
 
-/** Encodes on the first CUDA device, when there is one, and compares each precision with the CPU's; a precision
- *  NumKong has no device kernels for is reported and skipped. */
-static bool device_parity(uc::checkpoint_to_load_t const &checkpoint, geometry_t const &geometry, fu::flat_pool_t &pool,
-                          std::vector<float> const &states, std::vector<float> const &embeddings,
-                          std::vector<float> const &quantized_states, std::vector<float> const &quantized_embeddings) {
+/** Encodes in @p precision on the first CUDA device, when there is one, and compares with the
+ *  CPU's @p states and @p embeddings within @p tolerance ; a precision NumKong has no device
+ *  kernels for skips. */
+static void device_parity(test_suite_t &suite, uc::checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
+                          fu::flat_pool_t &pool, precision_t precision, std::vector<float> const &states,
+                          std::vector<float> const &embeddings, double tolerance) {
     nk_size_t devices = 0;
     nk_capability_t capabilities = 0;
     if (nk_cuda_count_devices(&devices) != nk_success_k || devices == 0 ||
         nk_cuda_capabilities_enabled(0, &capabilities) != nk_success_k || capabilities == 0)
-        return std::printf("device: no CUDA device, parity skipped\n"), true;
-    nk_stream_t stream = nullptr;
-    if (nk_stream_init_cuda(0, &stream) != nk_success_k) return std::printf("device: no stream\n"), false;
-
-    struct case_t {
-        precision_t precision;
-        char const *name;
-        std::vector<float> const &states, &embeddings;
-        double tolerance;
-    };
-    case_t const cases[2] = {{precision_t::bf16_k, "bf16", states, embeddings, 5e-2},
-                             {precision_t::e4m3_k, "e4m3", quantized_states, quantized_embeddings, 1e-1}};
+        return suite.skip(no_cuda_device_k);
     std::size_t const hidden = geometry.hidden, tokens = states.size() / hidden;
-    bool agrees = true;
-    for (case_t const &tested : cases) {
-        nk_size_t bytes = 0;
-        nk_status_t const supported = tested.precision == precision_t::bf16_k
-                                          ? nk_dots_pack_size_bf16_best(hidden, hidden, capabilities, &bytes)
-                                          : nk_dots_pack_size_e4m3_best(hidden, hidden, capabilities, &bytes);
-        if (supported != nk_success_k) {
-            std::printf("device %s: skipped, %s\n", tested.name, nk_status_name(supported));
-            continue;
-        }
-        std::vector<float> device_states, device_embeddings;
-        if (!encode(checkpoint, geometry, tested.precision, capabilities, stream, pool, device_states,
-                    device_embeddings)) {
-            agrees = false;
-            continue;
-        }
-        agreement_t const states_agreement = compare(device_states.data(), tested.states.data(), tokens, hidden);
-        agreement_t const embeddings_agreement = compare(device_embeddings.data(), tested.embeddings.data(), items_k,
-                                                         hidden);
-        std::printf("device vs cpu %s: states max relative %.4e worst cosine %.6f, embeddings max relative %.4e " //
-                    "worst cosine %.6f\n",
-                    tested.name, states_agreement.relative, states_agreement.cosine, embeddings_agreement.relative,
+    nk_size_t bytes = 0;
+    nk_status_t const supported = precision == precision_t::bf16_k
+                                      ? nk_dots_pack_size_bf16_best(hidden, hidden, capabilities, &bytes)
+                                      : nk_dots_pack_size_e4m3_best(hidden, hidden, capabilities, &bytes);
+    if (supported != nk_success_k) return suite.skip(nk_status_name(supported));
+    nk_stream_t stream = nullptr;
+    if (nk_stream_init_cuda(0, &stream) != nk_success_k) return suite.check(false, "device stream init");
+    std::vector<float> device_states, device_embeddings;
+    if (encode(suite, checkpoint, geometry, precision, capabilities, stream, pool, device_states, device_embeddings)) {
+        agreement_t const states_agreement = compare(device_states.data(), states.data(), tokens, hidden);
+        agreement_t const embeddings_agreement = compare(device_embeddings.data(), embeddings.data(), items_k, hidden);
+        suite.check(states_agreement.relative < tolerance && embeddings_agreement.relative < tolerance,
+                    "device matches the CPU: states max relative {:.4e} worst cosine {:.6f}, embeddings max " //
+                    "relative {:.4e} worst cosine {:.6f}",
+                    states_agreement.relative, states_agreement.cosine, embeddings_agreement.relative,
                     embeddings_agreement.cosine);
-        agrees = agrees && states_agreement.relative < tested.tolerance &&
-                 embeddings_agreement.relative < tested.tolerance;
     }
-    return nk_stream_free_cuda(stream) == nk_success_k && agrees;
+    suite.check(nk_stream_free_cuda(stream) == nk_success_k, "device stream free");
+}
+
+/** Compares the CPU's BFloat16 @p states and @p embeddings with the Rust crate's dumps at
+ *  @p states_path and @p embeddings_path , which skips without them. */
+static void rust_parity(test_suite_t &suite, char const *states_path, char const *embeddings_path,
+                        std::vector<float> const &states, std::vector<float> const &embeddings, std::size_t hidden) {
+    if (states_path == nullptr || embeddings_path == nullptr) return suite.skip("needs the Rust crate's dumps");
+    std::vector<float> const rust_states = read_floats(states_path), rust_embeddings = read_floats(embeddings_path);
+    if (rust_states.size() != states.size() || rust_embeddings.size() != embeddings.size())
+        return suite.check(false, "rust dumps hold {} and {} floats, expected {} and {}", rust_states.size(),
+                           rust_embeddings.size(), states.size(), embeddings.size());
+    agreement_t const states_agreement = compare(states.data(), rust_states.data(), states.size() / hidden, hidden);
+    agreement_t const embeddings_agreement = compare(embeddings.data(), rust_embeddings.data(), items_k, hidden);
+    suite.check(states_agreement.relative < 5e-2 && embeddings_agreement.relative < 5e-2,
+                "bf16 matches the Rust crate: states max relative {:.4e} worst cosine {:.6f}, embeddings max " //
+                "relative {:.4e} worst cosine {:.6f}",
+                states_agreement.relative, states_agreement.cosine, embeddings_agreement.relative,
+                embeddings_agreement.cosine);
 }
 
 int main(int argc, char **argv) {
     if (argc != 2 && argc != 4)
-        return std::printf("Usage: %s <tiny.safetensors> [<states.f32> <embeddings.f32>]\n", argv[0]), 1;
+        return fmt::println(stderr, "Usage: {} <tiny.safetensors> [<states.f32> <embeddings.f32>]", argv[0]), 1;
+    test_suite_t suite = test_suite_t::make(argv[0]);
     uc::expected<uc::checkpoint_to_load_t> checkpoint = uc::checkpoint_to_load_t::make({argv[1], std::strlen(argv[1])});
-    if (!checkpoint) return std::printf("checkpoint: %s\n", checkpoint.description_.c_str()), 1;
+    if (!checkpoint) return suite.check(false, "checkpoint: {}", checkpoint.description_), suite.finish();
     uc::expected<geometry_t> geometry = geometry_t::from(*checkpoint);
-    if (!geometry) return std::printf("geometry: %s\n", geometry.description_.c_str()), 1;
-    std::printf("geometry: depth %u hidden %u heads %u ffn %u context %u vocabulary %u\n", geometry->depth,
-                geometry->hidden, geometry->heads(), geometry->ffn(), geometry->context, geometry->vocabulary);
+    if (!geometry) return suite.check(false, "geometry: {}", geometry.description_), suite.finish();
 
     nk_capability_t capabilities = 0;
-    if (nk_cpu_capabilities_enabled(&capabilities) != nk_success_k) return std::printf("no CPU capabilities\n"), 1;
+    if (nk_cpu_capabilities_enabled(&capabilities) != nk_success_k)
+        return suite.check(false, "no CPU capabilities"), suite.finish();
     fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(4))) return std::printf("pool spawn failed\n"), 1;
+    if (fu::failed(pool.spawn(4))) return suite.check(false, "pool spawn failed"), suite.finish();
 
     std::vector<float> states, embeddings, quantized_states, quantized_embeddings;
-    if (!encode(*checkpoint, *geometry, precision_t::bf16_k, capabilities, nullptr, pool, states, embeddings)) return 1;
-    if (!encode(*checkpoint, *geometry, precision_t::e4m3_k, capabilities, nullptr, pool, quantized_states,
+    if (!encode(suite, *checkpoint, *geometry, precision_t::bf16_k, capabilities, nullptr, pool, states, embeddings) ||
+        !encode(suite, *checkpoint, *geometry, precision_t::e4m3_k, capabilities, nullptr, pool, quantized_states,
                 quantized_embeddings))
-        return 1;
-    std::size_t const hidden = geometry->hidden, tokens = states.size() / hidden;
-    std::printf("bf16: state[0][..4] %.6f %.6f %.6f %.6f, embedding[0][..4] %.6f %.6f %.6f %.6f\n", states[0],
-                states[1], states[2], states[3], embeddings[0], embeddings[1], embeddings[2], embeddings[3]);
-    agreement_t const quantized_states_agreement = compare(quantized_states.data(), states.data(), tokens, hidden);
-    agreement_t const quantized_embeddings_agreement = compare(quantized_embeddings.data(), embeddings.data(), items_k,
-                                                               hidden);
-    std::printf(
-        "e4m3 vs bf16: states max relative %.4e worst cosine %.6f, embeddings max relative %.4e worst cosine " "%.6f\n",
-        quantized_states_agreement.relative, quantized_states_agreement.cosine, quantized_embeddings_agreement.relative,
-        quantized_embeddings_agreement.cosine);
-    if (!device_parity(*checkpoint, *geometry, pool, states, embeddings, quantized_states, quantized_embeddings))
-        return std::printf("FAIL\n"), 1;
-    if (argc == 2) return 0;
-
-    std::vector<float> const rust_states = read_floats(argv[2]), rust_embeddings = read_floats(argv[3]);
-    if (rust_states.size() != states.size() || rust_embeddings.size() != embeddings.size())
-        return std::printf("rust dumps hold %zu and %zu floats, expected %zu and %zu\n", rust_states.size(),
-                           rust_embeddings.size(), states.size(), embeddings.size()),
-               1;
-    agreement_t const states_agreement = compare(states.data(), rust_states.data(), tokens, hidden);
-    agreement_t const embeddings_agreement = compare(embeddings.data(), rust_embeddings.data(), items_k, hidden);
-    std::printf(
-        "bf16 vs rust: states max relative %.4e worst cosine %.6f, embeddings max relative %.4e worst cosine " "%.6f\n",
-        states_agreement.relative, states_agreement.cosine, embeddings_agreement.relative, embeddings_agreement.cosine);
-    bool const agrees = states_agreement.relative < 5e-2 && embeddings_agreement.relative < 5e-2;
-    std::printf("%s\n", agrees ? "PASS" : "FAIL");
-    return agrees ? 0 : 1;
+        return suite.finish();
+    suite.run("device_parity/bf16", device_parity, *checkpoint, *geometry, pool, precision_t::bf16_k, states,
+              embeddings, 5e-2);
+    suite.run("device_parity/e4m3", device_parity, *checkpoint, *geometry, pool, precision_t::e4m3_k, quantized_states,
+              quantized_embeddings, 1e-1);
+    suite.run("rust_parity", rust_parity, argc == 4 ? argv[2] : nullptr, argc == 4 ? argv[3] : nullptr, states,
+              embeddings, geometry->hidden);
+    return suite.finish();
 }

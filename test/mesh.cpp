@@ -136,6 +136,7 @@ static void single_box_world(test_suite_t &suite, fs::path const &base, u32_t lo
  *  world; a follower adopts the lead's manifest. Both halves run against a matching simulated peer
  *  carrying this box's real GPU identity, and each must arrive at the correct world table. */
 static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
+    if (local_devices == 0) return suite.skip(no_cuda_device_k);
     sz::string_t device_name;
     if (!probe_local_device_name(device_name)) return suite.check(false, "probing the local GPU name");
     std::error_code error;
@@ -188,7 +189,8 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
  *  every rank bootstraps the world for real, then proves the assembled world table is byte-identical
  *  across ranks (round-trip fidelity + phase ordering) and the closing barrier completes. The world
  *  size travels as `$UFORM_HOST_DOMAIN_COUNT` (Slurm's `$SLURM_NTASKS` as a fallback). */
-static void run_cluster_exchange(test_suite_t &suite) {
+static void run_cluster_exchange(test_suite_t &suite, u32_t local_devices) {
+    if (local_devices == 0) return suite.skip(no_cuda_device_k);
     u32_t const index = host_domain_index_from_environment();
     u32_t count = 0;
     for (char const *variable : {"UFORM_HOST_DOMAIN_COUNT", "SLURM_NTASKS"})
@@ -222,8 +224,8 @@ static void run_cluster_exchange(test_suite_t &suite) {
     suite.check(static_cast<bool>(topology.barrier("done", 60.0)), "the closing barrier should complete");
 }
 
-int main() {
-    test_suite_t suite {"mesh conformance"};
+int main(int, char **argv) {
+    test_suite_t suite = test_suite_t::make(argv[0]);
     bool const cluster = std::getenv("UFORM_HOST_DOMAIN_INDEX") != nullptr;
 
     sz::string_t base_name;
@@ -234,24 +236,16 @@ int main() {
     fs::create_directories(base, error);
 
     // Host-only: the exchange primitive needs no driver.
-    exchange_round_trips(suite, base);
-
-    if (cuInit(0) != CUDA_SUCCESS) {
-        fs::remove_all(base, error);
-        return suite.finish();
-    }
-    if (cluster) {
-        fs::remove_all(base, error);
-        run_cluster_exchange(suite);
-        return suite.finish();
-    }
+    suite.run("exchange_round_trips", exchange_round_trips, base);
 
     // Bootstrap front-loads `discover_mesh_shape`, so the assembly tiers need a visible GPU.
-    auto discovered = discover_mesh_shape();
-    if (discovered) {
-        u32_t const local_devices = (*discovered).gpus_per_host_domain;
-        single_box_world(suite, base, local_devices);
-        world_reconciles(suite, base, local_devices);
+    u32_t local_devices = 0;
+    if (cuInit(0) == CUDA_SUCCESS)
+        if (auto discovered = discover_mesh_shape(); discovered) local_devices = discovered->gpus_per_host_domain;
+    if (cluster) suite.run("cluster_exchange", run_cluster_exchange, local_devices);
+    else {
+        suite.run("single_box_world", single_box_world, base, local_devices);
+        suite.run("world_reconciles", world_reconciles, base, local_devices);
     }
 
     fs::remove_all(base, error);

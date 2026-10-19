@@ -460,7 +460,7 @@ struct mixer_members_t {
  */
 static void mixer_routes_segments(test_suite_t &suite) {
     int device_count = 0;
-    if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 1) return;
+    if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 1) return suite.skip(no_cuda_device_k);
     u32_t const member_count = std::min<u32_t>(static_cast<u32_t>(device_count), members_cap_k);
     u64_t const seed = 0xA5A5C0FFEEULL;
     data_epoch_t const epoch {1u};
@@ -529,7 +529,7 @@ static void mixer_routes_segments(test_suite_t &suite) {
  */
 static void mixer_routes_bags(test_suite_t &suite, u32_t rows, u32_t columns_per_row) {
     int device_count = 0;
-    if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 1) return;
+    if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 1) return suite.skip(no_cuda_device_k);
     u32_t const member_count = std::min<u32_t>(static_cast<u32_t>(device_count), members_cap_k);
     u64_t const seed = 0xBA65C0FFEEULL;
     data_epoch_t const epoch {2u};
@@ -584,18 +584,18 @@ static void mixer_routes_bags(test_suite_t &suite, u32_t rows, u32_t columns_per
             suite.check(false, "verify bagged on GPU {}: {}", member, verified.description_);
 }
 
-int main() {
-    test_suite_t suite {"mixer conformance"};
+int main(int, char **argv) {
+    test_suite_t suite = test_suite_t::make(argv[0]);
     // The mixer runs eagerly (no captured graph) and its barrier is a device spin. Under CUDA's default lazy
     // module loading, the first kernel launched after the barrier blocks on its module load while the barrier
     // already spins — stranding the single host thread that still owes the other members' arrivals. Eager
     // loading resolves every module up front, so the post-barrier launch never touches the loader.
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
-    if (cuInit(0) != CUDA_SUCCESS) return suite.finish(); // no GPU — nothing to exercise
-    mixer_routes_segments(suite);
-    mixer_routes_bags(suite, 2u, 64u); // roomy: every bag lands whole
+    [[maybe_unused]] CUresult const initialized = cuInit(0); // a failure leaves no device to count, so each case skips
+    suite.run("routes_segments", mixer_routes_segments);
+    suite.run("routes_bags/roomy", mixer_routes_bags, 2u, 64u); // every bag lands whole
     // Tight: 20 cells hold one member's own 18-token load (sources stay valid) but not every receive
     // combination — a destination drawing two heavy bags overflows and must drop whole, mirror-verified.
-    mixer_routes_bags(suite, 1u, 20u);
+    suite.run("routes_bags/tight", mixer_routes_bags, 1u, 20u);
     return suite.finish();
 }

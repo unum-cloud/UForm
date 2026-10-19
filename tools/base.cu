@@ -18,12 +18,28 @@
  */
 #include <cstdlib> // `::setenv`, `std::getenv` — the launcher-contract boundary
 #include <cstring> // `std::strlen`
+#include <cstdio>  // `std::setvbuf`, `stdout`
 
-#include <unistd.h> // `::write`, `STDERR_FILENO`
-
-#include <cuda.h> // `cuInit`, `cuDeviceGetCount`
+#include <cuda.h>       // `cuInit`, `cuDeviceGetCount`
+#include <fmt/format.h> // `fmt::println`
 
 #include "train/datasets.hpp" // `mixture_t`, `dataset_source_t`, and the trainer
+
+/** Prints a StringZilla view as the text it spans. */
+template <>
+struct fmt::formatter<ashvardanian::stringzilla::string_view_t> : fmt::formatter<std::string_view> {
+    auto format(std::string_view text, fmt::format_context &context) const {
+        return fmt::formatter<std::string_view>::format(text, context);
+    }
+};
+
+/** Prints an owning StringZilla string as the text it holds. */
+template <>
+struct fmt::formatter<ashvardanian::stringzilla::string_t> : fmt::formatter<std::string_view> {
+    auto format(std::string_view text, fmt::format_context &context) const {
+        return fmt::formatter<std::string_view>::format(text, context);
+    }
+};
 
 namespace ul = unum::uform::loaders;
 using namespace unum::uform::train;
@@ -31,8 +47,7 @@ using namespace unum::uform::train;
 /** Tag @p message with the binary name, write it to standard error, and hand back main's failure
  *  code. */
 [[nodiscard]] static int fail_out_(sz::string_view_t message) noexcept {
-    sz::string_t line;
-    if (format_into(line, "uform_base: {}\n", message)) ::write(STDERR_FILENO, line.data(), line.size());
+    fmt::println(stderr, "uform_base: {}", message);
     return 1;
 }
 
@@ -41,18 +56,15 @@ using namespace unum::uform::train;
 [[nodiscard]] static int step_(trainer_t &trainer, trainer_config_t const &config, batch_source_t &source) noexcept {
     auto checkpoint = [&]() noexcept {
         expected_t saved = trainer.save(config.checkpoint);
-        sz::string_t line;
-        if (saved && format_into(line, "uform_base: checkpoint written to {} at step {}", config.checkpoint,
-                                 trainer.completed_steps))
-            report_line(line.view());
+        if (saved)
+            fmt::println("uform_base: checkpoint written to {} at step {}", config.checkpoint, trainer.completed_steps);
         return saved;
     };
     step_report_t report;
     for (u32_t ordinal = trainer.completed_steps; ordinal < config.steps; ++ordinal) {
         if (expected_t stepped = trainer.step(source, optimizer_step_t {ordinal}, report); !stepped) {
-            sz::string_t line;
-            if (!format_into(line, "step {} failed: {}", ordinal, stepped.description_.view())) return 1;
-            return fail_out_(line.view());
+            fmt::println(stderr, "uform_base: step {} failed: {}", ordinal, stepped.description_);
+            return 1;
         }
         u32_t const completed = ordinal + 1u;
         if (config.report_every && completed % config.report_every == 0u)
@@ -67,9 +79,9 @@ using namespace unum::uform::train;
     {
         switch_to_gpu_t gpu_scope {trainer.streams[0]};
         if (expected_t reported = trainer.ledger.report(trainer.streams[0]); !reported)
-            report_line(reported.description_.view());
+            fmt::println(stderr, "uform_base: {}", reported.description_);
     }
-    report_line("uform_base: done");
+    fmt::println("uform_base: done");
     return 0;
 }
 
@@ -88,32 +100,26 @@ using namespace unum::uform::train;
     mesh_t mesh;
     if (expected_t joined = mesh_t::make(mesh, options, devices.view()); !joined)
         return fail_out_(joined.description_.view());
-    sz::string_t banner;
-    if (format_into(banner, "uform_base: tokens{}{}{} mixture, {} GPU(s), host_domain {} of {}",
-                    config.batch.contains(modality_t::image_k) ? "+image" : "",
-                    config.batch.contains(modality_t::video_k) ? "+video" : "",
-                    config.batch.contains(modality_t::audio_k) ? "+audio" : "", device_count, options.host_domain_index,
-                    options.host_domain_count))
-        report_line(banner.view());
+    fmt::println("uform_base: tokens{}{}{} mixture, {} GPU(s), host_domain {} of {}",
+                 config.batch.contains(modality_t::image_k) ? "+image" : "",
+                 config.batch.contains(modality_t::video_k) ? "+video" : "",
+                 config.batch.contains(modality_t::audio_k) ? "+audio" : "", device_count, options.host_domain_index,
+                 options.host_domain_count);
 
     trainer_t trainer;
     if (expected_t built = trainer_t::make(trainer, mesh, config, devices.view()); !built)
         return fail_out_(built.description_.view());
     envelope_t const &envelope = trainer.envelope;
     f64_t const mebibyte = 1024.0 * 1024.0;
-    banner.clear();
-    if (format_into(banner,
-                    "uform_base: {} rows of {} columns per GPU: {:.1f} MiB free, {:.1f} MiB fixed + {:.1f} MiB " //
-                    "per row, {:.1f} MiB margin, the arena reserves {:.1f} MiB",
-                    envelope.rows, config.batch.max_columns_per_row, envelope.free_bytes / mebibyte,
-                    envelope.fixed_bytes / mebibyte, envelope.row_bytes / mebibyte, envelope.margin_bytes / mebibyte,
-                    envelope.reserve_bytes / mebibyte))
-        report_line(banner.view());
+    fmt::println(
+        "uform_base: {} rows of {} columns per GPU: {:.1f} MiB free, {:.1f} MiB fixed + {:.1f} MiB per row, " //
+        "{:.1f} MiB margin, the arena reserves {:.1f} MiB",
+        envelope.rows, config.batch.max_columns_per_row, envelope.free_bytes / mebibyte,
+        envelope.fixed_bytes / mebibyte, envelope.row_bytes / mebibyte, envelope.margin_bytes / mebibyte,
+        envelope.reserve_bytes / mebibyte);
     if (!config.resume.empty()) {
         if (expected_t resumed = trainer.resume(config.resume); !resumed) return fail_out_(resumed.description_.view());
-        sz::string_t line;
-        if (format_into(line, "uform_base: resumed from {} at step {}", config.resume, trainer.completed_steps))
-            report_line(line.view());
+        fmt::println("uform_base: resumed from {} at step {}", config.resume, trainer.completed_steps);
     }
     if (config.mixture.empty()) {
         synthetic_source_t synthetic;
@@ -131,6 +137,8 @@ int main(int argc, char **argv) {
     // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins (see the mixer
     // and base conformance suites); eager loading before `cuInit` front-loads every module.
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
+    // The trainer's telemetry writes the descriptor directly, so every line here flushes at once.
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
     expected<trainer_config_t> parsed = trainer_config_t::parse(argc, argv);
     if (!parsed) return fail_out_(parsed.description_.view());
     trainer_config_t config = std::move(parsed.value_);
@@ -140,10 +148,8 @@ int main(int argc, char **argv) {
         if (!read) return fail_out_(read.description_.view());
         mixture = std::move(read.value_);
         config.batch = mixture.shape(config.batch);
-        sz::string_t line;
-        if (format_into(line, "uform_base: mixture {} of {} datasets from {}", mixture.name.view(),
-                        mixture.datasets.size(), config.mixture))
-            report_line(line.view());
+        fmt::println("uform_base: mixture {} of {} datasets from {}", mixture.name, mixture.datasets.size(),
+                     config.mixture);
     }
     // The library never reads the environment, so the launcher contract maps onto the config and the mesh here:
     // UFORM_DEBUG_ASSERTS arms the gradient-boundary signal probes, the rest place this process in the run.

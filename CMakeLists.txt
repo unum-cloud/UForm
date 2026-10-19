@@ -42,7 +42,7 @@
 # loudly if absent — each is available on every target, including consumer / workstation GPUs. InfiniBand is the sole
 # optional path (absent on those cards): `-DUFORM_WITH_INFINIBAND=AUTO|ON|OFF` (default `AUTO` — probe and enable when
 # present). `-DUFORM_BUILD_TEST=OFF` and `-DUFORM_BUILD_TOOLS=OFF` skip `test/` and `tools/`, which only a top-level
-# build compiles by default.
+# build compiles by default, and `-DUFORM_BUILD_BENCH=ON` adds the GPU benchmarks in `bench/`.
 cmake_minimum_required(VERSION 3.27)
 
 # Every CUDA unit compiles one cubin per generation, as USearch's do: sm_86 runs Ampere's and B300 runs "100f", and PTX
@@ -99,6 +99,7 @@ option(UFORM_BUILD_LIB_PYTHON "Build the CPython extension, set by scikit-build"
 option(UFORM_BUILD_LIB_NODE "Build the Node addon, set by cmake-js" OFF)
 option(UFORM_BUILD_TEST "Compile the conformance suites in test/" ${UFORM_IS_MAIN_PROJECT})
 option(UFORM_BUILD_TOOLS "Compile the trainer in tools/" ${UFORM_IS_MAIN_PROJECT})
+option(UFORM_BUILD_BENCH "Compile the benchmarks in bench/" OFF)
 
 if (UFORM_BUILD_CUDA)
     enable_language(CUDA)
@@ -168,6 +169,12 @@ FetchContent_Declare(
     GIT_TAG 0.12.0
 )
 FetchContent_MakeAvailable(yyjson)
+if (UFORM_BUILD_TEST
+    OR UFORM_BUILD_TOOLS
+    OR UFORM_BUILD_BENCH
+)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/fmt.cmake")
+endif ()
 
 # Host codecs: libjpeg-turbo / libpng / libwebp decode images on the CPU, libav* demuxes video and decodes audio (no GPU
 # audio codec exists). WebAssembly builds take already-decoded media, so they discover none of them.
@@ -295,6 +302,9 @@ if (UFORM_BUILD_TEST)
 endif ()
 if (UFORM_BUILD_TOOLS AND UFORM_BUILD_CUDA)
     add_subdirectory(tools)
+endif ()
+if (UFORM_BUILD_BENCH AND UFORM_BUILD_CUDA)
+    add_subdirectory(bench)
 endif ()
 # `uform_bundle` → a self-contained runtime tree (executables + their shared-library closure, glibc excepted) under
 # `runtime-bundle/`, for Slurm or K8s clusters where nodes are not package-identical: deploy the tree to the shared

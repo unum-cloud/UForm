@@ -440,3 +440,11 @@ struct expected<void> {
 using expected_t = expected<void>;
 
 } // namespace unum::uform::core
+
+/** `std::format` support for statuses, printing the name @c to_string gives. */
+template <>
+struct std::formatter<unum::uform::core::status_t> : std::formatter<std::string_view> {
+    auto format(auto status, std::format_context &context) const {
+        return std::formatter<std::string_view>::format(to_string(status), context);
+    }
+};

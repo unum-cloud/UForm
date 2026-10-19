@@ -419,7 +419,7 @@ static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &
  */
 static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, array<b8_t> const &clip, gpu_arena_t &arena,
                              gpu_stream_t &stream, cpu_decode_pool_t &pool) {
-    if (clip.empty()) return; // an unset fixture — skip
+    if (clip.empty()) return suite.skip("the audio fixture is empty or unreadable");
     u32_t const columns = 24u, chunk = 400u, max_segments = 4u, sample_rate = 16000u;
     multimodal_batch_shape_t shape {};
     shape.max_rows_per_gpu = 1u;
@@ -486,7 +486,7 @@ static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, array
  */
 static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream,
                                   cpu_decode_pool_t &pool, array<b8_t> const &clip) {
-    if (clip.empty()) return; // audio fixture unset — skip
+    if (clip.empty()) return suite.skip("needs a UFORM_TEST_AUDIO fixture");
     u32_t const columns = 16u, chunk = 400u, max_segments = 4u, sample_rate = 16000u;
     array<b8_t> garbage; // not a decodable container → silence, but not the whole batch
     if (garbage.resize(64u) != status_t::success_k) return suite.check(false, "garbage scratch alloc failed");
@@ -551,7 +551,7 @@ static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_s
  */
 static void run_image_decode(test_suite_t &suite, sz::string_view_t label, array<b8_t> const &blob, gpu_arena_t &arena,
                              gpu_stream_t &stream, cpu_decode_pool_t &pool, nvjpeg_session_t &jpeg) {
-    if (blob.empty()) return; // an unset fixture — skip
+    if (blob.empty()) return suite.skip("the image fixture is empty or unreadable");
     u32_t const columns = 64u, patch = 16u, channels = 4u, max_segments = 4u;
     multimodal_batch_shape_t shape {};
     shape.max_rows_per_gpu = 1u;
@@ -631,7 +631,7 @@ static void run_image_decode(test_suite_t &suite, sz::string_view_t label, array
 static void run_video_decode(test_suite_t &suite, sz::string_view_t label, array<b8_t> const &clip,
                              std::span<u32_t const> frame_strides, gpu_arena_t &arena, gpu_stream_t &stream,
                              cpu_decode_pool_t &pool, nvdec_session_t &nvdec) {
-    if (clip.empty()) return; // video is external-only — skip without a fixture
+    if (clip.empty()) return suite.skip("the video fixture is empty or unreadable");
     u32_t const columns = 4096u, patch = 32u, channels = 3u, tube_frames = 2u, max_segments = 8u;
     multimodal_batch_shape_t shape {};
     shape.max_rows_per_gpu = 2u;
@@ -709,7 +709,8 @@ static void run_video_decode(test_suite_t &suite, sz::string_view_t label, array
 static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream,
                                      cpu_decode_pool_t &pool, nvjpeg_session_t &jpeg, array<b8_t> const &audio_clip,
                                      array<b8_t> const &image_blob) {
-    if (audio_clip.empty() || image_blob.empty()) return; // both fixtures required — skip otherwise
+    if (audio_clip.empty() || image_blob.empty())
+        return suite.skip("needs both UFORM_TEST_AUDIO and UFORM_TEST_IMAGE fixtures");
 
     // Decode the clip into an audio-only batch → its real segment length.
     u32_t const chunk = 400u, audio_columns = 12u;
@@ -857,7 +858,7 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
  */
 static void cross_rank_sampling(test_suite_t &suite) {
     char const *const dataset = std::getenv("UFORM_TEST_DATASET");
-    if (dataset == nullptr) return; // no shared dataset — the distributed tier is inert on a single box
+    if (dataset == nullptr) return suite.skip("needs a shared UFORM_TEST_DATASET");
 
     u32_t const index = host_domain_index_from_environment();
     u32_t count = 0;
@@ -900,22 +901,28 @@ static void cross_rank_sampling(test_suite_t &suite) {
     suite.check(static_cast<bool>(topology.barrier("done", 60.0)), "the closing barrier should complete");
 }
 
-int main() {
-    test_suite_t suite {"loaders conformance"};
+int main(int, char **argv) {
+    test_suite_t suite = test_suite_t::make(argv[0]);
 
-    draw_primitives_are_stable(suite);
-    file_pick_is_weighted_and_distinct(suite);
-    segment_geometry_packs_multiple_per_row(suite);
+    suite.run("draw_primitives_are_stable", draw_primitives_are_stable);
+    suite.run("file_pick_is_weighted_and_distinct", file_pick_is_weighted_and_distinct);
+    suite.run("segment_geometry_packs_multiple_per_row", segment_geometry_packs_multiple_per_row);
 
-    if (cuInit(0) != CUDA_SUCCESS) return suite.finish(); // no GPU — the host tiers already ran
+    int device_count = 0;
+    if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count == 0) {
+        suite.skip("fill_coords_routes_every_modality", no_cuda_device_k);
+        suite.skip("multimodal_packet_routes", no_cuda_device_k);
+        suite.skip("audio_fault_isolation", no_cuda_device_k);
+        return suite.finish();
+    }
 
     if (std::getenv("UFORM_HOST_DOMAIN_INDEX") != nullptr) { // the distributed sampling tier owns the process
-        cross_rank_sampling(suite);
+        suite.run("cross_rank_sampling", cross_rank_sampling);
         return suite.finish();
     }
 
     auto stream_made = gpu_stream_t::make(0);
-    if (!stream_made) return suite.finish();
+    if (!stream_made) return suite.check(false, "stream make: {}", stream_made.description_), suite.finish();
     gpu_stream_t stream = std::move(stream_made.value_);
     // Every decode tier below allocates pinned staging, and `cuMemAllocHost` needs a current context —
     // `gpu_stream_t::make` deliberately pushes and pops, so the suite holds the scope itself.
@@ -928,11 +935,11 @@ int main() {
     if (failed(pool.spawn(4u))) return suite.check(false, "the CPU decode pool should spawn"), suite.finish();
 
     // Tier C — the coordinate oracle, no external media.
-    fill_coords_routes_every_modality(suite, arena, stream);
+    suite.run("fill_coords_routes_every_modality", fill_coords_routes_every_modality, arena, stream);
 
     // Tier D — every UFORM_TEST_AUDIO clip through the audio decode contract.
     for_each_env_input("UFORM_TEST_AUDIO", [&](sz::string_view_t path) {
-        run_audio_decode(suite, "env-audio", read_fixture(path), arena, stream, pool);
+        suite.run("audio_decode", run_audio_decode, "env-audio", read_fixture(path), arena, stream, pool);
     });
 
     // Image — every UFORM_TEST_IMAGE blob, plus the real audio+image mixed packet.
@@ -942,10 +949,10 @@ int main() {
     if (jpeg_made) {
         nvjpeg_session_t jpeg = std::move(jpeg_made.value_);
         for_each_env_input("UFORM_TEST_IMAGE", [&](sz::string_view_t path) {
-            run_image_decode(suite, "env-image", read_fixture(path), arena, stream, pool, jpeg);
+            suite.run("image_decode", run_image_decode, "env-image", read_fixture(path), arena, stream, pool, jpeg);
         });
-        multimodal_packet_routes(suite, arena, stream, pool, jpeg, first_env_fixture("UFORM_TEST_AUDIO"),
-                                 first_env_fixture("UFORM_TEST_IMAGE"));
+        suite.run("multimodal_packet_routes", multimodal_packet_routes, arena, stream, pool, jpeg,
+                  first_env_fixture("UFORM_TEST_AUDIO"), first_env_fixture("UFORM_TEST_IMAGE"));
     }
 
     // Video — external only (a codec-bearing clip can't be embedded cheaply); each file at one representation, then
@@ -957,16 +964,19 @@ int main() {
             array<b8_t> const clip = read_fixture(path);
             stack_array<u32_t, 1> one_stride;
             (void)one_stride.push_back(1u);
-            run_video_decode(suite, "video-1view", clip, one_stride.view(), arena, stream, pool, nvdec);
+            suite.run("video_decode/one_view", run_video_decode, "video-1view", clip, one_stride.view(), arena, stream,
+                      pool, nvdec);
             stack_array<u32_t, 2> two_strides;
             (void)two_strides.push_back(1u);
             (void)two_strides.push_back(4u);
-            run_video_decode(suite, "video-2view", clip, two_strides.view(), arena, stream, pool, nvdec);
+            suite.run("video_decode/two_views", run_video_decode, "video-2view", clip, two_strides.view(), arena,
+                      stream, pool, nvdec);
         });
     }
 
     // Decode fault-isolation over the first real audio fixture.
-    audio_fault_isolation(suite, arena, stream, pool, first_env_fixture("UFORM_TEST_AUDIO"));
+    suite.run("audio_fault_isolation", audio_fault_isolation, arena, stream, pool,
+              first_env_fixture("UFORM_TEST_AUDIO"));
 
     return suite.finish();
 }

@@ -867,6 +867,21 @@ check_namespace_directories() {
         "$file opens a namespace no directory backs - use the directory's namespace, and \`static\` for file-local helpers:"
 }
 
+# A test or benchmark harness header lives in the namespace its directory spells, `test/harness.hpp` in
+# `unum::uform::test`, and opens no other at file scope. The whole staged file, since the namespace is context.
+check_harness_namespace() {
+    local expected="unum::uform::${file%/*}"
+    expected=${expected//\//::}
+    local misplaced
+    misplaced=$(top_level_namespaces < "$staged_blob" |
+        awk -F: -v expected="$expected" '
+            { ++opened; if (substr($0, index($0, ":") + 1) != expected) print "line " $0 }
+            END { if (!opened) print "line 1: no namespace" }')
+    [ -z "$misplaced" ] || fail "$misplaced" \
+        "$file is a harness header outside \`namespace $expected\` - its directory names the namespace," \
+        "            and no other opens at file scope:"
+}
+
 # A namespace opens once per file: closing it only to reopen it splits its body around whatever sits between,
 # usually an include that belongs in the preamble or a handle completed between two halves. The one gap allowed
 # holds a `fmt::` or `std::` specialization, which has to follow the type it formats or hashes and precede the
@@ -1002,6 +1017,26 @@ check_c_limit_macros() {
 # endregion Naming and Vocabulary
 
 # region C++ Surface and Containers
+
+# C stdio printing in C++ sources: the suites, benchmarks and tools print through fmt::, and the libraries never
+# print. The C tests under c/ keep their stdio; the dispatch below only routes C++ translation units here.
+check_printf() {
+    local prints
+    prints=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+        grep -nE '\b(std::)?(f|s)?printf[[:space:]]*\(|\bputs[[:space:]]*\(' || true)
+    [ -z "$prints" ] || fail "$prints" \
+        "$file prints through the C stdio family - write fmt::println(\"{} rows\", count):"
+}
+
+# A `fmt::print` whose literal does not end in a newline is half a line, and the other half arrives in a second
+# call - `fmt::styled` and `fmt::join` fold both halves into one `println`. A literal opening with a carriage
+# return is a redraw, never a fragment.
+check_partial_prints() {
+    local partial
+    partial=$(printf '%s\n' "$added" | grep -E 'fmt::print\(' | grep -vE '\\n"' | grep -vE 'fmt::print\("\\r' || true)
+    [ -z "$partial" ] || fail "$partial" \
+        "$file prints half a line - fold it into one fmt::println, with fmt::styled or fmt::join:"
+}
 
 # C++ iostreams - `std::cout`, `std::ifstream`, `std::ostringstream`, and the rest of the
 # `std::*stream` family - are banned wholesale: locale-dependent, allocation-happy, and verbose.
@@ -1206,17 +1241,26 @@ check_requires_clauses() {
 }
 
 # Rejects a print to stdout in a test body: the harness owns the output, a passing check is silent and a
-# failing one reports itself to stderr through `test_suite_t::check`, so a green run reads as one summary line.
-# Judges the suites that include `harness.hpp`; one still on its own `check` moves over whole.
+# failing one reports itself to stderr through `test_suite_t::check`, so a green run reads as one line per case.
 check_test_bodies_quiet() {
-    grep -q '^#include "harness.hpp"' "$staged_blob" || return 0
     local prints
     prints=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
         grep -nE '\b(fmt::println|fmt::print|printf|puts)[[:space:]]*\(|\bstd::cout\b|\bfprintf[[:space:]]*\([[:space:]]*stdout\b' |
         grep -vE '\([[:space:]]*stderr\b' || true)
     [ -z "$prints" ] || fail "$prints" \
         "$file prints to stdout from a test body - report failures through suite.check(...), which writes" \
-        "            stderr, and leave the summary line to the harness:"
+        "            stderr, and leave the result lines to the harness:"
+}
+
+# A test's oracle is the `check` family of test/harness.hpp, never `assert`, which compiles out wherever NDEBUG is
+# defined and, where it is not, aborts the whole run instead of counting one failure.
+check_test_oracle_never_compiled_out() {
+    local asserts
+    asserts=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+        grep -nE '(^|[^A-Za-z0-9_])assert[[:space:]]*\(' || true)
+    [ -z "$asserts" ] || fail "$asserts" \
+        "$file asserts in a test - write \`suite.check_equal(count, 3u, \"rows\");\` from test/harness.hpp," \
+        "            which counts the failure and never compiles out:"
 }
 
 # endregion C++ Surface and Containers
@@ -1557,7 +1601,7 @@ judge_cuda_path() {
     # built noexcept end-to-end — a bad_alloc anywhere would terminate. Outside tests, strings are
     # sz::string_t (try_append / try_push_back) and dynamic arrays are the cell's own array<T> (try_resize).
     case "$file" in
-    test/*) ;;
+    test/* | bench/*) ;;
     *)
         # Lines marked `vendor-boundary` are exempt: some vendor APIs (cudnn-frontend's set_stride,
         # execute's variant pack) force std containers in their signatures; the marker keeps those
@@ -1659,7 +1703,7 @@ judge_path() {
     [ -s "$staged_lines_path" ] || echo > "$staged_lines_path"
     added_lines=$(< "$staged_lines_path")
     case "$file" in
-    src/* | test/* | tools/*) judge_cuda_path ;;
+    src/* | test/* | tools/* | bench/*) judge_cuda_path ;;
     esac
     case "$file" in
     *.py) judge_python_path ;;
@@ -1708,6 +1752,8 @@ judge_path() {
         check_requires_clauses
         check_function_like_macros
         check_stl_streams
+        check_printf
+        check_partial_prints
         check_deque
         check_memcpy
         check_range_reconstruction
@@ -1728,9 +1774,15 @@ judge_path() {
     src/*.cuh | src/*.hpp | src/*.cu | src/*.cpp)
         check_stl_dynamic_containers
         ;;&
-    # The suites' bodies, whose harness alone writes the summary line.
-    test/harness.hpp) ;;
-    test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh) check_test_bodies_quiet ;;
+    # The harnesses, then the suites' bodies, whose harness alone writes the result lines.
+    test/harness.hpp | bench/harness.hpp)
+        check_harness_namespace
+        check_test_oracle_never_compiled_out
+        ;;
+    test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh)
+        check_test_bodies_quiet
+        check_test_oracle_never_compiled_out
+        ;;
     esac
     case "$file" in
     *.md)

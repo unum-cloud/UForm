@@ -92,6 +92,16 @@ static void probe_gpu_registration_(test_suite_t &suite, int device) noexcept {
     ibv_close_device(nic);
     ibv_free_device_list(nics);
 }
+
+/** Registers every one of the @p device_count local GPUs with its same-index NIC. */
+static void probe_gpudirect_(test_suite_t &suite, int device_count) noexcept {
+    if (device_count == 0) return suite.skip(no_cuda_device_k);
+    for (int device = 0; device < device_count; ++device) probe_gpu_registration_(suite, device);
+}
+#else
+
+/** Skips the GPUDirect check, which a build without InfiniBand cannot make. */
+static void probe_gpudirect_(test_suite_t &suite, int) noexcept { suite.skip("built without UFORM_WITH_INFINIBAND"); }
 #endif
 
 /**
@@ -101,7 +111,7 @@ static void probe_gpu_registration_(test_suite_t &suite, int device) noexcept {
  */
 static void probe_exchange_directory_(test_suite_t &suite) noexcept {
     char const *const exchange_directory = std::getenv("UFORM_EXCHANGE_DIR");
-    if (host_domain_count_from_environment() == 1u) return; // Single-node runs never rendezvous.
+    if (host_domain_count_from_environment() == 1u) return suite.skip("a single-node run needs no rendezvous");
     suite.check(exchange_directory != nullptr, "UFORM_EXCHANGE_DIR unset in a multi-node world");
     if (exchange_directory == nullptr) return;
     sz::string_t probe_path;
@@ -117,18 +127,12 @@ static void probe_exchange_directory_(test_suite_t &suite) noexcept {
     }
 }
 
-int main() {
-    test_suite_t suite {"env"};
+int main(int, char **argv) {
+    test_suite_t suite = test_suite_t::make(argv[0]);
+    suite.run("exchange_directory", probe_exchange_directory_);
 
-    CUresult const initialized = cuInit(0);
-    suite.check(initialized == CUDA_SUCCESS, "driver init failed ({})", static_cast<int>(initialized));
     int device_count = 0;
-    if (initialized == CUDA_SUCCESS) cuDeviceGetCount(&device_count);
-    suite.check(device_count > 0, "no CUDA devices visible");
-
-#if defined(UFORM_WITH_INFINIBAND)
-    for (int device = 0; device < device_count; ++device) probe_gpu_registration_(suite, device);
-#endif
-    probe_exchange_directory_(suite);
+    if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS) device_count = 0;
+    suite.run("gpudirect_registration", probe_gpudirect_, device_count);
     return suite.finish();
 }
