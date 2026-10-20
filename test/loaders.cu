@@ -22,6 +22,9 @@
 #include <cstdio>  // `std::fopen` — reading an optional media fixture
 #include <cmath>   // `std::isfinite`
 
+#include <sys/stat.h> // `mkdir` — the glob fixture
+#include <unistd.h>   // `symlink`, `unlink`, `rmdir`
+
 #include <utility>   // `std::move`
 #include <algorithm> // `std::min`, `std::max`
 #include <span>      // `std::span`
@@ -234,6 +237,37 @@ static void jpeg_probe_resumes_past_metadata(test_suite_t &suite) {
     suite.check(whole && whole->extent.width == 640, "the whole blob probes in one window");
 }
 
+/** `**` spans zero and two directory levels, a symlinked directory under `*` matches, and a
+ *  trailing `**` is refused. */
+static void glob_spans_depths_and_symlinks(test_suite_t &suite) {
+    char root[] = "/tmp/uform-glob-XXXXXX";
+    if (::mkdtemp(root) == nullptr) return suite.check(false, "temporary directory creation failed");
+    auto const path = [&](char const *suffix) {
+        sz::string_t joined;
+        if (sz::failed(joined.assign(sz::string_view_t {root})) ||
+            sz::failed(joined.append(sz::string_view_t {suffix})))
+            joined.clear();
+        return joined;
+    };
+    bool const made = ::mkdir(path("/a").c_str(), 0700) == 0 && ::mkdir(path("/a/b").c_str(), 0700) == 0 &&
+                      ::mkdir(path("/real").c_str(), 0700) == 0 &&
+                      ::symlink(path("/real").c_str(), path("/link").c_str()) == 0;
+    for (char const *file : {"/top.parquet", "/a/b/deep.parquet", "/real/shard.parquet"})
+        if (std::FILE *handle = std::fopen(path(file).c_str(), "w")) std::fclose(handle);
+    if (!made) return suite.check(false, "glob fixture creation failed");
+
+    auto const recursive = expand_glob(path("/**/*.parquet").view());
+    std::size_t const recursive_count = recursive ? recursive->size() : 0;
+    suite.check(recursive_count == 3, "** matches the top, the two-level and the real directory's shards (got {})",
+                recursive_count);
+    auto const linked = expand_glob(path("/l*/shard.parquet").view());
+    suite.check(linked && linked->size() == 1, "a symlinked directory under * matches");
+    suite.check(!expand_glob(path("/**").view()), "a trailing ** is refused");
+    for (char const *file : {"/top.parquet", "/a/b/deep.parquet", "/real/shard.parquet", "/link"})
+        ::unlink(path(file).c_str());
+    for (char const *directory : {"/a/b", "/a", "/real", ""}) ::rmdir(path(directory).c_str());
+}
+
 /** The weighted file pick is row-proportional, distinct, and floored at two shards. */
 static void file_pick_is_weighted_and_distinct(test_suite_t &suite) {
     constexpr splitmix64_hash_t hash {};
@@ -430,6 +464,52 @@ static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &
             ok = ok && host[token, 0] == want_t && host[token, 1] == want_h && host[token, 2] == want_w;
         }
     suite.check(ok, "every cell's (t,h,w) must match the per-modality coordinate oracle");
+}
+
+/** `pack_tokens` writes the prefix, then the text, and counts both in the segment's length. */
+static void pack_tokens_starts_with_prefix(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream) {
+    char const text[] = "abcde", prefix_text[] = "q:";
+    u64_t const host_offsets[] = {0, 3, 5}, host_elements[] = {1, 0};
+    using bytes_t = nk::tensor<b8_t, gpu_arena_alloc<b8_t>, 1>;
+    using u64s_t = nk::tensor<u64_t, gpu_arena_alloc<u64_t>, 1>;
+    using u32s_t = nk::tensor<u32_t, gpu_arena_alloc<u32_t>, 1>;
+    auto payload = bytes_t::uninitialized({5u}, gpu_arena_alloc<b8_t> {arena}).value;
+    auto prefix = bytes_t::uninitialized({2u}, gpu_arena_alloc<b8_t> {arena}).value;
+    auto offsets = u64s_t::uninitialized({3u}, gpu_arena_alloc<u64_t> {arena}).value;
+    auto elements = u64s_t::uninitialized({2u}, gpu_arena_alloc<u64_t> {arena}).value;
+    auto tokens = nk::tensor<token_id_t, gpu_arena_alloc<token_id_t>, 2>::uninitialized(
+                      {1u, 16u}, gpu_arena_alloc<token_id_t> {arena})
+                      .value;
+    auto segment_offsets = u32s_t::uninitialized({3u}, gpu_arena_alloc<u32_t> {arena}).value;
+    auto segment_lengths = u32s_t::uninitialized({2u}, gpu_arena_alloc<u32_t> {arena}).value;
+    auto segment_modality = nk::tensor<modality_t, gpu_arena_alloc<modality_t>, 1>::uninitialized(
+                                {2u}, gpu_arena_alloc<modality_t> {arena})
+                                .value;
+    if (!payload || !prefix || !offsets || !elements || !tokens || !segment_offsets || !segment_lengths ||
+        !segment_modality)
+        return suite.check(false, "pack scratch alloc failed");
+    bool const staged = copy_host_to_device<b8_t>(std::as_bytes(std::span {text, 5}), payload.span(), stream) &&
+                        copy_host_to_device<b8_t>(std::as_bytes(std::span {prefix_text, 2}), prefix.span(), stream) &&
+                        copy_host_to_device<u64_t>(std::span {host_offsets}, offsets.span(), stream) &&
+                        copy_host_to_device<u64_t>(std::span {host_elements}, elements.span(), stream);
+    if (!staged) return suite.check(false, "pack staging failed");
+    expected_t packed = pack_tokens(column_view_t {payload.view(), offsets.view()}, elements.view(), prefix.view(),
+                                    tokens.span(), segment_offsets.span(), segment_lengths.span(),
+                                    segment_modality.span(), stream);
+    if (!packed) return suite.check(false, "pack_tokens failed: {}", packed.description_);
+
+    token_id_t host_tokens[16] = {};
+    u32_t host_lengths[2] = {};
+    bool const landed = copy_device_to_host(tokens.view().flatten<1>(), std::span {host_tokens}, stream) &&
+                        copy_device_to_host(segment_lengths.view(), std::span {host_lengths}, stream) &&
+                        cuStreamSynchronize(stream.get()) == CUDA_SUCCESS;
+    if (!landed) return suite.check(false, "pack readback failed");
+    char const expected[] = "q:deq:abc";
+    bool matches = host_lengths[0] == 4u && host_lengths[1] == 5u;
+    for (std::size_t index = 0; index != 9; ++index)
+        matches = matches && host_tokens[index] == static_cast<token_id_t>(static_cast<u8_t>(expected[index]));
+    suite.check(matches, "two segments read \"q:de\" and \"q:abc\" (lengths {} and {})", host_lengths[0],
+                host_lengths[1]);
 }
 
 /**
@@ -931,6 +1011,7 @@ int main(int, char **argv) {
 
     suite.run("draw_primitives_are_stable", draw_primitives_are_stable);
     suite.run("jpeg_probe_resumes_past_metadata", jpeg_probe_resumes_past_metadata);
+    suite.run("glob_spans_depths_and_symlinks", glob_spans_depths_and_symlinks);
     suite.run("file_pick_is_weighted_and_distinct", file_pick_is_weighted_and_distinct);
     suite.run("segment_geometry_packs_multiple_per_row", segment_geometry_packs_multiple_per_row);
 
@@ -962,6 +1043,7 @@ int main(int, char **argv) {
 
     // Tier C — the coordinate oracle, no external media.
     suite.run("fill_coords_routes_every_modality", fill_coords_routes_every_modality, arena, stream);
+    suite.run("pack_tokens_starts_with_prefix", pack_tokens_starts_with_prefix, arena, stream);
 
     // Tier D — every UFORM_TEST_AUDIO clip through the audio decode contract.
     for_each_env_input("UFORM_TEST_AUDIO", [&](sz::string_view_t path) {

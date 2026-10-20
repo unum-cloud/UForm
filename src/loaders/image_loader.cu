@@ -900,7 +900,7 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
         // The batch's [rows,columns,P,P,C] image tensor names the whole grid directly: extent(2) is the square
         // patch side and extent(4) the RGBA channels — no arithmetic from a flattened run.
         std::span<image_batch_shape_t const> const representations {&image_, 1}; // one representation today
-        if (expected_t decoded = decode_images(decoder, *pool_, tape, draws[batch, nk::slice], representations,
+        if (expected_t decoded = decode_images(decoder, *pool_, tape, batch_records[batch, nk::slice], representations,
                                                loaded.images.span(), loaded.image_shapes.span(),
                                                loaded.segment_offsets.span(), loaded.segment_lengths.span(),
                                                loaded.segment_modality.span(), gpu_stream);

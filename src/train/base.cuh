@@ -177,6 +177,11 @@ struct trainer_config_t {
     /** The NVDEC engines a GPU carries, which no query reports; a mixture with video needs it. */
     u32_t nvdec_engines = 0;
 
+    /** The device bytes a data source's reservoir takes outside the arena at @c rows rows,
+     *  @c reservoir_fixed_bytes+rows·reservoir_row_bytes , charged by the source from its
+     *  shards. */
+    std::size_t reservoir_fixed_bytes = 0, reservoir_row_bytes = 0;
+
     /**
      *  @brief Fold the @c --flag value pairs into a config, each flag adjusting one knob.
      *

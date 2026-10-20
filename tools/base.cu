@@ -87,8 +87,7 @@ using namespace unum::uform::train;
 
 /** Bootstrap the mesh over every visible device, make the trainer and the source @p mixture names,
  *  and step. */
-[[nodiscard]] static int train_(trainer_config_t const &config, mesh_options_t const &options,
-                                mixture_t mixture) noexcept {
+[[nodiscard]] static int train_(trainer_config_t config, mesh_options_t const &options, mixture_t mixture) noexcept {
     if (cuInit(0) != CUDA_SUCCESS) return fail_out_("cuInit failed");
     int device_count = 0;
     if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) return fail_out_("no CUDA devices");
@@ -106,6 +105,14 @@ using namespace unum::uform::train;
                  config.batch.contains(modality_t::audio_k) ? "+audio" : "", device_count, options.host_domain_index,
                  options.host_domain_count);
 
+    // The loaders open before the trainer, so the envelope leaves room for their reservoirs.
+    expected<ul::gpu_direct_storage_session_t> storage = ul::gpu_direct_storage_session_t::make();
+    if (!storage) return fail_out_(storage.description_.view());
+    dataset_source_t datasets;
+    if (!config.mixture.empty())
+        if (expected_t opened = dataset_source_t::open(datasets, config, *storage, std::move(mixture)); !opened)
+            return fail_out_(opened.description_.view());
+
     trainer_t trainer;
     if (expected_t built = trainer_t::make(trainer, mesh, config, devices.view()); !built)
         return fail_out_(built.description_.view());
@@ -113,9 +120,10 @@ using namespace unum::uform::train;
     f64_t const mebibyte = 1024.0 * 1024.0;
     fmt::println(
         "uform_base: {} rows of {} columns per GPU: {:.1f} MiB free, {:.1f} MiB fixed + {:.1f} MiB per row, " //
-        "{:.1f} MiB margin, the arena reserves {:.1f} MiB",
+        "{:.1f} MiB margin, {:.1f} MiB + {:.1f} MiB per row for the reservoir, the arena reserves {:.1f} MiB",
         envelope.rows, config.batch.max_columns_per_row, envelope.free_bytes / mebibyte,
         envelope.fixed_bytes / mebibyte, envelope.row_bytes / mebibyte, envelope.margin_bytes / mebibyte,
+        config.reservoir_fixed_bytes / mebibyte, config.reservoir_row_bytes / mebibyte,
         envelope.reserve_bytes / mebibyte);
     if (!config.resume.empty()) {
         if (expected_t resumed = trainer.resume(config.resume); !resumed) return fail_out_(resumed.description_.view());
@@ -125,11 +133,7 @@ using namespace unum::uform::train;
         synthetic_source_t synthetic;
         return step_(trainer, config, synthetic);
     }
-    expected<ul::gpu_direct_storage_session_t> storage = ul::gpu_direct_storage_session_t::make();
-    if (!storage) return fail_out_(storage.description_.view());
-    dataset_source_t datasets;
-    if (expected_t made = dataset_source_t::make(datasets, trainer, *storage, std::move(mixture)); !made)
-        return fail_out_(made.description_.view());
+    if (expected_t made = dataset_source_t::make(datasets, trainer); !made) return fail_out_(made.description_.view());
     return step_(trainer, config, datasets);
 }
 

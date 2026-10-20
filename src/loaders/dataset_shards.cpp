@@ -128,6 +128,13 @@ struct flat_column_t {
             auto const *payload = static_cast<b8_t const *>(child.head());
             return result_t {flat_column_t {{payload, static_cast<std::size_t>(child.size())}, list.offsets(), {}}};
         }
+        // list<int32> — row indices, the mined hard negatives: the child values are the payload,
+        // and the list offsets count values, not bytes.
+        if (child.type().id() == cudf::type_id::INT32) {
+            auto const *payload = static_cast<b8_t const *>(child.head());
+            return result_t {
+                flat_column_t {{payload, static_cast<std::size_t>(child.size()) * sizeof(i32_t)}, list.offsets(), {}}};
+        }
         // list<string> — a nested column (K captions / negatives per row): the string child's chars are
         // the leaf payload, its offsets the element → bytes level, and the list offsets the row → element
         // groups.
@@ -140,7 +147,8 @@ struct flat_column_t {
     // requested child — unwrap and flatten the child itself.
     if (decoded.type().id() == cudf::type_id::STRUCT && decoded.num_children() == 1)
         return flatten_column_(decoded.child(0), name, stream);
-    return result_t::fail(status_t::shape_unsupported_k, "column {} is not string, list<uint8>, or list<string>", name);
+    return result_t::fail(status_t::shape_unsupported_k,
+                          "column {} is not string, list<uint8>, list<int32>, or list<string>", name);
 }
 
 /** Own a @c u64_t copy of @p offsets — cuDF decodes 32- or 64-bit @b signed offsets, and byte
@@ -447,6 +455,12 @@ expected<std::size_t> ul::file_size_bytes(sz::string_view_t path) noexcept {
     return result_t {static_cast<std::size_t>(info.st_size)};
 }
 
+/** Whether @p path names a directory once every symlink resolves. */
+[[nodiscard]] static bool is_directory_(sz::string_t const &path) noexcept {
+    struct ::stat info {}; // vendor-boundary: POSIX stat
+    return ::stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
+}
+
 expected<array<sz::string_t>> ul::expand_glob(sz::string_view_t path_or_glob) noexcept {
     using result_t = expected<array<sz::string_t>>;
 
@@ -475,6 +489,9 @@ expected<array<sz::string_t>> ul::expand_glob(sz::string_view_t path_or_glob) no
         sz::string_view_t const component = components[level];
         bool const last = level + 1 == components.size();
         bool const patterned = component.find_first_of(wildcards) != sz::string_view_t::npos;
+        bool const recursive = component == sz::string_view_t {"**", 2};
+        if (recursive && last)
+            return result_t::fail(status_t::invalid_input_k, "{} ends in **, not in a file pattern", path_or_glob);
 
         // A literal directory component descends every prefix without touching the filesystem — the
         // next level's opendir discovers a missing branch and drops it.
@@ -489,22 +506,29 @@ expected<array<sz::string_t>> ul::expand_glob(sz::string_view_t path_or_glob) no
         sz::string_t pattern_text; // null-terminated for fnmatch
         if (sz::failed(pattern_text.assign(component)))
             return result_t::fail(status_t::bad_alloc_k, "glob pattern allocation failed");
+        // `**` keeps each prefix and adds every real directory below, as a symlink could loop.
         array<sz::string_t> next_prefixes;
-        for (std::size_t index = 0; index != prefixes.size(); ++index) {
-            ::DIR *const handle = ::opendir(prefixes[index].c_str());
+        if (recursive) next_prefixes = std::move(prefixes);
+        array<sz::string_t> const &walked = recursive ? next_prefixes : prefixes;
+        for (std::size_t index = 0; index != walked.size(); ++index) {
+            ::DIR *const handle = ::opendir(walked[index].c_str());
             if (handle == nullptr) continue; // a forked branch without this component matches nothing
             for (::dirent const *entry = ::readdir(handle); entry != nullptr; entry = ::readdir(handle)) {
-                bool const is_directory = entry->d_type == DT_DIR;
-                if (last == is_directory) continue; // files close the walk; directories continue it
-                if (is_directory && (std::strcmp(entry->d_name, ".") == 0 || std::strcmp(entry->d_name, "..") == 0))
-                    continue;
-                if (::fnmatch(pattern_text.c_str(), entry->d_name, 0) != 0) continue;
+                if (std::strcmp(entry->d_name, ".") == 0 || std::strcmp(entry->d_name, "..") == 0) continue;
+                if (!recursive && ::fnmatch(pattern_text.c_str(), entry->d_name, 0) != 0) continue;
                 sz::string_t full;
-                if (sz::failed(full.assign(prefixes[index].view())) ||
+                if (sz::failed(full.assign(walked[index].view())) ||
                     sz::failed(full.append(sz::string_view_t {"/", 1})) ||
-                    sz::failed(full.append(sz::string_view_t {entry->d_name})) ||
-                    (last ? paths.push_back(std::move(full)) : next_prefixes.push_back(std::move(full))) !=
-                        status_t::success_k) {
+                    sz::failed(full.append(sz::string_view_t {entry->d_name}))) {
+                    ::closedir(handle);
+                    return result_t::fail(status_t::bad_alloc_k, "path string allocation failed");
+                }
+                // Shared filesystems report DT_UNKNOWN, and dataset folders are often symlinks.
+                bool const resolves = entry->d_type == DT_LNK || entry->d_type == DT_UNKNOWN;
+                bool const is_directory = entry->d_type == DT_DIR || (!recursive && resolves && is_directory_(full));
+                if (last == is_directory) continue; // files close the walk; directories continue it
+                if ((last ? paths.push_back(std::move(full)) : next_prefixes.push_back(std::move(full))) !=
+                    status_t::success_k) {
                     ::closedir(handle);
                     return result_t::fail(status_t::bad_alloc_k, "path string allocation failed");
                 }

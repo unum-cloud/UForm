@@ -52,8 +52,9 @@ static __global__ void sample_rows_kernel_(u64r1_span_t record_indices, u64_t se
  *  __grid_size__ @c [1,1,1] , one thread live; no dynamic shared memory.
  */
 static __global__ void tokens_geometry_kernel_(u64r1_view_t reservoir_offsets, u64r1_view_t record_indices,
-                                               u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
-                                               modality_span_t segment_modality, tokens_matrix_span_t tokens) {
+                                               std::size_t prefix_bytes, u32r1_span_t segment_offsets,
+                                               u32r1_span_t segment_lengths, modality_span_t segment_modality,
+                                               tokens_matrix_span_t tokens) {
     if (threadIdx.x != 0u || blockIdx.x != 0u) return;
     u32_t const columns_per_row = static_cast<u32_t>(tokens.extent(1));
     u32_t const capacity = static_cast<u32_t>(tokens.extent(0) * tokens.extent(1));
@@ -64,7 +65,7 @@ static __global__ void tokens_geometry_kernel_(u64r1_view_t reservoir_offsets, u
         u32_t columns = 0;
         if (segment_index < live_segments) {
             u64_t const source = record_indices[segment_index];
-            u64_t const bytes = reservoir_offsets[source + 1] - reservoir_offsets[source];
+            u64_t const bytes = prefix_bytes + reservoir_offsets[source + 1] - reservoir_offsets[source];
             columns = static_cast<u32_t>(std::min<u64_t>(bytes, columns_per_row));
         }
         // A segment never crosses its row: jump the cursor to the next row when it would.
@@ -92,8 +93,9 @@ static __global__ void tokens_geometry_kernel_(u64r1_view_t reservoir_offsets, u
  *  __grid_size__ @c [documents,1,1] ; a PAD segment (zero length) exits immediately.
  */
 static __global__ void tokens_gather_kernel_(b8r1_view_t reservoir_payload, u64r1_view_t reservoir_offsets,
-                                             u64r1_view_t record_indices, u32r1_view_t segment_offsets,
-                                             u32r1_view_t segment_lengths, tokens_matrix_span_t tokens) {
+                                             u64r1_view_t record_indices, b8r1_view_t prefix,
+                                             u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
+                                             tokens_matrix_span_t tokens) {
     u32_t const columns_per_row = static_cast<u32_t>(tokens.extent(1));
     u32_t const segment_index = blockIdx.x;
     u32_t const columns = segment_lengths[segment_index];
@@ -102,12 +104,15 @@ static __global__ void tokens_gather_kernel_(b8r1_view_t reservoir_payload, u64r
     u32_t const destination = segment_offsets[segment_index];
     u32_t const row = destination / columns_per_row;
     u32_t const column_begin = destination % columns_per_row;
-    for (u32_t column = threadIdx.x; column < columns; column += blockDim.x)
-        tokens[row, column_begin + column] = static_cast<token_id_t>(
-            static_cast<u8_t>(reservoir_payload[source_begin + column]));
+    std::size_t const prefix_bytes = prefix.extent(0);
+    for (u32_t column = threadIdx.x; column < columns; column += blockDim.x) {
+        b8_t const byte = column < prefix_bytes ? prefix[column]
+                                                : reservoir_payload[source_begin + column - prefix_bytes];
+        tokens[row, column_begin + column] = static_cast<token_id_t>(static_cast<u8_t>(byte));
+    }
 }
 
-expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, tokens_matrix_span_t tokens,
+expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view_t prefix, tokens_matrix_span_t tokens,
                            u32r1_span_t segment_offsets, u32r1_span_t segment_lengths, modality_span_t segment_modality,
                            gpu_stream_t &gpu_stream) noexcept {
     if (elements.extent(0) > segment_lengths.extent(0) || segment_offsets.extent(0) != segment_lengths.extent(0) + 1u ||
@@ -119,11 +124,12 @@ expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, tokens_ma
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
     dim3 const one_block {1u, 1u, 1u};
     expected_t packed = launch_kernel(&tokens_geometry_kernel_, one_block, one_block, gpu_stream, texts.offsets,
-                                      elements, segment_offsets, segment_lengths, segment_modality, tokens);
+                                      elements, prefix.extent(0), segment_offsets, segment_lengths, segment_modality,
+                                      tokens);
     if (packed)
         packed = launch_kernel(&tokens_gather_kernel_, dim3 {static_cast<u32_t>(elements.extent(0)), 1u, 1u},
                                dim3 {kernel_block_size_default_k, 1u, 1u}, gpu_stream, texts.payload, texts.offsets,
-                               elements, segment_offsets, segment_lengths, tokens);
+                               elements, prefix, segment_offsets, segment_lengths, tokens);
     return packed;
 }
 
@@ -156,7 +162,7 @@ expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, tokens_ma
     // Each batch packs its own row of the permutation; the rectangle carries its shape.
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t &loaded = batches[batch];
-        if (expected_t packed = pack_tokens(reservoir_column, batch_records[batch, nk::slice], loaded.tokens.span(),
+        if (expected_t packed = pack_tokens(reservoir_column, batch_records[batch, nk::slice], {}, loaded.tokens.span(),
                                             loaded.segment_offsets.span(), loaded.segment_lengths.span(),
                                             loaded.segment_modality.span(), gpu_stream);
             !packed)
@@ -191,6 +197,7 @@ expected<tokens_loader_parquet_t> tokens_loader_parquet_t::make(gpu_direct_stora
         if (metadata->rows == 0)
             return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
         loader.row_prefix_[index + 1] = loader.row_prefix_[index] + metadata->rows;
+        loader.reservoir_.charge(*metadata);
     }
     return result_t {std::move(loader)};
 }
@@ -287,6 +294,7 @@ expected<tokens_loader_jsonl_t> tokens_loader_jsonl_t::make(gpu_direct_storage_s
         if (*bytes == 0)
             return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
         loader.byte_prefix_[index + 1] = loader.byte_prefix_[index] + *bytes;
+        loader.reservoir_.charge(parquet_length_metadata_t {0, *bytes});
     }
     return result_t {std::move(loader)};
 }
@@ -368,6 +376,7 @@ expected<tokens_loader_csv_t> tokens_loader_csv_t::make(gpu_direct_storage_sessi
         if (*bytes == 0)
             return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
         loader.byte_prefix_[index + 1] = loader.byte_prefix_[index] + *bytes;
+        loader.reservoir_.charge(parquet_length_metadata_t {0, *bytes});
     }
     return result_t {std::move(loader)};
 }

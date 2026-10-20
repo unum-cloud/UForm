@@ -289,6 +289,8 @@ struct footprint_t {
         measured.pair_bytes = static_cast<std::size_t>(device.pair);
         measured.fixed_bytes = static_cast<std::size_t>(std::max(device.fixed, 0.0));
         measured.margin_bytes = high.device_bytes - std::min(high.device_bytes, high.arena_bytes);
+        device.fixed += static_cast<f64_t>(config.reservoir_fixed_bytes);
+        device.row += static_cast<f64_t>(config.reservoir_row_bytes);
         u64_t const fitting_rows = device.rows_within(static_cast<f64_t>(measured.free_bytes) -
                                                       static_cast<f64_t>(measured.margin_bytes));
         measured.rows = configured_rows ? configured_rows

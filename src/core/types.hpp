@@ -78,6 +78,7 @@ using u32r2_span_t = nk::tensor_span<u32_t, 2>;
 using u64r1_view_t = nk::tensor_view<u64_t, 1>;
 using u64r1_span_t = nk::tensor_span<u64_t, 1>;
 using u64r2_view_t = nk::tensor_view<u64_t, 2>;
+using u64r2_span_t = nk::tensor_span<u64_t, 2>;
 using f32r1_view_t = nk::tensor_view<f32_t, 1>;
 using f32r1_span_t = nk::tensor_span<f32_t, 1>;
 using f32r2_view_t = nk::tensor_view<f32_t, 2>;

@@ -4,7 +4,7 @@
  *  @date October 18, 2026
  *  @brief The mixture reader and the dataset source declared in @c src/train/datasets.hpp .
  */
-#include <algorithm> // `std::upper_bound`, `std::min`
+#include <algorithm> // `std::upper_bound`, `std::min`, `std::max`, `std::any_of`
 
 #include <cuda.h> // `cuStreamSynchronize`
 
@@ -52,13 +52,14 @@ using namespace unum::uform::train;
         else if (name == "positive") read = read_string_(value, "positive", entry.positive);
         else if (name == "media") read = read_string_(value, "media", entry.media);
         else if (name == "negative") read = read_string_(value, "negative", entry.negative);
+        else if (name == "anchor_prefix") read = read_string_(value, "anchor_prefix", entry.anchor_prefix);
+        else if (name == "positive_prefix") read = read_string_(value, "positive_prefix", entry.positive_prefix);
         else if (name == "weight") {
             if (!yyjson_is_num(value)) return expected_t::fail(status_t::invalid_input_k, "\"weight\" is not a number");
             entry.weight = yyjson_get_num(value);
         }
         // Read by the acquisition and mining scripts, not by the loaders.
-        else if (name != "positives_per_caption" && name != "min_epochs" && name != "anchor_prefix" &&
-                 name != "positive_prefix")
+        else if (name != "positives_per_caption" && name != "min_epochs")
             return expected_t::fail(status_t::invalid_input_k, "unknown key \"{}\"", name);
         if (!read) return read;
     }
@@ -132,15 +133,12 @@ multimodal_batch_shape_t mixture_t::shape(multimodal_batch_shape_t shape) const 
     return shape;
 }
 
-expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer, gpu_direct_storage_session_t &session,
-                                  mixture_t mixture) noexcept {
-    trainer_config_t const &config = trainer.config;
-    multimodal_batch_shape_t shape = config.batch;
-    std::size_t const gpus = trainer.replicas.size(), segments = shape.max_segments_per_gpu;
+expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &config,
+                                  gpu_direct_storage_session_t &session, mixture_t mixture) noexcept {
+    multimodal_batch_shape_t const &shape = config.batch;
     placed.mixture_ = std::move(mixture);
     std::span<mixture_entry_t const> const entries = placed.mixture_.datasets.view();
     bool const pairs = !entries.empty() && !entries[0].anchor.empty();
-    if (pairs) shape.max_bags_per_gpu = std::min(shape.max_rows_per_gpu, shape.max_segments_per_gpu) / 2u;
 
     if (pairs && fu::failed(placed.pool_.spawn(fu::allowed_cores_count())))
         return expected_t::fail(status_t::bad_alloc_k, "the decode pool did not spawn");
@@ -164,24 +162,40 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer, 
             made = adopt(tokens_loader_csv_t::make(session, glob, config.seed));
         else if (!pairs)
             made = expected_t::fail(status_t::invalid_input_k, "{} holds no Parquet, JSONL, CSV or text shards", glob);
-        else if (entry.media.empty())
-            made = expected_t::fail(status_t::shape_unsupported_k, "{} pairs two texts, which no loader reads yet",
-                                    entry.name.view());
-        else if (!entry.negative.empty())
-            made = expected_t::fail(status_t::shape_unsupported_k, "{} names hard negatives, which no loader reads yet",
-                                    entry.name.view());
         else if (entry.modality == modality_t::video_k && config.nvdec_engines == 0)
             made = expected_t::fail(status_t::invalid_input_k,
                                     "{} holds video: --nvdec-engines names the GPU's NVDEC engine count",
                                     entry.name.view());
         else
-            made = adopt(paired_loader_parquet_t::make(session, glob, config.seed, placed.pool_,
-                                                       {entry.anchor.view(), entry.media.view()}, entry.modality,
-                                                       shape));
+            made = adopt(
+                paired_loader_parquet_t::make(session, glob, config.seed, placed.pool_,
+                                              {entry.anchor.view(), entry.positive.view(), entry.negative.view(),
+                                               entry.anchor_prefix.view(), entry.positive_prefix.view()},
+                                              entry.modality, shape));
         if (!made) return expected_t::fail(made.status_, "{}: {}", entry.name.view(), made.description_.view());
         if (placed.weight_prefix_.push_back(placed.weight_prefix_[placed.weight_prefix_.size() - 1] + entry.weight) !=
             status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "weight table allocation failed");
+    }
+    reservoir_bound_t reservoir;
+    for (loader_t const &loader : placed.loaders_.view())
+        std::visit([&](auto const &typed) noexcept { reservoir.charge(typed.reservoir()); }, loader);
+    config.reservoir_fixed_bytes = reservoir.fixed_bytes;
+    config.reservoir_row_bytes = reservoir.row_bytes;
+    return {};
+}
+
+expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer) noexcept {
+    trainer_config_t const &config = trainer.config;
+    multimodal_batch_shape_t shape = config.batch;
+    std::size_t const gpus = trainer.replicas.size(), segments = shape.max_segments_per_gpu;
+    std::span<mixture_entry_t const> const entries = placed.mixture_.datasets.view();
+    // A pair spends two segments and one bag; with a hard negative, three segments and two bags.
+    if (!entries.empty() && !entries[0].anchor.empty()) {
+        std::size_t const lanes = std::min(shape.max_rows_per_gpu, shape.max_segments_per_gpu);
+        bool const negatives = std::any_of(entries.begin(), entries.end(),
+                                           [](mixture_entry_t const &entry) { return !entry.negative.empty(); });
+        shape.max_bags_per_gpu = static_cast<u32_t>(negatives ? std::max(lanes / 2u, 2u * (lanes / 3u)) : lanes / 2u);
     }
 
     for (std::size_t member = 0; member != gpus; ++member) {

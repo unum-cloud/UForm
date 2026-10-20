@@ -53,16 +53,18 @@ using tokens_matrix_span_t = nk::tensor_span<token_id_t, 2>;
  *
  *  @param[in] texts A text column, its payload and offsets both on device.
  *  @param[in] elements The device indices of the elements to pack, one per segment.
+ *  @param[in] prefix The device bytes every segment starts with, such as @c "query: " , often none.
  *  @param[out] tokens The rectangle the bytes land in, as token IDs.
  *  @param[out] segment_offsets @b [segments+1] start positions in @p tokens , the cursor's end at
  *      the back.
- *  @param[out] segment_lengths @b [segments] the bytes each segment kept.
+ *  @param[out] segment_lengths @b [segments] the bytes each segment kept, its prefix included.
  *  @param[out] segment_modality @b [segments] @c text_k throughout.
  *  @param[inout] gpu_stream The stream the geometry and the gather run on.
  */
-[[nodiscard]] expected_t pack_tokens(column_view_t texts, u64r1_view_t elements, tokens_matrix_span_t tokens,
-                                     u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
-                                     modality_span_t segment_modality, gpu_stream_t &gpu_stream) noexcept;
+[[nodiscard]] expected_t pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view_t prefix,
+                                     tokens_matrix_span_t tokens, u32r1_span_t segment_offsets,
+                                     u32r1_span_t segment_lengths, modality_span_t segment_modality,
+                                     gpu_stream_t &gpu_stream) noexcept;
 
 /** The Parquet tokens loader's baked knobs — a different config is a different loader. */
 struct tokens_base_loader_parquet_config_t {
@@ -145,6 +147,14 @@ struct tokens_loader_parquet_t {
      *  @c upper_bound maps a keyed row position to its owning file) and, at its back, the dataset's
      *  total rows. Read once per dataset; shared across every GPU the loader serves. */
     array<std::size_t> row_prefix_ {};
+
+    /** The device bytes a fill's reservoir can take, from the footers. */
+    reservoir_bound_t reservoir_ {};
+
+  public:
+
+    /** The device bytes a fill's reservoir can take outside the arena. */
+    [[nodiscard]] reservoir_bound_t reservoir() const noexcept { return reservoir_; }
 };
 
 /** The JSONL tokens loader's baked knobs — a different config is a different loader. */
@@ -207,6 +217,14 @@ struct tokens_loader_jsonl_t {
     /** @b [shards+1] cumulative @b byte sizes — the weighted file draw's search table. JSONL has
      *  no footer, so bytes (not rows) weigh the draw; the true row counts come from the decode. */
     array<std::size_t> byte_prefix_ {};
+
+    /** The device bytes the two largest files take; with no footer, no per-row term. */
+    reservoir_bound_t reservoir_ {};
+
+  public:
+
+    /** The device bytes a fill's reservoir takes at least, outside the arena. */
+    [[nodiscard]] reservoir_bound_t reservoir() const noexcept { return reservoir_; }
 };
 
 /** The CSV tokens loader's baked knobs — a different config is a different loader. */
@@ -275,6 +293,14 @@ struct tokens_loader_csv_t {
     /** @b [shards+1] cumulative @b byte sizes — the weighted file draw's search table. CSV has no
      *  footer, so bytes (not rows) weigh the draw; the true row counts come from the decode. */
     array<std::size_t> byte_prefix_ {};
+
+    /** The device bytes the two largest files take; with no footer, no per-row term. */
+    reservoir_bound_t reservoir_ {};
+
+  public:
+
+    /** The device bytes a fill's reservoir takes at least, outside the arena. */
+    [[nodiscard]] reservoir_bound_t reservoir() const noexcept { return reservoir_; }
 };
 
 } // namespace unum::uform::loaders

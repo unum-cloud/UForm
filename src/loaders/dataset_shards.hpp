@@ -24,8 +24,9 @@
 
 #include <cstddef> // `std::size_t`
 
-#include <memory> // `std::unique_ptr` — the pimpl owning the cuDF table
-#include <span>   // `std::span`
+#include <algorithm> // `std::max`
+#include <memory>    // `std::unique_ptr` — the pimpl owning the cuDF table
+#include <span>      // `std::span`
 
 #include "core/types.hpp"    // `expected`, `status_t`, the scalar aliases, `b8r1_view_t`, `sz::string_t`
 #include "core/array.hpp"    // `array` — the glob expansion result
@@ -63,6 +64,28 @@ struct column_view_t {
 struct parquet_length_metadata_t {
     std::size_t rows = 0;
     std::size_t bytes = 0;
+};
+
+/** The device bytes a fill's reservoir can take outside the arena, @c fixed_bytes+rows·row_bytes
+ *  for a fill of @c rows rows. A fill reads at least two shards whole, and more only while its rows
+ *  fall short, so it reads at most one shard past what its rows need. */
+struct reservoir_bound_t {
+    std::size_t fixed_bytes = 0, row_bytes = 0;
+
+    /** Widen the bound to cover a shard of @p shard 's footer, or of @c shard.bytes alone when it
+     *  tells no rows. Every byte counts thrice, as cuDF holds the compressed chunks, the
+     *  decompressed pages and the decoded columns at once. */
+    void charge(parquet_length_metadata_t shard) noexcept {
+        constexpr std::size_t copies = 3;
+        fixed_bytes = std::max(fixed_bytes, 2 * copies * shard.bytes);
+        if (shard.rows != 0) row_bytes = std::max(row_bytes, copies * divide_round_up(shard.bytes, shard.rows));
+    }
+
+    /** Widen the bound to cover @p other as well. */
+    void charge(reservoir_bound_t other) noexcept {
+        fixed_bytes = std::max(fixed_bytes, other.fixed_bytes);
+        row_bytes = std::max(row_bytes, other.row_bytes);
+    }
 };
 
 /** One Parquet shard's requested columns, decoded and owned on device. Move-only; the cuDF

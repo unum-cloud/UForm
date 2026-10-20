@@ -13,10 +13,12 @@
  *
  *  A text entry names its document column in @c text ; its shards are Parquet, JSONL, CSV with a
  *  header row, or @c .txt files of one document per line, whose only column is @c 0 . A paired
- *  entry names its caption column in @c anchor and its media in @c positive and @c media , the
- *  column's name telling the modality. Every step each GPU draws one entry by weight and fills its
- *  batch from it. Pairs route as bags of two segments, so one mixture never mixes them with plain
- *  text, whose segments route alone.
+ *  entry names its anchor text column in @c anchor and its positive in @c positive : another text,
+ *  or media also named in @c media , the column's name telling the modality. A paired entry may
+ *  name hard negatives in @c negative , and text prefixes in @c anchor_prefix and
+ *  @c positive_prefix . Every step each GPU draws one entry by weight and fills its batch from it.
+ *  Pairs route as bags, so one mixture never mixes them with plain text, whose segments route
+ *  alone.
  */
 #pragma once
 
@@ -51,7 +53,10 @@ struct mixture_entry_t {
     /** A pair's hard-negative column. */
     sz::string_t negative {};
 
-    /** The modality of @ref media , told by its name; @c text_k for a text entry. */
+    /** The bytes every anchor starts with, and every positive and negative text. */
+    sz::string_t anchor_prefix {}, positive_prefix {};
+
+    /** The modality of @ref media , told by its name; @c text_k for a text entry or a text pair. */
     modality_t modality = modality_t::text_k;
 };
 
@@ -92,10 +97,14 @@ struct mixture_t {
  */
 struct dataset_source_t final : batch_source_t {
 
-    /** Make one loader per entry of @p mixture over @p storage , and the loaded batches and the
-     *  mixer from @p trainer 's arenas. */
-    [[nodiscard]] static expected_t make(dataset_source_t &placed, trainer_t &trainer,
+    /** Make one loader per entry of @p mixture over @p storage , before the trainer, and charge
+     *  @p config with the device bytes their reservoirs can take outside the arena. */
+    [[nodiscard]] static expected_t open(dataset_source_t &placed, trainer_config_t &config,
                                          loaders::gpu_direct_storage_session_t &storage, mixture_t mixture) noexcept;
+
+    /** Make the loaded batches, the decoder sessions and the mixer of an @ref open source from
+     *  @p trainer 's arenas. */
+    [[nodiscard]] static expected_t make(dataset_source_t &placed, trainer_t &trainer) noexcept;
 
     /** Each GPU draws an entry by weight, keyed by the run seed, the epoch and its world
      *  coordinate, and fills its loaded batch from it; the mixer then routes every loaded batch
