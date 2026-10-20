@@ -7,25 +7,20 @@
  *
  *  1. Runtime closure: the binary links the whole `uform_train` stack, so starting at all proves
  *     every shared library resolves on the node.
- *  2. GPUDirect RDMA: an arena allocation of every local GPU must register with the NIC of the same
- *     index, in the single chunk the InfiniBand heaps rely on, since @c nvidia_peermem refuses a
- *     range spanning handles with @c EFAULT . The arena is grown first, so the range sits past a
- *     used tail.
+ *  2. GPUDirect RDMA: an arena allocation of every local GPU must register through the endpoint
+ *     the collectives build, on the NIC the transport picks for that GPU, in the single chunk the
+ *     heaps rely on, since @c nvidia_peermem refuses a range spanning handles with @c EFAULT . The
+ *     arena is grown first, so the range sits past a used tail.
  *  3. Rendezvous filesystem: the exchange directory the mesh names must be writable from the node.
  */
 #include <cstdlib> // `std::getenv`
 #include <cstdio>  // `std::fopen`, `std::remove`
-#include <cerrno>  // `errno` — the registration failure detail
 
 #include <cuda.h> // `cuInit`, `cuDeviceGetCount`, `cuDevicePrimaryCtxRetain`
 
-#if defined(UFORM_WITH_INFINIBAND)
-#include <infiniband/verbs.h> // `ibv_get_device_list`, `ibv_alloc_pd`, `ibv_reg_mr`
-#endif
-
 #include "core/gpu_allocators.hpp"         // `gpu_arena_t`, `gpu_registrable_alloc`
 #include "core/mesh.hpp"                   // `host_domain_count_from_environment`
-#include "core/infiniband_collectives.cuh" // `infiniband_access_flags_k` — the flags the heaps register with
+#include "core/infiniband_collectives.cuh" // `infiniband_nic_t`, `infiniband_endpoint_t` — the probed transport
 #include "harness.hpp"                     // `test_suite_t`
 
 using namespace unum::uform::core;
@@ -34,8 +29,9 @@ using namespace unum::uform::test;
 /** Reservation ceiling of the probe arena — roomy enough for the bump tail plus the heap-like range. */
 inline constexpr std::size_t probe_reserve_bytes_k = 64ull * 1024 * 1024;
 
-/** The heap-like registrable range — sized like the optimizer's world-gradient heap. */
-inline constexpr std::size_t probe_heap_bytes_k = 16ull * 1024 * 1024;
+/** The heap-like registrable range — sized like the optimizer's world-gradient heap, and ending
+ *  mid-page like the collectives' small heaps, which a dma-buf export rounds out to whole pages. */
+inline constexpr std::size_t probe_heap_bytes_k = 16ull * 1024 * 1024 + 384;
 
 /** The ordinary bump allocation preceding the heap, so the mapped prefix carries a used tail. */
 inline constexpr std::size_t probe_tail_bytes_k = 3ull * 1024 * 1024;
@@ -43,10 +39,10 @@ inline constexpr std::size_t probe_tail_bytes_k = 3ull * 1024 * 1024;
 #if defined(UFORM_WITH_INFINIBAND)
 
 /**
- *  @brief Register one GPU's registrable arena range with its same-index NIC and report the outcome —
- *      the per-device body of the GPUDirect check.
+ *  @brief Register one GPU's registrable arena range through the endpoint the collectives build,
+ *      on the NIC the transport picks for that GPU, and report the outcome.
  *  @param[inout] suite The probe suite the checks report into.
- *  @param[in] device The GPU ordinal, paired with NIC @c mlx5_<device> (clamped to the NIC count).
+ *  @param[in] device The GPU ordinal.
  */
 static void probe_gpu_registration_(test_suite_t &suite, int device) noexcept {
     CUcontext context = nullptr;
@@ -65,28 +61,12 @@ static void probe_gpu_registration_(test_suite_t &suite, int device) noexcept {
     suite.check(tail != nullptr && heap != nullptr, "probe arena allocation failed (device={})", device);
     if (heap == nullptr) return;
 
-    int nic_count = 0;
-    ibv_device **const nics = ibv_get_device_list(&nic_count);
-    suite.check(nic_count > 0, "no verbs devices visible (device={})", device);
-    if (nic_count == 0) return;
-    int const nic_index = device < nic_count ? device : nic_count - 1;
-    ibv_context *const nic = ibv_open_device(nics[nic_index]);
-    suite.check(nic != nullptr, "NIC open failed ({})", ibv_get_device_name(nics[nic_index]));
-    if (nic == nullptr) return;
-    ibv_pd *const protection_domain = ibv_alloc_pd(nic);
-    suite.check(protection_domain != nullptr, "protection-domain allocation failed (device={})", device);
-    if (protection_domain != nullptr) {
-        errno = 0;
-        ibv_mr *const region = ibv_reg_mr(protection_domain, heap, probe_heap_bytes_k, infiniband_access_flags_k);
-        suite.check(region != nullptr,
-                    "GPUDirect registration failed: GPU {} + {} errno={} — check nvidia_peermem and the " //
-                    "single-chunk heap contract",
-                    device, ibv_get_device_name(nics[nic_index]), errno);
-        if (region != nullptr) ibv_dereg_mr(region);
-        ibv_dealloc_pd(protection_domain);
-    }
-    ibv_close_device(nic);
-    ibv_free_device_list(nics);
+    expected<infiniband_nic_t> nic = infiniband_nic_t::make(static_cast<u32_t>(device));
+    suite.check(bool(nic), "no NIC serves GPU {}: {}", device, nic.description_);
+    if (!nic) return;
+    expected<infiniband_endpoint_t> endpoint = infiniband_endpoint_t::make(nic.value_,
+                                                                           b8r1_span_t {heap, probe_heap_bytes_k});
+    suite.check(bool(endpoint), "GPUDirect registration failed on GPU {}: {}", device, endpoint.description_);
 }
 
 /** Registers every one of the @p device_count local GPUs with its same-index NIC. */

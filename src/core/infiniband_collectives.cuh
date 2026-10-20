@@ -469,7 +469,7 @@ struct infiniband_nic_t {
           protection_domain_(std::exchange(other.protection_domain_, nullptr)),
           primary_context_(std::exchange(other.primary_context_, nullptr)), paired_gpu_(other.paired_gpu_),
           page_registry_(std::move(other.page_registry_)), local_identifier_(other.local_identifier_),
-          path_mtu_(other.path_mtu_), port_(other.port_) {
+          path_mtu_(other.path_mtu_), port_(other.port_), global_identifier_index_(other.global_identifier_index_) {
         std::memcpy(global_identifier_, other.global_identifier_, sizeof(global_identifier_));
     }
     infiniband_nic_t &operator=(infiniband_nic_t &&other) noexcept {
@@ -483,6 +483,7 @@ struct infiniband_nic_t {
             local_identifier_ = other.local_identifier_;
             path_mtu_ = other.path_mtu_;
             port_ = other.port_;
+            global_identifier_index_ = other.global_identifier_index_;
             std::memcpy(global_identifier_, other.global_identifier_, sizeof(global_identifier_));
         }
         return *this;
@@ -490,12 +491,12 @@ struct infiniband_nic_t {
     ~infiniband_nic_t() noexcept { destroy_(); }
 
     /**
-     *  @brief Open the adapter serving this host_domain's @b local GPU ordinal @p local_gpu_index (name
-     *      @c mlx5_<local_gpu_index> ) — HCAs are numbered @b per @b box, so the GPU↔HCA pairing is local,
-     *      never the global @c gpu_index (which would ask for @c mlx5_8 on the second box).
+     *  @brief Open the adapter serving this host_domain's @b local GPU ordinal @p local_gpu_index :
+     *      the one sharing the deepest PCIe switch with that GPU.
      *
-     *  The @c mlx5_<ordinal> pairing assumes index-identity affinity; resolving the NIC from the GPU's PCI
-     *  locality is the follow-up. Allocates the protection domain and caches the port identity.
+     *  A card's functions tie on depth, so the first whose port is active and can route wins: one
+     *  with a LID on InfiniBand, one with a RoCEv2 GID carrying an IPv4 address on Ethernet.
+     *  Allocates the protection domain and caches the port identity.
      *
      *  @param[in] infiniband_port The port on the adapter; single-port ConnectX parts use 1.
      */
@@ -516,8 +517,11 @@ struct infiniband_nic_t {
     /** The port number every queue pair binds. */
     [[nodiscard]] u8_t port() const noexcept { return port_; }
 
-    /** The 16-byte port GID — carried in coordinates for a future routed fabric. */
+    /** The 16-byte port GID every queue pair's global route header names. */
     [[nodiscard]] u8_t const *global_identifier() const noexcept { return global_identifier_; }
+
+    /** The GID table entry @ref global_identifier came from, the source of every route header. */
+    [[nodiscard]] u8_t global_identifier_index() const noexcept { return global_identifier_index_; }
 
     /** The NIC's page-registration ledger every mapping on this NIC acquires through — mlx5's
      *  page-shared pools make the reference counting mandatory (see @ref host_page_registry_t ). */
@@ -560,6 +564,9 @@ struct infiniband_nic_t {
     /** The bound port number. */
     u8_t port_ = 1;
 
+    /** The GID table entry the port routes from. */
+    u8_t global_identifier_index_ = 0;
+
     /** The port's global identifier. */
     u8_t global_identifier_[16] = {};
 };
@@ -589,8 +596,8 @@ struct infiniband_endpoint_t {
           memory_region_(std::exchange(other.memory_region_, nullptr)),
           gpu_buffer_(std::exchange(other.gpu_buffer_, b8r1_span_t {})),
           dmabuf_descriptor_(std::exchange(other.dmabuf_descriptor_, -1)), infiniband_port_(other.infiniband_port_),
-          path_mtu_(other.path_mtu_), local_coordinates_(other.local_coordinates_),
-          peer_coordinates_(other.peer_coordinates_) {}
+          global_identifier_index_(other.global_identifier_index_), path_mtu_(other.path_mtu_),
+          local_coordinates_(other.local_coordinates_), peer_coordinates_(other.peer_coordinates_) {}
     infiniband_endpoint_t &operator=(infiniband_endpoint_t &&other) noexcept {
         if (this != &other) {
             destroy_();
@@ -600,6 +607,7 @@ struct infiniband_endpoint_t {
             gpu_buffer_ = std::exchange(other.gpu_buffer_, b8r1_span_t {});
             dmabuf_descriptor_ = std::exchange(other.dmabuf_descriptor_, -1);
             infiniband_port_ = other.infiniband_port_;
+            global_identifier_index_ = other.global_identifier_index_;
             path_mtu_ = other.path_mtu_;
             local_coordinates_ = other.local_coordinates_;
             peer_coordinates_ = other.peer_coordinates_;
@@ -727,6 +735,9 @@ struct infiniband_endpoint_t {
 
     /** The bound port, from the owning NIC. */
     u8_t infiniband_port_ = 1;
+
+    /** The GID table entry route headers leave from, from the owning NIC. */
+    u8_t global_identifier_index_ = 0;
 
     /** The port's active MTU, from the owning NIC. */
     unsigned path_mtu_ = 0;
