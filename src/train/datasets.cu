@@ -221,7 +221,8 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer) 
         }
     }
     expected<multimodal_batch_mixer_t> mixer = multimodal_batch_mixer_t::make(
-        trainer.domain, trainer.mesh->colocated, trainer.arenas, shape, config.seed, trainer.streams);
+        trainer.domain, trainer.mesh->colocated, trainer.arenas, shape, config.seed, trainer.streams,
+        trainer.mesh->timeout_seconds);
     if (!mixer) return expected_t::fail(std::move(mixer));
     placed.mixer_ = std::move(mixer.value_);
 

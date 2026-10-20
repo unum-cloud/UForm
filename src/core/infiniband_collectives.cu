@@ -47,21 +47,26 @@ static __global__ void infiniband_allreduce_post_kernel_(infiniband_links_view_t
     infiniband_post_write(link.queue, nullptr, link.local_access_key,
                           link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
                           link.remote_access_key, sizeof(u32_t), infiniband_signaling_t::signaled_k, &flag_value);
-    infiniband_drain_one(link.completion);
+    infiniband_drain_one(link.completion, link.wait_nanoseconds);
 }
 
 /** Flag-wait step of one round: lane 0 acquire-spins until the inbound flag reaches the absolute
  *  target (monotonic @c >= — the flag never resets), then a system fence orders the partner's landed
- *  payload before the next kernel, propagated to the block by the closing @c __syncthreads . */
+ *  payload before the next kernel, propagated to the block by the closing @c __syncthreads . Traps
+ *  once the spin outlasts @c link.wait_nanoseconds . */
 static __global__ void infiniband_flag_wait_kernel_(infiniband_links_view_t links, u32_t round,
                                                     infiniband_round_view_t flag_round) {
     if (threadIdx.x == 0) {
         infiniband_link_t const link = links[round];
         u32_t const step_parity = (flag_round[0] / static_cast<u32_t>(links.extent(0))) & 1u;
         u32_t const target = flag_round[0] + round + 1u;
-        while (infiniband_load_acquire_u32(link.arrival_flag + step_parity) < target) {
-            // Spin until the partner's flag write for this round lands; its payload already did.
-        }
+        u64_t const deadline = global_nanoseconds() + link.wait_nanoseconds;
+        // Spin until the partner's flag write for this round lands; its payload already did.
+        while (infiniband_load_acquire_u32(link.arrival_flag + step_parity) < target)
+            if (global_nanoseconds() > deadline) {
+                printf("uform: round %u waited past its deadline at flag target %u\n", round, target);
+                __trap();
+            }
         __threadfence_system();
     }
     __syncthreads();
@@ -113,7 +118,7 @@ static __global__ void infiniband_allgather_post_kernel_(infiniband_links_view_t
     infiniband_post_write(link.queue, nullptr, link.local_access_key,
                           link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
                           link.remote_access_key, sizeof(u32_t), infiniband_signaling_t::signaled_k, &flag_value);
-    infiniband_drain_one(link.completion);
+    infiniband_drain_one(link.completion, link.wait_nanoseconds);
 }
 
 /**
@@ -142,7 +147,7 @@ static __global__ void infiniband_alltoall_post_kernel_(infiniband_links_view_t 
     infiniband_post_write(link.queue, nullptr, link.local_access_key,
                           link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
                           link.remote_access_key, sizeof(u32_t), infiniband_signaling_t::signaled_k, &flag_value);
-    infiniband_drain_one(link.completion);
+    infiniband_drain_one(link.completion, link.wait_nanoseconds);
 }
 
 expected<infiniband_nic_t> infiniband_nic_t::make(u32_t local_gpu_index, u8_t infiniband_port) noexcept {
@@ -537,6 +542,7 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
         link.remote_flag_offset = layout.flags_offset() + round * 2u * sizeof(u32_t);
         link.arrival_flag = typed_span<infiniband_round_t>(member.heap_.span()).data() +
                             link.remote_flag_offset / sizeof(infiniband_round_t);
+        link.wait_nanoseconds = static_cast<u64_t>(timeout_seconds * 1e9);
         host_links[round] = link;
     }
     if (CUresult result = cuMemcpyHtoD(device_address(member.links_.data()), host_links.view().data(),

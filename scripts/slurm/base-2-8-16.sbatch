@@ -14,8 +14,11 @@
 #   UFORM_OBJECTIVE        — masked, contrastive or joint; masked by default
 #   UFORM_STEPS            — optimizer steps, 200 by default
 #   UFORM_CHECKPOINT_EVERY — steps between checkpoints beside the final one, 100 by default
+#   UFORM_ROWS             — rows per GPU, left to the measuring pass when unset
+#   UFORM_RESUME           — a checkpoint on the shared filesystem to resume from
+#   UFORM_NVDEC_ENGINES    — the NVDEC engines per GPU, which a video mixture needs
 #
-# The rows per GPU are left to the measuring pass, which takes the most every GPU of both nodes holds.
+# Unset rows are left to the measuring pass, which takes the most every GPU of both nodes holds.
 #
 #SBATCH --job-name=uform-base-2-8-16
 #SBATCH --nodes=2
@@ -37,8 +40,18 @@ fi
 export UFORM_HOST_DOMAIN_COUNT="${SLURM_JOB_NUM_NODES:-2}"
 export UFORM_GPUS_PER_MULTIMEM_DOMAIN="${SLURM_GPUS_ON_NODE:-8}"
 export UFORM_JOB_ID="${UFORM_JOB_ID:-${SLURM_JOB_ID:-$(date +%s)}}"
-export UFORM_EXCHANGE_DIR="${UFORM_EXCHANGE_DIR:-${SCRATCH:-/tmp}/uform-exchange}"
+# Both nodes rendezvous through files, so the directory must be shared; a node-local /tmp never meets.
+if [[ -z "${UFORM_EXCHANGE_DIR:-}" && -z "${SCRATCH:-}" ]]; then
+    echo "uform-base-2-8-16: set UFORM_EXCHANGE_DIR or SCRATCH to a directory both nodes share" >&2
+    exit 1
+fi
+export UFORM_EXCHANGE_DIR="${UFORM_EXCHANGE_DIR:-${SCRATCH}/uform-exchange}"
 mkdir -p "${UFORM_EXCHANGE_DIR}"
+
+optional=()
+if [[ -n "${UFORM_ROWS:-}" ]]; then optional+=(--rows "${UFORM_ROWS}"); fi
+if [[ -n "${UFORM_RESUME:-}" ]]; then optional+=(--resume "${UFORM_RESUME}"); fi
+if [[ -n "${UFORM_NVDEC_ENGINES:-}" ]]; then optional+=(--nvdec-engines "${UFORM_NVDEC_ENGINES}"); fi
 
 mixture="${UFORM_MIXTURE:-scripts/data/tiny_text.json}"
 objective="${UFORM_OBJECTIVE:-masked}"
@@ -59,4 +72,5 @@ srun --ntasks="${UFORM_HOST_DOMAIN_COUNT}" --ntasks-per-node=1 --gpu-bind=none \
     --steps "${UFORM_STEPS:-200}" \
     --checkpoint "${UFORM_CHECKPOINT:-base-2-8-16-${objective}-${UFORM_JOB_ID}.safetensors}" \
     --checkpoint-every "${UFORM_CHECKPOINT_EVERY:-100}" \
-    --report-every "${UFORM_REPORT_EVERY:-10}"
+    --report-every "${UFORM_REPORT_EVERY:-10}" \
+    "${optional[@]}"

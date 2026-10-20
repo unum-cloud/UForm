@@ -487,7 +487,7 @@ static void run_distributed_case(test_suite_t &suite) {
     if (!topology) return suite.check(false, "single-domain bootstrap: {}", topology.description_);
     auto domain = multimem_domain_t::make(
         topology.value_, {devices, gpus_k},
-        distributed_contrastive_segments_t::payload_scalars_needed(config, topology.value_.shape), streams);
+        distributed_contrastive_segments_t::payload_scalars_needed(config, topology.value_.shape), streams, 120.0);
     if (!domain) return suite.check(false, "multimem domain make: {}", domain.description_);
     auto colocated = colocated_domain_t::make(topology.value_);
     if (!colocated) return suite.check(false, "colocated domain make: {}", colocated.description_);
@@ -606,7 +606,7 @@ static void run_cross_domain_case(test_suite_t &suite) {
     // The composition roots, in main-order: the ONE multimem domain, the ONE colocated domain.
     auto multimem = multimem_domain_t::make(
         topology, {devices.data(), gpus},
-        distributed_contrastive_segments_t::payload_scalars_needed(config, topology.shape), streams);
+        distributed_contrastive_segments_t::payload_scalars_needed(config, topology.shape), streams, 120.0);
     if (!multimem) return suite.check(false, "multimem domain make: {}", multimem.description_);
     auto colocated = colocated_domain_t::make(topology);
     if (!colocated) return suite.check(false, "colocated domain make: {}", colocated.description_);

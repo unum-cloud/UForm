@@ -329,6 +329,9 @@ struct multimem_member_t {
     /** The domain's member count — the barrier's arrival target and the peer fold's extent. */
     u32_t member_count = 0;
 
+    /** How long the barrier spins for the other members before it traps. */
+    u64_t wait_nanoseconds = 0;
+
 #if defined(__CUDACC__)
 
     /** Member @p member 's payload replica base. */
@@ -379,8 +382,8 @@ struct multimem_window_t {
  *  The arrival flag is shared by every consumer, so all ranks must issue their @ref barrier calls in
  *  the @b same order across consumers within a step — the natural property of an SPMD step program.
  *  Each barrier is its own round (the kernel self-advances the member's round scalar), so consumers
- *  never pair or count rounds. Violating the order is a hang (arrivals are monotonic, a mis-ordered
- *  barrier waits forever), never a silent corruption.
+ *  never pair or count rounds. Violating the order traps once a mis-ordered barrier outwaits the
+ *  domain's timeout, never a silent corruption.
  *
  *  Falls back to the peer-read tier when multicast is unsupported or the switch kernels do not load
  *  — same API, same determinism, the reduce just walks members serially. @ref tier() names which
@@ -423,11 +426,13 @@ struct multimem_domain_t {
      *  @param[in] local_devices The device ordinals this process drives — the slices it creates and binds.
      *  @param[in] payload_scalars Float32 payload scalars per replica, sized for every consumer's window.
      *  @param[in] local_streams One stream per local device; @c local_streams[0] carries the host staging.
+     *  @param[in] timeout_seconds Deadline on the rendezvous and on every later barrier's spin.
      */
     [[nodiscard]] static expected<multimem_domain_t> make(mesh_topology_t &topology,
                                                           std::span<i32_t const> local_devices,
                                                           std::size_t payload_scalars,
-                                                          std::span<gpu_stream_t> local_streams) noexcept;
+                                                          std::span<gpu_stream_t> local_streams,
+                                                          f64_t timeout_seconds) noexcept;
 
     /** The reduction tier this domain runs — see @ref multimem_tier_t . */
     [[nodiscard]] multimem_tier_t tier() const noexcept { return tier_.tier; }
@@ -495,6 +500,7 @@ struct multimem_domain_t {
         addresses.round = addresses.replica_flags + member_index * addresses.replica_stride_words + 1u;
         addresses.member_index = static_cast<u32_t>(member_index);
         addresses.member_count = static_cast<u32_t>(member_count());
+        addresses.wait_nanoseconds = wait_nanoseconds_;
         return addresses;
     }
 
@@ -525,6 +531,7 @@ struct multimem_domain_t {
         std::swap(payload_scalars_, other.payload_scalars_);
         std::swap(reserved_scalars_, other.reserved_scalars_);
         std::swap(member_offset_, other.member_offset_);
+        std::swap(wait_nanoseconds_, other.wait_nanoseconds_);
     }
 
     /** Reverse the multicast machinery; the symmetric arena member tears itself down after. This
@@ -567,6 +574,9 @@ struct multimem_domain_t {
 
     /** This process's first domain member — 0 iff it is the domain lead. */
     u32_t member_offset_ = 0;
+
+    /** How long a barrier spins for the other members before it traps, from the timeout. */
+    u64_t wait_nanoseconds_ = 0;
 };
 
 } // namespace unum::uform::core

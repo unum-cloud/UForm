@@ -305,6 +305,9 @@ struct infiniband_link_t {
     /** This rank's monotonic even-step arrival flag (device VRAM) the waiting kernel
      *  acquire-spins on; the odd-step twin is the next @c u32_t . */
     infiniband_round_t *arrival_flag = nullptr;
+
+    /** How long the flag wait and the completion drain spin before they trap. */
+    u64_t wait_nanoseconds = 0;
 };
 
 #if defined(UFORM_WITH_INFINIBAND)
@@ -968,12 +971,13 @@ __device__ inline void infiniband_post_write(infiniband_queue_handles_t handles,
 /**
  *  @brief Reap exactly @b one signaled send completion entirely from device code — the GDAKI drain.
  *
- *  Acquire-spins on the consumer cell's owner bit until the NIC flips it to this pass's polarity, traps
- *  loudly on a requester error, then bumps the consumer index and publishes it to the set-consumer-index
- *  doorbell so the small ring never fills across replays. Call from @b one thread; bound every signaled
- *  post with one drain.
+ *  Acquire-spins on the consumer cell's owner bit until the NIC flips it to this pass's polarity,
+ *  traps loudly on a requester error or once the spin outlasts @p wait_nanoseconds , then bumps the
+ *  consumer index and publishes it to the set-consumer-index doorbell so the small ring never fills
+ *  across replays. Call from @b one thread; bound every signaled post with one drain.
  */
-__device__ inline void infiniband_drain_one(infiniband_completion_handles_t completion) noexcept {
+__device__ inline void infiniband_drain_one(infiniband_completion_handles_t completion,
+                                            u64_t wait_nanoseconds) noexcept {
     u32_t const consumer_index = *completion.consumer_index;
     u32_t const cell = consumer_index & (completion.entry_count - 1u);
     std::byte *cell_bytes = completion.ring.data() + static_cast<std::size_t>(cell) * completion.entry_size;
@@ -981,7 +985,13 @@ __device__ inline void infiniband_drain_one(infiniband_completion_handles_t comp
     u32_t const expected_owner = (completion.initial_owner ^ ((consumer_index >> completion.entry_log_count) & 1u)) &
                                  1u;
 
+    u64_t const deadline = global_nanoseconds() + wait_nanoseconds;
     while (true) {
+        if (global_nanoseconds() > deadline) {
+            std::printf("uform: completion queue %u waited past its deadline at consumer index %u\n",
+                        completion.completion_queue_number, consumer_index);
+            __trap();
+        }
         u8_t const op_own = infiniband_load_acquire_u8(&entry->op_own);
         if ((static_cast<u32_t>(op_own) & mlx5_completion_owner_mask_k) != expected_owner) continue; // not yet ours
         u32_t const opcode = static_cast<u32_t>(op_own) >> 4;
@@ -1287,7 +1297,8 @@ struct colocated_domain_t {
      *      allocate from it (its chunks are GPUDirect-RDMA-capable by construction).
      *  @param[inout] stream The member's lead stream; the round scalar is seeded on it at setup.
      *  @param[in] layout The handle's heap shape — payload and landing bytes; the rounds are derived here.
-     *  @param[in] timeout_seconds Deadline on the coordinate and armed-peer rendezvous.
+     *  @param[in] timeout_seconds Deadline on the coordinate and armed-peer rendezvous, and on
+     *      every device-side flag wait and completion drain of the wired rounds.
      */
     [[nodiscard]] expected<infiniband_reach_t> reach_(u32_t member_index, gpu_arena_t &arena, gpu_stream_t &stream,
                                                       infiniband_reach_t::heap_layout_t layout,
@@ -1313,8 +1324,7 @@ struct infiniband_all_reduce {
      *  endpoint per recursive-doubling round — a single-domain world gets the zero-round identity. */
     [[nodiscard]] static expected<infiniband_all_reduce> make(colocated_domain_t &domain, u32_t member_index,
                                                               gpu_arena_t &arena, std::size_t scalars,
-                                                              gpu_stream_t &stream,
-                                                              f64_t timeout_seconds = 120.0) noexcept {
+                                                              gpu_stream_t &stream, f64_t timeout_seconds) noexcept {
         using result_t = expected<infiniband_all_reduce>;
         infiniband_reach_t::heap_layout_t layout;
         layout.payload_bytes = scalars * sizeof(value_type_);
@@ -1357,8 +1367,7 @@ struct infiniband_all_gather {
      *  landing (blocks gather in place) — a single-domain world gets the zero-round identity. */
     [[nodiscard]] static expected<infiniband_all_gather> make(colocated_domain_t &domain, u32_t member_index,
                                                               gpu_arena_t &arena, std::size_t block_scalars,
-                                                              gpu_stream_t &stream,
-                                                              f64_t timeout_seconds = 120.0) noexcept {
+                                                              gpu_stream_t &stream, f64_t timeout_seconds) noexcept {
         using result_t = expected<infiniband_all_gather>;
         infiniband_reach_t::heap_layout_t layout;
         layout.payload_bytes = static_cast<std::size_t>(domain.multimem_domain_count()) * block_scalars *
@@ -1404,8 +1413,7 @@ struct infiniband_all_to_all {
      *  needs the D-1 links (or a multi-hop schedule) the round wiring does not lay down. */
     [[nodiscard]] static expected<infiniband_all_to_all> make(colocated_domain_t &domain, u32_t member_index,
                                                               gpu_arena_t &arena, std::size_t block_scalars,
-                                                              gpu_stream_t &stream,
-                                                              f64_t timeout_seconds = 120.0) noexcept {
+                                                              gpu_stream_t &stream, f64_t timeout_seconds) noexcept {
         using result_t = expected<infiniband_all_to_all>;
         u32_t const domains = domain.multimem_domain_count();
         if (domains > 2u)
@@ -1499,7 +1507,7 @@ template <typename value_type_>
 struct infiniband_all_reduce {
     using value_type = value_type_;
     [[nodiscard]] static expected<infiniband_all_reduce> make(colocated_domain_t &, u32_t, gpu_arena_t &, std::size_t,
-                                                              gpu_stream_t &, f64_t = 120.0) noexcept {
+                                                              gpu_stream_t &, f64_t) noexcept {
         return expected<infiniband_all_reduce> {infiniband_all_reduce {}};
     }
     [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept { return {}; }
@@ -1511,7 +1519,7 @@ template <typename value_type_>
 struct infiniband_all_gather {
     using value_type = value_type_;
     [[nodiscard]] static expected<infiniband_all_gather> make(colocated_domain_t &, u32_t, gpu_arena_t &, std::size_t,
-                                                              gpu_stream_t &, f64_t = 120.0) noexcept {
+                                                              gpu_stream_t &, f64_t) noexcept {
         return expected<infiniband_all_gather> {infiniband_all_gather {}};
     }
     [[nodiscard]] nk::tensor_span<value_type_, 1> payload() noexcept { return {}; }
@@ -1522,7 +1530,7 @@ template <typename value_type_>
 struct infiniband_all_to_all {
     using value_type = value_type_;
     [[nodiscard]] static expected<infiniband_all_to_all> make(colocated_domain_t &, u32_t, gpu_arena_t &, std::size_t,
-                                                              gpu_stream_t &, f64_t = 120.0) noexcept {
+                                                              gpu_stream_t &, f64_t) noexcept {
         return expected<infiniband_all_to_all> {infiniband_all_to_all {}};
     }
     [[nodiscard]] nk::tensor_span<value_type_, 1> send_block(u32_t) noexcept { return {}; }

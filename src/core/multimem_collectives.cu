@@ -42,6 +42,8 @@ static bool parse_fabric_handle_(sz::string_view_t token, CUmemFabricHandle &han
  *      adds into every member's counter through the symmetric range, then spins on its own, and
  *      self-advances its round.
  *
+ *  Traps once the spin outlasts @c member.wait_nanoseconds .
+ *
  *  __grid_size__ @c [1,1,1] , one warp; no dynamic shared memory.
  */
 static __global__ void multimem_barrier_peer_kernel_(multimem_member_t member) {
@@ -51,9 +53,12 @@ static __global__ void multimem_barrier_peer_kernel_(multimem_member_t member) {
         u32_t *flag = member.peer_flag(peer);
         asm volatile("red.release.sys.global.add.u32 [%0], %1;" : : "l"(flag), "r"(1u) : "memory");
     }
-    while (multimem_load_acquire_(member.own_flag()) < target) {
-        // Spin until every member's arrival of this round reached our replica.
-    }
+    u64_t const deadline = global_nanoseconds() + member.wait_nanoseconds;
+    while (multimem_load_acquire_(member.own_flag()) < target)
+        if (global_nanoseconds() > deadline) {
+            printf("uform: member %u waited past its deadline at barrier target %u\n", member.member_index, target);
+            __trap();
+        }
     __threadfence_system();
     *member.round = target; // Self-advance: only this member's own kernels ever read its round.
 }
@@ -284,8 +289,8 @@ expected_t gpu_symmetric_arena_t::adopt_peer(std::size_t member, CUmemFabricHand
 }
 
 expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, std::span<i32_t const> local_devices,
-                                                    std::size_t payload_scalars,
-                                                    std::span<gpu_stream_t> local_streams) noexcept {
+                                                    std::size_t payload_scalars, std::span<gpu_stream_t> local_streams,
+                                                    f64_t timeout_seconds) noexcept {
     using result_t = expected<multimem_domain_t>;
     std::size_t const local_count = local_devices.size();
     if (local_count == 0) return result_t::fail(status_t::invalid_input_k, "a domain needs local devices");
@@ -303,7 +308,6 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, s
     u32_t const host_domains_per_domain = member_count / gpus_per_host;
     u32_t const domain_first_host = topology.multimem_domain_index() * host_domains_per_domain;
     bool const is_lead = member_offset == 0;
-    f64_t const timeout_seconds = 120.0;
     u32_t const collective_id = topology.next_collective_id();
     sz::string_t slice_key, multicast_key, barrier_key;
     if (!format_into(slice_key, "multimem.{}.slice", collective_id) ||
@@ -321,6 +325,7 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, s
     multimem_domain_t domain;
     domain.payload_scalars_ = payload_scalars;
     domain.member_offset_ = member_offset;
+    domain.wait_nanoseconds_ = static_cast<u64_t>(timeout_seconds * 1e9);
     // Replica layout: [payload f32×N | flag u32 | round u32], regions cache-line aligned. Each member's
     // round scalar lives in its own replica, self-advanced by its barrier kernels.
     std::size_t const replica_bytes = domain.flag_offset_() + 2 * sizeof(u32_t);

@@ -24,10 +24,10 @@
  *        segments with M-RoPE coordinates on every axis against a Float64 host replay, the one
  *        check exact enough for the attention and rotary paths.
  *
- *  The forward quantizes its GEMM and attention operands to E4M3 and the backward runs in
- *  BFloat16, so a finite difference agrees with the analytic gradient to about one E4M3 spacing,
- *  not to Float32 precision; a wrong Jacobian term misses by tens of percent, and the block replay
- *  checks the attention path exactly.
+ *  The forward and the backward both round their activations to BFloat16, so a forward's loss
+ *  carries a few thousandths of a nat of rounding noise and a finite difference agrees with the
+ *  analytic gradient to a few percent, not to Float32 precision; a wrong Jacobian term misses by
+ *  tens of percent, and the block replay checks the attention path exactly.
  */
 #include <cmath>   // `std::fabs`, `std::sqrt`, `std::log`, `std::pow`, `std::frexp`, `std::ldexp`
 #include <cstdlib> // `::setenv`
@@ -80,9 +80,9 @@ struct device_t {
  *  it. */
 inline constexpr std::size_t case_arena_bytes_k = 1ull << 30;
 
-/** The relative error a finite difference may show against the analytic gradient: one E4M3
- *  spacing, as the forward quantizes its GEMM and attention operands to E4M3 while the backward
- *  runs in BFloat16. */
+/** The relative error a finite difference may show against the analytic gradient: the BFloat16
+ *  activations' loss noise over a quarter-nat step, with room left to catch a 15% Jacobian
+ *  error. */
 inline constexpr f64_t finite_difference_tolerance_k = 0x1.0p-4;
 
 /** A two-block, two-head tower over four rows of 64 columns, scoring the masked objective; @p omni
@@ -187,7 +187,7 @@ static void finite_differences(test_suite_t &suite, device_t &device, bool omni)
         // The head and pool weights outside the masked objective take no gradient and move no loss.
         if (largest == 0) continue;
         // A step that changes the loss by about 1/4 nats, at most a quarter of the matrix's RMS per
-        // scalar: a hundred times the E4M3 rounding noise of a forward, yet short of the curvature.
+        // scalar: a hundred times a forward's BFloat16 rounding noise, yet short of the curvature.
         f64_t const weight_rms = std::sqrt(dot(weights.view(), weights.view()) / static_cast<f64_t>(scalars));
         f64_t const step = std::min(largest / (8.0 * dot(gradient.view(), gradient.view())), weight_rms / 4.0);
         for (std::size_t index = 0; index != scalars; ++index)

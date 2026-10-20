@@ -125,16 +125,24 @@ using namespace unum::uform::train;
         envelope.fixed_bytes / mebibyte, envelope.row_bytes / mebibyte, envelope.margin_bytes / mebibyte,
         config.reservoir_fixed_bytes / mebibyte, config.reservoir_row_bytes / mebibyte,
         envelope.reserve_bytes / mebibyte);
+    fmt::println("uform_base: multimem tier {}", trainer.domain.description());
     if (!config.resume.empty()) {
         if (expected_t resumed = trainer.resume(config.resume); !resumed) return fail_out_(resumed.description_.view());
         fmt::println("uform_base: resumed from {} at step {}", config.resume, trainer.completed_steps);
     }
+    int stepped = 0;
     if (config.mixture.empty()) {
         synthetic_source_t synthetic;
-        return step_(trainer, config, synthetic);
+        stepped = step_(trainer, config, synthetic);
     }
-    if (expected_t made = dataset_source_t::make(datasets, trainer); !made) return fail_out_(made.description_.view());
-    return step_(trainer, config, datasets);
+    else if (expected_t made = dataset_source_t::make(datasets, trainer); !made)
+        return fail_out_(made.description_.view());
+    else stepped = step_(trainer, config, datasets);
+    // No host tears its queue pairs down while a peer still awaits its last acknowledgement.
+    if (stepped == 0)
+        if (expected_t finished = mesh.topology.barrier("finish", mesh.timeout_seconds); !finished)
+            return fail_out_(finished.description_.view());
+    return stepped;
 }
 
 int main(int argc, char **argv) {

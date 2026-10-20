@@ -37,7 +37,7 @@ static __device__ inline void multimem_red_add_release_(u32_t *multimem_address,
  *
  *  Monotonic — neither counter ever resets, so a captured step replays cleanly, and every round
  *  read and write stays on the member's own stream: no enqueue order can hand a barrier a stale
- *  round.
+ *  round. Traps once the spin outlasts @c member.wait_nanoseconds .
  *
  *  __grid_size__ @c [1,1,1] , one warp; no dynamic shared memory.
  */
@@ -45,9 +45,12 @@ extern "C" __global__ void multimem_barrier_switch_kernel_(multimem_member_t mem
     if (threadIdx.x != 0u) return;
     u32_t const target = *member.round + member.member_count;
     multimem_red_add_release_(member.multimem_flag, 1u);
-    while (multimem_load_acquire_(member.own_flag()) < target) {
-        // Spin until every member's arrival of this round reached our replica.
-    }
+    u64_t const deadline = global_nanoseconds() + member.wait_nanoseconds;
+    while (multimem_load_acquire_(member.own_flag()) < target)
+        if (global_nanoseconds() > deadline) {
+            printf("uform: member %u waited past its deadline at barrier target %u\n", member.member_index, target);
+            __trap();
+        }
     __threadfence_system();
     *member.round = target; // Self-advance: only this member's own kernels ever read its round.
 }

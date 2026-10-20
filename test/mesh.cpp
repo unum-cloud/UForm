@@ -5,8 +5,8 @@
  *  @brief Conformance test of the mesh bootstrap — the one job `mesh.hpp` exists for: minting each
  *      host_domain's facts and reconciling them over a shared filesystem into one agreed world.
  *
- *  Four cases, each proving an operation that must @b succeed — the integer accessors are
- *  one-line divisions and carry no test:
+ *  Five cases, the first four proving an operation that must @b succeed — the integer accessors
+ *  are one-line divisions and carry no test:
  *
  *      - @ref exchange_round_trips — the durable primitive every wiring phase reuses: `publish_text`
  *        writes atomically and `await_text` reads the bytes back verbatim. Hand-built topology, no GPU.
@@ -18,6 +18,9 @@
  *        assembles the world; a follower adopts the lead's manifest. Both are driven against a @b matching
  *        simulated peer planted with this box's real GPU identity, so agreement genuinely passes. Needs a
  *        visible GPU (bootstrap front-loads `discover_mesh_shape`); a box without one SKIPs.
+ *      - @ref barrier_traps_past_deadline — a domain barrier no other arrival reaches traps after
+ *        the domain's timeout rather than hanging. Needs a visible GPU and runs last, since the
+ *        trap poisons the context.
  *
  *  The genuine multi-node happy path is @ref run_cluster_exchange , driven by
  *  `scripts/slurm/test_mesh-4-8-16.sbatch`: every rank bootstraps for real and must assemble a @b byte-identical
@@ -39,6 +42,7 @@
 #include <cuda.h> // `cuInit`, `cuDeviceGet`, `cuDeviceGetName`
 
 #include "core/mesh.hpp"
+#include "core/multimem_collectives.cuh"
 #include "harness.hpp"
 
 using namespace unum::uform::core;
@@ -248,6 +252,42 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
     }
 }
 
+/** A barrier whose other arrivals never come traps once it outwaits the domain's timeout instead of
+ *  hanging. Member 0's round scalar is set one round ahead, so even a one-GPU domain waits for an
+ *  arrival no member will make. The trap poisons the context, so this case runs last. */
+static void barrier_traps_past_deadline(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
+    if (local_devices == 0) return suite.skip(no_cuda_device_k);
+    auto bootstrapped = mesh_topology_t::bootstrap(0, 1, local_devices, base.c_str(), "barrier_deadline", 10.0);
+    if (!bootstrapped) return suite.check(false, "single-box bootstrap: {}", bootstrapped.description_);
+    mesh_topology_t topology = std::move(bootstrapped.value_);
+    per_gpu_array<i32_t> devices;
+    per_gpu_array<gpu_stream_t> streams;
+    for (u32_t device = 0; device != local_devices; ++device) {
+        expected<gpu_stream_t> stream = gpu_stream_t::make(static_cast<i32_t>(device));
+        if (!stream) return suite.check(false, "stream on GPU {}: {}", device, stream.description_);
+        if (devices.push_back(static_cast<i32_t>(device)) != status_t::success_k ||
+            streams.push_back(std::move(stream.value_)) != status_t::success_k)
+            return suite.check(false, "member tables full");
+    }
+    f64_t const timeout_seconds = 1.0;
+    auto made = multimem_domain_t::make(topology, devices.view(), 1u, streams.span(), timeout_seconds);
+    if (!made) return suite.check(false, "multimem domain make: {}", made.description_);
+    multimem_domain_t domain = std::move(made.value_);
+
+    switch_to_gpu_t gpu_scope {streams[0]};
+    if (!gpu_scope.ok()) return suite.check(false, "context entry failed");
+    if (cuMemsetD32(device_address(domain.member(0).round), 1u, 1) != CUDA_SUCCESS)
+        return suite.check(false, "round scalar advance failed");
+    auto const started = std::chrono::steady_clock::now();
+    expected_t const launched = domain.barrier(0, streams[0]);
+    CUresult const drained = cuStreamSynchronize(streams[0]);
+    std::chrono::duration<f64_t> const waited = std::chrono::steady_clock::now() - started;
+    suite.check(static_cast<bool>(launched), "barrier launch: {}", launched.description_);
+    suite.check(drained != CUDA_SUCCESS, "the starved barrier should trap, not pass");
+    suite.check(waited.count() < 10.0 * timeout_seconds, "the trap should land near the {}s timeout, took {}s",
+                timeout_seconds, waited.count());
+}
+
 /** The cluster tier, activated by `$UFORM_HOST_DOMAIN_INDEX` and driven by `mesh-4-8-16.sbatch`:
  *  every rank bootstraps the world for real, then proves the assembled world table is byte-identical
  *  across ranks (round-trip fidelity + phase ordering) and the closing barrier completes. The world
@@ -310,6 +350,7 @@ int main(int, char **argv) {
     else {
         suite.run("single_box_world", single_box_world, base, local_devices);
         suite.run("world_reconciles", world_reconciles, base, local_devices);
+        suite.run("barrier_traps_past_deadline", barrier_traps_past_deadline, base, local_devices);
     }
 
     fs::remove_all(base, error);

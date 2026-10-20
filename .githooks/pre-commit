@@ -1019,11 +1019,17 @@ check_c_limit_macros() {
 # region C++ Surface and Containers
 
 # C stdio printing in C++ sources: the suites, benchmarks and tools print through fmt::, and the libraries never
-# print. The C tests under c/ keep their stdio; the dispatch below only routes C++ translation units here.
+# print. A `__global__` or `__device__` function has no fmt::, so its device printf stays. The C tests under c/
+# keep their stdio; the dispatch below only routes C++ translation units here.
 check_printf() {
     local prints
-    prints=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
-        grep -nE '\b(std::)?(f|s)?printf[[:space:]]*\(|\bputs[[:space:]]*\(' || true)
+    prints=$(blank_c_comments_preserving_columns < "$staged_blob" | awk '
+        NR == FNR { added[$1 + 0]; next }
+        # A definition opens at column zero, and its first line names the side it runs on.
+        /^[A-Za-z_[]/ { device = /__(global|device)__/ }
+        (FNR in added) && !device && /(^|[^A-Za-z0-9_])((f|s)?printf|puts)[[:space:]]*\(/ {
+            printf "line %d: %s\n", FNR, $0
+        }' "$staged_lines_path" - || true)
     [ -z "$prints" ] || fail "$prints" \
         "$file prints through the C stdio family - write fmt::println(\"{} rows\", count):"
 }

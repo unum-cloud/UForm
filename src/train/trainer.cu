@@ -181,7 +181,7 @@ struct footprint_t {
             return expected_t::fail(status_t::bad_alloc_k, "batch table full");
     }
     expected<multimodal_batch_mixer_t> mixer = multimodal_batch_mixer_t::make(
-        probe.domain, mesh.colocated, probe.arenas, config.batch, config.seed, probe.streams);
+        probe.domain, mesh.colocated, probe.arenas, config.batch, config.seed, probe.streams, mesh.timeout_seconds);
     if (!mixer) return expected_t::fail(std::move(mixer));
     for (std::size_t member = 0; member != devices.size(); ++member) {
         switch_to_gpu_t gpu_scope {probe.streams[member]};
@@ -191,7 +191,11 @@ struct footprint_t {
         footprints[member].device_bytes = free_bytes[member] - std::min(memory->free_bytes, free_bytes[member]);
         footprints[member].arena_bytes = probe.arenas[member].used(); // exact, where mapped() moves whole chunks
     }
-    return {};
+    // A host destroys its queue pairs only once every host drained its last acknowledgement.
+    sz::string_t tag;
+    if (!format_into(tag, "probe-{}", mesh.topology.next_collective_id()))
+        return expected_t::fail(status_t::bad_alloc_k, "barrier tag assembly failed");
+    return mesh.topology.barrier(tag.view(), mesh.timeout_seconds);
 }
 
 /** Agree on the fewest @p rows any process measured: the lead collects every peer's count and
@@ -409,15 +413,16 @@ struct footprint_t {
                                                                contrastive_config, topology.shape)
                                                          : 0u;
     std::size_t const mixer_scalars = multimodal_batch_mixer_t::payload_scalars_needed(config.batch, topology.shape);
-    expected<multimem_domain_t> domain = multimem_domain_t::make(
-        mesh.topology, placed.devices.view(), gradient_scalars + force_scalars + mixer_scalars, placed.streams);
+    expected<multimem_domain_t> domain = multimem_domain_t::make(mesh.topology, placed.devices.view(),
+                                                                 gradient_scalars + force_scalars + mixer_scalars,
+                                                                 placed.streams, mesh.timeout_seconds);
     if (!domain) return expected_t::fail(std::move(domain));
     placed.domain = std::move(domain.value_);
     {
         switch_to_gpu_t gpu_scope {placed.streams[0]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
         expected<infiniband_all_reduce<f32_t>> world_reduce = infiniband_all_reduce<f32_t>::make(
-            mesh.colocated, 0, placed.arenas[0], gradient_scalars, placed.streams[0]);
+            mesh.colocated, 0, placed.arenas[0], gradient_scalars, placed.streams[0], mesh.timeout_seconds);
         if (!world_reduce) return expected_t::fail(std::move(world_reduce));
         placed.world_reduce = std::move(world_reduce.value_);
     }
@@ -445,7 +450,7 @@ struct footprint_t {
                                           : u32r1_view_t {full_width, 1};
         expected<distributed_contrastive_segments_t> contrastive = distributed_contrastive_segments_t::make(
             placed.domain, mesh.colocated, placed.arenas, placed.streams, towers.view(), relations.view(),
-            forces.view(), contrastive_config, prefixes);
+            forces.view(), contrastive_config, prefixes, mesh.timeout_seconds);
         if (!contrastive) return expected_t::fail(std::move(contrastive));
         placed.contrastive = std::move(contrastive.value_);
         for (u32_t member = 0; member != gpus; ++member) {
@@ -781,7 +786,8 @@ expected_t items_source_t::make(items_source_t &placed, trainer_t &trainer) noex
             return expected_t::fail(status_t::bad_alloc_k, "batch table full");
     }
     expected<multimodal_batch_mixer_t> mixer = multimodal_batch_mixer_t::make(
-        trainer.domain, trainer.mesh->colocated, trainer.arenas, shape, config.seed, trainer.streams);
+        trainer.domain, trainer.mesh->colocated, trainer.arenas, shape, config.seed, trainer.streams,
+        trainer.mesh->timeout_seconds);
     if (!mixer) return expected_t::fail(std::move(mixer));
     placed.mixer_ = std::move(mixer.value_);
 

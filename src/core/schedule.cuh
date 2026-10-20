@@ -472,6 +472,13 @@ template <unsigned block_size_>
     return block_total;
 }
 
+/** The device-wide nanosecond clock every spin-wait measures its deadline against. */
+[[nodiscard]] __device__ inline u64_t global_nanoseconds() noexcept {
+    u64_t value;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(value));
+    return value;
+}
+
 #endif // defined(__CUDACC__)
 
 /** How a §10 model region runs: captured once into a @ref gpu_replay_graph_t and replayed every step

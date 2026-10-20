@@ -1,6 +1,6 @@
 # Verification
 
-Model checking for the mesh protocols: the shared-filesystem rendezvous, the multimem domain's counting barrier, the windows its consumers stage and read, and the InfiniBand recursive doubling.
+Model checking for the mesh protocols: the shared-filesystem rendezvous, the multimem domain's counting barrier, the windows its consumers stage and read, the InfiniBand recursive doubling, the trainer's step across two hosts, and the probes' queue-pair teardown.
 [Spin](https://spinroot.com) checks each protocol as a Promela model.
 These protocols are GPU flags, RDMA writes and files rather than C++ atomics, so no GenMC client reads the code itself.
 
@@ -30,3 +30,5 @@ Each finding is the `@verify` line that replays it, where the full counterexampl
 - The distributed contrastive loss crosses a barrier after its reduce reads its peers' windows, or a loss run twice with no optimizer step between restages a window a peer still reads; the mixer has no such barrier and relies on the optimizer's: [`window_reuse.pml`](window_reuse.pml).
 - Every member crosses every consumer's barrier, in one order, since the barrier counts arrivals and carries no label, and the arrival is a release reduction for the spin's acquire: [`multimem_barrier.pml`](multimem_barrier.pml).
 - The InfiniBand all-reduce lands into the landing of its step's parity, while the all-gather lands into its payload with no parity and needs a later exchange before its next step, which the trainer's force and gradient all-reduces give: [`gdaki_doubling.pml`](gdaki_doubling.pml).
+- Every peer reads the gateway's world mean after the optimizer's second barrier, and the mixer's barrier already orders the gateway's restage after those reads, which the first barrier alone must do in a step with no mixer and no contrasts: [`gateway_ordering.pml`](gateway_ordering.pml).
+- A host destroys a probe's queue pair only after a host barrier, since its NIC may acknowledge the partner's last write after the host saw it land, and the barrier suffices because every post kernel drains its own write's completion: [`probe_teardown.pml`](probe_teardown.pml).
