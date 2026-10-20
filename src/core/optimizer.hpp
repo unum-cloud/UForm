@@ -97,9 +97,9 @@ struct adafactor_state_t {
     std::size_t gradient_offset = 0;
 };
 
-/** One rank's Adafactor: the combined moments, masters, and per-state scale scalars as owned
- *  arena tensors, the state table resolved once at @ref make — a @ref step is a pure enqueue over
- *  the tower's gradient buffers (or a reduced world gradient the distributed sibling supplies). */
+/** One rank's Adafactor: the combined moments, masters, and per-row update energies as owned arena
+ *  tensors, the state table resolved once at @ref make — a @ref step is a pure enqueue over the
+ *  tower's gradient buffers (or a reduced world gradient the distributed sibling supplies). */
 struct adafactor_t {
 
     /** Resolve the weights table into combined-state offsets, allocate the state, zero the
@@ -164,8 +164,9 @@ struct adafactor_t {
     /** The vector weights' Float32 masters, back to back in state order. */
     f32r1_tensor_arena_t masters_ {};
 
-    /** @b [states,2] per-state (row-moment mean, clip scale) scalars the apply pass reads. */
-    f32r2_tensor_arena_t state_scales_ {};
+    /** Each state row's squared-update energy at its row-moment offset, which the apply pass folds
+     *  into the clip scale; the column entries stay unused. */
+    f32r1_tensor_arena_t row_energies_ {};
 };
 
 /** The world-wide optimizer: one @ref adafactor_t per rank plus the two-level gradient reduce

@@ -457,19 +457,17 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, en
         !tower.head_fc1_ || !tower.head_fc1_grad_ || !tower.head_fc2_ || !tower.head_fc2_grad_)
         return result_t::fail(status_t::bad_alloc_k, "head weights allocation failed (arena_used={})", arena.used());
 
-    // Forward stashes and the two inverse-rms stashes.
+    // Forward stashes and the head norm's inverse-rms stash.
     tower.entry_output_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
     tower.normalized_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
     tower.pooled_ = bf16r2_tensor_arena_t::uninitialized({segments, hidden}, bf16_alloc).value;
     tower.head_normalized_ = bf16r2_tensor_arena_t::uninitialized({segments, hidden}, bf16_alloc).value;
     tower.head_hidden_ = bf16r2_tensor_arena_t::uninitialized({segments, hidden}, bf16_alloc).value;
     tower.head_activated_ = bf16r2_tensor_arena_t::uninitialized({segments, hidden}, bf16_alloc).value;
-    tower.final_inverse_rms_ = f32r1_tensor_arena_t::uninitialized({tokens}, f32_alloc).value;
     tower.head_inverse_rms_ = f32r1_tensor_arena_t::uninitialized({segments}, f32_alloc).value;
     tower.coords_ = i16r2_tensor_arena_t::uninitialized({tokens, 3}, i16_alloc).value;
     if (!tower.entry_output_ || !tower.normalized_ || !tower.pooled_ || !tower.head_normalized_ ||
-        !tower.head_hidden_ || !tower.head_activated_ || !tower.final_inverse_rms_ || !tower.head_inverse_rms_ ||
-        !tower.coords_)
+        !tower.head_hidden_ || !tower.head_activated_ || !tower.head_inverse_rms_ || !tower.coords_)
         return result_t::fail(status_t::bad_alloc_k, "stashes allocation failed (arena_used={})", arena.used());
 
     // The activation and gradient ping-pong buffers.
@@ -866,7 +864,11 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const row_grid {static_cast<u32_t>(live_tokens), 1u, 1u};
     dim3 const segment_grid {static_cast<u32_t>(batch.live_segments()), 1u, 1u};
-    dim3 const channel_grid {static_cast<u32_t>(divide_round_up(hidden, kernel_block_size_default_k)), 1u, 1u};
+    dim3 const channel_grid {static_cast<u32_t>(divide_round_up(hidden, warp_size_k)), 1u, 1u};
+    std::size_t const token_bands = divide_round_up(live_tokens, std::size_t {kernel_block_size_default_k});
+    std::size_t const segment_bands = divide_round_up(segments, std::size_t {kernel_block_size_default_k});
+    f32r2_span_t const token_scale_grad_partials {scratch_->qkv_grad.data(), token_bands, hidden};
+    f32r2_span_t const segment_scale_grad_partials {scratch_->qkv_grad.data(), segment_bands, hidden};
     u32r1_view_t const segment_offsets = batch.segment_offsets.view();
     u32r1_view_t const segment_lengths = batch.segment_lengths.view();
     modality_view_t const segment_modality = batch.segment_modality.view();
@@ -904,12 +906,13 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
         if (staged) staged = weight_gradient(segment_grad_b_.view(), head_normalized_.view(), head_fc1_grad_.span());
         if (staged) staged = data_gradient(segment_grad_b_.view(), packed_head_fc1_transposed_);
         if (staged)
-            staged = launch_kernel(&rmsnorm_backward_kernel, segment_grid, block_shape, stream, pooled_.view(),
-                                   head_norm_scale_.view(), head_inverse_rms_.view(), segment_grad_a_.view(),
-                                   segment_grad_b_.span());
+            staged = launch_kernel(&rmsnorm_backward_kernel, dim3 {static_cast<u32_t>(segment_bands), 1u, 1u},
+                                   block_shape, stream, pooled_.view(), head_norm_scale_.view(),
+                                   head_inverse_rms_.view(), segment_grad_a_.view(), segment_grad_b_.span(),
+                                   segment_scale_grad_partials);
         if (staged)
-            staged = launch_kernel(&rmsnorm_scale_grad_kernel, channel_grid, block_shape, stream, pooled_.view(),
-                                   head_inverse_rms_.view(), segment_grad_a_.view(), head_norm_scale_grad_.span());
+            staged = launch_kernel(&rmsnorm_scale_grad_kernel, channel_grid, block_shape, stream,
+                                   f32r2_view_t {segment_scale_grad_partials}, head_norm_scale_grad_.span());
         if (!staged) return staged;
 
         // The pool backward leaves the Float32 d(normalized) of every live token row in token_grad_a_.
@@ -934,12 +937,12 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
 
     // Final-norm backward: the Float32 d(normalized) in token_grad_a_ → the Float32 d(stack output) into
     // token_grad_b_, plus the scale grad.
-    staged = launch_kernel(&rmscast_backward_kernel, row_grid, block_shape, stream, stack_output_,
-                           final_norm_scale_.view(), token_grad_a_.view(), f32r2_view_t {}, token_grad_b_.span(),
-                           final_inverse_rms_.span(), config_.block.rms_eps);
+    staged = launch_kernel(&rmscast_backward_kernel, dim3 {static_cast<u32_t>(token_bands), 1u, 1u}, block_shape,
+                           stream, stack_output_, final_norm_scale_.view(), token_grad_a_.view(), f32r2_view_t {},
+                           token_grad_b_.span(), token_scale_grad_partials, config_.block.rms_eps);
     if (staged)
-        staged = launch_kernel(&rmscast_scale_grad_kernel, channel_grid, block_shape, stream, stack_output_,
-                               final_inverse_rms_.view(), token_grad_a_.view(), final_norm_scale_grad_.span());
+        staged = launch_kernel(&rmsnorm_scale_grad_kernel, channel_grid, block_shape, stream,
+                               f32r2_view_t {token_scale_grad_partials}, final_norm_scale_grad_.span());
     if (!staged) return staged;
 
     // Blocks in reverse; the flowing gradient ping-pongs the two token-gradient buffers. `coords_` still

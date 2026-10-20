@@ -30,87 +30,96 @@ __global__ void uc::rmsnorm_forward_kernel(bf16r2_view_t input, bf16r1_view_t sc
                                                    __bfloat162float(scale[channel]));
 }
 
-/** Learnable RMSNorm backward for the row gradient — external linkage; see the header. */
+/** Learnable RMSNorm backward for the row gradient and the band's scale-gradient partial, with
+ *  external linkage; see the header. */
 __global__ void uc::rmsnorm_backward_kernel(bf16r2_view_t input, bf16r1_view_t scale, f32r1_view_t inverse_rms,
-                                            bf16r2_view_t output_grad, bf16r2_span_t input_grad) {
+                                            bf16r2_view_t output_grad, bf16r2_span_t input_grad,
+                                            f32r2_span_t scale_grad_partials) {
+    constexpr unsigned warps_k = kernel_block_size_default_k / warp_size_k;
     std::size_t const rows = input.extent(0);
     u32_t const width = static_cast<u32_t>(input.extent(1));
-    std::size_t const row = blockIdx.x;
-    if (row >= rows) return;
-    f32_t const inverse = inverse_rms[row];
-    f32_t thread_partial = 0.0f;
-    for (u32_t channel = threadIdx.x; channel < width; channel += blockDim.x) {
-        f32_t const normalized = __bfloat162float(input[row, channel]) * inverse;
-        f32_t const scaled_grad = __bfloat162float(output_grad[row, channel]) * __bfloat162float(scale[channel]);
-        thread_partial += scaled_grad * normalized;
+    unsigned const lane_index = threadIdx.x % warp_size_k, warp_index = threadIdx.x / warp_size_k;
+    std::size_t const band_first = static_cast<std::size_t>(blockIdx.x) * kernel_block_size_default_k;
+    std::size_t const band_end = std::min<std::size_t>(rows, band_first + kernel_block_size_default_k);
+    for (std::size_t row = band_first + warp_index; row < band_end; row += warps_k) {
+        f32_t const inverse = inverse_rms[row];
+        f32_t lane_partial = 0.0f;
+        for (u32_t channel = lane_index; channel < width; channel += warp_size_k)
+            lane_partial += __bfloat162float(output_grad[row, channel]) * __bfloat162float(scale[channel]) *
+                            __bfloat162float(input[row, channel]);
+        f32_t const projection = warp_reduce_broadcast(lane_partial) * inverse / static_cast<f32_t>(width);
+        for (u32_t channel = lane_index; channel < width; channel += warp_size_k) {
+            f32_t const normalized = __bfloat162float(input[row, channel]) * inverse;
+            f32_t const scaled_grad = __bfloat162float(output_grad[row, channel]) * __bfloat162float(scale[channel]);
+            input_grad[row, channel] = __float2bfloat16_rn((scaled_grad - normalized * projection) * inverse);
+        }
     }
-    f32_t const projection = block_reduce_broadcast<kernel_block_size_default_k>(thread_partial) /
-                             static_cast<f32_t>(width);
     for (u32_t channel = threadIdx.x; channel < width; channel += blockDim.x) {
-        f32_t const normalized = __bfloat162float(input[row, channel]) * inverse;
-        f32_t const scaled_grad = __bfloat162float(output_grad[row, channel]) * __bfloat162float(scale[channel]);
-        f32_t const row_grad = (scaled_grad - normalized * projection) * inverse;
-        input_grad[row, channel] = __float2bfloat16_rn(row_grad);
+        f32_t band_total = 0.0f;
+#pragma unroll 16 // keeps the band's loads in flight ahead of the ordered sum
+        for (std::size_t row = band_first; row < band_end; ++row)
+            band_total += __bfloat162float(output_grad[row, channel]) * __bfloat162float(input[row, channel]) *
+                          inverse_rms[row];
+        scale_grad_partials[blockIdx.x, channel] = band_total;
     }
 }
 
-/** Learnable RMSNorm backward for the scale gradient — external linkage; see the header. */
-__global__ void uc::rmsnorm_scale_grad_kernel(bf16r2_view_t input, f32r1_view_t inverse_rms, bf16r2_view_t output_grad,
-                                              bf16r1_span_t scale_grad) {
-    std::size_t const rows = input.extent(0);
-    u32_t const width = static_cast<u32_t>(input.extent(1));
-    u32_t const channel = blockIdx.x * blockDim.x + threadIdx.x;
-    if (channel >= width) return;
-    f32_t accumulated = 0.0f;
-    for (std::size_t row = 0; row != rows; ++row)
-        accumulated += __bfloat162float(output_grad[row, channel]) * __bfloat162float(input[row, channel]) *
-                       inverse_rms[row];
-    scale_grad[channel] = __float2bfloat16_rn(accumulated);
+/** Fold the per-band scale-gradient partials in band order — external linkage; see the header. */
+__global__ void uc::rmsnorm_scale_grad_kernel(f32r2_view_t scale_grad_partials, bf16r1_span_t scale_grad) {
+    constexpr unsigned warps_k = kernel_block_size_default_k / warp_size_k;
+    __shared__ f32_t warp_totals[warps_k][warp_size_k];
+    std::size_t const bands = scale_grad_partials.extent(0);
+    u32_t const width = static_cast<u32_t>(scale_grad_partials.extent(1));
+    unsigned const lane_index = threadIdx.x % warp_size_k, warp_index = threadIdx.x / warp_size_k;
+    u32_t const channel = blockIdx.x * warp_size_k + lane_index;
+    f32_t total = 0.0f;
+    if (channel < width)
+        for (std::size_t band = warp_index; band < bands; band += warps_k) total += scale_grad_partials[band, channel];
+    warp_totals[warp_index][lane_index] = total;
+    __syncthreads();
+    if (warp_index != 0u || channel >= width) return;
+    for (unsigned warp = 1; warp != warps_k; ++warp) total += warp_totals[warp][lane_index];
+    scale_grad[channel] = __float2bfloat16_rn(total);
 }
 
-/** The row-gradient backward of rmscast — external linkage; see the header. */
+/** The row-gradient backward of rmscast and the band's scale-gradient partial, with external
+ *  linkage; see the header. */
 __global__ void uc::rmscast_backward_kernel(f32r2_view_t input, bf16r1_view_t scale, f32r2_view_t output_grad,
                                             f32r2_view_t residual_grad, f32r2_span_t input_grad,
-                                            f32r1_span_t inverse_rms, f32_t epsilon) {
+                                            f32r2_span_t scale_grad_partials, f32_t epsilon) {
+    constexpr unsigned warps_k = kernel_block_size_default_k / warp_size_k;
+    __shared__ f32_t band_inverse_rms[kernel_block_size_default_k];
     std::size_t const rows = input.extent(0);
     u32_t const width = static_cast<u32_t>(input.extent(1));
-    std::size_t const row = blockIdx.x;
-    if (row >= rows) return;
-    f32_t squares_partial = 0.0f;
-    for (u32_t channel = threadIdx.x; channel < width; channel += blockDim.x) {
-        f32_t const value = input[row, channel];
-        squares_partial += value * value;
-    }
-    f32_t const sum_squares = block_reduce_broadcast<kernel_block_size_default_k>(squares_partial);
-    f32_t const inverse = rsqrtf(sum_squares / static_cast<f32_t>(width) + epsilon);
-    if (threadIdx.x == 0u) inverse_rms[row] = inverse;
-    f32_t thread_partial = 0.0f;
-    for (u32_t channel = threadIdx.x; channel < width; channel += blockDim.x) {
-        f32_t const normalized = input[row, channel] * inverse;
-        thread_partial += output_grad[row, channel] * __bfloat162float(scale[channel]) * normalized;
-    }
-    f32_t const projection = block_reduce_broadcast<kernel_block_size_default_k>(thread_partial) /
-                             static_cast<f32_t>(width);
+    unsigned const lane_index = threadIdx.x % warp_size_k, warp_index = threadIdx.x / warp_size_k;
+    std::size_t const band_first = static_cast<std::size_t>(blockIdx.x) * kernel_block_size_default_k;
+    std::size_t const band_end = std::min<std::size_t>(rows, band_first + kernel_block_size_default_k);
     bool const residual_present = !residual_grad.empty();
-    for (u32_t channel = threadIdx.x; channel < width; channel += blockDim.x) {
-        f32_t const normalized = input[row, channel] * inverse;
-        f32_t const scaled_grad = output_grad[row, channel] * __bfloat162float(scale[channel]);
-        f32_t const residual = residual_present ? residual_grad[row, channel] : 0.0f;
-        input_grad[row, channel] = residual + (scaled_grad - normalized * projection) * inverse;
+    for (std::size_t row = band_first + warp_index; row < band_end; row += warps_k) {
+        f32_t squares_partial = 0.0f, projection_partial = 0.0f;
+        for (u32_t channel = lane_index; channel < width; channel += warp_size_k) {
+            f32_t const value = input[row, channel];
+            squares_partial += value * value;
+            projection_partial += output_grad[row, channel] * __bfloat162float(scale[channel]) * value;
+        }
+        f32_t const inverse = rsqrtf(warp_reduce_broadcast(squares_partial) / static_cast<f32_t>(width) + epsilon);
+        f32_t const projection = warp_reduce_broadcast(projection_partial) * inverse / static_cast<f32_t>(width);
+        if (lane_index == 0u) band_inverse_rms[row - band_first] = inverse;
+        for (u32_t channel = lane_index; channel < width; channel += warp_size_k) {
+            f32_t const normalized = input[row, channel] * inverse;
+            f32_t const scaled_grad = output_grad[row, channel] * __bfloat162float(scale[channel]);
+            f32_t const residual = residual_present ? residual_grad[row, channel] : 0.0f;
+            input_grad[row, channel] = residual + (scaled_grad - normalized * projection) * inverse;
+        }
     }
-}
-
-/** The scale-gradient backward of rmscast — external linkage; see the header. */
-__global__ void uc::rmscast_scale_grad_kernel(f32r2_view_t input, f32r1_view_t inverse_rms, f32r2_view_t output_grad,
-                                              bf16r1_span_t scale_grad) {
-    std::size_t const rows = input.extent(0);
-    u32_t const width = static_cast<u32_t>(input.extent(1));
-    u32_t const channel = blockIdx.x * blockDim.x + threadIdx.x;
-    if (channel >= width) return;
-    f32_t accumulated = 0.0f;
-    for (std::size_t row = 0; row != rows; ++row)
-        accumulated += output_grad[row, channel] * input[row, channel] * inverse_rms[row];
-    scale_grad[channel] = __float2bfloat16_rn(accumulated);
+    __syncthreads();
+    for (u32_t channel = threadIdx.x; channel < width; channel += blockDim.x) {
+        f32_t band_total = 0.0f;
+#pragma unroll 16 // keeps the band's loads in flight ahead of the ordered sum
+        for (std::size_t row = band_first; row < band_end; ++row)
+            band_total += output_grad[row, channel] * input[row, channel] * band_inverse_rms[row - band_first];
+        scale_grad_partials[blockIdx.x, channel] = band_total;
+    }
 }
 
 /** Inverted keyed dropout, in place — external linkage; see the header. The @p salt selects the
@@ -166,57 +175,71 @@ expected<rope_angles_t> rope_angles_t::make(gpu_arena_t &arena, u32_t max_positi
  *      @c dx = (dy − x̂·mean(dy·x̂))·(1/rms) over each 128-channel head vector, recomputing @c 1/rms from the
  *      Float32 pre-norm product the forward's rmscast read.
  *
- *  __grid_size__ @c [ceil(tokens·vectors·32/block),1,1] with one @b warp per head vector, the Q heads then the
- *  K heads of each token; lanes stripe the 128 channels; no dynamic shared memory.
+ *  __grid_size__ @c [⌈tokens·vectors·32/block⌉,1,1] with one @b warp per head vector, the Q heads
+ *  then the K heads of each token; each lane holds its 4 channels of both operands in registers; no
+ *  dynamic shared memory.
  *
  *  @note @p grads is read-modified in place (the QK-norm backward rescales each head vector here).
  */
 static __global__ void transformer_qk_norm_backward_kernel_(bf16r2_span_t grads, f32r2_view_t prenorm,
                                                             u32_t vectors_per_token, f32_t epsilon) {
+    constexpr u32_t channels_per_lane_k = transformer_head_dim_k / warp_size_k;
     std::size_t const tokens = grads.extent(0);
     std::size_t const vectors = tokens * vectors_per_token;
     std::size_t const vector = (static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x) / warp_size_k;
     unsigned const lane_index = threadIdx.x % warp_size_k;
     if (vector >= vectors) return;
     std::size_t const token = vector / vectors_per_token;
-    u32_t const base_channel = static_cast<u32_t>(vector % vectors_per_token) * transformer_head_dim_k;
-    f32_t squares_partial = 0.0f;
-    for (u32_t channel = lane_index; channel < transformer_head_dim_k; channel += warp_size_k) {
-        f32_t const value = prenorm[token, base_channel + channel];
-        squares_partial += value * value;
+    u32_t const lane_channel = static_cast<u32_t>(vector % vectors_per_token) * transformer_head_dim_k + lane_index;
+    f32_t values[channels_per_lane_k], value_grads[channels_per_lane_k];
+    f32_t squares_partial = 0.0f, projection_partial = 0.0f;
+    for (u32_t step = 0; step != channels_per_lane_k; ++step) {
+        u32_t const channel = lane_channel + step * warp_size_k;
+        values[step] = prenorm[token, channel];
+        value_grads[step] = __bfloat162float(grads[token, channel]);
+        squares_partial += values[step] * values[step];
+        projection_partial += value_grads[step] * values[step];
     }
     f32_t const inverse = rsqrtf(warp_reduce_broadcast(squares_partial) / static_cast<f32_t>(transformer_head_dim_k) +
                                  epsilon);
-    f32_t lane_partial = 0.0f;
-    for (u32_t channel = lane_index; channel < transformer_head_dim_k; channel += warp_size_k) {
-        f32_t const normalized = prenorm[token, base_channel + channel] * inverse;
-        lane_partial += __bfloat162float(grads[token, base_channel + channel]) * normalized;
-    }
-    f32_t const projection = warp_reduce_broadcast(lane_partial) / static_cast<f32_t>(transformer_head_dim_k);
-    for (u32_t channel = lane_index; channel < transformer_head_dim_k; channel += warp_size_k) {
-        f32_t const normalized = prenorm[token, base_channel + channel] * inverse;
-        f32_t const grad = __bfloat162float(grads[token, base_channel + channel]);
-        grads[token, base_channel + channel] = __float2bfloat16_rn((grad - normalized * projection) * inverse);
+    f32_t const projection = warp_reduce_broadcast(projection_partial) * inverse /
+                             static_cast<f32_t>(transformer_head_dim_k);
+    for (u32_t step = 0; step != channels_per_lane_k; ++step) {
+        u32_t const channel = lane_channel + step * warp_size_k;
+        grads[token, channel] = __float2bfloat16_rn((value_grads[step] - values[step] * inverse * projection) *
+                                                    inverse);
     }
 }
 
 /**
- *  @brief Rotary rotation in place over one strided role slice (Q or K inside the packed QKV):
- *      the split-half channel pair @b (k,k+64) rotates by the axis angle its index selects — the
- *      NeoX convention the CPU inference kernels and the wider ecosystem share.
+ *  @brief Rotary rotation in place of every Q and K head vector inside the packed QKV: the
+ *      split-half channel pair @b (k,k+64) rotates by the axis angle its index selects — the NeoX
+ *      convention the CPU inference kernels and the wider ecosystem share.
  *
- *  Setting @p angle_sign to @c -1 gives the inverse rotation the backward applies to the post-RoPE gradients.
+ *  Setting @p angle_sign to @c -1 gives the inverse rotation the backward applies to the post-RoPE
+ *  gradients.
  *
- *  __grid_size__ @c [ceil(tokens·heads·64/block),1,1] grid-stride over channel pairs; no dynamic
- *  shared memory.
+ *  __grid_size__ @c [⌈tokens·64/block⌉,1,1] , one thread per token and pair, which computes its
+ *  angle once and rotates that pair in all @c 2·heads Q and K vectors; no dynamic shared memory.
  *
  *  @note @p values is read-modified in place (the rotation overwrites each channel pair here).
  */
 static __global__ void transformer_rope_kernel_(bf16r2_span_t values, rope_angles_view_t angles, i16r2_view_t coords,
-                                                u32_t heads, u32_t role_offset, f32_t angle_sign) {
-    rope_rotate(values, angles, coords, heads, transformer_head_dim_k, role_offset, angle_sign,
-                static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x,
-                static_cast<std::size_t>(gridDim.x) * blockDim.x, tower_scalars_t {});
+                                                u32_t heads, f32_t angle_sign) {
+    constexpr u32_t pairs_per_head_k = transformer_head_dim_k / 2u;
+    std::size_t const thread = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    std::size_t const token = thread / pairs_per_head_k;
+    u32_t const pair = static_cast<u32_t>(thread % pairs_per_head_k);
+    if (token >= values.extent(0)) return;
+    f32_t sine = 0, cosine = 0;
+    __sincosf(angle_sign * rope_angle(pair, coords, token, angles), &sine, &cosine);
+    for (u32_t vector = 0; vector != 2u * heads; ++vector) {
+        u32_t const channel = vector * transformer_head_dim_k + pair;
+        f32_t const real = __bfloat162float(values[token, channel]);
+        f32_t const imaginary = __bfloat162float(values[token, channel + pairs_per_head_k]);
+        values[token, channel] = __float2bfloat16_rn(real * cosine - imaginary * sine);
+        values[token, channel + pairs_per_head_k] = __float2bfloat16_rn(real * sine + imaginary * cosine);
+    }
 }
 
 /**
@@ -240,18 +263,14 @@ static __global__ void transformer_zero_gaps_kernel_(f32r2_span_t rows, u32r1_vi
  *  @brief SwiGLU activation backward over the Float32 gate|up product, writing the packed @b [tokens,2·ffn]
  *      BFloat16 gate|up gradient: @c d_up = dy·SiLU(gate) and @c d_gate = dy·up·σ(gate)·(1+gate·(1−σ(gate))) .
  *
- *  __grid_size__ grid-stride over @c tokens·ffn cells; no dynamic shared memory.
+ *  __grid_size__ @c [tokens,1,1] , one CTA per token whose threads stripe its features; no dynamic
+ *  shared memory.
  */
 static __global__ void transformer_swiglu_backward_kernel_(f32r2_view_t gate_up, f32r2_view_t silu_up_grad,
                                                            bf16r2_span_t gate_up_grad) {
-    std::size_t const tokens = silu_up_grad.extent(0);
+    std::size_t const token = blockIdx.x;
     u32_t const ffn = static_cast<u32_t>(silu_up_grad.extent(1));
-    std::size_t const total = tokens * ffn;
-    std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t cell = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; cell < total;
-         cell += stride) {
-        std::size_t const token = cell / ffn;
-        u32_t const feature = static_cast<u32_t>(cell % ffn);
+    for (u32_t feature = threadIdx.x; feature < ffn; feature += blockDim.x) {
         f32_t const gate = gate_up[token, feature];
         f32_t const up = gate_up[token, ffn + feature];
         f32_t const grad = silu_up_grad[token, feature];
@@ -393,7 +412,6 @@ expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
     transformer_scratch_t scratch;
     scratch.products = f32r1_tensor_arena_t::uninitialized({tokens * ffn}, f32_alloc).value;
     scratch.residual_grad = f32r2_tensor_arena_t::uninitialized({tokens, hidden}, f32_alloc).value;
-    scratch.inverse_rms = f32r1_tensor_arena_t::uninitialized({tokens}, f32_alloc).value;
     scratch.narrowed_grad = bf16r1_tensor_arena_t::uninitialized({tokens * widest}, bf16_alloc).value;
     scratch.transposed_grad = bf16r1_tensor_arena_t::uninitialized({widest * padded_tokens}, bf16_alloc).value;
     scratch.transposed_input = bf16r1_tensor_arena_t::uninitialized({inputs * padded_tokens}, bf16_alloc).value;
@@ -572,16 +590,11 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
                                       capabilities_, stream.numkong()),
             "QK-norm");
     if (!staged) return staged;
-    std::size_t const head_vectors = tokens * heads;
-    u32_t const query_offset = 0u, key_offset = hidden;
     f32_t const forward_sign = 1.0f;
-    std::size_t const rope_pairs = head_vectors * (transformer_head_dim_k >> 1u);
+    std::size_t const rope_pairs = tokens * (transformer_head_dim_k >> 1u);
     dim3 const rope_grid {static_cast<u32_t>(divide_round_up(rope_pairs, kernel_block_size_default_k)), 1u, 1u};
     staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, packed_qkv, angles, coords, heads,
-                           query_offset, forward_sign);
-    if (staged)
-        staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, packed_qkv, angles, coords,
-                               heads, key_offset, forward_sign);
+                           forward_sign);
 
     // Attention over the segments, stashing its Float32 output and log-sum-exp for the backward.
     if (staged) staged = pack_keys_values_(segment_offsets, segment_lengths, stream);
@@ -665,9 +678,11 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
                                 tokens, config_.max_tokens);
 
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
-    dim3 const token_grid {static_cast<u32_t>(tokens), 1u, 1u};
-    dim3 const channel_grid {static_cast<u32_t>(divide_round_up(hidden, kernel_block_size_default_k)), 1u, 1u};
+    std::size_t const bands = divide_round_up(tokens, std::size_t {kernel_block_size_default_k});
+    dim3 const band_grid {static_cast<u32_t>(bands), 1u, 1u};
+    dim3 const channel_grid {static_cast<u32_t>(divide_round_up(hidden, warp_size_k)), 1u, 1u};
     f32_t const epsilon = config_.rms_eps;
+    f32r2_span_t const scale_grad_partials {scratch.qkv_grad.data(), bands, hidden}; // dead outside the attention
     bf16r2_span_t const hidden_narrowed {scratch.narrowed_grad.data(), tokens, hidden};
     bf16r2_span_t const gate_up_grad {scratch.narrowed_grad.data(), tokens, 2 * ffn};
     f32r2_span_t const silu_up_grad {scratch.products.data(), tokens, ffn};
@@ -689,10 +704,9 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
     if (staged) staged = weight_gradient(hidden_narrowed, silu_up_.view(), down_weight_grad_.span());
     // The gate/up gradient overwrites the narrowed output gradient both down-projection products consumed.
     if (staged)
-        staged = launch_kernel(
-            &transformer_swiglu_backward_kernel_,
-            dim3 {static_cast<u32_t>(divide_round_up(tokens * ffn, kernel_block_size_default_k)), 1u, 1u}, block_shape,
-            stream, gate_up_products_.view(), f32r2_view_t {silu_up_grad}, gate_up_grad);
+        staged = launch_kernel(&transformer_swiglu_backward_kernel_, dim3 {static_cast<u32_t>(tokens), 1u, 1u},
+                               block_shape, stream, gate_up_products_.view(), f32r2_view_t {silu_up_grad},
+                               gate_up_grad);
     if (staged)
         staged = multiply_bf16(gate_up_grad, packed_weights_transposed_[product_gate_up_k].view(), hidden_products,
                                capabilities_, stream);
@@ -700,13 +714,12 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
 
     // Post-attention norm backward: the residual-stream gradient adds the output gradient.
     if (staged)
-        staged = launch_kernel(&rmscast_backward_kernel, token_grid, block_shape, stream, attn_residual_.view(),
+        staged = launch_kernel(&rmscast_backward_kernel, band_grid, block_shape, stream, attn_residual_.view(),
                                post_norm_scale_.view(), f32r2_view_t {hidden_products}, output_grad,
-                               scratch.residual_grad.span(), scratch.inverse_rms.span(), epsilon);
+                               scratch.residual_grad.span(), scale_grad_partials, epsilon);
     if (staged)
-        staged = launch_kernel(&rmscast_scale_grad_kernel, channel_grid, block_shape, stream, attn_residual_.view(),
-                               scratch.inverse_rms.view(), f32r2_view_t {hidden_products},
-                               post_norm_scale_grad_.span());
+        staged = launch_kernel(&rmsnorm_scale_grad_kernel, channel_grid, block_shape, stream,
+                               f32r2_view_t {scale_grad_partials}, post_norm_scale_grad_.span());
 
     // Out-projection backward, whose Float32 data gradient is the attention's output gradient.
     if (staged)
@@ -745,16 +758,12 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
     if (!staged) return staged;
     f32_t const inverse_sign = -1.0f;
     std::size_t const head_vectors = tokens * heads;
-    std::size_t const rope_pairs = head_vectors * (transformer_head_dim_k >> 1u);
+    std::size_t const rope_pairs = tokens * (transformer_head_dim_k >> 1u);
     dim3 const rope_grid {static_cast<u32_t>(divide_round_up(rope_pairs, kernel_block_size_default_k)), 1u, 1u};
     dim3 const vector_grid {
         static_cast<u32_t>(divide_round_up(2 * head_vectors * warp_size_k, kernel_block_size_default_k)), 1u, 1u};
-    u32_t const query_offset = 0u, key_offset = hidden;
     staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, scratch.packed_qkv.span(), angles,
-                           coords, heads, query_offset, inverse_sign);
-    if (staged)
-        staged = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, scratch.packed_qkv.span(),
-                               angles, coords, heads, key_offset, inverse_sign);
+                           coords, heads, inverse_sign);
     if (staged)
         staged = launch_kernel(&transformer_qk_norm_backward_kernel_, vector_grid, block_shape, stream,
                                scratch.packed_qkv.span(), qkv_products_.view(), 2u * heads, epsilon);
@@ -765,12 +774,12 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
                                hidden_products, capabilities_, stream);
     if (staged) staged = weight_gradient(scratch.packed_qkv.view(), normalized_.view(), qkv_weight_grad_.span());
     if (staged)
-        staged = launch_kernel(&rmscast_backward_kernel, token_grid, block_shape, stream, input_stash_.view(),
+        staged = launch_kernel(&rmscast_backward_kernel, band_grid, block_shape, stream, input_stash_.view(),
                                pre_norm_scale_.view(), f32r2_view_t {hidden_products}, scratch.residual_grad.view(),
-                               input_grad, scratch.inverse_rms.span(), epsilon);
+                               input_grad, scale_grad_partials, epsilon);
     if (staged)
-        staged = launch_kernel(&rmscast_scale_grad_kernel, channel_grid, block_shape, stream, input_stash_.view(),
-                               scratch.inverse_rms.view(), f32r2_view_t {hidden_products}, pre_norm_scale_grad_.span());
+        staged = launch_kernel(&rmsnorm_scale_grad_kernel, channel_grid, block_shape, stream,
+                               f32r2_view_t {scale_grad_partials}, pre_norm_scale_grad_.span());
     return staged;
 }
 
@@ -849,16 +858,11 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
     launched = normalize(qkv_.data(), nullptr, qkv_.data(), 2 * heads, transformer_head_dim_k,
                          3 * hidden * sizeof(bf16_t));
     if (!launched) return launched;
-    std::size_t const head_vectors = tokens * heads;
-    u32_t const query_offset = 0u, key_offset = hidden;
     f32_t const forward_sign = 1.0f;
-    std::size_t const rope_pairs = head_vectors * (transformer_head_dim_k >> 1u);
+    std::size_t const rope_pairs = tokens * (transformer_head_dim_k >> 1u);
     dim3 const rope_grid {static_cast<u32_t>(divide_round_up(rope_pairs, kernel_block_size_default_k)), 1u, 1u};
     launched = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, qkv_.span(), angles, coords,
-                             heads, query_offset, forward_sign);
-    if (launched)
-        launched = launch_kernel(&transformer_rope_kernel_, rope_grid, block_shape, stream, qkv_.span(), angles, coords,
-                                 heads, key_offset, forward_sign);
+                             heads, forward_sign);
     if (!launched) return launched;
 
     // QK-norm leaves Q and K at unit RMS per head and V stays well inside E4M3's range, so all three cast

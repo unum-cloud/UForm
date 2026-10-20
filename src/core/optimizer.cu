@@ -66,25 +66,30 @@ static __global__ void adafactor_moments_kernel_(adafactor_state_t state, f32r1_
     }
 }
 
-/**
- *  @brief One CTA: fold the state's row-moment mean and the update's squared RMS into the two per-state
- *      scalars the apply pass reads — the whole state walked serially per thread stripe, fixed order.
- *
- *  __grid_size__ @c [1,1,1] ; no dynamic shared memory.
- */
-static __global__ void adafactor_scale_kernel_(adafactor_state_t state, f32r1_span_t moments,
-                                               f32r1_view_t reduced_gradients, f32r2_span_t state_scales,
-                                               u32_t state_index, f32_t clip_threshold) {
+/** The mean of @p state 's row moments, folded by the whole CTA in a fixed order, so every CTA of
+ *  every pass that calls it gets the same bits. */
+[[nodiscard]] __device__ inline f32_t adafactor_row_mean_(adafactor_state_t const &state,
+                                                          f32r1_view_t moments) noexcept {
     u32_t const rows = static_cast<u32_t>(state.weights.extent(0));
-    u32_t const cols = static_cast<u32_t>(state.weights.extent(1));
     f32_t thread_row_sum = 0.0f;
     for (u32_t row = threadIdx.x; row < rows; row += blockDim.x)
         thread_row_sum += moments[state.row_moment_offset + row];
-    f32_t const row_mean = block_reduce_broadcast<kernel_block_size_default_k>(thread_row_sum) / f32_t(rows);
+    return block_reduce_broadcast<kernel_block_size_default_k>(thread_row_sum) / f32_t(rows);
+}
+
+/**
+ *  @brief The squared-update energy of one state row into @p row_energies at its row-moment offset,
+ *      the first level of the clip's RMS; the apply pass folds the rows in order.
+ *
+ *  __grid_size__ @c [rows,1,1] ; threads stripe the row's columns; no dynamic shared memory.
+ */
+static __global__ void adafactor_scale_kernel_(adafactor_state_t state, f32r1_view_t moments,
+                                               f32r1_view_t reduced_gradients, f32r1_span_t row_energies) {
+    u32_t const row = blockIdx.x;
+    u32_t const cols = static_cast<u32_t>(state.weights.extent(1));
+    f32_t const row_mean = adafactor_row_mean_(state, moments);
     f32_t thread_update_energy = 0.0f;
-    std::size_t const scalars = static_cast<std::size_t>(rows) * cols;
-    for (std::size_t index = threadIdx.x; index < scalars; index += blockDim.x) {
-        u32_t const row = static_cast<u32_t>(index / cols), column = static_cast<u32_t>(index % cols);
+    for (u32_t column = threadIdx.x; column < cols; column += blockDim.x) {
         // Divide before multiplying: a zero gradient leaves both moments at (1-beta2)*epsilon1 ~ 1e-33, and
         // the raw r*c product underflows Float32 to zero - rsqrtf(0) is Inf and 0*Inf poisons the whole
         // matrix with NaN. The paper's own normalization (r/mean(r))*c keeps every factor representable, so
@@ -95,12 +100,8 @@ static __global__ void adafactor_scale_kernel_(adafactor_state_t state, f32r1_sp
         f32_t const update = gradient * rsqrtf(variance);
         thread_update_energy += update * update;
     }
-    f32_t const update_rms = sqrtf(block_reduce_broadcast<kernel_block_size_default_k>(thread_update_energy) /
-                                   f32_t(scalars));
-    if (threadIdx.x == 0u) {
-        state_scales[state_index, 0] = row_mean;
-        state_scales[state_index, 1] = 1.0f / fmaxf(1.0f, update_rms / clip_threshold);
-    }
+    f32_t const update_energy = block_reduce_broadcast<kernel_block_size_default_k>(thread_update_energy);
+    if (threadIdx.x == 0u) row_energies[state.row_moment_offset + row] = update_energy;
 }
 
 /** Round the finite @p value into BFloat16 up in magnitude with the probability the dropped 16 bits
@@ -114,25 +115,31 @@ static __global__ void adafactor_scale_kernel_(adafactor_state_t state, f32r1_sp
 /**
  *  @brief Apply the clipped update @c W -= @c lr·scale·G/√v , through the Float32 master for vector
  *      weights (the norm scales) and straight into BFloat16 otherwise, rounded stochastically under
- *      @p rounding_key .
+ *      @p rounding_key . Every CTA folds the row-moment mean and the @p row_energies into the clip
+ *      scale in the same order, so all of them agree bitwise.
  *
  *  __grid_size__ grid-stride over the state's scalars; no dynamic shared memory.
  */
-static __global__ void adafactor_apply_kernel_(adafactor_state_t state, f32r1_span_t moments,
-                                               f32r1_view_t reduced_gradients, f32r2_view_t state_scales,
-                                               u32_t state_index, f32r1_span_t masters, f32_t learning_rate,
+static __global__ void adafactor_apply_kernel_(adafactor_state_t state, f32r1_view_t moments,
+                                               f32r1_view_t reduced_gradients, f32r1_view_t row_energies,
+                                               f32r1_span_t masters, f32_t learning_rate, f32_t clip_threshold,
                                                u64_t rounding_key) {
     u32_t const rows = static_cast<u32_t>(state.weights.extent(0));
     u32_t const cols = static_cast<u32_t>(state.weights.extent(1));
-    f32_t const row_mean = state_scales[state_index, 0];
-    f32_t const clip_scale = state_scales[state_index, 1];
     std::size_t const scalars = static_cast<std::size_t>(rows) * cols;
+    f32_t const row_mean = adafactor_row_mean_(state, moments);
+    f32_t thread_update_energy = 0.0f;
+    for (u32_t row = threadIdx.x; row < rows; row += blockDim.x)
+        thread_update_energy += row_energies[state.row_moment_offset + row];
+    f32_t const update_rms = std::sqrt(block_reduce_broadcast<kernel_block_size_default_k>(thread_update_energy) /
+                                       f32_t(scalars));
+    f32_t const clip_scale = 1.0f / std::fmax(1.0f, update_rms / clip_threshold);
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
     for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < scalars;
          index += stride) {
         u32_t const row = static_cast<u32_t>(index / cols), column = static_cast<u32_t>(index % cols);
-        // The same divide-before-multiply order as the scale pass - the two must agree bitwise, and the raw
-        // r*c product underflows to 0*Inf=NaN on zero-gradient matrices (see the scale kernel's note).
+        // The same divide-before-multiply order as the scale pass, as the raw r*c product
+        // underflows to 0*Inf=NaN on zero-gradient matrices; see the scale kernel's note.
         f32_t const variance = moments[state.row_moment_offset + row] / row_mean *
                                moments[state.column_moment_offset + column];
         f32_t const gradient = adafactor_gradient_(state, reduced_gradients, row, column);
@@ -258,8 +265,8 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
     optimizer.moments_ = f32r1_tensor_arena_t::uninitialized({moment_scalars}, f32_alloc).value;
     optimizer.masters_ =
         f32r1_tensor_arena_t::uninitialized({master_scalars != 0 ? master_scalars : 1}, f32_alloc).value;
-    optimizer.state_scales_ = f32r2_tensor_arena_t::uninitialized({count, 2}, f32_alloc).value;
-    if (!optimizer.moments_ || !optimizer.masters_ || !optimizer.state_scales_)
+    optimizer.row_energies_ = f32r1_tensor_arena_t::uninitialized({moment_scalars}, f32_alloc).value;
+    if (!optimizer.moments_ || !optimizer.masters_ || !optimizer.row_energies_)
         return result_t::fail(status_t::bad_alloc_k, "optimizer state allocation failed ({} moments)", moment_scalars);
     if (CUresult result = cuMemsetD8(device_address(optimizer.moments_.data()), 0, moment_scalars * sizeof(f32_t));
         result != CUDA_SUCCESS)
@@ -342,13 +349,12 @@ expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_vi
         expected_t staged = launch_kernel(&adafactor_moments_kernel_, dim3 {rows + column_blocks, 1u, 1u}, block_shape,
                                           stream, state, moments_.span(), reduced_gradients, decay, config_.epsilon1);
         if (staged)
-            staged = launch_kernel(&adafactor_scale_kernel_, dim3 {1u, 1u, 1u}, block_shape, stream, state,
-                                   moments_.span(), reduced_gradients, state_scales_.span(), static_cast<u32_t>(index),
-                                   config_.clip_threshold);
+            staged = launch_kernel(&adafactor_scale_kernel_, dim3 {rows, 1u, 1u}, block_shape, stream, state,
+                                   moments_.view(), reduced_gradients, row_energies_.span());
         if (staged)
             staged = launch_kernel(&adafactor_apply_kernel_, dim3 {grid_size_for(rows * cols), 1u, 1u}, block_shape,
-                                   stream, state, moments_.span(), reduced_gradients, state_scales_.view(),
-                                   static_cast<u32_t>(index), masters_.span(), learning_rate,
+                                   stream, state, moments_.view(), reduced_gradients, row_energies_.view(),
+                                   masters_.span(), learning_rate, config_.clip_threshold,
                                    splitmix64_hash_t {}(steps_, index));
         if (!staged) return staged;
     }

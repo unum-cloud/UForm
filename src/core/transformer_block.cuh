@@ -181,41 +181,38 @@ __global__ void rmsnorm_forward_kernel(bf16r2_view_t input, bf16r1_view_t scale,
 
 /**
  *  @brief Learnable RMSNorm backward for the row gradient:
- *      @c dx = (dy·γ − x̂·mean(dy·γ·x̂))·(1/rms) with @c x̂ = x·(1/rms) , written to @p input_grad .
+ *      @c dx = (dy·γ − x̂·mean(dy·γ·x̂))·(1/rms) with @c x̂ = x·(1/rms) , written to
+ *      @p input_grad , and the band's scale-gradient partial @c Σ_band dy·x̂ into row
+ *      @c blockIdx.x of @p scale_grad_partials .
  *
- *  __grid_size__ @c [rows,1,1] ; one CTA per row; no dynamic shared memory.
+ *  __grid_size__ @c [⌈rows/block⌉,1,1] ; each CTA owns a band of @c block rows, one warp per row,
+ *  then one thread per channel folds the band's rows in order; no dynamic shared memory.
  */
 __global__ void rmsnorm_backward_kernel(bf16r2_view_t input, bf16r1_view_t scale, f32r1_view_t inverse_rms,
-                                        bf16r2_view_t output_grad, bf16r2_span_t input_grad);
+                                        bf16r2_view_t output_grad, bf16r2_span_t input_grad,
+                                        f32r2_span_t scale_grad_partials);
 
 /**
- *  @brief Learnable RMSNorm backward for the scale gradient: @c dγ[c] = Σ_r dy[r,c]·x̂[r,c] — one CTA per
- *      channel chunk walking the rows serially, so the fold order is fixed and deterministic.
+ *  @brief The scale gradient of either norm, @c dγ[c] = Σ_band partials[band,c] , folded in a fixed
+ *      order over the @b [bands,width] partials the row backward wrote.
  *
- *  __grid_size__ @c [ceil(width/block),1,1] ; no dynamic shared memory.
+ *  __grid_size__ @c [⌈width/32⌉,1,1] ; warp @c w sums every eighth band from @c w , then the CTA
+ *  adds its warps in order; no dynamic shared memory.
  */
-__global__ void rmsnorm_scale_grad_kernel(bf16r2_view_t input, f32r1_view_t inverse_rms, bf16r2_view_t output_grad,
-                                          bf16r1_span_t scale_grad);
+__global__ void rmsnorm_scale_grad_kernel(f32r2_view_t scale_grad_partials, bf16r1_span_t scale_grad);
 
 /**
  *  @brief The row-gradient backward of NumKong's rmscast over the Float32 residual stream:
- *      @c dx = residual + (dy·γ − x̂·mean(dy·γ·x̂))·(1/rms) , recomputing @c 1/rms from @p input into
- *      @p inverse_rms for @ref rmscast_scale_grad_kernel ; an empty @p residual_grad adds nothing.
+ *      @c dx = residual + (dy·γ − x̂·mean(dy·γ·x̂))·(1/rms) , recomputing @c 1/rms from @p input ,
+ *      and the band's scale-gradient partial into row @c blockIdx.x of @p scale_grad_partials for
+ *      @ref rmsnorm_scale_grad_kernel ; an empty @p residual_grad adds nothing.
  *
- *  __grid_size__ @c [rows,1,1] ; one CTA per row; no dynamic shared memory.
+ *  __grid_size__ @c [⌈rows/block⌉,1,1] ; each CTA owns a band of @c block rows, one warp per row,
+ *  then one thread per channel folds the band's rows in order; no dynamic shared memory.
  */
 __global__ void rmscast_backward_kernel(f32r2_view_t input, bf16r1_view_t scale, f32r2_view_t output_grad,
-                                        f32r2_view_t residual_grad, f32r2_span_t input_grad, f32r1_span_t inverse_rms,
-                                        f32_t epsilon);
-
-/**
- *  @brief The scale-gradient backward of rmscast: @c dγ[c] = Σ_r dy[r,c]·x̂[r,c] , reading the @c 1/rms
- *      @ref rmscast_backward_kernel wrote, in the same fixed serial fold as @ref rmsnorm_scale_grad_kernel .
- *
- *  __grid_size__ @c [ceil(width/block),1,1] ; no dynamic shared memory.
- */
-__global__ void rmscast_scale_grad_kernel(f32r2_view_t input, f32r1_view_t inverse_rms, f32r2_view_t output_grad,
-                                          bf16r1_span_t scale_grad);
+                                        f32r2_view_t residual_grad, f32r2_span_t input_grad,
+                                        f32r2_span_t scale_grad_partials, f32_t epsilon);
 
 /**
  *  @brief Inverted dropout, in place and keyed — declared here with @b external linkage (like the
@@ -250,9 +247,6 @@ struct transformer_scratch_t {
     /** Float32 @b [tokens,hidden] the residual-stream gradient between the two norm backwards. */
     f32r2_tensor_arena_t residual_grad {};
 
-    /** @b [tokens] the per-token @c 1/rms each norm backward recomputes for its scale gradient. */
-    f32r1_tensor_arena_t inverse_rms {};
-
     /** BFloat16 @b [tokens·max(3·hidden,2·ffn)] each product's output gradient narrowed into the A
      *  operand of its data and weight gradients. */
     bf16r1_tensor_arena_t narrowed_grad {};
@@ -270,7 +264,9 @@ struct transformer_scratch_t {
     /** @b [tokens,3·hidden] the backward's Q|K|V gradient, narrowed from @ref qkv_grad . */
     bf16r2_tensor_arena_t packed_qkv {};
 
-    /** Float32 @b [tokens,3·hidden] the attention's dQ|dK|dV, zeroed before each backward. */
+    /** Float32 @b [tokens,3·hidden] the attention's dQ|dK|dV, zeroed before each backward, and
+     *  outside the attention backward the @b [⌈tokens/block⌉,hidden] partials of each norm's
+     *  scale gradient. */
     f32r2_tensor_arena_t qkv_grad {};
 
     /** The keys and values of the block in flight in NumKong's attention layout, packed by its

@@ -323,9 +323,8 @@ struct encoder_tower_bf16_t {
     bf16r2_tensor_arena_t entry_output_ {}, normalized_ {}, pooled_ {}, head_normalized_ {}, head_hidden_ {},
         head_activated_ {};
 
-    /** Float32 @c 1/rms of the final ( @b [tokens] ) and head ( @b [segments] ) norms: the head norm's
-     *  forward stashes its own, and the final norm's backward recomputes its own. */
-    f32r1_tensor_arena_t final_inverse_rms_ {}, head_inverse_rms_ {};
+    /** Float32 @b [segments] @c 1/rms of the head norm, stashed by its forward for the backward. */
+    f32r1_tensor_arena_t head_inverse_rms_ {};
 
     /** The block stack's @b [tokens,hidden] Float32 residual-stream ping-pong, the widened entry state
      *  entering at @c activations_b_ , and the borrowed last-layer view. */
