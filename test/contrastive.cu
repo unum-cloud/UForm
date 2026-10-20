@@ -432,41 +432,45 @@ static void run_sharded_oracle_case(test_suite_t &suite) {
     cuCtxPopCurrent(nullptr);
 }
 
-/** The distributed tier: 2 GPUs vs the single-GPU global reference on identical data. */
+/** The distributed tier: every visible GPU vs the single-GPU global reference on identical data. */
 static void run_distributed_case(test_suite_t &suite) {
-    if (!cuda_devices_visible_(2)) return suite.skip("needs two CUDA devices");
-    constexpr std::size_t gpus_k = 2;
+    int device_count = 0;
+    if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 2)
+        return suite.skip("needs two CUDA devices");
+    // The topology spans the whole box, so the domain takes every visible GPU and shares no handle.
+    std::size_t const gpus = std::min<std::size_t>(static_cast<std::size_t>(device_count), max_gpus_per_host_k);
     constexpr u32_t vertices_k = 8, hidden_k = 64;
     constexpr std::size_t scalars_k = std::size_t(vertices_k) * hidden_k;
-    i32_t devices[gpus_k] = {0, 1};
+    i32_t devices[max_gpus_per_host_k] = {};
+    for (std::size_t rank = 0; rank != gpus; ++rank) devices[rank] = static_cast<i32_t>(rank);
     u32_t prefix_dims[1] = {hidden_k};
 
-    // Global data on the BFloat16 grid: 16 vertices; rank r owns rows [8r, 8r+8).
-    std::vector<f64_t> global_tower(gpus_k * scalars_k);
+    // Global data on the BFloat16 grid: 8 vertices per rank; rank r owns rows [8r, 8r+8).
+    std::vector<f64_t> global_tower(gpus * scalars_k);
     std::vector<nk_bf16_t> staging(global_tower.size());
     for (std::size_t index = 0; index != global_tower.size(); ++index) global_tower[index] = hash_fill(index, 7);
     if (!narrow_to_bf16(global_tower, staging)) return suite.check(false, "tower rounding failed");
-    nk::tensor_span<nk_bf16_t, 2> const staging_rows {staging.data(), gpus_k, scalars_k};
+    nk::tensor_span<nk_bf16_t, 2> const staging_rows {staging.data(), gpus, scalars_k};
 
     per_gpu_array<gpu_stream_t> streams;
     per_gpu_array<gpu_arena_t> arenas;
-    contrastive_relations_t owners[gpus_k];
-    contrastive_relations_view_t relations[gpus_k];
-    bf16r2_view_t towers[gpus_k];
-    bf16r2_span_t grads[gpus_k];
+    contrastive_relations_t owners[max_gpus_per_host_k];
+    contrastive_relations_view_t relations[max_gpus_per_host_k];
+    bf16r2_view_t towers[max_gpus_per_host_k];
+    bf16r2_span_t grads[max_gpus_per_host_k];
     contrastive_segments_config_t config;
     config.from_vertices_per_gpu = vertices_k;
     config.hidden = hidden_k;
     config.to_vertices_per_gpu = vertices_k;
-    config.gpu_subgraphs_per_step = gpus_k;
+    config.gpu_subgraphs_per_step = gpus;
     // The composition-root order: topology → arenas (visibility declared) → streams → the ONE
     // multimem domain → the ONE colocated domain → the consumer, borrowing all of it.
-    for (std::size_t rank = 0; rank != gpus_k; ++rank) {
+    for (std::size_t rank = 0; rank != gpus; ++rank) {
         auto stream_made = gpu_stream_t::make(devices[rank]);
         if (!stream_made || streams.push_back(std::move(stream_made.value_)) != status_t::success_k)
             return suite.check(false, "distributed stream make");
         cuCtxPushCurrent(streams[rank].context());
-        auto arena_made = gpu_arena_t::make(devices[rank], 1ull << 30, {devices, gpus_k});
+        auto arena_made = gpu_arena_t::make(devices[rank], 1ull << 30, {devices, gpus});
         if (!arena_made || arenas.push_back(std::move(arena_made.value_)) != status_t::success_k)
             return suite.check(false, "distributed arena make");
         bf16_t *tower = arenas[rank].allocate_object<bf16_t>(scalars_k);
@@ -486,28 +490,28 @@ static void run_distributed_case(test_suite_t &suite) {
     auto topology = mesh_topology_t::bootstrap(0, 1, 0, "/tmp/uform_exchange_local", "distributed_case");
     if (!topology) return suite.check(false, "single-domain bootstrap: {}", topology.description_);
     auto domain = multimem_domain_t::make(
-        topology.value_, {devices, gpus_k},
+        topology.value_, {devices, gpus},
         distributed_contrastive_segments_t::payload_scalars_needed(config, topology.value_.shape), streams, 120.0);
     if (!domain) return suite.check(false, "multimem domain make: {}", domain.description_);
     auto colocated = colocated_domain_t::make(topology.value_);
     if (!colocated) return suite.check(false, "colocated domain make: {}", colocated.description_);
     auto distributed = distributed_contrastive_segments_t::make(domain.value_, colocated.value_, arenas, streams,
-                                                                {towers, gpus_k}, {relations, gpus_k}, {grads, gpus_k},
+                                                                {towers, gpus}, {relations, gpus}, {grads, gpus},
                                                                 config, {prefix_dims, 1});
     if (!distributed) return suite.check(false, "distributed make: {}", distributed.description_);
     auto ran = distributed.value_(contrastive_recipe_t {}, streams);
     if (!ran) return suite.check(false, "distributed run: {}", ran.description_);
-    for (std::size_t rank = 0; rank != gpus_k; ++rank) {
+    for (std::size_t rank = 0; rank != gpus; ++rank) {
         cuCtxPushCurrent(streams[rank].context());
         cuStreamSynchronize(streams[rank].get());
         cuCtxPopCurrent(nullptr);
     }
     f64_t distributed_loss = 0.0;
-    std::vector<f64_t> distributed_grad(gpus_k * scalars_k);
+    std::vector<f64_t> distributed_grad(gpus * scalars_k);
     cuCtxPushCurrent(streams[0].context());
-    f32_t summands[gpus_k] = {};
-    cuMemcpyDtoH(summands, device_address(distributed.value_.loss_outs().data()), sizeof(summands));
-    for (std::size_t rank = 0; rank != gpus_k; ++rank) {
+    f32_t summands[max_gpus_per_host_k] = {};
+    cuMemcpyDtoH(summands, device_address(distributed.value_.loss_outs().data()), gpus * sizeof(f32_t));
+    for (std::size_t rank = 0; rank != gpus; ++rank) {
         distributed_loss += summands[rank];
         cuMemcpyDtoH(staging_rows[rank, nk::slice].data(), device_address(grads[rank].data()),
                      scalars_k * sizeof(nk_bf16_t));
@@ -519,8 +523,8 @@ static void run_distributed_case(test_suite_t &suite) {
     host_relations_t host_relations;
     u32_t const prefixes[1] = {hidden_k};
     auto const oracle_of = [&](std::vector<f64_t> const &towers) noexcept {
-        f64r2_view_t const rows {towers.data(), gpus_k * vertices_k, hidden_k};
-        return host_loss(rows, rows, prefixes, host_relations, 1.0, 0.0, gpus_k * vertices_k);
+        f64r2_view_t const rows {towers.data(), gpus * vertices_k, hidden_k};
+        return host_loss(rows, rows, prefixes, host_relations, 1.0, 0.0, gpus * vertices_k);
     };
     f64_t const oracle = oracle_of(global_tower);
     f64_t const relative = std::fabs(distributed_loss - oracle) / std::max(std::fabs(oracle), 1.0e-9);

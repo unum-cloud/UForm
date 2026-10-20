@@ -585,12 +585,13 @@ static void mixer_routes_bags(test_suite_t &suite, u32_t rows, u32_t columns_per
 }
 
 int main(int, char **argv) {
-    test_suite_t suite = test_suite_t::make(argv[0]);
-    // The mixer runs eagerly (no captured graph) and its barrier is a device spin. Under CUDA's default lazy
-    // module loading, the first kernel launched after the barrier blocks on its module load while the barrier
-    // already spins — stranding the single host thread that still owes the other members' arrivals. Eager
-    // loading resolves every module up front, so the post-barrier launch never touches the loader.
+    // The mixer runs eagerly (no captured graph) and its barrier is a device spin. Under CUDA's
+    // default lazy module loading, the first kernel launched after the barrier blocks on its module
+    // load while the barrier already spins — stranding the single host thread that still owes the
+    // other members' arrivals. Eager loading resolves every module up front, so the post-barrier
+    // launch never touches the loader. The suite initializes CUDA, so the setting lands before it.
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
+    test_suite_t suite = test_suite_t::make(argv[0]);
     [[maybe_unused]] CUresult const initialized = cuInit(0); // a failure leaves no device to count, so each case skips
     suite.run("routes_segments", mixer_routes_segments);
     suite.run("routes_bags/roomy", mixer_routes_bags, 2u, 64u); // every bag lands whole

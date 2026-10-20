@@ -5,7 +5,8 @@
 # executable beside its shared-library closure.
 #
 # Every executable is copied together with its resolved shared-library closure — everything except the
-# glibc core, which must come from the running node's own loader. Paired with the executables' `$ORIGIN`
+# glibc core, which must come from the running node's own loader, and the NVIDIA driver's user-mode
+# libraries, which must match the node's kernel module. Paired with the executables' `$ORIGIN`
 # build RPATH, the tree runs from a shared filesystem on any node regardless of what that node has
 # installed natively. Unresolved dependencies fail the bundle loudly, naming each library.
 
@@ -23,6 +24,8 @@ if (NOT BUNDLE_EXECUTABLES OR NOT DEFINED BUNDLE_DIR)
     message(FATAL_ERROR "bundle_runtime.cmake needs -DBUNDLE_DIR=<dir> and the executables after `--`")
 endif ()
 
+# A tree reused across builds would keep libraries the closure no longer names.
+file(REMOVE_RECURSE "${BUNDLE_DIR}")
 file(MAKE_DIRECTORY "${BUNDLE_DIR}")
 
 file(
@@ -34,15 +37,20 @@ file(
     UNRESOLVED_DEPENDENCIES_VAR
     bundle_unresolved
     # The glibc core travels with the node's own loader — bundling it breaks more than it fixes.
+    # A driver library from the build machine fails `cuInit` against any other kernel module.
     PRE_EXCLUDE_REGEXES
     "^ld-linux"
     "^libc\\.so"
     "^libm\\.so"
+    "^libmvec\\.so"
     "^libdl\\.so"
     "^libpthread\\.so"
     "^librt\\.so"
     "^libresolv\\.so"
     "^libgcc_s\\.so"
+    "^libcuda\\.so"
+    "^libnvcuvid\\.so"
+    "^libnvidia-"
 )
 
 if (bundle_unresolved)
