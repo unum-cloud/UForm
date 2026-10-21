@@ -400,8 +400,7 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
                                    gpu_stream_t &stream) noexcept;
 
 /** Enqueue the Float32 product @c c=a·Bᵀ against @p packed_b , the pack of a @b [columns,depth] B with
- *  @c columns=c.extent(1) and @c depth=a.extent(1) . NumKong products have no split-K, so they replay
- *  bit-identically. */
+ *  @c columns=c.extent(1) and @c depth=a.extent(1) . NumKong products replay bit-identically. */
 [[nodiscard]] expected_t multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t c,
                                        nk_capability_t capabilities, gpu_stream_t &stream) noexcept;
 
@@ -415,6 +414,13 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
                                           b8r1_span_t packed_transposed, nk_capability_t capabilities,
                                           gpu_stream_t &stream) noexcept;
 
+/** The workspace bytes @ref weight_gradient_bf16 takes for a @b [outputs,inputs] weight over
+ *  @p tokens on @p capabilities , where NumKong splits the token depth into slices it sums in a
+ *  fixed order. */
+[[nodiscard]] expected<std::size_t> weight_gradient_workspace_bytes_bf16(std::size_t outputs, std::size_t inputs,
+                                                                         std::size_t tokens,
+                                                                         nk_capability_t capabilities) noexcept;
+
 /**
  *  @brief One weight gradient @c dW=dYᵀ·X : transposes @p output_grad and @p input with token rows padded to 8,
  *      since NumKong reads A row-major and packs B row-major, multiplies @c dYᵀ by the packed @c Xᵀ , and narrows
@@ -426,11 +432,13 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
  *      @c inputs·round_up(tokens,8) scalars of scratch.
  *  @param[in] packed_input At least @ref pack_bytes_bf16 of @c [inputs,tokens] .
  *  @param[in] product At least @c outputs·inputs Float32 scalars of scratch.
+ *  @param[in] workspace At least @ref weight_gradient_workspace_bytes_bf16 , or empty for the
+ *      unsplit product.
  *  @param[inout] stream The stream every launch enqueues on.
  */
 [[nodiscard]] expected_t weight_gradient_bf16(bf16r2_view_t output_grad, bf16r2_view_t input, bf16r2_span_t weight_grad,
                                               bf16r1_span_t transposed_grad, bf16r1_span_t transposed_input,
-                                              b8r1_span_t packed_input, f32r1_span_t product,
+                                              b8r1_span_t packed_input, f32r1_span_t product, b8r1_span_t workspace,
                                               nk_capability_t capabilities, gpu_stream_t &stream) noexcept;
 
 /**

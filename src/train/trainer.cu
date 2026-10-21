@@ -169,22 +169,29 @@ struct footprint_t {
     if (expected_t stepped = probe.step(source, optimizer_step_t {0}, report); !stepped) return stepped;
     if (expected_t drained = probe.synchronize(); !drained) return drained;
     // A data source fills every GPU's batches for the next steps and mixes them from the arenas
-    // after the trainer, so the probe allocates the same, and the fit carries them per row.
+    // after the trainer, so the probe allocates the same, and the fit carries them per row; a
+    // held-out source allocates its own.
+    u32_t const sources = config.eval_every && !config.eval_mixture.empty() ? 2u : 1u;
     array<multimodal_batch_on_gpu_t> filled;
-    for (std::size_t member = 0; member != devices.size(); ++member) {
-        switch_to_gpu_t gpu_scope {probe.streams[member]};
-        if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-        for (u32_t batch_index = 0; batch_index != config.batches_per_fill; ++batch_index) {
-            expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(
-                gpu_arena_alloc_t {probe.arenas[member]}, config.batch);
-            if (!batch) return expected_t::fail(std::move(batch));
-            if (filled.push_back(std::move(batch.value_)) != status_t::success_k)
-                return expected_t::fail(status_t::bad_alloc_k, "batch table allocation failed");
+    array<multimodal_batch_mixer_t> mixers;
+    for (u32_t source_index = 0; source_index != sources; ++source_index) {
+        for (std::size_t member = 0; member != devices.size(); ++member) {
+            switch_to_gpu_t gpu_scope {probe.streams[member]};
+            if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
+            for (u32_t batch_index = 0; batch_index != config.batches_per_fill; ++batch_index) {
+                expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(
+                    gpu_arena_alloc_t {probe.arenas[member]}, config.batch);
+                if (!batch) return expected_t::fail(std::move(batch));
+                if (filled.push_back(std::move(batch.value_)) != status_t::success_k)
+                    return expected_t::fail(status_t::bad_alloc_k, "batch table allocation failed");
+            }
         }
+        expected<multimodal_batch_mixer_t> mixer = multimodal_batch_mixer_t::make(
+            probe.domain, mesh.colocated, probe.arenas, config.batch, config.seed, probe.streams, mesh.timeout_seconds);
+        if (!mixer) return expected_t::fail(std::move(mixer));
+        if (mixers.push_back(std::move(mixer.value_)) != status_t::success_k)
+            return expected_t::fail(status_t::bad_alloc_k, "mixer table allocation failed");
     }
-    expected<multimodal_batch_mixer_t> mixer = multimodal_batch_mixer_t::make(
-        probe.domain, mesh.colocated, probe.arenas, config.batch, config.seed, probe.streams, mesh.timeout_seconds);
-    if (!mixer) return expected_t::fail(std::move(mixer));
     for (std::size_t member = 0; member != devices.size(); ++member) {
         switch_to_gpu_t gpu_scope {probe.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
@@ -256,6 +263,10 @@ struct footprint_t {
                                                             std::span<i32_t const> devices,
                                                             std::span<std::size_t const> free_bytes) noexcept {
     using result_t = expected<envelope_t>;
+    if (config.late_interacts() && config.batch.max_rows_per_gpu == 0)
+        return result_t::fail(status_t::invalid_input_k,
+                              "late interaction costs rows² times the query span times the columns, so its rows " //
+                              "are set, never fitted to memory: pass --rows, or the batch's max_rows_per_device");
     std::size_t const gpus = devices.size();
     footprint_t smaller[max_gpus_per_host_k] = {}, middle[max_gpus_per_host_k] = {}, larger[max_gpus_per_host_k] = {};
     expected_t probed = probe_footprint_(mesh, config, devices, smaller_probe_rows_k, free_bytes, {smaller, gpus});
@@ -425,10 +436,12 @@ struct footprint_t {
     contrastive_tokens_config_t tokens_config;
     tokens_config.segments_per_gpu = static_cast<u32_t>(segments);
     tokens_config.head_tokens_per_gpu = static_cast<u32_t>(max_tokens);
+    std::size_t const query_tokens = std::min(max_tokens, segments * late_interaction.max_query_span);
     tokens_config.query_tokens_per_gpu = static_cast<u32_t>(round_up_to_multiple(
         late_interaction.max_query_tokens_per_gpu ? std::size_t {late_interaction.max_query_tokens_per_gpu}
-                                                  : max_tokens,
+                                                  : query_tokens,
         std::size_t {8}));
+    tokens_config.query_span_tokens = late_interaction.max_query_span;
     tokens_config.documents_per_gpu = late_interaction.max_documents_per_gpu ? late_interaction.max_documents_per_gpu
                                                                              : static_cast<u32_t>(segments);
     tokens_config.document_tokens_per_gpu = static_cast<u32_t>(
@@ -444,7 +457,9 @@ struct footprint_t {
                                           ? distributed_contrastive_tokens_t::payload_scalars_needed(tokens_config)
                                           : 0u;
     expected<multimem_domain_t> domain = multimem_domain_t::make(
-        mesh.topology, placed.devices.view(), gradient_scalars + force_scalars + token_scalars + mixer_scalars,
+        mesh.topology, placed.devices.view(),
+        multimem_domain_t::window_scalars(gradient_scalars) + multimem_domain_t::window_scalars(force_scalars) +
+            multimem_domain_t::window_scalars(token_scalars) + mixer_scalars,
         placed.streams, mesh.timeout_seconds);
     if (!domain) return expected_t::fail(std::move(domain));
     placed.domain = std::move(domain.value_);
@@ -664,6 +679,70 @@ expected_t trainer_t::step(batch_source_t &source, optimizer_step_t optimizer_st
     return {};
 }
 
+expected<retrieval_t> trainer_t::evaluate(batch_source_t &source, data_epoch_t data_epoch) noexcept {
+    using result_t = expected<retrieval_t>;
+    if (!config.contrasts()) return result_t::fail(status_t::invalid_input_k, "only a contrastive run pools vertices");
+    step_report_t report;
+    if (expected_t filled = source.fill(*this, data_epoch, report); !filled) return result_t::fail(std::move(filled));
+    std::size_t const gpus = replicas.size(), columns = std::size_t(retrieval_column_t::count_k);
+    for (std::size_t member = 0; member != gpus; ++member) {
+        switch_to_gpu_t gpu_scope {streams[member]};
+        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed");
+        base_replica_t &replica = replicas[member];
+        expected_t encoded = replica.tower.pack_weights(streams[member]);
+        if (encoded) encoded = replica.tower.forward(replica.batch, replica.vertices.span(), streams[member]);
+        if (!encoded) return result_t::fail(std::move(encoded));
+    }
+    for (std::size_t member = 0; member != gpus; ++member)
+        if (expected_t scored = contrastive.evaluate(member, replicas[member].recipe(config), streams[member]); !scored)
+            return result_t::fail(std::move(scored));
+    std::size_t const rows = config.batch.max_segments_per_gpu;
+    nk::tensor<f32_t, pinned_alloc<f32_t>, 3> tables =
+        nk::tensor<f32_t, pinned_alloc<f32_t>, 3>::uninitialized({gpus, rows, columns}, pinned_alloc<f32_t> {}).value;
+    if (!tables) return result_t::fail(status_t::bad_alloc_k, "retrieval staging allocation failed");
+    for (std::size_t member = 0; member != gpus; ++member) {
+        switch_to_gpu_t gpu_scope {streams[member]};
+        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed");
+        if (expected_t copied = copy_device_to_host(contrastive.retrieval(member).flatten<1>(),
+                                                    tables[member, nk::slice].flatten<1>(), streams[member]);
+            !copied)
+            return result_t::fail(std::move(copied));
+    }
+    if (expected_t drained = synchronize(); !drained) return result_t::fail(std::move(drained));
+    f64_t sums[std::size_t(retrieval_column_t::count_k)] = {};
+    f64_t live_rows = 0.0, squared_row_cosines = 0.0;
+    for (std::size_t member = 0; member != gpus; ++member)
+        for (std::size_t row = 0; row != rows; ++row) {
+            for (std::size_t column = 0; column != columns; ++column) sums[column] += tables[member, row, column];
+            f64_t const row_cosines = tables[member, row, std::size_t(retrieval_column_t::cosine_k)];
+            live_rows += tables[member, row, std::size_t(retrieval_column_t::live_vertices_k)] != 0.0f;
+            squared_row_cosines += row_cosines * row_cosines;
+        }
+    auto const sum = [&](retrieval_column_t which) noexcept { return sums[std::size_t(which)]; };
+    auto const ratio = [](f64_t numerator, f64_t denominator) noexcept {
+        return denominator != 0.0 ? numerator / denominator : 0.0;
+    };
+    retrieval_t retrieval;
+    retrieval.completed_steps = completed_steps;
+    retrieval.ranked = sum(retrieval_column_t::ranked_k);
+    retrieval.recall_at_1 = ratio(sum(retrieval_column_t::hit_at_1_k), retrieval.ranked);
+    retrieval.recall_at_5 = ratio(sum(retrieval_column_t::hit_at_5_k), retrieval.ranked);
+    retrieval.chance = ratio(sum(retrieval_column_t::chance_k), retrieval.ranked);
+    retrieval.cosine_gap = ratio(sum(retrieval_column_t::attract_cosine_k), sum(retrieval_column_t::attracts_k)) -
+                           ratio(sum(retrieval_column_t::ambient_cosine_k), sum(retrieval_column_t::ambients_k));
+    retrieval.hards = sum(retrieval_column_t::hards_k);
+    retrieval.hard_above = ratio(sum(retrieval_column_t::hard_above_k), retrieval.hards);
+    // The participation ratio of the double-centred cosine Gram matrix, whose N rows are the
+    // world's live vertices: trace N−S/N over the Frobenius norm Q−2R/N+S²/N², with S, R and Q the
+    // sums of every cosine, of each row's squared sum, and of every squared cosine.
+    f64_t const vertices = ratio(sum(retrieval_column_t::live_vertices_k), live_rows);
+    f64_t const total = sum(retrieval_column_t::cosine_k), squares = sum(retrieval_column_t::squared_cosine_k);
+    f64_t const trace = vertices - ratio(total, vertices);
+    retrieval.effective_rank = ratio(trace * trace, squares - 2.0 * ratio(squared_row_cosines, vertices) +
+                                                        ratio(total * total, vertices * vertices));
+    return result_t {retrieval};
+}
+
 expected_t trainer_t::reseed() noexcept {
     u32_t const groups = std::max(config.contrastive.temperature_groups, 1u);
     array<f32_t> inverse_temperatures, biases, token_inverse_temperatures, token_biases;
@@ -816,6 +895,16 @@ void telemetry_t::report() const noexcept {
     term("late interaction", late_interaction);
 }
 
+void retrieval_t::report() const noexcept {
+    sz::string_t line;
+    if (format_into(line,
+                    "  eval after {:>4}  recall@1 {:.4f}  recall@5 {:.4f}  chance {:.4f}  over {:.0f} rows  " //
+                    "cosine gap {:.4f}  hard above {:.4f} of {:.0f}  effective rank {:.2f}",
+                    completed_steps, recall_at_1, recall_at_5, chance, ranked, cosine_gap, hard_above, hards,
+                    effective_rank))
+        report_line(line.view());
+}
+
 #pragma endregion Trainer
 
 #pragma region Sources
@@ -887,7 +976,9 @@ expected_t items_source_t::make(items_source_t &placed, trainer_t &trainer) noex
     placed.mixer_ = std::move(mixer.value_);
 
     std::size_t const total_segments = gpus * segments;
-    std::size_t const edges = config.contrastive.max_edges_per_gpu ? config.contrastive.max_edges_per_gpu : segments;
+    std::size_t const edges = config.contrastive.max_edges_per_gpu
+                                  ? config.contrastive.max_edges_per_gpu
+                                  : relation_edges_capacity(static_cast<u32_t>(segments), shape.max_bag_segments);
     bool allocated = placed.tokens_.resize(total_segments) == status_t::success_k &&
                      placed.placements_.resize(total_segments) == status_t::success_k &&
                      placed.destinations_.resize(total_segments) == status_t::success_k &&
@@ -1200,10 +1291,11 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
         expected_t staged = copy_host_to_device(lengths_.view(), replica.to_vertex_lengths.span(), stream);
         if (staged) staged = copy_host_to_device(groups_.view(), replica.temperature_groups.span(), stream);
         if (staged)
-            staged = replica.relations.upload(
-                edges_.attract(), edges_.repel(), ignores ? edges_.ignore() : contrastive_edges_view_t {},
-                replica.batch.segment_lengths.view(), replica.to_vertex_lengths.view(), total_segments,
-                member * segments, config.contrastive.ambient_repulsion_weight, stream);
+            staged = replica.relations.upload(edges_.attract(), edges_.repel(),
+                                              ignores ? edges_.ignore() : contrastive_edges_view_t {},
+                                              replica.batch.segment_lengths.view(), replica.to_vertex_lengths.view(),
+                                              u64r1_view_t {}, u64r1_view_t {}, total_segments, member * segments,
+                                              config.contrastive.ambient_repulsion_weight, stream);
         if (staged) // the host columns are reused for the next device, so their copies land first
             if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
                 staged = cuda_failure(result, "relation staging drain failed (member={})", member);

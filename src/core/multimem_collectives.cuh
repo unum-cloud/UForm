@@ -472,16 +472,25 @@ struct multimem_domain_t {
             window.scalars * sizeof(f32_t)};
     }
 
-    /** Reserve @p scalars of the payload for one consumer — bump-reserve at construction time,
-     *  loud failure past capacity; windows are disjoint by construction. Mirrors the arena
-     *  discipline: no per-window free, the domain outlives its consumers. */
+    /** Payload scalars one window of @p scalars takes before the next, rounded to whole cache lines
+     *  so every window starts on one; a domain's sizing counts every window but the last through
+     *  it. */
+    [[nodiscard]] static constexpr std::size_t window_scalars(std::size_t scalars) noexcept {
+        return round_up_to_multiple(scalars, cache_line_bytes_k / sizeof(f32_t));
+    }
+
+    /** Reserve @p scalars of the payload for one consumer — bump-reserve at construction time, loud
+     *  failure past capacity; windows are disjoint by construction and start on a cache line, so
+     *  vectorized, 8-byte and TMA access holds in any window. Mirrors the arena discipline: no
+     *  per-window free, the domain outlives its consumers. */
     [[nodiscard]] expected<multimem_window_t> reserve(std::size_t scalars) noexcept {
         if (reserved_scalars_ + scalars > payload_scalars_)
             return expected<multimem_window_t>::fail(
                 status_t::bad_alloc_k, "window reservation of {} scalars exceeds the domain's {} ({} reserved)",
                 scalars, payload_scalars_, reserved_scalars_);
         multimem_window_t const window {reserved_scalars_, scalars};
-        reserved_scalars_ += scalars;
+        reserved_scalars_ += window_scalars(scalars);
+        static_assert(cache_line_bytes_k % sizeof(f32_t) == 0, "windows start on whole cache lines");
         return expected<multimem_window_t> {window};
     }
 

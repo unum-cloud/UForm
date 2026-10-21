@@ -319,8 +319,8 @@ expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t c
                                 "masked token gradient narrowing");
     if (staged)
         staged = weight_gradient_bf16(logit_grad, normalized, decoder_weight_grad_.span(), transposed_grad_.span(),
-                                      transposed_input_.span(), packed_input_.span(), products_.span(), capabilities_,
-                                      stream);
+                                      transposed_input_.span(), packed_input_.span(), products_.span(), b8r1_span_t {},
+                                      capabilities_, stream);
     return staged;
 }
 
@@ -564,7 +564,7 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
     if (staged)
         staged = weight_gradient_bf16(predicted_grad_.view(), normalized, recon_weight_grad_.span(),
                                       transposed_grad_.span(), transposed_input_.span(), packed_input_.span(),
-                                      products_.span(), capabilities_, stream);
+                                      products_.span(), b8r1_span_t {}, capabilities_, stream);
     return staged;
 }
 
@@ -766,7 +766,7 @@ expected_t masked_frames_t::operator()(bf16r2_view_t normalized, f32r2_view_t cl
     if (staged)
         staged = weight_gradient_bf16(predicted_grad_.view(), normalized, recon_weight_grad_.span(),
                                       transposed_grad_.span(), transposed_input_.span(), packed_input_.span(),
-                                      products_.span(), capabilities_, stream);
+                                      products_.span(), b8r1_span_t {}, capabilities_, stream);
     return staged;
 }
 

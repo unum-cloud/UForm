@@ -162,6 +162,8 @@ struct uform_trainer_handle_t {
     config.late_interaction.width = late_interaction.width ? static_cast<u32_t>(late_interaction.width) : 128u;
     config.late_interaction.inverse_temperature = chosen(late_interaction.inverse_temperature, 1.0f);
     config.late_interaction.bias = late_interaction.bias;
+    if (late_interaction.max_query_span)
+        config.late_interaction.max_query_span = static_cast<u32_t>(late_interaction.max_query_span);
     config.late_interaction.max_query_tokens_per_gpu = static_cast<u32_t>(late_interaction.max_query_tokens_per_device);
     config.late_interaction.max_documents_per_gpu = static_cast<u32_t>(late_interaction.max_documents_per_device);
     config.late_interaction.max_document_tokens_per_gpu = static_cast<u32_t>(

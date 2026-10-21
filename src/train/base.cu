@@ -24,7 +24,7 @@
  *  a linear ramp from zero to the peak over @c warmup_steps , then a cosine decay to @c min_learning_rate over
  *  the run's remainder — the validated draft envelope's shape.
  */
-#include <cmath>   // `std::cos` — the cosine decay, `std::sqrt` — the initialization's fan-in scale
+#include <cmath>   // `std::cos` — the cosine decay, `std::sqrt` — the initialization's fan-in scale, `std::isfinite`
 #include <cstring> // `std::strlen`
 
 #include <unistd.h> // `::write`, `STDOUT_FILENO` — the host diagnostic channel
@@ -412,6 +412,14 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
         else if (flag == "--seed") taken = number(config.seed);
         else if (flag == "--nvdec-engines") taken = number(config.nvdec_engines);
         else if (flag == "--batches-per-fill") taken = number(config.batches_per_fill) && config.batches_per_fill > 0;
+        else if (flag == "--pair-loss") {
+            if (value == "balanced") config.contrastive.pair_loss = contrastive_pair_loss_form_t::balanced_k;
+            else if (value == "ranked") config.contrastive.pair_loss = contrastive_pair_loss_form_t::ranked_k;
+            else taken = false;
+        }
+        else if (flag == "--late-interaction-weight")
+            taken = number(config.late_interaction.weight) && std::isfinite(config.late_interaction.weight) &&
+                    config.late_interaction.weight >= 0.0f;
         else if (flag == "--objective") {
             if (value == "masked") config.objective = objective_t::masked_k;
             else if (value == "contrastive") config.objective = objective_t::contrastive_k;
@@ -432,6 +440,8 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
         else if (flag == "--checkpoint") config.checkpoint = value;
         else if (flag == "--checkpoint-every") taken = number(config.checkpoint_every);
         else if (flag == "--report-every") taken = number(config.report_every);
+        else if (flag == "--eval-every") taken = number(config.eval_every);
+        else if (flag == "--eval-mixture") taken = value.ends_with(".json"), config.eval_mixture = value;
         else if (flag == "--resume") config.resume = value;
         else if (flag == "--telemetry") {
             if (value == "signals") config.telemetry_channels |= telemetry_signals_k;
@@ -547,7 +557,9 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
     if (config.contrasts()) {
         u32_t const segments = shape.max_segments_per_gpu;
         u32_t const groups = std::max(config.contrastive.temperature_groups, 1u);
-        u32_t const edges = config.contrastive.max_edges_per_gpu ? config.contrastive.max_edges_per_gpu : segments;
+        u32_t const edges = config.contrastive.max_edges_per_gpu
+                                ? config.contrastive.max_edges_per_gpu
+                                : relation_edges_capacity(segments, shape.max_bag_segments);
         replica.vertices = bf16r2_tensor_arena_t::uninitialized({segments, config.hidden}, bf16_alloc).value;
         replica.vertices_grad = bf16r2_tensor_arena_t::uninitialized({segments, config.hidden}, bf16_alloc).value;
         replica.inverse_temperatures = f32r1_tensor_arena_t::uninitialized({groups}, f32_alloc).value;

@@ -373,7 +373,8 @@ static __global__ void transformer_token_rescale_kernel_(f32r2_view_t products, 
 
 expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
                                                             transformer_block_config_t const &config,
-                                                            std::size_t entry_inputs) noexcept {
+                                                            std::span<u32_t const> entry_inputs,
+                                                            u32_t token_width) noexcept {
     using result_t = expected<transformer_scratch_t>;
     if (config.hidden == 0 || config.max_tokens == 0)
         return result_t::fail(status_t::invalid_input_k, "scratch capacities must be positive (hidden={} tokens={})",
@@ -388,7 +389,9 @@ expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
     std::size_t const tokens = config.max_tokens;
     std::size_t const padded_tokens = round_up_to_multiple(tokens, std::size_t {8});
     std::size_t const widest = std::max(3 * hidden, 2 * ffn);
-    std::size_t const inputs = std::max({hidden, ffn, entry_inputs});
+    std::size_t widest_entry = 0;
+    for (u32_t const entry : entry_inputs) widest_entry = std::max<std::size_t>(widest_entry, entry);
+    std::size_t const inputs = std::max({hidden, ffn, widest_entry});
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
     gpu_arena_alloc<b8_t> b8_alloc {arena};
@@ -402,6 +405,27 @@ expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
         expected<std::size_t> shape_bytes = pack_bytes_bf16(columns, depth, capabilities);
         if (!shape_bytes) return result_t::fail(std::move(shape_bytes));
         packed_bytes = std::max(packed_bytes, shape_bytes.value_);
+    }
+    // The split depth's partials are not monotone in a weight's width, so every shape is asked: the
+    // block's four, the tower head's, the token head's, then each entry's.
+    std::size_t const weight_shapes[][3] = {{3 * hidden, hidden, tokens},
+                                            {hidden, hidden, tokens},
+                                            {2 * ffn, hidden, tokens},
+                                            {hidden, ffn, tokens},
+                                            {hidden, hidden, config.max_segments},
+                                            {token_width, hidden, tokens}};
+    std::size_t const fixed_shapes = std::size(weight_shapes);
+    std::size_t workspace_bytes = 0;
+    for (std::size_t shape = 0; shape != fixed_shapes + entry_inputs.size(); ++shape) {
+        bool const fixed = shape < fixed_shapes;
+        std::size_t const outputs = fixed ? weight_shapes[shape][0] : hidden;
+        std::size_t const weight_inputs = fixed ? weight_shapes[shape][1] : entry_inputs[shape - fixed_shapes];
+        std::size_t const depth = fixed ? weight_shapes[shape][2] : tokens;
+        if (outputs == 0 || weight_inputs == 0) continue;
+        expected<std::size_t> shape_bytes = weight_gradient_workspace_bytes_bf16(outputs, weight_inputs, depth,
+                                                                                 capabilities);
+        if (!shape_bytes) return result_t::fail(std::move(shape_bytes));
+        workspace_bytes = std::max(workspace_bytes, shape_bytes.value_);
     }
     nk_size_t packed_keys_values_bytes = 0;
     if (nk_status_t const status = nk_attention_pack_size_bf16_best(hidden / transformer_head_dim_k,
@@ -423,9 +447,11 @@ expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
     scratch.weight_grad_products =
         f32r1_tensor_arena_t::uninitialized({std::max(widest, inputs) * hidden}, f32_alloc).value;
     scratch.packed_input = b8r1_tensor_arena_t::uninitialized({packed_bytes}, b8_alloc).value;
-    if (!scratch.products || !scratch.residual_grad || !scratch.inverse_rms || !scratch.narrowed_grad ||
-        !scratch.transposed_grad || !scratch.transposed_input || !scratch.transposed_weight || !scratch.packed_qkv ||
-        !scratch.qkv_grad || !scratch.packed_keys_values || !scratch.weight_grad_products || !scratch.packed_input)
+    scratch.weight_gradient_workspace = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, b8_alloc).value;
+    if (!scratch.products || !scratch.residual_grad || !scratch.narrowed_grad || !scratch.transposed_grad ||
+        !scratch.transposed_input || !scratch.transposed_weight || !scratch.packed_qkv || !scratch.qkv_grad ||
+        !scratch.packed_keys_values || !scratch.weight_grad_products || !scratch.packed_input ||
+        (workspace_bytes != 0 && !scratch.weight_gradient_workspace))
         return result_t::fail(status_t::bad_alloc_k, "scratch allocation failed (arena_used={})", arena.used());
     return result_t {std::move(scratch)};
 }
@@ -691,7 +717,8 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
                                bf16r2_span_t weight_grad) noexcept {
         return weight_gradient_bf16(product_grad, product_input, weight_grad, scratch.transposed_grad.span(),
                                     scratch.transposed_input.span(), scratch.packed_input.span(),
-                                    scratch.weight_grad_products.span(), capabilities_, stream);
+                                    scratch.weight_grad_products.span(), scratch.weight_gradient_workspace.span(),
+                                    capabilities_, stream);
     };
 
     // MLP backward: the output gradient narrows into the A operand of both down-projection gradients.

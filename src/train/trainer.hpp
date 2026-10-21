@@ -141,6 +141,38 @@ struct telemetry_t {
     void report() const noexcept;
 };
 
+/** One held-out retrieval evaluation of the pooled embeddings, every member of this process
+ *  summed. */
+struct retrieval_t {
+
+    /** The optimizer steps completed before the evaluation. */
+    u32_t completed_steps = 0;
+
+    /** Rows holding a positive and a negative, which the recalls and the chance average over. */
+    f64_t ranked = 0.0;
+
+    /** Shares of ranked rows whose best positive scores first, and within the top five. */
+    f64_t recall_at_1 = 0.0, recall_at_5 = 0.0;
+
+    /** The mean share of positives among a ranked row's scored cells, what a random order hits at
+     *  one. */
+    f64_t chance = 0.0;
+
+    /** The mean cosine of attract cells minus that of ambient cells. */
+    f64_t cosine_gap = 0.0;
+
+    /** Repel cells scored above their row's best positive, as a share of the @ref hards scored. */
+    f64_t hard_above = 0.0, hards = 0.0;
+
+    /** The participation ratio of the vertices' double-centred cosine Gram matrix: one when they
+     *  collapse onto a line, near the vertex count when they spread evenly. Exact when this process
+     *  holds the whole world; otherwise over its own rows against the world. */
+    f64_t effective_rank = 0.0;
+
+    /** Print the evaluation's lines. */
+    void report() const noexcept;
+};
+
 struct trainer_t;
 
 /** The one place data enters a step: fills every replica's batch, and the relations when the objective
@@ -337,6 +369,10 @@ struct trainer_t {
      *  contrastive collective, and per replica the backward region and the optimizer's slice. */
     [[nodiscard]] expected_t step(batch_source_t &source, optimizer_step_t optimizer_step,
                                   step_report_t &report) noexcept;
+
+    /** Fill every replica from @p source at @p data_epoch , encode it forward only, and score the
+     *  pooled vertices' retrieval over the world without a loss or an update. */
+    [[nodiscard]] expected<retrieval_t> evaluate(batch_source_t &source, data_epoch_t data_epoch) noexcept;
 
     /** Re-seed every replica's weights and temperatures to the identical deterministic init. */
     [[nodiscard]] expected_t reseed() noexcept;

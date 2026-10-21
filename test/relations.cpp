@@ -9,7 +9,7 @@
  *  One case per mesh, @c {1,1,1} , @c {2,8,16} and @c {4,8,16} , each over keyed bags with PAD
  *  rows: a process numbers its vertices from its first GPU, so a partner's ID lands on the GPU
  *  that holds it, inside the world axis the loss reads, and the attract graph stays symmetric.
- *  Two more cases pin the role rules of one bag and the key attraction across GPUs.
+ *  Two more cases pin the role rules of one bag and the edge capacity those rules derive.
  */
 #include "core/mesh.hpp"                  // `mesh_shape_t`, `mesh_topology_t`, `make_mesh_shape`
 #include "core/contrastive_relations.cuh" // `relate_roles`, `contrastive_edges`
@@ -82,8 +82,7 @@ static void fill_world_(world_columns_t &world, u32_t world_gpus, u64_t seed) no
                                  ? segment_role_t::positive_k
                                  : segment_role_t::anchor_k;
         expected_t related = relate_roles(u32r1_view_t {world.bags[gpu], segments_k}, {roles, segments_k},
-                                          u32r1_view_t {world.lengths[gpu], segments_k}, {}, {}, gpu * segments_k,
-                                          edges);
+                                          u32r1_view_t {world.lengths[gpu], segments_k}, {}, gpu * segments_k, edges);
         if (!related || edges.repel().ids.extent(0) != 0 || edges.ignore().ids.extent(0) != 0) return false;
         contrastive_edges_view_t const attract = edges.attract();
         gpu_relations_t &into = relations[gpu];
@@ -169,8 +168,7 @@ static void bag_roles(test_suite_t &suite) {
     if (!made) return suite.check(false, "edges: {}", made.description_);
     host_edges_t &edges = made.value_;
     expected_t related = relate_roles(u32r1_view_t {bags, segments}, {roles, segments},
-                                      u32r1_view_t {lengths, segments}, f32r1_view_t {weights, segments}, {}, base,
-                                      edges);
+                                      u32r1_view_t {lengths, segments}, f32r1_view_t {weights, segments}, base, edges);
     if (!related) return suite.check(false, "relate: {}", related.description_);
     contrastive_edges_view_t const attract = edges.attract(), repel = edges.repel(), ignore = edges.ignore();
     suite.check(row_is_(attract, 0, {101, 102}, {1, 1}) && row_is_(repel, 0, {103, 104}, {2.0f, 0.5f}) &&
@@ -187,32 +185,28 @@ static void bag_roles(test_suite_t &suite) {
     suite.check(inert, "a PAD vertex and a singleton bag name no edge");
 }
 
-/** Keys across GPUs: two GPUs of four segments, each holding a pair whose anchor carries key 7, so
- *  each anchor attracts the other GPU's anchor as well as its own positive; a PAD key never
- *  attracts, and a keyed negative is refused. */
-static void world_keys(test_suite_t &suite) {
-    constexpr u32_t segments = 4, world = 2 * segments;
+/** The derived capacity is exact: four bags of an anchor and two positives fill the attract set of
+ *  @ref relation_edges_capacity to the last edge, and one edge less is refused loudly. */
+static void bag_capacity(test_suite_t &suite) {
+    constexpr u32_t segments = 12, bag_segments = 3;
     using role_t = segment_role_t;
-    u32_t const bags[segments] = {0, 0, 1, 2};
-    u32_t const lengths[segments] = {3, 3, 2, 0};
-    role_t const roles[segments] = {role_t::anchor_k, role_t::positive_k, role_t::anchor_k, role_t::anchor_k};
-    u64_t keys[world] = {7, 0, 9, 0, 7, 0, 5, 0};
-    expected<host_edges_t> made = host_edges_t::make(segments, 8);
-    if (!made) return suite.check(false, "edges: {}", made.description_);
-    host_edges_t &edges = made.value_;
+    u32_t bags[segments], lengths[segments];
+    role_t roles[segments];
+    for (u32_t segment = 0; segment != segments; ++segment) {
+        bags[segment] = segment / bag_segments, lengths[segment] = 2;
+        roles[segment] = segment % bag_segments == 0 ? role_t::anchor_k : role_t::positive_k;
+    }
+    u32_t const capacity = relation_edges_capacity(segments, bag_segments);
+    expected<host_edges_t> exact = host_edges_t::make(segments, capacity);
+    expected<host_edges_t> short_by_one = host_edges_t::make(segments, capacity - 1u);
+    if (!exact || !short_by_one) return suite.check(false, "edges: {}", exact.description_);
     expected_t related = relate_roles(u32r1_view_t {bags, segments}, {roles, segments},
-                                      u32r1_view_t {lengths, segments}, {}, u64r1_view_t {keys, world}, segments,
-                                      edges);
-    if (!related) return suite.check(false, "relate: {}", related.description_);
-    contrastive_edges_view_t const attract = edges.attract();
-    suite.check(row_is_(attract, 0, {0, 5}, {1, 1}),
-                "GPU 1's anchor attracts GPU 0's same-key anchor and its positive");
-    suite.check(row_is_(attract, 2, {}, {}) && row_is_(attract, 3, {}, {}), "unmatched and PAD keys attract nothing");
-    role_t const keyed_negative[segments] = {role_t::anchor_k, role_t::negative_k, role_t::anchor_k, role_t::anchor_k};
-    keys[segments + 1] = 3;
-    suite.check(!relate_roles(u32r1_view_t {bags, segments}, {keyed_negative, segments},
-                              u32r1_view_t {lengths, segments}, {}, u64r1_view_t {keys, world}, segments, edges),
-                "a negative carrying a key is refused");
+                                      u32r1_view_t {lengths, segments}, {}, 0, exact.value_);
+    suite.check(related && exact.value_.attract().ids.extent(0) == capacity,
+                "bags of three fill the derived {} attract edges exactly", capacity);
+    suite.check(!relate_roles(u32r1_view_t {bags, segments}, {roles, segments}, u32r1_view_t {lengths, segments}, {}, 0,
+                              short_by_one.value_),
+                "one edge short of the derived capacity is refused");
 }
 
 int main(int, char **argv) {
@@ -221,6 +215,6 @@ int main(int, char **argv) {
     suite.run("world/2-8-16", slices_match_world, 2u, 8u, 16u);
     suite.run("world/4-8-16", slices_match_world, 4u, 8u, 16u);
     suite.run("roles/bag", bag_roles);
-    suite.run("roles/keys", world_keys);
+    suite.run("roles/capacity", bag_capacity);
     return suite.finish();
 }

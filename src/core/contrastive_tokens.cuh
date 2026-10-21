@@ -80,6 +80,10 @@ struct contrastive_tokens_config_t {
     /** Document token rows per product band, a multiple of 32 and at least the longest segment. */
     u32_t band_tokens = 0;
 
+    /** Tokens one query segment contributes at most, its first past the prefix; the rest still
+     *  serve the segment as a document. */
+    u32_t query_span_tokens = ~0u;
+
     /** The token vectors' width, a multiple of 8. */
     u32_t width = 128;
 

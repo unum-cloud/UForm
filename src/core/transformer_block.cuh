@@ -233,12 +233,14 @@ __global__ void dropout_kernel(bf16r1_span_t values, u32r1_view_t data_epoch, u3
  *  stashes, weights and packs. Owned by the stack, borrowed by each @ref transformer_block_bf16_t . */
 struct transformer_scratch_t {
 
-    /** Allocate every transient off @p arena for @p config 's capacities, wide enough for the weight
-     *  gradients of an entry projecting @p entry_inputs scalars per token and of the tower head over the
-     *  segments; the NumKong pack sizes come from the capabilities of the arena's device. */
+    /** Allocate every transient off @p arena for @p config 's capacities, wide enough for the
+     *  weight gradients of every entry projecting one of @p entry_inputs scalars per token, of the
+     *  tower head over the segments, and of a token head of @p token_width outputs when nonzero;
+     *  the NumKong pack and workspace sizes come from the capabilities of the arena's device. */
     [[nodiscard]] static expected<transformer_scratch_t> make(gpu_arena_t &arena,
                                                               transformer_block_config_t const &config,
-                                                              std::size_t entry_inputs) noexcept;
+                                                              std::span<u32_t const> entry_inputs,
+                                                              u32_t token_width) noexcept;
 
     /** Float32 @b [tokens·ffn] the SwiGLU output before its cast, then each data gradient before the
      *  house kernel or cast consuming it. */
@@ -278,6 +280,10 @@ struct transformer_scratch_t {
 
     /** The NumKong pack of @c Xᵀ , sized for the largest. */
     b8r1_tensor_arena_t packed_input {};
+
+    /** The ordered depth slices of each weight gradient's product, sized for the most any of them
+     *  takes. */
+    b8r1_tensor_arena_t weight_gradient_workspace {};
 };
 
 /** The training transformer block: BFloat16 products over a Float32 residual stream, forward and

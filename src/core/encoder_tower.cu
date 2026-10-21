@@ -356,7 +356,8 @@ static expected_t project_media_weight_grads(multimodal_batch_on_gpu_t const &ba
     auto weight_gradient = [&](bf16r2_view_t patches, bf16r2_span_t projection_grad) noexcept {
         return weight_gradient_bf16(entry_grad, patches, projection_grad, scratch.transposed_grad.span(),
                                     scratch.transposed_input.span(), scratch.packed_input.span(),
-                                    scratch.weight_grad_products.span(), capabilities, stream);
+                                    scratch.weight_grad_products.span(), scratch.weight_gradient_workspace.span(),
+                                    capabilities, stream);
     };
     // One pixel modality's weight grad: re-stage its cells, then fold the whole entry gradient against them.
     auto project_pixels_grad = [&](nk::tensor_view<pixel_t, 3> raw, modality_t target, f32r1_view_t mean,
@@ -590,7 +591,9 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, en
     // The block stack, over one scratch wide enough for the entries' and the head's weight gradients too.
     if (tower.blocks_.resize(config.depth) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "block table allocation failed ({})", config.depth);
-    expected<transformer_scratch_t> scratch = transformer_scratch_t::make(arena, config.block, max_entry_scalars);
+    u32_t const entry_scalars[3] = {image_patch_scalars, video_tube_scalars, audio_frame_scalars};
+    expected<transformer_scratch_t> scratch = transformer_scratch_t::make(arena, config.block, entry_scalars,
+                                                                          config.token_width);
     if (!scratch) return result_t::fail(std::move(scratch));
     tower.scratch_ = std::make_unique<transformer_scratch_t>(std::move(scratch.value_));
     for (u32_t layer_index = 0; layer_index != config.depth; ++layer_index) {
@@ -896,8 +899,8 @@ expected_t tower_token_head_t::backward(bf16r2_view_t vectors_grad, multimodal_b
     if (staged)
         staged = weight_gradient_bf16(projected_grad_.view(), normalized_.view(), projection_grad_.span(),
                                       scratch.transposed_grad.span(), scratch.transposed_input.span(),
-                                      scratch.packed_input.span(), scratch.weight_grad_products.span(), capabilities_,
-                                      stream);
+                                      scratch.packed_input.span(), scratch.weight_grad_products.span(),
+                                      scratch.weight_gradient_workspace.span(), capabilities_, stream);
     if (staged)
         staged = multiply_bf16(projected_grad_.view(), packed_projection_transposed_.view(), products, capabilities_,
                                stream);
@@ -1146,7 +1149,8 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
                                    bf16r2_span_t weight_grad) noexcept {
             return weight_gradient_bf16(product_grad, product_input, weight_grad, scratch.transposed_grad.span(),
                                         scratch.transposed_input.span(), scratch.packed_input.span(),
-                                        scratch.weight_grad_products.span(), capabilities_, stream);
+                                        scratch.weight_grad_products.span(), scratch.weight_gradient_workspace.span(),
+                                        capabilities_, stream);
         };
         auto data_gradient = [&](bf16r2_view_t product_grad, b8r1_tensor_arena_t const &packed_transposed) noexcept {
             expected_t multiplied = multiply_bf16(product_grad, packed_transposed.view(), head_products, capabilities_,

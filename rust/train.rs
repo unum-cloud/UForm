@@ -56,6 +56,7 @@ pub struct uform_late_interaction_t {
     pub width: usize,
     pub inverse_temperature: f32,
     pub bias: f32,
+    pub max_query_span: usize,
     pub max_query_tokens_per_device: usize,
     pub max_documents_per_device: usize,
     pub max_document_tokens_per_device: usize,

@@ -273,7 +273,10 @@ typedef struct uform_late_interaction_t {
     /** The starting logit bias of every contrastive group; zero is zero. */
     float bias;
 
-    /** Query token rows one device's step holds at most; the batch's tokens per device. */
+    /** Tokens one query segment contributes at most, its first past the prefix; 64. */
+    size_t max_query_span;
+
+    /** Query token rows one device's step holds at most; @c max_query_span of every segment. */
     size_t max_query_tokens_per_device;
 
     /** Document segments one device's step holds at most; @c max_segments_per_device. */

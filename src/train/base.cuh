@@ -91,7 +91,9 @@ struct contrastive_config_t {
 /** How the late-interaction loss scores the per-token vectors of query and document segments. */
 struct late_interaction_config_t {
 
-    /** The loss weight λ; zero trains no token head and allocates nothing for it. */
+    /** The loss weight λ; zero trains no token head and allocates nothing for it. A positive weight
+     *  needs the batch's rows set explicitly, since the in-batch MaxSim costs rows² times the query
+     *  span times the columns, a bound free memory cannot derive. */
     f32_t weight = 0.0f;
 
     /** The token vectors' width, a multiple of 8. */
@@ -106,7 +108,12 @@ struct late_interaction_config_t {
     /** The pair loss over each query row. */
     contrastive_pair_loss_form_t pair_loss = contrastive_pair_loss_form_t::ranked_k;
 
-    /** Query token rows one GPU's step holds at most; zero derives the batch's tokens per GPU. */
+    /** The per-query token cap: the tokens one query segment contributes at most, its first past
+     *  the prefix, as the reranker shape bounds a query. */
+    u32_t max_query_span = 64;
+
+    /** Query token rows one GPU's step holds at most; zero derives @ref max_query_span tokens of
+     *  every segment, within the batch's tokens per GPU. */
     u32_t max_query_tokens_per_gpu = 0;
 
     /** Document segments one GPU's step holds at most; zero derives @c max_segments_per_gpu . */
@@ -196,6 +203,13 @@ struct trainer_config_t {
 
     /** Steps between telemetry lines. */
     u32_t report_every = 10;
+
+    /** Steps between held-out retrieval evaluations; zero runs none. */
+    u32_t eval_every = 0;
+
+    /** The mixture JSON of the held-out batches; empty evaluates on the training source's next
+     *  batch. Borrows the storage it was parsed from. */
+    sz::string_view_t eval_mixture {};
 
     /** Warm-start path; empty starts from the keyed seed. Every replica loads the same file and the run
      *  continues from the file's saved step. Borrows the storage it was parsed from. */

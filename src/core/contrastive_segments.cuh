@@ -50,8 +50,9 @@
  *  @section labels Edges come from the relation graph
  *
  *  Every pair's target and weight resolve through @ref contrastive_pair_relation against the
- *  @ref contrastive_relations_view_t taken by value at launch: PAD > ignore > self > attract >
- *  repel > ambient repulsion, with the self-edge default when no explicit edges are staged.
+ *  @ref contrastive_relations_view_t taken by value at launch: PAD > ignore > self > key > attract
+ *  > repel > ambient repulsion, with the self-edge default when no explicit edges or keys are
+ *  staged.
  *
  *  @section balanced Score, loss and force passes
  *
@@ -147,6 +148,28 @@ enum class pair_loss_row_t : u32_t {
     loss_k = 0,
     bias_grad_k = 1,
     log_inverse_temperature_grad_k = 2,
+};
+
+/** The per-row sums of a retrieval evaluation, in the columns of its table. Ranked rows hold a
+ *  positive and a negative; a hit ranks its best positive first, or within the top five; chance is
+ *  the share of positives among the scored cells; the cosine and hard-negative columns count the
+ *  scored cells; the last three sum the cosine and the squared cosine to every live vertex, and
+ *  count those vertices, for the effective rank. */
+enum class retrieval_column_t : u32_t {
+    ranked_k = 0,
+    hit_at_1_k,
+    hit_at_5_k,
+    chance_k,
+    attract_cosine_k,
+    attracts_k,
+    ambient_cosine_k,
+    ambients_k,
+    hard_above_k,
+    hards_k,
+    cosine_k,
+    squared_cosine_k,
+    live_vertices_k,
+    count_k,
 };
 
 /** The positives one pass over a ranked row's negatives sums at once: the register tile of their
@@ -342,12 +365,31 @@ struct contrastive_segments_t {
                                         f32r1_span_t log_inverse_temperature_grad = {},
                                         f32r1_span_t bias_grad = {}) noexcept;
 
+    /** Score the vertices as a call does, at the full width and without the loss, then fold each
+     *  row's retrieval into the @b [rows,retrieval_columns] table @ref retrieval reads. */
+    [[nodiscard]] expected_t evaluate(bf16r2_view_t from_vertices, nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
+                                      contrastive_relations_view_t relations, contrastive_recipe_t recipe,
+                                      gpu_stream_t &stream) noexcept;
+
+    /** The @b [rows,retrieval_columns] table of the last @ref evaluate , in @ref retrieval_column_t
+     *  order. */
+    [[nodiscard]] f32r2_view_t retrieval() const noexcept { return retrieval_.view(); }
+
   private:
+
+    /** Validate a call's views and write the scaled cosines of every subgraph into
+     *  @ref logits_ . */
+    [[nodiscard]] expected_t score_(bf16r2_view_t from_vertices, nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,
+                                    contrastive_relations_view_t relations, contrastive_recipe_t recipe,
+                                    gpu_stream_t &stream) noexcept;
 
     /** The baked geometry and the validated prefix ladder — every capacity a call is checked
      *  against. */
     matryoshka_prefixes_t prefixes_ {};
     contrastive_segments_config_t config_ {};
+
+    /** @b [rows,retrieval_columns] per-row retrieval sums of the last @ref evaluate . */
+    f32r2_tensor_arena_t retrieval_ {};
 
     /** @b [prefixes,rows] per-row L2 norms of the from-vertex tower, and
      *  @b [subgraphs,prefixes,neighbors] those of every subgraph's to-vertex tower. */
@@ -420,7 +462,7 @@ struct distributed_contrastive_segments_t {
                                    config.from_vertices_per_gpu * config.hidden;
         std::size_t const window = forces + world_scalar_count_(config);
         if (shape.gpus_per_host_domain == shape.gpus_per_colocated_domain) return window;
-        return window + forces * sizeof(bf16_t) / sizeof(f32_t);
+        return multimem_domain_t::window_scalars(window) + forces * sizeof(bf16_t) / sizeof(f32_t);
     }
 
     /**
@@ -484,6 +526,13 @@ struct distributed_contrastive_segments_t {
      */
     [[nodiscard]] expected_t operator()(std::size_t rank, contrastive_recipe_t recipe, gpu_stream_t &stream) noexcept;
 
+    /** Local rank @p rank 's evaluation of the world tower, staged as a call stages it, without the
+     *  loss and its forces; ranks are enqueued in order within one evaluation. */
+    [[nodiscard]] expected_t evaluate(std::size_t rank, contrastive_recipe_t recipe, gpu_stream_t &stream) noexcept;
+
+    /** Local rank @p rank 's retrieval table of the last evaluation, on its device. */
+    [[nodiscard]] f32r2_view_t retrieval(std::size_t rank) const noexcept { return losses_[rank].retrieval(); }
+
     /** The eager convenience: every rank's slice in order over the per-rank streams. */
     [[nodiscard]] expected_t operator()(contrastive_recipe_t recipe, std::span<gpu_stream_t> streams) noexcept;
 
@@ -500,6 +549,11 @@ struct distributed_contrastive_segments_t {
     [[nodiscard]] static constexpr std::size_t world_scalar_count_(contrastive_segments_config_t config) noexcept {
         return 2u * std::size_t {config.temperature_groups} + 1u;
     }
+
+    /** Make the world tower readable for rank @p rank : a whole world waits for every peer's tower
+     *  in place, otherwise the rank stages its tower into member 0's window and gathers the remote
+     *  domains. */
+    [[nodiscard]] expected_t stage_world_tower_(std::size_t rank, gpu_stream_t &stream) noexcept;
 
     /** Copy this domain's staged towers into the gather member's own block, all-gather the remote
      *  domains' blocks, and copy the world tower back into member 0's window. Gateway stream only,

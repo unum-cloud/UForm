@@ -50,7 +50,7 @@ static __global__ void contrastive_tokens_layout_kernel_( //
     multimodal_batch_view_t batch, u32r1_view_t token_offsets, u32r1_span_t query_offsets, u32r1_span_t query_lengths,
     u32r1_span_t document_offsets, u32r1_span_t document_segments, u32r1_span_t document_lengths,
     u32r1_span_t document_of_segment, f32r1_span_t live_queries, u32r1_span_t overflow, u32_t query_capacity,
-    u32_t document_capacity, u32_t band_tokens) {
+    u32_t document_capacity, u32_t band_tokens, u32_t query_span_tokens) {
     using block_scan_t = cub::BlockScan<u32_t, kernel_block_size_default_k>;
     __shared__ typename block_scan_t::TempStorage scan_storage;
     __shared__ u32_t query_rows, documents, queries;
@@ -63,7 +63,7 @@ static __global__ void contrastive_tokens_layout_kernel_( //
         bool const live = segment < segments;
         u32_t const span = live ? token_offsets[segment + 1u] - token_offsets[segment] : 0u;
         late_interaction_side_t const side = live ? batch.segment_side[segment] : late_interaction_side_t::none_k;
-        u32_t const query_span = contrastive_tokens_queries_(side) ? span : 0u;
+        u32_t const query_span = contrastive_tokens_queries_(side) ? min(span, query_span_tokens) : 0u;
         u32_t const is_document = contrastive_tokens_documents_(side) && span != 0u ? 1u : 0u;
         u32_t const document_span = is_document ? span : 0u;
         u32_t query_row = 0, document = 0, is_query = 0, totals[3] = {};
@@ -415,8 +415,9 @@ static __global__ void contrastive_tokens_finish_kernel_(multimodal_batch_view_t
     u32_t const segment = live ? contrastive_tokens_owner_(token_offsets, row) : 0u;
     u32_t const offset = live ? row - token_offsets[segment] : 0u;
     late_interaction_side_t const side = live ? batch.segment_side[segment] : late_interaction_side_t::none_k;
-    std::size_t const query_row = contrastive_tokens_queries_(side) ? query_offsets[segment] + offset
-                                                                    : ~std::size_t {0};
+    bool const queried = contrastive_tokens_queries_(side) &&
+                         offset < query_offsets[segment + 1u] - query_offsets[segment];
+    std::size_t const query_row = queried ? query_offsets[segment] + offset : ~std::size_t {0};
     u32_t const document = contrastive_tokens_documents_(side) ? document_of_segment[segment] : ~0u;
     std::size_t const document_row = document != ~0u ? document_offsets[document] + offset : ~std::size_t {0};
     for (std::size_t channel = threadIdx.x; channel < token_vectors_grad.extent(1); channel += blockDim.x) {
@@ -560,7 +561,7 @@ expected_t contrastive_tokens_t::stage(bf16r2_view_t token_vectors, u32r1_view_t
         &contrastive_tokens_layout_kernel_, dim3 {1u, 1u, 1u}, block_shape, stream, batch, token_offsets,
         query_offsets_.span(), query_lengths_.span(), document_offsets_.span(), document_segments_.span(),
         document_lengths_.span(), document_of_segment_.span(), live_queries_.span(), overflow_.span(),
-        config_.query_tokens_per_gpu, config_.document_tokens_per_gpu, config_.band_tokens);
+        config_.query_tokens_per_gpu, config_.document_tokens_per_gpu, config_.band_tokens, config_.query_span_tokens);
     if (staged)
         staged = launch_kernel(&contrastive_tokens_gather_queries_kernel_, dim3 {config_.query_tokens_per_gpu, 1u, 1u},
                                block_shape, stream, token_vectors, token_offsets, query_offsets_.view(),

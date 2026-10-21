@@ -51,9 +51,11 @@ using namespace unum::uform::train;
     return 1;
 }
 
-/** Step @p trainer from its completed steps to @c config.steps over @p source , with telemetry and
- *  checkpoints on cadence and a checkpoint at the end. */
-[[nodiscard]] static int step_(trainer_t &trainer, trainer_config_t const &config, batch_source_t &source) noexcept {
+/** Step @p trainer from its completed steps to @c config.steps over @p source , with telemetry,
+ *  checkpoints and held-out evaluations over @p held_out on cadence, and a checkpoint at the
+ *  end. */
+[[nodiscard]] static int step_(trainer_t &trainer, trainer_config_t const &config, batch_source_t &source,
+                               batch_source_t &held_out) noexcept {
     auto checkpoint = [&]() noexcept {
         expected_t saved = trainer.save(config.checkpoint);
         if (saved)
@@ -69,6 +71,13 @@ using namespace unum::uform::train;
         u32_t const completed = ordinal + 1u;
         if (config.report_every && completed % config.report_every == 0u)
             trainer.telemetry(optimizer_step_t {ordinal}).report();
+        if (config.eval_every && completed % config.eval_every == 0u) {
+            // Held-out draws key past the training steps, so a synthetic source never repeats a
+            // step's batch.
+            expected<retrieval_t> evaluated = trainer.evaluate(held_out, data_epoch_t {config.steps + ordinal});
+            if (!evaluated) return fail_out_(evaluated.description_.view());
+            evaluated.value_.report();
+        }
         if (!config.checkpoint.empty() && config.checkpoint_every && completed % config.checkpoint_every == 0u &&
             completed != config.steps)
             if (expected_t saved = checkpoint(); !saved) return fail_out_(saved.description_.view());
@@ -108,10 +117,21 @@ using namespace unum::uform::train;
     // The loaders open before the trainer, so the envelope leaves room for their reservoirs.
     expected<ul::gpu_direct_storage_session_t> storage = ul::gpu_direct_storage_session_t::make();
     if (!storage) return fail_out_(storage.description_.view());
-    dataset_source_t datasets;
+    dataset_source_t datasets, held_out;
     if (!config.mixture.empty())
         if (expected_t opened = dataset_source_t::open(datasets, config, *storage, std::move(mixture)); !opened)
             return fail_out_(opened.description_.view());
+    if (config.eval_every && config.eval_mixture.empty() && !config.mixture.empty())
+        return fail_out_("--eval-every over a mixture needs --eval-mixture, whose shards training never draws");
+    if (config.eval_every && !config.eval_mixture.empty()) {
+        expected<mixture_t> read = mixture_t::read(config.eval_mixture);
+        if (!read) return fail_out_(read.description_.view());
+        // Each source charges its own reservoir, so the envelope makes room for both.
+        std::size_t const training_fixed = config.reservoir_fixed_bytes, training_row = config.reservoir_row_bytes;
+        if (expected_t opened = dataset_source_t::open(held_out, config, *storage, std::move(read.value_)); !opened)
+            return fail_out_(opened.description_.view());
+        config.reservoir_fixed_bytes += training_fixed, config.reservoir_row_bytes += training_row;
+    }
 
     trainer_t trainer;
     if (expected_t built = trainer_t::make(trainer, mesh, config, devices.view()); !built)
@@ -131,13 +151,15 @@ using namespace unum::uform::train;
         fmt::println("uform_base: resumed from {} at step {}", config.resume, trainer.completed_steps);
     }
     int stepped = 0;
-    if (config.mixture.empty()) {
-        synthetic_source_t synthetic;
-        stepped = step_(trainer, config, synthetic);
-    }
+    if (!config.eval_mixture.empty() && config.eval_every)
+        if (expected_t made = dataset_source_t::make(held_out, trainer); !made)
+            return fail_out_(made.description_.view());
+    synthetic_source_t synthetic;
+    batch_source_t &evaluated = config.eval_mixture.empty() ? static_cast<batch_source_t &>(synthetic) : held_out;
+    if (config.mixture.empty()) stepped = step_(trainer, config, synthetic, evaluated);
     else if (expected_t made = dataset_source_t::make(datasets, trainer); !made)
         return fail_out_(made.description_.view());
-    else stepped = step_(trainer, config, datasets);
+    else stepped = step_(trainer, config, datasets, evaluated);
     // No host tears its queue pairs down while a peer still awaits its last acknowledgement.
     if (stepped == 0)
         if (expected_t finished = mesh.topology.barrier("finish", mesh.timeout_seconds); !finished)

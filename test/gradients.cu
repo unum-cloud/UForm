@@ -166,6 +166,7 @@ static void finite_differences(test_suite_t &suite, device_t &device, bool omni)
     // stack; the block's own backward is checked exactly by block_host_replay.
     trainer_config_t config = test_geometry_(omni);
     config.depth = 1;
+    config.seed = suite.settings.seed;
     expected<gpu_arena_t> arena = gpu_arena_t::make(0, case_arena_bytes_k);
     if (!arena) return suite.check(false, "arena: {}", arena.description_);
     expected<base_replica_t> made = make_replica_(*arena, device, config, data_epoch_t {0});
@@ -178,24 +179,32 @@ static void finite_differences(test_suite_t &suite, device_t &device, bool omni)
     cuStreamSynchronize(device.stream.get());
 
     array<f64_t> weights, gradient, plus, minus;
+    array<nk_bf16_t> staging;
     for (differentiable_weights_t const &matrix : replica.weights.view()) {
         std::size_t const scalars = matrix.weights.numel();
         if (!download_widened_(matrix.weights.data(), scalars, weights) ||
             !download_widened_(matrix.weights_grad.data(), scalars, gradient) ||
             plus.resize_uninitialized(scalars) != status_t::success_k ||
-            minus.resize_uninitialized(scalars) != status_t::success_k)
+            minus.resize_uninitialized(scalars) != status_t::success_k ||
+            staging.resize_uninitialized(scalars) != status_t::success_k)
             return suite.check(false, "host staging for {} failed", matrix.name);
         f64_t largest = 0;
         for (f64_t const value : gradient.view()) largest = std::max(largest, std::fabs(value));
         // The head and pool weights outside the masked objective take no gradient and move no loss.
         if (largest == 0) continue;
-        // A step that changes the loss by about 1/4 nats, at most a quarter of the matrix's RMS per
-        // scalar: a hundred times a forward's BFloat16 rounding noise, yet short of the curvature.
         f64_t const weight_rms = std::sqrt(dot(weights.view(), weights.view()) / static_cast<f64_t>(scalars));
-        f64_t const step = std::min(largest / (8.0 * dot(gradient.view(), gradient.view())), weight_rms / 4.0);
-        for (std::size_t index = 0; index != scalars; ++index)
-            plus[index] = weights[index] + step * gradient[index] / largest,
-            minus[index] = weights[index] - step * gradient[index] / largest;
+        f64_t predicted = 0;
+        // Double the step until the BF16-rounded move predicts an eighth of a nat, never past the
+        // matrix's RMS.
+        f64_t const first_step = largest / (8.0 * dot(gradient.view(), gradient.view()));
+        for (f64_t step = first_step; step == first_step || (predicted < 0.125 && step <= weight_rms); step *= 2) {
+            for (std::size_t index = 0; index != scalars; ++index)
+                plus[index] = weights[index] + step * gradient[index] / largest,
+                minus[index] = weights[index] - step * gradient[index] / largest;
+            if (!narrow_to_bf16(plus.span(), staging.span()) || !narrow_to_bf16(minus.span(), staging.span()))
+                return suite.check(false, "host rounding for {} failed", matrix.name);
+            predicted = dot(gradient.view(), plus.view()) - dot(gradient.view(), minus.view());
+        }
         bool uploaded = upload_narrowed_(plus.span(), matrix.weights.data());
         expected<f64_t> const loss_plus = forward_loss_(replica, device.stream);
         uploaded = uploaded && upload_narrowed_(minus.span(), matrix.weights.data());
@@ -203,7 +212,6 @@ static void finite_differences(test_suite_t &suite, device_t &device, bool omni)
         uploaded = uploaded && upload_narrowed_(weights.span(), matrix.weights.data());
         if (!uploaded || !loss_plus || !loss_minus)
             return suite.check(false, "perturbed forward of {} failed", matrix.name);
-        f64_t const predicted = dot(gradient.view(), plus.view()) - dot(gradient.view(), minus.view());
         f64_t const measured = *loss_plus - *loss_minus;
         f64_t const gap = std::fabs(measured - predicted), error = gap / std::max(std::fabs(predicted), 1.0e-6);
         suite.check(error <= finite_difference_tolerance_k,
@@ -236,18 +244,34 @@ struct host_segments_t {
     return segments;
 }
 
-/** The linear loss @c ⟨R,V⟩ over the token head's vectors @c V after one tower forward. */
+/** The linear loss @c ⟨R,V⟩ over the token head's unit vectors @c V after one tower forward,
+ *  normalized in Float64 from the Float32 projections, since the BFloat16 vectors' rounding noise
+ *  would swamp a central difference of the projection. */
 [[nodiscard]] static expected<f64_t> token_head_loss_(base_replica_t &replica, array<f64_t> const &direction,
                                                       gpu_stream_t &stream) noexcept {
     expected_t forwarded = replica.tower.pack_weights(stream);
     if (forwarded) forwarded = replica.tower.forward(replica.batch, {}, stream);
     if (!forwarded) return expected<f64_t>::fail(std::move(forwarded));
     cuStreamSynchronize(stream.get());
-    array<f64_t> vectors;
-    bf16r2_view_t const token_vectors = replica.tower.token_vectors();
-    if (!download_widened_(token_vectors.data(), token_vectors.numel(), vectors))
-        return expected<f64_t>::fail(status_t::bad_alloc_k, "token vector staging failed");
-    return expected<f64_t> {dot(vectors.view(), direction.view())};
+    f32r2_view_t const projections = replica.tower.token_projections();
+    std::size_t const tokens = projections.extent(0), width = projections.extent(1);
+    array<f32_t> rows;
+    if (rows.resize_uninitialized(tokens * width) != status_t::success_k)
+        return expected<f64_t>::fail(status_t::bad_alloc_k, "token projection staging failed");
+    cuMemcpyDtoH(rows.data(), device_address(projections.data()), tokens * width * sizeof(f32_t));
+    f32r2_view_t const projection_rows {rows.data(), tokens, width};
+    f64r2_view_t const direction_rows {direction.data(), tokens, width};
+    f64_t const epsilon = replica.tower.config().block.rms_eps;
+    f64_t loss = 0;
+    for (std::size_t token = 0; token != tokens; ++token) {
+        f64_t squares = 0, along = 0;
+        for (std::size_t channel = 0; channel != width; ++channel) {
+            f64_t const value = projection_rows[token, channel];
+            squares += value * value, along += value * direction_rows[token, channel];
+        }
+        loss += along / std::sqrt(std::max(squares, epsilon));
+    }
+    return expected<f64_t> {loss};
 }
 
 /** The token head and its Float32 join into the tower: a fixed linear loss over the token vectors,
@@ -258,6 +282,7 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
     switch_to_gpu_t scope {device.stream};
     trainer_config_t config = test_geometry_(false);
     config.depth = 1;
+    config.seed = suite.settings.seed;
     config.objective = objective_t::contrastive_k;
     config.late_interaction.weight = 1.0f;
     config.late_interaction.width = 32;
@@ -712,7 +737,7 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
     config.max_tokens = tokens;
     config.max_segments = segments;
     config.max_segment_tokens = sequence;
-    expected<transformer_scratch_t> scratch = transformer_scratch_t::make(*arena, config, 0);
+    expected<transformer_scratch_t> scratch = transformer_scratch_t::make(*arena, config, {}, 0);
     if (!scratch) return suite.check(false, "scratch: {}", scratch.description_);
     expected<transformer_block_bf16_t> block = transformer_block_bf16_t::make(*arena, *scratch, config);
     if (!block) return suite.check(false, "block: {}", block.description_);

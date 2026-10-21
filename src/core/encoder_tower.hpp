@@ -241,6 +241,10 @@ struct tower_token_head_t {
     /** @b [tokens,width] the unit token vectors of the last @ref forward . */
     [[nodiscard]] bf16r2_view_t token_vectors() const noexcept { return vectors_.view(); }
 
+    /** @b [tokens,width] the Float32 projections @ref token_vectors are the narrowed unit rows
+     *  of. */
+    [[nodiscard]] f32r2_view_t token_projections() const noexcept { return projected_.view(); }
+
     /** @b [segments+1] each segment's first row in @ref token_vectors , the last entry the live
      *  total. */
     [[nodiscard]] u32r1_view_t token_offsets() const noexcept { return token_offsets_.view(); }
@@ -344,6 +348,9 @@ struct encoder_tower_bf16_t {
     /** @b [tokens,token_width] the late-interaction token vectors of the last forward, empty
      *  without the head. */
     [[nodiscard]] bf16r2_view_t token_vectors() const noexcept { return token_head_.token_vectors(); }
+
+    /** @b [tokens,token_width] the Float32 projections behind @ref token_vectors . */
+    [[nodiscard]] f32r2_view_t token_projections() const noexcept { return token_head_.token_projections(); }
 
     /** @b [segments+1] each segment's first row in @ref token_vectors . */
     [[nodiscard]] u32r1_view_t token_offsets() const noexcept { return token_head_.token_offsets(); }

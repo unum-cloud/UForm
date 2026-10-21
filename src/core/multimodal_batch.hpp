@@ -226,6 +226,10 @@ struct multimodal_batch_shape_t {
      *  routing unit — the masked pipeline's degenerate case and the default. */
     u32_t max_bags_per_gpu = 0;
 
+    /** Most segments one bag holds: an anchor, its positives and its negatives, as the loader's
+     *  roles allow. Zero means no loader groups segments into role bags. */
+    u32_t max_bag_segments = 0;
+
     /** The image modality's geometry (patch side, channels) — handed to the image loader alone. */
     image_batch_shape_t image {};
 

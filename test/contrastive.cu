@@ -48,6 +48,7 @@ struct host_relations_t {
     std::vector<u32_t> attract_offsets, attract_ids, repel_offsets, repel_ids, ignore_offsets, ignore_ids;
     std::vector<f32_t> attract_scores, repel_scores;
     std::vector<u32_t> vertex_effective, neighbor_effective;
+    std::vector<u64_t> vertex_keys, neighbor_keys;
     std::size_t self_edge_base = 0;
     f32_t ambient = 1.0f;
 
@@ -69,8 +70,12 @@ struct host_relations_t {
         };
         if (in_run(ignore_offsets, ignore_ids, nullptr)) return {0.0, 0.0};
         bool const is_self = neighbor_global == self_edge_base + vertex;
-        if (attract_ids.empty()) return is_self ? resolved_edge_t {1.0, 1.0} : resolved_edge_t {-1.0, f64_t(ambient)};
+        bool const keyed = !vertex_keys.empty();
+        if (attract_ids.empty() && !keyed)
+            return is_self ? resolved_edge_t {1.0, 1.0} : resolved_edge_t {-1.0, f64_t(ambient)};
         if (is_self) return {0.0, 0.0};
+        if (keyed && vertex_keys[vertex] != 0 && vertex_keys[vertex] == neighbor_keys[neighbor_global])
+            return {1.0, 1.0};
         std::size_t position = 0;
         if (in_run(attract_offsets, attract_ids, &position)) return {1.0, f64_t(attract_scores[position])};
         if (in_run(repel_offsets, repel_ids, &position)) return {-1.0, f64_t(repel_scores[position])};
@@ -117,17 +122,18 @@ struct host_bags_t {
         nk::tensor_view<segment_role_t, 1> const role_column = std::span {roles};
         f32r1_view_t const weight_column = std::span {weights};
         return relate_roles(bag_column[rows, nk::slice], role_column[rows, nk::slice], length_column[rows, nk::slice],
-                            weight_column[rows, nk::slice], std::span {keys}, first, edges);
+                            weight_column[rows, nk::slice], first, edges);
     }
 };
 
 /** Ten segments in four bags with one PAD among them: a triplet {0,1,2} whose negative weighs 2, a
- *  multi-positive {3,4,5}, a PAD {6}, and a pair {7,8} with a light negative 9; segments 4 and 8
- *  share a key across bags. */
+ *  multi-positive {3,4,5}, a PAD {6}, and a pair {7,8} with a light negative 9; segments 1, 4 and 8
+ *  share one key across three bags, which attract through the resolver and name no edge. */
 [[nodiscard]] static host_bags_t ragged_bags_() {
     using role_t = segment_role_t;
     host_bags_t bags;
-    bags.add(0, role_t::anchor_k, 4), bags.add(0, role_t::positive_k, 3), bags.add(0, role_t::negative_k, 2, 2.0f);
+    bags.add(0, role_t::anchor_k, 4), bags.add(0, role_t::positive_k, 3, 1.0f, 11);
+    bags.add(0, role_t::negative_k, 2, 2.0f);
     bags.add(1, role_t::anchor_k, 5), bags.add(1, role_t::positive_k, 1, 1.0f, 11), bags.add(1, role_t::positive_k, 2);
     bags.add(2, role_t::anchor_k, 0);
     bags.add(3, role_t::anchor_k, 6), bags.add(3, role_t::positive_k, 2, 1.0f, 11);
@@ -310,7 +316,7 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
             {std::span {host_relations.repel_offsets}, std::span {host_relations.repel_ids},
              std::span {host_relations.repel_scores}},
             {std::span {host_relations.ignore_offsets}, std::span {host_relations.ignore_ids}, {}}, effective_view,
-            effective_view, num_vertices, 0, ambient_weight, stream);
+            effective_view, {}, {}, num_vertices, 0, ambient_weight, stream);
     }
     else if (graph == oracle_graph_t::roles_k) {
         expected<host_edges_t> edges = host_edges_t::make(u32_t(num_vertices), 32);
@@ -318,8 +324,12 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
         staged = bags.relate(edges.value_, 0, u32_t(num_vertices));
         if (!staged) return suite.check(false, "relate: {}", staged.description_);
         host_relations.adopt(edges.value_);
+        host_relations.vertex_keys = bags.keys;
+        host_relations.neighbor_keys = bags.keys;
+        u64r1_span_t const keys {arena.allocate_object<u64_t>(num_vertices), num_vertices};
+        cuMemcpyHtoD(device_address(keys.data()), bags.keys.data(), num_vertices * sizeof(u64_t));
         staged = relations.upload(edges.value_.attract(), edges.value_.repel(), edges.value_.ignore(), effective_view,
-                                  effective_view, num_vertices, 0, ambient_weight, stream);
+                                  effective_view, keys, keys, num_vertices, 0, ambient_weight, stream);
     }
     else
         staged = relations.upload_self_edges(u32_t(num_vertices), effective_view, effective_view, 0, ambient_weight,
@@ -378,6 +388,66 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
         }
     }
 
+    // The retrieval table against the Float64 rows: ranks, cosine sums and the Gram terms of every
+    // row.
+    if (graph == oracle_graph_t::roles_k) {
+        if (expected_t evaluated = loss.evaluate(bf16r2_view_t {tower, num_vertices, hidden}, {&subgraph, 1},
+                                                 relations.view(), recipe, stream);
+            !evaluated)
+            return suite.check(false, "evaluate: {}", evaluated.description_);
+        cuStreamSynchronize(stream.get());
+        std::size_t const columns = std::size_t(retrieval_column_t::count_k);
+        std::vector<f32_t> table(num_vertices * columns);
+        cuMemcpyDtoH(table.data(), device_address(loss.retrieval().data()), table.size() * sizeof(f32_t));
+        f32r2_view_t const table_rows {table.data(), num_vertices, columns};
+        f64r2_view_t const rows {host_tower.data(), num_vertices, hidden};
+        f64_t worst = 0.0;
+        for (std::size_t row = 0; row != num_vertices; ++row) {
+            f64_t expected[std::size_t(retrieval_column_t::count_k)] = {};
+            auto const cell = [&](retrieval_column_t which) noexcept -> f64_t & {
+                return expected[std::size_t(which)];
+            };
+            std::vector<f64_t> cosines(num_vertices);
+            f64_t best = -1e300, positives = 0.0, negatives = 0.0, above = 0.0;
+            for (std::size_t other = 0; other != num_vertices && host_effective[row] != 0u; ++other) {
+                if (host_effective[other] == 0u) continue;
+                f64r1_view_t const ours = rows[row, nk::slice], theirs = rows[other, nk::slice];
+                f64_t const denominator = std::sqrt(dot(ours, ours) * dot(theirs, theirs));
+                cosines[other] = denominator > 1.0e-2 ? dot(ours, theirs) / denominator : 0.0;
+                cell(retrieval_column_t::cosine_k) += cosines[other];
+                cell(retrieval_column_t::squared_cosine_k) += cosines[other] * cosines[other];
+                cell(retrieval_column_t::live_vertices_k) += 1.0;
+                auto [target, weight] = host_relations.resolve(u32_t(row), u32_t(other));
+                if (target > 0 && weight != 0.0)
+                    best = std::max(best, cosines[other]), positives += 1.0,
+                    cell(retrieval_column_t::attract_cosine_k) += cosines[other];
+            }
+            for (std::size_t other = 0; other != num_vertices && host_effective[row] != 0u; ++other) {
+                auto [target, weight] = host_relations.resolve(u32_t(row), u32_t(other));
+                if (!(target < 0) || weight == 0.0) continue;
+                bool const outranks = cosines[other] > best;
+                negatives += 1.0, above += outranks;
+                bool hard = false;
+                for (u32_t edge = host_relations.repel_offsets[row]; edge != host_relations.repel_offsets[row + 1];
+                     ++edge)
+                    hard = hard || host_relations.repel_ids[edge] == other;
+                if (hard) cell(retrieval_column_t::hards_k) += 1.0, cell(retrieval_column_t::hard_above_k) += outranks;
+                else
+                    cell(retrieval_column_t::ambients_k) += 1.0,
+                        cell(retrieval_column_t::ambient_cosine_k) += cosines[other];
+            }
+            bool const ranked = positives != 0.0 && negatives != 0.0;
+            cell(retrieval_column_t::ranked_k) = ranked;
+            cell(retrieval_column_t::hit_at_1_k) = ranked && above == 0.0;
+            cell(retrieval_column_t::hit_at_5_k) = ranked && above < 5.0;
+            cell(retrieval_column_t::chance_k) = ranked ? positives / (positives + negatives) : 0.0;
+            cell(retrieval_column_t::attracts_k) = positives;
+            for (std::size_t column = 0; column != columns; ++column)
+                worst = std::max(worst, std::fabs(f64_t(table_rows[row, column]) - expected[column]));
+        }
+        suite.check(worst < 1.0e-2, "the retrieval table matches the Float64 rows: worst difference {:.2e}", worst);
+    }
+
     // Capture once, replay twice: the replays land where the eager run did, up to reduction order.
     std::vector<f64_t> const eager_grad = host_grad;
     auto graph_made = gpu_replay_graph_t::make(stream.get(), [&]() noexcept { return run_once(); });
@@ -409,13 +479,15 @@ static void run_negative_cases(test_suite_t &suite) {
     f32_t scores[2] = {1.0f, 1.0f};
     u32_t empty_offsets[5] = {0, 0, 0, 0, 0};
     auto unsorted = relations.value_.upload({{offsets, 5}, {unsorted_ids, 2}, {scores, 2}},
-                                            {{empty_offsets, 5}, {}, {}}, {}, {}, {}, 8, 0, 1.0f, stream.value_);
+                                            {{empty_offsets, 5}, {}, {}}, {}, {}, {}, {}, {}, 8, 0, 1.0f,
+                                            stream.value_);
     suite.check(!unsorted, "unsorted run is rejected loudly");
     u32_t overflowing_ids[6] = {0, 1, 2, 3, 4, 5};
     u32_t overflow_offsets[5] = {0, 6, 6, 6, 6};
     f32_t overflow_scores[6] = {1, 1, 1, 1, 1, 1};
     auto overflow = relations.value_.upload({{overflow_offsets, 5}, {overflowing_ids, 6}, {overflow_scores, 6}},
-                                            {{empty_offsets, 5}, {}, {}}, {}, {}, {}, 8, 0, 1.0f, stream.value_);
+                                            {{empty_offsets, 5}, {}, {}}, {}, {}, {}, {}, {}, 8, 0, 1.0f,
+                                            stream.value_);
     suite.check(!overflow, "edge-capacity overflow is rejected loudly");
     infiniband_coordinates_t coordinates;
     suite.check(!infiniband_coordinates_t::from_text("lid banana\n", coordinates), "corrupt coordinates are rejected");
@@ -470,11 +542,13 @@ static void run_sharded_oracle_case(test_suite_t &suite, oracle_graph_t graph, c
     bf16r2_span_t const row_grad {arena.allocate_object<bf16_t>(world_k * hidden_k), world_k, hidden_k};
     f32r2_span_t const column_grad {arena.allocate_object<f32_t>(world_k * hidden_k), world_k, hidden_k};
     u32r1_span_t const world_lengths {arena.allocate_object<u32_t>(world_k), world_k};
+    u64r1_span_t const world_keys {arena.allocate_object<u64_t>(world_k), world_k};
     f32r1_span_t const temperatures {arena.allocate_object<f32_t>(2), 2};
     f32r2_span_t const outputs {arena.allocate_object<f32_t>(3 * (ranks_k + 1)), ranks_k + 1, 3};
     f32_t const host_temperatures[2] = {beta_k, bias_k};
     cuMemcpyHtoD(device_address(tower.data()), staging.data(), staging.size() * sizeof(nk_bf16_t));
     cuMemcpyHtoD(device_address(world_lengths.data()), host_lengths, sizeof(host_lengths));
+    cuMemcpyHtoD(device_address(world_keys.data()), world_bags.keys.data(), world_k * sizeof(u64_t));
     cuMemcpyHtoD(device_address(temperatures.data()), host_temperatures, sizeof(host_temperatures));
     contrastive_recipe_t recipe;
     recipe.inverse_temperature_device = temperatures[nk::range(0, 1), nk::slice];
@@ -490,8 +564,8 @@ static void run_sharded_oracle_case(test_suite_t &suite, oracle_graph_t graph, c
             staged = world_bags.relate(edges, first_vertex, rows);
             if (staged)
                 staged = relations.upload(edges.attract(), edges.repel(), edges.ignore(),
-                                          world_lengths[owned, nk::slice], world_lengths, world_k, first_vertex, 1.0f,
-                                          stream);
+                                          world_lengths[owned, nk::slice], world_lengths, world_keys[owned, nk::slice],
+                                          world_keys, world_k, first_vertex, 1.0f, stream);
             // The host edges are refilled by the next call, so their copies land first.
             if (staged && cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
                 staged = expected_t::fail(status_t::cuda_error_k, "relation staging drain failed");
@@ -560,7 +634,11 @@ static void run_sharded_oracle_case(test_suite_t &suite, oracle_graph_t graph, c
     host_relations_t host_relations;
     host_relations.vertex_effective.assign(host_lengths, host_lengths + world_k);
     host_relations.neighbor_effective.assign(host_lengths, host_lengths + world_k);
-    if (graph == oracle_graph_t::roles_k) host_relations.adopt(global_edges.value_);
+    if (graph == oracle_graph_t::roles_k) {
+        host_relations.adopt(global_edges.value_);
+        host_relations.vertex_keys = world_bags.keys;
+        host_relations.neighbor_keys = world_bags.keys;
+    }
     f64r2_view_t const host_rows {host_tower.data(), world_k, hidden_k};
     auto oracle_at = [&](f64_t beta, f64_t bias) noexcept {
         return host_pair_loss(form, host_rows, host_rows, prefixes, host_relations, beta, bias, live_vertices);
@@ -1366,8 +1444,8 @@ struct device_tokens_inputs_t {
     expected_t uploaded = inputs.relations.upload(
         {std::span {attract_offsets}, std::span {attract_ids}, std::span {attract_scores}},
         {std::span {repel_offsets}, std::span {repel_ids}, std::span {repel_scores}},
-        {std::span {ignore_offsets}, std::span {ignore_ids}, {}}, {}, {}, world_segments, row_begin, host.ambient,
-        stream);
+        {std::span {ignore_offsets}, std::span {ignore_ids}, {}}, {}, {}, {}, {}, world_segments, row_begin,
+        host.ambient, stream);
     if (!uploaded) return result_t::fail(std::move(uploaded));
     return result_t {std::move(inputs)};
 }
@@ -1710,6 +1788,8 @@ static void run_tokens_cross_domain_case(test_suite_t &suite) {
 }
 
 int main(int, char **argv) {
+    // Lazy loading would strand the one host thread still owing other members' barrier arrivals.
+    ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
     test_suite_t suite = test_suite_t::make(argv[0]);
     [[maybe_unused]] CUresult const initialized = cuInit(0); // a failure leaves no device to count, so each case skips
     if (std::getenv("UFORM_HOST_DOMAIN_INDEX") != nullptr) {

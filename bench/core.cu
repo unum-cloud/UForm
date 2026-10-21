@@ -215,7 +215,8 @@ static void contrastive_tokens(loop_t &loop, u64_t seed) {
     expected<contrastive_relations_t> relations = contrastive_relations_t::make(*arena, segments, queries_k);
     if (!relations) return loop.fail(relations.description_.view());
     if (expected_t staged = relations->upload({attract_offsets.view(), attract_ids.view(), attract_scores.view()},
-                                              {repel_offsets.view(), {}, {}}, {}, {}, {}, segments, 0, 1.0f, *stream);
+                                              {repel_offsets.view(), {}, {}}, {}, {}, {}, {}, {}, segments, 0, 1.0f,
+                                              *stream);
         !staged)
         return loop.fail(staged.description_.view());
     multimodal_batch_view_t batch;

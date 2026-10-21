@@ -4,7 +4,7 @@
  *  @date October 18, 2026
  *  @brief The mixture reader and the dataset source declared in @c src/train/datasets.hpp .
  */
-#include <algorithm> // `std::upper_bound`, `std::min`, `std::max`
+#include <algorithm> // `std::upper_bound`, `std::min`, `std::max`, `std::any_of`
 #include <utility>   // `std::swap` — a step's batches into the mixer's table and back
 
 #include <cuda.h> // `cuStreamSynchronize`
@@ -128,6 +128,14 @@ bool mixture_t::names(modality_t modality) const noexcept {
 }
 
 multimodal_batch_shape_t mixture_t::shape(multimodal_batch_shape_t shape) const noexcept {
+    // The paired loader's bag holds an anchor and a positive, and a negative when the entry names
+    // one.
+    std::span<mixture_entry_t const> const entries = datasets.view();
+    if (!entries.empty() && !entries[0].anchor.empty())
+        shape.max_bag_segments = std::any_of(entries.begin(), entries.end(),
+                                             [](mixture_entry_t const &entry) { return !entry.negative.empty(); })
+                                     ? 3u
+                                     : 2u;
     if (names(modality_t::image_k)) shape.image = image_batch_shape_t {16u};
     if (names(modality_t::video_k)) shape.video = video_batch_shape_t {16u, 3u, 2u, 1u};
     if (names(modality_t::audio_k)) shape.audio = audio_batch_shape_t {256u, 16000u};
@@ -234,16 +242,15 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer) 
     placed.next_batch_ = config.batches_per_fill;
 
     if (!config.contrasts()) return {};
-    std::size_t const world_segments = std::size_t {segments} * trainer.mesh->topology.shape.gpus_per_colocated_domain;
-    u32_t const edges = config.contrastive.max_edges_per_gpu ? config.contrastive.max_edges_per_gpu
-                                                             : 2u * static_cast<u32_t>(segments);
+    u32_t const edges = config.contrastive.max_edges_per_gpu
+                            ? config.contrastive.max_edges_per_gpu
+                            : relation_edges_capacity(static_cast<u32_t>(segments), shape.max_bag_segments);
     placed.bags_ = u32r2_tensor_pinned_t::uninitialized({gpus, segments}, pinned_alloc<u32_t> {}).value;
     placed.lengths_ = u32r2_tensor_pinned_t::uninitialized({gpus, segments}, pinned_alloc<u32_t> {}).value;
     placed.roles_ = nk::tensor<segment_role_t, pinned_alloc<segment_role_t>, 2>::uninitialized(
                         {gpus, segments}, pinned_alloc<segment_role_t> {})
                         .value;
-    placed.world_keys_ = u64r1_tensor_pinned_t::uninitialized({world_segments}, pinned_alloc<u64_t> {}).value;
-    if (!placed.bags_ || !placed.lengths_ || !placed.roles_ || !placed.world_keys_)
+    if (!placed.bags_ || !placed.lengths_ || !placed.roles_)
         return expected_t::fail(status_t::bad_alloc_k, "relation scratch allocation failed");
     expected<contrastive_edges_pinned_t> edge_sets = contrastive_edges_pinned_t::make(static_cast<u32_t>(segments),
                                                                                       edges);
@@ -347,9 +354,6 @@ expected_t dataset_source_t::relate_(trainer_t &trainer) noexcept {
                                          trainer.streams[member]);
         if (copied)
             copied = copy_device_to_host(mixed.segment_role.view(), roles_[member, nk::slice], trainer.streams[member]);
-        if (copied && member == 0)
-            copied = copy_device_to_host(mixer_.world_keys(member).flatten<1>(), world_keys_.span(),
-                                         trainer.streams[member]);
         if (!copied) return copied;
     }
     if (expected_t drained = trainer.synchronize(); !drained) return drained;
@@ -357,8 +361,7 @@ expected_t dataset_source_t::relate_(trainer_t &trainer) noexcept {
     for (std::size_t member = 0; member != gpus; ++member) {
         u32_t const vertex_base = (first + static_cast<u32_t>(member)) * segments;
         if (expected_t related = relate_roles(bags_[member, nk::slice], roles_[member, nk::slice],
-                                              lengths_[member, nk::slice], f32r1_view_t {}, world_keys_.view(),
-                                              vertex_base, edges_);
+                                              lengths_[member, nk::slice], f32r1_view_t {}, vertex_base, edges_);
             !related)
             return related;
 
@@ -366,10 +369,11 @@ expected_t dataset_source_t::relate_(trainer_t &trainer) noexcept {
         gpu_stream_t &stream = trainer.streams[member];
         switch_to_gpu_t gpu_scope {stream};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-        expected_t staged = replica.relations.upload(edges_.attract(), edges_.repel(), edges_.ignore(),
-                                                     replica.batch.segment_lengths.view(),
-                                                     mixer_.world_lengths(member).flatten<1>(), world_segments,
-                                                     vertex_base, config.contrastive.ambient_repulsion_weight, stream);
+        expected_t staged = replica.relations.upload(
+            edges_.attract(), edges_.repel(), edges_.ignore(), replica.batch.segment_lengths.view(),
+            mixer_.world_lengths(member).flatten<1>(), replica.batch.segment_key.view(),
+            mixer_.world_keys(member).flatten<1>(), world_segments, vertex_base,
+            config.contrastive.ambient_repulsion_weight, stream);
         if (staged) // the host columns are reused for the next GPU, so their copies land first
             if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
                 staged = cuda_failure(result, "relation staging drain failed (member={})", member);

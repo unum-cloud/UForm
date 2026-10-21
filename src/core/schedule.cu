@@ -146,21 +146,39 @@ expected_t uc::pack_weight_bf16(bf16r2_view_t weight, bf16r1_span_t transposed, 
     return staged;
 }
 
+expected<std::size_t> uc::weight_gradient_workspace_bytes_bf16(std::size_t outputs, std::size_t inputs,
+                                                               std::size_t tokens,
+                                                               nk_capability_t capabilities) noexcept {
+    nk_size_t bytes = 0;
+    if (nk_status_t const status = nk_dots_packed_workspace_size_bf16_best(outputs, inputs, tokens, capabilities,
+                                                                           &bytes);
+        status != nk_success_k)
+        return expected<std::size_t>::fail(status_t::cuda_error_k,
+                                           "weight gradient workspace sizing [{}x{}x{}] failed: {}", outputs, inputs,
+                                           tokens, nk_status_name(status));
+    return expected<std::size_t> {static_cast<std::size_t>(bytes)};
+}
+
 expected_t uc::weight_gradient_bf16(bf16r2_view_t output_grad, bf16r2_view_t input, bf16r2_span_t weight_grad,
                                     bf16r1_span_t transposed_grad, bf16r1_span_t transposed_input,
-                                    b8r1_span_t packed_input, f32r1_span_t product, nk_capability_t capabilities,
-                                    gpu_stream_t &stream) noexcept {
+                                    b8r1_span_t packed_input, f32r1_span_t product, b8r1_span_t workspace,
+                                    nk_capability_t capabilities, gpu_stream_t &stream) noexcept {
     std::size_t const tokens = output_grad.extent(0), outputs = output_grad.extent(1), inputs = input.extent(1);
     std::size_t const padded_tokens = round_up_to_multiple(tokens, std::size_t {8});
     bf16r2_span_t const output_grad_padded {transposed_grad.data(), outputs, padded_tokens};
     bf16r2_span_t const input_padded {transposed_input.data(), inputs, padded_tokens};
     bf16r2_span_t const output_grad_transposed = output_grad_padded[nk::all, nk::range(0, tokens), nk::slice];
     bf16r2_span_t const input_transposed = input_padded[nk::all, nk::range(0, tokens), nk::slice];
-    f32r2_span_t const weight_grad_wide {product.data(), outputs, inputs};
     expected_t staged = transpose_bf16(output_grad, output_grad_transposed, stream);
     if (staged) staged = transpose_bf16(input, input_transposed, stream);
     if (staged) staged = pack_bf16(input_transposed, packed_input, capabilities, stream);
-    if (staged) staged = multiply_bf16(output_grad_transposed, packed_input, weight_grad_wide, capabilities, stream);
+    if (staged)
+        staged = numkong_result(
+            nk_dots_packed_bf16_best(numkong_scalars(output_grad_transposed.data()), packed_input.data(),
+                                     product.data(), outputs, inputs, tokens, output_grad_transposed.stride_bytes(0),
+                                     inputs * sizeof(f32_t), workspace.data(), workspace.extent(0), capabilities,
+                                     stream.numkong()),
+            "weight gradient product");
     if (staged)
         staged = numkong_result(nk_cast_best(product.data(), nk_f32_k, weight_grad.data(), nk_bf16_k, outputs * inputs,
                                              capabilities, stream.numkong()),
