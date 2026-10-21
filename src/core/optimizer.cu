@@ -113,17 +113,19 @@ static __global__ void adafactor_scale_kernel_(adafactor_state_t state, f32r1_vi
 }
 
 /**
- *  @brief Apply the clipped update @c W -= @c lr·scale·G/√v , through the Float32 master for vector
- *      weights (the norm scales) and straight into BFloat16 otherwise, rounded stochastically under
- *      @p rounding_key . Every CTA folds the row-moment mean and the @p row_energies into the clip
- *      scale in the same order, so all of them agree bitwise.
+ *  @brief Apply the clipped update @c W -= @c lr·scale·G/√v , or its running mean under @p beta1
+ *      when @p first_moments are kept, through the Float32 master for vector weights (the norm
+ *      scales) and straight into BFloat16 otherwise, rounded stochastically under @p rounding_key .
+ *
+ *  Every CTA folds the row-moment mean and the @p row_energies into the clip scale in the same
+ *  order, so all of them agree bitwise.
  *
  *  __grid_size__ grid-stride over the state's scalars; no dynamic shared memory.
  */
 static __global__ void adafactor_apply_kernel_(adafactor_state_t state, f32r1_view_t moments,
                                                f32r1_view_t reduced_gradients, f32r1_view_t row_energies,
                                                f32r1_span_t masters, f32_t learning_rate, f32_t clip_threshold,
-                                               u64_t rounding_key) {
+                                               u64_t rounding_key, f32r1_span_t first_moments, f32_t beta1) {
     u32_t const rows = static_cast<u32_t>(state.weights.extent(0));
     u32_t const cols = static_cast<u32_t>(state.weights.extent(1));
     std::size_t const scalars = static_cast<std::size_t>(rows) * cols;
@@ -143,7 +145,12 @@ static __global__ void adafactor_apply_kernel_(adafactor_state_t state, f32r1_vi
         f32_t const variance = moments[state.row_moment_offset + row] / row_mean *
                                moments[state.column_moment_offset + column];
         f32_t const gradient = adafactor_gradient_(state, reduced_gradients, row, column);
-        f32_t const step = learning_rate * clip_scale * gradient * rsqrtf(variance);
+        f32_t step = learning_rate * clip_scale * gradient * rsqrtf(variance);
+        if (!first_moments.empty()) {
+            f32_t &moment = first_moments[state.gradient_offset + index];
+            moment = beta1 * moment + (1.0f - beta1) * clip_scale * gradient * rsqrtf(variance);
+            step = learning_rate * moment;
+        }
         if (rows == 1u) {
             f32_t const updated = masters[state.master_offset + index] - step;
             masters[state.master_offset + index] = updated;
@@ -266,6 +273,14 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
     optimizer.masters_ =
         f32r1_tensor_arena_t::uninitialized({master_scalars != 0 ? master_scalars : 1}, f32_alloc).value;
     optimizer.row_energies_ = f32r1_tensor_arena_t::uninitialized({moment_scalars}, f32_alloc).value;
+    if (config.beta1 != 0.0f) {
+        optimizer.first_moments_ = f32r1_tensor_arena_t::uninitialized({gradient_scalars}, f32_alloc).value;
+        if (!optimizer.first_moments_)
+            return result_t::fail(status_t::bad_alloc_k, "first moment allocation failed ({} scalars)",
+                                  gradient_scalars);
+        if (expected_t zeroed = zero_async(optimizer.first_moments_.span(), stream); !zeroed)
+            return result_t::fail(std::move(zeroed));
+    }
     if (!optimizer.moments_ || !optimizer.masters_ || !optimizer.row_energies_)
         return result_t::fail(status_t::bad_alloc_k, "optimizer state allocation failed ({} moments)", moment_scalars);
     if (CUresult result = cuMemsetD8(device_address(optimizer.moments_.data()), 0, moment_scalars * sizeof(f32_t));
@@ -279,12 +294,15 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
 }
 
 expected_t adafactor_t::save(checkpoint_to_save_t &checkpoint, gpu_stream_t &stream) const noexcept {
-    array<f32_t> moments, masters;
+    array<f32_t> moments, masters, first_moments;
     if (moments.resize_uninitialized(moments_.numel()) != status_t::success_k ||
-        masters.resize_uninitialized(masters_.numel()) != status_t::success_k)
+        masters.resize_uninitialized(masters_.numel()) != status_t::success_k ||
+        first_moments.resize_uninitialized(first_moments_.numel()) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "optimizer state staging failed");
     expected_t staged = copy_device_to_host(moments_.view(), moments.span(), stream);
     if (staged) staged = copy_device_to_host(masters_.view(), masters.span(), stream);
+    if (staged && !first_moments_.empty())
+        staged = copy_device_to_host(first_moments_.view(), first_moments.span(), stream);
     if (!staged) return staged;
     if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
         return cuda_failure(result, "optimizer state download failed");
@@ -300,6 +318,8 @@ expected_t adafactor_t::save(checkpoint_to_save_t &checkpoint, gpu_stream_t &str
         expected_t inserted = insert("row_moments", moments.data() + state.row_moment_offset, rows);
         if (inserted) inserted = insert("column_moments", moments.data() + state.column_moment_offset, cols);
         if (inserted && rows == 1u) inserted = insert("master", masters.data() + state.master_offset, cols);
+        if (inserted && !first_moments_.empty())
+            inserted = insert("first_moment", first_moments.data() + state.gradient_offset, rows * cols);
         if (!inserted) return inserted;
     }
     return {};
@@ -331,6 +351,11 @@ expected_t adafactor_t::load(checkpoint_to_load_t const &checkpoint, gpu_stream_
                                [&]() noexcept { return zero_async(column_moments, stream); });
         if (restored && rows == 1u)
             restored = restore("master", master, [&]() noexcept { return seed_master_(state, masters_, stream); });
+        if (restored && !first_moments_.empty()) {
+            f32r1_span_t const first_moment {first_moments_.data() + state.gradient_offset, rows * cols};
+            restored = restore("first_moment", first_moment,
+                               [&]() noexcept { return zero_async(first_moment, stream); });
+        }
         if (!restored) return restored;
     }
     steps_ = checkpoint.step();
@@ -355,7 +380,7 @@ expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_vi
             staged = launch_kernel(&adafactor_apply_kernel_, dim3 {grid_size_for(rows * cols), 1u, 1u}, block_shape,
                                    stream, state, moments_.view(), reduced_gradients, row_energies_.view(),
                                    masters_.span(), learning_rate, config_.clip_threshold,
-                                   splitmix64_hash_t {}(steps_, index));
+                                   splitmix64_hash_t {}(steps_, index), first_moments_.span(), config_.beta1);
         if (!staged) return staged;
     }
     return {};

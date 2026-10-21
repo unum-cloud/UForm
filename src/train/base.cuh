@@ -72,11 +72,11 @@ struct contrastive_config_t {
     /** Learnable (inverse temperature, bias) entries a step's items select by group. */
     u32_t temperature_groups = 1;
 
-    /** The starting inverse temperature of every group. */
-    f32_t inverse_temperature = 1.0f;
+    /** The starting inverse temperature of every group, SigLIP's for the default sigmoid form. */
+    f32_t inverse_temperature = 10.0f;
 
-    /** The starting logit bias of every group. */
-    f32_t bias = 0.0f;
+    /** The starting logit bias of every group, SigLIP's for the default sigmoid form. */
+    f32_t bias = -10.0f;
 
     /** The weight of every pair no edge names; zero repels named pairs alone. */
     f32_t ambient_repulsion_weight = 1.0f;
@@ -85,7 +85,7 @@ struct contrastive_config_t {
     u32_t max_edges_per_gpu = 0;
 
     /** The pair loss over each anchor row. */
-    contrastive_pair_loss_form_t pair_loss = contrastive_pair_loss_form_t::balanced_k;
+    contrastive_pair_loss_form_t pair_loss = contrastive_pair_loss_form_t::sigmoid_k;
 };
 
 /** How the late-interaction loss scores the per-token vectors of query and document segments. */
@@ -146,7 +146,7 @@ struct trainer_config_t {
     u32_t steps = 100;
 
     /** The peak Adafactor learning rate the warmup ramps to and the cosine decays from. */
-    f32_t learning_rate = 5.0e-3f;
+    f32_t learning_rate = 5.0e-4f;
 
     /** The cosine-decay floor the learning rate settles at over the run's tail. */
     f32_t min_learning_rate = 1.0e-5f;
@@ -154,6 +154,9 @@ struct trainer_config_t {
     /** Linear warmup steps from zero to @ref learning_rate before the cosine decay begins; zero
      *  derives a tenth of @ref steps , at most 400. */
     u32_t warmup_steps = 0;
+
+    /** Adafactor's first-moment decay of the clipped update; zero keeps none. */
+    f32_t adafactor_beta1 = 0.9f;
 
     /** Which losses a step relaxes. */
     objective_t objective = objective_t::masked_k;

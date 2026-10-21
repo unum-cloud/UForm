@@ -150,8 +150,8 @@ struct uform_trainer_handle_t {
     config.contrastive.temperature_groups = contrastive.temperature_groups
                                                 ? static_cast<u32_t>(contrastive.temperature_groups)
                                                 : 1u;
-    config.contrastive.inverse_temperature = chosen(contrastive.inverse_temperature, 1.0f);
-    config.contrastive.bias = contrastive.bias;
+    config.contrastive.inverse_temperature = chosen(contrastive.inverse_temperature, 10.0f);
+    config.contrastive.bias = chosen(contrastive.bias, -10.0f);
     config.contrastive.ambient_repulsion_weight = contrastive.negatives == uform_negatives_named_k
                                                       ? 0.0f
                                                       : chosen(contrastive.ambient_repulsion_weight, 1.0f);
@@ -169,7 +169,7 @@ struct uform_trainer_handle_t {
     config.late_interaction.max_document_tokens_per_gpu = static_cast<u32_t>(
         late_interaction.max_document_tokens_per_device);
 
-    config.learning_rate = chosen(arguments.schedule.learning_rate, 5.0e-3f);
+    config.learning_rate = chosen(arguments.schedule.learning_rate, 5.0e-4f);
     config.min_learning_rate = chosen(arguments.schedule.min_learning_rate, 1.0e-5f);
     config.warmup_steps = static_cast<u32_t>(arguments.schedule.warmup_steps);
     config.steps = static_cast<u32_t>(arguments.schedule.steps);

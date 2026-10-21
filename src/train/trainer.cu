@@ -473,7 +473,7 @@ struct footprint_t {
     }
     expected<distributed_adafactor_t> optimizer = distributed_adafactor_t::make(
         placed.domain, placed.world_reduce, placed.arenas, registrations.view(), lead_weights.size(),
-        adafactor_config_t {}, placed.streams, placed.ledger);
+        adafactor_config_t {.beta1 = config.adafactor_beta1}, placed.streams, placed.ledger);
     if (!optimizer) return expected_t::fail(std::move(optimizer));
     placed.optimizer = std::move(optimizer.value_);
 

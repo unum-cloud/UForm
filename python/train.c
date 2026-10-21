@@ -161,9 +161,9 @@ static uform_py_field_t const Contrastive_fields[] = {
     {"temperature_groups", uform_py_field_size_k, offsetof(uform_contrastive_t, temperature_groups), NULL,
      "Learnable (inverse temperature, bias) pairs; 0 derives one."},
     {"inverse_temperature", uform_py_field_float_k, offsetof(uform_contrastive_t, inverse_temperature), NULL,
-     "The starting inverse temperature of every group; 0 derives 1."},
+     "The starting inverse temperature of every group; 0 derives 10, SigLIP's."},
     {"bias", uform_py_field_float_k, offsetof(uform_contrastive_t, bias), NULL,
-     "The starting logit bias of every group."},
+     "The starting logit bias of every group; 0 derives -10, SigLIP's."},
     {"negatives", uform_py_field_enum_k, offsetof(uform_contrastive_t, negatives), &uform_py_negatives,
      "Which pairs repel, a `Negatives`."},
     {"ambient_repulsion_weight", uform_py_field_float_k, offsetof(uform_contrastive_t, ambient_repulsion_weight), NULL,
@@ -183,7 +183,7 @@ uform_py_fields_t ContrastiveType = {
 
 static uform_py_field_t const Schedule_fields[] = {
     {"learning_rate", uform_py_field_float_k, offsetof(uform_schedule_t, learning_rate), NULL,
-     "The peak learning rate; 0 derives 5e-3."},
+     "The peak learning rate; 0 derives 5e-4."},
     {"min_learning_rate", uform_py_field_float_k, offsetof(uform_schedule_t, min_learning_rate), NULL,
      "The floor the cosine settles at; 0 derives 1e-5."},
     {"warmup_steps", uform_py_field_size_k, offsetof(uform_schedule_t, warmup_steps), NULL,

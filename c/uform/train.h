@@ -241,10 +241,10 @@ typedef struct uform_contrastive_t {
     /** Learnable (inverse temperature, bias) pairs, one per group a step's items select; one. */
     size_t temperature_groups;
 
-    /** The starting inverse temperature of every group; 1. */
+    /** The starting inverse temperature of every group; 10, SigLIP's. */
     float inverse_temperature;
 
-    /** The starting logit bias of every group; zero is zero. */
+    /** The starting logit bias of every group; −10, SigLIP's. */
     float bias;
 
     /** Which pairs repel. */
@@ -289,7 +289,7 @@ typedef struct uform_late_interaction_t {
 /** The learning-rate schedule: a linear warmup to the peak, then a cosine decay to the floor. */
 typedef struct uform_schedule_t {
 
-    /** The peak learning rate; zero derives 5e-3. */
+    /** The peak learning rate; zero derives 5e-4. */
     float learning_rate;
 
     /** The floor the cosine settles at; zero derives 1e-5. */

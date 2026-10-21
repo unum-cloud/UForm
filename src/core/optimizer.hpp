@@ -76,6 +76,10 @@ struct adafactor_config_t {
 
     /** RMS clip threshold @c d — updates larger than this root-mean-square are scaled down. */
     f32_t clip_threshold = 1.0f;
+
+    /** The first-moment decay of the clipped update, so a step follows the last few batches
+     *  instead of one; zero keeps no first moment. */
+    f32_t beta1 = 0.0f;
 };
 
 /** One weight matrix's window into the optimizer's combined Float32 state — plain spans and
@@ -167,6 +171,10 @@ struct adafactor_t {
     /** Each state row's squared-update energy at its row-moment offset, which the apply pass folds
      *  into the clip scale; the column entries stay unused. */
     f32r1_tensor_arena_t row_energies_ {};
+
+    /** Every state's Float32 first moment of the clipped update, back to back in gradient order;
+     *  empty when the config keeps none. */
+    f32r1_tensor_arena_t first_moments_ {};
 };
 
 /** The world-wide optimizer: one @ref adafactor_t per rank plus the two-level gradient reduce

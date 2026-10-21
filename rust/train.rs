@@ -463,9 +463,9 @@ pub struct Contrastive<'config> {
     pub matryoshka_dimensions: &'config [usize],
     /// Learnable inverse temperature and bias pairs, one per group a step's items select; one.
     pub temperature_groups: usize,
-    /// The starting inverse temperature of every group; 1.
+    /// The starting inverse temperature of every group; 10, SigLIP's.
     pub inverse_temperature: f32,
-    /// The starting logit bias of every group; zero is zero.
+    /// The starting logit bias of every group; −10, SigLIP's.
     pub bias: f32,
     /// Which pairs repel.
     pub negatives: Negatives,
@@ -499,7 +499,7 @@ impl Contrastive<'_> {
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 #[repr(C)]
 pub struct Schedule {
-    /// The peak learning rate; zero derives 5e-3.
+    /// The peak learning rate; zero derives 5e-4.
     pub learning_rate: f32,
     /// The floor the cosine settles at; zero derives 1e-5.
     pub min_learning_rate: f32,

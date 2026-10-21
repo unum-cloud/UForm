@@ -142,9 +142,11 @@ struct host_bags_t {
 }
 
 /** The Float64 oracle: the exact per-header math of the segments loss over the @b [vertices,hidden]
- *  and @b [neighbors,hidden] towers, held on the BFloat16 grid. */
+ *  and @b [neighbors,hidden] towers, held on the BFloat16 grid; @p sum_negatives weighs every repel
+ *  on the attracts' scale, as the sigmoid form does. */
 static f64_t host_loss(f64r2_view_t vertices, f64r2_view_t neighbors, std::span<u32_t const> prefixes,
-                       host_relations_t const &relations, f64_t beta, f64_t bias, std::size_t vertices_per_mesh) {
+                       host_relations_t const &relations, f64_t beta, f64_t bias, std::size_t vertices_per_mesh,
+                       bool sum_negatives) {
     std::size_t const num_vertices = vertices.extent(0), num_neighbors = neighbors.extent(0);
     f64_t loss = 0.0;
     for (std::size_t vertex = 0; vertex != num_vertices; ++vertex) {
@@ -156,7 +158,7 @@ static f64_t host_loss(f64r2_view_t vertices, f64r2_view_t neighbors, std::span<
             else if (target < 0) neg_weight += weight;
         }
         f64_t const pos_scale = 1.0 / std::max(pos_weight, f64_t(1.0e-12));
-        f64_t const neg_scale = 1.0 / std::max(neg_weight, f64_t(1.0e-12));
+        f64_t const neg_scale = sum_negatives ? pos_scale : 1.0 / std::max(neg_weight, f64_t(1.0e-12));
         f64_t vertex_loss = 0.0;
         for (std::size_t prefix_index = 0; prefix_index != prefixes.size(); ++prefix_index) {
             auto const prefix = nk::range(0, prefixes[prefix_index]);
@@ -226,7 +228,8 @@ static f64_t host_pair_loss(contrastive_pair_loss_form_t form, f64r2_view_t vert
                             std::size_t vertices_per_mesh) {
     if (form == contrastive_pair_loss_form_t::ranked_k)
         return host_ranked_loss(vertices, neighbors, prefixes, relations, beta, vertices_per_mesh);
-    return host_loss(vertices, neighbors, prefixes, relations, beta, bias, vertices_per_mesh);
+    return host_loss(vertices, neighbors, prefixes, relations, beta, bias, vertices_per_mesh,
+                     form == contrastive_pair_loss_form_t::sigmoid_k);
 }
 
 /** Which relation graph an oracle case stages. */
@@ -805,7 +808,7 @@ static void run_distributed_case(test_suite_t &suite) {
     u32_t const prefixes[1] = {hidden_k};
     auto const oracle_of = [&](std::vector<f64_t> const &towers) noexcept {
         f64r2_view_t const rows {towers.data(), gpus * vertices_k, hidden_k};
-        return host_loss(rows, rows, prefixes, host_relations, 1.0, 0.0, gpus * vertices_k);
+        return host_loss(rows, rows, prefixes, host_relations, 1.0, 0.0, gpus * vertices_k, false);
     };
     f64_t const oracle = oracle_of(global_tower);
     f64_t const relative = std::fabs(distributed_loss - oracle) / std::max(std::fabs(oracle), 1.0e-9);
@@ -933,7 +936,7 @@ static void run_cross_domain_case(test_suite_t &suite) {
     host_relations_t host_relations;
     auto const oracle_of = [&](std::vector<f64_t> const &towers) noexcept {
         f64r2_view_t const rows {towers.data(), world_gpus * vertices_k, hidden_k};
-        return host_loss(rows, rows, prefix_dims, host_relations, 1.0, 0.0, world_gpus * vertices_k);
+        return host_loss(rows, rows, prefix_dims, host_relations, 1.0, 0.0, world_gpus * vertices_k, false);
     };
     f64_t const oracle = oracle_of(global_tower);
     f64_t const relative = std::fabs(global_loss - oracle) / std::max(std::fabs(oracle), 1.0e-9);
@@ -1838,12 +1841,14 @@ int main(int, char **argv) {
     using graph_t = oracle_graph_t;
     constexpr contrastive_pair_loss_form_t balanced_k = contrastive_pair_loss_form_t::balanced_k;
     constexpr contrastive_pair_loss_form_t ranked_k = contrastive_pair_loss_form_t::ranked_k;
+    constexpr contrastive_pair_loss_form_t sigmoid_k = contrastive_pair_loss_form_t::sigmoid_k;
     suite.run("oracle/self-edges", run_oracle_case, 8, 64, {64}, graph_t::self_edges_k, false, 1.0f, balanced_k);
     suite.run("oracle/matryoshka", run_oracle_case, 8, 64, {32, 64}, graph_t::self_edges_k, false, 1.0f, balanced_k);
     suite.run("oracle/explicit-edges", run_oracle_case, 8, 64, {64}, graph_t::explicit_edges_k, false, 0.5f,
               balanced_k);
     suite.run("oracle/roles", run_oracle_case, 10, 64, {32, 64}, graph_t::roles_k, false, 1.0f, balanced_k);
     suite.run("oracle/ranked-roles", run_oracle_case, 10, 64, {32, 64}, graph_t::roles_k, false, 1.0f, ranked_k);
+    suite.run("oracle/sigmoid-roles", run_oracle_case, 10, 64, {32, 64}, graph_t::roles_k, false, 1.0f, sigmoid_k);
     suite.run("oracle/ranked-self-edges", run_oracle_case, 8, 64, {64}, graph_t::self_edges_k, false, 1.0f, ranked_k);
     suite.run("oracle/pad-rows", run_oracle_case, 8, 64, {64}, graph_t::self_edges_k, true, 1.0f, balanced_k);
     suite.run("oracle/no-ambient", run_oracle_case, 8, 64, {64}, graph_t::self_edges_k, false, 0.0f, balanced_k);
@@ -1853,6 +1858,7 @@ int main(int, char **argv) {
     suite.run("sharded_oracle/self-edges", run_sharded_oracle_case, graph_t::self_edges_k, balanced_k);
     suite.run("sharded_oracle/roles", run_sharded_oracle_case, graph_t::roles_k, balanced_k);
     suite.run("sharded_oracle/ranked-roles", run_sharded_oracle_case, graph_t::roles_k, ranked_k);
+    suite.run("sharded_oracle/sigmoid-roles", run_sharded_oracle_case, graph_t::roles_k, sigmoid_k);
     suite.run("distributed", run_distributed_case);
     suite.run("tokens/oracle", run_tokens_oracle_case);
     suite.run("tokens/distributed", run_tokens_distributed_case);

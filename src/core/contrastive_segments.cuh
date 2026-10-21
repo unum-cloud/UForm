@@ -137,6 +137,10 @@ enum class contrastive_pair_loss_form_t : u32_t {
 
     /** The sigmoid BCE of every positive's score over every negative's, where the bias cancels. */
     ranked_k = 1,
+
+    /** SigLIP's sigmoid BCE of every cell, each repel weighed like an attract, so the negatives sum
+     *  instead of sharing one half of the row's loss. */
+    sigmoid_k = 2,
 };
 
 /** Floor on a per-vertex @c Σw denominator so a fully-masked row yields a finite zero loss and
@@ -253,10 +257,11 @@ struct matryoshka_prefixes_t {
  *
  *  Row @c r is local vertex @c r , and candidate @c s·per_subgraph+n of the stash is global vertex
  *  @c s·per_subgraph+n , so the subgraphs tile the global axis in order. Under @c balanced_k every
- *  cell is a sigmoid BCE on @c β·score+bias , its attract and repel halves normalized apart. Under
- *  @c ranked_k , row @c i scores @c Σ_p Σ_n w_p·w_n·softplus(x_n−x_p)/(Σw_p·Σw_n) over the attract
- *  set @c P_i and the repel and ambient set @c N_i , where the bias cancels and its gradient is
- *  zero. Both average over the live anchors, and every fold runs in a fixed order.
+ *  cell is a sigmoid BCE on @c β·score+bias , its attract and repel halves normalized apart, and
+ *  under @c sigmoid_k every repel is weighed on the attracts' scale instead. Under @c ranked_k ,
+ *  row @c i scores @c Σ_p Σ_n w_p·w_n·softplus(x_n−x_p)/(Σw_p·Σw_n) over the attract set @c P_i
+ *  and the repel and ambient set @c N_i , where the bias cancels and its gradient is zero. All
+ *  three average over the live anchors, and every fold runs in a fixed order.
  */
 struct contrastive_pair_loss_t {
 
@@ -294,7 +299,7 @@ struct contrastive_pair_loss_t {
     f32r2_tensor_arena_t from_vertex_accumulator_ {};
 
     /** @b [rows,candidates_per_row] one prefix's ranked gradients, written while its scores are
-     *  still read; empty under @c balanced_k . */
+     *  still read; empty unless @c ranked_k . */
     f32r2_tensor_arena_t ranked_grad_ {};
 
     /** The pair loss baked at @ref make . */

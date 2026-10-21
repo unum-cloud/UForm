@@ -296,18 +296,22 @@ static __global__ void contrastive_cast_f32_to_bf16_kernel_(f32r2_view_t source,
 }
 
 /**
- *  @brief The balanced sigmoid BCE over whole anchor rows, all prefixes fused, in place: the signed
- *      weight totals over the row first, then every cell's @c d(loss)/d(logit) over its scaled
- *      score, and the row's loss, bias and log-β summands.
+ *  @brief The sigmoid BCE over whole anchor rows, all prefixes fused, in place: the signed weight
+ *      totals over the row first, then every cell's @c d(loss)/d(logit) over its scaled score, and
+ *      the row's loss, bias and log-β summands.
+ *
+ *  The balanced @p form normalizes the attract and repel halves apart; the sigmoid form weighs
+ *  every repel on the attracts' scale.
  *
  *  A non-finite @c t·logit leaves the pair's gradient zero; a @c w==0 pair is skipped in place.
  *
  *  __grid_size__ @c [rows,1,1] ; one CTA per row, the threads stripe the candidates; no dynamic
  *  shared memory.
  */
-static __global__ void contrastive_balanced_bce_kernel_(f32r4_span_t logits, f32r2_span_t accumulator,
-                                                        contrastive_relations_view_t relations,
-                                                        contrastive_recipe_t recipe, f32r1_view_t live_anchors) {
+static __global__ void contrastive_sigmoid_bce_kernel_(f32r4_span_t logits, f32r2_span_t accumulator,
+                                                       contrastive_relations_view_t relations,
+                                                       contrastive_recipe_t recipe, f32r1_view_t live_anchors,
+                                                       contrastive_pair_loss_form_t form) {
     std::size_t const prefixes = logits.extent(0), rows = logits.extent(2);
     std::size_t const candidates = logits.extent(1) * logits.extent(3);
     u32_t const row = blockIdx.x;
@@ -322,7 +326,9 @@ static __global__ void contrastive_balanced_bce_kernel_(f32r4_span_t logits, f32
     f32_t const positive_weight = block_reduce_broadcast<kernel_block_size_default_k>(thread_positive);
     f32_t const negative_weight = block_reduce_broadcast<kernel_block_size_default_k>(thread_negative);
     f32_t const positive_scale = 1.0f / (std::fmax(positive_weight, weight_sum_floor_k) * live);
-    f32_t const negative_scale = 1.0f / (std::fmax(negative_weight, weight_sum_floor_k) * live);
+    f32_t const negative_scale = form == contrastive_pair_loss_form_t::sigmoid_k
+                                     ? positive_scale
+                                     : 1.0f / (std::fmax(negative_weight, weight_sum_floor_k) * live);
     f32_t const bias = contrastive_from_vertex_bias_(recipe, row);
     f32_t thread_loss = 0.0f, thread_bias_grad = 0.0f, thread_log_inverse_temperature_grad = 0.0f;
     for (std::size_t prefix = 0; prefix != prefixes; ++prefix)
@@ -708,9 +714,9 @@ expected_t contrastive_pair_loss_t::operator()(f32r4_span_t logits, contrastive_
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const row_grid {static_cast<u32_t>(rows), 1u, 1u};
     expected_t launched {};
-    if (form_ == contrastive_pair_loss_form_t::balanced_k)
-        launched = launch_kernel(&contrastive_balanced_bce_kernel_, row_grid, block_shape, stream, logits,
-                                 from_vertex_accumulator_.span(), relations, recipe, live_anchors);
+    if (form_ != contrastive_pair_loss_form_t::ranked_k)
+        launched = launch_kernel(&contrastive_sigmoid_bce_kernel_, row_grid, block_shape, stream, logits,
+                                 from_vertex_accumulator_.span(), relations, recipe, live_anchors, form_);
     for (u32_t prefix = 0; form_ == contrastive_pair_loss_form_t::ranked_k && launched && prefix != logits.extent(0);
          ++prefix) {
         launched = launch_kernel(&contrastive_ranked_bce_kernel_, row_grid, block_shape, stream, f32r4_view_t {logits},

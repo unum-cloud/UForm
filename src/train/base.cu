@@ -415,7 +415,12 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
         else if (flag == "--pair-loss") {
             if (value == "balanced") config.contrastive.pair_loss = contrastive_pair_loss_form_t::balanced_k;
             else if (value == "ranked") config.contrastive.pair_loss = contrastive_pair_loss_form_t::ranked_k;
+            else if (value == "sigmoid") config.contrastive.pair_loss = contrastive_pair_loss_form_t::sigmoid_k;
             else taken = false;
+            // Each form starts at its own logit scale: the sigmoid sum at SigLIP's β=10, b=−10.
+            bool const sigmoid = config.contrastive.pair_loss == contrastive_pair_loss_form_t::sigmoid_k;
+            config.contrastive.inverse_temperature = sigmoid ? 10.0f : 1.0f;
+            config.contrastive.bias = sigmoid ? -10.0f : 0.0f;
         }
         else if (flag == "--late-interaction-weight")
             taken = number(config.late_interaction.weight) && std::isfinite(config.late_interaction.weight) &&

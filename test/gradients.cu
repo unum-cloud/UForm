@@ -34,7 +34,10 @@
  */
 #include <cmath>   // `std::fabs`, `std::sqrt`, `std::log`, `std::pow`, `std::frexp`, `std::ldexp`
 #include <cstdlib> // `::setenv`
-#include <cstring> // `std::memcpy`
+#include <cstdio>  // `std::remove`
+#include <cstring> // `std::memcpy`, `std::memcmp`
+
+#include <unistd.h> // `::getpid`
 
 #include <algorithm> // `std::max`, `std::min`
 #include <span>      // `std::span`
@@ -551,9 +554,10 @@ struct optimized_matrix_t {
 
 /** Two Adafactor steps on a @b [24,40] matrix and a @b [1,40] vector against the paper's update
  *  replayed in Float64 on the host: factored second moments decaying at @c 1−t^−0.8 , the RMS clip,
- *  and the step. Each step restarts the host replay from the device's rounded weights, so the
- *  comparison allows one BFloat16 spacing. */
-static void adafactor_reference(test_suite_t &suite, device_t &device) {
+ *  the first moment of the clipped update under @p beta1 , and the step. Each step restarts the
+ *  host replay from the device's rounded weights, so the comparison allows one BFloat16 spacing. A
+ *  kept first moment must also survive a save and a load into a fresh optimizer unchanged. */
+static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t beta1) {
     switch_to_gpu_t scope {device.stream};
     expected<gpu_arena_t> arena = gpu_arena_t::make(0, 64ull << 20);
     if (!arena) return suite.check(false, "arena: {}", arena.description_);
@@ -573,16 +577,17 @@ static void adafactor_reference(test_suite_t &suite, device_t &device) {
             table.push_back(std::move(entry)) != status_t::success_k)
             return suite.check(false, "weight table growth failed");
     }
-    adafactor_config_t const config;
+    adafactor_config_t const config {.beta1 = beta1};
     expected<adafactor_t> optimizer = adafactor_t::make(*arena, table.view(), config, device.stream);
     if (!optimizer) return suite.check(false, "optimizer: {}", optimizer.description_);
 
     f32_t const learning_rate = 1.0e-2f;
-    array<f64_t> row_moments[2], column_moments[2], masters[2];
+    array<f64_t> row_moments[2], column_moments[2], masters[2], first_moments[2];
     for (u32_t matrix = 0; matrix != 2u; ++matrix) {
         if (row_moments[matrix].resize(shapes[matrix][0]) != status_t::success_k ||
             column_moments[matrix].resize(shapes[matrix][1]) != status_t::success_k ||
-            masters[matrix].resize(matrices[matrix].host_weights.size()) != status_t::success_k)
+            masters[matrix].resize(matrices[matrix].host_weights.size()) != status_t::success_k ||
+            first_moments[matrix].resize(matrices[matrix].host_weights.size()) != status_t::success_k)
             return suite.check(false, "host moments allocation failed");
         for (std::size_t index = 0; index != masters[matrix].size(); ++index)
             masters[matrix][index] = matrices[matrix].host_weights[index];
@@ -630,12 +635,15 @@ static void adafactor_reference(test_suite_t &suite, device_t &device) {
             f64r2_view_t const got {device_weights.data(), rows, columns};
             f64r2_view_t const started {state.host_weights.data(), rows, columns};
             f64r2_span_t const master {masters[matrix].data(), rows, columns};
+            f64r2_span_t const first_moment {first_moments[matrix].data(), rows, columns};
             u32_t off_grid = 0;
             f64_t worst = 0;
             for (std::size_t row = 0; row != rows; ++row)
                 for (std::size_t column = 0; column != columns; ++column) {
                     f64_t const start = rows == 1 ? master[row, column] : started[row, column];
-                    f64_t const wanted = start - learning_rate * clip * update_at(row, column);
+                    f64_t const clipped = clip * update_at(row, column);
+                    first_moment[row, column] = beta1 * first_moment[row, column] + (1.0 - beta1) * clipped;
+                    f64_t const wanted = start - learning_rate * (beta1 != 0.0f ? first_moment[row, column] : clipped);
                     f64_t const distance = std::fabs(got[row, column] - wanted) / bf16_spacing_(wanted);
                     worst = std::max(worst, distance);
                     off_grid += distance > 1.0 ? 1u : 0u;
@@ -647,6 +655,38 @@ static void adafactor_reference(test_suite_t &suite, device_t &device) {
                         step, off_grid, rows * columns, rows == 1 ? "vector" : "matrix", worst);
             std::memcpy(state.host_weights.data(), device_weights.data(), rows * columns * sizeof(f64_t));
         }
+    }
+    if (beta1 == 0.0f) return;
+
+    // The first moment round-trips: saved, loaded into a fresh optimizer, and saved again bitwise.
+    sz::string_t path;
+    if (!format_into(path, "/tmp/uform-test-first-moment-{}.safetensors", ::getpid()))
+        return suite.check(false, "checkpoint path formatting failed");
+    checkpoint_to_save_t saved;
+    if (expected_t written = optimizer->save(saved, device.stream); !written)
+        return suite.check(false, "save: {}", written.description_);
+    if (expected_t written = saved.save(path.view()); !written)
+        return suite.check(false, "save to {}: {}", path.view(), written.description_);
+    expected<checkpoint_to_load_t> loaded = checkpoint_to_load_t::make(path.view());
+    if (!loaded) return suite.check(false, "load: {}", loaded.description_);
+    expected<adafactor_t> resumed = adafactor_t::make(*arena, table.view(), config, device.stream);
+    if (!resumed) return suite.check(false, "resumed optimizer: {}", resumed.description_);
+    if (expected_t restored = resumed->load(*loaded, device.stream); !restored)
+        return suite.check(false, "restore: {}", restored.description_);
+    checkpoint_to_save_t resaved;
+    if (expected_t written = resumed->save(resaved, device.stream); !written)
+        return suite.check(false, "resave: {}", written.description_);
+    std::remove(path.c_str());
+    if (expected_t written = resaved.save(path.view()); !written)
+        return suite.check(false, "resave to {}: {}", path.view(), written.description_);
+    expected<checkpoint_to_load_t> reloaded = checkpoint_to_load_t::make(path.view());
+    std::remove(path.c_str());
+    if (!reloaded) return suite.check(false, "reload: {}", reloaded.description_);
+    for (char const *name : {"optimizer.matrix.first_moment", "optimizer.vector.first_moment"}) {
+        nk::tensor_view<f32_t, 2> const before = loaded->float32(name), after = reloaded->float32(name);
+        bool const same = !before.empty() && before.extent(1) == after.extent(1) &&
+                          std::memcmp(before.data(), after.data(), before.extent(1) * sizeof(f32_t)) == 0;
+        suite.check(same, "{} survives a save and a load", name);
     }
 }
 
@@ -969,9 +1009,10 @@ int main(int, char **argv) {
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
     test_suite_t suite = test_suite_t::make(argv[0]);
     int device_count = 0;
-    char const *const cases[] = {"gradients/tokens",    "gradients/omni",        "gradients/token_head",
-                                 "masking/text_rows",   "masking/media_rows",    "init/chance_entropy",
-                                 "adafactor/reference", "adafactor/small_steps", "block/host_replay"};
+    char const *const cases[] = {"gradients/tokens",    "gradients/omni",         "gradients/token_head",
+                                 "masking/text_rows",   "masking/media_rows",     "init/chance_entropy",
+                                 "adafactor/reference", "adafactor/first_moment", "adafactor/small_steps",
+                                 "block/host_replay"};
     if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) {
         for (char const *name : cases) suite.skip(name, no_cuda_device_k);
         return suite.finish();
@@ -989,7 +1030,8 @@ int main(int, char **argv) {
     suite.run("masking/text_rows", masked_text_rows, device);
     suite.run("masking/media_rows", masked_media_rows, device);
     suite.run("init/chance_entropy", chance_cross_entropy, device);
-    suite.run("adafactor/reference", adafactor_reference, device);
+    suite.run("adafactor/reference", adafactor_reference, device, 0.0f);
+    suite.run("adafactor/first_moment", adafactor_reference, device, 0.9f);
     suite.run("adafactor/small_steps", adafactor_small_steps, device);
     suite.run("block/host_replay", block_host_replay, device);
     return suite.finish();
