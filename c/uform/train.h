@@ -257,6 +257,32 @@ typedef struct uform_contrastive_t {
     size_t max_edges_per_device;
 } uform_contrastive_t;
 
+/** How the late-interaction loss scores the per-token vectors of query and document segments; every
+ *  zero derives the default named. */
+typedef struct uform_late_interaction_t {
+
+    /** The loss weight; zero trains no token head. */
+    float weight;
+
+    /** The token vectors' width, a multiple of 8; 128. */
+    size_t width;
+
+    /** The starting inverse temperature of every contrastive group; 1. */
+    float inverse_temperature;
+
+    /** The starting logit bias of every contrastive group; zero is zero. */
+    float bias;
+
+    /** Query token rows one device's step holds at most; the batch's tokens per device. */
+    size_t max_query_tokens_per_device;
+
+    /** Document segments one device's step holds at most; @c max_segments_per_device. */
+    size_t max_documents_per_device;
+
+    /** Document token rows one device's step holds at most; the batch's tokens per device. */
+    size_t max_document_tokens_per_device;
+} uform_late_interaction_t;
+
 /** The learning-rate schedule: a linear warmup to the peak, then a cosine decay to the floor. */
 typedef struct uform_schedule_t {
 
@@ -424,6 +450,9 @@ typedef struct uform_trainer_init_vram_t {
 
     /** The contrastive loss's scoring, read unless the objective is masked alone. */
     uform_contrastive_t contrastive;
+
+    /** The late-interaction loss beside the pooled one, read when its weight is positive. */
+    uform_late_interaction_t late_interaction;
 
     /** The learning-rate schedule. */
     uform_schedule_t schedule;

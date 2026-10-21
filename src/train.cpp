@@ -157,6 +157,16 @@ struct uform_trainer_handle_t {
                                                       : chosen(contrastive.ambient_repulsion_weight, 1.0f);
     config.contrastive.max_edges_per_gpu = static_cast<u32_t>(contrastive.max_edges_per_device);
 
+    uform_late_interaction_t const &late_interaction = arguments.late_interaction;
+    config.late_interaction.weight = late_interaction.weight;
+    config.late_interaction.width = late_interaction.width ? static_cast<u32_t>(late_interaction.width) : 128u;
+    config.late_interaction.inverse_temperature = chosen(late_interaction.inverse_temperature, 1.0f);
+    config.late_interaction.bias = late_interaction.bias;
+    config.late_interaction.max_query_tokens_per_gpu = static_cast<u32_t>(late_interaction.max_query_tokens_per_device);
+    config.late_interaction.max_documents_per_gpu = static_cast<u32_t>(late_interaction.max_documents_per_device);
+    config.late_interaction.max_document_tokens_per_gpu = static_cast<u32_t>(
+        late_interaction.max_document_tokens_per_device);
+
     config.learning_rate = chosen(arguments.schedule.learning_rate, 5.0e-3f);
     config.min_learning_rate = chosen(arguments.schedule.min_learning_rate, 1.0e-5f);
     config.warmup_steps = static_cast<u32_t>(arguments.schedule.warmup_steps);

@@ -8,11 +8,17 @@
  *
  *  - "tower/forward_backward": a text-only tower forward to the pooled vertices and its backward.
  *  - "contrastive/loss": the rank-local contrastive loss and its forces over self-edges.
+ *  - "contrastive/tokens": the late-interaction loss and its forces, 256 queries of 64 tokens
+ *    against 256 documents of 1024 tokens at width 128, each query attracting one document under
+ *    ranked BCE.
  */
+#include <algorithm> // `std::min` — the bench's attract rows
+
 #include <cuda.h> // `cuInit`, `cuMemcpyHtoD`
 
 #include "core/array.hpp"                // `array`
 #include "core/contrastive_segments.cuh" // `contrastive_segments_t`, `contrastive_relations_t`
+#include "core/contrastive_tokens.cuh"   // `contrastive_tokens_t`
 #include "core/encoder_tower.hpp"        // `encoder_tower_bf16_t`
 #include "harness.hpp"                   // `loop_t`, `time_windows`, `run`
 
@@ -152,6 +158,78 @@ static void contrastive_loss(loop_t &loop, u64_t seed) {
     });
 }
 
+/** One single-GPU late-interaction loss and its forces at the reranker shape of the plan. */
+static void contrastive_tokens(loop_t &loop, u64_t seed) {
+    constexpr u32_t queries_k = 256, query_tokens_k = 64, documents_k = 256, document_tokens_k = 1024, width_k = 128;
+    constexpr u32_t segments = queries_k + documents_k;
+    constexpr u32_t head_rows = queries_k * query_tokens_k + documents_k * document_tokens_k;
+    expected<gpu_stream_t> stream = gpu_stream_t::make(0);
+    if (!stream) return loop.fail(stream.description_.view());
+    switch_to_gpu_t gpu_scope {*stream};
+    if (!gpu_scope.ok()) return loop.fail("context entry failed");
+    expected<gpu_arena_t> arena = gpu_arena_t::make(0, 4ull << 30);
+    if (!arena) return loop.fail(arena.description_.view());
+
+    contrastive_tokens_config_t config;
+    config.segments_per_gpu = segments;
+    config.head_tokens_per_gpu = head_rows;
+    config.query_tokens_per_gpu = queries_k * query_tokens_k;
+    config.documents_per_gpu = documents_k;
+    config.document_tokens_per_gpu = documents_k * document_tokens_k;
+    config.band_tokens = document_tokens_k;
+    config.width = width_k;
+    expected<contrastive_tokens_t> loss = contrastive_tokens_t::make(*arena, config);
+    if (!loss) return loop.fail(loss.description_.view());
+
+    // Query i attracts document i; every other document repels it at the ambient weight.
+    array<u32_t> offsets, attract_offsets, attract_ids, repel_offsets;
+    array<f32_t> attract_scores;
+    if (offsets.resize(segments + 1u) != status_t::success_k ||
+        attract_offsets.resize(segments + 1u) != status_t::success_k ||
+        repel_offsets.resize(segments + 1u) != status_t::success_k ||
+        attract_ids.resize(queries_k) != status_t::success_k || attract_scores.resize(queries_k) != status_t::success_k)
+        return loop.fail("host staging failed");
+    array<late_interaction_side_t> sides;
+    if (sides.resize(segments) != status_t::success_k) return loop.fail("host staging failed");
+    for (u32_t segment = 0; segment != segments; ++segment) {
+        bool const query = segment < queries_k;
+        sides[segment] = query ? late_interaction_side_t::query_k : late_interaction_side_t::document_k;
+        offsets[segment + 1u] = offsets[segment] + (query ? query_tokens_k : document_tokens_k);
+        if (query) attract_ids[segment] = queries_k + segment, attract_scores[segment] = 1.0f;
+        attract_offsets[segment + 1u] = std::min(segment + 1u, queries_k);
+        repel_offsets[segment + 1u] = 0;
+    }
+    std::size_t const scalars = std::size_t(head_rows) * width_k;
+    bf16_t *vectors = arena->allocate_object<bf16_t>(scalars);
+    bf16_t *grad = arena->allocate_object<bf16_t>(scalars);
+    u32_t *offsets_device = arena->allocate_object<u32_t>(segments + 1u);
+    late_interaction_side_t *sides_device = arena->allocate_object<late_interaction_side_t>(segments);
+    f32_t *loss_out = arena->allocate_object<f32_t>(1);
+    if (vectors == nullptr || grad == nullptr || offsets_device == nullptr || sides_device == nullptr ||
+        loss_out == nullptr)
+        return loop.fail("token allocation failed");
+    if (expected_t seeded = upload_keyed_(vectors, scalars, seed, 1); !seeded)
+        return loop.fail(seeded.description_.view());
+    cuMemcpyHtoD(device_address(offsets_device), offsets.data(), (segments + 1u) * sizeof(u32_t));
+    cuMemcpyHtoD(device_address(sides_device), sides.data(), segments * sizeof(late_interaction_side_t));
+    expected<contrastive_relations_t> relations = contrastive_relations_t::make(*arena, segments, queries_k);
+    if (!relations) return loop.fail(relations.description_.view());
+    if (expected_t staged = relations->upload({attract_offsets.view(), attract_ids.view(), attract_scores.view()},
+                                              {repel_offsets.view(), {}, {}}, {}, {}, {}, segments, 0, 1.0f, *stream);
+        !staged)
+        return loop.fail(staged.description_.view());
+    multimodal_batch_view_t batch;
+    batch.segment_side = nk::tensor_view<late_interaction_side_t, 1> {sides_device, segments};
+    contrastive_recipe_t recipe;
+    recipe.inverse_temperature = 10.0f;
+
+    time_windows(loop, stream->get(), [&]() noexcept -> expected_t {
+        return (*loss)(bf16r2_view_t {vectors, head_rows, width_k}, u32r1_view_t {offsets_device, segments + 1u}, batch,
+                       relations->view(), recipe, f32r1_span_t {loss_out, 1}, bf16r2_span_t {grad, head_rows, width_k},
+                       *stream);
+    });
+}
+
 int main() {
     settings_t const settings = read_settings();
     print(settings);
@@ -160,5 +238,6 @@ int main() {
         return fmt::println(stderr, "no CUDA device detected"), 1;
     bool const tower_failed = run(settings, "tower/forward_backward", tower_forward_backward, settings.seed);
     bool const loss_failed = run(settings, "contrastive/loss", contrastive_loss, settings.seed);
-    return tower_failed || loss_failed ? 1 : 0;
+    bool const tokens_failed = run(settings, "contrastive/tokens", contrastive_tokens, settings.seed);
+    return tower_failed || loss_failed || tokens_failed ? 1 : 0;
 }

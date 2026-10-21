@@ -294,6 +294,7 @@ struct row_partition_t {
     }
     if (batch.contains(modality_t::audio_k)) tower.audio_chunk_samples = batch.audio.chunk_samples;
     tower.rope_max_positions = static_cast<u32_t>(std::min<u64_t>(positions, std::numeric_limits<u32_t>::max()));
+    tower.token_width = config.late_interacts() ? config.late_interaction.width : 0u;
     return tower;
 }
 
@@ -563,6 +564,17 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
         if (!relations) return result_t::fail(std::move(relations));
         replica.relations = std::move(relations.value_);
     }
+    if (config.late_interacts()) {
+        if (!config.contrasts())
+            return result_t::fail(status_t::invalid_input_k, "late interaction reads the contrastive relations");
+        u32_t const groups = std::max(config.contrastive.temperature_groups, 1u);
+        replica.token_vectors_grad =
+            bf16r2_tensor_arena_t::uninitialized({max_tokens, config.late_interaction.width}, bf16_alloc).value;
+        replica.token_inverse_temperatures = f32r1_tensor_arena_t::uninitialized({groups}, f32_alloc).value;
+        replica.token_biases = f32r1_tensor_arena_t::uninitialized({groups}, f32_alloc).value;
+        if (!replica.token_vectors_grad || !replica.token_inverse_temperatures || !replica.token_biases)
+            return result_t::fail(status_t::bad_alloc_k, "late-interaction scratch allocation failed");
+    }
 
     // The registration list — tower first, then each live head, identical order on every replica. The tower
     // spells its own weight names; the heads take their instance names here, where the modalities are told apart.
@@ -608,6 +620,14 @@ expected_t base_replica_t::draw(trainer_config_t const &config, u32_t gpu_index_
                                         partition.begins[2], partition.begins[3], factor.patch_rows, factor.patch_cols);
         !laid)
         return laid;
+    // Every synthetic segment queries and is queried with no prefix, so late interaction
+    // retrieves each segment's own tokens, as the self-edge relations pair them.
+    if (CUresult result = cuMemsetD8Async(device_address(batch.segment_side.data()),
+                                          static_cast<u8_t>(late_interaction_side_t::query_and_document_k),
+                                          batch.segment_side.numel(), stream.get());
+        result != CUDA_SUCCESS)
+        return cuda_failure(result, "synthetic side fill failed");
+    if (expected_t cleared = zero_async(batch.segment_prefix_length.span(), stream); !cleared) return cleared;
 
     // Each live modality's raw content — filled across the whole tensor, keyed identically every run.
     if (shape.contains(modality_t::image_k)) {
@@ -758,7 +778,7 @@ expected_t base_replica_t::forward_region(gpu_stream_t &stream) noexcept {
 }
 
 expected_t base_replica_t::backward_region(gpu_stream_t &stream) noexcept {
-    return tower.backward(vertices_grad.view(), normalized_grad.view(), batch, stream);
+    return tower.backward(vertices_grad.view(), normalized_grad.view(), batch, stream, token_vectors_grad.view());
 }
 
 contrastive_recipe_t base_replica_t::recipe(trainer_config_t const &config) const noexcept {
@@ -768,6 +788,17 @@ contrastive_recipe_t base_replica_t::recipe(trainer_config_t const &config) cons
     recipe.ambient_repulsion_weight = config.contrastive.ambient_repulsion_weight;
     recipe.inverse_temperature_device = inverse_temperatures.view();
     recipe.bias_device = biases.view();
+    recipe.from_vertex_temperature_group = temperature_groups.view();
+    return recipe;
+}
+
+contrastive_recipe_t base_replica_t::token_recipe(trainer_config_t const &config) const noexcept {
+    contrastive_recipe_t recipe;
+    recipe.inverse_temperature = config.late_interaction.inverse_temperature;
+    recipe.bias = config.late_interaction.bias;
+    recipe.ambient_repulsion_weight = config.contrastive.ambient_repulsion_weight;
+    recipe.inverse_temperature_device = token_inverse_temperatures.view();
+    recipe.bias_device = token_biases.view();
     recipe.from_vertex_temperature_group = temperature_groups.view();
     return recipe;
 }

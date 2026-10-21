@@ -50,6 +50,18 @@ pub struct uform_contrastive_t {
 }
 
 #[repr(C)]
+#[derive(Default)]
+pub struct uform_late_interaction_t {
+    pub weight: f32,
+    pub width: usize,
+    pub inverse_temperature: f32,
+    pub bias: f32,
+    pub max_query_tokens_per_device: usize,
+    pub max_documents_per_device: usize,
+    pub max_document_tokens_per_device: usize,
+}
+
+#[repr(C)]
 pub struct uform_mesh_options_t {
     pub host_domain_index: usize,
     pub host_domain_count: usize,
@@ -103,6 +115,7 @@ pub struct uform_trainer_init_vram_t {
     pub objective: uform_objective_t,
     pub masking: uform_masking_t,
     pub contrastive: uform_contrastive_t,
+    pub late_interaction: uform_late_interaction_t,
     pub schedule: uform_schedule_t,
     pub mesh: uform_mesh_t,
     pub seed: u64,
@@ -894,6 +907,7 @@ impl<'mesh> Trainer<'mesh> {
                 objective: config.objective as uform_objective_t,
                 masking: config.masking,
                 contrastive: config.contrastive.lower(),
+                late_interaction: uform_late_interaction_t::default(),
                 schedule: config.schedule,
                 mesh: config.mesh.map_or(ptr::null_mut(), |mesh| mesh.handle),
                 seed: config.seed,

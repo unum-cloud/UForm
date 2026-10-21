@@ -13,6 +13,9 @@
  *        change of two forwards is compared with the gradient's dot product with the rounded step.
  *        That covers the block backward, the embedding scatter, the media projections, the token
  *        cross-entropy head and the patch and frame MSE heads.
+ *      - @ref token_head_finite_differences : the late-interaction token head and its join into the
+ *        tower, under a linear loss over the token vectors, with prefixes and side-less segments
+ *        left out.
  *      - @ref masked_text_rows : every text row with bytes carries at least one masked position.
  *      - @ref masked_media_rows : each media head scores only the cells of its own modality.
  *      - @ref chance_cross_entropy : a freshly seeded model starts at the uniform byte prediction.
@@ -231,6 +234,171 @@ struct host_segments_t {
     cuMemcpyDtoH(segments.lengths.data(), device_address(batch.segment_lengths.data()), count * sizeof(u32_t));
     cuMemcpyDtoH(segments.modality.data(), device_address(batch.segment_modality.data()), count * sizeof(modality_t));
     return segments;
+}
+
+/** The linear loss @c ⟨R,V⟩ over the token head's vectors @c V after one tower forward. */
+[[nodiscard]] static expected<f64_t> token_head_loss_(base_replica_t &replica, array<f64_t> const &direction,
+                                                      gpu_stream_t &stream) noexcept {
+    expected_t forwarded = replica.tower.pack_weights(stream);
+    if (forwarded) forwarded = replica.tower.forward(replica.batch, {}, stream);
+    if (!forwarded) return expected<f64_t>::fail(std::move(forwarded));
+    cuStreamSynchronize(stream.get());
+    array<f64_t> vectors;
+    bf16r2_view_t const token_vectors = replica.tower.token_vectors();
+    if (!download_widened_(token_vectors.data(), token_vectors.numel(), vectors))
+        return expected<f64_t>::fail(status_t::bad_alloc_k, "token vector staging failed");
+    return expected<f64_t> {dot(vectors.view(), direction.view())};
+}
+
+/** The token head and its Float32 join into the tower: a fixed linear loss over the token vectors,
+ *  whose gradient is its direction, against central differences of the projection and the final
+ *  norm, and the norm scale against a Float64 replay, with each segment's prefix and the side-less
+ *  segments left out of the compact rows. */
+static void token_head_finite_differences(test_suite_t &suite, device_t &device) {
+    switch_to_gpu_t scope {device.stream};
+    trainer_config_t config = test_geometry_(false);
+    config.depth = 1;
+    config.objective = objective_t::contrastive_k;
+    config.late_interaction.weight = 1.0f;
+    config.late_interaction.width = 32;
+    expected<gpu_arena_t> arena = gpu_arena_t::make(0, case_arena_bytes_k);
+    if (!arena) return suite.check(false, "arena: {}", arena.description_);
+    expected<base_replica_t> made = base_replica_t::make(*arena, config, config.batch.max_segments_per_gpu);
+    expected_t staged = made ? seed_weights(made->weights, device.stream) : expected_t::fail(std::move(made));
+    if (staged) staged = made->draw(config, 0, data_epoch_t {0}, device.stream);
+    if (!staged) return suite.check(false, "replica: {}", staged.description_);
+    base_replica_t &replica = *made;
+    cuStreamSynchronize(device.stream.get());
+
+    // Sides and prefixes over the four drawn segments: a query, a document, a side-less segment and
+    // one of both.
+    host_segments_t const segments = read_segments_(replica.batch);
+    std::size_t const count = segments.lengths.size();
+    late_interaction_side_t const sides[] = {late_interaction_side_t::query_k, late_interaction_side_t::document_k,
+                                             late_interaction_side_t::none_k,
+                                             late_interaction_side_t::query_and_document_k};
+    u32_t const prefixes[] = {3, 0, 2, 5};
+    u32_t expected_offsets[5] = {};
+    for (std::size_t segment = 0; segment != count; ++segment) {
+        u32_t const length = segments.lengths[segment];
+        bool const sided = sides[segment] != late_interaction_side_t::none_k;
+        expected_offsets[segment + 1] = expected_offsets[segment] +
+                                        (sided && length > prefixes[segment] ? length - prefixes[segment] : 0u);
+    }
+    cuMemcpyHtoD(device_address(replica.batch.segment_side.data()), sides, sizeof(sides));
+    cuMemcpyHtoD(device_address(replica.batch.segment_prefix_length.data()), prefixes, sizeof(prefixes));
+
+    bf16r2_view_t const token_vectors = replica.tower.token_vectors();
+    array<f64_t> direction;
+    if (direction.resize_uninitialized(token_vectors.numel()) != status_t::success_k)
+        return suite.check(false, "direction staging failed");
+    for (std::size_t index = 0; index != direction.size(); ++index)
+        direction[index] = f64_t((index * 2654435761ull + 40503ull) % 1000ull) / 1000.0 - 0.5;
+    if (!upload_narrowed_(direction.span(), replica.token_vectors_grad.data()))
+        return suite.check(false, "direction upload failed");
+    expected<f64_t> const base_loss = token_head_loss_(replica, direction, device.stream);
+    if (!base_loss) return suite.check(false, "forward: {}", base_loss.description_);
+    u32_t offsets[5] = {};
+    cuMemcpyDtoH(offsets, device_address(replica.tower.token_offsets().data()), sizeof(offsets));
+    bool const laid_out = std::equal(offsets, offsets + count + 1, expected_offsets);
+    suite.check(laid_out, "token head spans skip prefixes and side-less segments: total {} expected {}", offsets[count],
+                expected_offsets[count]);
+    if (expected_t backward = replica.tower.backward({}, {}, replica.batch, device.stream,
+                                                     replica.token_vectors_grad.view());
+        !backward)
+        return suite.check(false, "backward: {}", backward.description_);
+    cuStreamSynchronize(device.stream.get());
+
+    // The norm scale's gradient against a Float64 replay of the head over the same states: through
+    // the L2 normalization it moves the loss only at second order along most directions, too little
+    // for a difference.
+    array<f64_t> states, scale, scale_grad, projection;
+    differentiable_weights_t const *norm = nullptr, *projected = nullptr;
+    for (differentiable_weights_t const &matrix : replica.weights.view())
+        if (matrix.name.view() == "token_head.norm") norm = &matrix;
+        else if (matrix.name.view() == "token_head.projection") projected = &matrix;
+    bf16r2_view_t const normalized = replica.tower.normalized();
+    std::size_t const hidden = config.hidden, width = config.late_interaction.width;
+    if (norm == nullptr || projected == nullptr || !download_widened_(normalized.data(), normalized.numel(), states) ||
+        !download_widened_(norm->weights.data(), hidden, scale) ||
+        !download_widened_(norm->weights_grad.data(), hidden, scale_grad) ||
+        !download_widened_(projected->weights.data(), width * hidden, projection))
+        return suite.check(false, "token head replay staging failed");
+    f64_t const epsilon = replica.tower.config().block.rms_eps;
+    f64r2_view_t const projection_rows {projection.data(), width, hidden};
+    f64r2_view_t const direction_rows {direction.data(), direction.size() / width, width};
+    array<f64_t> replayed, unit, normed;
+    if (replayed.resize(hidden) != status_t::success_k || unit.resize(width) != status_t::success_k ||
+        normed.resize(hidden) != status_t::success_k)
+        return suite.check(false, "token head replay staging failed");
+    for (std::size_t segment = 0; segment != count; ++segment)
+        for (u32_t token = 0; token != expected_offsets[segment + 1] - expected_offsets[segment]; ++token) {
+            std::size_t const row = expected_offsets[segment] + token;
+            f64_t const *const state = states.data() + (segments.offsets[segment] + prefixes[segment] + token) * hidden;
+            f64_t squares = 0;
+            for (std::size_t channel = 0; channel != hidden; ++channel) squares += state[channel] * state[channel];
+            f64_t const inverse_rms = 1.0 / std::sqrt(squares / f64_t(hidden) + epsilon);
+            for (std::size_t channel = 0; channel != hidden; ++channel)
+                normed[channel] = state[channel] * inverse_rms * scale[channel];
+            f64_t norm_squared = 0, along = 0;
+            for (std::size_t output = 0; output != width; ++output) {
+                unit[output] = 0;
+                for (std::size_t channel = 0; channel != hidden; ++channel)
+                    unit[output] += projection_rows[output, channel] * normed[channel];
+                norm_squared += unit[output] * unit[output];
+            }
+            f64_t const inverse_norm = 1.0 / std::sqrt(std::max(norm_squared, epsilon));
+            for (std::size_t output = 0; output != width; ++output)
+                unit[output] *= inverse_norm, along += unit[output] * direction_rows[row, output];
+            for (std::size_t channel = 0; channel != hidden; ++channel) {
+                f64_t normed_grad = 0;
+                for (std::size_t output = 0; output != width; ++output)
+                    normed_grad += projection_rows[output, channel] *
+                                   (direction_rows[row, output] - along * unit[output]) * inverse_norm;
+                replayed[channel] += normed_grad * state[channel] * inverse_rms;
+            }
+        }
+    f64_t gap = 0, magnitude = 0;
+    for (std::size_t channel = 0; channel != hidden; ++channel)
+        gap += (scale_grad[channel] - replayed[channel]) * (scale_grad[channel] - replayed[channel]),
+            magnitude += replayed[channel] * replayed[channel];
+    suite.check(std::sqrt(gap) <= 2.0e-2 * std::sqrt(magnitude),
+                "token_head.norm gradient matches the Float64 replay: relative {:.3g}", std::sqrt(gap / magnitude));
+
+    array<f64_t> weights, gradient, plus, minus;
+    for (differentiable_weights_t const &matrix : replica.weights.view()) {
+        sz::string_view_t const name = matrix.name.view();
+        if (name != "token_head.projection" && name != "final_norm") continue;
+        std::size_t const scalars = matrix.weights.numel();
+        if (!download_widened_(matrix.weights.data(), scalars, weights) ||
+            !download_widened_(matrix.weights_grad.data(), scalars, gradient) ||
+            plus.resize_uninitialized(scalars) != status_t::success_k ||
+            minus.resize_uninitialized(scalars) != status_t::success_k)
+            return suite.check(false, "host staging for {} failed", name);
+        f64_t largest = 0;
+        for (f64_t const value : gradient.view()) largest = std::max(largest, std::fabs(value));
+        if (largest == 0) {
+            suite.check(false, "{} takes no gradient through the token head", name);
+            continue;
+        }
+        f64_t const weight_rms = std::sqrt(dot(weights.view(), weights.view()) / static_cast<f64_t>(scalars));
+        f64_t const step = std::min(largest / (8.0 * dot(gradient.view(), gradient.view())), weight_rms / 4.0);
+        for (std::size_t index = 0; index != scalars; ++index)
+            plus[index] = weights[index] + step * gradient[index] / largest,
+            minus[index] = weights[index] - step * gradient[index] / largest;
+        bool uploaded = upload_narrowed_(plus.span(), matrix.weights.data());
+        expected<f64_t> const loss_plus = token_head_loss_(replica, direction, device.stream);
+        uploaded = uploaded && upload_narrowed_(minus.span(), matrix.weights.data());
+        expected<f64_t> const loss_minus = token_head_loss_(replica, direction, device.stream);
+        uploaded = uploaded && upload_narrowed_(weights.span(), matrix.weights.data());
+        if (!uploaded || !loss_plus || !loss_minus) return suite.check(false, "perturbed forward of {} failed", name);
+        f64_t const predicted = dot(gradient.view(), plus.view()) - dot(gradient.view(), minus.view());
+        f64_t const measured = *loss_plus - *loss_minus;
+        f64_t const error = std::fabs(measured - predicted) / std::max(std::fabs(predicted), 1.0e-6);
+        suite.check(error <= finite_difference_tolerance_k,
+                    "{}: loss moved {:.6g}, the gradient predicts {:.6g}, off by {:.3g} relative (loss {:.4f})", name,
+                    measured, predicted, error, *base_loss);
+    }
 }
 
 /** Every text row with bytes carries at least one masked position, over sixteen 64-byte rows and
@@ -776,9 +944,9 @@ int main(int, char **argv) {
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
     test_suite_t suite = test_suite_t::make(argv[0]);
     int device_count = 0;
-    char const *const cases[] = {"gradients/tokens",      "gradients/omni",      "masking/text_rows",
-                                 "masking/media_rows",    "init/chance_entropy", "adafactor/reference",
-                                 "adafactor/small_steps", "block/host_replay"};
+    char const *const cases[] = {"gradients/tokens",    "gradients/omni",        "gradients/token_head",
+                                 "masking/text_rows",   "masking/media_rows",    "init/chance_entropy",
+                                 "adafactor/reference", "adafactor/small_steps", "block/host_replay"};
     if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) {
         for (char const *name : cases) suite.skip(name, no_cuda_device_k);
         return suite.finish();
@@ -792,6 +960,7 @@ int main(int, char **argv) {
     device_t device {std::move(*stream)};
     suite.run("gradients/tokens", finite_differences_tokens, device);
     suite.run("gradients/omni", finite_differences_omni, device);
+    suite.run("gradients/token_head", token_head_finite_differences, device);
     suite.run("masking/text_rows", masked_text_rows, device);
     suite.run("masking/media_rows", masked_media_rows, device);
     suite.run("init/chance_entropy", chance_cross_entropy, device);

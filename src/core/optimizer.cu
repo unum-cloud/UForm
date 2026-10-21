@@ -554,11 +554,13 @@ static __global__ void adafactor_temperatures_kernel_(f32r1_span_t inverse_tempe
 }
 
 expected<adafactor_temperatures_t> adafactor_temperatures_t::make(gpu_arena_t &arena, u32_t groups,
-                                                                  adafactor_config_t config,
+                                                                  adafactor_config_t config, sz::string_view_t prefix,
                                                                   gpu_stream_t &stream) noexcept {
     using result_t = expected<adafactor_temperatures_t>;
     adafactor_temperatures_t optimizer;
     optimizer.config_ = config;
+    if (!format_into(optimizer.key_, "{}.temperature_moments", prefix))
+        return result_t::fail(status_t::bad_alloc_k, "temperature moments key formatting failed");
     optimizer.moments_ =
         f32r1_tensor_arena_t::uninitialized({2u * std::size_t {groups}}, gpu_arena_alloc<f32_t> {arena}).value;
     if (groups == 0 || !optimizer.moments_)
@@ -587,15 +589,14 @@ expected_t adafactor_temperatures_t::save(checkpoint_to_save_t &checkpoint, gpu_
     if (expected_t copied = copy_device_to_host(moments_.view(), moments.span(), stream); !copied) return copied;
     if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
         return cuda_failure(result, "temperature moments download failed");
-    return checkpoint.insert("contrastive.temperature_moments", f32r2_view_t {moments.data(), 1, moments.size()});
+    return checkpoint.insert(key_.view(), f32r2_view_t {moments.data(), 1, moments.size()});
 }
 
 expected_t adafactor_temperatures_t::load(checkpoint_to_load_t const &checkpoint, gpu_stream_t &stream) noexcept {
-    f32r2_view_t const saved = checkpoint.float32("contrastive.temperature_moments");
+    f32r2_view_t const saved = checkpoint.float32(key_.view());
     if (saved.empty()) return zero_async(moments_.span(), stream);
     if (saved.extent(0) != 1u || saved.extent(1) != moments_.numel())
-        return expected_t::fail(status_t::shape_unsupported_k,
-                                "contrastive.temperature_moments holds [{},{}], the run [1,{}]", saved.extent(0),
-                                saved.extent(1), moments_.numel());
+        return expected_t::fail(status_t::shape_unsupported_k, "{} holds [{},{}], the run [1,{}]", key_.view(),
+                                saved.extent(0), saved.extent(1), moments_.numel());
     return copy_host_to_device(saved.flatten<1>(), moments_.span(), stream);
 }

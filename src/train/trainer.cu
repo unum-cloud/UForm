@@ -373,6 +373,10 @@ struct footprint_t {
         return probed;
     if (expected_t probed = loss_probe("base/contrastive", config.contrasts(), placed.probes.contrastive); !probed)
         return probed;
+    if (expected_t probed = loss_probe("base/late_interaction", config.late_interacts(),
+                                       placed.probes.late_interaction);
+        !probed)
+        return probed;
     for (u32_t member = 0; member != gpus; ++member) {
         sz::string_t name;
         if (!format_into(name, "base/round/{}", member))
@@ -416,9 +420,32 @@ struct footprint_t {
                                                                contrastive_config, topology.shape)
                                                          : 0u;
     std::size_t const mixer_scalars = multimodal_batch_mixer_t::payload_scalars_needed(config.batch, topology.shape);
-    expected<multimem_domain_t> domain = multimem_domain_t::make(mesh.topology, placed.devices.view(),
-                                                                 gradient_scalars + force_scalars + mixer_scalars,
-                                                                 placed.streams, mesh.timeout_seconds);
+    late_interaction_config_t const &late_interaction = config.late_interaction;
+    std::size_t const max_tokens = std::size_t {config.batch.max_rows_per_gpu} * config.batch.max_columns_per_row;
+    contrastive_tokens_config_t tokens_config;
+    tokens_config.segments_per_gpu = static_cast<u32_t>(segments);
+    tokens_config.head_tokens_per_gpu = static_cast<u32_t>(max_tokens);
+    tokens_config.query_tokens_per_gpu = static_cast<u32_t>(round_up_to_multiple(
+        late_interaction.max_query_tokens_per_gpu ? std::size_t {late_interaction.max_query_tokens_per_gpu}
+                                                  : max_tokens,
+        std::size_t {8}));
+    tokens_config.documents_per_gpu = late_interaction.max_documents_per_gpu ? late_interaction.max_documents_per_gpu
+                                                                             : static_cast<u32_t>(segments);
+    tokens_config.document_tokens_per_gpu = static_cast<u32_t>(
+        late_interaction.max_document_tokens_per_gpu ? late_interaction.max_document_tokens_per_gpu : max_tokens);
+    tokens_config.band_tokens = static_cast<u32_t>(
+        round_up_to_multiple(std::size_t {config.batch.max_columns_per_row}, std::size_t {warp_size_k}));
+    tokens_config.width = late_interaction.width;
+    tokens_config.gpu_subgraphs_per_step = topology.shape.gpus_per_colocated_domain;
+    tokens_config.temperature_groups = contrastive_config.temperature_groups;
+    tokens_config.pair_loss = late_interaction.pair_loss;
+    tokens_config.weight = late_interaction.weight;
+    std::size_t const token_scalars = config.late_interacts()
+                                          ? distributed_contrastive_tokens_t::payload_scalars_needed(tokens_config)
+                                          : 0u;
+    expected<multimem_domain_t> domain = multimem_domain_t::make(
+        mesh.topology, placed.devices.view(), gradient_scalars + force_scalars + token_scalars + mixer_scalars,
+        placed.streams, mesh.timeout_seconds);
     if (!domain) return expected_t::fail(std::move(domain));
     placed.domain = std::move(domain.value_);
     {
@@ -460,11 +487,27 @@ struct footprint_t {
             switch_to_gpu_t gpu_scope {placed.streams[member]};
             if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
             expected<adafactor_temperatures_t> temperatures = adafactor_temperatures_t::make(
-                placed.arenas[member], contrastive_config.temperature_groups, adafactor_config_t {},
+                placed.arenas[member], contrastive_config.temperature_groups, adafactor_config_t {}, "contrastive",
                 placed.streams[member]);
             if (!temperatures) return expected_t::fail(std::move(temperatures));
             if (placed.temperatures.push_back(std::move(temperatures.value_)) != status_t::success_k)
                 return expected_t::fail(status_t::bad_alloc_k, "temperature optimizer table full");
+        }
+    }
+    if (config.late_interacts()) {
+        expected<distributed_contrastive_tokens_t> tokens = distributed_contrastive_tokens_t::make(
+            placed.domain, mesh.colocated, placed.arenas, placed.streams, tokens_config, mesh.timeout_seconds);
+        if (!tokens) return expected_t::fail(std::move(tokens));
+        placed.late_interaction = std::move(tokens.value_);
+        for (u32_t member = 0; member != gpus; ++member) {
+            switch_to_gpu_t gpu_scope {placed.streams[member]};
+            if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
+            expected<adafactor_temperatures_t> temperatures = adafactor_temperatures_t::make(
+                placed.arenas[member], tokens_config.temperature_groups, adafactor_config_t {}, "late_interaction",
+                placed.streams[member]);
+            if (!temperatures) return expected_t::fail(std::move(temperatures));
+            if (placed.token_temperatures.push_back(std::move(temperatures.value_)) != status_t::success_k)
+                return expected_t::fail(status_t::bad_alloc_k, "token temperature optimizer table full");
         }
     }
     if (config.capture == replayed_k) return placed.capture();
@@ -535,6 +578,13 @@ expected_t trainer_t::resume(sz::string_view_t path) noexcept {
                                               replica.inverse_temperatures.span(), streams[member]);
         if (restored) restored = restore_vector_(*loaded, "contrastive.biases", replica.biases.span(), streams[member]);
         if (restored) restored = temperatures[member].load(*loaded, streams[member]);
+        if (restored && config.late_interacts())
+            restored = restore_vector_(*loaded, "late_interaction.inverse_temperatures",
+                                       replica.token_inverse_temperatures.span(), streams[member]);
+        if (restored && config.late_interacts())
+            restored = restore_vector_(*loaded, "late_interaction.biases", replica.token_biases.span(),
+                                       streams[member]);
+        if (restored && config.late_interacts()) restored = token_temperatures[member].load(*loaded, streams[member]);
         if (!restored) return restored;
     }
     // After the weights, since every state the file misses restarts from them.
@@ -582,6 +632,18 @@ expected_t trainer_t::step(batch_source_t &source, optimizer_step_t optimizer_st
             if (expected_t contrasted = contrastive(member, replicas[member].recipe(config), streams[member]);
                 !contrasted)
                 return contrasted;
+    if (config.late_interacts()) {
+        per_gpu_array<gpu_tokens_inputs_t> inputs;
+        for (std::size_t member = 0; member != gpus; ++member) {
+            base_replica_t &replica = replicas[member];
+            gpu_tokens_inputs_t const member_inputs {replica.tower.token_vectors(), replica.tower.token_offsets(),
+                                                     replica.batch.view(),          replica.relations.view(),
+                                                     replica.token_recipe(config),  replica.token_vectors_grad.span()};
+            if (inputs.push_back(member_inputs) != status_t::success_k)
+                return expected_t::fail(status_t::bad_alloc_k, "late-interaction input table full");
+        }
+        if (expected_t contrasted = late_interaction(inputs.view(), streams.span()); !contrasted) return contrasted;
+    }
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
@@ -592,6 +654,10 @@ expected_t trainer_t::step(batch_source_t &source, optimizer_step_t optimizer_st
             stepped = temperatures[member].step(replicas[member].inverse_temperatures.span(),
                                                 replicas[member].biases.span(), contrastive.temperature_grads(member),
                                                 report.learning_rate, streams[member]);
+        if (stepped && config.late_interacts())
+            stepped = token_temperatures[member].step(
+                replicas[member].token_inverse_temperatures.span(), replicas[member].token_biases.span(),
+                late_interaction.temperature_grads(member), report.learning_rate, streams[member]);
         if (!stepped) return stepped;
     }
     completed_steps = optimizer_step.ordinal + 1u;
@@ -600,13 +666,18 @@ expected_t trainer_t::step(batch_source_t &source, optimizer_step_t optimizer_st
 
 expected_t trainer_t::reseed() noexcept {
     u32_t const groups = std::max(config.contrastive.temperature_groups, 1u);
-    array<f32_t> inverse_temperatures, biases;
+    array<f32_t> inverse_temperatures, biases, token_inverse_temperatures, token_biases;
     if (config.contrasts()) {
-        if (inverse_temperatures.resize(groups) != status_t::success_k || biases.resize(groups) != status_t::success_k)
+        if (inverse_temperatures.resize(groups) != status_t::success_k ||
+            biases.resize(groups) != status_t::success_k ||
+            token_inverse_temperatures.resize(groups) != status_t::success_k ||
+            token_biases.resize(groups) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "temperature staging failed");
         for (u32_t group = 0; group != groups; ++group)
             inverse_temperatures[group] = config.contrastive.inverse_temperature,
-            biases[group] = config.contrastive.bias;
+            biases[group] = config.contrastive.bias,
+            token_inverse_temperatures[group] = config.late_interaction.inverse_temperature,
+            token_biases[group] = config.late_interaction.bias;
     }
     for (std::size_t member = 0; member != replicas.size(); ++member) {
         switch_to_gpu_t gpu_scope {streams[member]};
@@ -619,6 +690,12 @@ expected_t trainer_t::reseed() noexcept {
         if (staged)
             staged = copy_host_to_device(f32r1_view_t {biases.data(), groups}, replica.biases.span(), streams[member]);
         if (staged) staged = zero_async(replica.temperature_groups.span(), streams[member]);
+        if (staged && config.late_interacts())
+            staged = copy_host_to_device(f32r1_view_t {token_inverse_temperatures.data(), groups},
+                                         replica.token_inverse_temperatures.span(), streams[member]);
+        if (staged && config.late_interacts())
+            staged = copy_host_to_device(f32r1_view_t {token_biases.data(), groups}, replica.token_biases.span(),
+                                         streams[member]);
         if (!staged) return staged;
         cuStreamSynchronize(streams[member].get());
     }
@@ -670,6 +747,14 @@ telemetry_t trainer_t::telemetry(optimizer_step_t optimizer_step) noexcept {
             ledger.scalar(probes.contrastive, staging[0], 1.0);
         }
     }
+    if (config.late_interacts()) {
+        f32r1_tensor_pinned_t staging = f32r1_tensor_pinned_t::uninitialized({1}, pinned_alloc<f32_t> {}).value;
+        if (staging && copy_device_to_host(late_interaction.world_loss(0), staging.span(), streams[0])) {
+            cuStreamSynchronize(streams[0].get());
+            telemetry.late_interaction = staging[0];
+            ledger.scalar(probes.late_interaction, staging[0], 1.0);
+        }
+    }
     if (u32_t const *const round = domain.member(domain.member_offset()).round; round != nullptr) {
         u32r1_tensor_pinned_t staging = u32r1_tensor_pinned_t::uninitialized({1}, pinned_alloc<u32_t> {}).value;
         nk::tensor_view<u32_t, 1> const source {round, 1};
@@ -693,6 +778,12 @@ expected_t trainer_t::save(sz::string_view_t path) noexcept {
     if (saved && config.contrasts())
         saved = insert_vector_(checkpoint, "contrastive.biases", replicas[0].biases.view(), streams[0]);
     if (saved && config.contrasts()) saved = temperatures[0].save(checkpoint, streams[0]);
+    if (saved && config.late_interacts())
+        saved = insert_vector_(checkpoint, "late_interaction.inverse_temperatures",
+                               replicas[0].token_inverse_temperatures.view(), streams[0]);
+    if (saved && config.late_interacts())
+        saved = insert_vector_(checkpoint, "late_interaction.biases", replicas[0].token_biases.view(), streams[0]);
+    if (saved && config.late_interacts()) saved = token_temperatures[0].save(checkpoint, streams[0]);
     if (saved) saved = save_weights(checkpoint, config, replicas[0].weights, completed_steps, streams[0]);
     if (saved) saved = checkpoint.save(path);
     return saved;
@@ -722,6 +813,7 @@ void telemetry_t::report() const noexcept {
     term("video MSE", video_mse);
     term("audio MSE", audio_mse);
     term("contrastive", contrastive);
+    term("late interaction", late_interaction);
 }
 
 #pragma endregion Trainer

@@ -130,6 +130,7 @@ if (UFORM_BUILD_CUDA)
         core/checkpoint.cpp
         core/multimodal_batch.cu
         core/contrastive_segments.cu
+        core/contrastive_tokens.cu
         core/optimizer.cu
         core/transformer_block.cu
         core/encoder_tower.cu

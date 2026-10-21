@@ -11,6 +11,7 @@
  */
 #include <cmath>   // `std::fabs`, `std::sqrt`, `std::exp`, `std::log1p`
 #include <cstdlib> // `std::getenv`, `std::atoi`, `std::atof`
+#include <cstring> // `std::memcpy` — the tokens cases' compacted head rows
 
 #include <span>    // `std::span` — the oracle's borrowed towers
 #include <utility> // `std::move`
@@ -20,8 +21,9 @@
 
 #include "core/infiniband_collectives.cuh" // `infiniband_coordinates_t` — the corrupt-payload negative test
 #include "core/contrastive_segments.cuh"
-#include "core/encoder_tower.hpp" // `encoder_tower_bf16_t` — the pool + head the FP64 parity case gates
-#include "harness.hpp"            // `test_suite_t`
+#include "core/contrastive_tokens.cuh" // `contrastive_tokens_t`, `distributed_contrastive_tokens_t`
+#include "core/encoder_tower.hpp"      // `encoder_tower_bf16_t` — the pool + head the FP64 parity case gates
+#include "harness.hpp"                 // `test_suite_t`
 
 using namespace unum::uform::core;
 using namespace unum::uform::test;
@@ -1179,11 +1181,540 @@ static void run_pool_parity_case(test_suite_t &suite) {
     cuCtxPopCurrent(nullptr);
 }
 
+/** One GPU's late-interaction layout for the tokens cases: a triplet bag, a multi-positive bag, a
+ *  PAD segment and a segment that both queries and is queried, over ragged spans and documents laid
+ *  across three bands. */
+struct host_tokens_layout_t {
+    static constexpr std::size_t segments_k = 8, width_k = 32, head_rows_k = 96, query_rows_k = 16;
+    static constexpr std::size_t documents_k = 8, document_rows_k = 128, band_k = 32;
+    static constexpr u32_t spans_k[segments_k] = {3, 20, 9, 2, 17, 12, 0, 6};
+    static constexpr late_interaction_side_t sides_k[segments_k] = {
+        late_interaction_side_t::query_k,    late_interaction_side_t::document_k,
+        late_interaction_side_t::document_k, late_interaction_side_t::query_k,
+        late_interaction_side_t::document_k, late_interaction_side_t::document_k,
+        late_interaction_side_t::none_k,     late_interaction_side_t::query_and_document_k};
+
+    /** The head rows one copy fills, every sided span back to back. */
+    [[nodiscard]] static constexpr std::size_t live_rows() noexcept {
+        std::size_t rows = 0;
+        for (u32_t const span : spans_k) rows += span;
+        return rows;
+    }
+
+    [[nodiscard]] static bool queries(late_interaction_side_t side) noexcept {
+        return side == late_interaction_side_t::query_k || side == late_interaction_side_t::query_and_document_k;
+    }
+    [[nodiscard]] static bool documents(late_interaction_side_t side) noexcept {
+        return side == late_interaction_side_t::document_k || side == late_interaction_side_t::query_and_document_k;
+    }
+};
+
+/** The Float64 ranked MaxSim oracle over @p gpus copies of @ref host_tokens_layout_t , whose head
+ *  rows sit back to back in @p vectors : @c S(q,d)=mean_t max_s⟨q_t,d_s⟩ , and per query row the
+ *  weighted softplus of @c −β(s⁺−s⁻) over its positive and negative pairs, averaged over the live
+ *  queries. */
+static f64_t host_tokens_loss(std::vector<f64_t> const &vectors, std::size_t gpus, host_relations_t const &relations,
+                              f64_t beta) {
+    using layout_t = host_tokens_layout_t;
+    std::size_t const segments = gpus * layout_t::segments_k, width = layout_t::width_k;
+    std::vector<std::size_t> first_rows(segments + 1u, 0);
+    for (std::size_t segment = 0; segment != segments; ++segment)
+        first_rows[segment + 1u] = first_rows[segment] + layout_t::spans_k[segment % layout_t::segments_k];
+    auto row_of = [&](std::size_t segment, std::size_t token) {
+        return (segment / layout_t::segments_k) * layout_t::head_rows_k + first_rows[segment] -
+               first_rows[segment - segment % layout_t::segments_k] + token;
+    };
+    auto score = [&](std::size_t query, std::size_t document) {
+        f64_t sum = 0;
+        for (std::size_t token = 0; token != layout_t::spans_k[query % layout_t::segments_k]; ++token) {
+            f64_t best = -1.0e300;
+            for (std::size_t other = 0; other != layout_t::spans_k[document % layout_t::segments_k]; ++other) {
+                f64_t const product = dot(f64r1_view_t {vectors.data() + row_of(query, token) * width, width},
+                                          f64r1_view_t {vectors.data() + row_of(document, other) * width, width});
+                best = std::max(best, product);
+            }
+            sum += best;
+        }
+        return sum / f64_t(layout_t::spans_k[query % layout_t::segments_k]);
+    };
+    f64_t loss = 0;
+    std::size_t live_queries = 0;
+    for (std::size_t query = 0; query != segments; ++query) {
+        late_interaction_side_t const side = layout_t::sides_k[query % layout_t::segments_k];
+        if (!layout_t::queries(side) || layout_t::spans_k[query % layout_t::segments_k] == 0) continue;
+        ++live_queries;
+        struct scored_t {
+            f64_t score, weight;
+        };
+        std::vector<scored_t> positives, negatives;
+        for (std::size_t document = 0; document != segments; ++document) {
+            late_interaction_side_t const other = layout_t::sides_k[document % layout_t::segments_k];
+            if (!layout_t::documents(other) || layout_t::spans_k[document % layout_t::segments_k] == 0) continue;
+            auto const [target, weight] = relations.resolve(u32_t(query), u32_t(document));
+            if (weight == 0) continue;
+            (target > 0 ? positives : negatives).push_back({beta * score(query, document), weight});
+        }
+        f64_t positive_weight = 0, negative_weight = 0, row = 0;
+        for (scored_t const &positive : positives) positive_weight += positive.weight;
+        for (scored_t const &negative : negatives) negative_weight += negative.weight;
+        for (scored_t const &positive : positives)
+            for (scored_t const &negative : negatives) {
+                f64_t const margin = negative.score - positive.score;
+                row += positive.weight * negative.weight *
+                       (std::max(margin, 0.0) + std::log1p(std::exp(-std::fabs(margin))));
+            }
+        if (positive_weight > 0 && negative_weight > 0) loss += row / (positive_weight * negative_weight);
+    }
+    return loss / f64_t(std::max<std::size_t>(live_queries, 1));
+}
+
+/** The per-GPU relation rows of @ref host_tokens_layout_t on GPU @p gpu of @p gpus : the triplet's
+ *  attract and hard negative, the multi-positive bag's two positives, and the two-sided segment
+ *  attracting the next GPU's first positive while ignoring itself. Appended to @p world as global
+ *  rows. */
+static void append_tokens_relations(host_relations_t &world, std::size_t gpu, std::size_t gpus) {
+    u32_t const base = u32_t(gpu * host_tokens_layout_t::segments_k);
+    u32_t const next = u32_t(((gpu + 1u) % gpus) * host_tokens_layout_t::segments_k);
+    if (world.attract_offsets.empty()) world.attract_offsets = world.repel_offsets = world.ignore_offsets = {0};
+    for (u32_t segment = 0; segment != host_tokens_layout_t::segments_k; ++segment) {
+        if (segment == 0) world.attract_ids.push_back(base + 1), world.attract_scores.push_back(1.0f);
+        if (segment == 0) world.repel_ids.push_back(base + 2), world.repel_scores.push_back(2.0f);
+        if (segment == 3)
+            world.attract_ids.insert(world.attract_ids.end(), {base + 4, base + 5}),
+                world.attract_scores.insert(world.attract_scores.end(), {1.0f, 0.5f});
+        if (segment == 7) {
+            u32_t const low = std::min(base + 1, next + 1), high = std::max(base + 1, next + 1);
+            world.attract_ids.push_back(low), world.attract_scores.push_back(1.0f);
+            if (high != low) world.attract_ids.push_back(high), world.attract_scores.push_back(1.0f);
+            world.ignore_ids.push_back(base + 7);
+        }
+        world.attract_offsets.push_back(u32_t(world.attract_ids.size()));
+        world.repel_offsets.push_back(u32_t(world.repel_ids.size()));
+        world.ignore_offsets.push_back(u32_t(world.ignore_ids.size()));
+    }
+}
+
+/** One GPU's device inputs of the tokens cases: the head rows, their offsets and sides, the
+ *  relation rows and the outputs, all off its arena. */
+struct device_tokens_inputs_t {
+    bf16r2_view_t token_vectors {};
+    u32r1_view_t token_offsets {};
+    multimodal_batch_view_t batch {};
+    contrastive_relations_t relations {};
+    bf16r2_span_t token_vectors_grad {};
+    f32r1_span_t loss_out {};
+};
+
+/** Stage @p copies back-to-back copies of the layout, host copies @c [first,first+copies) of
+ *  @p staging , with their live head rows compacted the way the token head lays them out, and the
+ *  matching relation rows of @p host into @p arena . */
+[[nodiscard]] static expected<device_tokens_inputs_t> stage_tokens_inputs(
+    gpu_arena_t &arena, std::vector<nk_bf16_t> const &staging, std::size_t first, std::size_t copies,
+    host_relations_t const &host, std::size_t world_segments, gpu_stream_t &stream) {
+    using layout_t = host_tokens_layout_t;
+    using result_t = expected<device_tokens_inputs_t>;
+    std::size_t const segments = copies * layout_t::segments_k, rows = copies * layout_t::head_rows_k;
+    std::size_t const width = layout_t::width_k, live_rows = layout_t::live_rows();
+    std::vector<u32_t> offsets(segments + 1u, 0);
+    std::vector<late_interaction_side_t> sides(segments);
+    for (std::size_t segment = 0; segment != segments; ++segment) {
+        sides[segment] = layout_t::sides_k[segment % layout_t::segments_k];
+        offsets[segment + 1u] = offsets[segment] + layout_t::spans_k[segment % layout_t::segments_k];
+    }
+    std::vector<nk_bf16_t> compacted(rows * width, nk_bf16_t {});
+    for (std::size_t copy = 0; copy != copies; ++copy)
+        std::memcpy(compacted.data() + copy * live_rows * width,
+                    staging.data() + (first + copy) * layout_t::head_rows_k * width,
+                    live_rows * width * sizeof(nk_bf16_t));
+    device_tokens_inputs_t inputs;
+    bf16_t *vectors = arena.allocate_object<bf16_t>(rows * width);
+    bf16_t *grad = arena.allocate_object<bf16_t>(rows * width);
+    u32_t *offsets_device = arena.allocate_object<u32_t>(segments + 1u);
+    late_interaction_side_t *sides_device = arena.allocate_object<late_interaction_side_t>(segments);
+    f32_t *loss = arena.allocate_object<f32_t>(1);
+    cuMemcpyHtoD(device_address(vectors), compacted.data(), compacted.size() * sizeof(nk_bf16_t));
+    cuMemcpyHtoD(device_address(offsets_device), offsets.data(), offsets.size() * sizeof(u32_t));
+    cuMemcpyHtoD(device_address(sides_device), sides.data(), sides.size() * sizeof(late_interaction_side_t));
+    inputs.token_vectors = bf16r2_view_t {vectors, rows, width};
+    inputs.token_vectors_grad = bf16r2_span_t {grad, rows, width};
+    inputs.token_offsets = u32r1_view_t {offsets_device, segments + 1u};
+    inputs.batch.segment_side = nk::tensor_view<late_interaction_side_t, 1> {sides_device, segments};
+    inputs.loss_out = f32r1_span_t {loss, 1};
+
+    // This range's relation rows, sliced from the world rows.
+    std::size_t const row_begin = first * layout_t::segments_k;
+    auto rebased = [&](std::vector<u32_t> const &world_offsets) {
+        std::vector<u32_t> local;
+        for (std::size_t row = row_begin; row <= row_begin + segments; ++row)
+            local.push_back(world_offsets[row] - world_offsets[row_begin]);
+        return local;
+    };
+    auto sliced = [&](std::vector<u32_t> const &world_offsets, auto const &world_values) {
+        return std::vector(world_values.begin() + world_offsets[row_begin],
+                           world_values.begin() + world_offsets[row_begin + segments]);
+    };
+    std::vector<u32_t> attract_offsets = rebased(host.attract_offsets), repel_offsets = rebased(host.repel_offsets);
+    std::vector<u32_t> ignore_offsets = rebased(host.ignore_offsets);
+    std::vector<u32_t> attract_ids = sliced(host.attract_offsets, host.attract_ids);
+    std::vector<u32_t> repel_ids = sliced(host.repel_offsets, host.repel_ids);
+    std::vector<u32_t> ignore_ids = sliced(host.ignore_offsets, host.ignore_ids);
+    std::vector<f32_t> attract_scores = sliced(host.attract_offsets, host.attract_scores);
+    std::vector<f32_t> repel_scores = sliced(host.repel_offsets, host.repel_scores);
+    expected<contrastive_relations_t> relations = contrastive_relations_t::make(arena, u32_t(segments), 64);
+    if (!relations) return result_t::fail(std::move(relations));
+    inputs.relations = std::move(relations.value_);
+    expected_t uploaded = inputs.relations.upload(
+        {std::span {attract_offsets}, std::span {attract_ids}, std::span {attract_scores}},
+        {std::span {repel_offsets}, std::span {repel_ids}, std::span {repel_scores}},
+        {std::span {ignore_offsets}, std::span {ignore_ids}, {}}, {}, {}, world_segments, row_begin, host.ambient,
+        stream);
+    if (!uploaded) return result_t::fail(std::move(uploaded));
+    return result_t {std::move(inputs)};
+}
+
+/** The tokens loss geometry for @p copies back-to-back layouts on one GPU and @p subgraphs query
+ *  tiles. */
+[[nodiscard]] static contrastive_tokens_config_t tokens_config_(std::size_t copies, std::size_t subgraphs) noexcept {
+    using layout_t = host_tokens_layout_t;
+    contrastive_tokens_config_t config;
+    config.segments_per_gpu = u32_t(copies * layout_t::segments_k);
+    config.head_tokens_per_gpu = u32_t(copies * layout_t::head_rows_k);
+    config.query_tokens_per_gpu = u32_t(copies * layout_t::query_rows_k);
+    config.documents_per_gpu = u32_t(copies * layout_t::documents_k);
+    config.document_tokens_per_gpu = u32_t(copies * layout_t::document_rows_k);
+    config.band_tokens = u32_t(layout_t::band_k);
+    config.width = u32_t(layout_t::width_k);
+    config.gpu_subgraphs_per_step = u32_t(subgraphs);
+    config.pair_loss = contrastive_pair_loss_form_t::ranked_k;
+    return config;
+}
+
+/** The single-GPU tokens loss against the Float64 ranked MaxSim oracle, with central finite
+ *  differences on query and document token entries. */
+static void run_tokens_oracle_case(test_suite_t &suite) {
+    using layout_t = host_tokens_layout_t;
+    if (!cuda_devices_visible_(1)) return suite.skip(no_cuda_device_k);
+    auto stream_made = gpu_stream_t::make(0);
+    if (!stream_made) return suite.check(false, "stream: {}", stream_made.description_);
+    gpu_stream_t stream = std::move(stream_made.value_);
+    cuCtxPushCurrent(stream.context());
+    auto arena_made = gpu_arena_t::make(0, 1ull << 30);
+    if (!arena_made) return suite.check(false, "arena: {}", arena_made.description_);
+    gpu_arena_t arena = std::move(arena_made.value_);
+
+    std::size_t const scalars = layout_t::head_rows_k * layout_t::width_k;
+    std::vector<f64_t> vectors(scalars);
+    std::vector<nk_bf16_t> staging(scalars);
+    for (std::size_t index = 0; index != scalars; ++index) vectors[index] = hash_fill(index, 29);
+    if (!narrow_to_bf16(vectors, staging) || !widen_from_bf16(staging, vectors))
+        return suite.check(false, "vector rounding failed");
+    host_relations_t host;
+    append_tokens_relations(host, 0, 1);
+    expected<device_tokens_inputs_t> inputs = stage_tokens_inputs(arena, staging, 0, 1, host, layout_t::segments_k,
+                                                                  stream);
+    if (!inputs) return suite.check(false, "inputs: {}", inputs.description_);
+    expected<contrastive_tokens_t> loss = contrastive_tokens_t::make(arena, tokens_config_(1, 1));
+    if (!loss) return suite.check(false, "loss make: {}", loss.description_);
+    f64_t const beta = 4.0;
+    contrastive_recipe_t recipe;
+    recipe.inverse_temperature = f32_t(beta);
+    expected_t ran = (*loss)(inputs->token_vectors, inputs->token_offsets, inputs->batch, inputs->relations.view(),
+                             recipe, inputs->loss_out, inputs->token_vectors_grad, stream);
+    if (!ran) return suite.check(false, "loss run: {}", ran.description_);
+    cuStreamSynchronize(stream.get());
+    f32_t device_loss = 0;
+    cuMemcpyDtoH(&device_loss, device_address(inputs->loss_out.data()), sizeof(f32_t));
+    f64_t const oracle = host_tokens_loss(vectors, 1, host, beta);
+    f64_t const relative = std::fabs(f64_t(device_loss) - oracle) / std::max(std::fabs(oracle), 1.0e-9);
+    suite.check(relative < 5.0e-3, "tokens loss {:.6f} matches the Float64 oracle {:.6f}: relative {:.2e}", device_loss,
+                oracle, relative);
+
+    std::vector<f64_t> gradient(scalars);
+    cuMemcpyDtoH(staging.data(), device_address(inputs->token_vectors_grad.data()), scalars * sizeof(nk_bf16_t));
+    if (!widen_from_bf16(staging, gradient)) return suite.check(false, "gradient widening failed");
+    // Query tokens of the triplet and the multi-positive bag, tokens of three documents, and the
+    // two-sided segment.
+    std::size_t const rows[] = {0, 2, 32, 33, 4, 12, 30, 53, 65};
+    for (std::size_t const row : rows)
+        for (std::size_t const channel : {std::size_t {3}, std::size_t {17}}) {
+            std::size_t const index = row * layout_t::width_k + channel;
+            f64_t const step = 1.0e-4;
+            std::vector<f64_t> plus = vectors, minus = vectors;
+            plus[index] += step, minus[index] -= step;
+            f64_t const numeric = (host_tokens_loss(plus, 1, host, beta) - host_tokens_loss(minus, 1, host, beta)) /
+                                  (2.0 * step);
+            suite.check(std::fabs(numeric - gradient[index]) <= 2.0e-2 * std::max(std::fabs(numeric), 0.02),
+                        "token [{},{}] force: numeric {:.5f} analytic {:.5f}", row, channel, numeric, gradient[index]);
+        }
+    cuCtxPopCurrent(nullptr);
+}
+
+/** The distributed tokens loss over every visible GPU, up to the host's limit, against the
+ *  single-GPU loss over the same world laid out back to back. */
+static void run_tokens_distributed_case(test_suite_t &suite) {
+    using layout_t = host_tokens_layout_t;
+    int device_count = 0;
+    if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 2)
+        return suite.skip("needs two CUDA devices");
+    std::size_t const gpus = std::min<std::size_t>(static_cast<std::size_t>(device_count), max_gpus_per_host_k);
+    std::size_t const rank_scalars = layout_t::head_rows_k * layout_t::width_k;
+    i32_t devices[max_gpus_per_host_k] = {};
+    for (std::size_t rank = 0; rank != gpus; ++rank) devices[rank] = static_cast<i32_t>(rank);
+    std::vector<f64_t> vectors(gpus * rank_scalars);
+    std::vector<nk_bf16_t> staging(vectors.size());
+    for (std::size_t index = 0; index != vectors.size(); ++index) vectors[index] = hash_fill(index, 31);
+    if (!narrow_to_bf16(vectors, staging)) return suite.check(false, "vector rounding failed");
+    host_relations_t host;
+    for (std::size_t rank = 0; rank != gpus; ++rank) append_tokens_relations(host, rank, gpus);
+    std::size_t const world_segments = gpus * layout_t::segments_k;
+    contrastive_recipe_t recipe;
+    recipe.inverse_temperature = 4.0f;
+
+    // The single-GPU reference over the whole world on device 0.
+    std::vector<f64_t> reference_gradient(vectors.size());
+    f32_t reference_loss = 0;
+    {
+        auto stream_made = gpu_stream_t::make(0);
+        if (!stream_made) return suite.check(false, "stream: {}", stream_made.description_);
+        gpu_stream_t stream = std::move(stream_made.value_);
+        cuCtxPushCurrent(stream.context());
+        auto arena = gpu_arena_t::make(0, 1ull << 30);
+        if (!arena) return suite.check(false, "arena: {}", arena.description_);
+        expected<device_tokens_inputs_t> inputs = stage_tokens_inputs(*arena, staging, 0, gpus, host, world_segments,
+                                                                      stream);
+        expected<contrastive_tokens_t> loss = inputs ? contrastive_tokens_t::make(*arena, tokens_config_(gpus, 1))
+                                                     : expected<contrastive_tokens_t>::fail(std::move(inputs));
+        expected_t ran = loss ? (*loss)(inputs->token_vectors, inputs->token_offsets, inputs->batch,
+                                        inputs->relations.view(), recipe, inputs->loss_out, inputs->token_vectors_grad,
+                                        stream)
+                              : expected_t::fail(std::move(loss));
+        if (!ran) return suite.check(false, "reference run: {}", ran.description_);
+        cuStreamSynchronize(stream.get());
+        cuMemcpyDtoH(&reference_loss, device_address(inputs->loss_out.data()), sizeof(f32_t));
+        std::vector<nk_bf16_t> narrowed(vectors.size());
+        cuMemcpyDtoH(narrowed.data(), device_address(inputs->token_vectors_grad.data()),
+                     narrowed.size() * sizeof(nk_bf16_t));
+        if (!widen_from_bf16(narrowed, reference_gradient)) return suite.check(false, "gradient widening failed");
+        cuCtxPopCurrent(nullptr);
+    }
+
+    per_gpu_array<gpu_stream_t> streams;
+    per_gpu_array<gpu_arena_t> arenas;
+    device_tokens_inputs_t inputs[max_gpus_per_host_k];
+    for (std::size_t rank = 0; rank != gpus; ++rank) {
+        auto stream_made = gpu_stream_t::make(devices[rank]);
+        if (!stream_made || streams.push_back(std::move(stream_made.value_)) != status_t::success_k)
+            return suite.check(false, "distributed stream make");
+        cuCtxPushCurrent(streams[rank].context());
+        auto arena_made = gpu_arena_t::make(devices[rank], 1ull << 30, {devices, gpus});
+        if (!arena_made || arenas.push_back(std::move(arena_made.value_)) != status_t::success_k)
+            return suite.check(false, "distributed arena make");
+        expected<device_tokens_inputs_t> staged = stage_tokens_inputs(arenas[rank], staging, rank, 1, host,
+                                                                      world_segments, streams[rank]);
+        if (!staged) return suite.check(false, "rank {} inputs: {}", rank, staged.description_);
+        inputs[rank] = std::move(staged.value_);
+        cuCtxPopCurrent(nullptr);
+    }
+    contrastive_tokens_config_t const config = tokens_config_(1, gpus);
+    auto topology = mesh_topology_t::bootstrap(0, 1, 0, "/tmp/uform_exchange_local", "tokens_distributed_case");
+    if (!topology) return suite.check(false, "single-domain bootstrap: {}", topology.description_);
+    auto domain = multimem_domain_t::make(topology.value_, {devices, gpus},
+                                          distributed_contrastive_tokens_t::payload_scalars_needed(config), streams,
+                                          120.0);
+    if (!domain) return suite.check(false, "multimem domain make: {}", domain.description_);
+    auto colocated = colocated_domain_t::make(topology.value_);
+    if (!colocated) return suite.check(false, "colocated domain make: {}", colocated.description_);
+    auto distributed = distributed_contrastive_tokens_t::make(domain.value_, colocated.value_, arenas, streams, config);
+    if (!distributed) return suite.check(false, "distributed make: {}", distributed.description_);
+    gpu_tokens_inputs_t step_inputs[max_gpus_per_host_k];
+    for (std::size_t rank = 0; rank != gpus; ++rank)
+        step_inputs[rank] = {inputs[rank].token_vectors,
+                             inputs[rank].token_offsets,
+                             inputs[rank].batch,
+                             inputs[rank].relations.view(),
+                             recipe,
+                             inputs[rank].token_vectors_grad};
+    if (expected_t ran = distributed.value_({step_inputs, gpus}, streams.span()); !ran)
+        return suite.check(false, "distributed run: {}", ran.description_);
+    std::size_t const live_scalars = layout_t::live_rows() * layout_t::width_k;
+    f64r2_view_t const reference_rows {reference_gradient.data(), gpus, live_scalars};
+    f64_t worst = 0, largest = 0;
+    f32_t world_loss = 0;
+    std::vector<nk_bf16_t> narrowed(rank_scalars);
+    std::vector<f64_t> widened(rank_scalars);
+    for (std::size_t rank = 0; rank != gpus; ++rank) {
+        cuCtxPushCurrent(streams[rank].context());
+        cuStreamSynchronize(streams[rank].get());
+        if (rank == 0)
+            cuMemcpyDtoH(&world_loss, device_address(distributed.value_.world_loss(0).data()), sizeof(f32_t));
+        cuMemcpyDtoH(narrowed.data(), device_address(inputs[rank].token_vectors_grad.data()),
+                     rank_scalars * sizeof(nk_bf16_t));
+        cuCtxPopCurrent(nullptr);
+        if (!widen_from_bf16(narrowed, widened)) return suite.check(false, "gradient widening failed");
+        for (std::size_t index = 0; index != live_scalars; ++index) {
+            f64_t const expected = reference_rows[rank, index];
+            largest = std::max(largest, std::fabs(expected));
+            worst = std::max(worst, std::fabs(widened[index] - expected));
+        }
+    }
+    f64_t const relative = std::fabs(f64_t(world_loss) - reference_loss) /
+                           std::max(std::fabs(f64_t(reference_loss)), 1.0e-9);
+    suite.check(relative < 1.0e-4, "{}-GPU tokens loss {:.6f} matches the single-GPU {:.6f}: relative {:.2e}", gpus,
+                world_loss, reference_loss, relative);
+    suite.check(worst <= 1.0e-2 * largest, "{}-GPU token forces match the single-GPU: worst {:.3g} of {:.3g}", gpus,
+                worst, largest);
+}
+
+/** The tokens loss across two multimem domains, one process each, against the single-GPU loss over
+ *  the same world on this process's first GPU: the world loss and this process's token forces.
+ *  Runs when @c UFORM_HOST_DOMAIN_INDEX names the process's domain. */
+static void run_tokens_cross_domain_case(test_suite_t &suite) {
+#if !defined(UFORM_WITH_INFINIBAND)
+    suite.skip("built without UFORM_WITH_INFINIBAND");
+#else
+    using layout_t = host_tokens_layout_t;
+    if (!cuda_devices_visible_(1)) return suite.skip(no_cuda_device_k);
+    int device_count = 0;
+    cuDeviceGetCount(&device_count);
+    std::size_t const gpus = std::min<std::size_t>(static_cast<std::size_t>(device_count), max_gpus_per_host_k);
+    u32_t const home_domain = u32_t(std::atoi(std::getenv("UFORM_HOST_DOMAIN_INDEX")));
+    // A job of its own, since the segments case before it rendezvoused under the launcher's job
+    // in this process.
+    char const *const launcher_job = std::getenv("UFORM_JOB_ID");
+    sz::string_t job;
+    if (!format_into(job, "{}-tokens", launcher_job != nullptr ? launcher_job : "cross_domain"))
+        return suite.check(false, "job name formatting");
+    auto topology_made = mesh_topology_t::bootstrap(home_domain, 2, u32_t(gpus), std::getenv("UFORM_EXCHANGE_DIR"),
+                                                    job.c_str());
+    if (!topology_made) return suite.check(false, "bootstrap: {}", topology_made.description_);
+    mesh_topology_t topology = std::move(topology_made.value_);
+    std::size_t const world_gpus = 2u * gpus, rank_scalars = layout_t::head_rows_k * layout_t::width_k;
+    std::size_t const live_scalars = layout_t::live_rows() * layout_t::width_k;
+    std::vector<f64_t> vectors(world_gpus * rank_scalars);
+    std::vector<nk_bf16_t> staging(vectors.size());
+    for (std::size_t index = 0; index != vectors.size(); ++index) vectors[index] = hash_fill(index, 37);
+    if (!narrow_to_bf16(vectors, staging)) return suite.check(false, "vector rounding failed");
+    host_relations_t host;
+    for (std::size_t world_gpu = 0; world_gpu != world_gpus; ++world_gpu)
+        append_tokens_relations(host, world_gpu, world_gpus);
+    std::size_t const world_segments = world_gpus * layout_t::segments_k;
+    contrastive_recipe_t recipe;
+    recipe.inverse_temperature = 4.0f;
+    i32_t devices[max_gpus_per_host_k] = {};
+    for (std::size_t rank = 0; rank != gpus; ++rank) devices[rank] = static_cast<i32_t>(rank);
+
+    // The single-GPU reference over the whole world on this process's first device.
+    std::vector<f64_t> reference_gradient(world_gpus * live_scalars);
+    f32_t reference_loss = 0;
+    {
+        auto stream_made = gpu_stream_t::make(0);
+        if (!stream_made) return suite.check(false, "stream: {}", stream_made.description_);
+        gpu_stream_t stream = std::move(stream_made.value_);
+        cuCtxPushCurrent(stream.context());
+        auto arena = gpu_arena_t::make(0, 1ull << 30);
+        if (!arena) return suite.check(false, "arena: {}", arena.description_);
+        expected<device_tokens_inputs_t> inputs = stage_tokens_inputs(*arena, staging, 0, world_gpus, host,
+                                                                      world_segments, stream);
+        expected<contrastive_tokens_t> loss = inputs ? contrastive_tokens_t::make(*arena, tokens_config_(world_gpus, 1))
+                                                     : expected<contrastive_tokens_t>::fail(std::move(inputs));
+        expected_t ran = loss ? (*loss)(inputs->token_vectors, inputs->token_offsets, inputs->batch,
+                                        inputs->relations.view(), recipe, inputs->loss_out, inputs->token_vectors_grad,
+                                        stream)
+                              : expected_t::fail(std::move(loss));
+        if (!ran) return suite.check(false, "reference run: {}", ran.description_);
+        cuStreamSynchronize(stream.get());
+        cuMemcpyDtoH(&reference_loss, device_address(inputs->loss_out.data()), sizeof(f32_t));
+        std::vector<nk_bf16_t> narrowed(reference_gradient.size());
+        cuMemcpyDtoH(narrowed.data(), device_address(inputs->token_vectors_grad.data()),
+                     narrowed.size() * sizeof(nk_bf16_t));
+        if (!widen_from_bf16(narrowed, reference_gradient)) return suite.check(false, "gradient widening failed");
+        cuCtxPopCurrent(nullptr);
+    }
+
+    per_gpu_array<gpu_stream_t> streams;
+    per_gpu_array<gpu_arena_t> arenas;
+    device_tokens_inputs_t inputs[max_gpus_per_host_k];
+    for (std::size_t rank = 0; rank != gpus; ++rank) {
+        auto stream_made = gpu_stream_t::make(devices[rank]);
+        if (!stream_made || streams.push_back(std::move(stream_made.value_)) != status_t::success_k)
+            return suite.check(false, "cross-domain stream make on GPU {}", rank);
+        cuCtxPushCurrent(streams[rank].context());
+        auto arena_made = gpu_arena_t::make(devices[rank], 1ull << 30, {devices, gpus});
+        if (!arena_made || arenas.push_back(std::move(arena_made.value_)) != status_t::success_k)
+            return suite.check(false, "cross-domain arena make on GPU {}", rank);
+        expected<device_tokens_inputs_t> staged = stage_tokens_inputs(arenas[rank], staging, home_domain * gpus + rank,
+                                                                      1, host, world_segments, streams[rank]);
+        if (!staged) return suite.check(false, "rank {} inputs: {}", rank, staged.description_);
+        inputs[rank] = std::move(staged.value_);
+        cuCtxPopCurrent(nullptr);
+    }
+    contrastive_tokens_config_t const config = tokens_config_(1, world_gpus);
+    auto multimem = multimem_domain_t::make(
+        topology, {devices, gpus}, distributed_contrastive_tokens_t::payload_scalars_needed(config), streams, 120.0);
+    if (!multimem) return suite.check(false, "multimem domain make: {}", multimem.description_);
+    auto colocated = colocated_domain_t::make(topology);
+    if (!colocated) return suite.check(false, "colocated domain make: {}", colocated.description_);
+    auto distributed = distributed_contrastive_tokens_t::make(multimem.value_, colocated.value_, arenas, streams,
+                                                              config);
+    if (!distributed) return suite.check(false, "cross-domain make: {}", distributed.description_);
+    gpu_tokens_inputs_t step_inputs[max_gpus_per_host_k];
+    for (std::size_t rank = 0; rank != gpus; ++rank)
+        step_inputs[rank] = {inputs[rank].token_vectors,
+                             inputs[rank].token_offsets,
+                             inputs[rank].batch,
+                             inputs[rank].relations.view(),
+                             recipe,
+                             inputs[rank].token_vectors_grad};
+    // Two steps over the same inputs enqueued back to back, with no host wait between them, so a
+    // gather of the second landing on blocks the first still reads would show as a mismatch.
+    f64r2_view_t const reference_rows {reference_gradient.data(), world_gpus, live_scalars};
+    std::vector<nk_bf16_t> narrowed(rank_scalars);
+    std::vector<f64_t> widened(rank_scalars);
+    for (u32_t step = 0; step != 2u; ++step) {
+        if (expected_t ran = distributed.value_({step_inputs, gpus}, streams.span()); !ran)
+            return suite.check(false, "cross-domain step {}: {}", step, ran.description_);
+        if (step == 0u) continue;
+        f64_t worst = 0, largest = 0;
+        f32_t world_loss = 0;
+        for (std::size_t rank = 0; rank != gpus; ++rank) {
+            cuCtxPushCurrent(streams[rank].context());
+            CUresult const synchronized = cuStreamSynchronize(streams[rank].get());
+            if (rank == 0)
+                cuMemcpyDtoH(&world_loss, device_address(distributed.value_.world_loss(0).data()), sizeof(f32_t));
+            cuMemcpyDtoH(narrowed.data(), device_address(inputs[rank].token_vectors_grad.data()),
+                         rank_scalars * sizeof(nk_bf16_t));
+            cuCtxPopCurrent(nullptr);
+            if (synchronized != CUDA_SUCCESS)
+                return suite.check(false, "cross-domain sync on GPU {}: result {}", rank,
+                                   static_cast<int>(synchronized));
+            if (!widen_from_bf16(narrowed, widened)) return suite.check(false, "gradient widening failed");
+            std::size_t const world_gpu = home_domain * gpus + rank;
+            for (std::size_t index = 0; index != live_scalars; ++index) {
+                f64_t const expected = reference_rows[world_gpu, index];
+                largest = std::max(largest, std::fabs(expected));
+                worst = std::max(worst, std::fabs(widened[index] - expected));
+            }
+        }
+        f64_t const relative = std::fabs(f64_t(world_loss) - reference_loss) /
+                               std::max(std::fabs(f64_t(reference_loss)), 1.0e-9);
+        suite.check(relative < 1.0e-4,
+                    "step {}: 2-domain tokens loss {:.6f} matches the single-GPU {:.6f}: relative {:.2e}", step,
+                    world_loss, reference_loss, relative);
+        suite.check(worst <= 1.0e-2 * largest,
+                    "step {}: 2-domain token forces match the single-GPU: worst {:.3g} of {:.3g}", step, worst,
+                    largest);
+    }
+    expected_t closed = topology.barrier("tokens_done", 60.0);
+    suite.check(static_cast<bool>(closed), "the closing barrier should complete: {}", closed.description_);
+#endif
+}
+
 int main(int, char **argv) {
     test_suite_t suite = test_suite_t::make(argv[0]);
     [[maybe_unused]] CUresult const initialized = cuInit(0); // a failure leaves no device to count, so each case skips
     if (std::getenv("UFORM_HOST_DOMAIN_INDEX") != nullptr) {
         suite.run("cross_domain", run_cross_domain_case);
+        suite.run("tokens/cross_domain", run_tokens_cross_domain_case);
         return suite.finish();
     }
 
@@ -1207,5 +1738,7 @@ int main(int, char **argv) {
     suite.run("sharded_oracle/roles", run_sharded_oracle_case, graph_t::roles_k, balanced_k);
     suite.run("sharded_oracle/ranked-roles", run_sharded_oracle_case, graph_t::roles_k, ranked_k);
     suite.run("distributed", run_distributed_case);
+    suite.run("tokens/oracle", run_tokens_oracle_case);
+    suite.run("tokens/distributed", run_tokens_distributed_case);
     return suite.finish();
 }

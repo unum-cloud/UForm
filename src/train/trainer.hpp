@@ -22,6 +22,7 @@
 #include "core/mesh.hpp"                   // `mesh_topology_t`
 #include "core/introspect.cuh"             // `telemetry_ledger_t`, `telemetry_probe_t`
 #include "core/optimizer.hpp"              // `distributed_adafactor_t`
+#include "core/contrastive_tokens.cuh"     // `distributed_contrastive_tokens_t`
 #include "train/base.cuh"                  // `trainer_config_t`, `base_replica_t`
 
 namespace unum::uform::train {
@@ -124,12 +125,16 @@ struct telemetry_t {
      *  when the objective has none. */
     f32_t contrastive = 0.0f;
 
+    /** The world's weighted late-interaction loss over the live queries, or zero when the run has
+     *  none. */
+    f32_t late_interaction = 0.0f;
+
     /** The domain's barrier round after this optimizer step. */
     concurrency_round_t concurrency_round {};
 
     /** The composite loss — every live term. */
     [[nodiscard]] f32_t composite() const noexcept {
-        return contrastive + token_ce + image_mse + video_mse + audio_mse;
+        return contrastive + late_interaction + token_ce + image_mse + video_mse + audio_mse;
     }
 
     /** Print one progress line for this step. */
@@ -260,7 +265,7 @@ struct trainer_t {
     /** The ledger rows: one loss row per head, one round row per member — inert zero handles whenever their
      *  channels are dark or their head is absent, so feeding them never branches. */
     struct probes_t {
-        telemetry_probe_t token {}, image {}, video {}, audio {}, contrastive {};
+        telemetry_probe_t token {}, image {}, video {}, audio {}, contrastive {}, late_interaction {};
         per_gpu_array<telemetry_probe_t> rounds {};
     };
     probes_t probes {};
@@ -284,6 +289,14 @@ struct trainer_t {
     /** One temperature step per replica over its learnable β and bias groups, present when the
      *  objective contrasts. */
     per_gpu_array<adafactor_temperatures_t> temperatures {};
+
+    /** The domain-wide late-interaction loss over the token head — wired only when the run
+     *  late-interacts. */
+    distributed_contrastive_tokens_t late_interaction {};
+
+    /** One temperature step per replica over the late-interaction β and bias groups, present when
+     *  it is. */
+    per_gpu_array<adafactor_temperatures_t> token_temperatures {};
 
     /** One captured forward and backward region per GPU under @c replayed_k ; empty runs the regions eagerly. */
     per_gpu_array<gpu_replay_graph_t> forward_graphs {}, backward_graphs {};

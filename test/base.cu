@@ -580,6 +580,66 @@ static void graph_capture(test_suite_t &suite, world_health_t &health, tier_t ti
                 "two captured replays agree");
 }
 
+/** Download one replica's @b [groups] Float32 temperatures, β then bias, into @p host . */
+[[nodiscard]] static bool read_temperatures_(base_replica_t &replica, gpu_stream_t &stream,
+                                             array<f32_t> &host) noexcept {
+    std::size_t const groups = replica.token_inverse_temperatures.numel();
+    if (host.resize_uninitialized(2u * groups) != status_t::success_k) return false;
+    f32r1_tensor_pinned_t staging = f32r1_tensor_pinned_t::uninitialized({2u * groups}, pinned_alloc<f32_t> {}).value;
+    if (!staging) return false;
+    f32r1_span_t const halves = staging.span();
+    if (!copy_device_to_host(replica.token_inverse_temperatures.view(), halves[nk::range(0, groups), nk::slice],
+                             stream) ||
+        !copy_device_to_host(replica.token_biases.view(), halves[nk::range(groups, 2u * groups), nk::slice], stream))
+        return false;
+    cuStreamSynchronize(stream.get());
+    std::memcpy(host.data(), staging.data(), 2u * groups * sizeof(f32_t));
+    return true;
+}
+
+/** The late-interaction temperatures and their Adafactor moments survive a checkpoint: a
+ *  trainer resumed from another's file takes the identical next temperature step, which zeroed
+ *  moments would not. */
+static void late_interaction_resume(test_suite_t &suite, world_health_t &health, tier_t tier) {
+    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
+    trainer_config_t config = test_geometry_(false);
+    config.objective = objective_t::contrastive_k;
+    config.late_interaction.weight = 1.0f;
+    config.late_interaction.width = 32;
+    config.capture = eager_k;
+    sz::string_view_t const path = "/tmp/uform_test_late_interaction_resume.safetensors";
+    array<f32_t> started, continued, resumed;
+    {
+        trainer_t trainer;
+        if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
+            return suite.check(false, "late-interaction trainer bring-up: {}", built.description_);
+        switch_to_gpu_t gpu_scope {trainer.streams[0]};
+        expected_t stepped = read_temperatures_(trainer.replicas[0], trainer.streams[0], started)
+                                 ? run_steps_(trainer, 0, 3)
+                                 : expected_t::fail(status_t::cuda_error_k, "temperature download failed");
+        if (stepped) stepped = trainer.synchronize();
+        if (stepped) stepped = trainer.save(path);
+        if (stepped) stepped = run_steps_(trainer, 3, 4);
+        if (stepped) stepped = trainer.synchronize();
+        if (!stepped || !read_temperatures_(trainer.replicas[0], trainer.streams[0], continued))
+            return suite.check(false, "late-interaction steps: {}", stepped.description_);
+    }
+    trainer_t trainer;
+    if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
+        return suite.check(false, "resumed trainer bring-up: {}", built.description_);
+    switch_to_gpu_t gpu_scope {trainer.streams[0]};
+    expected_t stepped = trainer.resume(path);
+    if (stepped) stepped = run_steps_(trainer, 3, 4);
+    if (stepped) stepped = trainer.synchronize();
+    if (!stepped || !read_temperatures_(trainer.replicas[0], trainer.streams[0], resumed))
+        return suite.check(false, "resumed step: {}", stepped.description_);
+    suite.check(std::memcmp(started.data(), continued.data(), started.size() * sizeof(f32_t)) != 0,
+                "four late-interaction steps move the temperatures");
+    suite.check(std::memcmp(continued.data(), resumed.data(), continued.size() * sizeof(f32_t)) == 0,
+                "the resumed trainer takes the identical temperature step: β {} vs {}, bias {} vs {}", continued[0],
+                resumed[0], continued[continued.size() / 2], resumed[resumed.size() / 2]);
+}
+
 int main(int, char **argv) {
     // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins: the spinning
     // wait blocks its context, the peer's next launch blocks on module loading behind it, and neither
@@ -594,6 +654,7 @@ int main(int, char **argv) {
     int device_count = 0;
     if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) {
         suite.skip("capture/replay", no_cuda_device_k);
+        suite.skip("resume/late_interaction", no_cuda_device_k);
         suite.skip("conformance/tokens", no_cuda_device_k);
         suite.skip("conformance/omni", no_cuda_device_k);
         suite.skip("sweep", no_cuda_device_k);
@@ -631,6 +692,7 @@ int main(int, char **argv) {
 
     world_health_t health;
     suite.run("capture/replay", graph_capture, health, cheap);
+    suite.run("resume/late_interaction", late_interaction_resume, health, cheap);
     suite.run("conformance/tokens", run_base_conformance, health, "tokens", test_geometry_(false), wide);
     suite.run("conformance/omni", run_base_conformance, health, "omni", test_geometry_(true), wide);
     mixture_sweep(suite, health, wide, cheap);

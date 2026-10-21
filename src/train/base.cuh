@@ -88,6 +88,35 @@ struct contrastive_config_t {
     contrastive_pair_loss_form_t pair_loss = contrastive_pair_loss_form_t::balanced_k;
 };
 
+/** How the late-interaction loss scores the per-token vectors of query and document segments. */
+struct late_interaction_config_t {
+
+    /** The loss weight λ; zero trains no token head and allocates nothing for it. */
+    f32_t weight = 0.0f;
+
+    /** The token vectors' width, a multiple of 8. */
+    u32_t width = 128;
+
+    /** The starting inverse temperature of every group the contrastive loss's items select. */
+    f32_t inverse_temperature = 1.0f;
+
+    /** The starting logit bias of every group. */
+    f32_t bias = 0.0f;
+
+    /** The pair loss over each query row. */
+    contrastive_pair_loss_form_t pair_loss = contrastive_pair_loss_form_t::ranked_k;
+
+    /** Query token rows one GPU's step holds at most; zero derives the batch's tokens per GPU. */
+    u32_t max_query_tokens_per_gpu = 0;
+
+    /** Document segments one GPU's step holds at most; zero derives @c max_segments_per_gpu . */
+    u32_t max_documents_per_gpu = 0;
+
+    /** Document token rows one GPU's step holds at most; zero derives the batch's tokens per
+     *  GPU. */
+    u32_t max_document_tokens_per_gpu = 0;
+};
+
 /** One run's whole description, parsed once and threaded by const reference. The modality mixture is the
  *  @ref batch envelope itself: a media modality trains iff its nested slice is live, and the token head is
  *  present whenever the objective reconstructs. */
@@ -133,6 +162,10 @@ struct trainer_config_t {
 
     /** The contrastive loss's scoring, read unless the objective is masked alone. */
     contrastive_config_t contrastive {};
+
+    /** The late-interaction loss over the token head, beside the pooled one when its weight is
+     *  positive. */
+    late_interaction_config_t late_interaction {};
 
     /** The tensor-condition-regularization distortion target @c ε² . Not consumed anywhere yet —
      *  carried from the validated draft envelope until the regularizer lands. */
@@ -211,6 +244,9 @@ struct trainer_config_t {
 
     /** Whether the objective contrasts pooled vertices. */
     [[nodiscard]] bool contrasts() const noexcept { return objective != objective_t::masked_k; }
+
+    /** Whether the run trains the token head through the late-interaction loss. */
+    [[nodiscard]] bool late_interacts() const noexcept { return late_interaction.weight > 0.0f; }
 };
 
 /**
@@ -275,6 +311,14 @@ struct base_replica_t {
     /** The @b [vertices_per_mesh] live length of every vertex of the mesh by global id, zero for PAD. */
     u32r1_tensor_arena_t to_vertex_lengths {};
 
+    /** The @b [max_tokens,width] gradient of the tower's token vectors the late-interaction loss
+     *  writes. */
+    bf16r2_tensor_arena_t token_vectors_grad {};
+
+    /** The @b [temperature_groups] late-interaction inverse temperatures and biases, selected by
+     *  the same vertex groups as the pooled ones. */
+    f32r1_tensor_arena_t token_inverse_temperatures {}, token_biases {};
+
     /**
      *  @brief This replica's parameter registrations: one named @ref differentiable_weights_t
      *      @c {name, weights, weights_grad} entry per matrix — the views non-owning, the checkpoint name
@@ -306,12 +350,16 @@ struct base_replica_t {
      *  live head scores its clean target into @ref normalized_grad . Pure enqueue, shape-stable. */
     [[nodiscard]] expected_t forward_region(gpu_stream_t &stream) noexcept;
 
-    /** The captured backward region: the tower's backward from the vertex forces and the masked forces,
-     *  joined at the final-norm states. Pure enqueue, shape-stable. */
+    /** The captured backward region: the tower's backward from the vertex forces, the masked forces
+     *  and the token-vector forces, joined at the final-norm states. Pure enqueue, shape-stable. */
     [[nodiscard]] expected_t backward_region(gpu_stream_t &stream) noexcept;
 
     /** The contrastive recipe over this replica's device temperatures and vertex groups. */
     [[nodiscard]] contrastive_recipe_t recipe(trainer_config_t const &config) const noexcept;
+
+    /** The late-interaction recipe over this replica's token temperatures and the same vertex
+     *  groups. */
+    [[nodiscard]] contrastive_recipe_t token_recipe(trainer_config_t const &config) const noexcept;
 
   private:
 

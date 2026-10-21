@@ -124,6 +124,9 @@ struct encoder_tower_config_t {
 
     /** The rotary frequency base. */
     f32_t rope_base = 10000.0f;
+
+    /** The per-token late-interaction width; 0 ⇒ the tower carries no token head. */
+    u32_t token_width = 0;
 };
 
 #if defined(__CUDACC__)
@@ -186,6 +189,96 @@ struct tower_pool_t {
     f32r2_tensor_arena_t pooled_grad_ {}, query_partials_ {};
 };
 
+/**
+ *  @brief The per-token late-interaction head: every query and document token of the final-norm
+ *      states, past its segment's prefix, through a learnable-scale RMSNorm, a biasless
+ *      @b [width,hidden] projection and a per-token L2 normalization, into compact rows.
+ *
+ *  A segment's tokens land contiguously at @ref token_offsets , in segment order; segments of no
+ *  late-interaction side, PAD and prefix-only segments contribute none, and rows past the live
+ *  total stay zero. Every pass runs at the baked @b [max_tokens] capacity, so the shapes never
+ *  change between steps.
+ */
+struct tower_token_head_t {
+
+    /** Allocate the weights, their gradients, the packs and every stash off @p arena for @p block
+     *  's capacities. */
+    [[nodiscard]] static expected<tower_token_head_t> make(gpu_arena_t &arena, transformer_block_config_t const &block,
+                                                           u32_t width) noexcept;
+
+    /**
+     *  @brief Project the late-interaction tokens of @p states — pure enqueue: lay out the compact
+     *      spans, gather, normalize, project and L2-normalize into @ref token_vectors .
+     *  @param[in] states @b [tokens,hidden] the final-norm states.
+     *  @param[in] batch The step's segment geometry, sides and prefix lengths.
+     *  @param[inout] stream The stream every launch enqueues on.
+     */
+    [[nodiscard]] expected_t forward(bf16r2_view_t states, multimodal_batch_view_t const &batch,
+                                     gpu_stream_t &stream) noexcept;
+
+    /**
+     *  @brief Differentiate the last @ref forward , adding the force on the final-norm states into
+     *      @p states_grad .
+     *  @param[in] vectors_grad @b [tokens,width] the gradient of @ref token_vectors , zero past the
+     *      live rows.
+     *  @param[in] batch The geometry the forward read.
+     *  @param[inout] states_grad @b [tokens,hidden] the Float32 gradient of the final-norm states,
+     *      added onto.
+     *  @param[inout] scratch The tower's shared transients, borrowed for the weight-gradient
+     *      products.
+     *  @param[inout] stream The stream every launch enqueues on.
+     */
+    [[nodiscard]] expected_t backward(bf16r2_view_t vectors_grad, multimodal_batch_view_t const &batch,
+                                      f32r2_span_t states_grad, transformer_scratch_t &scratch,
+                                      gpu_stream_t &stream) noexcept;
+
+    /** Append @c token_head.norm and @c token_head.projection to @p weights . */
+    [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;
+
+    /** Pack the projection for its forward and data-gradient products, once per optimizer step. */
+    [[nodiscard]] expected_t pack_weights(bf16r1_span_t transposed, gpu_stream_t &stream) noexcept;
+
+    /** @b [tokens,width] the unit token vectors of the last @ref forward . */
+    [[nodiscard]] bf16r2_view_t token_vectors() const noexcept { return vectors_.view(); }
+
+    /** @b [segments+1] each segment's first row in @ref token_vectors , the last entry the live
+     *  total. */
+    [[nodiscard]] u32r1_view_t token_offsets() const noexcept { return token_offsets_.view(); }
+
+  private:
+
+    /** The NumKong capabilities of the arena's device, picking every product. */
+    nk_capability_t capabilities_ = 0;
+
+    /** The RMSNorm floor the tower's norms share, also flooring the squared L2 norm. */
+    f32_t epsilon_ = 0.0f;
+
+    /** The norm's @c γ and its gradient, @b [hidden] . */
+    bf16r1_tensor_arena_t norm_scale_ {}, norm_scale_grad_ {};
+
+    /** The @b [width,hidden] projection and its gradient. */
+    bf16r2_tensor_arena_t projection_ {}, projection_grad_ {};
+
+    /** The projection packed as its forward B operand, and transposed as its data gradient's. */
+    b8r1_tensor_arena_t packed_projection_ {}, packed_projection_transposed_ {};
+
+    /** @b [segments+1] the compact offsets of the last forward. */
+    u32r1_tensor_arena_t token_offsets_ {};
+
+    /** @b [tokens,hidden] the gathered states, their normalized rows, and the gathered rows'
+     *  gradient. */
+    bf16r2_tensor_arena_t gathered_ {}, normalized_ {}, gathered_grad_ {};
+
+    /** @b [tokens] Float32 @c 1/rms of the norm and @c 1/‖projected‖ of the L2 normalization. */
+    f32r1_tensor_arena_t inverse_rms_ {}, inverse_norms_ {};
+
+    /** @b [tokens,width] the Float32 projected rows the L2 normalization differentiates through. */
+    f32r2_tensor_arena_t projected_ {};
+
+    /** @b [tokens,width] the unit vectors, and the projected rows' gradient. */
+    bf16r2_tensor_arena_t vectors_ {}, projected_grad_ {};
+};
+
 /** The training tower: entry + block stack + final norm + attention pool + head, every weight,
  *  gradient, stash, and pack owned — @ref forward stashes, @ref backward consumes, both pure enqueues. */
 struct encoder_tower_bf16_t {
@@ -208,9 +301,11 @@ struct encoder_tower_bf16_t {
      *  table's, deterministically). Populated @p vertices_grad drives the contrastive path; populated
      *  @p hidden_grad the masked path; both present ⇒ the masked force is added onto the pooled force
      *  at the final-norm states. Reuses @ref coords_ from the paired forward — the caller must not run
-     *  another forward in between. */
+     *  another forward in between. A populated @p token_vectors_grad , the gradient of
+     *  @ref token_vectors , joins the same Float32 states' gradient through the token head. */
     [[nodiscard]] expected_t backward(bf16r2_view_t vertices_grad, bf16r2_view_t hidden_grad,
-                                      multimodal_batch_on_gpu_t const &batch, gpu_stream_t &stream) noexcept;
+                                      multimodal_batch_on_gpu_t const &batch, gpu_stream_t &stream,
+                                      bf16r2_view_t token_vectors_grad = {}) noexcept;
 
     /** Stage each present media modality's raw pixels into the @b clean per-channel-normalized patch
      *  vectors a masked-autoencoder step reconstructs against — the same @c (byte/255 − mean)·inverse_std
@@ -228,8 +323,9 @@ struct encoder_tower_bf16_t {
      *  per-modality @c image_projection / @c video_projection / @c audio_projection (present iff
      *  configured), the per-layer @c blocks.{i}.qkv / @c blocks.{i}.out / @c blocks.{i}.gate_up /
      *  @c blocks.{i}.down / @c blocks.{i}.pre_norm / @c blocks.{i}.post_norm , then @c final_norm ,
-     *  @c pool_query , @c head.norm , @c head.fc1 , and @c head.fc2 — the composition root adds only
-     *  its @c model. prefix. */
+     *  @c pool_query , @c head.norm , @c head.fc1 , and @c head.fc2 , then @c token_head.norm and
+     *  @c token_head.projection when the token head is present — the composition root adds only its
+     *  @c model. prefix. */
     [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;
 
     /** Pack every block's, head's and media projection's weights for NumKong's products — pure enqueue,
@@ -244,6 +340,13 @@ struct encoder_tower_bf16_t {
 
     /** The per-token final-norm states — the masked head's input on the masked path. */
     [[nodiscard]] bf16r2_view_t normalized() const noexcept { return normalized_.view(); }
+
+    /** @b [tokens,token_width] the late-interaction token vectors of the last forward, empty
+     *  without the head. */
+    [[nodiscard]] bf16r2_view_t token_vectors() const noexcept { return token_head_.token_vectors(); }
+
+    /** @b [segments+1] each segment's first row in @ref token_vectors . */
+    [[nodiscard]] u32r1_view_t token_offsets() const noexcept { return token_head_.token_offsets(); }
 
     /** The baked geometry. */
     [[nodiscard]] encoder_tower_config_t const &config() const noexcept { return config_; }
@@ -299,6 +402,9 @@ struct encoder_tower_bf16_t {
 
     /** The attention pool's forward and backward. */
     tower_pool_t pool_ {};
+
+    /** The late-interaction head, present iff @c config.token_width is nonzero. */
+    tower_token_head_t token_head_ {};
 
     /** The head's learnable-scale RMSNorm @c γ and its gradient (@b [hidden] vectors). */
     bf16r1_tensor_arena_t head_norm_scale_ {}, head_norm_scale_grad_ {};

@@ -278,9 +278,11 @@ struct distributed_adafactor_t {
  */
 struct adafactor_temperatures_t {
 
-    /** Allocate and zero the @b [2·groups] second moment off @p arena on @p stream . */
+    /** Allocate and zero the @b [2·groups] second moment off @p arena on @p stream ,
+     *  checkpointed as @c temperature_moments under the loss's @p prefix , such as
+     *  @c contrastive . */
     [[nodiscard]] static expected<adafactor_temperatures_t> make(gpu_arena_t &arena, u32_t groups,
-                                                                 adafactor_config_t config,
+                                                                 adafactor_config_t config, sz::string_view_t prefix,
                                                                  gpu_stream_t &stream) noexcept;
 
     /** One step of the @b [groups] @p inverse_temperatures and @p biases in place, from the
@@ -288,8 +290,7 @@ struct adafactor_temperatures_t {
     [[nodiscard]] expected_t step(f32r1_span_t inverse_temperatures, f32r1_span_t biases, f32r1_view_t gradients,
                                   f32_t learning_rate, gpu_stream_t &stream) noexcept;
 
-    /** Insert the second moment into @p checkpoint as @c contrastive.temperature_moments , draining
-     *  @p stream . */
+    /** Insert the second moment into @p checkpoint under its key, draining @p stream . */
     [[nodiscard]] expected_t save(checkpoint_to_save_t &checkpoint, gpu_stream_t &stream) const noexcept;
 
     /**
@@ -304,6 +305,9 @@ struct adafactor_temperatures_t {
 
     /** @b [2·groups] second moments, the log-β ones first. */
     f32r1_tensor_arena_t moments_ {};
+
+    /** The checkpoint key of @ref moments_ , the loss's prefix then @c .temperature_moments . */
+    sz::string_t key_ {};
 };
 
 } // namespace unum::uform::core
