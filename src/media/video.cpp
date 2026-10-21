@@ -141,6 +141,8 @@ static i64_t video_memory_seek_(void *opaque, i64_t offset, int whence) noexcept
 [[nodiscard]] static char const *bitstream_filter_name_(video_codec_t codec) noexcept {
     if (codec == video_codec_t::h264_k) return "h264_mp4toannexb";
     if (codec == video_codec_t::h265_k) return "hevc_mp4toannexb";
+    // MP4 keeps MPEG-4 Part 2's VOL header in extradata, which NVDEC's parser needs in the stream.
+    if (codec == video_codec_t::mpeg4_k) return "dump_extra";
     return nullptr;
 }
 

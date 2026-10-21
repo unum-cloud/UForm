@@ -176,13 +176,21 @@ def repack_shard(tar_path: str, captions_json: str, *, keep_raw: bool, overwrite
         return 0
 
     caption_index = _load_caption_index(captions_json)
-    mp4_bytes: list[bytes] = []
-    captions: list[list[str]] = []
-    video_paths: list[str] = []
+    schema = pa.schema(
+        [
+            ("mp4", pa.binary()),
+            ("captions", pa.list_(pa.string())),
+            ("video", pa.string()),
+            ("key", pa.string()),
+        ]
+    )
+    columns: dict[str, list] = {name: [] for name in schema.names}
     keys: list[str] = []
     payload_hashes: list[bytes] = []
     dropped_no_caption = 0
-    with tarfile.open(tar_path, mode="r") as archive:
+    pending = out_path + ".pending"
+    # One row group at a time, so a split far larger than RAM repacks in bounded memory.
+    with tarfile.open(tar_path, mode="r") as archive, pq.ParquetWriter(pending, schema, compression="zstd") as writer:
         for member in archive:
             if not member.isfile() or not member.name.endswith(".mp4"):
                 continue
@@ -195,45 +203,45 @@ def repack_shard(tar_path: str, captions_json: str, *, keep_raw: bool, overwrite
             if handle is None:
                 continue
             payload = handle.read()
-            mp4_bytes.append(payload)
-            captions.append(moments)
-            video_paths.append(member.name)
+            columns["mp4"].append(payload)
+            columns["captions"].append(moments)
+            columns["video"].append(member.name)
+            columns["key"].append(base[: -len(".mp4")])
             keys.append(base[: -len(".mp4")])
             payload_hashes.append(xxhash.xxh64(payload).digest())
+            if len(columns["mp4"]) == ROW_GROUP_SIZE:
+                writer.write_table(pa.table(columns, schema=schema))
+                columns = {name: [] for name in schema.names}
+        if columns["mp4"]:
+            writer.write_table(pa.table(columns, schema=schema))
 
-    if not mp4_bytes:
+    if not keys:
+        os.unlink(pending)
         print(f"[empty] {tar_path}: no clips joined to a caption list", file=sys.stderr)
         return 1
 
-    table = pa.table(
-        {
-            "mp4": pa.array(mp4_bytes, type=pa.binary()),
-            "captions": pa.array(captions, type=pa.list_(pa.string())),
-            "video": pa.array(video_paths, type=pa.string()),
-            "key": pa.array(keys, type=pa.string()),
-        }
-    )
-    pending = out_path + ".pending"
-    pq.write_table(table, pending, compression="zstd", row_group_size=ROW_GROUP_SIZE)
-
-    verify = pq.read_table(pending, columns=["mp4", "key"])
-    verify_payloads = verify.column("mp4").to_pylist()
-    verify_keys = verify.column("key").to_pylist()
-    if len(verify_payloads) != len(mp4_bytes):
+    position = 0
+    for batch in pq.ParquetFile(pending).iter_batches(batch_size=ROW_GROUP_SIZE, columns=["mp4", "key"]):
+        for key, payload in zip(batch.column("key").to_pylist(), batch.column("mp4").to_pylist(), strict=True):
+            if (
+                position >= len(keys)
+                or key != keys[position]
+                or xxhash.xxh64(payload).digest() != payload_hashes[position]
+            ):
+                os.unlink(pending)
+                print(f"[FAIL] {tar_path}: verify payload mismatch at row {position}", file=sys.stderr)
+                return 1
+            position += 1
+    if position != len(keys):
         os.unlink(pending)
         print(f"[FAIL] {tar_path}: verify row-count mismatch", file=sys.stderr)
         return 1
-    for position, (key, payload) in enumerate(zip(verify_keys, verify_payloads, strict=True)):
-        if key != keys[position] or xxhash.xxh64(payload).digest() != payload_hashes[position]:
-            os.unlink(pending)
-            print(f"[FAIL] {tar_path}: verify payload mismatch at row {position}", file=sys.stderr)
-            return 1
     os.replace(pending, out_path)
     if not keep_raw:
         os.unlink(tar_path)
     print(
         f"[done] {os.path.basename(tar_path)} -> {os.path.basename(out_path)}  "
-        f"({len(mp4_bytes)} clips, dropped {dropped_no_caption} without captions)",
+        f"({len(keys)} clips, dropped {dropped_no_caption} without captions)",
         flush=True,
     )
     return 0
@@ -289,7 +297,7 @@ def download(
 
 def main() -> int:
     """Download DiDeMo and repack it, or repack the single shard named by the hidden worker flags."""
-    parser =argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", maxsplit=1)[0])
     parser.add_argument(
         "--data-root",
         default=DEFAULT_DATA_ROOT,

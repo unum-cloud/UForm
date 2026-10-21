@@ -348,8 +348,12 @@ extern "C" int CUDAAPI on_video_sequence(void *user_data, CUVIDEOFORMAT *format)
         engine->cuvid->cuvidDestroyDecoder(entry.decoder);
         entry.decoder = nullptr;
     }
-    unsigned long decoder_max_width = std::max<unsigned long>(engine->max_side, format->coded_width);
-    unsigned long decoder_max_height = std::max<unsigned long>(engine->max_side, format->coded_height);
+    // NVDEC takes a maximum above the coded frame only for the codecs it can reconfigure in place.
+    bool const resizable = context->codec == video_codec_t::h264_k || context->codec == video_codec_t::h265_k ||
+                           context->codec == video_codec_t::vp9_k || context->codec == video_codec_t::av1_k;
+    unsigned long const max_side = resizable ? engine->max_side : 0ul;
+    unsigned long decoder_max_width = std::max<unsigned long>(max_side, format->coded_width);
+    unsigned long decoder_max_height = std::max<unsigned long>(max_side, format->coded_height);
     // The engine's bound follows the grid's width, which can pass what NVDEC decodes, and a decoder
     // asked for more than its codec's maximum fails to create.
     CUVIDDECODECAPS caps {};

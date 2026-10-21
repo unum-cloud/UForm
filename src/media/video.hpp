@@ -47,8 +47,9 @@ enum class video_codec_t : u8_t { h264_k = 0, h265_k, vp9_k, av1_k, mpeg2_k, mpe
 /** Count of @ref video_codec_t enumerators. */
 inline constexpr std::size_t video_codec_count_k = 7;
 
-/** One demuxed clip: its elementary stream, where each packet starts in it, its codec, and its native extent and
- *  frame count. H.264 and H.265 arrive as Annex-B; the others keep their packets as the container stored them. */
+/** One demuxed clip: its elementary stream, where each packet starts in it, its codec, and its
+ *  native extent and frame count. H.264 and H.265 arrive as Annex-B, MPEG-4 Part 2 with its VOL
+ *  header ahead of each keyframe, and the others with packets as the container stored them. */
 struct demuxed_t {
 
     /** The elementary stream, every packet back to back. */
