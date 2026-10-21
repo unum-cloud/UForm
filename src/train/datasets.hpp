@@ -103,13 +103,16 @@ struct mixture_t {
 struct dataset_source_t final : batch_source_t {
 
     /** Make one loader per entry of @p mixture over @p storage , before the trainer, and charge
-     *  @p config with the device bytes their reservoirs can take outside the arena. */
+     *  @p config with the device bytes their reservoirs can take outside the arena when one fill
+     *  packs @p batches_per_fill batches. */
     [[nodiscard]] static expected_t open(dataset_source_t &placed, trainer_config_t &config,
-                                         loaders::gpu_direct_storage_session_t &storage, mixture_t mixture) noexcept;
+                                         loaders::gpu_direct_storage_session_t &storage, mixture_t mixture,
+                                         std::size_t batches_per_fill) noexcept;
 
     /** Make the loaded batches, the decoder sessions and the mixer of an @ref open source from
-     *  @p trainer 's arenas. */
-    [[nodiscard]] static expected_t make(dataset_source_t &placed, trainer_t &trainer) noexcept;
+     *  @p trainer 's arenas, packing @p batches_per_fill batches per GPU per fill. */
+    [[nodiscard]] static expected_t make(dataset_source_t &placed, trainer_t &trainer,
+                                         std::size_t batches_per_fill) noexcept;
 
     /** Take every GPU's batch of this step, refilling a GPU whose period starts here; the mixer
      *  then routes them into the replicas. */

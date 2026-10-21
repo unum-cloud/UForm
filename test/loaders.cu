@@ -325,7 +325,7 @@ static void segment_geometry_packs_multiple_per_row(test_suite_t &suite) {
         lengths.resize(total_segments) != status_t::success_k)
         return suite.check(false, "segment scratch alloc failed");
     u32_t cursor = 0, jumps = 0;
-    for (u32_t index = 0; index != total_segments; ++index) {
+    for (std::size_t index = 0; index != total_segments; ++index) {
         u32_t columns_here = 0;
         if (index < live_segments) columns_here = static_cast<u32_t>(std::min<u64_t>(item_bytes[index], columns));
         u32_t const room_in_row = columns - cursor % columns; // a segment never crosses its row
@@ -342,7 +342,7 @@ static void segment_geometry_packs_multiple_per_row(test_suite_t &suite) {
 
     bool row_safe = true, pad_ok = true;
     u32_t shared_rows = 0;
-    for (u32_t index = 0; index != total_segments; ++index) {
+    for (std::size_t index = 0; index != total_segments; ++index) {
         if (lengths[index] != 0u) {
             u32_t const first = offsets[index] / columns, last = (offsets[index] + lengths[index] - 1u) / columns;
             row_safe = row_safe && first == last;
@@ -402,8 +402,8 @@ static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &
     modality_t const live_modality[] = {modality_t::text_k,  modality_t::image_k, modality_t::video_k,
                                         modality_t::audio_k, modality_t::text_k,  modality_t::text_k,
                                         modality_t::text_k,  modality_t::text_k};
-    for (u32_t s = 0; s != max_segments + 1u; ++s) offsets[s] = live_offsets[s];
-    for (u32_t s = 0; s != max_segments; ++s) {
+    for (std::size_t s = 0; s != max_segments + 1u; ++s) offsets[s] = live_offsets[s];
+    for (std::size_t s = 0; s != max_segments; ++s) {
         lengths[s] = live_lengths[s];
         modality[s] = live_modality[s];
     }
@@ -441,8 +441,8 @@ static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &
         return suite.check(false, "coords readback sync failed");
 
     bool ok = true;
-    for (u32_t s = 0; s != max_segments; ++s)
-        for (u32_t k = 0; k != lengths[s]; ++k) {
+    for (std::size_t s = 0; s != max_segments; ++s)
+        for (std::size_t k = 0; k != lengths[s]; ++k) {
             i16_t want_t = 0, want_h = 0, want_w = 0;
             switch (modality[s]) {
             case modality_t::text_k:
@@ -575,7 +575,7 @@ static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, array
     for (std::size_t i = 0; i != live; ++i) finite = finite && std::isfinite(samples[i]);
     suite.check(finite, "[{}] every audio sample must be finite", label);
     bool pad = true;
-    for (u32_t s = 1; s != max_segments; ++s) pad = pad && lengths[s] == 0u && modality[s] == modality_t::text_k;
+    for (std::size_t s = 1; s != max_segments; ++s) pad = pad && lengths[s] == 0u && modality[s] == modality_t::text_k;
     suite.check(pad, "[{}] audio PAD segments must carry zero length and text_k", label);
     suite.check(offsets[max_segments] == lengths[0], "[{}] terminal offset must close the last segment", label);
 }
@@ -761,19 +761,19 @@ static void image_batch_matches_single(test_suite_t &suite, std::span<array<b8_t
                cuStreamSynchronize(stream.get()) == CUDA_SUCCESS;
     };
     array<u64_t> drawn;
-    for (u64_t row = 0; row != images; ++row)
+    for (std::size_t row = 0; row != images; ++row)
         if (drawn.push_back(row) != status_t::success_k) return suite.check(false, "drawn row append");
     landed_t together;
     if (!decode(drawn.view(), together)) return suite.check(false, "the batched decode should succeed");
     array<landed_t> singles;
-    for (u32_t image = 0; image != images; ++image) {
+    for (std::size_t image = 0; image != images; ++image) {
         landed_t alone;
         if (!decode(drawn.view().subspan(image, 1), alone) ||
             singles.push_back(std::move(alone)) != status_t::success_k)
             return suite.check(false, "image {} decoded alone should succeed", image);
     }
     // The mean absolute pixel difference between batched `image` and single decode `single`.
-    auto distance = [&](u32_t image, u32_t single) noexcept -> double {
+    auto distance = [&](std::size_t image, std::size_t single) noexcept -> double {
         landed_t const &alone = singles[single];
         std::size_t const values = std::size_t {std::min(together.lengths[image], alone.lengths[0])} * cell_pixels;
         double total = 0;
@@ -782,10 +782,10 @@ static void image_batch_matches_single(test_suite_t &suite, std::span<array<b8_t
                               double(alone.pixels[std::size_t {alone.offsets[0]} * cell_pixels + value]));
         return values ? total / double(values) : 0.0;
     };
-    for (u32_t image = 0; image != images; ++image) {
+    for (std::size_t image = 0; image != images; ++image) {
         double const own = distance(image, image);
-        u32_t nearest = image;
-        for (u32_t single = 0; single != images; ++single)
+        std::size_t nearest = image;
+        for (std::size_t single = 0; single != images; ++single)
             if (distance(image, single) < distance(image, nearest)) nearest = single;
         suite.check(own == 0.0 && together.lengths[image] == singles[image].lengths[0],
                     "image {} of {} must decode the same in a batch as alone: mean |diff| {:.3f}, " //
@@ -979,7 +979,7 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
     u16r2_tensor_pinned_t video_shapes = u16r2_tensor_pinned_t::zeros({max_segments, 3u}, pinned_alloc<u16_t> {}).value;
     if (!offsets || !lengths || !modality || !shapes || !video_shapes)
         return suite.check(false, "multimodal: mixed staging alloc failed");
-    for (u32_t s = 0; s != max_segments + 1u; ++s) offsets[s] = audio_length + image_length;
+    for (std::size_t s = 0; s != max_segments + 1u; ++s) offsets[s] = audio_length + image_length;
     offsets[0] = 0u;
     offsets[1] = audio_length;
     lengths[0] = audio_length;
@@ -1017,12 +1017,12 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
         return suite.check(false, "multimodal: coords readback sync failed");
 
     bool audio_ok = true, image_ok = true;
-    for (u32_t k = 0; k != audio_length; ++k) { // audio walks the 1-D position axis
+    for (std::size_t k = 0; k != audio_length; ++k) { // audio walks the 1-D position axis
         std::size_t const token = k;
         audio_ok = audio_ok && host[token, 0] == static_cast<i16_t>(k) && host[token, 1] == 0 && host[token, 2] == 0;
     }
     u32_t const pc = grid_cols;
-    for (u32_t k = 0; k != image_length; ++k) { // image is 2-D spatial over its real grid
+    for (std::size_t k = 0; k != image_length; ++k) { // image is 2-D spatial over its real grid
         std::size_t const token = std::size_t {audio_length} + k;
         image_ok = image_ok && host[token, 0] == 0 && host[token, 1] == static_cast<i16_t>(k / pc) &&
                    host[token, 2] == static_cast<i16_t>(k % pc);
@@ -1075,10 +1075,11 @@ static void cross_rank_sampling(test_suite_t &suite) {
         return suite.check(false, "publishing the shard set should succeed: {}", published.description_);
 
     bool distinct = true;
-    for (u32_t peer = 0; peer != count; ++peer) {
+    for (std::size_t peer = 0; peer != count; ++peer) {
         if (peer == index) continue;
         sz::string_t other;
-        if (expected_t awaited = topology.await_text(peer, "shards", other, 60.0); !awaited) distinct = false;
+        if (expected_t awaited = topology.await_text(static_cast<u32_t>(peer), "shards", other, 60.0); !awaited)
+            distinct = false;
         else if (other.view() == mine.view()) distinct = false; // a peer drew the byte-identical shard set
     }
     suite.check(distinct, "rank {} must draw a shard set distinct from every peer", index);

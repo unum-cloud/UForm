@@ -232,7 +232,7 @@ struct trainer_config_t {
 
     /** How many steps' batches one data fill packs per GPU from one shard read, so the read is paid
      *  once per that many steps. */
-    u32_t batches_per_fill = 16;
+    std::size_t batches_per_fill = 16;
 
     /** The device bytes a data source's reservoir takes outside the arena at @c rows rows,
      *  @c reservoir_fixed_bytes+rows·reservoir_row_bytes , charged by the source from its

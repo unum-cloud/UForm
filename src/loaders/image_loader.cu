@@ -825,33 +825,29 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
     // images; never fewer than two, unless the whole dataset is one file.
     array<sz::string_view_t> picked_paths;
     array<std::size_t> picked_shards;
-    if (picked_paths.resize(shard_count) != status_t::success_k ||
-        picked_shards.resize(shard_count) != status_t::success_k)
-        return expected_t::fail(status_t::bad_alloc_k, "file pick allocation failed");
-    std::size_t picked_count = 0, pooled_estimate = 0, attempt = 0;
-    while ((pooled_estimate < total_images || picked_count < floor_files) && picked_count < shard_count) {
+    std::size_t pooled_estimate = 0, attempt = 0;
+    while ((pooled_estimate < total_images || picked_shards.size() < floor_files) &&
+           picked_shards.size() < shard_count) {
         std::size_t const position = hash(seed_, training_step, gpu_rank, file_draw_salt_k, attempt) % total_rows;
         ++attempt;
         std::size_t const file = static_cast<std::size_t>(
             std::upper_bound(row_prefix_.begin(), row_prefix_.end(), position) - row_prefix_.begin() - 1);
-        std::span<std::size_t const> const chosen {picked_shards.data(), picked_count};
-        if (std::find(chosen.begin(), chosen.end(), file) != chosen.end()) continue;
-        picked_shards[picked_count] = file;
-        picked_paths[picked_count] = absolute_paths_[file].view();
+        if (std::find(picked_shards.begin(), picked_shards.end(), file) != picked_shards.end()) continue;
+        if (picked_shards.push_back(file) != status_t::success_k ||
+            picked_paths.push_back(absolute_paths_[file].view()) != status_t::success_k)
+            return expected_t::fail(status_t::bad_alloc_k, "file pick allocation failed");
         pooled_estimate += row_prefix_[file + 1] - row_prefix_[file];
-        ++picked_count;
     }
 
     // Decode the picked files' blob column into one device reservoir; the true pool is the decoded rows.
-    auto reservoir_read = parquet_file_t::make(*storage_, picked_paths.view().subspan(0, picked_count),
-                                               {&config.column, 1}, gpu_stream);
+    auto reservoir_read = parquet_file_t::make(*storage_, picked_paths.view(), {&config.column, 1}, gpu_stream);
     if (!reservoir_read) return expected_t::fail(std::move(reservoir_read));
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();
     if (pooled_rows < total_images)
         return expected_t::fail(status_t::shape_unsupported_k,
                                 "{} pooled rows across {} files cover fewer than the {} images this fill needs",
-                                pooled_rows, picked_count, total_images);
+                                pooled_rows, picked_shards.size(), total_images);
 
     switch_to_gpu_t gpu_scope {gpu_stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");

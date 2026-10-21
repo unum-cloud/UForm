@@ -119,7 +119,9 @@ using namespace unum::uform::train;
     if (!storage) return fail_out_(storage.description_.view());
     dataset_source_t datasets, held_out;
     if (!config.mixture.empty())
-        if (expected_t opened = dataset_source_t::open(datasets, config, *storage, std::move(mixture)); !opened)
+        if (expected_t opened = dataset_source_t::open(datasets, config, *storage, std::move(mixture),
+                                                       config.batches_per_fill);
+            !opened)
             return fail_out_(opened.description_.view());
     if (config.eval_every && config.eval_mixture.empty() && !config.mixture.empty())
         return fail_out_("--eval-every over a mixture needs --eval-mixture, whose shards training never draws");
@@ -128,7 +130,8 @@ using namespace unum::uform::train;
         if (!read) return fail_out_(read.description_.view());
         // Each source charges its own reservoir, so the envelope makes room for both.
         std::size_t const training_fixed = config.reservoir_fixed_bytes, training_row = config.reservoir_row_bytes;
-        if (expected_t opened = dataset_source_t::open(held_out, config, *storage, std::move(read.value_)); !opened)
+        // Every evaluation refills, so each scores fresh entries rather than a fill 16 evals old.
+        if (expected_t opened = dataset_source_t::open(held_out, config, *storage, std::move(read.value_), 1); !opened)
             return fail_out_(opened.description_.view());
         config.reservoir_fixed_bytes += training_fixed, config.reservoir_row_bytes += training_row;
     }
@@ -152,12 +155,12 @@ using namespace unum::uform::train;
     }
     int stepped = 0;
     if (!config.eval_mixture.empty() && config.eval_every)
-        if (expected_t made = dataset_source_t::make(held_out, trainer); !made)
+        if (expected_t made = dataset_source_t::make(held_out, trainer, 1); !made)
             return fail_out_(made.description_.view());
     synthetic_source_t synthetic;
     batch_source_t &evaluated = config.eval_mixture.empty() ? static_cast<batch_source_t &>(synthetic) : held_out;
     if (config.mixture.empty()) stepped = step_(trainer, config, synthetic, evaluated);
-    else if (expected_t made = dataset_source_t::make(datasets, trainer); !made)
+    else if (expected_t made = dataset_source_t::make(datasets, trainer, config.batches_per_fill); !made)
         return fail_out_(made.description_.view());
     else stepped = step_(trainer, config, datasets, evaluated);
     // No host tears its queue pairs down while a peer still awaits its last acknowledgement.

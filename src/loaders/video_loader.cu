@@ -107,11 +107,8 @@ struct nvdec_engine_t {
     /** Shared context lock, aliased — serializes the context-critical cuvid calls across engines. */
     CUvideoctxlock context_lock = nullptr;
 
-    /** Decode-surface width ceiling every decoder this engine builds is capped to. */
-    unsigned long max_width = 0;
-
-    /** Decode-surface height ceiling every decoder this engine builds is capped to. */
-    unsigned long max_height = 0;
+    /** Decode-surface ceiling on both sides, capping every decoder this engine builds. */
+    unsigned long max_side = 0;
 
     /** The per-codec parser / decoder entries, indexed by @ref video_codec_t — built lazily per codec. */
     codec_entry_t entries[video_codec_count_k] {};
@@ -133,9 +130,6 @@ struct nvdec_state_t {
 
     /** The shared context lock serializing the context-critical cuvid calls across every engine. */
     CUvideoctxlock context_lock = nullptr;
-
-    /** How many decode @ref nvdec_engine_t engines are stood up — the caller-stated concurrency. */
-    u32_t engine_count = 0;
 
     /** The owned decode engines, each with its own per-codec parser / decoder entries. */
     array<nvdec_engine_t> engines {};
@@ -354,8 +348,8 @@ extern "C" int CUDAAPI on_video_sequence(void *user_data, CUVIDEOFORMAT *format)
         engine->cuvid->cuvidDestroyDecoder(entry.decoder);
         entry.decoder = nullptr;
     }
-    unsigned long decoder_max_width = std::max<unsigned long>(engine->max_width, format->coded_width);
-    unsigned long decoder_max_height = std::max<unsigned long>(engine->max_height, format->coded_height);
+    unsigned long decoder_max_width = std::max<unsigned long>(engine->max_side, format->coded_width);
+    unsigned long decoder_max_height = std::max<unsigned long>(engine->max_side, format->coded_height);
     // The engine's bound follows the grid's width, which can pass what NVDEC decodes, and a decoder
     // asked for more than its codec's maximum fails to create.
     CUVIDDECODECAPS caps {};
@@ -545,7 +539,6 @@ expected<nvdec_session_t> nvdec_session_t::make(nvdec_config_t config) noexcept 
 
     auto state = std::unique_ptr<nvdec_state_t> {new (std::nothrow) nvdec_state_t {}};
     if (state == nullptr) return result_t::fail(status_t::bad_alloc_k, "NVDEC session state allocation failed");
-    state->engine_count = engine_count;
 
     if (cuCtxGetCurrent(&state->context) != CUDA_SUCCESS || state->context == nullptr)
         return result_t::fail(status_t::invalid_input_k, "no current CUDA context for the NVDEC session");
@@ -557,11 +550,11 @@ expected<nvdec_session_t> nvdec_session_t::make(nvdec_config_t config) noexcept 
         return result_t::fail(status_t::bad_alloc_k, "NVDEC engine table allocation failed ({} engines)", engine_count);
     // Alias the shared handles into each engine so the parser callbacks reach them without a back-pointer; the engines
     // own only their per-codec decoders (freed by ~nvdec_state_t). No streams — decode rides the caller's stream.
-    for (u32_t engine_index = 0; engine_index != engine_count; ++engine_index) {
+    for (std::size_t engine_index = 0; engine_index != engine_count; ++engine_index) {
         nvdec_engine_t &engine = state->engines[engine_index];
         engine.cuvid = state->cuvid;
         engine.context_lock = state->context_lock;
-        engine.max_width = engine.max_height = static_cast<unsigned long>(config.max_side);
+        engine.max_side = static_cast<unsigned long>(config.max_side);
     }
     return result_t {nvdec_session_t {std::move(state)}};
 }
@@ -756,17 +749,18 @@ struct cursor_plan_t {
             u32_t group_index = 0;
             if (length != 0u) {
                 u32_t const reach = static_cast<u32_t>(grid.temporal_groups) * tube_frames * stride;
+                // Segments run clip by clip, so only the table's tail can hold this clip's groups.
                 std::size_t found = plan.groups.size();
-                for (std::size_t g = 0; g != plan.groups.size(); ++g)
-                    if (plan.groups[g].clip == static_cast<u32_t>(clip) &&
-                        plan.groups[g].patch_rows == grid.patch_rows &&
-                        plan.groups[g].patch_cols == grid.patch_columns) {
-                        found = g;
+                u32_t const clip_index = static_cast<u32_t>(clip);
+                for (std::size_t g = plan.groups.size(); g != 0 && plan.groups[g - 1].clip == clip_index; --g)
+                    if (plan.groups[g - 1].patch_rows == grid.patch_rows &&
+                        plan.groups[g - 1].patch_cols == grid.patch_columns) {
+                        found = g - 1;
                         break;
                     }
                 if (found == plan.groups.size()) {
                     decode_group_t new_group;
-                    new_group.clip = static_cast<u32_t>(clip);
+                    new_group.clip = clip_index;
                     new_group.frames_offset = 0; // assigned in pass 2
                     new_group.frames_to_decode = reach;
                     new_group.patch_rows = grid.patch_rows;
@@ -891,9 +885,9 @@ struct engine_cursor_t {
  *  non-AV1 clip returns @c opened with its Annex-B tail for the caller to chunk-feed; an AV1 clip is fed inline
  *  here (its OBU temporal units must not be split) and returns @c av1_done ; a spent stripe returns @c drained .
  *  @p group is left pointing at the group that was opened or fed inline. */
-[[nodiscard]] static clip_feed_t open_clip_(decode_jobs_t &drive, u32_t e, std::size_t &group) noexcept {
+[[nodiscard]] static clip_feed_t open_clip_(decode_jobs_t &drive, std::size_t e, std::size_t &group) noexcept {
     nvdec_state_t *const state = drive.state;
-    u32_t const engine_count = state->engine_count;
+    std::size_t const engine_count = state->engines.size();
     std::size_t const group_count = drive.groups.size();
     nvdec_engine_t &engine = state->engines[e];
     for (; group < group_count; group += engine_count) {
@@ -930,12 +924,13 @@ struct engine_cursor_t {
 /** Drive engine @p e forward until it opens a chunk-fed group or drains, retrying past every AV1 group it
  *  decodes inline. Returns the Annex-B tail to feed — empty exactly once the engine's @c {e,e+N,…} stripe is
  *  spent. */
-[[nodiscard]] static std::span<b8_t const> advance_engine_(decode_jobs_t &drive, u32_t e, std::size_t &group) noexcept {
+[[nodiscard]] static std::span<b8_t const> advance_engine_(decode_jobs_t &drive, std::size_t e,
+                                                           std::size_t &group) noexcept {
     for (;;) {
         clip_feed_t const feed = open_clip_(drive, e, group);
         if (feed.state == feed_state_::opened) return feed.pending;
         if (feed.state == feed_state_::drained) return {};
-        group += drive.state->engine_count; // av1_done: this AV1 group is decoded — advance and retry the engine
+        group += drive.state->engines.size(); // av1_done: this AV1 group is decoded — advance and retry the engine
     }
 }
 
@@ -951,7 +946,7 @@ struct engine_cursor_t {
  */
 [[nodiscard]] static expected_t drive_decode_(decode_jobs_t &drive, gpu_stream_t &stream) noexcept {
     nvdec_state_t *const state = drive.state;
-    u32_t const engine_count = state->engine_count;
+    std::size_t const engine_count = state->engines.size();
     array<engine_cursor_t> cursors;
     if (cursors.resize(engine_count) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "decode cursor allocation failed ({} engines)", engine_count);
@@ -959,13 +954,13 @@ struct engine_cursor_t {
     // Prime each engine on its stripe's first feedable group, then count the live engines once. `live` only ever
     // decrements from here — when an engine feeds its final chunk and its next advance drains its stripe.
     u32_t live = 0;
-    for (u32_t e = 0; e != engine_count; ++e) {
+    for (std::size_t e = 0; e != engine_count; ++e) {
         cursors[e].group_index = e;
         cursors[e].pending = advance_engine_(drive, e, cursors[e].group_index);
         live += !cursors[e].pending.empty();
     }
     while (live != 0)
-        for (u32_t e = 0; e != engine_count; ++e) {
+        for (std::size_t e = 0; e != engine_count; ++e) {
             engine_cursor_t &cursor = cursors[e];
             if (cursor.pending.empty()) continue; // this engine drained its queue
             nvdec_engine_t &engine = state->engines[e];
@@ -1246,32 +1241,28 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
 
     array<sz::string_view_t> picked_paths;
     array<std::size_t> picked_shards;
-    if (picked_paths.resize(shard_count) != status_t::success_k ||
-        picked_shards.resize(shard_count) != status_t::success_k)
-        return expected_t::fail(status_t::bad_alloc_k, "file pick allocation failed");
-    std::size_t picked_count = 0, pooled_estimate = 0, attempt = 0;
-    while ((pooled_estimate < total_clips || picked_count < floor_files) && picked_count < shard_count) {
+    std::size_t pooled_estimate = 0, attempt = 0;
+    while ((pooled_estimate < total_clips || picked_shards.size() < floor_files) &&
+           picked_shards.size() < shard_count) {
         std::size_t const position = hash(seed_, training_step, gpu_rank, file_draw_salt_k, attempt) % total_rows;
         ++attempt;
         std::size_t const file = static_cast<std::size_t>(
             std::upper_bound(row_prefix_.begin(), row_prefix_.end(), position) - row_prefix_.begin() - 1);
-        std::span<std::size_t const> const chosen {picked_shards.data(), picked_count};
-        if (std::find(chosen.begin(), chosen.end(), file) != chosen.end()) continue;
-        picked_shards[picked_count] = file;
-        picked_paths[picked_count] = absolute_paths_[file].view();
+        if (std::find(picked_shards.begin(), picked_shards.end(), file) != picked_shards.end()) continue;
+        if (picked_shards.push_back(file) != status_t::success_k ||
+            picked_paths.push_back(absolute_paths_[file].view()) != status_t::success_k)
+            return expected_t::fail(status_t::bad_alloc_k, "file pick allocation failed");
         pooled_estimate += row_prefix_[file + 1] - row_prefix_[file];
-        ++picked_count;
     }
 
-    auto reservoir_read = parquet_file_t::make(*storage_, picked_paths.view().subspan(0, picked_count),
-                                               {&config.clip_column, 1}, gpu_stream);
+    auto reservoir_read = parquet_file_t::make(*storage_, picked_paths.view(), {&config.clip_column, 1}, gpu_stream);
     if (!reservoir_read) return expected_t::fail(std::move(reservoir_read));
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();
     if (pooled_rows < total_clips)
         return expected_t::fail(status_t::shape_unsupported_k,
                                 "{} pooled rows across {} files cover fewer than the {} clips this fill needs",
-                                pooled_rows, picked_count, total_clips);
+                                pooled_rows, picked_shards.size(), total_clips);
 
     switch_to_gpu_t gpu_scope {gpu_stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");

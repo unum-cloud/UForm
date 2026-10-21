@@ -325,10 +325,11 @@ static __global__ void contrastive_sigmoid_bce_kernel_(f32r4_span_t logits, f32r
     f32_t const live = std::fmax(live_anchors[0], 1.0f);
     f32_t const positive_weight = block_reduce_broadcast<kernel_block_size_default_k>(thread_positive);
     f32_t const negative_weight = block_reduce_broadcast<kernel_block_size_default_k>(thread_negative);
-    f32_t const positive_scale = 1.0f / (std::fmax(positive_weight, weight_sum_floor_k) * live);
-    f32_t const negative_scale = form == contrastive_pair_loss_form_t::sigmoid_k
-                                     ? positive_scale
-                                     : 1.0f / (std::fmax(negative_weight, weight_sum_floor_k) * live);
+    // A sigmoid row weighs cells like SigLIP's one positive, so a row of repels alone stays finite.
+    bool const sigmoid = form == contrastive_pair_loss_form_t::sigmoid_k;
+    f32_t const positive_scale = 1.0f / (std::fmax(positive_weight, sigmoid ? 1.0f : weight_sum_floor_k) * live);
+    f32_t const negative_scale = sigmoid ? positive_scale
+                                         : 1.0f / (std::fmax(negative_weight, weight_sum_floor_k) * live);
     f32_t const bias = contrastive_from_vertex_bias_(recipe, row);
     f32_t thread_loss = 0.0f, thread_bias_grad = 0.0f, thread_log_inverse_temperature_grad = 0.0f;
     for (std::size_t prefix = 0; prefix != prefixes; ++prefix)

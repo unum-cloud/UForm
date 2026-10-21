@@ -126,7 +126,7 @@ struct footprint_t {
 [[nodiscard]] static expected_t prepare_(trainer_t &placed, mesh_t &mesh, trainer_config_t const &config,
                                          std::span<i32_t const> devices, std::span<std::size_t> free_bytes) noexcept {
     mesh_topology_t const &topology = mesh.topology;
-    u32_t const gpus = static_cast<u32_t>(devices.size());
+    std::size_t const gpus = devices.size();
     if (gpus == 0 || gpus != topology.shape.gpus_per_host_domain)
         return expected_t::fail(status_t::invalid_input_k, "the trainer drives the mesh's {} devices, not {}",
                                 topology.shape.gpus_per_host_domain, gpus);
@@ -134,7 +134,7 @@ struct footprint_t {
     placed.mesh = &mesh;
     if (placed.devices.assign(devices) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "device table allocation failed");
-    for (u32_t member = 0; member != gpus; ++member) {
+    for (std::size_t member = 0; member != gpus; ++member) {
         expected<gpu_stream_t> stream = gpu_stream_t::make(devices[member]);
         if (!stream) return expected_t::fail(std::move(stream));
         if (placed.streams.push_back(std::move(stream.value_)) != status_t::success_k)
@@ -171,14 +171,15 @@ struct footprint_t {
     // A data source fills every GPU's batches for the next steps and mixes them from the arenas
     // after the trainer, so the probe allocates the same, and the fit carries them per row; a
     // held-out source allocates its own.
-    u32_t const sources = config.eval_every && !config.eval_mixture.empty() ? 2u : 1u;
+    std::size_t const sources = config.eval_every && !config.eval_mixture.empty() ? 2 : 1;
     array<multimodal_batch_on_gpu_t> filled;
     array<multimodal_batch_mixer_t> mixers;
-    for (u32_t source_index = 0; source_index != sources; ++source_index) {
+    for (std::size_t source_index = 0; source_index != sources; ++source_index) {
         for (std::size_t member = 0; member != devices.size(); ++member) {
             switch_to_gpu_t gpu_scope {probe.streams[member]};
             if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-            for (u32_t batch_index = 0; batch_index != config.batches_per_fill; ++batch_index) {
+            std::size_t const batches = source_index == 0 ? config.batches_per_fill : 1; // held-out refills per eval
+            for (std::size_t batch_index = 0; batch_index != batches; ++batch_index) {
                 expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(
                     gpu_arena_alloc_t {probe.arenas[member]}, config.batch);
                 if (!batch) return expected_t::fail(std::move(batch));
@@ -232,9 +233,11 @@ struct footprint_t {
         return result_t {agreed};
     }
     u32_t agreed = rows;
-    for (u32_t peer = 1; peer != topology.host_domain_count(); ++peer) {
+    for (std::size_t peer = 1; peer != topology.host_domain_count(); ++peer) {
         u32_t peer_rows = 0;
-        if (expected_t awaited = topology.await_text(peer, measured_key.view(), text, mesh.timeout_seconds); !awaited)
+        if (expected_t awaited = topology.await_text(static_cast<u32_t>(peer), measured_key.view(), text,
+                                                     mesh.timeout_seconds);
+            !awaited)
             return result_t::fail(std::move(awaited));
         if (!parsed(peer_rows))
             return result_t::fail(status_t::invalid_input_k, "host domain {} measured {} rows", peer, text.view());
@@ -342,8 +345,8 @@ struct footprint_t {
     trainer_config_t const &config = placed.config;
     mesh_topology_t const &topology = mesh.topology;
     std::span<i32_t const> const devices = placed.devices.view();
-    u32_t const gpus = static_cast<u32_t>(devices.size());
-    for (u32_t member = 0; member != gpus; ++member) {
+    std::size_t const gpus = devices.size();
+    for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {placed.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
         expected<gpu_arena_t> arena = gpu_arena_t::make(devices[member], reserve_bytes, devices);
@@ -388,7 +391,7 @@ struct footprint_t {
                                        placed.probes.late_interaction);
         !probed)
         return probed;
-    for (u32_t member = 0; member != gpus; ++member) {
+    for (std::size_t member = 0; member != gpus; ++member) {
         sz::string_t name;
         if (!format_into(name, "base/round/{}", member))
             return expected_t::fail(status_t::bad_alloc_k, "round probe name formatting failed");
@@ -401,7 +404,7 @@ struct footprint_t {
 
     std::size_t const segments = config.batch.max_segments_per_gpu;
     std::size_t const vertices_per_mesh = segments * topology.shape.gpus_per_colocated_domain;
-    for (u32_t member = 0; member != gpus; ++member) {
+    for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {placed.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
         expected<base_replica_t> replica = base_replica_t::make(placed.arenas[member], config, vertices_per_mesh);
@@ -412,7 +415,7 @@ struct footprint_t {
     if (expected_t seeded = placed.reseed(); !seeded) return seeded;
 
     array<differentiable_weights_t> registrations; // a transient the optimizer copies into its per-replica state
-    for (u32_t member = 0; member != gpus; ++member)
+    for (std::size_t member = 0; member != gpus; ++member)
         for (differentiable_weights_t const &entry : placed.replicas[member].weights.view()) {
             expected<differentiable_weights_t> copied = entry.copy();
             if (!copied || registrations.push_back(std::move(copied.value_)) != status_t::success_k)
@@ -481,7 +484,7 @@ struct footprint_t {
         per_gpu_array<bf16r2_view_t> towers;
         per_gpu_array<contrastive_relations_view_t> relations;
         per_gpu_array<bf16r2_span_t> forces;
-        for (u32_t member = 0; member != gpus; ++member) {
+        for (std::size_t member = 0; member != gpus; ++member) {
             base_replica_t &replica = placed.replicas[member];
             if (towers.push_back(replica.vertices.view()) != status_t::success_k ||
                 relations.push_back(replica.relations.view()) != status_t::success_k ||
@@ -498,7 +501,7 @@ struct footprint_t {
             forces.view(), contrastive_config, prefixes, mesh.timeout_seconds);
         if (!contrastive) return expected_t::fail(std::move(contrastive));
         placed.contrastive = std::move(contrastive.value_);
-        for (u32_t member = 0; member != gpus; ++member) {
+        for (std::size_t member = 0; member != gpus; ++member) {
             switch_to_gpu_t gpu_scope {placed.streams[member]};
             if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
             expected<adafactor_temperatures_t> temperatures = adafactor_temperatures_t::make(
@@ -514,7 +517,7 @@ struct footprint_t {
             placed.domain, mesh.colocated, placed.arenas, placed.streams, tokens_config, mesh.timeout_seconds);
         if (!tokens) return expected_t::fail(std::move(tokens));
         placed.late_interaction = std::move(tokens.value_);
-        for (u32_t member = 0; member != gpus; ++member) {
+        for (std::size_t member = 0; member != gpus; ++member) {
             switch_to_gpu_t gpu_scope {placed.streams[member]};
             if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
             expected<adafactor_temperatures_t> temperatures = adafactor_temperatures_t::make(
@@ -735,7 +738,7 @@ expected<retrieval_t> trainer_t::evaluate(batch_source_t &source, data_epoch_t d
 }
 
 expected_t trainer_t::reseed() noexcept {
-    u32_t const groups = std::max(config.contrastive.temperature_groups, 1u);
+    std::size_t const groups = std::max<std::size_t>(config.contrastive.temperature_groups, 1);
     array<f32_t> inverse_temperatures, biases, token_inverse_temperatures, token_biases;
     if (config.contrasts()) {
         if (inverse_temperatures.resize(groups) != status_t::success_k ||
@@ -743,7 +746,7 @@ expected_t trainer_t::reseed() noexcept {
             token_inverse_temperatures.resize(groups) != status_t::success_k ||
             token_biases.resize(groups) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "temperature staging failed");
-        for (u32_t group = 0; group != groups; ++group)
+        for (std::size_t group = 0; group != groups; ++group)
             inverse_temperatures[group] = config.contrastive.inverse_temperature,
             biases[group] = config.contrastive.bias,
             token_inverse_temperatures[group] = config.late_interaction.inverse_temperature,
@@ -1111,7 +1114,8 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
             if (modality == modality_t::text_k) {
                 tokens_span_t const cell_tokens = staged.tokens.flatten<1>();
                 tokens_span_t const tokens = cell_tokens[run, nk::slice];
-                for (u32_t token = 0; token != kept; ++token) tokens[token] = static_cast<token_id_t>(bytes[token]);
+                for (std::size_t token = 0; token != kept; ++token)
+                    tokens[token] = static_cast<token_id_t>(bytes[token]);
             }
             else if (modality == modality_t::image_k) {
                 expected<um::image_plan_t> planned = um::plan_image(bytes, shape.image.patch_side, columns, 1u);
@@ -1151,7 +1155,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
     for (std::size_t device = 0; device != gpus; ++device) {
         multimodal_batch_on_cpu_t &staged = staged_[device];
         multimodal_batch_on_gpu_t &loaded = loaded_[device];
-        for (u32_t segment = used_segments[device]; segment != segments; ++segment) {
+        for (std::size_t segment = used_segments[device]; segment != segments; ++segment) {
             staged.segment_offsets[segment] = cursors[device];
             staged.segment_lengths[segment] = 0u;
             staged.segment_modality[segment] = modality_t::text_k;
@@ -1241,7 +1245,7 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
             f32r1_span_t const weights = edges_.weights(set);
             u32_t written = 0;
             offsets[0] = 0;
-            for (u32_t row = 0; row != segments; ++row) {
+            for (std::size_t row = 0; row != segments; ++row) {
                 u32_t const item = sources_[member, row];
                 u32_t const row_begin = written;
                 if (item != absent_k && edges_of.offsets)
@@ -1265,7 +1269,7 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
                 offsets[row + 1] = written;
             }
         }
-        for (u32_t row = 0; row != segments; ++row) {
+        for (std::size_t row = 0; row != segments; ++row) {
             u32_t const item = sources_[member, row];
             u32_t const group = item != absent_k && items.temperature_groups ? items.temperature_groups[item] : 0u;
             if (group >= groups)

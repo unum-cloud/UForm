@@ -246,14 +246,14 @@ struct row_partition_t {
 
     row_partition_t partition;
     u32_t position = 0;
-    for (u32_t modality = 0; modality != 4u; ++modality) {
+    for (std::size_t modality = 0; modality != 4; ++modality) {
         if (!live[modality]) continue;
         u32_t const bonus = ((position + live_count - rotation) % live_count) < extra ? 1u : 0u;
         partition.rows[modality] = floor_rows + bonus;
         ++position;
     }
     u32_t cursor = 0;
-    for (u32_t modality = 0; modality != 4u; ++modality) {
+    for (std::size_t modality = 0; modality != 4; ++modality) {
         partition.begins[modality] = cursor;
         cursor += partition.rows[modality];
     }
@@ -355,10 +355,10 @@ expected_t ut::save_weights(checkpoint_to_save_t &checkpoint, trainer_config_t c
         text.clear();
         return format_into(text, "{}", value) && static_cast<bool>(checkpoint.metadata(key, text.view()));
     };
-    auto record_list = [&](sz::string_view_t key, f32_t const *values, u32_t count) noexcept {
+    auto record_list = [&](sz::string_view_t key, f32_t const *values, std::size_t count) noexcept {
         text.clear();
         bool formatted = true;
-        for (u32_t index = 0; index != count; ++index)
+        for (std::size_t index = 0; index != count; ++index)
             formatted = formatted && (index == 0 || format_into(text, ",")) && format_into(text, "{}", values[index]);
         return formatted && static_cast<bool>(checkpoint.metadata(key, text.view()));
     };

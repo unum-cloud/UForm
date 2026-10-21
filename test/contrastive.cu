@@ -157,7 +157,7 @@ static f64_t host_loss(f64r2_view_t vertices, f64r2_view_t neighbors, std::span<
             if (target > 0) pos_weight += weight;
             else if (target < 0) neg_weight += weight;
         }
-        f64_t const pos_scale = 1.0 / std::max(pos_weight, f64_t(1.0e-12));
+        f64_t const pos_scale = 1.0 / std::max(pos_weight, sum_negatives ? f64_t(1.0) : f64_t(1.0e-12));
         f64_t const neg_scale = sum_negatives ? pos_scale : 1.0 / std::max(neg_weight, f64_t(1.0e-12));
         f64_t vertex_loss = 0.0;
         for (std::size_t prefix_index = 0; prefix_index != prefixes.size(); ++prefix_index) {
@@ -365,6 +365,8 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
     f64_t const relative = std::fabs(f64_t(device_loss) - oracle) / std::max(std::fabs(oracle), 1.0e-9);
     suite.check(relative < 5.0e-3, "loss {:.6f} matches the Float64 oracle {:.6f}: relative {:.2e}", device_loss,
                 oracle, relative);
+    // Each cell's softplus stays under 2 at unit β and zero bias, so repel-only rows stay bounded.
+    suite.check(device_loss < 2.0f * 1.5f * f32_t(num_vertices), "loss {:.6f} stays bounded by its cells", device_loss);
 
     // Finite-difference force check on a few sampled channels: the analytic BF16 gradient must sit
     // within BF16 resolution of (L(x+h) - L(x-h)) / 2h.

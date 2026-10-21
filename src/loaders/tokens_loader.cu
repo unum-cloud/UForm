@@ -338,31 +338,26 @@ expected_t tokens_loader_jsonl_t::fill(gpu_stream_t &gpu_stream, tokens_base_loa
     // rows cover the fill — never fewer than two, unless the whole dataset is one file.
     array<jsonl_file_t> parts;
     array<std::size_t> picked_shards;
-    if (picked_shards.resize(shard_count) != status_t::success_k)
-        return expected_t::fail(status_t::bad_alloc_k, "file pick allocation failed");
-    std::size_t picked_count = 0;
     std::size_t pooled_rows = 0;
     std::size_t attempt = 0;
-    while ((pooled_rows < total_segments || picked_count < floor_files) && picked_count < shard_count) {
+    while ((pooled_rows < total_segments || parts.size() < floor_files) && parts.size() < shard_count) {
         std::size_t const position = hash(seed_, training_step, gpu_rank, file_draw_salt_k, attempt) % total_bytes;
         ++attempt;
         std::size_t const file = static_cast<std::size_t>(
             std::upper_bound(byte_prefix_.begin(), byte_prefix_.end(), position) - byte_prefix_.begin() - 1);
-        std::span<std::size_t const> const chosen {picked_shards.data(), picked_count};
-        if (std::find(chosen.begin(), chosen.end(), file) != chosen.end()) continue;
+        if (std::find(picked_shards.begin(), picked_shards.end(), file) != picked_shards.end()) continue;
         // Decode this file to learn its rows (no footer), and keep it alive for the concat.
         auto shard = jsonl_file_t::make(*storage_, absolute_paths_[file], config.field, gpu_stream);
         if (!shard) return expected_t::fail(std::move(shard));
         pooled_rows += shard->rows();
-        picked_shards[picked_count] = file;
-        if (parts.push_back(std::move(shard.value_)) != status_t::success_k)
+        if (picked_shards.push_back(file) != status_t::success_k ||
+            parts.push_back(std::move(shard.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "reservoir parts allocation failed");
-        ++picked_count;
     }
     if (pooled_rows < total_segments)
         return expected_t::fail(status_t::shape_unsupported_k,
                                 "{} pooled rows across {} JSONL files cover fewer than the {} segments this fill needs",
-                                pooled_rows, picked_count, total_segments);
+                                pooled_rows, parts.size(), total_segments);
 
     // Merge the decoded shards into one reservoir field, then the shared pack.
     auto reservoir_read = jsonl_file_t::concat(parts.view(), gpu_stream);
@@ -419,32 +414,27 @@ expected_t tokens_loader_csv_t::fill(gpu_stream_t &gpu_stream, tokens_base_loade
     // cover the fill — never fewer than two, unless the whole dataset is one file.
     array<csv_file_t> parts;
     array<std::size_t> picked_shards;
-    if (picked_shards.resize(shard_count) != status_t::success_k)
-        return expected_t::fail(status_t::bad_alloc_k, "file pick allocation failed");
-    std::size_t picked_count = 0;
     std::size_t pooled_rows = 0;
     std::size_t attempt = 0;
-    while ((pooled_rows < total_segments || picked_count < floor_files) && picked_count < shard_count) {
+    while ((pooled_rows < total_segments || parts.size() < floor_files) && parts.size() < shard_count) {
         std::size_t const position = hash(seed_, training_step, gpu_rank, file_draw_salt_k, attempt) % total_bytes;
         ++attempt;
         std::size_t const file = static_cast<std::size_t>(
             std::upper_bound(byte_prefix_.begin(), byte_prefix_.end(), position) - byte_prefix_.begin() - 1);
-        std::span<std::size_t const> const chosen {picked_shards.data(), picked_count};
-        if (std::find(chosen.begin(), chosen.end(), file) != chosen.end()) continue;
+        if (std::find(picked_shards.begin(), picked_shards.end(), file) != picked_shards.end()) continue;
         // Decode this file to learn its rows (no footer), and keep it alive for the concat.
         auto shard = csv_file_t::make(*storage_, absolute_paths_[file], config.column, config.delimiter, config.header,
                                       gpu_stream);
         if (!shard) return expected_t::fail(std::move(shard));
         pooled_rows += shard->rows();
-        picked_shards[picked_count] = file;
-        if (parts.push_back(std::move(shard.value_)) != status_t::success_k)
+        if (picked_shards.push_back(file) != status_t::success_k ||
+            parts.push_back(std::move(shard.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "reservoir parts allocation failed");
-        ++picked_count;
     }
     if (pooled_rows < total_segments)
         return expected_t::fail(status_t::shape_unsupported_k,
                                 "{} pooled rows across {} CSV files cover fewer than the {} segments this fill needs",
-                                pooled_rows, picked_count, total_segments);
+                                pooled_rows, parts.size(), total_segments);
 
     // Merge the decoded shards into one reservoir column, then the shared pack.
     auto reservoir_read = csv_file_t::concat(parts.view(), gpu_stream);

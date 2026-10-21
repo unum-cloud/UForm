@@ -156,7 +156,8 @@ multimodal_batch_shape_t mixture_t::shape(multimodal_batch_shape_t shape) const 
 }
 
 expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &config,
-                                  gpu_direct_storage_session_t &session, mixture_t mixture) noexcept {
+                                  gpu_direct_storage_session_t &session, mixture_t mixture,
+                                  std::size_t batches_per_fill) noexcept {
     multimodal_batch_shape_t const &shape = config.batch;
     placed.mixture_ = std::move(mixture);
     std::span<mixture_entry_t const> const entries = placed.mixture_.datasets.view();
@@ -204,11 +205,11 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
         std::visit([&](auto const &typed) noexcept { reservoir.charge(typed.reservoir()); }, loader);
     // One fill pools the rows of every batch it packs, so the per-row term scales with them.
     config.reservoir_fixed_bytes = reservoir.fixed_bytes;
-    config.reservoir_row_bytes = reservoir.row_bytes * config.batches_per_fill;
+    config.reservoir_row_bytes = reservoir.row_bytes * batches_per_fill;
     return {};
 }
 
-expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer) noexcept {
+expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer, std::size_t batches_per_fill) noexcept {
     trainer_config_t const &config = trainer.config;
     multimodal_batch_shape_t shape = config.batch;
     std::size_t const gpus = trainer.replicas.size(), segments = shape.max_segments_per_gpu;
@@ -223,7 +224,7 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer) 
         switch_to_gpu_t gpu_scope {trainer.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
         array<multimodal_batch_on_gpu_t> filled;
-        for (u32_t batch_index = 0; batch_index != config.batches_per_fill; ++batch_index) {
+        for (std::size_t batch_index = 0; batch_index != batches_per_fill; ++batch_index) {
             expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(
                 gpu_arena_alloc_t {trainer.arenas[member]}, shape);
             if (!batch) return expected_t::fail(std::move(batch));
@@ -255,7 +256,7 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer) 
     std::size_t const world_gpus = trainer.mesh->topology.shape.gpus_per_colocated_domain;
     for (std::size_t member = 0; member != gpus; ++member) {
         std::size_t const world_gpu = trainer.mesh->topology.first_gpu_index() + member;
-        if (placed.phases_.push_back(world_gpu * config.batches_per_fill / world_gpus) != status_t::success_k)
+        if (placed.phases_.push_back(world_gpu * batches_per_fill / world_gpus) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "fill phase table full");
     }
 
@@ -279,7 +280,7 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer) 
 
 expected_t dataset_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &) noexcept {
     std::size_t const gpus = trainer.replicas.size();
-    std::size_t const batches_per_fill = trainer.config.batches_per_fill;
+    std::size_t const batches_per_fill = filled_[0].size();
     // Each GPU takes its batches in its own phase of the period and refills where that wraps, so a
     // step pays for a share of the reads and the world's datasets rotate a few at a time.
     auto const batch_of = [&](std::size_t member) noexcept {
