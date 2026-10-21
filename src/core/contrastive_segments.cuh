@@ -153,8 +153,8 @@ enum class pair_loss_row_t : u32_t {
 /** The per-row sums of a retrieval evaluation, in the columns of its table. Ranked rows hold a
  *  positive and a negative; a hit ranks its best positive first, or within the top five; chance is
  *  the share of positives among the scored cells; the cosine and hard-negative columns count the
- *  scored cells; the last three sum the cosine and the squared cosine to every live vertex, and
- *  count those vertices, for the effective rank. */
+ *  scored cells; the last two hold the row's squared norm and its squared products with every live
+ *  vertex once the world's mean unit vector is subtracted, for the effective rank. */
 enum class retrieval_column_t : u32_t {
     ranked_k = 0,
     hit_at_1_k,
@@ -166,9 +166,8 @@ enum class retrieval_column_t : u32_t {
     ambients_k,
     hard_above_k,
     hards_k,
-    cosine_k,
-    squared_cosine_k,
-    live_vertices_k,
+    centred_norm_k,
+    centred_products_k,
     count_k,
 };
 
@@ -390,6 +389,11 @@ struct contrastive_segments_t {
 
     /** @b [rows,retrieval_columns] per-row retrieval sums of the last @ref evaluate . */
     f32r2_tensor_arena_t retrieval_ {};
+
+    /** @b [hidden] sum of the world's live unit vertices, which @ref evaluate centres on, and the
+     *  @b [rows] / @b [subgraphs,neighbors] products of every unit vertex with that sum. */
+    f32r1_tensor_arena_t world_centre_ {}, from_vertex_alignment_ {};
+    f32r2_tensor_arena_t to_vertex_alignment_ {};
 
     /** @b [prefixes,rows] per-row L2 norms of the from-vertex tower, and
      *  @b [subgraphs,prefixes,neighbors] those of every subgraph's to-vertex tower. */

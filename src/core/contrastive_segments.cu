@@ -551,16 +551,54 @@ static __global__ void contrastive_pair_loss_finalize_kernel_(f32r2_view_t accum
 }
 
 /**
+ *  @brief Add one subgraph's live unit vertices into the world's centre sum over its width,
+ *      @c centre[k]+=Σ_j v[j,k]/‖v_j‖ , each thread walking the rows of its channel in order.
+ *
+ *  __grid_size__ @c [ceil(width/block),1,1] ; no dynamic shared memory.
+ */
+static __global__ void contrastive_centre_add_kernel_(bf16r2_view_t vertices, f32r1_view_t norms, u32r1_view_t lengths,
+                                                      f32r1_span_t centre) {
+    std::size_t const channel = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (channel >= centre.extent(0)) return;
+    f32_t sum = centre[channel];
+    for (std::size_t row = 0; row != vertices.extent(0); ++row)
+        if ((lengths.empty() || lengths[row] != 0u) && norms[row] != 0.0f)
+            sum += __bfloat162float(vertices[row, channel]) / norms[row];
+    centre[channel] = sum;
+}
+
+/**
+ *  @brief Every row's unit vertex against the world's centre sum,
+ *      @c alignment[j]=(v_j/‖v_j‖)·centre , over the centre's width.
+ *
+ *  __grid_size__ @c [rows,1,1] ; one CTA per row; no dynamic shared memory.
+ */
+static __global__ void contrastive_centre_alignment_kernel_(bf16r2_view_t vertices, f32r1_view_t norms,
+                                                            f32r1_view_t centre, f32r1_span_t alignment) {
+    std::size_t const row = blockIdx.x;
+    if (row >= vertices.extent(0)) return;
+    f32_t thread_partial = 0.0f;
+    for (std::size_t channel = threadIdx.x; channel < centre.extent(0); channel += blockDim.x)
+        thread_partial += __bfloat162float(vertices[row, channel]) * centre[channel];
+    f32_t const total = block_reduce_broadcast<kernel_block_size_default_k>(thread_partial);
+    if (threadIdx.x == 0u) alignment[row] = norms[row] != 0.0f ? total / norms[row] : 0.0f;
+}
+
+/**
  *  @brief One row's retrieval over the full-width scaled cosines: the rank of its best positive
  *      among the scored cells, the mean cosines of its attract and ambient cells, its hard
- *      negatives above that positive, and the squared cosines to every live vertex.
+ *      negatives above that positive, and its products with every live vertex once each unit
+ *      vertex has the world's mean unit vector @c m subtracted, @c cos−a_i−a_j+‖m‖² with
+ *      @c a_j=û_j·m , formed per cell so no sum of near-unit cosines cancels.
  *
  *  __grid_size__ @c [rows,1,1] ; one CTA per row, the threads stripe the candidates; no dynamic
  *  shared memory.
  */
 static __global__ void contrastive_retrieval_kernel_(f32r4_view_t logits, f32r2_span_t table,
                                                      contrastive_relations_view_t relations,
-                                                     contrastive_recipe_t recipe) {
+                                                     contrastive_recipe_t recipe, f32r1_view_t centre,
+                                                     f32r1_view_t from_vertex_alignment,
+                                                     f32r2_view_t to_vertex_alignment, f32r1_view_t live_vertices) {
     std::size_t const prefix = logits.extent(0) - 1u, rows = logits.extent(2), per_subgraph = logits.extent(3);
     std::size_t const candidates = logits.extent(1) * per_subgraph;
     u32_t const row = blockIdx.x;
@@ -574,12 +612,21 @@ static __global__ void contrastive_retrieval_kernel_(f32r4_view_t logits, f32r2_
     auto const score = [&](std::size_t candidate) noexcept -> f32_t {
         return logits[prefix, candidate / per_subgraph, row, candidate % per_subgraph];
     };
+    f32_t const world = live_vertices[0];
+    f32_t thread_centre = 0.0f;
+    for (std::size_t channel = threadIdx.x; channel < centre.extent(0); channel += blockDim.x)
+        thread_centre += centre[channel] * centre[channel];
+    f32_t const centre_norm = block_reduce_broadcast<kernel_block_size_default_k>(thread_centre) / (world * world);
+    f32_t const row_alignment = from_vertex_alignment[row] / world;
     f32_t best_positive = -std::numeric_limits<f32_t>::infinity();
-    f32_t positives = 0.0f, attract_cosine = 0.0f, cosines = 0.0f, squared_cosine = 0.0f, live_vertices = 0.0f;
+    f32_t positives = 0.0f, attract_cosine = 0.0f, centred_products = 0.0f;
     for (std::size_t candidate = threadIdx.x; live && candidate < candidates; candidate += blockDim.x) {
         if (!lengths.empty() && lengths[candidate] == 0u) continue;
         f32_t const cosine = score(candidate) / beta;
-        cosines += cosine, squared_cosine += cosine * cosine, live_vertices += 1.0f;
+        f32_t const candidate_alignment = to_vertex_alignment[candidate / per_subgraph, candidate % per_subgraph] /
+                                          world;
+        f32_t const centred = cosine - row_alignment - candidate_alignment + centre_norm;
+        centred_products += centred * centred;
         contrastive_pair_relation_t const relation = contrastive_pair_relation(relations, row, u32_t(candidate));
         if (relation.target <= 0.0f || relation.weight == 0.0f) continue;
         best_positive = std::fmax(best_positive, score(candidate));
@@ -598,8 +645,8 @@ static __global__ void contrastive_retrieval_kernel_(f32r4_view_t logits, f32r2_
         if (hard) hards += 1.0f, hard_above += outranks ? 1.0f : 0.0f;
         else ambients += 1.0f, ambient_cosine += scored / beta;
     }
-    f32_t const sums[] = {positives,  negatives, above,          attract_cosine, ambient_cosine, ambients,
-                          hard_above, hards,     squared_cosine, live_vertices,  cosines};
+    f32_t const sums[] = {positives, negatives,  above, attract_cosine,  ambient_cosine,
+                          ambients,  hard_above, hards, centred_products};
     f32_t totals[std::size(sums)];
     for (std::size_t index = 0; index != std::size(sums); ++index)
         totals[index] = block_reduce_broadcast<kernel_block_size_default_k>(sums[index]);
@@ -616,9 +663,8 @@ static __global__ void contrastive_retrieval_kernel_(f32r4_view_t logits, f32r2_
     column(retrieval_column_t::ambients_k) = totals[5];
     column(retrieval_column_t::hard_above_k) = totals[6];
     column(retrieval_column_t::hards_k) = totals[7];
-    column(retrieval_column_t::squared_cosine_k) = totals[8];
-    column(retrieval_column_t::live_vertices_k) = totals[9];
-    column(retrieval_column_t::cosine_k) = totals[10];
+    column(retrieval_column_t::centred_norm_k) = live ? 1.0f - 2.0f * row_alignment + centre_norm : 0.0f;
+    column(retrieval_column_t::centred_products_k) = totals[8];
 }
 
 expected<contrastive_pair_loss_t> contrastive_pair_loss_t::make(gpu_arena_t &arena, u32_t rows,
@@ -751,7 +797,10 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
                                                       stash_cells, arena.used());
     loss.retrieval_ =
         f32r2_tensor_arena_t::uninitialized({rows, std::size_t(retrieval_column_t::count_k)}, f32_alloc).value;
-    if (!loss.retrieval_)
+    loss.world_centre_ = f32r1_tensor_arena_t::uninitialized({hidden}, f32_alloc).value;
+    loss.from_vertex_alignment_ = f32r1_tensor_arena_t::uninitialized({rows}, f32_alloc).value;
+    loss.to_vertex_alignment_ = f32r2_tensor_arena_t::uninitialized({subgraphs, to_vertices_per_gpu}, f32_alloc).value;
+    if (!loss.retrieval_ || !loss.world_centre_ || !loss.from_vertex_alignment_ || !loss.to_vertex_alignment_)
         return expected<contrastive_segments_t>::fail(status_t::bad_alloc_k, "retrieval table allocation failed");
     expected<contrastive_pair_loss_t> pair_loss = contrastive_pair_loss_t::make(
         arena, config.from_vertices_per_gpu, static_cast<u32_t>(subgraphs * to_vertices_per_gpu), config.pair_loss);
@@ -879,9 +928,39 @@ expected_t contrastive_segments_t::evaluate(bf16r2_view_t vertices, nk::tensor_v
                                             contrastive_relations_view_t relations, contrastive_recipe_t recipe,
                                             gpu_stream_t &stream) noexcept {
     if (expected_t scored = score_(vertices, gpu_subgraphs, relations, recipe, stream); !scored) return scored;
-    return launch_kernel(&contrastive_retrieval_kernel_, dim3 {config_.from_vertices_per_gpu, 1u, 1u},
-                         dim3 {kernel_block_size_default_k, 1u, 1u}, stream, logits_.view(), retrieval_.span(),
-                         relations, recipe);
+    // The world's centre over the full-width prefix, summed subgraph by subgraph in order, and
+    // every unit vertex's alignment with it.
+    u32_t const prefix = prefixes_.size() - 1u;
+    f32r1_span_t const centre = world_centre_[nk::range(0, prefixes_[prefix]), nk::slice];
+    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
+    expected_t launched = zero_async(centre, stream);
+    for (std::size_t subgraph_index = 0; launched && subgraph_index != gpu_subgraphs.extent(0); ++subgraph_index) {
+        gpu_subgraph_t const subgraph = gpu_subgraphs[subgraph_index];
+        std::size_t const neighbors = subgraph.to_vertices.extent(0);
+        u32r1_view_t const lengths =
+            relations.to_vertex_effective_length.empty()
+                ? u32r1_view_t {}
+                : relations
+                      .to_vertex_effective_length[nk::range(subgraph.global_offset, subgraph.global_offset + neighbors),
+                                                  nk::slice];
+        launched = launch_kernel(&contrastive_centre_add_kernel_, dim3 {grid_size_for(centre.extent(0)), 1u, 1u},
+                                 block_shape, stream, subgraph.to_vertices,
+                                 f32r1_view_t {to_vertex_norms_[subgraph_index, prefix, nk::slice]}, lengths, centre);
+    }
+    for (std::size_t subgraph_index = 0; launched && subgraph_index != gpu_subgraphs.extent(0); ++subgraph_index)
+        launched = launch_kernel(&contrastive_centre_alignment_kernel_,
+                                 dim3 {static_cast<u32_t>(gpu_subgraphs[subgraph_index].to_vertices.extent(0)), 1u, 1u},
+                                 block_shape, stream, gpu_subgraphs[subgraph_index].to_vertices,
+                                 f32r1_view_t {to_vertex_norms_[subgraph_index, prefix, nk::slice]},
+                                 f32r1_view_t {centre}, to_vertex_alignment_[subgraph_index, nk::slice]);
+    if (launched)
+        launched = launch_kernel(&contrastive_centre_alignment_kernel_, dim3 {config_.from_vertices_per_gpu, 1u, 1u},
+                                 block_shape, stream, vertices, f32r1_view_t {from_vertex_norms_[prefix, nk::slice]},
+                                 f32r1_view_t {centre}, from_vertex_alignment_.span());
+    if (!launched) return launched;
+    return launch_kernel(&contrastive_retrieval_kernel_, dim3 {config_.from_vertices_per_gpu, 1u, 1u}, block_shape,
+                         stream, logits_.view(), retrieval_.span(), relations, recipe, f32r1_view_t {centre},
+                         from_vertex_alignment_.view(), to_vertex_alignment_.view(), live_vertices_.view());
 }
 
 expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor_view<gpu_subgraph_t, 1> gpu_subgraphs,

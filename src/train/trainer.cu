@@ -710,14 +710,9 @@ expected<retrieval_t> trainer_t::evaluate(batch_source_t &source, data_epoch_t d
     }
     if (expected_t drained = synchronize(); !drained) return result_t::fail(std::move(drained));
     f64_t sums[std::size_t(retrieval_column_t::count_k)] = {};
-    f64_t live_rows = 0.0, squared_row_cosines = 0.0;
     for (std::size_t member = 0; member != gpus; ++member)
-        for (std::size_t row = 0; row != rows; ++row) {
+        for (std::size_t row = 0; row != rows; ++row)
             for (std::size_t column = 0; column != columns; ++column) sums[column] += tables[member, row, column];
-            f64_t const row_cosines = tables[member, row, std::size_t(retrieval_column_t::cosine_k)];
-            live_rows += tables[member, row, std::size_t(retrieval_column_t::live_vertices_k)] != 0.0f;
-            squared_row_cosines += row_cosines * row_cosines;
-        }
     auto const sum = [&](retrieval_column_t which) noexcept { return sums[std::size_t(which)]; };
     auto const ratio = [](f64_t numerator, f64_t denominator) noexcept {
         return denominator != 0.0 ? numerator / denominator : 0.0;
@@ -732,14 +727,10 @@ expected<retrieval_t> trainer_t::evaluate(batch_source_t &source, data_epoch_t d
                            ratio(sum(retrieval_column_t::ambient_cosine_k), sum(retrieval_column_t::ambients_k));
     retrieval.hards = sum(retrieval_column_t::hards_k);
     retrieval.hard_above = ratio(sum(retrieval_column_t::hard_above_k), retrieval.hards);
-    // The participation ratio of the double-centred cosine Gram matrix, whose N rows are the
-    // world's live vertices: trace N−S/N over the Frobenius norm Q−2R/N+S²/N², with S, R and Q the
-    // sums of every cosine, of each row's squared sum, and of every squared cosine.
-    f64_t const vertices = ratio(sum(retrieval_column_t::live_vertices_k), live_rows);
-    f64_t const total = sum(retrieval_column_t::cosine_k), squares = sum(retrieval_column_t::squared_cosine_k);
-    f64_t const trace = vertices - ratio(total, vertices);
-    retrieval.effective_rank = ratio(trace * trace, squares - 2.0 * ratio(squared_row_cosines, vertices) +
-                                                        ratio(total * total, vertices * vertices));
+    // The participation ratio of the centred unit vertices' Gram matrix: its squared trace over its
+    // squared Frobenius norm.
+    f64_t const trace = sum(retrieval_column_t::centred_norm_k);
+    retrieval.effective_rank = ratio(trace * trace, sum(retrieval_column_t::centred_products_k));
     return result_t {retrieval};
 }
 

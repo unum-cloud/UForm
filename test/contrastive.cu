@@ -388,20 +388,34 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
         }
     }
 
-    // The retrieval table against the Float64 rows: ranks, cosine sums and the Gram terms of every
-    // row.
-    if (graph == oracle_graph_t::roles_k) {
+    // The retrieval table against the Float64 rows, over the oracle's tower and then over one whose
+    // vertices all lie within a few degrees of one direction, where uncentred cosine sums cancel.
+    auto const check_retrieval = [&](std::vector<f64_t> const &values, char const *tower_name) noexcept {
         if (expected_t evaluated = loss.evaluate(bf16r2_view_t {tower, num_vertices, hidden}, {&subgraph, 1},
                                                  relations.view(), recipe, stream);
             !evaluated)
-            return suite.check(false, "evaluate: {}", evaluated.description_);
+            return suite.check(false, "evaluate over the {} tower: {}", tower_name, evaluated.description_);
         cuStreamSynchronize(stream.get());
         std::size_t const columns = std::size_t(retrieval_column_t::count_k);
         std::vector<f32_t> table(num_vertices * columns);
         cuMemcpyDtoH(table.data(), device_address(loss.retrieval().data()), table.size() * sizeof(f32_t));
         f32r2_view_t const table_rows {table.data(), num_vertices, columns};
-        f64r2_view_t const rows {host_tower.data(), num_vertices, hidden};
-        f64_t worst = 0.0;
+        f64r2_view_t const rows {values.data(), num_vertices, hidden};
+        std::vector<f64_t> units(num_vertices * hidden), centre(hidden);
+        f64r2_span_t const unit_rows {units.data(), num_vertices, hidden};
+        f64_t live = 0.0;
+        for (std::size_t row = 0; row != num_vertices; ++row) {
+            f64_t const norm = std::sqrt(dot(rows[row, nk::slice], rows[row, nk::slice]));
+            if (host_effective[row] == 0u || norm == 0.0) continue;
+            live += 1.0;
+            for (std::size_t channel = 0; channel != hidden; ++channel)
+                unit_rows[row, channel] = rows[row, channel] / norm, centre[channel] += unit_rows[row, channel];
+        }
+        for (f64_t &channel : centre) channel /= live;
+        for (std::size_t row = 0; row != num_vertices; ++row)
+            for (std::size_t channel = 0; channel != hidden && host_effective[row] != 0u; ++channel)
+                unit_rows[row, channel] -= centre[channel];
+        f64_t worst = 0.0, trace = 0.0, frobenius = 0.0, device_trace = 0.0, device_frobenius = 0.0;
         for (std::size_t row = 0; row != num_vertices; ++row) {
             f64_t expected[std::size_t(retrieval_column_t::count_k)] = {};
             auto const cell = [&](retrieval_column_t which) noexcept -> f64_t & {
@@ -409,14 +423,15 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
             };
             std::vector<f64_t> cosines(num_vertices);
             f64_t best = -1e300, positives = 0.0, negatives = 0.0, above = 0.0;
+            if (host_effective[row] != 0u)
+                cell(retrieval_column_t::centred_norm_k) = dot(unit_rows[row, nk::slice], unit_rows[row, nk::slice]);
             for (std::size_t other = 0; other != num_vertices && host_effective[row] != 0u; ++other) {
                 if (host_effective[other] == 0u) continue;
                 f64r1_view_t const ours = rows[row, nk::slice], theirs = rows[other, nk::slice];
                 f64_t const denominator = std::sqrt(dot(ours, ours) * dot(theirs, theirs));
                 cosines[other] = denominator > 1.0e-2 ? dot(ours, theirs) / denominator : 0.0;
-                cell(retrieval_column_t::cosine_k) += cosines[other];
-                cell(retrieval_column_t::squared_cosine_k) += cosines[other] * cosines[other];
-                cell(retrieval_column_t::live_vertices_k) += 1.0;
+                f64_t const centred = dot(unit_rows[row, nk::slice], unit_rows[other, nk::slice]);
+                cell(retrieval_column_t::centred_products_k) += centred * centred;
                 auto [target, weight] = host_relations.resolve(u32_t(row), u32_t(other));
                 if (target > 0 && weight != 0.0)
                     best = std::max(best, cosines[other]), positives += 1.0,
@@ -444,8 +459,29 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
             cell(retrieval_column_t::attracts_k) = positives;
             for (std::size_t column = 0; column != columns; ++column)
                 worst = std::max(worst, std::fabs(f64_t(table_rows[row, column]) - expected[column]));
+            trace += cell(retrieval_column_t::centred_norm_k);
+            frobenius += cell(retrieval_column_t::centred_products_k);
+            device_trace += table_rows[row, std::size_t(retrieval_column_t::centred_norm_k)];
+            device_frobenius += table_rows[row, std::size_t(retrieval_column_t::centred_products_k)];
         }
-        suite.check(worst < 1.0e-2, "the retrieval table matches the Float64 rows: worst difference {:.2e}", worst);
+        f64_t const rank = trace * trace / frobenius, device_rank = device_trace * device_trace / device_frobenius;
+        suite.check(worst < 1.0e-2, "the retrieval table over the {} tower matches the Float64 rows: worst {:.2e}",
+                    tower_name, worst);
+        suite.check(std::fabs(device_rank - rank) <= 1.0e-2 * rank,
+                    "the effective rank over the {} tower matches Float64: {:.4f} against {:.4f}", tower_name,
+                    device_rank, rank);
+    };
+    if (graph == oracle_graph_t::roles_k) {
+        check_retrieval(host_tower, "oracle");
+        std::vector<f64_t> parallel(scalars);
+        for (std::size_t index = 0; index != scalars; ++index)
+            parallel[index] = 1.0 + 0.05 * hash_fill(index, num_vertices + hidden + 1);
+        if (!narrow_to_bf16(parallel, staging) || !widen_from_bf16(staging, parallel))
+            return suite.check(false, "parallel tower rounding failed");
+        cuMemcpyHtoD(device_address(tower), staging.data(), scalars * sizeof(nk_bf16_t));
+        check_retrieval(parallel, "nearly parallel");
+        if (!narrow_to_bf16(host_tower, staging)) return suite.check(false, "tower rounding failed");
+        cuMemcpyHtoD(device_address(tower), staging.data(), scalars * sizeof(nk_bf16_t));
     }
 
     // Capture once, replay twice: the replays land where the eager run did, up to reduction order.
