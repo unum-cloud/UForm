@@ -26,12 +26,12 @@
  *        the per-prefix @c d(raw) blocks over the prefixes containing the segment;
  *      - to-vertex forces: @c subgraph.to_vertices_grad[:,seg] += G_segᵀ·V_seg .
  *
- *  Hand-rolled kernels keep only the O(R²·K) and O(R·H·K) epilogues: norms, the scaled-cosine scaling, the
- *  balanced BCE with the relation resolution, the @c d(raw) build and its suffix accumulation, the cosine
- *  self-coefficient folds, the finalise, and the casts. Determinism holds through the products: NumKong has
- *  no split-K, so every run and every replay sums in the same order; the packs and transposes are owned
- *  arena tensors, so no allocation hides inside a call — the capture guard of @ref gpu_replay_graph_t::make
- *  would name it if it did.
+ *  Hand-rolled kernels keep only the O(R²·K) and O(R·H·K) epilogues: norms, the scaled-cosine
+ *  scaling, the pair loss with the relation resolution, the @c d(raw) build and its suffix
+ *  accumulation, the cosine self-coefficient folds, the finalise, and the casts. Determinism holds
+ *  through the products: NumKong has no split-K, so every run and every replay sums in the same
+ *  order; the packs and transposes are owned arena tensors, so no allocation hides inside a call —
+ *  the capture guard of @ref gpu_replay_graph_t::make would name it if it did.
  *
  *  @section gpu_subgraphs The force grid as a per-GPU subgraph loop
  *
@@ -50,14 +50,18 @@
  *  @section labels Edges come from the relation graph
  *
  *  Every pair's target and weight resolve through @ref contrastive_pair_relation against the
- *  @ref contrastive_relations_view_t taken by value at launch: PAD > ignore > attract > repel > ambient
- *  repulsion, with the self-edge default when no explicit edges are staged.
+ *  @ref contrastive_relations_view_t taken by value at launch: PAD > ignore > self > attract >
+ *  repel > ambient repulsion, with the self-edge default when no explicit edges are staged.
  *
- *  @section balanced Balanced per-vertex reduction
+ *  @section balanced Score, loss and force passes
  *
- *  Attractive and repulsive contributions are normalised @b separately by their own per-vertex
+ *  A call scores every subgraph into a @b [prefixes,subgraphs,rows,neighbors] stash of scaled
+ *  cosines, hands the whole rows to @ref contrastive_pair_loss_t , which rewrites them into logit
+ *  gradients, and then turns each subgraph's gradients into forces. Under the balanced form,
+ *  attractive and repulsive contributions are normalised @b separately by their own per-vertex
  *  weight totals @c Σw⁺(i) / @c Σw⁻(i) and averaged over the @b live global vertex count, PAD
- *  excluded: @c loss = Σ_i (pos_i/Σw⁺(i) + neg_i/Σw⁻(i)) / live_vertices_per_mesh .
+ *  excluded: @c loss = Σ_i (pos_i/Σw⁺(i) + neg_i/Σw⁻(i)) / live_vertices_per_mesh . The ranked form
+ *  couples each row's positives with its negatives instead, as @ref contrastive_pair_loss_t states.
  *
  *  @section distributed Distributed contract — rank-local object, collectives at the boundaries
  *
@@ -124,20 +128,30 @@ inline constexpr u32_t max_matryoshka_prefixes_k = 8u;
  */
 inline constexpr f32_t cosine_denominator_floor_k = 1.0e-2f;
 
+/** Which pair loss turns an anchor row's scores into logit gradients. */
+enum class contrastive_pair_loss_form_t : u32_t {
+
+    /** The sigmoid BCE of every cell, its attract and repel halves normalized apart. */
+    balanced_k = 0,
+
+    /** The sigmoid BCE of every positive's score over every negative's, where the bias cancels. */
+    ranked_k = 1,
+};
+
 /** Floor on a per-vertex @c Σw denominator so a fully-masked row yields a finite zero loss and
  *  zero gradient instead of a divide-by-zero. */
 inline constexpr f32_t weight_sum_floor_k = 1.0e-12f;
 
-/** The six rows of the packed @b [6,rows] per-from-vertex accumulator, in storage order — the one
- *  naming of the row indices the balanced-BCE epilogue reads and writes. */
-enum class from_vertex_accumulator_t : u32_t {
-    positive_weight_sum_k = 0,
-    negative_weight_sum_k = 1,
-    positive_softplus_mass_k = 2,
-    negative_softplus_mass_k = 3,
-    bias_grad_k = 4,
-    log_inverse_temperature_grad_k = 5,
+/** The three rows of the pair loss's @b [3,rows] accumulator, in storage order. */
+enum class pair_loss_row_t : u32_t {
+    loss_k = 0,
+    bias_grad_k = 1,
+    log_inverse_temperature_grad_k = 2,
 };
+
+/** The positives one pass over a ranked row's negatives sums at once: the register tile of their
+ *  per-positive totals. */
+inline constexpr u32_t ranked_positives_per_pass_k = 8u;
 
 /** One GPU's subgraph of the force layout: its contiguous run of the global vertex axis — always
  *  @b [to_vertices_per_gpu,hidden] , wherever the transport put it (local tile, NVLink peer memory, or
@@ -210,6 +224,61 @@ struct matryoshka_prefixes_t {
     return recipe.bias_device[static_cast<u32_t>(temperature_group)];
 }
 
+/**
+ *  @brief The pair loss over whole anchor rows, the component every contrastive loss owns: it turns
+ *      a stash of scaled scores into logit gradients in place, then folds the loss and the
+ *      temperature summands.
+ *
+ *  Row @c r is local vertex @c r , and candidate @c s·per_subgraph+n of the stash is global vertex
+ *  @c s·per_subgraph+n , so the subgraphs tile the global axis in order. Under @c balanced_k every
+ *  cell is a sigmoid BCE on @c β·score+bias , its attract and repel halves normalized apart. Under
+ *  @c ranked_k , row @c i scores @c Σ_p Σ_n w_p·w_n·softplus(x_n−x_p)/(Σw_p·Σw_n) over the attract
+ *  set @c P_i and the repel and ambient set @c N_i , where the bias cancels and its gradient is
+ *  zero. Both average over the live anchors, and every fold runs in a fixed order.
+ */
+struct contrastive_pair_loss_t {
+
+    /** Allocate the @b [3,rows] accumulator, and under @c ranked_k the @b [rows,candidates_per_row]
+     *  gradient stash the positives' scores must outlive. */
+    [[nodiscard]] static expected<contrastive_pair_loss_t> make(gpu_arena_t &arena, u32_t rows,
+                                                                u32_t candidates_per_row,
+                                                                contrastive_pair_loss_form_t form) noexcept;
+
+    /**
+     *  @brief Rewrite @p logits from scaled scores into @c d(loss)/d(logit) and write the loss and
+     *      the temperature summands, enqueue-only and capture-safe.
+     *
+     *  @param[inout] logits @b [prefixes,subgraphs,rows,per_subgraph] Float32: @c β·score without
+     *      the bias in, the logit gradient out.
+     *  @param[in] relations The relation graph over the rows and the global candidates.
+     *  @param[in] recipe β and bias, host scalars or per-temperature-group device entries.
+     *  @param[in] live_anchors @b [1] the mean divisor, floored at one here.
+     *  @param[out] loss_out @b [1] Float32 summand of the mean. Overwritten.
+     *  @param[in] stream The stream every kernel is enqueued on.
+     *  @param[out] log_inverse_temperature_grad Optional @b [temperature_group_count] summands;
+     *      empty disables.
+     *  @param[out] bias_grad Optional @b [temperature_group_count] summands, zero under the ranked
+     *      form; empty disables.
+     */
+    [[nodiscard]] expected_t operator()(f32r4_span_t logits, contrastive_relations_view_t relations,
+                                        contrastive_recipe_t recipe, f32r1_view_t live_anchors, f32r1_span_t loss_out,
+                                        gpu_stream_t &stream, f32r1_span_t log_inverse_temperature_grad = {},
+                                        f32r1_span_t bias_grad = {}) noexcept;
+
+  private:
+
+    /** @b [3,rows] per-row loss, bias and log-β gradient summands, in @ref pair_loss_row_t
+     *  order. */
+    f32r2_tensor_arena_t from_vertex_accumulator_ {};
+
+    /** @b [rows,candidates_per_row] one prefix's ranked gradients, written while its scores are
+     *  still read; empty under @c balanced_k . */
+    f32r2_tensor_arena_t ranked_grad_ {};
+
+    /** The pair loss baked at @ref make . */
+    contrastive_pair_loss_form_t form_ = contrastive_pair_loss_form_t::balanced_k;
+};
+
 /** The baked geometry of one segments loss — every capacity a call may not exceed; a different
  *  config is a different object, exactly the capture contract of @ref multimodal_batch_shape_t . */
 struct contrastive_segments_config_t {
@@ -228,6 +297,9 @@ struct contrastive_segments_config_t {
 
     /** Learnable β and bias entries the recipe selects by group, sizing the temperature grads. */
     u32_t temperature_groups = 1;
+
+    /** The pair loss over each anchor row. */
+    contrastive_pair_loss_form_t pair_loss = contrastive_pair_loss_form_t::balanced_k;
 };
 
 /** The segments contrastive loss as a function object: shapes, Matryoshka prefixes, and every
@@ -277,22 +349,25 @@ struct contrastive_segments_t {
     matryoshka_prefixes_t prefixes_ {};
     contrastive_segments_config_t config_ {};
 
-    /** @b [prefixes,rows] / @b [prefixes,neighbors] per-row L2 norms of the from-vertex and
-     *  to-vertex towers. */
-    f32r2_tensor_arena_t from_vertex_norms_ {}, to_vertex_norms_ {};
+    /** @b [prefixes,rows] per-row L2 norms of the from-vertex tower, and
+     *  @b [subgraphs,prefixes,neighbors] those of every subgraph's to-vertex tower. */
+    f32r2_tensor_arena_t from_vertex_norms_ {};
+    f32r3_tensor_arena_t to_vertex_norms_ {};
 
-    /** @b [prefixes,rows,neighbors] per-prefix raw dot products, scaled cosine (β·cos, no bias),
-     *  logit gradient, and raw-dot gradient of one subgraph block. */
-    f32r3_tensor_arena_t raw_dot_ {}, scaled_cosine_ {}, logit_grad_ {}, raw_dot_grad_ {};
+    /** @b [prefixes,subgraphs,rows,neighbors] per-prefix raw dot products of every subgraph, and
+     *  the logits over the same cells: the scaled cosines (β·cos, no bias) the pair loss rewrites
+     *  into logit gradients. */
+    f32r4_tensor_arena_t raw_dot_ {}, logits_ {};
+
+    /** @b [prefixes,rows,neighbors] raw-dot gradient of one subgraph block. */
+    f32r3_tensor_arena_t raw_dot_grad_ {};
 
     /** @b [prefixes,rows,neighbors] BFloat16 cast of @ref raw_dot_grad_ — the gradient products'
      *  operand, its rows padded to 8 for NumKong's 16-byte stride rule. */
     bf16r3_tensor_arena_t raw_dot_grad_bf16_ {};
 
-    /** The six @b [rows] accumulator rows indexed by @ref from_vertex_accumulator_t : Σw⁺, Σw⁻,
-     *  positive and negative softplus mass, bias and log-β gradient summands — one @b [6,rows] tensor,
-     *  one memset covers them all. */
-    f32r2_tensor_arena_t from_vertex_accumulator_ {};
+    /** The pair loss over whole rows, baked from the config's form. */
+    contrastive_pair_loss_t pair_loss_ {};
 
     /** @b [1] live vertices of the global axis, counted every call — the mean divisor. */
     f32r1_tensor_arena_t live_vertices_ {};
@@ -315,11 +390,6 @@ struct contrastive_segments_t {
 
     /** The NumKong capabilities of the arena's device, picking every product. */
     nk_capability_t capabilities_ = 0;
-
-    /** The @p which row of the packed @ref from_vertex_accumulator_ as a mutable span. */
-    [[nodiscard]] f32r1_span_t accumulator_row(from_vertex_accumulator_t which) noexcept {
-        return {from_vertex_accumulator_.row(static_cast<u32_t>(which)).data(), from_vertex_accumulator_.extent(1)};
-    }
 };
 
 /**

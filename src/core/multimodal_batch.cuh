@@ -122,6 +122,11 @@ struct multimodal_batch_mixer_t {
      *  GPU's last mix, each @c source_gpu·max_segments_per_gpu+source_segment , @c ~0u for PAD. */
     [[nodiscard]] u32r2_view_t world_sources(std::size_t local) const noexcept { return world_sources_[local].view(); }
 
+    /** Local member @p local 's @b [world_gpus,max_segments_per_gpu] keys of every world GPU's last
+     *  mix, read from each segment's source and zero for PAD; flattened, the global vertex indexes
+     *  them as the contrastive relations read them. */
+    [[nodiscard]] u64r2_view_t world_keys(std::size_t local) const noexcept { return world_keys_[local].view(); }
+
   private:
 
     /** The main-owned multimem_domain — borrowed; its barrier brackets every mix. */
@@ -147,6 +152,10 @@ struct multimodal_batch_mixer_t {
      *  bags make a destination's source un-derivable per segment. On the member's own arena; never
      *  exchanged, never part of a batch. */
     per_gpu_array<u32r2_tensor_arena_t> world_lengths_ {}, world_sources_ {};
+
+    /** Per-member @b [world_gpus,max_segments_per_gpu] keys of every world GPU's mix, read through
+     *  the sources once the world pass completes them. */
+    per_gpu_array<u64r2_tensor_arena_t> world_keys_ {};
 
     /** How many multimem_domains the world spans; 1 is the single-NVLink-domain fast path. */
     u32_t domains_ = 1;

@@ -1,9 +1,10 @@
 /**
- *  @brief The contrastive relation graph: per-pair attract / repel / ignore semantics over the global
- *      vertex axis, as compressed sparse rows — the edge sets of the force layout the losses relax.
  *  @file src/core/contrastive_relations.cuh
  *  @author Ash Vardanian
  *  @date July 2, 2026
+ *  @brief The contrastive relation graph: per-pair attract / repel / ignore semantics over the
+ *      global vertex axis, as compressed sparse rows — the edge sets of the force layout the losses
+ *      relax.
  *
  *  Both contrastive losses (segments and tokens) score a @b [from_vertices_per_gpu,to_vertices_per_mesh] cell grid
  *  and need one answer per cell: the target sign and the weight. This file is that answer's single source
@@ -16,10 +17,11 @@
  *  exact precedence order (first match wins):
  *
  *      1. Either side is PAD (effective length 0) — weight 0, the cell does not exist.
- *      2. @c j is in @c ignore_ids[i] — weight 0: a known false negative or a self-pairing to skip.
- *      3. @c j is in @c attract_ids[i] — target +1, weight from @c attract_scores (default 1).
- *      4. @c j is in @c repel_ids[i] — target −1, weight from @c repel_scores (default 1).
- *      5. Every other cell — target −1, weight @c ambient_repulsion_weight .
+ *      2. @c j is in @c ignore_ids[i] — weight 0: a known false negative to skip.
+ *      3. @c j is @c i 's own copy while explicit attract edges exist — weight 0.
+ *      4. @c j is in @c attract_ids[i] — target +1, weight from @c attract_scores (default 1).
+ *      5. @c j is in @c repel_ids[i] — target −1, weight from @c repel_scores (default 1).
+ *      6. Every other cell — target −1, weight @c ambient_repulsion_weight .
  *
  *  The explicit-vs-ambient balance is @b weights-only — there is no policy flag, and
  *  @c ambient_repulsion_weight==0 removes the background repulsion through the same code path. When no
@@ -50,6 +52,8 @@
 
 #include <cstdint> // `std::uint32_t`
 
+#include <memory> // `std::allocator_traits`, the edge owner's per-type rebinding
+
 #include <cuda.h> // `cuMemcpyHtoDAsync`, `cuMemsetD8Async`
 #if defined(__CUDACC__)
 #include <cub/thread/thread_search.cuh> // `cub::LowerBound` — the per-run membership search
@@ -57,9 +61,10 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor`, `nk::tensor_view` — owning columns and borrowed views
 
-#include "core/types.hpp"          // `expected`, `expected_t`, `status_t`
-#include "core/gpu_allocators.hpp" // `gpu_arena_t`, `gpu_arena_alloc` backing the owning tensors
-#include "core/schedule.cuh"       // `gpu_stream_t` ordering the uploads
+#include "core/types.hpp"            // `expected`, `expected_t`, `status_t`
+#include "core/gpu_allocators.hpp"   // `gpu_arena_t`, `gpu_arena_alloc` backing the owning tensors
+#include "core/schedule.cuh"         // `gpu_stream_t` ordering the uploads
+#include "core/multimodal_batch.hpp" // `segment_role_t`, the bag roles the builder reads
 
 namespace unum::uform::core {
 
@@ -121,6 +126,15 @@ struct contrastive_pair_relation_t {
 
     /** Per-cell weight; 0 skips the cell entirely. */
     f32_t weight;
+};
+
+/** One CSR edge set over a GPU's vertex rows, borrowed: @b [rows+1] offsets, the global vertex IDs
+ *  ascending per row, and per-edge weights, which an ignore set carries none of. Empty offsets name
+ *  no set. */
+struct contrastive_edges_view_t {
+    u32r1_view_t offsets {};
+    u32r1_view_t ids {};
+    f32r1_view_t weights {};
 };
 
 /**
@@ -198,8 +212,9 @@ struct contrastive_relations_view_t {
 
 /**
  *  @brief Resolve one cell of the @b [from_vertices_per_gpu,to_vertices_per_mesh] grid to its target and weight,
- *      in the file-header precedence: PAD > ignore > attract > repel > implicit negative. Padding is read
- *      from the view's own effective-length columns — the label grid carries its whole state.
+ *      in the file-header precedence: PAD > ignore > self > attract > repel > implicit negative.
+ *      Padding is read from the view's own effective-length columns — the label grid carries its
+ *      whole state.
  *
  *  @param[in] relations The graph views, taken by value at kernel launch.
  *  @param[in] vertex_index Row in @c [0,from_vertices_per_gpu) .
@@ -217,12 +232,12 @@ struct contrastive_relations_view_t {
         u32_t const end = relations.ignore_offsets[vertex_index + 1];
         if (contrastive_run_find_(relations.ignore_ids, begin, end, neighbor_global) != end) return {0.0f, 0.0f};
     }
-    if (!relations.has_explicit_attract_edges()) {
-        bool const is_self_edge = static_cast<std::size_t>(neighbor_global) ==
-                                  relations.self_edge_base + static_cast<std::size_t>(vertex_index);
+    bool const is_self_edge = static_cast<std::size_t>(neighbor_global) ==
+                              relations.self_edge_base + static_cast<std::size_t>(vertex_index);
+    if (!relations.has_explicit_attract_edges())
         return is_self_edge ? contrastive_pair_relation_t {1.0f, 1.0f}
                             : contrastive_pair_relation_t {-1.0f, relations.ambient_repulsion_weight};
-    }
+    if (is_self_edge) return {0.0f, 0.0f}; // a vertex is never its own negative once bags name positives
     // Attract lookup: an explicit positive edge carrying its own weight.
     {
         u32_t const begin = relations.attract_offsets[vertex_index];
@@ -242,49 +257,198 @@ struct contrastive_relations_view_t {
 
 #endif // defined(__CUDACC__)
 
+/** The three edge sets of a relation graph, in their storage order. */
+enum class contrastive_edge_set_t : u32_t {
+    attract_k = 0,
+    repel_k = 1,
+    ignore_k = 2,
+};
+
+/** The live edges of @p set over @b [3,rows+1] offsets, @b [3,capacity] IDs and @b [2,capacity]
+ *  weights. A plain function, as nvcc's front end miscompiles a multidimensional subscript inside a
+ *  class template. */
+[[nodiscard]] inline contrastive_edges_view_t contrastive_edges_live_(u32r2_view_t offsets, u32r2_view_t ids,
+                                                                      f32r2_view_t weights,
+                                                                      contrastive_edge_set_t set) noexcept {
+    std::size_t const index = static_cast<std::size_t>(set);
+    u32r1_view_t const row_offsets = offsets[index, nk::slice];
+    u32_t const count = row_offsets[row_offsets.extent(0) - 1u];
+    contrastive_edges_view_t view;
+    view.offsets = row_offsets;
+    view.ids = ids[index, nk::range(0, count), nk::slice];
+    if (set != contrastive_edge_set_t::ignore_k) view.weights = weights[index, nk::range(0, count), nk::slice];
+    return view;
+}
+
 /**
- *  @brief One GPU's bag relations, a pure host function: every live segment attracts the other
- *      live segments of its bag, which the mixer lands whole and contiguous on one GPU, by global
- *      vertex ID.
+ *  @brief The host owner of one GPU's attract, repel and ignore sets, sized once at @ref make and
+ *      refilled every step by @ref relate_roles or by an explicit edge list.
  *
- *  @param[in] bags The GPU's @b [segments] mixed bag column; @c ~0u names no bag.
+ *  Each set's live edge count is the last entry of its offsets row, so nothing beside the columns
+ *  counts it.
+ *
+ *  @tparam alloc_type_ A byte-typed host allocator handle, @c pinned_alloc_t for staging and
+ *      @c nk::aligned_allocator for host-only use, rebound per element type inside.
+ */
+template <typename alloc_type_>
+struct contrastive_edges {
+
+    /** @p alloc_type_ rebound to @p value_type_ , every column's allocator spelling. */
+    template <typename value_type_>
+    using rebound = typename std::allocator_traits<alloc_type_>::template rebind_alloc<value_type_>;
+
+    /** Allocate @b [3,rows+1] offsets, @b [3,max_edges] IDs and @b [2,max_edges] weights, every set
+     *  empty. */
+    [[nodiscard]] static expected<contrastive_edges> make(u32_t rows, u32_t max_edges,
+                                                          alloc_type_ allocator = {}) noexcept {
+        using result_t = expected<contrastive_edges>;
+        contrastive_edges edges;
+        edges.offsets_ = nk::tensor<u32_t, rebound<u32_t>, 2>::zeros({3u, rows + 1u}, rebound<u32_t> {allocator}).value;
+        edges.ids_ =
+            nk::tensor<u32_t, rebound<u32_t>, 2>::uninitialized({3u, max_edges}, rebound<u32_t> {allocator}).value;
+        edges.weights_ =
+            nk::tensor<f32_t, rebound<f32_t>, 2>::uninitialized({2u, max_edges}, rebound<f32_t> {allocator}).value;
+        if (!edges.offsets_ || (max_edges != 0u && (!edges.ids_ || !edges.weights_)))
+            return result_t::fail(status_t::bad_alloc_k, "edge sets of {} rows and {} edges failed to allocate", rows,
+                                  max_edges);
+        return result_t {std::move(edges)};
+    }
+
+    /** Vertex rows every set describes. */
+    [[nodiscard]] u32_t rows() const noexcept { return static_cast<u32_t>(offsets_.extent(1) - 1u); }
+
+    /** Edges each set holds at most. */
+    [[nodiscard]] u32_t capacity() const noexcept { return static_cast<u32_t>(ids_.extent(1)); }
+
+    /** The @b [rows+1] offsets row of @p set , to write. */
+    [[nodiscard]] u32r1_span_t offsets(contrastive_edge_set_t set) noexcept {
+        return offsets_.row(static_cast<std::size_t>(set)).template flatten<1>();
+    }
+
+    /** The @b [capacity] IDs of @p set , to write. */
+    [[nodiscard]] u32r1_span_t ids(contrastive_edge_set_t set) noexcept {
+        return ids_.row(static_cast<std::size_t>(set)).template flatten<1>();
+    }
+
+    /** The @b [capacity] weights of @p set , to write; empty for the ignore set. */
+    [[nodiscard]] f32r1_span_t weights(contrastive_edge_set_t set) noexcept {
+        if (set == contrastive_edge_set_t::ignore_k) return {};
+        return weights_.row(static_cast<std::size_t>(set)).template flatten<1>();
+    }
+
+    /** The attract set over its live edges. */
+    [[nodiscard]] contrastive_edges_view_t attract() const noexcept { return live_(contrastive_edge_set_t::attract_k); }
+
+    /** The repel set over its live edges. */
+    [[nodiscard]] contrastive_edges_view_t repel() const noexcept { return live_(contrastive_edge_set_t::repel_k); }
+
+    /** The ignore set over its live edges. */
+    [[nodiscard]] contrastive_edges_view_t ignore() const noexcept { return live_(contrastive_edge_set_t::ignore_k); }
+
+  private:
+
+    [[nodiscard]] contrastive_edges_view_t live_(contrastive_edge_set_t set) const noexcept {
+        return contrastive_edges_live_(offsets_.view(), ids_.view(), weights_.view(), set);
+    }
+
+    /** @b [3,rows+1] , @b [3,capacity] and @b [2,capacity] columns in @ref contrastive_edge_set_t
+     *  order. */
+    nk::tensor<u32_t, rebound<u32_t>, 2> offsets_ {}, ids_ {};
+    nk::tensor<f32_t, rebound<f32_t>, 2> weights_ {};
+};
+
+/** The pinned owner the trainer stages from. */
+using contrastive_edges_pinned_t = contrastive_edges<pinned_alloc_t>;
+
+/**
+ *  @brief One GPU's relation graph from its bags, a pure host function over the mixed columns,
+ *      which the mixer lands whole and contiguous per bag on one GPU.
+ *
+ *  Inside a bag, the anchor and its positives attract each other at unit weight, the anchor and a
+ *  negative repel each other at the negative's weight, and a positive and a negative, or two
+ *  negatives, ignore each other. Across bags, two live vertices with one nonzero key attract, as
+ *  the same media in another language does. Every other pair stays ambient, and no vertex names
+ *  itself.
+ *
+ *  @param[in] bags The GPU's @b [segments] mixed bag column.
+ *  @param[in] roles The GPU's @b [segments] mixed role column.
  *  @param[in] lengths The GPU's @b [segments] mixed length column; a zero length is PAD.
+ *  @param[in] weights The GPU's @b [segments] repel weight of every negative; empty means unit
+ *      weights.
+ *  @param[in] world_keys The @b [world_segments] keys of every vertex by global ID, zero for PAD
+ *      and for negatives; empty attracts no key.
  *  @param[in] vertex_base The global vertex of the GPU's segment 0, its world coordinate times the
  *      segments.
- *  @param[out] offsets The @b [segments+1] attract row offsets.
- *  @param[out] partners The attract edges' global vertices, ascending per row.
- *  @param[out] weights The unit weight of every attract edge.
- *  @return The edge count.
- *  @retval status_t::invalid_input_k Columns of other extents, or more edges than @p partners
- *      holds.
+ *  @param[out] edges The three sets, refilled over the @b [segments] rows.
+ *  @retval status_t::invalid_input_k Columns of other extents, a keyed negative, or more edges than
+ *      a set holds.
  */
-[[nodiscard]] inline expected<u32_t> relate_bags(u32r1_view_t bags, u32r1_view_t lengths, u32_t vertex_base,
-                                                 u32r1_span_t offsets, u32r1_span_t partners,
-                                                 f32r1_span_t weights) noexcept {
-    using result_t = expected<u32_t>;
+template <typename alloc_type_>
+[[nodiscard]] expected_t relate_roles(u32r1_view_t bags, nk::tensor_view<segment_role_t, 1> roles, u32r1_view_t lengths,
+                                      f32r1_view_t weights, u64r1_view_t world_keys, u32_t vertex_base,
+                                      contrastive_edges<alloc_type_> &edges) noexcept {
+    using set_t = contrastive_edge_set_t;
     u32_t const segments = static_cast<u32_t>(lengths.extent(0));
-    if (bags.extent(0) != segments || offsets.extent(0) != segments + 1u || weights.extent(0) < partners.extent(0))
-        return result_t::fail(status_t::invalid_input_k, "{} bags, {} lengths and {} offsets disagree", bags.extent(0),
-                              segments, offsets.extent(0));
-    u32_t written = 0;
-    offsets[0] = 0;
-    for (u32_t segment = 0; segment != segments; ++segment) {
-        u32_t begin = segment, end = segment + 1;
-        if (lengths[segment] != 0 && bags[segment] != ~0u) {
-            while (begin != 0 && bags[begin - 1] == bags[segment] && lengths[begin - 1] != 0) --begin;
-            while (end != segments && bags[end] == bags[segment] && lengths[end] != 0) ++end;
-        }
-        for (u32_t partner = begin; partner != end; ++partner) {
-            if (partner == segment || lengths[segment] == 0) continue;
-            if (written == partners.extent(0))
-                return result_t::fail(status_t::invalid_input_k, "a GPU's bags name over {} edges", partners.extent(0));
-            partners[written] = vertex_base + partner;
-            weights[written] = 1.0f;
-            ++written;
-        }
-        offsets[segment + 1] = written;
+    u32_t const world = static_cast<u32_t>(world_keys.extent(0));
+    if (bags.extent(0) != segments || roles.extent(0) != segments || edges.rows() != segments ||
+        (!weights.empty() && weights.extent(0) != segments) || (world != 0u && world < vertex_base + segments))
+        return expected_t::fail(status_t::invalid_input_k,
+                                "{} bags, {} roles, {} lengths, {} weights, {} rows and {} world keys disagree",
+                                bags.extent(0), roles.extent(0), segments, weights.extent(0), edges.rows(), world);
+    u32_t written[3] = {};
+    for (set_t const set : {set_t::attract_k, set_t::repel_k, set_t::ignore_k}) {
+        u32r1_span_t const offsets = edges.offsets(set);
+        offsets[0] = 0u;
     }
-    return result_t {written};
+    for (u32_t segment = 0; segment != segments; ++segment) {
+        bool const live = lengths[segment] != 0u;
+        u32_t begin = segment, end = segment + 1u;
+        if (live) {
+            while (begin != 0u && bags[begin - 1u] == bags[segment] && lengths[begin - 1u] != 0u) --begin;
+            while (end != segments && bags[end] == bags[segment] && lengths[end] != 0u) ++end;
+        }
+        segment_role_t const role = roles[segment];
+        u64_t const key = live && world != 0u ? world_keys[vertex_base + segment] : 0u;
+        if (key != 0u && role == segment_role_t::negative_k)
+            return expected_t::fail(status_t::invalid_input_k, "negative segment {} carries key {}", segment, key);
+        u32_t const bag_begin = vertex_base + begin, bag_end = vertex_base + end, self = vertex_base + segment;
+        u32_t const scan_begin = key != 0u ? 0u : bag_begin, scan_end = key != 0u ? world : bag_end;
+        for (u32_t partner = scan_begin; live && partner != scan_end; ++partner) {
+            if (partner == self) continue;
+            set_t set = set_t::attract_k;
+            f32_t weight = 1.0f;
+            if (partner >= bag_begin && partner < bag_end) {
+                u32_t const partner_segment = partner - vertex_base;
+                segment_role_t const partner_role = roles[partner_segment];
+                bool const negative = role == segment_role_t::negative_k;
+                bool const partner_negative = partner_role == segment_role_t::negative_k;
+                if (negative != partner_negative &&
+                    (role == segment_role_t::anchor_k || partner_role == segment_role_t::anchor_k)) {
+                    set = set_t::repel_k;
+                    u32_t const negative_segment = negative ? segment : partner_segment;
+                    weight = weights.empty() ? 1.0f : weights[negative_segment];
+                }
+                else if (negative || partner_negative) set = set_t::ignore_k;
+            }
+            else if (world_keys[partner] != key) continue;
+            u32_t &count = written[static_cast<u32_t>(set)];
+            if (count == edges.capacity())
+                return expected_t::fail(status_t::invalid_input_k, "a GPU's bags name over {} edges in one set",
+                                        edges.capacity());
+            u32r1_span_t const ids = edges.ids(set);
+            ids[count] = partner;
+            if (set != set_t::ignore_k) {
+                f32r1_span_t const weights_of_set = edges.weights(set);
+                weights_of_set[count] = weight;
+            }
+            ++count;
+        }
+        for (set_t const set : {set_t::attract_k, set_t::repel_k, set_t::ignore_k}) {
+            u32r1_span_t const offsets = edges.offsets(set);
+            offsets[segment + 1u] = written[static_cast<u32_t>(set)];
+        }
+    }
+    return {};
 }
 
 /**
@@ -349,71 +513,71 @@ struct contrastive_relations_t {
      *  offsets, id/score length mismatches, unsorted or duplicate ids within a run, ids outside
      *  @c [0,to_vertices_per_mesh) , negative scores. There is no silent fallback.
      *
-     *  @param[in] ignore_offsets / @p ignore_ids Empty views mean no ignores.
+     *  @param[in] attract The attract set; its offsets span @c from_vertices_per_gpu+1 .
+     *  @param[in] repel The repel set over the same rows.
+     *  @param[in] ignore The ignore set over the same rows, its weights unread; empty offsets mean
+     *      no ignores.
      *  @param[in] from_vertex_effective_length / @p to_vertex_effective_length The per-step PAD columns the
      *      resolver reads: @b [from_vertices_per_gpu] and @b [to_vertices_per_mesh] (by global id) device
      *      views, 0 marking PAD, empty meaning all-live. @b Borrowed, never copied — the batch pipeline owns
      *      them and keeps the addresses capture-stable.
      */
-    [[nodiscard]] expected_t upload(                                                                  //
-        u32r1_view_t attract_offsets, u32r1_view_t attract_ids,                                       //
-        f32r1_view_t attract_scores,                                                                  //
-        u32r1_view_t repel_offsets, u32r1_view_t repel_ids,                                           //
-        f32r1_view_t repel_scores,                                                                    //
-        u32r1_view_t ignore_offsets, u32r1_view_t ignore_ids,                                         //
-        u32r1_view_t from_vertex_effective_length, u32r1_view_t to_vertex_effective_length,           //
-        std::size_t to_vertices_per_mesh, std::size_t self_edge_base, f32_t ambient_repulsion_weight, //
-        gpu_stream_t &stream) noexcept {
+    [[nodiscard]] expected_t upload(contrastive_edges_view_t attract, contrastive_edges_view_t repel,
+                                    contrastive_edges_view_t ignore, u32r1_view_t from_vertex_effective_length,
+                                    u32r1_view_t to_vertex_effective_length, std::size_t to_vertices_per_mesh,
+                                    std::size_t self_edge_base, f32_t ambient_repulsion_weight,
+                                    gpu_stream_t &stream) noexcept {
 
-        if (attract_offsets.extent(0) < 2 || attract_offsets.extent(0) != repel_offsets.extent(0))
+        if (attract.offsets.extent(0) < 2 || attract.offsets.extent(0) != repel.offsets.extent(0))
             return expected_t::fail( //
                 status_t::invalid_input_k,
                 "attract and repel offset rows must both span from_vertices_per_gpu+1 (got {} and {})",
-                attract_offsets.extent(0), repel_offsets.extent(0));
-        u32_t const from_vertices_per_gpu = static_cast<u32_t>(attract_offsets.extent(0) - 1u);
-        bool const has_ignores = !ignore_offsets.empty();
-        if (has_ignores && ignore_offsets.extent(0) != attract_offsets.extent(0))
+                attract.offsets.extent(0), repel.offsets.extent(0));
+        u32_t const from_vertices_per_gpu = static_cast<u32_t>(attract.offsets.extent(0) - 1u);
+        bool const has_ignores = !ignore.offsets.empty();
+        if (has_ignores && ignore.offsets.extent(0) != attract.offsets.extent(0))
             return expected_t::fail( //
                 status_t::invalid_input_k,
                 "ignore offsets must span from_vertices_per_gpu+1 like the others (got {}, expected {})",
-                ignore_offsets.extent(0), attract_offsets.extent(0));
+                ignore.offsets.extent(0), attract.offsets.extent(0));
 
-        if (expected_t checked = validate_edges_("attract", attract_offsets, attract_ids, attract_scores,
+        if (expected_t checked = validate_edges_("attract", attract.offsets, attract.ids, attract.weights,
                                                  to_vertices_per_mesh);
             !checked)
             return checked;
-        if (expected_t checked = validate_edges_("repel", repel_offsets, repel_ids, repel_scores, to_vertices_per_mesh);
+        if (expected_t checked = validate_edges_("repel", repel.offsets, repel.ids, repel.weights,
+                                                 to_vertices_per_mesh);
             !checked)
             return checked;
         if (has_ignores)
-            if (expected_t checked = validate_edges_("ignore", ignore_offsets, ignore_ids, {}, to_vertices_per_mesh);
+            if (expected_t checked = validate_edges_("ignore", ignore.offsets, ignore.ids, {}, to_vertices_per_mesh);
                 !checked)
                 return checked;
 
         bool resized = nk::succeeded(attract_offsets_.resize({from_vertices_per_gpu + 1u}));
         resized = resized && nk::succeeded(repel_offsets_.resize({from_vertices_per_gpu + 1u}));
-        resized = resized && nk::succeeded(attract_ids_.resize({attract_ids.extent(0)}));
-        resized = resized && nk::succeeded(attract_scores_.resize({attract_scores.extent(0)}));
-        resized = resized && nk::succeeded(repel_ids_.resize({repel_ids.extent(0)}));
-        resized = resized && nk::succeeded(repel_scores_.resize({repel_scores.extent(0)}));
+        resized = resized && nk::succeeded(attract_ids_.resize({attract.ids.extent(0)}));
+        resized = resized && nk::succeeded(attract_scores_.resize({attract.weights.extent(0)}));
+        resized = resized && nk::succeeded(repel_ids_.resize({repel.ids.extent(0)}));
+        resized = resized && nk::succeeded(repel_scores_.resize({repel.weights.extent(0)}));
         resized = resized && nk::succeeded(ignore_offsets_.resize({has_ignores ? from_vertices_per_gpu + 1u : 0u}));
-        resized = resized && nk::succeeded(ignore_ids_.resize({has_ignores ? ignore_ids.extent(0) : 0u}));
+        resized = resized && nk::succeeded(ignore_ids_.resize({has_ignores ? ignore.ids.extent(0) : 0u}));
         if (!resized)
             return expected_t::fail( //
                 status_t::shape_unsupported_k,
                 "relations exceed the reserved capacities (vertices={}/{} attract={}/{} repel={}/{} ignore={}/{})",
-                from_vertices_per_gpu + 1u, attract_offsets_.capacity(), attract_ids.extent(0), attract_ids_.capacity(),
-                repel_ids.extent(0), repel_ids_.capacity(), has_ignores ? ignore_ids.extent(0) : 0u,
+                from_vertices_per_gpu + 1u, attract_offsets_.capacity(), attract.ids.extent(0), attract_ids_.capacity(),
+                repel.ids.extent(0), repel_ids_.capacity(), has_ignores ? ignore.ids.extent(0) : 0u,
                 ignore_ids_.capacity());
 
-        expected_t copied = copy_host_to_device(attract_offsets, attract_offsets_.span(), stream);
-        if (copied) copied = copy_host_to_device(attract_ids, attract_ids_.span(), stream);
-        if (copied) copied = copy_host_to_device(attract_scores, attract_scores_.span(), stream);
-        if (copied) copied = copy_host_to_device(repel_offsets, repel_offsets_.span(), stream);
-        if (copied) copied = copy_host_to_device(repel_ids, repel_ids_.span(), stream);
-        if (copied) copied = copy_host_to_device(repel_scores, repel_scores_.span(), stream);
-        if (copied && has_ignores) copied = copy_host_to_device(ignore_offsets, ignore_offsets_.span(), stream);
-        if (copied && has_ignores) copied = copy_host_to_device(ignore_ids, ignore_ids_.span(), stream);
+        expected_t copied = copy_host_to_device(attract.offsets, attract_offsets_.span(), stream);
+        if (copied) copied = copy_host_to_device(attract.ids, attract_ids_.span(), stream);
+        if (copied) copied = copy_host_to_device(attract.weights, attract_scores_.span(), stream);
+        if (copied) copied = copy_host_to_device(repel.offsets, repel_offsets_.span(), stream);
+        if (copied) copied = copy_host_to_device(repel.ids, repel_ids_.span(), stream);
+        if (copied) copied = copy_host_to_device(repel.weights, repel_scores_.span(), stream);
+        if (copied && has_ignores) copied = copy_host_to_device(ignore.offsets, ignore_offsets_.span(), stream);
+        if (copied && has_ignores) copied = copy_host_to_device(ignore.ids, ignore_ids_.span(), stream);
         if (!copied) return copied;
 
         from_vertex_effective_length_ = from_vertex_effective_length;

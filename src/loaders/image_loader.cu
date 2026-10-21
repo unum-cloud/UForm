@@ -494,10 +494,6 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
                                            static_cast<u32_t>(entries.size()));
         !widened)
         return widened;
-    // The RGB scratch and the descriptor table are freed stream-ordered after the widen kernel — hold the sync
-    // for the caller's resize, which reads only the RGBA scratch.
-    if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "JPEG RGBA expansion synchronization failed");
     return {};
 }
 
@@ -636,9 +632,9 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
 
 /** Crop each decoded RGBA scratch image to its factor-pair aspect, Lanczos-resize it into a contiguous
  *  scratch tape (one @c nppiResize per image — NPP's batched variant takes neither single-image batches
- *  nor Lanczos), then scatter each into its column sub-range of the batch's shared patch
- *  grid — the scratch and device-resident offsets are held alive until the whole stream-ordered chain
- *  retires. Budgets vary per image now, so each resized frame's byte size (and its base in the tape) is a
+ *  nor Lanczos), then scatter each into its column sub-range of the batch's shared patch grid. The
+ *  scratch and device-resident offsets free stream-ordered behind it, so nothing waits here.
+ *  Budgets vary per image now, so each resized frame's byte size (and its base in the tape) is a
  *  running prefix, not a fixed stride. @p segment_offsets / @p segment_lengths carry the placement the
  *  segment kernel laid down. */
 [[nodiscard]] static expected_t resize_plans_(std::span<image_plan_t const> plans, u8_t *scratch,
@@ -702,15 +698,12 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
         !uploaded)
         return uploaded;
 
-    // Scatter every resized image into its column sub-range (one CTA per segment), then retire the whole
-    // stream-ordered chain before the owning scratch / descriptor arrays fall out of scope.
+    // Scatter every resized image into its column sub-range (one CTA per segment).
     if (expected_t tiled = launch_kernel(&tile_patches_kernel_, dim3 {static_cast<u32_t>(images), 1u, 1u},
                                          dim3 {kernel_block_size_default_k, 1u, 1u}, stream, pixels, resized_base,
                                          device_resized_offsets.data(), image_shapes, segment_offsets, segment_lengths);
         !tiled)
         return tiled;
-    if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "resize/tile synchronization failed");
     return {};
 }
 

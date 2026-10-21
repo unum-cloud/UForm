@@ -85,6 +85,8 @@ using f32r2_view_t = nk::tensor_view<f32_t, 2>;
 using f32r2_span_t = nk::tensor_span<f32_t, 2>;
 using f32r3_view_t = nk::tensor_view<f32_t, 3>;
 using f32r3_span_t = nk::tensor_span<f32_t, 3>;
+using f32r4_view_t = nk::tensor_view<f32_t, 4>;
+using f32r4_span_t = nk::tensor_span<f32_t, 4>;
 
 /** The whole @p value_type_ scalars of @p bytes , a trailing partial scalar dropped — the one place a byte region
  *  takes on a scalar type. The region comes from an allocation, which creates implicit-lifetime scalars on first

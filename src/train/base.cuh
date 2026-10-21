@@ -83,6 +83,9 @@ struct contrastive_config_t {
 
     /** Edges one GPU's step names per edge set at most; zero derives @c max_segments_per_gpu . */
     u32_t max_edges_per_gpu = 0;
+
+    /** The pair loss over each anchor row. */
+    contrastive_pair_loss_form_t pair_loss = contrastive_pair_loss_form_t::balanced_k;
 };
 
 /** One run's whole description, parsed once and threaded by const reference. The modality mixture is the

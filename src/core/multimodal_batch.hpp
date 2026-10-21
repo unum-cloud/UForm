@@ -107,6 +107,23 @@ using modality_view_t = nk::tensor_view<modality_t, 1>;
 /** Rank-1 mutable span over a segment's @ref modality_t tags — @b [max_segments_per_gpu] . */
 using modality_span_t = nk::tensor_span<modality_t, 1>;
 
+/** One segment's part in its bag: the anchor and its positives attract each other, and a negative
+ *  repels the anchor while it ignores the positives and the other negatives. */
+enum class segment_role_t : u8_t {
+    anchor_k = 0,
+    positive_k = 1,
+    negative_k = 2,
+};
+
+/** Which side of a late-interaction score a segment takes: a query's tokens score a document's,
+ *  and a symmetric pair plays both. */
+enum class late_interaction_side_t : u8_t {
+    none_k = 0,
+    query_k = 1,
+    document_k = 2,
+    query_and_document_k = 3,
+};
+
 /** Scalars in one image patch — @c patch_size²·channels , the projection fan-in the tower peels
  *  @c (patch_side,patch_side,channels) into; channels are the innermost rank. */
 [[nodiscard]] constexpr u32_t patch_scalars(u32_t patch_size, u32_t channels) noexcept {
@@ -243,6 +260,9 @@ struct multimodal_batch_view_t {
     nk::tensor_view<u32_t, 1> segment_offsets {};
     nk::tensor_view<u32_t, 1> segment_lengths {};
     nk::tensor_view<modality_t, 1> segment_modality {};
+    nk::tensor_view<segment_role_t, 1> segment_role {};
+    nk::tensor_view<u32_t, 1> segment_prefix_length {};
+    nk::tensor_view<late_interaction_side_t, 1> segment_side {};
     nk::tensor_view<token_id_t, 2> tokens {};
     nk::tensor_view<pixel_t, 5> images {};
     nk::tensor_view<u16_t, 2> image_shapes {};
@@ -288,6 +308,22 @@ struct multimodal_batch {
      *  @ref multimodal_batch_shape_t::max_bags_per_gpu is nonzero; a PAD segment's bag value is inert —
      *  the mixer's nonzero-length filter excludes it from every bag before the tag is consulted. */
     nk::tensor<u32_t, rebound<u32_t>, 1> segment_bag {};
+
+    /** @b [max_segments_per_gpu] each segment's @ref segment_role_t in its bag; PAD segments carry
+     *  @c anchor_k , inert. */
+    nk::tensor<segment_role_t, rebound<segment_role_t>, 1> segment_role {};
+
+    /** @b [max_segments_per_gpu] leading tokens of each segment no score reads, such as a "query: "
+     *  prefix. */
+    nk::tensor<u32_t, rebound<u32_t>, 1> segment_prefix_length {};
+
+    /** @b [max_segments_per_gpu] each segment's sample identity, such as the media key; equal
+     *  nonzero keys are one item, and zero names none. */
+    nk::tensor<u64_t, rebound<u64_t>, 1> segment_key {};
+
+    /** @b [max_segments_per_gpu] each segment's @ref late_interaction_side_t ; PAD and @c none_k
+     *  segments are skipped. */
+    nk::tensor<late_interaction_side_t, rebound<late_interaction_side_t>, 1> segment_side {};
 
     /** @b [rows,columns] discrete token ids — text is the degenerate modality, a scalar per grid
      *  position whose coordinate is @c (position,0,0) . Every media modality lifts this same
@@ -338,9 +374,9 @@ struct multimodal_batch {
 
     /** Every tensor, borrowed read-only. */
     [[nodiscard]] multimodal_batch_view_t view() const noexcept {
-        return {segment_offsets.view(), segment_lengths.view(), segment_modality.view(),
-                tokens.view(),          images.view(),          image_shapes.view(),
-                videos.view(),          video_shapes.view(),    audio_samples.view()};
+        return {segment_offsets.view(),       segment_lengths.view(), segment_modality.view(), segment_role.view(),
+                segment_prefix_length.view(), segment_side.view(),    tokens.view(),           images.view(),
+                image_shapes.view(),          videos.view(),          video_shapes.view(),     audio_samples.view()};
     }
 
     /**
@@ -375,6 +411,18 @@ struct multimodal_batch {
         batch.segment_bag = nk::tensor<u32_t, rebound<u32_t>, 1>::uninitialized({shape.max_segments_per_gpu},
                                                                                 rebound<u32_t> {allocator})
                                 .value;
+        batch.segment_role = nk::tensor<segment_role_t, rebound<segment_role_t>, 1>::uninitialized(
+                                 {shape.max_segments_per_gpu}, rebound<segment_role_t> {allocator})
+                                 .value;
+        batch.segment_prefix_length = nk::tensor<u32_t, rebound<u32_t>, 1>::uninitialized({shape.max_segments_per_gpu},
+                                                                                          rebound<u32_t> {allocator})
+                                          .value;
+        batch.segment_key = nk::tensor<u64_t, rebound<u64_t>, 1>::uninitialized({shape.max_segments_per_gpu},
+                                                                                rebound<u64_t> {allocator})
+                                .value;
+        batch.segment_side = nk::tensor<late_interaction_side_t, rebound<late_interaction_side_t>, 1>::uninitialized(
+                                 {shape.max_segments_per_gpu}, rebound<late_interaction_side_t> {allocator})
+                                 .value;
         batch.tokens = nk::tensor<token_id_t, rebound<token_id_t>, 2>::uninitialized(
                            {shape.max_rows_per_gpu, shape.max_columns_per_row}, rebound<token_id_t> {allocator})
                            .value;
@@ -385,6 +433,7 @@ struct multimodal_batch {
                                                                                  rebound<u16_t> {allocator})
                                  .value;
         if (!batch.segment_offsets || !batch.segment_lengths || !batch.segment_modality || !batch.segment_bag ||
+            !batch.segment_role || !batch.segment_prefix_length || !batch.segment_key || !batch.segment_side ||
             !batch.tokens || !batch.image_shapes || !batch.video_shapes)
             return result_t::fail(status_t::bad_alloc_k, "batch allocation failed (rows={} segments={} columns={})",
                                   shape.max_rows_per_gpu, shape.max_segments_per_gpu, shape.max_columns_per_row);

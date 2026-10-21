@@ -38,40 +38,63 @@ inline constexpr u32_t positive_role_k = 0u, anchor_role_k = 1u, negative_role_k
 /** A segment shape table, @b [segments,2] for images and @b [segments,3] for videos. */
 using segment_shapes_span_t = nk::tensor_span<u16_t, 2>;
 
+/** The batch's per-segment tags the pairing kernel writes beside the geometry. */
+struct pair_tags_span_t_ {
+    modality_span_t modality {};
+    u32r1_span_t bag {};
+    nk::tensor_span<segment_role_t, 1> role {};
+    u32r1_span_t prefix_length {};
+    u64r1_span_t key {};
+    nk::tensor_span<late_interaction_side_t, 1> side {};
+};
+
 /**
- *  @brief Interleave the role tables into the batch's segment table, tagging each segment's bag.
+ *  @brief Interleave the role tables into the batch's segment table, tagging each segment's bag and
+ *      role.
  *
  *  Pair @c i takes its positive, its anchor shifted by @p anchor_begin , and with three roles its
- *  negative shifted by @p negative_begin . The positive and the anchor share bag @c i , a negative
- *  is bag @c pairs+i alone, and the segments past the pairs PAD at @p end with bag @p absent_bag .
+ *  negative shifted by @p negative_begin . All three share bag @c i , so the mixer routes a triplet
+ *  whole and the relations read its negative as a repel edge of its anchor. A text segment's prefix
+ *  length is the bytes its role's prefix kept, and the segments past the pairs PAD at @p end with
+ *  bag @p absent_bag . Keys and sides stay zero and @c none_k until mixtures name them.
  *
  *  @b grid_size grid-stride over the batch's segments; no dynamic shared memory.
  */
 static __global__ void pair_segments_kernel_(u32r2_view_t role_offsets, u32r2_view_t role_lengths,
                                              nk::tensor_view<modality_t, 2> role_modalities,
                                              nk::tensor_view<u16_t, 3> media_shapes, u32_t anchor_begin,
-                                             u32_t negative_begin, u32r1_span_t segment_offsets,
-                                             u32r1_span_t segment_lengths, modality_span_t segment_modality,
-                                             u32r1_span_t segment_bag, segment_shapes_span_t shapes, u32_t end,
-                                             u32_t absent_bag) {
+                                             u32_t negative_begin, u32_t anchor_prefix_bytes,
+                                             u32_t positive_prefix_bytes, u32r1_span_t segment_offsets,
+                                             u32r1_span_t segment_lengths, pair_tags_span_t_ tags,
+                                             segment_shapes_span_t shapes, u32_t end, u32_t absent_bag) {
     u32_t const segments = static_cast<u32_t>(segment_lengths.extent(0));
     u32_t const roles = static_cast<u32_t>(role_lengths.extent(0)), pairs = static_cast<u32_t>(role_lengths.extent(1));
     u32_t const stride = gridDim.x * blockDim.x;
     for (u32_t segment = blockIdx.x * blockDim.x + threadIdx.x; segment < segments; segment += stride) {
         u32_t const pair = segment / roles, role = segment % roles;
+        tags.key[segment] = 0u;
+        tags.side[segment] = late_interaction_side_t::none_k;
         if (pair >= pairs) {
             segment_offsets[segment] = end;
             segment_lengths[segment] = 0u;
-            segment_modality[segment] = modality_t::text_k;
-            segment_bag[segment] = absent_bag;
+            tags.modality[segment] = modality_t::text_k;
+            tags.bag[segment] = absent_bag;
+            tags.role[segment] = segment_role_t::anchor_k;
+            tags.prefix_length[segment] = 0u;
         }
         else {
             u32_t const begin = role == anchor_role_k ? anchor_begin : role == negative_role_k ? negative_begin : 0u;
+            u32_t const length = role_lengths[role, pair];
+            modality_t const modality = role_modalities[role, pair];
+            u32_t const prefix_bytes = role == anchor_role_k ? anchor_prefix_bytes : positive_prefix_bytes;
             segment_offsets[segment] = begin + role_offsets[role, pair];
-            segment_lengths[segment] = role_lengths[role, pair];
-            segment_modality[segment] = role_modalities[role, pair];
-            // A negative is a bag of one: it attracts nothing, and the ambient weight repels it.
-            segment_bag[segment] = role == negative_role_k ? pairs + pair : pair;
+            segment_lengths[segment] = length;
+            tags.modality[segment] = modality;
+            tags.bag[segment] = pair;
+            tags.role[segment] = role == anchor_role_k     ? segment_role_t::anchor_k
+                                 : role == negative_role_k ? segment_role_t::negative_k
+                                                           : segment_role_t::positive_k;
+            tags.prefix_length[segment] = modality == modality_t::text_k ? std::min(prefix_bytes, length) : 0u;
             if (role != anchor_role_k)
                 for (std::size_t axis = 0; axis != shapes.extent(1); ++axis)
                     shapes[segment, axis] = media_shapes[role == negative_role_k ? 1u : 0u, pair, axis];
@@ -376,12 +399,19 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
                                                                                 : segment_shapes_span_t {};
         u32_t const anchor_begin = static_cast<u32_t>((rows - anchor_rows) * columns);
         u32_t const negative_begin = static_cast<u32_t>(positive_rows * columns);
+        pair_tags_span_t_ tags;
+        tags.modality = loaded.segment_modality.span();
+        tags.bag = loaded.segment_bag.span();
+        tags.role = loaded.segment_role.span();
+        tags.prefix_length = loaded.segment_prefix_length.span();
+        tags.key = loaded.segment_key.span();
+        tags.side = loaded.segment_side.span();
         if (expected_t paired = launch_kernel(
                 &pair_segments_kernel_, dim3 {grid_size_for(segments), 1u, 1u},
                 dim3 {kernel_block_size_default_k, 1u, 1u}, gpu_stream, role_offsets, role_lengths, role_modalities,
-                media_shape_tables, anchor_begin, negative_begin, loaded.segment_offsets.span(),
-                loaded.segment_lengths.span(), loaded.segment_modality.span(), loaded.segment_bag.span(), shapes,
-                static_cast<u32_t>(anchor_begin + anchor_cells), static_cast<u32_t>(negatives ? 2 * pairs : pairs));
+                media_shape_tables, anchor_begin, negative_begin, static_cast<u32_t>(anchor_prefix_bytes),
+                static_cast<u32_t>(positive_prefix_bytes), loaded.segment_offsets.span(), loaded.segment_lengths.span(),
+                tags, shapes, static_cast<u32_t>(anchor_begin + anchor_cells), static_cast<u32_t>(pairs));
             !paired)
             return paired;
     }

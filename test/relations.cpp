@@ -9,9 +9,10 @@
  *  One case per mesh, @c {1,1,1} , @c {2,8,16} and @c {4,8,16} , each over keyed bags with PAD
  *  rows: a process numbers its vertices from its first GPU, so a partner's ID lands on the GPU
  *  that holds it, inside the world axis the loss reads, and the attract graph stays symmetric.
+ *  Two more cases pin the role rules of one bag and the key attraction across GPUs.
  */
 #include "core/mesh.hpp"                  // `mesh_shape_t`, `mesh_topology_t`, `make_mesh_shape`
-#include "core/contrastive_relations.cuh" // `relate_bags`
+#include "core/contrastive_relations.cuh" // `relate_roles`, `contrastive_edges`
 #include "harness.hpp"
 
 using namespace unum::uform::core;
@@ -23,11 +24,13 @@ static constexpr u32_t segments_k = 12u, max_world_gpus_k = 16u;
 /** The cap of attract edges one GPU's bags name: a segment in a bag of three attracts two. */
 static constexpr u32_t max_edges_k = 2u * segments_k;
 
+/** The host-only edge owner the cases build into. */
+using host_edges_t = contrastive_edges<nk::aligned_allocator<b8_t>>;
+
 /** One GPU's attract rows by global vertex ID. */
 struct gpu_relations_t {
     u32_t offsets[segments_k + 1] = {};
     u32_t ids[max_edges_k] = {};
-    f32_t weights[max_edges_k] = {};
     u32_t edges = 0;
 };
 
@@ -64,18 +67,29 @@ static void fill_world_(world_columns_t &world, u32_t world_gpus, u64_t seed) no
     }
 }
 
-/** Build the relations of every GPU @p topology drives into @p relations , indexed by world GPU. */
+/** Build the relations of every GPU @p topology drives into @p relations , indexed by world GPU:
+ *  every bag's first segment anchors it and the rest are its positives. */
 [[nodiscard]] static bool relate_process_(mesh_topology_t const &topology, world_columns_t const &world,
                                           gpu_relations_t *relations) noexcept {
+    expected<host_edges_t> made = host_edges_t::make(segments_k, max_edges_k);
+    if (!made) return false;
+    host_edges_t &edges = made.value_;
     for (u32_t member = 0; member != topology.shape.gpus_per_host_domain; ++member) {
         u32_t const gpu = topology.first_gpu_index() + member;
+        segment_role_t roles[segments_k];
+        for (u32_t segment = 0; segment != segments_k; ++segment)
+            roles[segment] = segment != 0 && world.bags[gpu][segment - 1] == world.bags[gpu][segment]
+                                 ? segment_role_t::positive_k
+                                 : segment_role_t::anchor_k;
+        expected_t related = relate_roles(u32r1_view_t {world.bags[gpu], segments_k}, {roles, segments_k},
+                                          u32r1_view_t {world.lengths[gpu], segments_k}, {}, {}, gpu * segments_k,
+                                          edges);
+        if (!related || edges.repel().ids.extent(0) != 0 || edges.ignore().ids.extent(0) != 0) return false;
+        contrastive_edges_view_t const attract = edges.attract();
         gpu_relations_t &into = relations[gpu];
-        expected<u32_t> written = relate_bags(
-            u32r1_view_t {world.bags[gpu], segments_k}, u32r1_view_t {world.lengths[gpu], segments_k}, gpu * segments_k,
-            u32r1_span_t {into.offsets, segments_k + 1}, u32r1_span_t {into.ids, max_edges_k},
-            f32r1_span_t {into.weights, max_edges_k});
-        if (!written) return false;
-        into.edges = *written;
+        into.edges = static_cast<u32_t>(attract.ids.extent(0));
+        for (u32_t row = 0; row != segments_k + 1; ++row) into.offsets[row] = attract.offsets[row];
+        for (u32_t edge = 0; edge != into.edges; ++edge) into.ids[edge] = attract.ids[edge];
     }
     return true;
 }
@@ -125,10 +139,88 @@ static void slices_match_world(test_suite_t &suite, u32_t host, u32_t multimem, 
     }
 }
 
+/** The run of @p row in @p set as one comparable list of global IDs and weights. */
+[[nodiscard]] static bool row_is_(contrastive_edges_view_t set, u32_t row, std::initializer_list<u32_t> ids,
+                                  std::initializer_list<f32_t> weights) noexcept {
+    u32_t const begin = set.offsets[row], end = set.offsets[row + 1];
+    if (end - begin != ids.size()) return false;
+    u32_t const *const expected_ids = ids.begin();
+    f32_t const *const expected_weights = weights.begin();
+    for (u32_t index = 0; index != ids.size(); ++index) {
+        if (set.ids[begin + index] != expected_ids[index]) return false;
+        if (weights.size() != 0 && set.weights[begin + index] != expected_weights[index]) return false;
+    }
+    return true;
+}
+
+/** One bag of an anchor, two positives and two weighted negatives, then a PAD and a singleton, from
+ *  vertex 100: the anchor and positives attract each other, the anchor and each negative repel each
+ *  other at the negative's weight, every other pair inside the bag is ignored, and no vertex ever
+ *  names itself. */
+static void bag_roles(test_suite_t &suite) {
+    constexpr u32_t segments = 7, base = 100;
+    using role_t = segment_role_t;
+    u32_t const bags[segments] = {0, 0, 0, 0, 0, 1, 2};
+    u32_t const lengths[segments] = {4, 3, 2, 5, 1, 0, 6};
+    role_t const roles[segments] = {role_t::anchor_k,   role_t::positive_k, role_t::positive_k, role_t::negative_k,
+                                    role_t::negative_k, role_t::anchor_k,   role_t::anchor_k};
+    f32_t const weights[segments] = {1.0f, 1.0f, 1.0f, 2.0f, 0.5f, 1.0f, 1.0f};
+    expected<host_edges_t> made = host_edges_t::make(segments, 16);
+    if (!made) return suite.check(false, "edges: {}", made.description_);
+    host_edges_t &edges = made.value_;
+    expected_t related = relate_roles(u32r1_view_t {bags, segments}, {roles, segments},
+                                      u32r1_view_t {lengths, segments}, f32r1_view_t {weights, segments}, {}, base,
+                                      edges);
+    if (!related) return suite.check(false, "relate: {}", related.description_);
+    contrastive_edges_view_t const attract = edges.attract(), repel = edges.repel(), ignore = edges.ignore();
+    suite.check(row_is_(attract, 0, {101, 102}, {1, 1}) && row_is_(repel, 0, {103, 104}, {2.0f, 0.5f}) &&
+                    row_is_(ignore, 0, {}, {}),
+                "the anchor attracts its positives and repels its negatives at their weights");
+    suite.check(
+        row_is_(attract, 1, {100, 102}, {1, 1}) && row_is_(repel, 1, {}, {}) && row_is_(ignore, 1, {103, 104}, {}),
+        "a positive attracts the anchor and the other positive and ignores the negatives");
+    suite.check(
+        row_is_(attract, 3, {}, {}) && row_is_(repel, 3, {100}, {2.0f}) && row_is_(ignore, 3, {101, 102, 104}, {}),
+        "a negative repels the anchor at its own weight and ignores the rest of its bag");
+    bool const inert = row_is_(attract, 5, {}, {}) && row_is_(repel, 5, {}, {}) && row_is_(ignore, 5, {}, {}) &&
+                       row_is_(attract, 6, {}, {}) && row_is_(repel, 6, {}, {}) && row_is_(ignore, 6, {}, {});
+    suite.check(inert, "a PAD vertex and a singleton bag name no edge");
+}
+
+/** Keys across GPUs: two GPUs of four segments, each holding a pair whose anchor carries key 7, so
+ *  each anchor attracts the other GPU's anchor as well as its own positive; a PAD key never
+ *  attracts, and a keyed negative is refused. */
+static void world_keys(test_suite_t &suite) {
+    constexpr u32_t segments = 4, world = 2 * segments;
+    using role_t = segment_role_t;
+    u32_t const bags[segments] = {0, 0, 1, 2};
+    u32_t const lengths[segments] = {3, 3, 2, 0};
+    role_t const roles[segments] = {role_t::anchor_k, role_t::positive_k, role_t::anchor_k, role_t::anchor_k};
+    u64_t keys[world] = {7, 0, 9, 0, 7, 0, 5, 0};
+    expected<host_edges_t> made = host_edges_t::make(segments, 8);
+    if (!made) return suite.check(false, "edges: {}", made.description_);
+    host_edges_t &edges = made.value_;
+    expected_t related = relate_roles(u32r1_view_t {bags, segments}, {roles, segments},
+                                      u32r1_view_t {lengths, segments}, {}, u64r1_view_t {keys, world}, segments,
+                                      edges);
+    if (!related) return suite.check(false, "relate: {}", related.description_);
+    contrastive_edges_view_t const attract = edges.attract();
+    suite.check(row_is_(attract, 0, {0, 5}, {1, 1}),
+                "GPU 1's anchor attracts GPU 0's same-key anchor and its positive");
+    suite.check(row_is_(attract, 2, {}, {}) && row_is_(attract, 3, {}, {}), "unmatched and PAD keys attract nothing");
+    role_t const keyed_negative[segments] = {role_t::anchor_k, role_t::negative_k, role_t::anchor_k, role_t::anchor_k};
+    keys[segments + 1] = 3;
+    suite.check(!relate_roles(u32r1_view_t {bags, segments}, {keyed_negative, segments},
+                              u32r1_view_t {lengths, segments}, {}, u64r1_view_t {keys, world}, segments, edges),
+                "a negative carrying a key is refused");
+}
+
 int main(int, char **argv) {
     test_suite_t suite = test_suite_t::make(argv[0]);
     suite.run("world/1-1-1", slices_match_world, 1u, 1u, 1u);
     suite.run("world/2-8-16", slices_match_world, 2u, 8u, 16u);
     suite.run("world/4-8-16", slices_match_world, 4u, 8u, 16u);
+    suite.run("roles/bag", bag_roles);
+    suite.run("roles/keys", world_keys);
     return suite.finish();
 }

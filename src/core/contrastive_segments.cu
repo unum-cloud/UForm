@@ -76,136 +76,33 @@ static __global__ void contrastive_prefix_norms_kernel_(bf16r2_view_t embeddings
 }
 
 /**
- *  @brief The scaled-cosine scaling of one subgraph block: @c scaled_cosine[p,v,n] = β_v·raw/(‖v‖·‖n‖)
- *      (β·cos, @b no bias) with the floored denominator — the epilogue of the tensor-core dot products.
+ *  @brief The scaled cosines of every subgraph: @c logits[p,s,v,n] = β_v·raw/(‖v‖·‖n‖) , that is
+ *      β·cos with @b no bias, with the floored denominator — the epilogue of the tensor-core dot
+ *      products.
  *
- *  __grid_size__ @c [ceil(K·R·Rc/block),1,1] ; grid-stride over cells; no dynamic shared memory.
+ *  __grid_size__ @c [K·S·R·Rc/block,1,1] rounded up; grid-stride over cells; no dynamic shared
+ *  memory.
  */
-static __global__ void contrastive_scaled_cosine_kernel_(f32r3_view_t raw_dot, f32r2_view_t from_vertex_norms,
-                                                         f32r2_view_t to_vertex_norms, contrastive_recipe_t recipe,
-                                                         f32r3_span_t scaled_cosine) {
-    std::size_t const num_vertices = raw_dot.extent(1);
-    std::size_t const num_neighbors = raw_dot.extent(2);
-    std::size_t const total = raw_dot.extent(0) * num_vertices * num_neighbors;
+static __global__ void contrastive_scaled_cosine_kernel_(f32r4_view_t raw_dot, f32r2_view_t from_vertex_norms,
+                                                         f32r3_view_t to_vertex_norms, contrastive_recipe_t recipe,
+                                                         f32r4_span_t logits) {
+    std::size_t const subgraphs = raw_dot.extent(1), num_vertices = raw_dot.extent(2);
+    std::size_t const num_neighbors = raw_dot.extent(3);
+    std::size_t const total = raw_dot.extent(0) * subgraphs * num_vertices * num_neighbors;
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
     for (std::size_t cell = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; cell < total;
          cell += stride) {
-        std::size_t const prefix_index = cell / (num_vertices * num_neighbors);
+        std::size_t const prefix_index = cell / (subgraphs * num_vertices * num_neighbors);
+        std::size_t const subgraph_index = (cell / (num_vertices * num_neighbors)) % subgraphs;
         std::size_t const vertex_index = (cell / num_neighbors) % num_vertices;
         std::size_t const neighbor_index = cell % num_neighbors;
         f32_t const denominator = from_vertex_norms[prefix_index, vertex_index] *
-                                  to_vertex_norms[prefix_index, neighbor_index];
+                                  to_vertex_norms[subgraph_index, prefix_index, neighbor_index];
         f32_t const cosine = denominator > cosine_denominator_floor_k
-                                 ? raw_dot[prefix_index, vertex_index, neighbor_index] / denominator
+                                 ? raw_dot[prefix_index, subgraph_index, vertex_index, neighbor_index] / denominator
                                  : 0.0f;
-        scaled_cosine[prefix_index, vertex_index, neighbor_index] =
+        logits[prefix_index, subgraph_index, vertex_index, neighbor_index] =
             contrastive_from_vertex_beta_(recipe, static_cast<u32_t>(vertex_index)) * cosine;
-    }
-}
-
-/**
- *  @brief Per-from-vertex weight totals by sign — the two @b unsigned sums @c Σw⁺(i) / @c Σw⁻(i) over one
- *      subgraph — the score-free pre-pass supplying the balanced-reduction denominators, resolved pair by
- *      pair through the relation graph.
- *
- *  Run once per subgraph; the row totals accumulate serially on the stream — no atomics.
- *
- *  __grid_size__ @c [num_vertices,1,1] ; one CTA per vertex row; threads stripe the subgraph's rows; no
- *  dynamic shared memory.
- */
-static __global__ void contrastive_weight_totals_by_sign_kernel_(f32r1_span_t pos_weight_row,
-                                                                 f32r1_span_t neg_weight_row,
-                                                                 contrastive_relations_view_t relations,
-                                                                 std::size_t num_neighbors, std::size_t neighbor_base) {
-    std::size_t const num_vertices = pos_weight_row.extent(0);
-    std::size_t const vertex_index = blockIdx.x;
-    if (vertex_index >= num_vertices) return;
-    f32_t thread_pos = 0.0f, thread_neg = 0.0f;
-    for (std::size_t neighbor_local = threadIdx.x; neighbor_local < num_neighbors; neighbor_local += blockDim.x) {
-        contrastive_pair_relation_t const relation = contrastive_pair_relation(
-            relations, static_cast<u32_t>(vertex_index), static_cast<u32_t>(neighbor_base + neighbor_local));
-        if (relation.target > 0.0f) thread_pos += relation.weight;
-        else if (relation.target < 0.0f) thread_neg += relation.weight;
-    }
-    f32_t const block_pos = block_reduce_broadcast<kernel_block_size_default_k>(thread_pos);
-    f32_t const block_neg = block_reduce_broadcast<kernel_block_size_default_k>(thread_neg);
-    if (threadIdx.x == 0u) {
-        pos_weight_row[vertex_index] += block_pos;
-        neg_weight_row[vertex_index] += block_neg;
-    }
-}
-
-/**
- *  @brief NaN-safe balanced weighted sigmoid-BCE over one subgraph block, all prefixes fused: writes the
- *      @b final per-vertex-scaled @c dL/d(logit) and accumulates the four per-vertex rows (softplus
- *      masses, bias and log-β gradient summands).
- *
- *  A non-finite @c t·logit leaves the pair's gradient zero; a @c w==0 pair is skipped in place.
- *
- *  __grid_size__ @c [num_vertices,1,1] ; one CTA per vertex row; the prefix loop lives inside the CTA and
- *  the threads stripe the subgraph's rows, so the row accumulators stay race-free; no dynamic shared
- *  memory.
- */
-static __global__ void contrastive_bce_balanced_kernel_(
-    f32r3_view_t scaled_cosine, f32r3_span_t logit_grad, f32r1_view_t pos_weight_row, f32r1_view_t neg_weight_row,
-    f32r1_span_t pos_loss_row, f32r1_span_t neg_loss_row, f32r1_span_t bias_grad_row,
-    f32r1_span_t log_inverse_temperature_grad_row, contrastive_relations_view_t relations, contrastive_recipe_t recipe,
-    f32r1_view_t live_vertices, std::size_t neighbor_base) {
-    std::size_t const num_vertices = pos_loss_row.extent(0);
-    std::size_t const num_neighbors = scaled_cosine.extent(2);
-    std::size_t const prefix_count = scaled_cosine.extent(0);
-    std::size_t const vertex_index = blockIdx.x;
-    if (vertex_index >= num_vertices) return;
-    f32_t const pos_scale = 1.0f / (std::fmax(pos_weight_row[vertex_index], weight_sum_floor_k) * live_vertices[0]);
-    f32_t const neg_scale = 1.0f / (std::fmax(neg_weight_row[vertex_index], weight_sum_floor_k) * live_vertices[0]);
-    f32_t const bias = contrastive_from_vertex_bias_(recipe, static_cast<u32_t>(vertex_index));
-    f32_t thread_pos_loss = 0.0f, thread_neg_loss = 0.0f;
-    f32_t thread_bias_grad = 0.0f, thread_log_inverse_temperature_grad = 0.0f;
-    for (std::size_t prefix_index = 0; prefix_index != prefix_count; ++prefix_index) {
-        for (std::size_t neighbor_local = threadIdx.x; neighbor_local < num_neighbors; neighbor_local += blockDim.x) {
-            contrastive_pair_relation_t const relation = contrastive_pair_relation(
-                relations, static_cast<u32_t>(vertex_index), static_cast<u32_t>(neighbor_base + neighbor_local));
-            if (relation.weight == 0.0f) {
-                logit_grad[prefix_index, vertex_index, neighbor_local] = 0.0f;
-                continue;
-            }
-            f32_t const logit = scaled_cosine[prefix_index, vertex_index, neighbor_local] + bias;
-            f32_t const signed_logit = relation.target * logit;
-            f32_t cell_grad = 0.0f;
-            if (isfinite(signed_logit)) {
-                // Numerically-stable sigmoid + softplus, weighted by the per-cell weight and scaled by
-                // the sign's own balanced denominator.
-
-                f32_t sigmoid_value;
-                if (signed_logit >= 0.0f) sigmoid_value = 1.0f / (1.0f + expf(-signed_logit));
-                else {
-                    f32_t const exp_positive = expf(signed_logit);
-                    sigmoid_value = exp_positive / (1.0f + exp_positive);
-                }
-                f32_t const negated = -signed_logit;
-                f32_t const softplus = fmaxf(negated, 0.0f) + log1pf(expf(-fabsf(negated)));
-                bool const is_positive = relation.target > 0.0f;
-                if (is_positive) thread_pos_loss += relation.weight * softplus;
-                else thread_neg_loss += relation.weight * softplus;
-                cell_grad = relation.weight * relation.target * (sigmoid_value - 1.0f) *
-                            (is_positive ? pos_scale : neg_scale);
-                thread_bias_grad += cell_grad;
-                thread_log_inverse_temperature_grad += cell_grad *
-                                                       scaled_cosine[prefix_index, vertex_index, neighbor_local];
-            }
-            logit_grad[prefix_index, vertex_index, neighbor_local] = cell_grad;
-        }
-    }
-    f32_t const block_pos_loss = block_reduce_broadcast<kernel_block_size_default_k>(thread_pos_loss);
-    f32_t const block_neg_loss = block_reduce_broadcast<kernel_block_size_default_k>(thread_neg_loss);
-    f32_t const block_bias_grad = block_reduce_broadcast<kernel_block_size_default_k>(thread_bias_grad);
-    f32_t const block_log_inverse_temperature_grad = block_reduce_broadcast<kernel_block_size_default_k>(
-        thread_log_inverse_temperature_grad);
-    if (threadIdx.x == 0u) {
-        pos_loss_row[vertex_index] += block_pos_loss;
-        neg_loss_row[vertex_index] += block_neg_loss;
-        bias_grad_row[vertex_index] += block_bias_grad;
-        log_inverse_temperature_grad_row[vertex_index] += block_log_inverse_temperature_grad;
     }
 }
 
@@ -361,26 +258,236 @@ static __global__ void contrastive_to_vertex_self_fold_kernel_(bf16r2_view_t nei
 }
 
 /**
- *  @brief Balanced finalise: the rank-local loss summand plus the optional learnable-temperature / bias
- *      gradient summands scattered @b per pair type — fixed-order block reduces over the per-vertex
- *      rows.
+ *  @brief Elementwise Float32 → BFloat16 cast of a matrix into a same-shaped, possibly row-padded
+ *      destination.
  *
- *  __grid_size__ @c [1,1,1] ; one CTA, threads stripe the vertex rows once per pair type; no dynamic
+ *  __grid_size__ @c [rows·columns/block,1,1] rounded up; grid-stride; no dynamic shared memory.
+ */
+static __global__ void contrastive_cast_f32_to_bf16_kernel_(f32r2_view_t source, bf16r2_span_t destination) {
+    std::size_t const columns = source.extent(1), count = source.extent(0) * columns;
+    std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+    for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < count;
+         index += stride)
+        destination[index / columns, index % columns] = __float2bfloat16(source[index / columns, index % columns]);
+}
+
+/** The numerically stable logistic @c σ(value) . */
+[[nodiscard]] static __device__ f32_t contrastive_sigmoid_(f32_t value) noexcept {
+    if (value >= 0.0f) return 1.0f / (1.0f + std::exp(-value));
+    f32_t const exp_value = std::exp(value);
+    return exp_value / (1.0f + exp_value);
+}
+
+/** The numerically stable @c softplus(value)=log(1+e^value) . */
+[[nodiscard]] static __device__ f32_t contrastive_softplus_(f32_t value) noexcept {
+    return std::fmax(value, 0.0f) + std::log1p(std::exp(-std::fabs(value)));
+}
+
+/** Cell @c (prefix,row,candidate) of a @b [prefixes,subgraphs,rows,per_subgraph] stash by global
+ *  candidate. */
+[[nodiscard]] static __device__ f32_t &contrastive_stash_cell_(f32r4_span_t stash, std::size_t prefix, std::size_t row,
+                                                               std::size_t candidate) noexcept {
+    std::size_t const per_subgraph = stash.extent(3);
+    return stash[prefix, candidate / per_subgraph, row, candidate % per_subgraph];
+}
+
+/**
+ *  @brief The balanced sigmoid BCE over whole anchor rows, all prefixes fused, in place: the signed
+ *      weight totals over the row first, then every cell's @c d(loss)/d(logit) over its scaled
+ *      score, and the row's loss, bias and log-β summands.
+ *
+ *  A non-finite @c t·logit leaves the pair's gradient zero; a @c w==0 pair is skipped in place.
+ *
+ *  __grid_size__ @c [rows,1,1] ; one CTA per row, the threads stripe the candidates; no dynamic
  *  shared memory.
  */
-static __global__ void contrastive_finalize_kernel_(f32r1_view_t pos_loss_row, f32r1_view_t neg_loss_row,
-                                                    f32r1_view_t pos_weight_row, f32r1_view_t neg_weight_row,
-                                                    f32r1_view_t bias_grad_row,
-                                                    f32r1_view_t log_inverse_temperature_grad_row,
-                                                    contrastive_recipe_t recipe, f32r1_span_t loss_out,
-                                                    f32r1_span_t bias_grad, f32r1_span_t log_inverse_temperature_grad,
-                                                    f32r1_view_t live_vertices) {
-    std::size_t const num_vertices = pos_loss_row.extent(0);
+static __global__ void contrastive_balanced_bce_kernel_(f32r4_span_t logits, f32r2_span_t accumulator,
+                                                        contrastive_relations_view_t relations,
+                                                        contrastive_recipe_t recipe, f32r1_view_t live_anchors) {
+    std::size_t const prefixes = logits.extent(0), rows = logits.extent(2);
+    std::size_t const candidates = logits.extent(1) * logits.extent(3);
+    u32_t const row = blockIdx.x;
+    if (row >= rows) return;
+    f32_t thread_positive = 0.0f, thread_negative = 0.0f;
+    for (std::size_t candidate = threadIdx.x; candidate < candidates; candidate += blockDim.x) {
+        contrastive_pair_relation_t const relation = contrastive_pair_relation(relations, row, u32_t(candidate));
+        if (relation.target > 0.0f) thread_positive += relation.weight;
+        else if (relation.target < 0.0f) thread_negative += relation.weight;
+    }
+    f32_t const live = std::fmax(live_anchors[0], 1.0f);
+    f32_t const positive_weight = block_reduce_broadcast<kernel_block_size_default_k>(thread_positive);
+    f32_t const negative_weight = block_reduce_broadcast<kernel_block_size_default_k>(thread_negative);
+    f32_t const positive_scale = 1.0f / (std::fmax(positive_weight, weight_sum_floor_k) * live);
+    f32_t const negative_scale = 1.0f / (std::fmax(negative_weight, weight_sum_floor_k) * live);
+    f32_t const bias = contrastive_from_vertex_bias_(recipe, row);
+    f32_t thread_loss = 0.0f, thread_bias_grad = 0.0f, thread_log_inverse_temperature_grad = 0.0f;
+    for (std::size_t prefix = 0; prefix != prefixes; ++prefix)
+        for (std::size_t candidate = threadIdx.x; candidate < candidates; candidate += blockDim.x) {
+            f32_t &cell = contrastive_stash_cell_(logits, prefix, row, candidate);
+            contrastive_pair_relation_t const relation = contrastive_pair_relation(relations, row, u32_t(candidate));
+            f32_t const scaled = cell;
+            f32_t const signed_logit = relation.target * (scaled + bias);
+            f32_t cell_grad = 0.0f;
+            if (relation.weight != 0.0f && isfinite(signed_logit)) {
+                f32_t const scale = relation.target > 0.0f ? positive_scale : negative_scale;
+                thread_loss += relation.weight * contrastive_softplus_(-signed_logit) * scale;
+                cell_grad = relation.weight * relation.target * (contrastive_sigmoid_(signed_logit) - 1.0f) * scale;
+                thread_bias_grad += cell_grad;
+                thread_log_inverse_temperature_grad += cell_grad * scaled;
+            }
+            cell = cell_grad;
+        }
+    f32_t const loss = block_reduce_broadcast<kernel_block_size_default_k>(thread_loss);
+    f32_t const bias_grad = block_reduce_broadcast<kernel_block_size_default_k>(thread_bias_grad);
+    f32_t const log_inverse_temperature_grad = block_reduce_broadcast<kernel_block_size_default_k>(
+        thread_log_inverse_temperature_grad);
+    if (threadIdx.x != 0u) return;
+    accumulator[static_cast<u32_t>(pair_loss_row_t::loss_k), row] = loss;
+    accumulator[static_cast<u32_t>(pair_loss_row_t::bias_grad_k), row] = bias_grad;
+    accumulator[static_cast<u32_t>(pair_loss_row_t::log_inverse_temperature_grad_k), row] =
+        log_inverse_temperature_grad;
+}
+
+/**
+ *  @brief The ranked BCE of one prefix over whole anchor rows: every positive's scaled score
+ *      against every negative's, written into @p gradients while @p logits keeps the scores the
+ *      other cells read.
+ *
+ *  Row @c i 's positives are its attract run, each resolved again so PAD and ignores win, or its
+ *  own copy on the self-edge default. Each pass over the negatives sums
+ *  @ref ranked_positives_per_pass_k positives at once: a negative's gradient accumulates across the
+ *  passes in its own cell, and each positive's total folds once at the pass's end in a fixed order.
+ *  The first prefix assigns the row's summands and every later one adds; the bias cancels, so its
+ *  summand stays zero.
+ *
+ *  __grid_size__ @c [rows,1,1] ; one CTA per row, the threads stripe the candidates; no dynamic
+ *  shared memory.
+ */
+static __global__ void contrastive_ranked_bce_kernel_(f32r4_view_t logits, f32r2_span_t gradients,
+                                                      f32r2_span_t accumulator, contrastive_relations_view_t relations,
+                                                      f32r1_view_t live_anchors, u32_t prefix) {
+    std::size_t const rows = logits.extent(2), per_subgraph = logits.extent(3);
+    std::size_t const candidates = logits.extent(1) * per_subgraph;
+    u32_t const row = blockIdx.x;
+    if (row >= rows) return;
+    auto const score = [&](std::size_t candidate) noexcept -> f32_t {
+        return logits[prefix, candidate / per_subgraph, row, candidate % per_subgraph];
+    };
+    bool const self_edges = !relations.has_explicit_attract_edges();
+    std::size_t const self = relations.self_edge_base + row;
+    u32_t const positives_begin = self_edges ? 0u : relations.attract_offsets[row];
+    u32_t const positives_end = self_edges ? (self < candidates ? 1u : 0u) : relations.attract_offsets[row + 1u];
+    u32_t const positives = positives_end - positives_begin;
+    auto const positive_at = [&](u32_t index) noexcept -> u32_t {
+        return self_edges ? u32_t(self) : relations.attract_ids[positives_begin + index];
+    };
+
+    f32_t thread_positive = 0.0f, thread_negative = 0.0f;
+    for (u32_t index = threadIdx.x; index < positives; index += blockDim.x) {
+        contrastive_pair_relation_t const relation = contrastive_pair_relation(relations, row, positive_at(index));
+        if (relation.target > 0.0f) thread_positive += relation.weight;
+    }
+    for (std::size_t candidate = threadIdx.x; candidate < candidates; candidate += blockDim.x) {
+        contrastive_pair_relation_t const relation = contrastive_pair_relation(relations, row, u32_t(candidate));
+        if (relation.target < 0.0f) thread_negative += relation.weight;
+    }
+    f32_t const positive_weight = block_reduce_broadcast<kernel_block_size_default_k>(thread_positive);
+    f32_t const negative_weight = block_reduce_broadcast<kernel_block_size_default_k>(thread_negative);
+    f32_t const scale = 1.0f / (std::fmax(positive_weight * negative_weight, weight_sum_floor_k) *
+                                std::fmax(live_anchors[0], 1.0f));
+
+    f32_t thread_loss = 0.0f, thread_log_inverse_temperature_grad = 0.0f;
+    u32_t const passes = positives != 0u ? divide_round_up(positives, ranked_positives_per_pass_k) : 1u;
+    for (u32_t pass = 0; pass != passes; ++pass) {
+        f32_t positive_scores[ranked_positives_per_pass_k] = {}, positive_weights[ranked_positives_per_pass_k] = {};
+        u32_t positive_ids[ranked_positives_per_pass_k] = {};
+        for (u32_t entry = 0; entry != ranked_positives_per_pass_k; ++entry) {
+            u32_t const index = pass * ranked_positives_per_pass_k + entry;
+            if (index >= positives) continue;
+            u32_t const positive = positive_at(index);
+            contrastive_pair_relation_t const relation = contrastive_pair_relation(relations, row, positive);
+            if (relation.target <= 0.0f || relation.weight == 0.0f) continue;
+            positive_ids[entry] = positive;
+            positive_weights[entry] = relation.weight;
+            positive_scores[entry] = score(positive);
+        }
+        f32_t thread_pulls[ranked_positives_per_pass_k] = {};
+        for (std::size_t candidate = threadIdx.x; candidate < candidates; candidate += blockDim.x) {
+            contrastive_pair_relation_t const relation = contrastive_pair_relation(relations, row, u32_t(candidate));
+            bool const negative = relation.target < 0.0f && relation.weight != 0.0f;
+            f32_t cell_grad = pass != 0u && negative ? gradients[row, candidate] : 0.0f;
+            if (negative) {
+                f32_t const negative_score = score(candidate);
+                f32_t pushed = 0.0f;
+                for (u32_t entry = 0; entry != ranked_positives_per_pass_k; ++entry) {
+                    f32_t const margin = negative_score - positive_scores[entry];
+                    if (positive_weights[entry] == 0.0f || !isfinite(margin)) continue;
+                    f32_t const sigmoid = contrastive_sigmoid_(margin);
+                    pushed += positive_weights[entry] * sigmoid;
+                    thread_pulls[entry] += relation.weight * sigmoid;
+                    thread_loss += positive_weights[entry] * relation.weight * contrastive_softplus_(margin);
+                }
+                f32_t const pass_grad = relation.weight * pushed * scale;
+                cell_grad += pass_grad;
+                thread_log_inverse_temperature_grad += pass_grad * negative_score;
+            }
+            if (pass == 0u || negative) gradients[row, candidate] = cell_grad;
+        }
+        for (u32_t entry = 0; entry != ranked_positives_per_pass_k; ++entry) {
+            f32_t const pull = block_reduce_broadcast<kernel_block_size_default_k>(thread_pulls[entry]);
+            if (threadIdx.x != 0u || positive_weights[entry] == 0.0f) continue;
+            f32_t const positive_grad = -positive_weights[entry] * pull * scale;
+            gradients[row, positive_ids[entry]] = positive_grad;
+            thread_log_inverse_temperature_grad += positive_grad * positive_scores[entry];
+        }
+    }
+    f32_t const loss = block_reduce_broadcast<kernel_block_size_default_k>(thread_loss) * scale;
+    f32_t const log_inverse_temperature_grad = block_reduce_broadcast<kernel_block_size_default_k>(
+        thread_log_inverse_temperature_grad);
+    if (threadIdx.x != 0u) return;
+    u32_t const loss_row = static_cast<u32_t>(pair_loss_row_t::loss_k);
+    u32_t const bias_row = static_cast<u32_t>(pair_loss_row_t::bias_grad_k);
+    u32_t const beta_row = static_cast<u32_t>(pair_loss_row_t::log_inverse_temperature_grad_k);
+    accumulator[loss_row, row] = (prefix != 0u ? accumulator[loss_row, row] : 0.0f) + loss;
+    accumulator[bias_row, row] = 0.0f;
+    accumulator[beta_row, row] = (prefix != 0u ? accumulator[beta_row, row] : 0.0f) + log_inverse_temperature_grad;
+}
+
+/**
+ *  @brief Copy one prefix's ranked @p gradients back into its @b [subgraphs,rows,per_subgraph]
+ *      plane of the stash.
+ *
+ *  __grid_size__ grid-stride over the plane; no dynamic shared memory.
+ */
+static __global__ void contrastive_ranked_copy_kernel_(f32r2_view_t gradients, f32r3_span_t plane) {
+    std::size_t const rows = plane.extent(1), per_subgraph = plane.extent(2);
+    std::size_t const cells = plane.extent(0) * rows * per_subgraph;
+    f32r3_view_t const row_planes = gradients.reshape<3>({rows, plane.extent(0), per_subgraph});
+    std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+    for (std::size_t cell = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; cell < cells;
+         cell += stride) {
+        std::size_t const subgraph = cell / (rows * per_subgraph), row = (cell / per_subgraph) % rows;
+        std::size_t const column = cell % per_subgraph;
+        plane[subgraph, row, column] = row_planes[row, subgraph, column];
+    }
+}
+
+/**
+ *  @brief The pair loss's finalise: the rank-local loss summand and the optional temperature
+ *      gradient summands of every group, in fixed-order block reduces over the per-row accumulator.
+ *
+ *  __grid_size__ @c [1,1,1] ; one CTA, threads stripe the rows once per group; no dynamic shared
+ *  memory.
+ */
+static __global__ void contrastive_pair_loss_finalize_kernel_(f32r2_view_t accumulator, contrastive_recipe_t recipe,
+                                                              f32r1_span_t loss_out, f32r1_span_t bias_grad,
+                                                              f32r1_span_t log_inverse_temperature_grad) {
+    std::size_t const rows = accumulator.extent(1);
+    u32_t const loss_row = static_cast<u32_t>(pair_loss_row_t::loss_k);
+    u32_t const bias_row = static_cast<u32_t>(pair_loss_row_t::bias_grad_k);
+    u32_t const beta_row = static_cast<u32_t>(pair_loss_row_t::log_inverse_temperature_grad_k);
     f32_t thread_loss = 0.0f;
-    for (std::size_t vertex_index = threadIdx.x; vertex_index < num_vertices; vertex_index += blockDim.x)
-        thread_loss += (pos_loss_row[vertex_index] / fmaxf(pos_weight_row[vertex_index], weight_sum_floor_k) +
-                        neg_loss_row[vertex_index] / fmaxf(neg_weight_row[vertex_index], weight_sum_floor_k)) /
-                       live_vertices[0];
+    for (std::size_t row = threadIdx.x; row < rows; row += blockDim.x) thread_loss += accumulator[loss_row, row];
     f32_t const total_loss = block_reduce_broadcast<kernel_block_size_default_k>(thread_loss);
     if (threadIdx.x == 0u) loss_out[0] = total_loss;
 
@@ -389,37 +496,84 @@ static __global__ void contrastive_finalize_kernel_(f32r1_view_t pos_loss_row, f
     if (!wants_bias && !wants_log_inverse_temperature) return;
     for (u32_t temperature_group = 0; temperature_group != recipe.temperature_group_count(); ++temperature_group) {
         f32_t thread_bias_grad = 0.0f, thread_log_inverse_temperature_grad = 0.0f;
-        for (std::size_t vertex_index = threadIdx.x; vertex_index < num_vertices; vertex_index += blockDim.x) {
+        for (std::size_t row = threadIdx.x; row < rows; row += blockDim.x) {
             u32_t const resolved_temperature_group =
                 recipe.from_vertex_temperature_group.empty()
                     ? 0u
-                    : static_cast<u32_t>(recipe.from_vertex_temperature_group[static_cast<u32_t>(vertex_index)]);
+                    : static_cast<u32_t>(recipe.from_vertex_temperature_group[static_cast<u32_t>(row)]);
             if (resolved_temperature_group != temperature_group) continue;
-            thread_bias_grad += bias_grad_row[vertex_index];
-            thread_log_inverse_temperature_grad += log_inverse_temperature_grad_row[vertex_index];
+            thread_bias_grad += accumulator[bias_row, row];
+            thread_log_inverse_temperature_grad += accumulator[beta_row, row];
         }
-        f32_t const temperature_group_bias_grad = block_reduce_broadcast<kernel_block_size_default_k>(thread_bias_grad);
-        f32_t const temperature_group_log_inverse_temperature_grad =
-            block_reduce_broadcast<kernel_block_size_default_k>(thread_log_inverse_temperature_grad);
+        f32_t const group_bias_grad = block_reduce_broadcast<kernel_block_size_default_k>(thread_bias_grad);
+        f32_t const group_log_inverse_temperature_grad = block_reduce_broadcast<kernel_block_size_default_k>(
+            thread_log_inverse_temperature_grad);
         if (threadIdx.x == 0u) {
-            if (wants_bias) bias_grad[temperature_group] = temperature_group_bias_grad;
+            if (wants_bias) bias_grad[temperature_group] = group_bias_grad;
             if (wants_log_inverse_temperature)
-                log_inverse_temperature_grad[temperature_group] = temperature_group_log_inverse_temperature_grad;
+                log_inverse_temperature_grad[temperature_group] = group_log_inverse_temperature_grad;
         }
     }
 }
 
-/**
- *  @brief Elementwise Float32 → BFloat16 cast of a matrix into a same-shaped, possibly row-padded destination.
- *
- *  __grid_size__ @c [ceil(rows·columns/block),1,1] ; grid-stride; no dynamic shared memory.
- */
-static __global__ void contrastive_cast_f32_to_bf16_kernel_(f32r2_view_t source, bf16r2_span_t destination) {
-    std::size_t const columns = source.extent(1), count = source.extent(0) * columns;
-    std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < count;
-         index += stride)
-        destination[index / columns, index % columns] = __float2bfloat16(source[index / columns, index % columns]);
+expected<contrastive_pair_loss_t> contrastive_pair_loss_t::make(gpu_arena_t &arena, u32_t rows,
+                                                                u32_t candidates_per_row,
+                                                                contrastive_pair_loss_form_t form) noexcept {
+    using result_t = expected<contrastive_pair_loss_t>;
+    if (rows == 0 || candidates_per_row == 0)
+        return result_t::fail(status_t::shape_unsupported_k, "a pair loss needs rows and candidates ({}x{})", rows,
+                              candidates_per_row);
+    contrastive_pair_loss_t loss;
+    loss.form_ = form;
+    gpu_arena_alloc<f32_t> f32_alloc {arena};
+    loss.from_vertex_accumulator_ = f32r2_tensor_arena_t::uninitialized({3u, rows}, f32_alloc).value;
+    if (form == contrastive_pair_loss_form_t::ranked_k)
+        loss.ranked_grad_ = f32r2_tensor_arena_t::uninitialized({rows, candidates_per_row}, f32_alloc).value;
+    if (!loss.from_vertex_accumulator_ || (form == contrastive_pair_loss_form_t::ranked_k && !loss.ranked_grad_))
+        return result_t::fail(status_t::bad_alloc_k, "pair loss scratch allocation failed ({}x{}, arena_used={})", rows,
+                              candidates_per_row, arena.used());
+    return result_t {std::move(loss)};
+}
+
+expected_t contrastive_pair_loss_t::operator()(f32r4_span_t logits, contrastive_relations_view_t relations,
+                                               contrastive_recipe_t recipe, f32r1_view_t live_anchors,
+                                               f32r1_span_t loss_out, gpu_stream_t &stream,
+                                               f32r1_span_t log_inverse_temperature_grad,
+                                               f32r1_span_t bias_grad) noexcept {
+    std::size_t const rows = from_vertex_accumulator_.extent(1);
+    std::size_t const candidates = logits.extent(1) * logits.extent(3);
+    if (logits.extent(2) != rows || relations.from_vertices_per_gpu() != rows)
+        return expected_t::fail(status_t::shape_unsupported_k, "{} logit rows and {} relation rows, {} baked",
+                                logits.extent(2), relations.from_vertices_per_gpu(), rows);
+    if (form_ == contrastive_pair_loss_form_t::ranked_k && candidates != ranked_grad_.extent(1))
+        return expected_t::fail(status_t::shape_unsupported_k, "{} candidates per row, {} baked", candidates,
+                                ranked_grad_.extent(1));
+    if (loss_out.empty() || live_anchors.empty())
+        return expected_t::fail(status_t::invalid_input_k, "the loss and the live count need one element each");
+    u32_t const groups = recipe.temperature_group_count();
+    if ((!bias_grad.empty() && bias_grad.extent(0) < groups) ||
+        (!log_inverse_temperature_grad.empty() && log_inverse_temperature_grad.extent(0) < groups))
+        return expected_t::fail(status_t::shape_unsupported_k, "temperature gradients must span the {} groups", groups);
+    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
+    dim3 const row_grid {static_cast<u32_t>(rows), 1u, 1u};
+    expected_t launched {};
+    if (form_ == contrastive_pair_loss_form_t::balanced_k)
+        launched = launch_kernel(&contrastive_balanced_bce_kernel_, row_grid, block_shape, stream, logits,
+                                 from_vertex_accumulator_.span(), relations, recipe, live_anchors);
+    for (u32_t prefix = 0; form_ == contrastive_pair_loss_form_t::ranked_k && launched && prefix != logits.extent(0);
+         ++prefix) {
+        launched = launch_kernel(&contrastive_ranked_bce_kernel_, row_grid, block_shape, stream, f32r4_view_t {logits},
+                                 ranked_grad_.span(), from_vertex_accumulator_.span(), relations, live_anchors, prefix);
+        f32r3_span_t const plane = logits[prefix, nk::slice];
+        if (launched)
+            launched = launch_kernel(&contrastive_ranked_copy_kernel_, dim3 {grid_size_for(plane.numel()), 1u, 1u},
+                                     block_shape, stream, ranked_grad_.view(), plane);
+    }
+    if (launched)
+        launched = launch_kernel(&contrastive_pair_loss_finalize_kernel_, dim3 {1u, 1u, 1u}, block_shape, stream,
+                                 from_vertex_accumulator_.view(), recipe, loss_out, bias_grad,
+                                 log_inverse_temperature_grad);
+    return launched;
 }
 
 expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena, contrastive_segments_config_t config,
@@ -454,24 +608,25 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
 
     std::size_t const rows = config.from_vertices_per_gpu, hidden = config.hidden;
     u32_t const to_vertices_per_gpu = config.to_vertices_per_gpu;
-    std::size_t const prefix_count = loss.prefixes_.size();
+    std::size_t const prefix_count = loss.prefixes_.size(), subgraphs = config.gpu_subgraphs_per_step;
     std::size_t const block_cells = prefix_count * rows * to_vertices_per_gpu;
+    std::size_t const stash_cells = block_cells * subgraphs;
     std::size_t const padded_rows = round_up_to_multiple(rows, std::size_t {8});
     std::size_t const padded_neighbors = round_up_to_multiple(to_vertices_per_gpu, std::size_t {8});
     gpu_arena_alloc<f32_t> f32_alloc {arena};
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<b8_t> byte_alloc {arena};
     loss.from_vertex_norms_ = f32r2_tensor_arena_t::uninitialized({prefix_count, rows}, f32_alloc).value;
-    loss.to_vertex_norms_ = f32r2_tensor_arena_t::uninitialized({prefix_count, to_vertices_per_gpu}, f32_alloc).value;
-    loss.raw_dot_ = f32r3_tensor_arena_t::uninitialized({prefix_count, rows, to_vertices_per_gpu}, f32_alloc).value;
-    loss.scaled_cosine_ =
-        f32r3_tensor_arena_t::uninitialized({prefix_count, rows, to_vertices_per_gpu}, f32_alloc).value;
-    loss.logit_grad_ = f32r3_tensor_arena_t::uninitialized({prefix_count, rows, to_vertices_per_gpu}, f32_alloc).value;
+    loss.to_vertex_norms_ =
+        f32r3_tensor_arena_t::uninitialized({subgraphs, prefix_count, to_vertices_per_gpu}, f32_alloc).value;
+    loss.raw_dot_ =
+        f32r4_tensor_arena_t::uninitialized({prefix_count, subgraphs, rows, to_vertices_per_gpu}, f32_alloc).value;
+    loss.logits_ =
+        f32r4_tensor_arena_t::uninitialized({prefix_count, subgraphs, rows, to_vertices_per_gpu}, f32_alloc).value;
     loss.raw_dot_grad_ =
         f32r3_tensor_arena_t::uninitialized({prefix_count, rows, to_vertices_per_gpu}, f32_alloc).value;
     loss.raw_dot_grad_bf16_ =
         bf16r3_tensor_arena_t::uninitialized({prefix_count, rows, padded_neighbors}, bf16_alloc).value;
-    loss.from_vertex_accumulator_ = f32r2_tensor_arena_t::uninitialized({6, rows}, f32_alloc).value;
     loss.live_vertices_ = f32r1_tensor_arena_t::uninitialized({1}, f32_alloc).value;
     loss.from_vertex_self_coefficients_ = f32r2_tensor_arena_t::uninitialized({prefix_count, rows}, f32_alloc).value;
     loss.to_vertex_self_coefficients_ =
@@ -482,14 +637,17 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
     loss.to_vertices_transposed_ = bf16r1_tensor_arena_t::uninitialized({hidden * padded_neighbors}, bf16_alloc).value;
     loss.gradient_transposed_ =
         bf16r1_tensor_arena_t::uninitialized({to_vertices_per_gpu * padded_rows}, bf16_alloc).value;
-    if (!loss.from_vertex_norms_ || !loss.to_vertex_norms_ || !loss.raw_dot_ || !loss.scaled_cosine_ ||
-        !loss.logit_grad_ || !loss.raw_dot_grad_ || !loss.raw_dot_grad_bf16_ || !loss.from_vertex_accumulator_ ||
-        !loss.live_vertices_ || !loss.from_vertex_self_coefficients_ || !loss.to_vertex_self_coefficients_ ||
-        !loss.from_vertices_grad_f32_ || !loss.from_vertices_grad_products_ || !loss.vertices_transposed_ ||
-        !loss.to_vertices_transposed_ || !loss.gradient_transposed_)
+    if (!loss.from_vertex_norms_ || !loss.to_vertex_norms_ || !loss.raw_dot_ || !loss.logits_ || !loss.raw_dot_grad_ ||
+        !loss.raw_dot_grad_bf16_ || !loss.live_vertices_ || !loss.from_vertex_self_coefficients_ ||
+        !loss.to_vertex_self_coefficients_ || !loss.from_vertices_grad_f32_ || !loss.from_vertices_grad_products_ ||
+        !loss.vertices_transposed_ || !loss.to_vertices_transposed_ || !loss.gradient_transposed_)
         return expected<contrastive_segments_t>::fail(status_t::bad_alloc_k,
                                                       "loss scratch allocation failed ({} cells, arena_used={})",
-                                                      block_cells, arena.used());
+                                                      stash_cells, arena.used());
+    expected<contrastive_pair_loss_t> pair_loss = contrastive_pair_loss_t::make(
+        arena, config.from_vertices_per_gpu, static_cast<u32_t>(subgraphs * to_vertices_per_gpu), config.pair_loss);
+    if (!pair_loss) return expected<contrastive_segments_t>::fail(std::move(pair_loss));
+    loss.pair_loss_ = std::move(pair_loss.value_);
 
     std::size_t packed_bytes = 0;
     for (u32_t segment = 0; segment != prefix_count; ++segment) {
@@ -563,12 +721,10 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
             "(neighbors={} base={} vertices={})",
             to_vertices_per_mesh, relations.self_edge_base, config_.from_vertices_per_gpu);
 
-    // Zero the accumulators: the six contiguous per-vertex rows and the Float32 owned-vertex force.
-    if (expected_t reset = zero_async(from_vertex_accumulator_.span(), stream); !reset) return reset;
+    // Zero the Float32 owned-vertex force; the pair loss writes every row of its own accumulator.
     for (f32r2_tensor_arena_t *const zeroed : {&from_vertices_grad_f32_, &from_vertices_grad_products_})
         if (expected_t reset = zero_async(zeroed->span(), stream); !reset) return reset;
 
-    f32r1_view_t const live_vertices = live_vertices_.view();
     u32_t const prefix_count = prefixes_.size();
     std::size_t const cells_per_prefix = static_cast<std::size_t>(config_.from_vertices_per_gpu) *
                                          config_.to_vertices_per_gpu;
@@ -579,24 +735,12 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
     dim3 const block_grid {grid_size_for(block_cells), 1u, 1u};
 
     // The scratch views the read-only kernel parameters bind to; the launcher copies raw bytes, so
-    // spans convert to views here, explicitly. The six accumulator rows are consecutive rows of one
-    // [6,from_vertices_per_gpu] tensor, so a single memset covers them all.
+    // spans convert to views here, explicitly.
 
-    f32r1_span_t const pos_weight_row = accumulator_row(from_vertex_accumulator_t::positive_weight_sum_k);
-    f32r1_span_t const neg_weight_row = accumulator_row(from_vertex_accumulator_t::negative_weight_sum_k);
-    f32r1_span_t const pos_loss_row = accumulator_row(from_vertex_accumulator_t::positive_softplus_mass_k);
-    f32r1_span_t const neg_loss_row = accumulator_row(from_vertex_accumulator_t::negative_softplus_mass_k);
-    f32r1_span_t const bias_grad_row = accumulator_row(from_vertex_accumulator_t::bias_grad_k);
-    f32r1_span_t const log_inverse_temperature_grad_row = accumulator_row(
-        from_vertex_accumulator_t::log_inverse_temperature_grad_k);
     f32r2_view_t const from_vertex_norms_view = from_vertex_norms_.view();
-    f32r2_view_t const to_vertex_norms_view = to_vertex_norms_.view();
-    f32r3_view_t const raw_dot_view = raw_dot_.view();
-    f32r3_view_t const scaled_cosine_view = scaled_cosine_.view();
-    f32r3_view_t const logit_grad_view = logit_grad_.view();
-    f32r3_view_t const raw_dot_grad_view = raw_dot_grad_.view();
     f32r2_view_t const from_vertex_self_view = from_vertex_self_coefficients_.view();
     f32r2_view_t const to_vertex_self_view = to_vertex_self_coefficients_.view();
+    f32r3_view_t const raw_dot_grad_view = raw_dot_grad_.view();
     std::size_t const num_neighbors = config_.to_vertices_per_gpu;
     std::size_t const rows = config_.from_vertices_per_gpu, hidden = config_.hidden;
     std::size_t const padded_rows = round_up_to_multiple(rows, std::size_t {8});
@@ -617,7 +761,7 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
         return multiplied;
     };
 
-    // Per-prefix owned-vertex norms, once; each subgraph recomputes only its own vertex norms.
+    // Per-prefix owned-vertex norms, once; each subgraph computes its own vertex norms.
 
     expected_t launched = launch_kernel(&contrastive_live_vertices_kernel_, dim3 {1u, 1u, 1u}, block_shape, stream,
                                         relations, to_vertices_per_mesh, live_vertices_.span());
@@ -627,48 +771,51 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
     if (launched) launched = transpose_bf16(vertices, vertices_transposed, stream);
     if (!launched) return launched;
 
-    // Signed Σw pre-pass over every subgraph: the per-vertex weight totals must span the whole
-    // global vertex axis before any BCE block runs.
+    // Score: every subgraph's raw dots per segment over the column slices of the full `[·,hidden]`
+    // tiles in that segment's prefix band; each plane adds the previous one, so plane p IS prefix
+    // p's raw dot.
     for (std::size_t subgraph_index = 0; subgraph_index != gpu_subgraphs.extent(0); ++subgraph_index) {
         gpu_subgraph_t const subgraph = gpu_subgraphs[subgraph_index];
-        launched = launch_kernel(&contrastive_weight_totals_by_sign_kernel_, vertex_grid, block_shape, stream,
-                                 pos_weight_row, neg_weight_row, relations, num_neighbors, subgraph.global_offset);
-        if (!launched) return launched;
-    }
-
-    for (std::size_t subgraph_index = 0; subgraph_index != gpu_subgraphs.extent(0); ++subgraph_index) {
-        gpu_subgraph_t const subgraph = gpu_subgraphs[subgraph_index];
-
         launched = launch_kernel(&contrastive_prefix_norms_kernel_, neighbor_grid, block_shape, stream,
-                                 subgraph.to_vertices, to_vertex_norms_.span(), prefixes_);
-        if (launched) launched = transpose_bf16(subgraph.to_vertices, to_vertices_transposed, stream);
+                                 subgraph.to_vertices, f32r2_span_t {to_vertex_norms_[subgraph_index, nk::slice]},
+                                 prefixes_);
         if (!launched) return launched;
-
-        // Dots per segment over the column slices of the full `[·,hidden]` tiles in this segment's prefix band;
-        // each plane adds the previous one, so plane p IS prefix p's raw dot.
         for (u32_t segment = 0; segment != prefix_count; ++segment) {
             u32_t const segment_begin = prefixes_.segment_begin(segment);
             u32_t const segment_width = prefixes_.segment_width(segment);
             auto const band = nk::range(segment_begin, segment_begin + segment_width);
-            f32r2_span_t const raw_dot_plane {raw_dot_.row(segment).data(), rows, num_neighbors};
+            f32r2_span_t const raw_dot_plane = raw_dot_[segment, subgraph_index, nk::slice];
             expected_t product = multiply(vertices[nk::all, band, nk::slice],
                                           subgraph.to_vertices[nk::all, band, nk::slice], raw_dot_plane);
-            if (product && segment != 0)
+            if (product && segment != 0) {
+                f32r2_view_t const previous_plane = raw_dot_[segment - 1u, subgraph_index, nk::slice];
                 product = numkong_result(
-                    nk_each_sum_f32_best(raw_dot_plane.data(), raw_dot_.row(segment - 1).data(), cells_per_prefix,
+                    nk_each_sum_f32_best(raw_dot_plane.data(), previous_plane.data(), cells_per_prefix,
                                          raw_dot_plane.data(), capabilities_, stream.numkong()),
                     "prefix dot nesting");
+            }
             if (!product) return product;
         }
+    }
 
-        launched = launch_kernel(&contrastive_scaled_cosine_kernel_, block_grid, block_shape, stream, raw_dot_view,
-                                 from_vertex_norms_view, to_vertex_norms_view, recipe, scaled_cosine_.span());
-        if (launched)
-            launched = launch_kernel(&contrastive_bce_balanced_kernel_, vertex_grid, block_shape, stream,
-                                     scaled_cosine_view, logit_grad_.span(), f32r1_view_t {pos_weight_row},
-                                     f32r1_view_t {neg_weight_row}, pos_loss_row, neg_loss_row, bias_grad_row,
-                                     log_inverse_temperature_grad_row, relations, recipe, live_vertices,
-                                     subgraph.global_offset);
+    // Loss: the scaled cosines of every subgraph in one pass, then the pair loss over whole rows
+    // rewrites them into logit gradients and writes the loss and the temperature summands.
+    launched = launch_kernel(&contrastive_scaled_cosine_kernel_, dim3 {grid_size_for(logits_.numel()), 1u, 1u},
+                             block_shape, stream, raw_dot_.view(), from_vertex_norms_view, to_vertex_norms_.view(),
+                             recipe, logits_.span());
+    if (launched)
+        launched = pair_loss_(logits_.span(), relations, recipe, live_vertices_.view(), loss_out, stream,
+                              log_inverse_temperature_grad, bias_grad);
+    if (!launched) return launched;
+
+    // Force: every subgraph's logit gradients into the owned and the subgraph vertices.
+    for (std::size_t subgraph_index = 0; subgraph_index != gpu_subgraphs.extent(0); ++subgraph_index) {
+        gpu_subgraph_t const subgraph = gpu_subgraphs[subgraph_index];
+        f32r3_view_t const raw_dot_view = raw_dot_[nk::all, subgraph_index, nk::slice];
+        f32r3_view_t const logit_grad_view = logits_[nk::all, subgraph_index, nk::slice];
+        f32r2_view_t const to_vertex_norms_view = to_vertex_norms_[subgraph_index, nk::slice];
+
+        launched = transpose_bf16(subgraph.to_vertices, to_vertices_transposed, stream);
         if (launched)
             launched = launch_kernel(&contrastive_raw_dot_grad_kernel_, block_grid, block_shape, stream,
                                      logit_grad_view, from_vertex_norms_view, to_vertex_norms_view, recipe,
@@ -730,13 +877,6 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
                                      subgraph.to_vertices_grad, prefixes_);
         if (!launched) return launched;
     }
-
-    launched = launch_kernel(&contrastive_finalize_kernel_, dim3 {1u, 1u, 1u}, block_shape, stream,
-                             f32r1_view_t {pos_loss_row}, f32r1_view_t {neg_loss_row}, f32r1_view_t {pos_weight_row},
-                             f32r1_view_t {neg_weight_row}, f32r1_view_t {bias_grad_row},
-                             f32r1_view_t {log_inverse_temperature_grad_row}, recipe, loss_out, bias_grad,
-                             log_inverse_temperature_grad, live_vertices);
-    if (!launched) return launched;
 
     // Cast the owned-vertex force to BFloat16 — every vertex is owned by exactly one rank.
     return launch_kernel(&contrastive_cast_f32_to_bf16_kernel_, dim3 {grid_size_for(rows * hidden), 1u, 1u},

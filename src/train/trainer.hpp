@@ -220,11 +220,9 @@ struct items_source_t final : batch_source_t {
     /** @b [gpus,segments] the item packed into each device segment of the mesh, or @c ~0u . */
     u32r2_tensor_pinned_t packed_items_ {};
 
-    /** One device's relations rebuilt on host: @b [3,segments+1] offsets and @b [3,edges] IDs of
-     *  the attract, repel and ignore sets, @b [2,edges] weights of the first two, and the live
-     *  length of every mesh vertex. */
-    u32r2_tensor_pinned_t offsets_ {}, ids_ {};
-    nk::tensor<f32_t, pinned_alloc<f32_t>, 2> weights_ {};
+    /** One device's attract, repel and ignore sets rebuilt on host, and the live length of every
+     *  mesh vertex. */
+    contrastive_edges_pinned_t edges_ {};
     array<u32_t> lengths_ {};
     array<temperature_group_t> groups_ {};
 

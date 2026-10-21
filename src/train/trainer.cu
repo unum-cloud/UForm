@@ -411,6 +411,7 @@ struct footprint_t {
     contrastive_config.to_vertices_per_gpu = static_cast<u32_t>(segments);
     contrastive_config.gpu_subgraphs_per_step = topology.shape.gpus_per_colocated_domain;
     contrastive_config.temperature_groups = std::max(config.contrastive.temperature_groups, 1u);
+    contrastive_config.pair_loss = config.contrastive.pair_loss;
     std::size_t const force_scalars = config.contrasts() ? distributed_contrastive_segments_t::payload_scalars_needed(
                                                                contrastive_config, topology.shape)
                                                          : 0u;
@@ -805,16 +806,16 @@ expected_t items_source_t::make(items_source_t &placed, trainer_t &trainer) noex
         allocated = allocated && placed.window_.resize(std::size_t {shape.max_columns_per_row} *
                                                        shape.audio.chunk_samples) == status_t::success_k;
     if (config.contrasts()) {
-        placed.offsets_ = u32r2_tensor_pinned_t::uninitialized({3, segments + 1}, pinned_alloc<u32_t> {}).value;
-        placed.ids_ = u32r2_tensor_pinned_t::uninitialized({3, edges}, pinned_alloc<u32_t> {}).value;
-        placed.weights_ =
-            nk::tensor<f32_t, pinned_alloc<f32_t>, 2>::uninitialized({2, edges}, pinned_alloc<f32_t> {}).value;
+        expected<contrastive_edges_pinned_t> edge_sets = contrastive_edges_pinned_t::make(static_cast<u32_t>(segments),
+                                                                                          static_cast<u32_t>(edges));
+        if (!edge_sets) return expected_t::fail(std::move(edge_sets));
+        placed.edges_ = std::move(edge_sets.value_);
         placed.sources_ = u32r2_tensor_pinned_t::uninitialized({gpus, segments}, pinned_alloc<u32_t> {}).value;
         placed.pooled_ = nk::tensor<bf16_t, pinned_alloc<bf16_t>, 3>::uninitialized({gpus, segments, config.hidden},
                                                                                     pinned_alloc<bf16_t> {})
                              .value;
-        allocated = allocated && placed.offsets_ && placed.ids_ && placed.weights_ && placed.sources_ &&
-                    placed.pooled_ && placed.lengths_.resize(total_segments) == status_t::success_k &&
+        allocated = allocated && placed.sources_ && placed.pooled_ &&
+                    placed.lengths_.resize(total_segments) == status_t::success_k &&
                     placed.groups_.resize(segments) == status_t::success_k;
     }
     if (!allocated) return expected_t::fail(status_t::bad_alloc_k, "item routing scratch allocation failed");
@@ -1034,7 +1035,7 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
     trainer_config_t const &config = trainer.config;
     std::size_t const gpus = trainer.replicas.size(), count = items.modalities.size();
     u32_t const segments = config.batch.max_segments_per_gpu;
-    std::size_t const total_segments = gpus * segments, edges = ids_.extent(1);
+    std::size_t const total_segments = gpus * segments, edges = edges_.capacity();
     u32_t const groups = std::max(config.contrastive.temperature_groups, 1u);
 
     for (std::size_t member = 0; member != gpus; ++member) {
@@ -1059,11 +1060,11 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
 
     item_edges_t const *const sets[3] = {&items.attract, &items.repel, &items.ignore};
     for (std::size_t member = 0; member != gpus; ++member) {
-        u32_t edge_counts[3] = {};
-        for (std::size_t set = 0; set != 3; ++set) {
-            item_edges_t const &edges_of = *sets[set];
-            u32r1_span_t const offsets = offsets_[set, nk::slice], ids = ids_[set, nk::slice];
-            f32r1_span_t const weights = set != 2 ? weights_[set, nk::slice] : f32r1_span_t {};
+        for (std::size_t set_index = 0; set_index != 3; ++set_index) {
+            contrastive_edge_set_t const set = static_cast<contrastive_edge_set_t>(set_index);
+            item_edges_t const &edges_of = *sets[set_index];
+            u32r1_span_t const offsets = edges_.offsets(set), ids = edges_.ids(set);
+            f32r1_span_t const weights = edges_.weights(set);
             u32_t written = 0;
             offsets[0] = 0;
             for (u32_t row = 0; row != segments; ++row) {
@@ -1089,7 +1090,6 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
                                                     weights.empty() ? f32r1_span_t {} : weights[row_edges, nk::slice]);
                 offsets[row + 1] = written;
             }
-            edge_counts[set] = written;
         }
         for (u32_t row = 0; row != segments; ++row) {
             u32_t const item = sources_[member, row];
@@ -1105,22 +1105,13 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
         switch_to_gpu_t gpu_scope {stream};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
         bool const ignores = items.ignore.offsets != nullptr;
-        // An empty range slices to an empty view, which uploads as a set with no edges.
-        auto const set_ids = [&](std::size_t set) noexcept -> u32r1_view_t {
-            return ids_[set, nk::range(0, edge_counts[set]), nk::slice];
-        };
-        auto const set_weights = [&](std::size_t set) noexcept -> f32r1_view_t {
-            return weights_[set, nk::range(0, edge_counts[set]), nk::slice];
-        };
         expected_t staged = copy_host_to_device(lengths_.view(), replica.to_vertex_lengths.span(), stream);
         if (staged) staged = copy_host_to_device(groups_.view(), replica.temperature_groups.span(), stream);
         if (staged)
             staged = replica.relations.upload(
-                offsets_[0, nk::slice], set_ids(0), set_weights(0), offsets_[1, nk::slice], set_ids(1), set_weights(1),
-                ignores ? u32r1_view_t {offsets_[2, nk::slice]} : u32r1_view_t {},
-                ignores ? set_ids(2) : u32r1_view_t {}, replica.batch.segment_lengths.view(),
-                replica.to_vertex_lengths.view(), total_segments, member * segments,
-                config.contrastive.ambient_repulsion_weight, stream);
+                edges_.attract(), edges_.repel(), ignores ? edges_.ignore() : contrastive_edges_view_t {},
+                replica.batch.segment_lengths.view(), replica.to_vertex_lengths.view(), total_segments,
+                member * segments, config.contrastive.ambient_repulsion_weight, stream);
         if (staged) // the host columns are reused for the next device, so their copies land first
             if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
                 staged = cuda_failure(result, "relation staging drain failed (member={})", member);

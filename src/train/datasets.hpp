@@ -149,13 +149,17 @@ struct dataset_source_t final : batch_source_t {
     std::size_t next_batch_ = 0;
     multimodal_batch_mixer_t mixer_ {};
 
-    /** @b [gpus,segments] every mixed segment's bag and length across this process's GPUs, landed
-     *  for the relations. */
+    /** @b [gpus,segments] every mixed segment's bag, length and role across this process's GPUs,
+     *  landed for the relations. */
     u32r2_tensor_pinned_t bags_ {}, lengths_ {};
+    nk::tensor<segment_role_t, pinned_alloc<segment_role_t>, 2> roles_ {};
 
-    /** One GPU's attract and repel offset rows, its attract IDs and their weights. */
-    array<u32_t> offsets_ {}, ids_ {};
-    array<f32_t> weights_ {};
+    /** @b [world_segments] the key of every world vertex, landed from the mixer for the
+     *  relations. */
+    u64r1_tensor_pinned_t world_keys_ {};
+
+    /** One GPU's attract, repel and ignore sets. */
+    contrastive_edges_pinned_t edges_ {};
 };
 
 } // namespace unum::uform::train
