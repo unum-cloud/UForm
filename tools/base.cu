@@ -181,6 +181,18 @@ int main(int argc, char **argv) {
         expected<mixture_t> read = mixture_t::read(config.mixture);
         if (!read) return fail_out_(read.description_.view());
         mixture = std::move(read.value_);
+        bool queried = false;
+        for (mixture_entry_t const &entry : mixture.datasets.view())
+            for (late_interaction_side_t const side : {entry.sides.anchor, entry.sides.positive, entry.sides.negative})
+                queried |= side == late_interaction_side_t::query_k ||
+                           side == late_interaction_side_t::query_and_document_k;
+        if (config.late_interacts() && !queried) {
+            fmt::println(stderr,
+                         "uform_base: late interaction needs query rows, but no entry of {} names a `query` side; " //
+                         "add \"query\": \"anchor\" to an entry or pass --late-interaction-weight 0",
+                         config.mixture);
+            return 1;
+        }
         config.batch = mixture.shape(config.batch);
         fmt::println("uform_base: mixture {} of {} datasets from {}", mixture.name, mixture.datasets.size(),
                      config.mixture);
