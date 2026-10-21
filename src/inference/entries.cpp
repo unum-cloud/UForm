@@ -35,7 +35,7 @@ expected<rope_angles_t> rope_angles_t::make(u32_t positions, u32_t temporal, u32
     angles.pairs_[0] = temporal / 2u, angles.pairs_[1] = height / 2u, angles.pairs_[2] = width / 2u;
     u32_t const denominators[3] = {temporal + height + width, height, width};
     std::size_t const pairs = angles.pairs_[0] + angles.pairs_[1] + angles.pairs_[2];
-    if (angles.angles_.resize(static_cast<std::size_t>(positions) * pairs) != status_t::success_k)
+    if (st::failed(angles.angles_.resize(static_cast<std::size_t>(positions) * pairs)))
         return result_t::fail(status_t::bad_alloc_k, "angle grid allocation failed ({} positions)", positions);
     std::size_t offset = 0;
     for (u32_t axis = 0; axis != 3; ++axis)

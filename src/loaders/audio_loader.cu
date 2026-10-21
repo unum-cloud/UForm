@@ -94,20 +94,20 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, u64r1_
     // Hop each drawn clip's encoded bytes device → pinned back to back — the decoder's host-side source. A pinned
     // `column_view_t` (packed `encoded` buffer + `[clips+1]` offsets) tapes them, so a per-clip byte range is one
     // indexed `staged_tape[clip]` read whose length is the adjacent-offset difference — no side table to disagree.
-    array<b8_t, pinned_alloc<b8_t>> encoded;
-    array<u64_t> encoded_offsets;
-    if (encoded_offsets.resize_uninitialized(clips + 1) != status_t::success_k)
+    st::basic_vector<b8_t, pinned_alloc<b8_t>> encoded;
+    st::basic_vector<u64_t> encoded_offsets;
+    if (st::failed(encoded_offsets.resize(st::assume_uninitialized, clips + 1)))
         return expected_t::fail(status_t::bad_alloc_k, "clip offset staging allocation failed ({} clips)", clips);
     std::size_t total_bytes = 0;
     for (std::size_t index = 0; index != clips; ++index) total_bytes += tape[drawn_rows[index]].size();
-    if (encoded.resize_uninitialized(total_bytes) != status_t::success_k)
+    if (st::failed(encoded.resize(st::assume_uninitialized, total_bytes)))
         return expected_t::fail(status_t::bad_alloc_k, "clip staging allocation failed ({} bytes)", total_bytes);
     std::size_t cursor = 0;
     for (std::size_t index = 0; index != clips; ++index) {
         auto const blob = tape[drawn_rows[index]];
         encoded_offsets[index] = cursor;
-        if (expected_t hopped = copy_device_to_host(b8r1_view_t {blob}, encoded.span().subspan(cursor, blob.size()),
-                                                    stream);
+        if (expected_t hopped = copy_device_to_host(b8r1_view_t {blob},
+                                                    std::span<b8_t> {encoded}.subspan(cursor, blob.size()), stream);
             !hopped)
             return hopped;
         cursor += blob.size();
@@ -115,17 +115,16 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, u64r1_
     encoded_offsets[clips] = cursor;
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "clip byte staging synchronization failed");
-    column_view_t const staged_tape {encoded.view(), encoded_offsets.view()};
+    column_view_t const staged_tape {std::span<b8_t const> {encoded}, std::span<u64_t const> {encoded_offsets}};
 
     // Decode + resample to mono Float32 across the borrowed pool, into a pinned waveform landing already carrying
     // the grid's `[clips,columns,chunk_samples]` layout: clip `c` fills row `c` (a clip is exactly `clip_samples`).
     std::size_t const waveform_samples = job_count * static_cast<std::size_t>(clip_samples);
-    array<f32_t, pinned_alloc<f32_t>> waveforms;
-    array<i32_t> statuses;
-    array<u32_t> sample_rates; // each representation's resample rate, captured for the pool workers
-    if (waveforms.resize_uninitialized(waveform_samples) != status_t::success_k ||
-        statuses.resize_uninitialized(job_count) != status_t::success_k ||
-        sample_rates.resize(reps_count) != status_t::success_k)
+    st::basic_vector<f32_t, pinned_alloc<f32_t>> waveforms;
+    st::basic_vector<i32_t> statuses;
+    st::basic_vector<u32_t> sample_rates; // each representation's resample rate, captured for the pool workers
+    if (st::failed(waveforms.resize(st::assume_uninitialized, waveform_samples)) ||
+        st::failed(statuses.resize(st::assume_uninitialized, job_count)) || st::failed(sample_rates.resize(reps_count)))
         return expected_t::fail(status_t::bad_alloc_k, "waveform staging allocation failed ({} samples)",
                                 waveform_samples);
     for (std::size_t rep = 0; rep != reps_count; ++rep) sample_rates[rep] = representations[rep].sample_rate;
@@ -155,7 +154,9 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, u64r1_
     // decode buffer already matches that `[clips,columns,chunk_samples]` sub-span, so there is no reshape or
     // scatter — then the geometry kernel writes the segment table. Both retire at the closing synchronize.
     audio_samples_span_t const landing = audio_samples[nk::range(0, job_count), nk::slice];
-    if (expected_t hopped = copy_host_to_device(waveforms.view(), landing.flatten<1>(), stream); !hopped) return hopped;
+    if (expected_t hopped = copy_host_to_device(std::span<f32_t const> {waveforms}, landing.flatten<1>(), stream);
+        !hopped)
+        return hopped;
 
     expected_t staged = launch_kernel(&audio_segments_kernel_, dim3 {1u, 1u, 1u}, dim3 {1u, 1u, 1u}, stream,
                                       segment_offsets, segment_lengths, segment_modality, static_cast<u32_t>(job_count),
@@ -189,7 +190,7 @@ expected<audio_loader_parquet_t> audio_loader_parquet_t::make(gpu_direct_storage
 
     // Footer only — host-side, no GPU: a running prefix of each file's row count, the weighted file draw's
     // search table; its back holds the dataset's total rows.
-    if (loader.row_prefix_.resize(loader.absolute_paths_.size() + 1) != status_t::success_k)
+    if (st::failed(loader.row_prefix_.resize(loader.absolute_paths_.size() + 1)))
         return result_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)",
                               loader.absolute_paths_.size());
     loader.row_prefix_[0] = 0;
@@ -229,8 +230,8 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
 
     // Open distinct files, drawn with probability proportional to their row count, until the pool covers the
     // fill's clips; never fewer than two, unless the whole dataset is one file.
-    array<sz::string_view_t> picked_paths;
-    array<std::size_t> picked_shards;
+    st::basic_vector<sz::string_view_t> picked_paths;
+    st::basic_vector<std::size_t> picked_shards;
     std::size_t pooled_estimate = 0, attempt = 0;
     while ((pooled_estimate < total_clips || picked_shards.size() < floor_files) &&
            picked_shards.size() < shard_count) {
@@ -239,14 +240,14 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
         std::size_t const file = static_cast<std::size_t>(
             std::upper_bound(row_prefix_.begin(), row_prefix_.end(), position) - row_prefix_.begin() - 1);
         if (std::find(picked_shards.begin(), picked_shards.end(), file) != picked_shards.end()) continue;
-        if (picked_shards.push_back(file) != status_t::success_k ||
-            picked_paths.push_back(absolute_paths_[file].view()) != status_t::success_k)
+        if (st::failed(picked_shards.push_back(std::size_t {file})) ||
+            st::failed(picked_paths.push_back(absolute_paths_[file].view())))
             return expected_t::fail(status_t::bad_alloc_k, "file pick allocation failed");
         pooled_estimate += row_prefix_[file + 1] - row_prefix_[file];
     }
 
     // Decode the picked files' clip column into one device reservoir; the true pool is the decoded rows.
-    auto reservoir_read = parquet_file_t::make(*storage_, picked_paths.view(), {&config.column, 1}, gpu_stream);
+    auto reservoir_read = parquet_file_t::make(*storage_, picked_paths, {&config.column, 1}, gpu_stream);
     if (!reservoir_read) return expected_t::fail(std::move(reservoir_read));
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();
@@ -261,23 +262,24 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
     // The reservoir's clip offsets to the host once — every per-row byte bound is then host arithmetic.
     column_view_t const column = reservoir.column(0);
     std::size_t const offsets_count = column.size() + 1u;
-    array<u64_t> reservoir_offsets;
-    if (reservoir_offsets.resize_uninitialized(offsets_count) != status_t::success_k)
+    st::basic_vector<u64_t> reservoir_offsets;
+    if (st::failed(reservoir_offsets.resize(st::assume_uninitialized, offsets_count)))
         return expected_t::fail(status_t::bad_alloc_k, "reservoir offsets landing failed ({} rows)", pooled_rows);
-    if (expected_t landed = copy_device_to_host(column.offsets, reservoir_offsets.span(), gpu_stream); !landed)
+    if (expected_t landed = copy_device_to_host(column.offsets, std::span<u64_t> {reservoir_offsets}, gpu_stream);
+        !landed)
         return landed;
     if (cuStreamSynchronize(gpu_stream.get()) != CUDA_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "reservoir offsets readback failed");
 
     // Draw the whole fill's rows on the host — a keyed bijection over the pool.
     u64_t const row_key = hash(seed_, gpu_rank, row_draw_salt_k);
-    array<u64_t> record_indices;
-    if (record_indices.resize_uninitialized(total_clips) != status_t::success_k)
+    st::basic_vector<u64_t> record_indices;
+    if (st::failed(record_indices.resize(st::assume_uninitialized, total_clips)))
         return expected_t::fail(status_t::bad_alloc_k, "row index allocation failed ({} draws)", total_clips);
     for (std::size_t segment = 0; segment != total_clips; ++segment)
         record_indices[segment] = epoch_permutation(row_key, data_epoch_t {training_step}, segment, pooled_rows);
 
-    column_view_t const tape {column.payload, reservoir_offsets.view()};
+    column_view_t const tape {column.payload, std::span<u64_t const> {reservoir_offsets}};
     u64r2_view_t const batch_records {record_indices.data(), unroll, clips_per_batch};
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t &loaded = batches[batch];

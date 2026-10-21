@@ -40,8 +40,7 @@
 
 #include <cuda.h> // `cuMulticastCreate`, `cuMulticastBindMem`, `cuMemMap`, `cuMemSetAccess`
 
-#include "core/types.hpp"          // `expected`, `expected_t`, `status_t`, the scalar aliases
-#include "core/array.hpp"          // `array` — the runtime-sized per-member tables
+#include "core/types.hpp"          // `expected`, `expected_t`, `status_t`, the scalar aliases, `st::basic_vector`
 #include "core/gpu_allocators.hpp" // `gpu_arena_t` conventions, `round_up_to_multiple`
 #include "core/schedule.cuh"       // `gpu_stream_t`, `launch_kernel`, `current_context_t`, the rank-1 aliases
 #include "core/mesh.hpp"           // `mesh_topology_t` — the multimem_domain may span processes; the fabric
@@ -184,8 +183,8 @@ struct gpu_symmetric_arena_t {
         }
         cuMemAddressFree(base_, member_stride_ * handles_.size());
         base_ = 0;
-        devices_.reset();
-        handles_.reset();
+        devices_ = {};
+        handles_ = {};
     }
 
     /** Start of the one contiguous reservation covering every member's slice. */
@@ -201,11 +200,11 @@ struct gpu_symmetric_arena_t {
     CUmemAllocationHandleType handle_type_ = CU_MEM_HANDLE_TYPE_NONE;
 
     /** This process's local devices, slice order — the slices it created (not the whole domain). */
-    array<i32_t> devices_ {};
+    st::basic_vector<i32_t> devices_ {};
 
     /** The physical handles indexed by @b domain member: local ones created, remote ones adopted;
      *  0 for a member not yet filled. */
-    array<CUmemGenericAllocationHandle> handles_ {};
+    st::basic_vector<CUmemGenericAllocationHandle> handles_ {};
 };
 
 /** Which reduction tier a @ref multimem_domain_t runs: NVSwitch-fused @c multimem loads, or the
@@ -286,7 +285,7 @@ struct multimem_tier_choice_t {
     sz::string_t reason {};
 
     /** One loaded bundle per local device, in local order, on the switch tier; empty otherwise. */
-    array<multimem_switch_module_t> modules {};
+    st::basic_vector<multimem_switch_module_t> modules {};
 
     /** Probe @p local_devices for a domain of @p member_count members; fails only when a query
      *  fails. */

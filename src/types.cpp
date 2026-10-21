@@ -185,12 +185,12 @@ static fu::memory_domain_t const *node_of(fu::machine_topology_t const &topology
 
 /** Copies the NUMA nodes @p ram names into @p domains, every node of @p topology when it names none. False once
  *  @p outcome records why not. */
-static bool adopt_memory_domains(array<i32_t> &domains, uform_ram_options_t const &ram,
+static bool adopt_memory_domains(st::basic_vector<i32_t> &domains, uform_ram_options_t const &ram,
                                  fu::machine_topology_t const &topology, uform_outcome_t *outcome) noexcept {
     if (ram.memory_domains_count && !ram.memory_domains)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The memory domains must not be null");
     std::size_t const count = ram.memory_domains_count ? ram.memory_domains_count : topology.memory_domains_count();
-    if (domains.resize(count) != core::status_t::success_k)
+    if (st::failed(domains.resize(count)))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the memory domains");
     for (std::size_t index = 0; index != count; ++index) {
         domains[index] = ram.memory_domains_count ? ram.memory_domains[index]
@@ -203,7 +203,7 @@ static bool adopt_memory_domains(array<i32_t> &domains, uform_ram_options_t cons
 }
 
 /** Cores the NUMA nodes in @p domains carry, every one of them a node of @p topology. */
-static std::size_t cores_of(fu::machine_topology_t const &topology, array<i32_t> const &domains) noexcept {
+static std::size_t cores_of(fu::machine_topology_t const &topology, st::basic_vector<i32_t> const &domains) noexcept {
     std::size_t cores = 0;
     for (i32_t const domain : domains) cores += node_of(topology, domain)->logical_cores_count;
     return cores;
@@ -213,7 +213,7 @@ static std::size_t cores_of(fu::machine_topology_t const &topology, array<i32_t>
  *  through @p output; frees it once @p outcome records why not. */
 static void hand_out_executor(std::unique_ptr<uform_executor_handle_t> executor, std::size_t limit,
                               uform_executor_t *output, uform_outcome_t *outcome) noexcept {
-    if (executor->deferred.resize(limit ? limit : deferred_limit_default_k) != core::status_t::success_k)
+    if (st::failed(executor->deferred.resize(limit ? limit : deferred_limit_default_k)))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the deferred table"), void();
     {
         std::lock_guard<fu::spin_mutex_t> lock(deferred_registry.guard);

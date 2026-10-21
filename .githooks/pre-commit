@@ -1231,14 +1231,14 @@ check_mutable_and_const_cast() {
 
 # STL dynamic containers in the shipped library hide allocations and grow behind the caller's back; the
 # standard vector and string are already refused above, and the node-based maps, sets, lists and adaptors
-# go the same way. Use `core::array<T>`, kept sorted where a lookup needs it, or an `nk::tensor`; a vendor
-# API that demands one carries the `vendor-boundary` marker.
+# go the same way. Use `st::basic_vector<T>`, kept sorted where a lookup needs it, or an `nk::tensor`;
+# a vendor API that demands one carries the `vendor-boundary` marker.
 check_stl_dynamic_containers() {
     local owners
     owners=$(printf '%s\n' "$added" | grep -v 'vendor-boundary' | blank_c_comments_preserving_columns |
         grep -E '\bstd::(list|forward_list|map|multimap|set|multiset|unordered_[a-z_]+|basic_string|priority_queue|stack|queue)\b' || true)
     [ -z "$owners" ] || fail "$owners" \
-        "$file uses an STL dynamic container - use core::array<T>, sorted where a lookup needs it, or nk::tensor:"
+        "$file uses an STL dynamic container - use st::basic_vector<T>, sorted where a lookup needs it, or nk::tensor:"
 }
 
 # A range rebuilt from its own parts - `{x.data(), x.size()}`, `{rows.data(), rows.extent(0)}`,
@@ -1750,7 +1750,7 @@ judge_cuda_path() {
     fi
     # Exception policy: std::string / std::vector allocate through throwing paths, and this codebase is
     # built noexcept end-to-end — a bad_alloc anywhere would terminate. Outside tests, strings are
-    # sz::string_t (try_append / try_push_back) and dynamic arrays are the cell's own array<T> (try_resize).
+    # sz::string_t (try_append / try_push_back) and dynamic arrays are st::basic_vector<T>.
     case "$file" in
     test/* | bench/*) ;;
     *)
@@ -1760,7 +1760,7 @@ judge_cuda_path() {
             grep -nE 'std::(string|vector)\b' || true)
         if [ -n "$std_containers" ]; then
             echo "pre-commit: $file adds std::string / std::vector — throwing containers violate the"
-            echo "            strict no-exceptions policy; use sz::string_t / core::array<T> instead:"
+            echo "            strict no-exceptions policy; use sz::string_t / st::basic_vector<T> instead:"
             printf '%s\n' "$std_containers" | head -5
             rejection_count=$((rejection_count + 1))
         fi

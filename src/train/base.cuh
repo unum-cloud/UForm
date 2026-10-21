@@ -32,7 +32,7 @@
 
 #include <array> // `std::array` — the summand pairs
 
-#include "core/array.hpp"                // `array`, `per_gpu_array`
+#include "core/array.hpp"                // `per_gpu_array`
 #include "core/checkpoint.hpp"           // `checkpoint_to_load_t`
 #include "core/gpu_allocators.hpp"       // `gpu_arena_t`
 #include "core/schedule.cuh"             // `gpu_stream_t`, replay graphs
@@ -344,7 +344,7 @@ struct base_replica_t {
      *  The scalars live once inside this GPU's tensors; the optimizer's @c make copies these views into its
      *  own per-replica state, so the concatenated table is a construction-time transient.
      */
-    array<differentiable_weights_t> weights {};
+    st::basic_vector<differentiable_weights_t> weights {};
 
     /** Build the replica over the world-owned @p arena , publishing its parameter matrices into
      *  @ref weights in the same order on every replica. @p vertices_per_mesh sizes the contrastive
@@ -389,7 +389,8 @@ struct base_replica_t {
 /** Re-seed every matrix of @p weights to the identical deterministic init: full matrices from a
  *  keyed hash fill of standard deviation @c 1/√fan_in , the blocks' output projections further by
  *  @c 1/√(2·depth) , and vector scales exactly one. Identical on every replica. */
-[[nodiscard]] expected_t seed_weights(array<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept;
+[[nodiscard]] expected_t seed_weights(st::basic_vector<differentiable_weights_t> const &weights,
+                                      gpu_stream_t &stream) noexcept;
 
 /**
  *  @brief Upload every matrix of @p weights from @p checkpoint by name, all or nothing, on @p stream ; the caller
@@ -398,12 +399,13 @@ struct base_replica_t {
  *  @retval status_t::shape_unsupported_k A matrix of another shape.
  */
 [[nodiscard]] expected_t load_weights(checkpoint_to_load_t const &checkpoint,
-                                      array<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept;
+                                      st::basic_vector<differentiable_weights_t> const &weights,
+                                      gpu_stream_t &stream) noexcept;
 
 /** Snapshot @p weights into @p checkpoint as @c model.* , with @p steps and the geometry a reader
  *  rebuilds the tower from. */
 [[nodiscard]] expected_t save_weights(checkpoint_to_save_t &checkpoint, trainer_config_t const &config,
-                                      array<differentiable_weights_t> const &weights, u32_t steps,
+                                      st::basic_vector<differentiable_weights_t> const &weights, u32_t steps,
                                       gpu_stream_t &stream) noexcept;
 
 /** Print one line to standard output, newline-terminated. */

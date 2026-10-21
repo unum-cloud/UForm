@@ -173,8 +173,8 @@ struct grid_factor_t {
     return matrix.name.view().ends_with(".out") || matrix.name.view().ends_with(".down");
 }
 
-expected_t ut::seed_weights(array<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept {
-    std::span<differentiable_weights_t const> const list {weights.view().data(), weights.size()};
+expected_t ut::seed_weights(st::basic_vector<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept {
+    std::span<differentiable_weights_t const> const list {weights};
     std::size_t residual_writers = 0;
     for (differentiable_weights_t const &matrix : list) residual_writers += writes_residual_(matrix) ? 1u : 0u;
     for (std::size_t weight_index = 0; weight_index != list.size(); ++weight_index) {
@@ -298,9 +298,9 @@ struct row_partition_t {
     return tower;
 }
 
-expected_t ut::load_weights(checkpoint_to_load_t const &checkpoint, array<differentiable_weights_t> const &weights,
-                            gpu_stream_t &stream) noexcept {
-    std::span<differentiable_weights_t const> const list {weights.view().data(), weights.size()};
+expected_t ut::load_weights(checkpoint_to_load_t const &checkpoint,
+                            st::basic_vector<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept {
+    std::span<differentiable_weights_t const> const list {weights};
     sz::string_t name_text;
     for (differentiable_weights_t const &matrix : list) {
         name_text.clear();
@@ -322,16 +322,16 @@ expected_t ut::load_weights(checkpoint_to_load_t const &checkpoint, array<differ
 }
 
 expected_t ut::save_weights(checkpoint_to_save_t &checkpoint, trainer_config_t const &config,
-                            array<differentiable_weights_t> const &weights, u32_t steps,
+                            st::basic_vector<differentiable_weights_t> const &weights, u32_t steps,
                             gpu_stream_t &stream) noexcept {
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-    std::span<differentiable_weights_t const> const list {weights.view().data(), weights.size()};
+    std::span<differentiable_weights_t const> const list {weights};
     u64_t largest_scalars = 0;
     for (differentiable_weights_t const &matrix : list)
         if (matrix.weights.numel() > largest_scalars) largest_scalars = matrix.weights.numel();
-    array<nk_bf16_t> staging;
-    if (staging.resize_uninitialized(largest_scalars) != status_t::success_k)
+    st::basic_vector<nk_bf16_t> staging;
+    if (st::failed(staging.resize(st::assume_uninitialized, largest_scalars)))
         return expected_t::fail(status_t::bad_alloc_k, "checkpoint staging failed ({} scalars)", largest_scalars);
     sz::string_t name_text;
     for (differentiable_weights_t const &matrix : list) {

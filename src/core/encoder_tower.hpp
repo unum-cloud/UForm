@@ -233,7 +233,7 @@ struct tower_token_head_t {
                                       gpu_stream_t &stream) noexcept;
 
     /** Append @c token_head.norm and @c token_head.projection to @p weights . */
-    [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;
+    [[nodiscard]] expected_t fill(st::basic_vector<differentiable_weights_t> &weights) noexcept;
 
     /** Pack the projection for its forward and data-gradient products, once per optimizer step. */
     [[nodiscard]] expected_t pack_weights(bf16r1_span_t transposed, gpu_stream_t &stream) noexcept;
@@ -330,7 +330,7 @@ struct encoder_tower_bf16_t {
      *  @c pool_query , @c head.norm , @c head.fc1 , and @c head.fc2 , then @c token_head.norm and
      *  @c token_head.projection when the token head is present — the composition root adds only its
      *  @c model. prefix. */
-    [[nodiscard]] expected_t fill(array<differentiable_weights_t> &weights) noexcept;
+    [[nodiscard]] expected_t fill(st::basic_vector<differentiable_weights_t> &weights) noexcept;
 
     /** Pack every block's, head's and media projection's weights for NumKong's products — pure enqueue,
      *  capture-safe. Call once per optimizer step, after the weights change and before the first @ref forward ;
@@ -376,7 +376,7 @@ struct encoder_tower_bf16_t {
     std::unique_ptr<transformer_scratch_t> scratch_ {};
 
     /** The @c depth transformer blocks, owned in order. */
-    array<transformer_block_bf16_t> blocks_ {};
+    st::basic_vector<transformer_block_bf16_t> blocks_ {};
 
     /** The @b [vocabulary,hidden] token embedding table and its gradient (present iff
      *  @c config.vocabulary != 0 ). */
@@ -489,7 +489,7 @@ struct encoder_tower_e4m3_t {
     nk_capability_t capabilities_ = 0;
 
     /** The @c depth E4M3 transformer blocks, owned in order — the quantized-precision tier. */
-    array<transformer_block_e4m3_t> blocks_ {};
+    st::basic_vector<transformer_block_e4m3_t> blocks_ {};
 
     /** The @b [vocabulary,hidden] BFloat16 token embedding table (forward only, no gradient). */
     bf16r2_tensor_arena_t entry_weight_ {};

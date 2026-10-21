@@ -29,8 +29,7 @@
 #include <numkong/capabilities.h> // `nk_capability_t`, `nk_stream_t`
 #include <numkong/types.h>        // `nk_bf16_t`, `nk_e4m3_t`
 
-#include "core/types.hpp"            // the scalar aliases and the rank-tagged views
-#include "core/array.hpp"            // `array` — the angle grids
+#include "core/types.hpp"            // the scalar aliases and the rank-tagged views, `st::basic_vector`
 #include "core/multimodal_batch.hpp" // `modality_t`, the shape views
 
 namespace unum::uform::inference {
@@ -38,6 +37,7 @@ namespace unum::uform::inference {
 namespace uc = unum::uform::core;
 namespace fu = ashvardanian::forkunion;
 namespace nk = ashvardanian::numkong;
+namespace st = ashvardanian::smashtable;
 
 using uc::expected;
 using uc::f32_t;
@@ -99,7 +99,7 @@ struct rope_angles_t {
                                                       f32_t base) noexcept;
 
     /** Every angle, the three grids back to back, for a copy into the memory a tower runs from. */
-    [[nodiscard]] std::span<f32_t const> scalars() const noexcept { return angles_.view(); }
+    [[nodiscard]] std::span<f32_t const> scalars() const noexcept { return angles_; }
 
     /** The three grids over @p copy , a copy of @ref scalars in any memory. */
     [[nodiscard]] rope_grids_t grids(f32_t const *copy) const noexcept {
@@ -111,7 +111,7 @@ struct rope_angles_t {
     }
 
   private:
-    uc::array<f32_t> angles_ {};
+    st::basic_vector<f32_t> angles_ {};
     u32_t positions_ = 0;
     u32_t pairs_[3] = {};
 };

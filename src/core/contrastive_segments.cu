@@ -1232,8 +1232,8 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     // caller towers/grads and the domain windows never move after construction.
     bf16r3_span_t const world_tower = whole_world ? bf16r3_span_t {} : distributed.world_tower_();
     for (std::size_t rank = 0; rank != gpus; ++rank) {
-        array<gpu_subgraph_t> &table = distributed.subgraph_tables_[rank];
-        if (table.resize(subgraphs) != status_t::success_k)
+        st::basic_vector<gpu_subgraph_t> &table = distributed.subgraph_tables_[rank];
+        if (st::failed(table.resize(subgraphs)))
             return result_t::fail(status_t::bad_alloc_k, "subgraph table allocation failed (rank={})", rank);
         f32r3_span_t const forces = distributed.window_forces_(domain.member_offset() + rank);
         for (std::size_t subgraph = 0; subgraph != subgraphs; ++subgraph) {
@@ -1273,7 +1273,8 @@ expected_t distributed_contrastive_segments_t::evaluate(std::size_t rank, contra
                                                                      : subgraph_tables_[rank][rank].to_vertices;
     expected_t evaluated = stage_world_tower_(rank, stream);
     if (evaluated)
-        evaluated = losses_[rank].evaluate(own_tower, subgraph_tables_[rank].view(), relations_[rank], recipe, stream);
+        evaluated = losses_[rank].evaluate(own_tower, std::span<gpu_subgraph_t const> {subgraph_tables_[rank]},
+                                           relations_[rank], recipe, stream);
     // Every member has read the world tower before any member's next call stages it again.
     if (evaluated) evaluated = domain_->barrier(member, stream);
     return evaluated;
@@ -1295,7 +1296,7 @@ expected_t distributed_contrastive_segments_t::operator()(std::size_t rank, cont
 
     std::size_t const member = domain_->member_offset() + rank;
     expected_t staged = stage_world_tower_(rank, stream);
-    nk::tensor_view<gpu_subgraph_t, 1> const table = subgraph_tables_[rank].view();
+    nk::tensor_view<gpu_subgraph_t, 1> const table = std::span<gpu_subgraph_t const> {subgraph_tables_[rank]};
     f32r1_span_t const loss_out = loss_outs_[nk::range(rank, rank + 1), nk::slice];
     bf16r1_span_t const grad_flat = from_vertices_grads_[rank].flatten<1>();
     // The rank's own tower is stored once: in the staging list when the world is staged, otherwise as its

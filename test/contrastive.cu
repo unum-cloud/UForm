@@ -1007,7 +1007,7 @@ static void run_pool_parity_case(test_suite_t &suite) {
 
     // Keyed weight seeding through the registration list, each matrix kept on the BFloat16 grid in
     // Float64 for the host replica.
-    array<differentiable_weights_t> weights;
+    st::basic_vector<differentiable_weights_t> weights;
     if (!tower.value_.fill(weights)) {
         suite.check(false, "pool-parity registration");
         cuCtxPopCurrent(nullptr);

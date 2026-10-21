@@ -29,7 +29,6 @@
 #include <span>      // `std::span`
 
 #include "core/types.hpp"    // `expected`, `status_t`, the scalar aliases, `b8r1_view_t`, `sz::string_t`
-#include "core/array.hpp"    // `array` — the glob expansion result and the row-group lists
 #include "core/schedule.cuh" // `gpu_stream_t`
 #include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t` — the reader's GDS precondition
 
@@ -66,11 +65,11 @@ struct parquet_length_metadata_t {
     std::size_t bytes = 0;
 
     /** @b [groups] each row group's rows and summed uncompressed bytes, for partial reads. */
-    array<std::size_t> group_rows {}, group_bytes {};
+    st::basic_vector<std::size_t> group_rows {}, group_bytes {};
 
     /** @b [groups] each row group's rows that no null leaf of the named columns leaves incomplete,
      *  at least; every row when no column is named. */
-    array<std::size_t> group_complete_rows {};
+    st::basic_vector<std::size_t> group_complete_rows {};
 };
 
 /** The device bytes a fill's reservoir can take outside the arena, @c fixed_bytes+rows·row_bytes
@@ -143,7 +142,7 @@ struct parquet_file_t {
     [[nodiscard]] static expected<parquet_file_t> make(gpu_direct_storage_session_t const &storage,
                                                        std::span<sz::string_view_t const> paths,
                                                        std::span<sz::string_view_t const> columns,
-                                                       std::span<array<u32_t> const> row_groups,
+                                                       std::span<st::basic_vector<u32_t> const> row_groups,
                                                        gpu_stream_t &stream) noexcept;
 
     /** Read only the shard's Parquet footer at @p path — @c num_rows , the @b whole table's summed
@@ -277,6 +276,6 @@ struct csv_file_t {
 /** Expand a @c directory/pattern (or a plain path) into the sorted paths it matches, via POSIX
  *  @c opendir / @c readdir + @c fnmatch — no glob library to link — sorted so the shard order is
  *  deterministic across every rank. An empty match is a failure, not an empty list. */
-[[nodiscard]] expected<array<sz::string_t>> expand_glob(sz::string_view_t path_or_glob) noexcept;
+[[nodiscard]] expected<st::basic_vector<sz::string_t>> expand_glob(sz::string_view_t path_or_glob) noexcept;
 
 } // namespace unum::uform::loaders

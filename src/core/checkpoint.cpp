@@ -145,8 +145,8 @@ struct checkpoint_file_t {
  *  offsets validated against @p payload_bytes — and every string metadata pair into @p pairs .
  *  Records of other dtypes are skipped, and a lookup treats them exactly like absent names. */
 [[nodiscard]] static expected_t read_header_(std::span<char> header, yyjson_alc *pool, u64_t payload_bytes,
-                                             array<checkpoint_entry_t> &entries,
-                                             array<checkpoint_metadata_t> &pairs) noexcept {
+                                             st::basic_vector<checkpoint_entry_t> &entries,
+                                             st::basic_vector<checkpoint_metadata_t> &pairs) noexcept {
     yyjson_doc *document = // default flags skip the trailing pad spaces; the pool owns the document
         yyjson_read_opts(header.data(), header.size(), 0, pool, nullptr);
     yyjson_val *root = document != nullptr ? yyjson_doc_get_root(document) : nullptr;
@@ -171,7 +171,7 @@ struct checkpoint_file_t {
                 expected_t owned = own_text_(pair.key, {yyjson_get_str(metadata_key), yyjson_get_len(metadata_key)});
                 if (owned) owned = own_text_(pair.value, {value_chars, yyjson_get_len(metadata_value)});
                 if (!owned) return owned;
-                if (pairs.push_back(std::move(pair)) != status_t::success_k)
+                if (st::failed(pairs.push_back(std::move(pair))))
                     return expected_t::fail(status_t::bad_alloc_k, "metadata table growth failed");
             }
             continue;
@@ -207,16 +207,16 @@ struct checkpoint_file_t {
         entry.rows = static_cast<std::size_t>(rows); // In bounds of a mapped payload, so 32-bit wasm fits it too.
         entry.cols = static_cast<std::size_t>(cols);
         entry.byte_offset = static_cast<std::size_t>(begin);
-        if (entries.push_back(std::move(entry)) != status_t::success_k)
+        if (st::failed(entries.push_back(std::move(entry))))
             return expected_t::fail(status_t::bad_alloc_k, "entry table growth failed");
     }
     return {};
 }
 
 expected_t checkpoint_to_save_t::reserve(u64_t total_bytes, u64_t tensor_count) noexcept {
-    if (payload_.reserve(total_bytes) != status_t::success_k)
+    if (st::failed(payload_.reserve(total_bytes)))
         return expected_t::fail(status_t::bad_alloc_k, "payload reservation failed ({} bytes)", total_bytes);
-    if (entries_.reserve(tensor_count) != status_t::success_k)
+    if (st::failed(entries_.reserve(tensor_count)))
         return expected_t::fail(status_t::bad_alloc_k, "entry table reservation failed ({} tensors)", tensor_count);
     return {};
 }
@@ -243,9 +243,13 @@ expected_t checkpoint_to_save_t::insert_(sz::string_view_t name, checkpoint_dtyp
     if (payload_.size() % scalar_size != 0)
         return expected_t::fail(status_t::invalid_input_k, "{} would start at byte {}, unaligned for {}", name,
                                 payload_.size(), dtype_name_(dtype));
-    for (checkpoint_entry_t const &existing : entries_)
-        if (existing.name.view() == name)
+    u64_t const key = static_cast<u64_t>(name.hash());
+    if (auto const found = index_.find(key); found != index_.end()) {
+        if (entries_[found.value()].name.view() == name)
             return expected_t::fail(status_t::invalid_input_k, "duplicate entry: {}", name);
+        return expected_t::fail(status_t::invalid_input_k, "{} collides with {} in its name hash", name,
+                                entries_[found.value()].name.view());
+    }
 
     checkpoint_entry_t entry;
     if (expected_t owned = own_text_(entry.name, name); !owned) return owned;
@@ -254,12 +258,17 @@ expected_t checkpoint_to_save_t::insert_(sz::string_view_t name, checkpoint_dtyp
     entry.cols = cols;
     entry.byte_offset = payload_.size();
     std::size_t const bytes = rows * cols * scalar_size;
-    if (payload_.resize_uninitialized(entry.byte_offset + bytes) != status_t::success_k)
+    if (st::failed(payload_.resize(st::assume_uninitialized, entry.byte_offset + bytes)))
         return expected_t::fail(status_t::bad_alloc_k, "payload growth failed ({} bytes)", entry.byte_offset + bytes);
     std::memcpy(payload_.data() + entry.byte_offset, data, bytes);
-    if (entries_.push_back(std::move(entry)) != status_t::success_k) {
+    if (st::failed(entries_.push_back(std::move(entry)))) {
         (void)payload_.resize(payload_.size() - bytes); // a shrink never fails
         return expected_t::fail(status_t::bad_alloc_k, "entry table growth failed");
+    }
+    if (st::failed(index_.upsert(st::mapping<u64_t, u32_t> {key, static_cast<u32_t>(entries_.size() - 1)}))) {
+        (void)entries_.resize(entries_.size() - 1); // a shrink never fails
+        (void)payload_.resize(payload_.size() - bytes);
+        return expected_t::fail(status_t::bad_alloc_k, "entry index growth failed");
     }
     return {};
 }
@@ -270,7 +279,7 @@ expected_t checkpoint_to_save_t::metadata(sz::string_view_t key, sz::string_view
     checkpoint_metadata_t pair;
     expected_t owned = own_text_(pair.key, key);
     if (owned) owned = own_text_(pair.value, value);
-    if (owned && metadata_.push_back(std::move(pair)) != status_t::success_k)
+    if (owned && st::failed(metadata_.push_back(std::move(pair))))
         owned = expected_t::fail(status_t::bad_alloc_k, "metadata table growth failed");
     return owned;
 }
@@ -284,17 +293,17 @@ expected_t checkpoint_to_save_t::save(sz::string_view_t path) noexcept {
     sz::string_view_t header {};
     for (;;) {
         std::size_t const pool_bytes = scratch_.capacity() != 0 ? scratch_.capacity() : 4096;
-        if (scratch_.resize_uninitialized(pool_bytes) != status_t::success_k)
+        if (st::failed(scratch_.resize(st::assume_uninitialized, pool_bytes)))
             return expected_t::fail(status_t::bad_alloc_k, "header scratch growth failed ({} bytes)", pool_bytes);
         yyjson_alc pool;
         if (!yyjson_alc_pool_init(&pool, scratch_.data(), scratch_.size()))
             return expected_t::fail(status_t::bad_alloc_k, "header pool setup failed ({} bytes)", scratch_.size());
-        expected<sz::string_view_t> serialized = write_header_(entries_.view(), metadata_.view(), &pool);
+        expected<sz::string_view_t> serialized = write_header_(entries_, metadata_, &pool);
         if (serialized) {
             header = *serialized;
             break;
         }
-        if (scratch_.reserve(scratch_.size() * 2) != status_t::success_k)
+        if (st::failed(scratch_.reserve(scratch_.size() * 2)))
             return expected_t::fail(std::move(serialized)); // a dry pool with no room left to grow
     }
 
@@ -328,6 +337,7 @@ expected_t checkpoint_to_save_t::save(sz::string_view_t path) noexcept {
 
 void checkpoint_to_save_t::clear() noexcept {
     entries_.clear();
+    index_.clear();
     metadata_.clear();
     payload_.clear();
     scratch_.clear();
@@ -389,9 +399,9 @@ expected<checkpoint_to_load_t> checkpoint_to_load_t::view(std::span<b8_t const> 
 
     // The parse scratch holds a copy of the header up front and the yyjson pool behind it — one allocation,
     // released once the tables are indexed.
-    array<char> scratch;
+    st::basic_vector<char> scratch;
     std::size_t const pool_bytes = yyjson_read_max_memory_usage(header_length, 0);
-    if (scratch.resize_uninitialized(header_length + pool_bytes) != status_t::success_k)
+    if (st::failed(scratch.resize(st::assume_uninitialized, header_length + pool_bytes)))
         return loaded_t::fail(status_t::bad_alloc_k, "header staging failed ({} bytes)", header_length + pool_bytes);
     std::memcpy(scratch.data(), buffer.data() + sizeof(header_length), header_length);
     yyjson_alc pool;
@@ -401,14 +411,24 @@ expected<checkpoint_to_load_t> checkpoint_to_load_t::view(std::span<b8_t const> 
     std::span<char> const header {scratch.data(), static_cast<std::size_t>(header_length)};
     if (expected_t parsed = read_header_(header, &pool, payload_bytes, loaded.entries_, loaded.metadata_); !parsed)
         return loaded_t::fail(std::move(parsed));
+    for (std::size_t position = 0; position != loaded.entries_.size(); ++position) {
+        sz::string_view_t const name = loaded.entries_[position].name.view();
+        u64_t const key = static_cast<u64_t>(name.hash());
+        if (auto const found = loaded.index_.find(key); found != loaded.index_.end())
+            return loaded_t::fail(status_t::invalid_input_k, "{} and {} share a name hash",
+                                  loaded.entries_[found.value()].name.view(), name);
+        if (st::failed(loaded.index_.upsert(st::mapping<u64_t, u32_t> {key, static_cast<u32_t>(position)})))
+            return loaded_t::fail(status_t::bad_alloc_k, "entry index growth failed");
+    }
     loaded.payload_ = buffer.data() + sizeof(header_length) + header_length;
     return loaded_t {std::move(loaded)};
 }
 
 checkpoint_entry_t const *checkpoint_to_load_t::find_(sz::string_view_t name, checkpoint_dtype_t dtype) const noexcept {
-    for (checkpoint_entry_t const &entry : entries_)
-        if (entry.name.view() == name) return entry.dtype == dtype ? &entry : nullptr;
-    return nullptr;
+    auto const found = index_.find(static_cast<u64_t>(name.hash()));
+    if (found == index_.end()) return nullptr;
+    checkpoint_entry_t const &entry = entries_[found.value()];
+    return entry.name.view() == name && entry.dtype == dtype ? &entry : nullptr;
 }
 
 nk::tensor_view<nk_bf16_t, 2> checkpoint_to_load_t::operator[](sz::string_view_t name) const noexcept {

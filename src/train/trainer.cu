@@ -132,7 +132,7 @@ struct footprint_t {
                                 topology.shape.gpus_per_host_domain, gpus);
     placed.config = config;
     placed.mesh = &mesh;
-    if (placed.devices.assign(devices) != status_t::success_k)
+    if (st::failed(placed.devices.assign(devices)))
         return expected_t::fail(status_t::bad_alloc_k, "device table allocation failed");
     for (std::size_t member = 0; member != gpus; ++member) {
         expected<gpu_stream_t> stream = gpu_stream_t::make(devices[member]);
@@ -172,8 +172,8 @@ struct footprint_t {
     // after the trainer, so the probe allocates the same, and the fit carries them per row; a
     // held-out source allocates its own.
     std::size_t const sources = config.eval_every && !config.eval_mixture.empty() ? 2 : 1;
-    array<multimodal_batch_on_gpu_t> filled;
-    array<multimodal_batch_mixer_t> mixers;
+    st::basic_vector<multimodal_batch_on_gpu_t> filled;
+    st::basic_vector<multimodal_batch_mixer_t> mixers;
     for (std::size_t source_index = 0; source_index != sources; ++source_index) {
         for (std::size_t member = 0; member != devices.size(); ++member) {
             switch_to_gpu_t gpu_scope {probe.streams[member]};
@@ -183,14 +183,14 @@ struct footprint_t {
                 expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(
                     gpu_arena_alloc_t {probe.arenas[member]}, config.batch);
                 if (!batch) return expected_t::fail(std::move(batch));
-                if (filled.push_back(std::move(batch.value_)) != status_t::success_k)
+                if (st::failed(filled.push_back(std::move(batch.value_))))
                     return expected_t::fail(status_t::bad_alloc_k, "batch table allocation failed");
             }
         }
         expected<multimodal_batch_mixer_t> mixer = multimodal_batch_mixer_t::make(
             probe.domain, mesh.colocated, probe.arenas, config.batch, config.seed, probe.streams, mesh.timeout_seconds);
         if (!mixer) return expected_t::fail(std::move(mixer));
-        if (mixers.push_back(std::move(mixer.value_)) != status_t::success_k)
+        if (st::failed(mixers.push_back(std::move(mixer.value_))))
             return expected_t::fail(status_t::bad_alloc_k, "mixer table allocation failed");
     }
     for (std::size_t member = 0; member != devices.size(); ++member) {
@@ -344,7 +344,7 @@ struct footprint_t {
 [[nodiscard]] static expected_t assemble_(trainer_t &placed, mesh_t &mesh, std::size_t reserve_bytes) noexcept {
     trainer_config_t const &config = placed.config;
     mesh_topology_t const &topology = mesh.topology;
-    std::span<i32_t const> const devices = placed.devices.view();
+    std::span<i32_t const> const devices = placed.devices;
     std::size_t const gpus = devices.size();
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {placed.streams[member]};
@@ -414,14 +414,15 @@ struct footprint_t {
     }
     if (expected_t seeded = placed.reseed(); !seeded) return seeded;
 
-    array<differentiable_weights_t> registrations; // a transient the optimizer copies into its per-replica state
+    st::basic_vector<differentiable_weights_t>
+        registrations; // a transient the optimizer copies into its per-replica state
     for (std::size_t member = 0; member != gpus; ++member)
-        for (differentiable_weights_t const &entry : placed.replicas[member].weights.view()) {
+        for (differentiable_weights_t const &entry : placed.replicas[member].weights) {
             expected<differentiable_weights_t> copied = entry.copy();
-            if (!copied || registrations.push_back(std::move(copied.value_)) != status_t::success_k)
+            if (!copied || st::failed(registrations.push_back(std::move(copied.value_))))
                 return expected_t::fail(status_t::bad_alloc_k, "registration table allocation failed");
         }
-    std::span<differentiable_weights_t const> const lead_weights = placed.replicas[0].weights.view();
+    std::span<differentiable_weights_t const> const lead_weights = placed.replicas[0].weights;
     std::size_t const gradient_scalars = distributed_adafactor_t::payload_scalars_needed(lead_weights);
     contrastive_segments_config_t contrastive_config;
     contrastive_config.from_vertices_per_gpu = static_cast<u32_t>(segments);
@@ -460,7 +461,7 @@ struct footprint_t {
                                           ? distributed_contrastive_tokens_t::payload_scalars_needed(tokens_config)
                                           : 0u;
     expected<multimem_domain_t> domain = multimem_domain_t::make(
-        mesh.topology, placed.devices.view(),
+        mesh.topology, placed.devices,
         multimem_domain_t::window_scalars(gradient_scalars) + multimem_domain_t::window_scalars(force_scalars) +
             multimem_domain_t::window_scalars(token_scalars) + mixer_scalars,
         placed.streams, mesh.timeout_seconds);
@@ -475,7 +476,7 @@ struct footprint_t {
         placed.world_reduce = std::move(world_reduce.value_);
     }
     expected<distributed_adafactor_t> optimizer = distributed_adafactor_t::make(
-        placed.domain, placed.world_reduce, placed.arenas, registrations.view(), lead_weights.size(),
+        placed.domain, placed.world_reduce, placed.arenas, registrations, lead_weights.size(),
         adafactor_config_t {.beta1 = config.adafactor_beta1}, placed.streams, placed.ledger);
     if (!optimizer) return expected_t::fail(std::move(optimizer));
     placed.optimizer = std::move(optimizer.value_);
@@ -572,10 +573,10 @@ expected_t trainer_t::make(trainer_t &placed, mesh_t &mesh, trainer_config_t con
  *  @p name . */
 [[nodiscard]] static expected_t insert_vector_(checkpoint_to_save_t &checkpoint, sz::string_view_t name,
                                                f32r1_view_t values, gpu_stream_t &stream) noexcept {
-    array<f32_t> staging;
-    if (staging.resize_uninitialized(values.extent(0)) != status_t::success_k)
+    st::basic_vector<f32_t> staging;
+    if (st::failed(staging.resize(st::assume_uninitialized, values.extent(0))))
         return expected_t::fail(status_t::bad_alloc_k, "{} staging failed", name);
-    if (expected_t copied = copy_device_to_host(values, staging.span(), stream); !copied) return copied;
+    if (expected_t copied = copy_device_to_host(values, std::span<f32_t> {staging}, stream); !copied) return copied;
     if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
         return cuda_failure(result, "{} download failed", name);
     return checkpoint.insert(name, f32r2_view_t {staging.data(), 1, staging.size()});
@@ -739,12 +740,10 @@ expected<retrieval_t> trainer_t::evaluate(batch_source_t &source, data_epoch_t d
 
 expected_t trainer_t::reseed() noexcept {
     std::size_t const groups = std::max<std::size_t>(config.contrastive.temperature_groups, 1);
-    array<f32_t> inverse_temperatures, biases, token_inverse_temperatures, token_biases;
+    st::basic_vector<f32_t> inverse_temperatures, biases, token_inverse_temperatures, token_biases;
     if (config.contrasts()) {
-        if (inverse_temperatures.resize(groups) != status_t::success_k ||
-            biases.resize(groups) != status_t::success_k ||
-            token_inverse_temperatures.resize(groups) != status_t::success_k ||
-            token_biases.resize(groups) != status_t::success_k)
+        if (st::failed(inverse_temperatures.resize(groups)) || st::failed(biases.resize(groups)) ||
+            st::failed(token_inverse_temperatures.resize(groups)) || st::failed(token_biases.resize(groups)))
             return expected_t::fail(status_t::bad_alloc_k, "temperature staging failed");
         for (std::size_t group = 0; group != groups; ++group)
             inverse_temperatures[group] = config.contrastive.inverse_temperature,
@@ -973,15 +972,15 @@ expected_t items_source_t::make(items_source_t &placed, trainer_t &trainer) noex
     std::size_t const edges = config.contrastive.max_edges_per_gpu
                                   ? config.contrastive.max_edges_per_gpu
                                   : relation_edges_capacity(static_cast<u32_t>(segments), shape.max_bag_segments);
-    bool allocated = placed.tokens_.resize(total_segments) == status_t::success_k &&
-                     placed.placements_.resize(total_segments) == status_t::success_k &&
-                     placed.destinations_.resize(total_segments) == status_t::success_k &&
-                     placed.order_.resize(total_segments) == status_t::success_k;
+    bool allocated = !st::failed(placed.tokens_.resize(total_segments)) &&
+                     !st::failed(placed.placements_.resize(total_segments)) &&
+                     !st::failed(placed.destinations_.resize(total_segments)) &&
+                     !st::failed(placed.order_.resize(total_segments));
     placed.packed_items_ = u32r2_tensor_pinned_t::uninitialized({gpus, segments}, pinned_alloc<u32_t> {}).value;
     allocated = allocated && placed.packed_items_;
     if (shape.contains(modality_t::audio_k))
-        allocated = allocated && placed.window_.resize(std::size_t {shape.max_columns_per_row} *
-                                                       shape.audio.chunk_samples) == status_t::success_k;
+        allocated = allocated && !st::failed(placed.window_.resize(std::size_t {shape.max_columns_per_row} *
+                                                                   shape.audio.chunk_samples));
     if (config.contrasts()) {
         expected<contrastive_edges_pinned_t> edge_sets = contrastive_edges_pinned_t::make(static_cast<u32_t>(segments),
                                                                                           static_cast<u32_t>(edges));
@@ -992,8 +991,7 @@ expected_t items_source_t::make(items_source_t &placed, trainer_t &trainer) noex
                                                                                     pinned_alloc<bf16_t> {})
                              .value;
         allocated = allocated && placed.sources_ && placed.pooled_ &&
-                    placed.lengths_.resize(total_segments) == status_t::success_k &&
-                    placed.groups_.resize(segments) == status_t::success_k;
+                    !st::failed(placed.lengths_.resize(total_segments)) && !st::failed(placed.groups_.resize(segments));
     }
     if (!allocated) return expected_t::fail(status_t::bad_alloc_k, "item routing scratch allocation failed");
     return {};
@@ -1048,7 +1046,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
                       divide_round_up(clip->extent.height, video.patch_side);
         }
         else {
-            f32r1_span_t const window = window_.span();
+            f32r1_span_t const window = std::span<f32_t> {window_};
             if (expected_t decoded = um::decode_audio(bytes, shape.audio.sample_rate, window); !decoded) return decoded;
             std::size_t heard = window_.size(); // the decoder pads a short clip with exact silence
             while (heard && window_[heard - 1] == 0.0f) --heard;
@@ -1283,8 +1281,11 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
         switch_to_gpu_t gpu_scope {stream};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
         bool const ignores = items.ignore.offsets != nullptr;
-        expected_t staged = copy_host_to_device(lengths_.view(), replica.to_vertex_lengths.span(), stream);
-        if (staged) staged = copy_host_to_device(groups_.view(), replica.temperature_groups.span(), stream);
+        expected_t staged = copy_host_to_device(std::span<u32_t const> {lengths_}, replica.to_vertex_lengths.span(),
+                                                stream);
+        if (staged)
+            staged = copy_host_to_device(std::span<temperature_group_t const> {groups_},
+                                         replica.temperature_groups.span(), stream);
         if (staged)
             staged = replica.relations.upload(edges_.attract(), edges_.repel(),
                                               ignores ? edges_.ignore() : contrastive_edges_view_t {},

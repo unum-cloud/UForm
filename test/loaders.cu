@@ -32,7 +32,7 @@
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
 #include "core/types.hpp"             // `splitmix64_hash_t`, `epoch_permutation`, `data_epoch_t`, `to_string`
-#include "core/array.hpp"             // `array`, `stack_array` — the host-oracle and staging scratch
+#include "core/array.hpp"             // `stack_array` — the host-oracle and staging scratch
 #include "core/gpu_allocators.hpp"    // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`, the tensor aliases
 #include "core/schedule.cuh"          // `gpu_stream_t`, `copy_host_to_device`, `copy_device_to_host`
 #include "core/mesh.hpp"              // `mesh_topology_t`, `host_domain_index_from_environment`
@@ -80,11 +80,13 @@ struct fabricated_tape_t {
     b8r1_tensor_arena_t device_bytes {};
 
     /** @b [blobs+1] byte offsets on the host — the Arrow offsets @ref view hands to @ref column_view_t . */
-    array<u64_t> offsets {};
+    st::basic_vector<u64_t> offsets {};
 
     /** The Arrow packed view a loader decodes: the device buffer with 64-bit host offsets, so
      *  @c tape[row] is a device slice computed on the host. */
-    [[nodiscard]] column_view_t view() const noexcept { return column_view_t {device_bytes.view(), offsets.view()}; }
+    [[nodiscard]] column_view_t view() const noexcept {
+        return column_view_t {device_bytes.view(), std::span<u64_t const> {offsets}};
+    }
 
     /**
      *  @brief Pack @p blobs into a fresh device tape on @p arena , staging the host accumulator through
@@ -97,16 +99,16 @@ struct fabricated_tape_t {
                                                           std::span<std::span<b8_t const> const> blobs) noexcept {
         using result_t = expected<fabricated_tape_t>;
         fabricated_tape_t tape;
-        if (tape.offsets.push_back(0) != status_t::success_k)
+        if (st::failed(tape.offsets.push_back(0)))
             return result_t::fail(status_t::bad_alloc_k, "tape offsets seed failed");
-        array<b8_t> host;
+        st::basic_vector<b8_t> host;
         for (std::span<b8_t const> const blob : blobs) {
             for (b8_t const byte : blob)
-                if (host.push_back(byte) != status_t::success_k)
+                if (st::failed(host.push_back(b8_t {byte})))
                     return result_t::fail(status_t::bad_alloc_k, "tape byte accumulate failed");
-            if (host.push_back(b8_t {0}) != status_t::success_k) // one guard byte per blob
+            if (st::failed(host.push_back(b8_t {0}))) // one guard byte per blob
                 return result_t::fail(status_t::bad_alloc_k, "tape guard append failed");
-            if (tape.offsets.push_back(static_cast<u64_t>(host.size())) != status_t::success_k)
+            if (st::failed(tape.offsets.push_back(static_cast<u64_t>(host.size()))))
                 return result_t::fail(status_t::bad_alloc_k, "tape offset append failed");
         }
         std::size_t const total = std::max<std::size_t>(host.size(), 1u);
@@ -115,7 +117,8 @@ struct fabricated_tape_t {
         if (!tape.device_bytes) return result_t::fail(status_t::bad_alloc_k, "tape device buffer alloc failed");
         if (CUresult reset = cuMemsetD8(device_address(tape.device_bytes.data()), 0, total); reset != CUDA_SUCCESS)
             return cuda_failure<fabricated_tape_t>(reset, "tape device buffer reset failed");
-        if (expected_t staged = copy_host_to_device(host.view(), tape.device_bytes.span(), stream); !staged)
+        if (expected_t staged = copy_host_to_device(std::span<b8_t const> {host}, tape.device_bytes.span(), stream);
+            !staged)
             return result_t::fail(std::move(staged));
         if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
             return cuda_failure<fabricated_tape_t>(synced, "tape staging sync failed");
@@ -124,12 +127,13 @@ struct fabricated_tape_t {
 };
 
 /**
- *  @brief Read a file's bytes into an @ref array , or an empty array if @p path is empty / unreadable. Takes
- *      a @c sz::string_view_t subspan and null-terminates it (an @c sz::string_t ) only at the C @c fopen boundary.
+ *  @brief Read a file's bytes into an @c st::basic_vector , or an empty one if @p path is empty or
+ *      unreadable. Takes a @c sz::string_view_t subspan and null-terminates it, as an
+ *      @c sz::string_t , only at the C @c fopen boundary.
  *  @param[in] path The filesystem path to read.
  */
-[[nodiscard]] static array<b8_t> read_fixture(sz::string_view_t path) noexcept {
-    array<b8_t> bytes;
+[[nodiscard]] static st::basic_vector<b8_t> read_fixture(sz::string_view_t path) noexcept {
+    st::basic_vector<b8_t> bytes;
     if (path.empty()) return bytes;
     sz::string_t owned;
     if (sz::failed(owned.assign(path))) return bytes;
@@ -139,7 +143,7 @@ struct fabricated_tape_t {
     long const size = std::ftell(file);
     std::fseek(file, 0, SEEK_SET);
     if (size > 0) {
-        if (bytes.resize(static_cast<std::size_t>(size)) != status_t::success_k) {
+        if (st::failed(bytes.resize(static_cast<std::size_t>(size)))) {
             std::fclose(file);
             return bytes;
         }
@@ -170,7 +174,7 @@ static void for_each_env_input(char const *name, path_fn_ &&on_path) noexcept {
  *      variable is unset — for the cases that need a single fixture rather than a fan-out.
  *  @param[in] name The environment variable holding the comma-separated path list.
  */
-[[nodiscard]] static array<b8_t> first_env_fixture(char const *name) noexcept {
+[[nodiscard]] static st::basic_vector<b8_t> first_env_fixture(char const *name) noexcept {
     char const *value = std::getenv(name);
     if (value == nullptr) return {};
     for (sz::string_view_t path : sz::string_view_t {value}.split(","))
@@ -195,8 +199,8 @@ static void draw_primitives_are_stable(test_suite_t &suite) {
                 "two-arg hash must be the splitmix64 golden-ratio fold (got {})", folded);
 
     std::size_t const draw_count = 100;
-    array<u8_t> seen;
-    if (seen.resize(draw_count) != status_t::success_k) return suite.check(false, "seen scratch alloc failed");
+    st::basic_vector<u8_t> seen;
+    if (st::failed(seen.resize(draw_count))) return suite.check(false, "seen scratch alloc failed");
     bool bijection = true;
     for (std::size_t index = 0; index != draw_count; ++index) {
         std::size_t const row = epoch_permutation(hash(seed, 3u, row_draw_salt_k), data_epoch_t {7u}, index,
@@ -219,14 +223,14 @@ static void draw_primitives_are_stable(test_suite_t &suite) {
  *  probes in one window. */
 static void jpeg_probe_resumes_past_metadata(test_suite_t &suite) {
     constexpr std::size_t app1_length_k = 6000, frame_offset_k = 4 + app1_length_k, window_k = 4096;
-    array<b8_t> blob;
-    if (blob.resize(frame_offset_k + 19) != status_t::success_k) return suite.check(false, "blob alloc failed");
+    st::basic_vector<b8_t> blob;
+    if (st::failed(blob.resize(frame_offset_k + 19))) return suite.check(false, "blob alloc failed");
     u8_t const head[6] = {0xFF, 0xD8, 0xFF, 0xE1, app1_length_k >> 8, app1_length_k & 0xFF};
     u8_t const frame[9] = {0xFF, 0xC0, 0x00, 0x11, 8, 480 >> 8, 480 & 0xFF, 640 >> 8, 640 & 0xFF};
     for (std::size_t index = 0; index != 6; ++index) blob[index] = b8_t {head[index]};
     for (std::size_t index = 0; index != 9; ++index) blob[frame_offset_k + index] = b8_t {frame[index]};
 
-    std::span<b8_t const> const bytes = blob.view();
+    std::span<b8_t const> const bytes = blob;
     auto const prefix = um::probe_image(bytes.first(window_k));
     suite.check(prefix && prefix->extent.width == 0 && prefix->resume_offset == frame_offset_k,
                 "a prefix short of the frame resumes at offset {} (got {})", frame_offset_k,
@@ -276,15 +280,14 @@ static void file_pick_is_weighted_and_distinct(test_suite_t &suite) {
     stack_array<std::size_t, 5> rows; // file 2 owns ~85% of the rows
     for (std::size_t count : {std::size_t {10}, std::size_t {5}, std::size_t {200}, std::size_t {20}, std::size_t {5}})
         (void)rows.push_back(count);
-    array<std::size_t> prefix;
-    if (prefix.push_back(0) != status_t::success_k) return suite.check(false, "prefix scratch alloc failed");
+    st::basic_vector<std::size_t> prefix;
+    if (st::failed(prefix.push_back(0))) return suite.check(false, "prefix scratch alloc failed");
     for (std::size_t r = 0; r != rows.size(); ++r)
-        if (prefix.push_back(prefix[r] + rows[r]) != status_t::success_k)
-            return suite.check(false, "prefix scratch alloc failed");
+        if (st::failed(prefix.push_back(prefix[r] + rows[r]))) return suite.check(false, "prefix scratch alloc failed");
     std::size_t const total_rows = prefix[rows.size()];
 
-    array<std::size_t> hits;
-    if (hits.resize(rows.size()) != status_t::success_k) return suite.check(false, "hits scratch alloc failed");
+    st::basic_vector<std::size_t> hits;
+    if (st::failed(hits.resize(rows.size()))) return suite.check(false, "hits scratch alloc failed");
     std::size_t const steps = 4000;
     bool floored = true, distinct = true;
     for (std::size_t step = 0; step != steps; ++step) {
@@ -320,9 +323,8 @@ static void segment_geometry_packs_multiple_per_row(test_suite_t &suite) {
     for (u64_t count : {u64_t {3}, u64_t {4}, u64_t {2}, u64_t {5}, u64_t {6}}) (void)item_bytes.push_back(count);
     u32_t const live_segments = static_cast<u32_t>(item_bytes.size());
 
-    array<u32_t> offsets, lengths;
-    if (offsets.resize(total_segments + 1u) != status_t::success_k ||
-        lengths.resize(total_segments) != status_t::success_k)
+    st::basic_vector<u32_t> offsets, lengths;
+    if (st::failed(offsets.resize(total_segments + 1u)) || st::failed(lengths.resize(total_segments)))
         return suite.check(false, "segment scratch alloc failed");
     u32_t cursor = 0, jumps = 0;
     for (std::size_t index = 0; index != total_segments; ++index) {
@@ -523,8 +525,8 @@ static void pack_tokens_starts_with_prefix(test_suite_t &suite, gpu_arena_t &are
  *  @param[inout] stream The stream every stage enqueues on.
  *  @param[inout] pool The CPU-decode worker pool.
  */
-static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, array<b8_t> const &clip, gpu_arena_t &arena,
-                             gpu_stream_t &stream, cpu_decode_pool_t &pool) {
+static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, st::basic_vector<b8_t> const &clip,
+                             gpu_arena_t &arena, gpu_stream_t &stream, cpu_decode_pool_t &pool) {
     if (clip.empty()) return suite.skip("the audio fixture is empty or unreadable");
     u32_t const columns = 24u, chunk = 400u, max_segments = 4u, sample_rate = 16000u;
     multimodal_batch_shape_t shape {};
@@ -537,7 +539,7 @@ static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, array
     if (!made) return suite.check(false, "[{}] audio batch make: {}", label, to_string(made.status_));
     multimodal_batch_on_gpu_t batch = std::move(made.value_);
 
-    std::span<b8_t const> blob = clip.view();
+    std::span<b8_t const> blob = clip;
     auto tape_made = fabricated_tape_t::make(arena, stream, {&blob, 1});
     if (!tape_made) return suite.check(false, "[{}] audio tape: {}", label, to_string(tape_made.status_));
     fabricated_tape_t tape = std::move(tape_made.value_);
@@ -591,11 +593,11 @@ static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, array
  *  @param[in] clip The real env audio clip; an empty clip skips the case.
  */
 static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream,
-                                  cpu_decode_pool_t &pool, array<b8_t> const &clip) {
+                                  cpu_decode_pool_t &pool, st::basic_vector<b8_t> const &clip) {
     if (clip.empty()) return suite.skip("needs a UFORM_TEST_AUDIO fixture");
     u32_t const columns = 16u, chunk = 400u, max_segments = 4u, sample_rate = 16000u;
-    array<b8_t> garbage; // not a decodable container → silence, but not the whole batch
-    if (garbage.resize(64u) != status_t::success_k) return suite.check(false, "garbage scratch alloc failed");
+    st::basic_vector<b8_t> garbage; // not a decodable container → silence, but not the whole batch
+    if (st::failed(garbage.resize(64u))) return suite.check(false, "garbage scratch alloc failed");
     for (std::size_t i = 0; i != garbage.size(); ++i) garbage[i] = b8_t {0x7F};
 
     multimodal_batch_shape_t shape {};
@@ -609,8 +611,8 @@ static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_s
     multimodal_batch_on_gpu_t batch = std::move(made.value_);
 
     stack_array<std::span<b8_t const>, 2> blobs;
-    (void)blobs.push_back(clip.view());
-    (void)blobs.push_back(garbage.view());
+    (void)blobs.push_back(std::span<b8_t const> {clip});
+    (void)blobs.push_back(std::span<b8_t const> {garbage});
     auto tape_made = fabricated_tape_t::make(arena, stream, blobs.view());
     if (!tape_made) return suite.check(false, "isolation tape: {}", to_string(tape_made.status_));
     fabricated_tape_t tape = std::move(tape_made.value_);
@@ -655,8 +657,9 @@ static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_s
  *  @param[inout] pool The CPU-decode worker pool.
  *  @param[inout] jpeg This GPU's nvJPEG session.
  */
-static void run_image_decode(test_suite_t &suite, sz::string_view_t label, array<b8_t> const &blob, gpu_arena_t &arena,
-                             gpu_stream_t &stream, cpu_decode_pool_t &pool, nvjpeg_session_t &jpeg) {
+static void run_image_decode(test_suite_t &suite, sz::string_view_t label, st::basic_vector<b8_t> const &blob,
+                             gpu_arena_t &arena, gpu_stream_t &stream, cpu_decode_pool_t &pool,
+                             nvjpeg_session_t &jpeg) {
     if (blob.empty()) return suite.skip("the image fixture is empty or unreadable");
     u32_t const columns = 64u, patch = 16u, channels = 4u, max_segments = 4u;
     multimodal_batch_shape_t shape {};
@@ -669,7 +672,7 @@ static void run_image_decode(test_suite_t &suite, sz::string_view_t label, array
     if (!made) return suite.check(false, "[{}] image batch make: {}", label, to_string(made.status_));
     multimodal_batch_on_gpu_t batch = std::move(made.value_);
 
-    std::span<b8_t const> one = blob.view();
+    std::span<b8_t const> one = blob;
     auto tape_made = fabricated_tape_t::make(arena, stream, {&one, 1});
     if (!tape_made) return suite.check(false, "[{}] image tape: {}", label, to_string(tape_made.status_));
     fabricated_tape_t tape = std::move(tape_made.value_);
@@ -719,8 +722,9 @@ static void run_image_decode(test_suite_t &suite, sz::string_view_t label, array
 
 /** Decode every @p blobs image in one batch, then each alone with the same shape, and require each
  *  image's patches to match bit for bit, so no image's decode writes into another's region. */
-static void image_batch_matches_single(test_suite_t &suite, std::span<array<b8_t> const> blobs, gpu_arena_t &arena,
-                                       gpu_stream_t &stream, cpu_decode_pool_t &pool, nvjpeg_session_t &jpeg) {
+static void image_batch_matches_single(test_suite_t &suite, std::span<st::basic_vector<b8_t> const> blobs,
+                                       gpu_arena_t &arena, gpu_stream_t &stream, cpu_decode_pool_t &pool,
+                                       nvjpeg_session_t &jpeg) {
     if (blobs.size() < 2) return suite.skip("needs at least two UFORM_TEST_IMAGE fixtures");
     u32_t const columns = 256u, patch = 16u, channels = 4u, images = static_cast<u32_t>(blobs.size());
     std::size_t const cell_pixels = std::size_t {patch} * patch * channels;
@@ -730,10 +734,10 @@ static void image_batch_matches_single(test_suite_t &suite, std::span<array<b8_t
     shape.max_columns_per_row = columns;
     shape.image.patch_side = patch;
     shape.image.channels = channels;
-    array<std::span<b8_t const>> views;
-    for (array<b8_t> const &blob : blobs)
-        if (views.push_back(blob.view()) != status_t::success_k) return suite.check(false, "blob view append");
-    auto tape_made = fabricated_tape_t::make(arena, stream, views.view());
+    st::basic_vector<std::span<b8_t const>> views;
+    for (st::basic_vector<b8_t> const &blob : blobs)
+        if (st::failed(views.push_back(std::span<b8_t const> {blob}))) return suite.check(false, "blob view append");
+    auto tape_made = fabricated_tape_t::make(arena, stream, views);
     if (!tape_made) return suite.check(false, "image tape: {}", to_string(tape_made.status_));
     fabricated_tape_t tape = std::move(tape_made.value_);
     image_batch_shape_t const representation {patch, channels};
@@ -760,16 +764,16 @@ static void image_batch_matches_single(test_suite_t &suite, std::span<array<b8_t
                copy_device_to_host(batch.images.view().flatten<1>(), landed.pixels.span(), stream) &&
                cuStreamSynchronize(stream.get()) == CUDA_SUCCESS;
     };
-    array<u64_t> drawn;
+    st::basic_vector<u64_t> drawn;
     for (std::size_t row = 0; row != images; ++row)
-        if (drawn.push_back(row) != status_t::success_k) return suite.check(false, "drawn row append");
+        if (st::failed(drawn.push_back(u64_t {row}))) return suite.check(false, "drawn row append");
     landed_t together;
-    if (!decode(drawn.view(), together)) return suite.check(false, "the batched decode should succeed");
-    array<landed_t> singles;
+    if (!decode(drawn, together)) return suite.check(false, "the batched decode should succeed");
+    st::basic_vector<landed_t> singles;
     for (std::size_t image = 0; image != images; ++image) {
         landed_t alone;
-        if (!decode(drawn.view().subspan(image, 1), alone) ||
-            singles.push_back(std::move(alone)) != status_t::success_k)
+        if (!decode(std::span<u64_t const> {drawn}.subspan(image, 1), alone) ||
+            st::failed(singles.push_back(std::move(alone))))
             return suite.check(false, "image {} decoded alone should succeed", image);
     }
     // The mean absolute pixel difference between batched `image` and single decode `single`.
@@ -812,7 +816,7 @@ static void image_batch_matches_single(test_suite_t &suite, std::span<array<b8_t
  *  @param[inout] pool The CPU demux pool.
  *  @param[inout] nvdec The multi-engine NVDEC session.
  */
-static void run_video_decode(test_suite_t &suite, sz::string_view_t label, array<b8_t> const &clip,
+static void run_video_decode(test_suite_t &suite, sz::string_view_t label, st::basic_vector<b8_t> const &clip,
                              std::span<u32_t const> frame_strides, gpu_arena_t &arena, gpu_stream_t &stream,
                              cpu_decode_pool_t &pool, nvdec_session_t &nvdec) {
     if (clip.empty()) return suite.skip("the video fixture is empty or unreadable");
@@ -832,7 +836,7 @@ static void run_video_decode(test_suite_t &suite, sz::string_view_t label, array
     for (u32_t stride : frame_strides)
         (void)representations.push_back(video_batch_shape_t {patch, channels, tube_frames, stride});
 
-    std::span<b8_t const> one = clip.view();
+    std::span<b8_t const> one = clip;
     auto tape_made = fabricated_tape_t::make(arena, stream, {&one, 1});
     if (!tape_made) return suite.check(false, "[{}] video tape: {}", label, to_string(tape_made.status_));
     fabricated_tape_t tape = std::move(tape_made.value_);
@@ -891,8 +895,9 @@ static void run_video_decode(test_suite_t &suite, sz::string_view_t label, array
  *  @param[in] image_blob The real env image blob; empty skips the case.
  */
 static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream,
-                                     cpu_decode_pool_t &pool, nvjpeg_session_t &jpeg, array<b8_t> const &audio_clip,
-                                     array<b8_t> const &image_blob) {
+                                     cpu_decode_pool_t &pool, nvjpeg_session_t &jpeg,
+                                     st::basic_vector<b8_t> const &audio_clip,
+                                     st::basic_vector<b8_t> const &image_blob) {
     if (audio_clip.empty() || image_blob.empty())
         return suite.skip("needs both UFORM_TEST_AUDIO and UFORM_TEST_IMAGE fixtures");
 
@@ -907,7 +912,7 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
     auto audio_made = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {arena}, audio_shape);
     if (!audio_made) return suite.check(false, "multimodal: audio batch make: {}", to_string(audio_made.status_));
     multimodal_batch_on_gpu_t audio_batch = std::move(audio_made.value_);
-    std::span<b8_t const> audio_one = audio_clip.view();
+    std::span<b8_t const> audio_one = audio_clip;
     auto audio_tape_made = fabricated_tape_t::make(arena, stream, {&audio_one, 1});
     if (!audio_tape_made) return suite.check(false, "multimodal: audio tape: {}", to_string(audio_tape_made.status_));
     fabricated_tape_t audio_tape = std::move(audio_tape_made.value_);
@@ -931,7 +936,7 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
     auto image_made = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {arena}, image_shape);
     if (!image_made) return suite.check(false, "multimodal: image batch make: {}", to_string(image_made.status_));
     multimodal_batch_on_gpu_t image_batch = std::move(image_made.value_);
-    std::span<b8_t const> image_one = image_blob.view();
+    std::span<b8_t const> image_one = image_blob;
     auto image_tape_made = fabricated_tape_t::make(arena, stream, {&image_one, 1});
     if (!image_tape_made) return suite.check(false, "multimodal: image tape: {}", to_string(image_tape_made.status_));
     fabricated_tape_t image_tape = std::move(image_tape_made.value_);
@@ -1136,13 +1141,12 @@ int main(int, char **argv) {
                 to_string(jpeg_made.status_));
     if (jpeg_made) {
         nvjpeg_session_t jpeg = std::move(jpeg_made.value_);
-        array<array<b8_t>> image_blobs;
+        st::basic_vector<st::basic_vector<b8_t>> image_blobs;
         for_each_env_input("UFORM_TEST_IMAGE", [&](sz::string_view_t path) {
             suite.run("image_decode", run_image_decode, "env-image", read_fixture(path), arena, stream, pool, jpeg);
             (void)image_blobs.push_back(read_fixture(path));
         });
-        suite.run("image_batch_matches_single", image_batch_matches_single, image_blobs.view(), arena, stream, pool,
-                  jpeg);
+        suite.run("image_batch_matches_single", image_batch_matches_single, image_blobs, arena, stream, pool, jpeg);
         suite.run("multimodal_packet_routes", multimodal_packet_routes, arena, stream, pool, jpeg,
                   first_env_fixture("UFORM_TEST_AUDIO"), first_env_fixture("UFORM_TEST_IMAGE"));
     }
@@ -1153,7 +1157,7 @@ int main(int, char **argv) {
     if (nvdec_made) {
         nvdec_session_t nvdec = std::move(nvdec_made.value_);
         for_each_env_input("UFORM_TEST_VIDEO", [&](sz::string_view_t path) {
-            array<b8_t> const clip = read_fixture(path);
+            st::basic_vector<b8_t> const clip = read_fixture(path);
             stack_array<u32_t, 1> one_stride;
             (void)one_stride.push_back(1u);
             suite.run("video_decode/one_view", run_video_decode, "video-1view", clip, one_stride.view(), arena, stream,

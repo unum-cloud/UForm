@@ -10,12 +10,11 @@
 #include <algorithm> // `std::clamp`
 #include <numbers>   // `std::numbers::pi`
 
-#include "core/array.hpp" // `array` — the resize scratch
+#include "core/types.hpp" // `st::basic_vector` — the resize scratch
 #include "media/image.hpp"
 
 namespace um = unum::uform::media;
 using namespace um;
-using uc::array;
 using uc::f32_t;
 using uc::i64_t;
 
@@ -45,8 +44,8 @@ struct lanczos_tap_t {
  *  pixel centers map onto source pixel centers, @c (target+0.5)·scale−0.5 , and the window keeps its six-tap
  *  support whatever the scale. */
 [[nodiscard]] static status_t lanczos_taps_(u32_t source_length, u32_t target_length,
-                                            array<lanczos_tap_t> &taps) noexcept {
-    if (taps.resize(target_length) != status_t::success_k) return status_t::bad_alloc_k;
+                                            st::basic_vector<lanczos_tap_t> &taps) noexcept {
+    if (st::failed(taps.resize(target_length))) return status_t::bad_alloc_k;
     f64_t const scale = static_cast<f64_t>(source_length) / static_cast<f64_t>(target_length);
     i64_t const last = static_cast<i64_t>(source_length) - 1;
     for (u32_t target = 0; target != target_length; ++target) {
@@ -80,12 +79,12 @@ expected_t um::resize_image(pixel_image_view_t source, pixel_patches_span_t out)
         return expected_t::fail(status_t::shape_unsupported_k, "a {}x{} image has no {}x{} crop", width, height,
                                 target.width, target.height);
 
-    array<lanczos_tap_t> horizontal, vertical;
-    array<f32_t> staged; // the crop's rows resampled to the target width, before the vertical pass
+    st::basic_vector<lanczos_tap_t> horizontal, vertical;
+    st::basic_vector<f32_t> staged; // the crop's rows resampled to the target width, before the vertical pass
     if (lanczos_taps_(crop.width, target.width, horizontal) != status_t::success_k ||
         lanczos_taps_(crop.height, target.height, vertical) != status_t::success_k ||
-        staged.resize_uninitialized(static_cast<std::size_t>(crop.height) * target.width * image_channels_k) !=
-            status_t::success_k)
+        st::failed(staged.resize(st::assume_uninitialized,
+                                 static_cast<std::size_t>(crop.height) * target.width * image_channels_k)))
         return expected_t::fail(status_t::bad_alloc_k, "resize scratch allocation failed ({}x{})", target.width,
                                 crop.height);
 

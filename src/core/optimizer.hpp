@@ -114,7 +114,7 @@ struct adafactor_t {
 
     /** The resolved states, for the distributed sibling's staging pass. */
     [[nodiscard]] nk::tensor_view<adafactor_state_t, 1> states() const noexcept {
-        return {states_.view().data(), states_.size()};
+        return std::span<adafactor_state_t const> {states_};
     }
 
     /** One optimizer step: moments, clip scales, apply — per state, pure enqueue. A non-empty
@@ -157,10 +157,10 @@ struct adafactor_t {
     u64_t steps_ = 0;
 
     /** One optimizer state per weight matrix, resolved once at @ref make . */
-    array<adafactor_state_t> states_ {};
+    st::basic_vector<adafactor_state_t> states_ {};
 
     /** Each state's weight name, in state order, which its checkpoint entries carry. */
-    array<sz::string_t> names_ {};
+    st::basic_vector<sz::string_t> names_ {};
 
     /** Every state's row + column moments, back to back in state order. */
     f32r1_tensor_arena_t moments_ {};

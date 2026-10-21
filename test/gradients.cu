@@ -56,20 +56,21 @@ using namespace unum::uform::train;
 using namespace unum::uform::test;
 
 /** Download @p count BFloat16 scalars at @p device into @p widened , widened once by NumKong. */
-[[nodiscard]] static bool download_widened_(bf16_t const *device, std::size_t count, array<f64_t> &widened) noexcept {
-    array<nk_bf16_t> staging;
-    if (staging.resize_uninitialized(count) != status_t::success_k ||
-        widened.resize_uninitialized(count) != status_t::success_k)
+[[nodiscard]] static bool download_widened_(bf16_t const *device, std::size_t count,
+                                            st::basic_vector<f64_t> &widened) noexcept {
+    st::basic_vector<nk_bf16_t> staging;
+    if (st::failed(staging.resize(st::assume_uninitialized, count)) ||
+        st::failed(widened.resize(st::assume_uninitialized, count)))
         return false;
     cuMemcpyDtoH(staging.data(), device_address(device), count * sizeof(nk_bf16_t));
-    return widen_from_bf16(staging.view(), widened.span());
+    return widen_from_bf16(staging, widened);
 }
 
 /** Narrow @p values onto the BFloat16 grid in place and upload them to @p device , landed before
  *  the non-blocking stream reads them. */
 [[nodiscard]] static bool upload_narrowed_(std::span<f64_t> values, bf16_t *device) noexcept {
-    array<nk_bf16_t> staging;
-    if (staging.resize_uninitialized(values.size()) != status_t::success_k || !narrow_to_bf16(values, staging.span()))
+    st::basic_vector<nk_bf16_t> staging;
+    if (st::failed(staging.resize(st::assume_uninitialized, values.size())) || !narrow_to_bf16(values, staging))
         return false;
     cuMemcpyHtoD(device_address(device), staging.data(), staging.size() * sizeof(nk_bf16_t));
     cuCtxSynchronize(); // a pageable copy may return before its DMA lands
@@ -181,38 +182,38 @@ static void finite_differences(test_suite_t &suite, device_t &device, bool omni)
         return suite.check(false, "backward: {}", backward.description_);
     cuStreamSynchronize(device.stream.get());
 
-    array<f64_t> weights, gradient, plus, minus;
-    array<nk_bf16_t> staging;
-    for (differentiable_weights_t const &matrix : replica.weights.view()) {
+    st::basic_vector<f64_t> weights, gradient, plus, minus;
+    st::basic_vector<nk_bf16_t> staging;
+    for (differentiable_weights_t const &matrix : replica.weights) {
         std::size_t const scalars = matrix.weights.numel();
         if (!download_widened_(matrix.weights.data(), scalars, weights) ||
             !download_widened_(matrix.weights_grad.data(), scalars, gradient) ||
-            plus.resize_uninitialized(scalars) != status_t::success_k ||
-            minus.resize_uninitialized(scalars) != status_t::success_k ||
-            staging.resize_uninitialized(scalars) != status_t::success_k)
+            st::failed(plus.resize(st::assume_uninitialized, scalars)) ||
+            st::failed(minus.resize(st::assume_uninitialized, scalars)) ||
+            st::failed(staging.resize(st::assume_uninitialized, scalars)))
             return suite.check(false, "host staging for {} failed", matrix.name);
         f64_t largest = 0;
-        for (f64_t const value : gradient.view()) largest = std::max(largest, std::fabs(value));
+        for (f64_t const value : gradient) largest = std::max(largest, std::fabs(value));
         // The head and pool weights outside the masked objective take no gradient and move no loss.
         if (largest == 0) continue;
-        f64_t const weight_rms = std::sqrt(dot(weights.view(), weights.view()) / static_cast<f64_t>(scalars));
+        f64_t const weight_rms = std::sqrt(dot(weights, weights) / static_cast<f64_t>(scalars));
         f64_t predicted = 0;
         // Double the step until the BF16-rounded move predicts an eighth of a nat, never past the
         // matrix's RMS.
-        f64_t const first_step = largest / (8.0 * dot(gradient.view(), gradient.view()));
+        f64_t const first_step = largest / (8.0 * dot(gradient, gradient));
         for (f64_t step = first_step; step == first_step || (predicted < 0.125 && step <= weight_rms); step *= 2) {
             for (std::size_t index = 0; index != scalars; ++index)
                 plus[index] = weights[index] + step * gradient[index] / largest,
                 minus[index] = weights[index] - step * gradient[index] / largest;
-            if (!narrow_to_bf16(plus.span(), staging.span()) || !narrow_to_bf16(minus.span(), staging.span()))
+            if (!narrow_to_bf16(plus, staging) || !narrow_to_bf16(minus, staging))
                 return suite.check(false, "host rounding for {} failed", matrix.name);
-            predicted = dot(gradient.view(), plus.view()) - dot(gradient.view(), minus.view());
+            predicted = dot(gradient, plus) - dot(gradient, minus);
         }
-        bool uploaded = upload_narrowed_(plus.span(), matrix.weights.data());
+        bool uploaded = upload_narrowed_(plus, matrix.weights.data());
         expected<f64_t> const loss_plus = forward_loss_(replica, device.stream);
-        uploaded = uploaded && upload_narrowed_(minus.span(), matrix.weights.data());
+        uploaded = uploaded && upload_narrowed_(minus, matrix.weights.data());
         expected<f64_t> const loss_minus = forward_loss_(replica, device.stream);
-        uploaded = uploaded && upload_narrowed_(weights.span(), matrix.weights.data());
+        uploaded = uploaded && upload_narrowed_(weights, matrix.weights.data());
         if (!uploaded || !loss_plus || !loss_minus)
             return suite.check(false, "perturbed forward of {} failed", matrix.name);
         f64_t const measured = *loss_plus - *loss_minus;
@@ -231,15 +232,15 @@ static void finite_differences_omni(test_suite_t &suite, device_t &device) { fin
 
 /** Host copies of the batch's segment table. */
 struct host_segments_t {
-    array<u32_t> offsets {}, lengths {};
-    array<modality_t> modality {};
+    st::basic_vector<u32_t> offsets {}, lengths {};
+    st::basic_vector<modality_t> modality {};
 };
 
 [[nodiscard]] static host_segments_t read_segments_(multimodal_batch_on_gpu_t const &batch) noexcept {
     host_segments_t segments;
     std::size_t const count = batch.segment_lengths.extent(0);
-    if (segments.offsets.resize(count) != status_t::success_k ||
-        segments.lengths.resize(count) != status_t::success_k || segments.modality.resize(count) != status_t::success_k)
+    if (st::failed(segments.offsets.resize(count)) || st::failed(segments.lengths.resize(count)) ||
+        st::failed(segments.modality.resize(count)))
         return {};
     cuMemcpyDtoH(segments.offsets.data(), device_address(batch.segment_offsets.data()), count * sizeof(u32_t));
     cuMemcpyDtoH(segments.lengths.data(), device_address(batch.segment_lengths.data()), count * sizeof(u32_t));
@@ -250,7 +251,7 @@ struct host_segments_t {
 /** The linear loss @c ⟨R,V⟩ over the token head's unit vectors @c V after one tower forward,
  *  normalized in Float64 from the Float32 projections, since the BFloat16 vectors' rounding noise
  *  would swamp a central difference of the projection. */
-[[nodiscard]] static expected<f64_t> token_head_loss_(base_replica_t &replica, array<f64_t> const &direction,
+[[nodiscard]] static expected<f64_t> token_head_loss_(base_replica_t &replica, st::basic_vector<f64_t> const &direction,
                                                       gpu_stream_t &stream) noexcept {
     expected_t forwarded = replica.tower.pack_weights(stream);
     if (forwarded) forwarded = replica.tower.forward(replica.batch, {}, stream);
@@ -258,8 +259,8 @@ struct host_segments_t {
     cuStreamSynchronize(stream.get());
     f32r2_view_t const projections = replica.tower.token_projections();
     std::size_t const tokens = projections.extent(0), width = projections.extent(1);
-    array<f32_t> rows;
-    if (rows.resize_uninitialized(tokens * width) != status_t::success_k)
+    st::basic_vector<f32_t> rows;
+    if (st::failed(rows.resize(st::assume_uninitialized, tokens * width)))
         return expected<f64_t>::fail(status_t::bad_alloc_k, "token projection staging failed");
     cuMemcpyDtoH(rows.data(), device_address(projections.data()), tokens * width * sizeof(f32_t));
     f32r2_view_t const projection_rows {rows.data(), tokens, width};
@@ -317,12 +318,12 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
     cuMemcpyHtoD(device_address(replica.batch.segment_prefix_length.data()), prefixes, sizeof(prefixes));
 
     bf16r2_view_t const token_vectors = replica.tower.token_vectors();
-    array<f64_t> direction;
-    if (direction.resize_uninitialized(token_vectors.numel()) != status_t::success_k)
+    st::basic_vector<f64_t> direction;
+    if (st::failed(direction.resize(st::assume_uninitialized, token_vectors.numel())))
         return suite.check(false, "direction staging failed");
     for (std::size_t index = 0; index != direction.size(); ++index)
         direction[index] = f64_t((index * 2654435761ull + 40503ull) % 1000ull) / 1000.0 - 0.5;
-    if (!upload_narrowed_(direction.span(), replica.token_vectors_grad.data()))
+    if (!upload_narrowed_(direction, replica.token_vectors_grad.data()))
         return suite.check(false, "direction upload failed");
     expected<f64_t> const base_loss = token_head_loss_(replica, direction, device.stream);
     if (!base_loss) return suite.check(false, "forward: {}", base_loss.description_);
@@ -340,9 +341,9 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
     // The norm scale's gradient against a Float64 replay of the head over the same states: through
     // the L2 normalization it moves the loss only at second order along most directions, too little
     // for a difference.
-    array<f64_t> states, scale, scale_grad, projection;
+    st::basic_vector<f64_t> states, scale, scale_grad, projection;
     differentiable_weights_t const *norm = nullptr, *projected = nullptr;
-    for (differentiable_weights_t const &matrix : replica.weights.view())
+    for (differentiable_weights_t const &matrix : replica.weights)
         if (matrix.name.view() == "token_head.norm") norm = &matrix;
         else if (matrix.name.view() == "token_head.projection") projected = &matrix;
     bf16r2_view_t const normalized = replica.tower.normalized();
@@ -355,9 +356,8 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
     f64_t const epsilon = replica.tower.config().block.rms_eps;
     f64r2_view_t const projection_rows {projection.data(), width, hidden};
     f64r2_view_t const direction_rows {direction.data(), direction.size() / width, width};
-    array<f64_t> replayed, unit, normed;
-    if (replayed.resize(hidden) != status_t::success_k || unit.resize(width) != status_t::success_k ||
-        normed.resize(hidden) != status_t::success_k)
+    st::basic_vector<f64_t> replayed, unit, normed;
+    if (st::failed(replayed.resize(hidden)) || st::failed(unit.resize(width)) || st::failed(normed.resize(hidden)))
         return suite.check(false, "token head replay staging failed");
     for (std::size_t segment = 0; segment != count; ++segment)
         for (u32_t token = 0; token != expected_offsets[segment + 1] - expected_offsets[segment]; ++token) {
@@ -393,34 +393,34 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
     suite.check(std::sqrt(gap) <= 2.0e-2 * std::sqrt(magnitude),
                 "token_head.norm gradient matches the Float64 replay: relative {:.3g}", std::sqrt(gap / magnitude));
 
-    array<f64_t> weights, gradient, plus, minus;
-    for (differentiable_weights_t const &matrix : replica.weights.view()) {
+    st::basic_vector<f64_t> weights, gradient, plus, minus;
+    for (differentiable_weights_t const &matrix : replica.weights) {
         sz::string_view_t const name = matrix.name.view();
         if (name != "token_head.projection" && name != "final_norm") continue;
         std::size_t const scalars = matrix.weights.numel();
         if (!download_widened_(matrix.weights.data(), scalars, weights) ||
             !download_widened_(matrix.weights_grad.data(), scalars, gradient) ||
-            plus.resize_uninitialized(scalars) != status_t::success_k ||
-            minus.resize_uninitialized(scalars) != status_t::success_k)
+            st::failed(plus.resize(st::assume_uninitialized, scalars)) ||
+            st::failed(minus.resize(st::assume_uninitialized, scalars)))
             return suite.check(false, "host staging for {} failed", name);
         f64_t largest = 0;
-        for (f64_t const value : gradient.view()) largest = std::max(largest, std::fabs(value));
+        for (f64_t const value : gradient) largest = std::max(largest, std::fabs(value));
         if (largest == 0) {
             suite.check(false, "{} takes no gradient through the token head", name);
             continue;
         }
-        f64_t const weight_rms = std::sqrt(dot(weights.view(), weights.view()) / static_cast<f64_t>(scalars));
-        f64_t const step = std::min(largest / (8.0 * dot(gradient.view(), gradient.view())), weight_rms / 4.0);
+        f64_t const weight_rms = std::sqrt(dot(weights, weights) / static_cast<f64_t>(scalars));
+        f64_t const step = std::min(largest / (8.0 * dot(gradient, gradient)), weight_rms / 4.0);
         for (std::size_t index = 0; index != scalars; ++index)
             plus[index] = weights[index] + step * gradient[index] / largest,
             minus[index] = weights[index] - step * gradient[index] / largest;
-        bool uploaded = upload_narrowed_(plus.span(), matrix.weights.data());
+        bool uploaded = upload_narrowed_(plus, matrix.weights.data());
         expected<f64_t> const loss_plus = token_head_loss_(replica, direction, device.stream);
-        uploaded = uploaded && upload_narrowed_(minus.span(), matrix.weights.data());
+        uploaded = uploaded && upload_narrowed_(minus, matrix.weights.data());
         expected<f64_t> const loss_minus = token_head_loss_(replica, direction, device.stream);
-        uploaded = uploaded && upload_narrowed_(weights.span(), matrix.weights.data());
+        uploaded = uploaded && upload_narrowed_(weights, matrix.weights.data());
         if (!uploaded || !loss_plus || !loss_minus) return suite.check(false, "perturbed forward of {} failed", name);
-        f64_t const predicted = dot(gradient.view(), plus.view()) - dot(gradient.view(), minus.view());
+        f64_t const predicted = dot(gradient, plus) - dot(gradient, minus);
         f64_t const measured = *loss_plus - *loss_minus;
         f64_t const error = std::fabs(measured - predicted) / std::max(std::fabs(predicted), 1.0e-6);
         suite.check(error <= finite_difference_tolerance_k,
@@ -440,7 +440,7 @@ static void masked_text_rows(test_suite_t &suite, device_t &device) {
     if (!arena) return suite.check(false, "arena: {}", arena.description_);
     expected<base_replica_t> replica = make_replica_(*arena, device, config, data_epoch_t {0});
     if (!replica) return suite.check(false, "replica: {}", replica.description_);
-    array<u32_t> weights;
+    st::basic_vector<u32_t> weights;
     for (u32_t epoch = 0; epoch != 8u; ++epoch) {
         if (expected_t drawn = epoch == 0 ? expected_t {}
                                           : redraw_(*replica, config, data_epoch_t {epoch}, device.stream);
@@ -448,7 +448,7 @@ static void masked_text_rows(test_suite_t &suite, device_t &device) {
             return suite.check(false, "epoch {}: {}", epoch, drawn.description_);
         cuStreamSynchronize(device.stream.get());
         std::size_t const tokens = replica->token_loss_weights.extent(0);
-        if (weights.resize(tokens) != status_t::success_k) return suite.check(false, "weights staging failed");
+        if (st::failed(weights.resize(tokens))) return suite.check(false, "weights staging failed");
         cuMemcpyDtoH(weights.data(), device_address(replica->token_loss_weights.data()), tokens * sizeof(u32_t));
         host_segments_t const segments = read_segments_(replica->batch);
         u32_t unmasked = 0;
@@ -525,7 +525,7 @@ static void chance_cross_entropy(test_suite_t &suite, device_t &device) {
  *  cases. */
 struct optimized_matrix_t {
     bf16r2_tensor_arena_t weights {}, gradient {};
-    array<f64_t> host_weights {}, host_gradient {};
+    st::basic_vector<f64_t> host_weights {}, host_gradient {};
 };
 
 [[nodiscard]] static expected_t allocate_matrix_(optimized_matrix_t &matrix, gpu_arena_t &arena, std::size_t rows,
@@ -533,8 +533,8 @@ struct optimized_matrix_t {
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     matrix.weights = bf16r2_tensor_arena_t::uninitialized({rows, columns}, bf16_alloc).value;
     matrix.gradient = bf16r2_tensor_arena_t::uninitialized({rows, columns}, bf16_alloc).value;
-    if (!matrix.weights || !matrix.gradient || matrix.host_weights.resize(rows * columns) != status_t::success_k ||
-        matrix.host_gradient.resize(rows * columns) != status_t::success_k)
+    if (!matrix.weights || !matrix.gradient || st::failed(matrix.host_weights.resize(rows * columns)) ||
+        st::failed(matrix.host_gradient.resize(rows * columns)))
         return expected_t::fail(status_t::bad_alloc_k, "matrix [{},{}] allocation failed", rows, columns);
     return {};
 }
@@ -563,31 +563,31 @@ static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t bet
     if (!arena) return suite.check(false, "arena: {}", arena.description_);
     std::size_t const shapes[2][2] = {{24, 40}, {1, 40}};
     optimized_matrix_t matrices[2];
-    array<differentiable_weights_t> table;
+    st::basic_vector<differentiable_weights_t> table;
     for (u32_t matrix = 0; matrix != 2u; ++matrix) {
         if (expected_t allocated = allocate_matrix_(matrices[matrix], *arena, shapes[matrix][0], shapes[matrix][1]);
             !allocated)
             return suite.check(false, "{}", allocated.description_);
         for (std::size_t index = 0; index != matrices[matrix].host_weights.size(); ++index)
             matrices[matrix].host_weights[index] = keyed_uniform_(suite.settings.seed, matrix, index);
-        if (!upload_narrowed_(matrices[matrix].host_weights.span(), matrices[matrix].weights.data()))
+        if (!upload_narrowed_(matrices[matrix].host_weights, matrices[matrix].weights.data()))
             return suite.check(false, "weights upload failed");
         differentiable_weights_t entry {{}, matrices[matrix].weights.span(), matrices[matrix].gradient.view()};
         if (sz::failed(entry.name.assign(matrix == 0 ? "matrix" : "vector")) ||
-            table.push_back(std::move(entry)) != status_t::success_k)
+            st::failed(table.push_back(std::move(entry))))
             return suite.check(false, "weight table growth failed");
     }
     adafactor_config_t const config {.beta1 = beta1};
-    expected<adafactor_t> optimizer = adafactor_t::make(*arena, table.view(), config, device.stream);
+    expected<adafactor_t> optimizer = adafactor_t::make(*arena, table, config, device.stream);
     if (!optimizer) return suite.check(false, "optimizer: {}", optimizer.description_);
 
     f32_t const learning_rate = 1.0e-2f;
-    array<f64_t> row_moments[2], column_moments[2], masters[2], first_moments[2];
+    st::basic_vector<f64_t> row_moments[2], column_moments[2], masters[2], first_moments[2];
     for (u32_t matrix = 0; matrix != 2u; ++matrix) {
-        if (row_moments[matrix].resize(shapes[matrix][0]) != status_t::success_k ||
-            column_moments[matrix].resize(shapes[matrix][1]) != status_t::success_k ||
-            masters[matrix].resize(matrices[matrix].host_weights.size()) != status_t::success_k ||
-            first_moments[matrix].resize(matrices[matrix].host_weights.size()) != status_t::success_k)
+        if (st::failed(row_moments[matrix].resize(shapes[matrix][0])) ||
+            st::failed(column_moments[matrix].resize(shapes[matrix][1])) ||
+            st::failed(masters[matrix].resize(matrices[matrix].host_weights.size())) ||
+            st::failed(first_moments[matrix].resize(matrices[matrix].host_weights.size())))
             return suite.check(false, "host moments allocation failed");
         for (std::size_t index = 0; index != masters[matrix].size(); ++index)
             masters[matrix][index] = matrices[matrix].host_weights[index];
@@ -597,7 +597,7 @@ static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t bet
             optimized_matrix_t &state = matrices[matrix];
             for (std::size_t index = 0; index != state.host_gradient.size(); ++index)
                 state.host_gradient[index] = keyed_uniform_(suite.settings.seed, 16u * step + matrix + 2u, index);
-            if (!upload_narrowed_(state.host_gradient.span(), state.gradient.data()))
+            if (!upload_narrowed_(state.host_gradient, state.gradient.data()))
                 return suite.check(false, "gradient upload failed");
         }
         if (expected_t stepped = optimizer->step(learning_rate, device.stream); !stepped)
@@ -629,7 +629,7 @@ static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t bet
                 for (std::size_t column = 0; column != columns; ++column)
                     update_energy += update_at(row, column) * update_at(row, column);
             f64_t const clip = 1.0 / std::max(1.0, std::sqrt(update_energy / (rows * columns)) / config.clip_threshold);
-            array<f64_t> device_weights;
+            st::basic_vector<f64_t> device_weights;
             if (!download_widened_(state.weights.data(), rows * columns, device_weights))
                 return suite.check(false, "weights readback failed");
             f64r2_view_t const got {device_weights.data(), rows, columns};
@@ -669,7 +669,7 @@ static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t bet
         return suite.check(false, "save to {}: {}", path.view(), written.description_);
     expected<checkpoint_to_load_t> loaded = checkpoint_to_load_t::make(path.view());
     if (!loaded) return suite.check(false, "load: {}", loaded.description_);
-    expected<adafactor_t> resumed = adafactor_t::make(*arena, table.view(), config, device.stream);
+    expected<adafactor_t> resumed = adafactor_t::make(*arena, table, config, device.stream);
     if (!resumed) return suite.check(false, "resumed optimizer: {}", resumed.description_);
     if (expected_t restored = resumed->load(*loaded, device.stream); !restored)
         return suite.check(false, "restore: {}", restored.description_);
@@ -703,14 +703,14 @@ static void adafactor_small_steps(test_suite_t &suite, device_t &device) {
         return suite.check(false, "{}", allocated.description_);
     for (std::size_t index = 0; index != rows * columns; ++index)
         matrix.host_weights[index] = 1.0, matrix.host_gradient[index] = 1.0;
-    if (!upload_narrowed_(matrix.host_weights.span(), matrix.weights.data()) ||
-        !upload_narrowed_(matrix.host_gradient.span(), matrix.gradient.data()))
+    if (!upload_narrowed_(matrix.host_weights, matrix.weights.data()) ||
+        !upload_narrowed_(matrix.host_gradient, matrix.gradient.data()))
         return suite.check(false, "upload failed");
-    array<differentiable_weights_t> table;
+    st::basic_vector<differentiable_weights_t> table;
     differentiable_weights_t entry {{}, matrix.weights.span(), matrix.gradient.view()};
-    if (sz::failed(entry.name.assign("ones")) || table.push_back(std::move(entry)) != status_t::success_k)
+    if (sz::failed(entry.name.assign("ones")) || st::failed(table.push_back(std::move(entry))))
         return suite.check(false, "weight table growth failed");
-    expected<adafactor_t> optimizer = adafactor_t::make(*arena, table.view(), adafactor_config_t {}, device.stream);
+    expected<adafactor_t> optimizer = adafactor_t::make(*arena, table, adafactor_config_t {}, device.stream);
     if (!optimizer) return suite.check(false, "optimizer: {}", optimizer.description_);
     f64_t const learning_rate = 0x1.0p-10;
     if (expected_t stepped = optimizer->step(static_cast<f32_t>(learning_rate), device.stream); !stepped)
@@ -718,7 +718,7 @@ static void adafactor_small_steps(test_suite_t &suite, device_t &device) {
     cuStreamSynchronize(device.stream.get());
     if (!download_widened_(matrix.weights.data(), rows * columns, matrix.host_weights))
         return suite.check(false, "weights readback failed");
-    f64_t const total = nk::reduce_moments<nk::f64_t>(matrix.host_weights.view()).value.sum;
+    f64_t const total = nk::reduce_moments<nk::f64_t>(matrix.host_weights).value.sum;
     f64_t const mean_step = 1.0 - total / static_cast<f64_t>(rows * columns);
     // Each scalar moves by 2^-8 with probability 1/4, so the mean of 16384 carries a 1.3e-5
     // standard error.
@@ -794,26 +794,25 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
     seeded_t const seeded[] = {{block->qkv_weight(), hidden},     {block->out_weight(), hidden},
                                {block->gate_up_weight(), hidden}, {block->down_weight(), ffn},
                                {block->pre_norm_scale(), 0},      {block->post_norm_scale(), 0}};
-    array<f64_t> weights[6];
+    st::basic_vector<f64_t> weights[6];
     for (u32_t matrix = 0; matrix != 6u; ++matrix) {
-        if (weights[matrix].resize(seeded[matrix].weights.extent(0)) != status_t::success_k)
+        if (st::failed(weights[matrix].resize(seeded[matrix].weights.extent(0))))
             return suite.check(false, "staging failed");
         f64_t const deviation = seeded[matrix].fan_in ? 1.0 / std::sqrt(f64_t(seeded[matrix].fan_in)) : 0.0;
         for (std::size_t index = 0; index != weights[matrix].size(); ++index)
             weights[matrix][index] =
                 deviation ? keyed_uniform_(suite.settings.seed, 32u + matrix, index) * 1.7320508 * deviation : 1.0;
-        if (!upload_narrowed_(weights[matrix].span(), seeded[matrix].weights.data()))
+        if (!upload_narrowed_(weights[matrix], seeded[matrix].weights.data()))
             return suite.check(false, "weights upload failed");
     }
-    array<f32_t> input, output_grad, output;
-    array<f64_t> widened_input;
-    array<u32_t> offsets, lengths;
-    array<i16_t> coordinates;
-    if (input.resize(tokens * hidden) != status_t::success_k ||
-        widened_input.resize(tokens * hidden) != status_t::success_k ||
-        output_grad.resize(tokens * hidden) != status_t::success_k ||
-        output.resize(tokens * hidden) != status_t::success_k || offsets.resize(segments + 1) != status_t::success_k ||
-        lengths.resize(segments) != status_t::success_k || coordinates.resize(tokens * 3) != status_t::success_k)
+    st::basic_vector<f32_t> input, output_grad, output;
+    st::basic_vector<f64_t> widened_input;
+    st::basic_vector<u32_t> offsets, lengths;
+    st::basic_vector<i16_t> coordinates;
+    if (st::failed(input.resize(tokens * hidden)) || st::failed(widened_input.resize(tokens * hidden)) ||
+        st::failed(output_grad.resize(tokens * hidden)) || st::failed(output.resize(tokens * hidden)) ||
+        st::failed(offsets.resize(segments + 1)) || st::failed(lengths.resize(segments)) ||
+        st::failed(coordinates.resize(tokens * 3)))
         return suite.check(false, "host staging failed");
     for (std::size_t index = 0; index != input.size(); ++index)
         input[index] = keyed_uniform_(suite.settings.seed, 40u, index) * 1.7320508f,
@@ -830,7 +829,7 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
         token_coordinates[token, 1] = static_cast<i16_t>(position / 7 % 5);
         token_coordinates[token, 2] = static_cast<i16_t>(position % 3);
     }
-    if (nk::cast<nk::f32_t, nk::f64_t>(input.view(), widened_input.span()) != nk::status_t::success_k)
+    if (nk::cast<nk::f32_t, nk::f64_t>(input, widened_input) != nk::status_t::success_k)
         return suite.check(false, "input widening failed");
     f32_t *const device_input = arena->allocate_object<f32_t>(tokens * hidden);
     f32_t *const device_output = arena->allocate_object<f32_t>(tokens * hidden);
@@ -859,7 +858,7 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
     if (!staged) return suite.check(false, "block step: {}", staged.description_);
     cuStreamSynchronize(device.stream.get());
     cuMemcpyDtoH(output.data(), device_address(device_output), output.size() * sizeof(f32_t));
-    array<f64_t> narrowed_grad, packed_grad;
+    st::basic_vector<f64_t> narrowed_grad, packed_grad;
     if (!download_widened_(scratch->narrowed_grad.data(), tokens * hidden, narrowed_grad) ||
         !download_widened_(scratch->packed_qkv.data(), tokens * 3 * hidden, packed_grad))
         return suite.check(false, "gradients readback failed");
@@ -873,9 +872,8 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
 
     // The attention's output gradient, from the narrowed out-projection gradient the device
     // multiplied by W_out.
-    array<f64_t> attention_output_grad;
-    if (attention_output_grad.resize(tokens * hidden) != status_t::success_k)
-        return suite.check(false, "staging failed");
+    st::basic_vector<f64_t> attention_output_grad;
+    if (st::failed(attention_output_grad.resize(tokens * hidden))) return suite.check(false, "staging failed");
     f64r2_span_t const output_grad_rows {attention_output_grad.data(), tokens, hidden};
     f64r3_view_t const output_grads {attention_output_grad.data(), {tokens, heads, transformer_head_dim_k}};
     for (std::size_t token = 0; token != tokens; ++token)
@@ -888,23 +886,21 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
 
     // The host forward: pre-norm, QKV, the QK-norm, attention per segment and head, then the MLP
     // half.
-    array<f64_t> products, normalized, attended, normalized_row, branch, mlp_input, gate_up, activated;
-    if (products.resize(tokens * 3 * hidden) != status_t::success_k ||
-        normalized.resize(tokens * 3 * hidden) != status_t::success_k ||
-        attended.resize(tokens * hidden) != status_t::success_k ||
-        normalized_row.resize(hidden) != status_t::success_k || branch.resize(hidden) != status_t::success_k ||
-        mlp_input.resize(hidden) != status_t::success_k || gate_up.resize(2 * ffn) != status_t::success_k ||
-        activated.resize(ffn) != status_t::success_k)
+    st::basic_vector<f64_t> products, normalized, attended, normalized_row, branch, mlp_input, gate_up, activated;
+    if (st::failed(products.resize(tokens * 3 * hidden)) || st::failed(normalized.resize(tokens * 3 * hidden)) ||
+        st::failed(attended.resize(tokens * hidden)) || st::failed(normalized_row.resize(hidden)) ||
+        st::failed(branch.resize(hidden)) || st::failed(mlp_input.resize(hidden)) ||
+        st::failed(gate_up.resize(2 * ffn)) || st::failed(activated.resize(ffn)))
         return suite.check(false, "host replay staging failed");
     f64r2_span_t const product_rows {products.data(), tokens, 3 * hidden};
     f64r2_span_t const normalized_rows {normalized.data(), tokens, 3 * hidden};
     f64r4_span_t const pre_norm {products.data(), {tokens, 3, heads, transformer_head_dim_k}};
     f64r4_span_t const qkv {normalized.data(), {tokens, 3, heads, transformer_head_dim_k}};
     for (std::size_t token = 0; token != tokens; ++token) {
-        normalize_rms_(inputs.row(token), normalized_row.span(), config.rms_eps);
+        normalize_rms_(inputs.row(token), std::span<f64_t> {normalized_row}, config.rms_eps);
         for (std::size_t output_index = 0; output_index != 3 * hidden; ++output_index)
             product_rows[token, output_index] = normalized_rows[token, output_index] = dot(
-                qkv_weights.row(output_index), normalized_row.view());
+                qkv_weights.row(output_index), normalized_row);
         for (std::size_t role = 0; role != 2; ++role)
             for (std::size_t head = 0; head != heads; ++head) {
                 normalize_rms_(pre_norm[token, role, head, nk::slice], qkv[token, role, head, nk::slice],
@@ -913,9 +909,9 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
             }
     }
     f64_t const scale = 1.0 / std::sqrt(static_cast<f64_t>(transformer_head_dim_k));
-    array<f64_t> probability_cells, scores_grad_cells;
-    if (probability_cells.resize(sequence * sequence) != status_t::success_k ||
-        scores_grad_cells.resize(sequence * sequence) != status_t::success_k)
+    st::basic_vector<f64_t> probability_cells, scores_grad_cells;
+    if (st::failed(probability_cells.resize(sequence * sequence)) ||
+        st::failed(scores_grad_cells.resize(sequence * sequence)))
         return suite.check(false, "host replay staging failed");
     f64r2_span_t const probabilities {probability_cells.data(), sequence, sequence};
     f64r2_span_t const scores_grad {scores_grad_cells.data(), sequence, sequence};
@@ -984,13 +980,13 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
     for (std::size_t token = 0; token != tokens; ++token) {
         for (std::size_t channel = 0; channel != hidden; ++channel)
             branch[channel] = inputs[token, channel] + dot(out_weights.row(channel), attended_rows.row(token));
-        normalize_rms_(branch.view(), mlp_input.span(), config.rms_eps);
+        normalize_rms_(branch, std::span<f64_t> {mlp_input}, config.rms_eps);
         for (std::size_t output_index = 0; output_index != 2 * ffn; ++output_index)
-            gate_up[output_index] = dot(gate_up_weights.row(output_index), mlp_input.view());
+            gate_up[output_index] = dot(gate_up_weights.row(output_index), mlp_input);
         for (std::size_t feature = 0; feature != ffn; ++feature)
             activated[feature] = gate_up[feature] / (1.0 + std::exp(-gate_up[feature])) * gate_up[ffn + feature];
         for (std::size_t channel = 0; channel != hidden; ++channel) {
-            f64_t const wanted = branch[channel] + dot(down_weights.row(channel), activated.view());
+            f64_t const wanted = branch[channel] + dot(down_weights.row(channel), activated);
             worst_output = std::max(worst_output, std::fabs(wanted - outputs[token, channel]));
             largest_output = std::max(largest_output, std::fabs(wanted));
         }

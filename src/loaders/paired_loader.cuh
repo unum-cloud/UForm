@@ -32,7 +32,6 @@
 #include <span> // `std::span`
 
 #include "core/types.hpp"             // `expected`, `status_t`, `epoch_permutation`
-#include "core/array.hpp"             // `array`
 #include "core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`
 #include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
 #include "loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
@@ -152,7 +151,7 @@ struct paired_loader_parquet_t {
     cpu_decode_pool_t *pool_ = nullptr;
 
     /** The dataset's Parquet shard paths, sorted by the glob. */
-    array<sz::string_t> absolute_paths_ {};
+    st::basic_vector<sz::string_t> absolute_paths_ {};
 
     /** The caption column, the positive column resolved to its blob leaf, and the negative column,
      *  empty for none. */
@@ -171,21 +170,21 @@ struct paired_loader_parquet_t {
     u64_t seed_ = 0;
 
     /** @b [shards+1] cumulative footer row counts, bounding a media negative's shard-local row. */
-    array<std::size_t> row_prefix_ {};
+    st::basic_vector<std::size_t> row_prefix_ {};
 
     /** @b [groups+1] cumulative complete rows of every row group over the shards in order, the
      *  weighted draw's search table, and @b [shards+1] each shard's first group in it. */
-    array<std::size_t> group_prefix_ {}, shard_first_group_ {};
+    st::basic_vector<std::size_t> group_prefix_ {}, shard_first_group_ {};
 
     /** @b [groups] each row group's shard, rows, and first shard-local row. */
-    array<std::size_t> group_shard_ {}, group_rows_ {}, group_first_row_ {};
+    st::basic_vector<std::size_t> group_shard_ {}, group_rows_ {}, group_first_row_ {};
 
     /** The shards with a complete row, which bound the draw's floor of two. */
     std::size_t drawable_shards_ = 0;
 
     /** @b [shards] each shard path's hash, which a row's sample key folds with its shard-local row,
      *  so every entry that reads one shard keys its rows alike. */
-    array<u64_t> shard_keys_ {};
+    st::basic_vector<u64_t> shard_keys_ {};
 
     /** The device bytes a fill's reservoir can take, from the footers. */
     reservoir_bound_t reservoir_ {};

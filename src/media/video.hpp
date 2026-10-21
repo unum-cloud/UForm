@@ -18,14 +18,12 @@
 
 #include <span> // `std::span`
 
-#include "core/types.hpp"            // `expected`, `status_t`, the scalar aliases
-#include "core/array.hpp"            // `array` — the demuxed stream
+#include "core/types.hpp"            // `expected`, `status_t`, the scalar aliases, `st::basic_vector`
 #include "core/multimodal_batch.hpp" // `video_batch_shape_t`
 #include "media/planning.hpp"        // `image_extent_t`, `video_grid_t`
 
 namespace unum::uform::media {
 
-using uc::array;
 using uc::b8_t;
 using uc::expected;
 using uc::expected_t;
@@ -53,10 +51,10 @@ inline constexpr std::size_t video_codec_count_k = 7;
 struct demuxed_t {
 
     /** The elementary stream, every packet back to back. */
-    array<b8_t> annex_b {};
+    st::basic_vector<b8_t> annex_b {};
 
     /** @b [packets+1] packet boundaries into @ref annex_b ; a raw Annex-B input is one packet. */
-    array<u64_t> packet_offsets {};
+    st::basic_vector<u64_t> packet_offsets {};
 
     /** The elementary-stream codec. */
     video_codec_t codec = video_codec_t::h264_k;

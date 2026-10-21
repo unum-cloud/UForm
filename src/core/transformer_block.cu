@@ -150,8 +150,8 @@ expected<rope_angles_t> rope_angles_t::make(gpu_arena_t &arena, u32_t max_positi
     std::size_t total = 0;
     for (u32_t axis = 0; axis != 3; ++axis) total += static_cast<std::size_t>(max_positions) * pair_counts[axis];
     angles.angles_ = f32r1_tensor_arena_t::uninitialized({total}, f32_alloc).value;
-    array<f32_t> host_angles {};
-    if (!angles.angles_ || host_angles.resize(total) != status_t::success_k)
+    st::basic_vector<f32_t> host_angles {};
+    if (!angles.angles_ || st::failed(host_angles.resize(total)))
         return result_t::fail(status_t::bad_alloc_k, "angle grid allocation failed ({} scalars)", total);
     std::size_t offset = 0;
     for (u32_t axis = 0; axis != 3; ++axis) {
@@ -163,8 +163,8 @@ expected<rope_angles_t> rope_angles_t::make(gpu_arena_t &arena, u32_t max_positi
                                             std::pow(static_cast<f64_t>(base),
                                                      -2.0 * pair / static_cast<f64_t>(denominators[axis])));
     }
-    std::span<f32_t const> host_view = host_angles.view();
-    if (CUresult result = cuMemcpyHtoD(device_address(angles.angles_.data()), host_view.data(), total * sizeof(f32_t));
+    if (CUresult result = cuMemcpyHtoD(device_address(angles.angles_.data()), host_angles.data(),
+                                       total * sizeof(f32_t));
         result != CUDA_SUCCESS)
         return cuda_failure<rope_angles_t>(result, "angle grid upload failed");
     return result_t {std::move(angles)};

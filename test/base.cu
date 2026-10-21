@@ -96,7 +96,7 @@ struct tier_t {
     placed.topology.shape.gpus_per_multimem_domain = gpus;
     placed.topology.shape.gpus_per_colocated_domain = gpus;
     placed.topology.host_domain_index = 0;
-    if (placed.topology.host_domains.resize(1) != status_t::success_k)
+    if (st::failed(placed.topology.host_domains.resize(1)))
         return expected_t::fail(status_t::bad_alloc_k, "narrowed host-domain table allocation failed");
     placed.topology.host_domains[0] = world.host_domains[world.host_domain_index];
     placed.topology.host_domains[0].host_domain_index = 0;
@@ -164,20 +164,20 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
 
 /** DtoH one replica's whole registration list into a byte-comparable host array — the snapshot behind
  *  assertions A, C, and the gradient-propagation check. */
-[[nodiscard]] static expected<array<bf16_t>> snapshot_weights_(array<differentiable_weights_t> const &weights,
-                                                               gpu_stream_t &stream) noexcept {
-    using result_t = expected<array<bf16_t>>;
+[[nodiscard]] static expected<st::basic_vector<bf16_t>> snapshot_weights_(
+    st::basic_vector<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept {
+    using result_t = expected<st::basic_vector<bf16_t>>;
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed");
-    std::span<differentiable_weights_t const> const list = weights.view();
+    std::span<differentiable_weights_t const> const list = weights;
     std::size_t total = 0, largest = 0;
     for (differentiable_weights_t const &matrix : list) {
         std::size_t const scalars = matrix.weights.numel();
         total += scalars;
         largest = std::max(largest, scalars);
     }
-    array<bf16_t> host;
-    if (host.resize_uninitialized(total) != status_t::success_k)
+    st::basic_vector<bf16_t> host;
+    if (st::failed(host.resize(st::assume_uninitialized, total)))
         return result_t::fail(status_t::bad_alloc_k, "snapshot allocation failed");
     nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging =
         nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::uninitialized({largest}, pinned_alloc<bf16_t> {}).value;
@@ -198,8 +198,9 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
 }
 
 /** DtoH the lead replica's shared @c d(normalized) - the score output whose two captured replays must agree. */
-[[nodiscard]] static expected<array<bf16_t>> snapshot_grad_(base_replica_t &replica, gpu_stream_t &stream) noexcept {
-    using result_t = expected<array<bf16_t>>;
+[[nodiscard]] static expected<st::basic_vector<bf16_t>> snapshot_grad_(base_replica_t &replica,
+                                                                       gpu_stream_t &stream) noexcept {
+    using result_t = expected<st::basic_vector<bf16_t>>;
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed");
     bf16r2_view_t const view = replica.normalized_grad.view();
@@ -210,20 +211,22 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
     if (expected_t copied = copy_device_to_host(view.flatten<1>(), staging.span(), stream); !copied)
         return result_t::fail(std::move(copied));
     cuStreamSynchronize(stream.get());
-    array<bf16_t> host;
-    if (host.resize_uninitialized(scalars) != status_t::success_k)
+    st::basic_vector<bf16_t> host;
+    if (st::failed(host.resize(st::assume_uninitialized, scalars)))
         return result_t::fail(status_t::bad_alloc_k, "snapshot allocation failed");
     std::memcpy(host.data(), staging.data(), scalars * sizeof(bf16_t));
     return result_t {std::move(host)};
 }
 
 /** Bytewise-equal two snapshots, as replicas fed one all-reduced gradient must agree exactly. */
-[[nodiscard]] static bool snapshots_match_(array<bf16_t> const &left, array<bf16_t> const &right) noexcept {
+[[nodiscard]] static bool snapshots_match_(st::basic_vector<bf16_t> const &left,
+                                           st::basic_vector<bf16_t> const &right) noexcept {
     return left.size() == right.size() && std::memcmp(left.data(), right.data(), left.size() * sizeof(bf16_t)) == 0;
 }
 
 /** Two snapshots agree within 1% of the first's peak, for runs whose reductions may add in any order. */
-[[nodiscard]] static bool snapshots_near_(array<bf16_t> const &left, array<bf16_t> const &right) noexcept {
+[[nodiscard]] static bool snapshots_near_(st::basic_vector<bf16_t> const &left,
+                                          st::basic_vector<bf16_t> const &right) noexcept {
     if (left.size() != right.size()) return false;
     f32_t largest = 0.0f, worst = 0.0f;
     for (std::size_t index = 0; index != left.size(); ++index) {
@@ -315,16 +318,17 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
                                  trainer_config_t const &config, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
     mesh_topology_t const &topology = tier.mesh.topology;
-    array<bf16_t> captured_lead;
+    st::basic_vector<bf16_t> captured_lead;
     {
         trainer_t trainer;
         if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
             return suite.check(false, "[{}] trainer bring-up: {}", label, built.description_);
         u32_t const gpus = static_cast<u32_t>(trainer.replicas.size());
-        check_weight_naming_(suite, label, config, trainer.replicas[0].weights.view());
+        check_weight_naming_(suite, label, config, trainer.replicas[0].weights);
 
         // Assertion F's reference: the lead replica's freshly seeded weights, untouched by the capture.
-        expected<array<bf16_t>> seed_lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
+        expected<st::basic_vector<bf16_t>> seed_lead = snapshot_weights_(trainer.replicas[0].weights,
+                                                                         trainer.streams[0]);
         if (!seed_lead) return suite.check(false, "[{}] seed snapshot: {}", label, seed_lead.description_);
 
         // The captured run, telemetry every step. A midpoint snapshot splits the run into two halves; assertion D
@@ -392,15 +396,15 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
         }
         if (expected_t drained = trainer.synchronize(); !drained)
             return suite.check(false, "[{}] drain: {}", label, drained.description_);
-        expected<array<bf16_t>> lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
+        expected<st::basic_vector<bf16_t>> lead = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
         if (!lead) return suite.check(false, "[{}] lead snapshot: {}", label, lead.description_);
         captured_lead = std::move(lead.value_);
 
         // A — every replica byte-matches the lead. Vacuous at one GPU (the peer loop is empty), but the run stands.
         bool replicas_identical = true;
         for (u32_t member_index = 1; member_index < gpus; ++member_index) {
-            expected<array<bf16_t>> peer = snapshot_weights_(trainer.replicas[member_index].weights,
-                                                             trainer.streams[member_index]);
+            expected<st::basic_vector<bf16_t>> peer = snapshot_weights_(trainer.replicas[member_index].weights,
+                                                                        trainer.streams[member_index]);
             replicas_identical = replicas_identical && peer && snapshots_match_(peer.value_, captured_lead);
         }
         suite.check(replicas_identical, "[{}] every replica matches the lead bitwise (A)", label);
@@ -467,7 +471,7 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
         return suite.check(false, "[{}] eager run: {}", label, ran.description_);
     if (expected_t drained = eager.synchronize(); !drained)
         return suite.check(false, "[{}] eager drain: {}", label, drained.description_);
-    expected<array<bf16_t>> eager_lead = snapshot_weights_(eager.replicas[0].weights, eager.streams[0]);
+    expected<st::basic_vector<bf16_t>> eager_lead = snapshot_weights_(eager.replicas[0].weights, eager.streams[0]);
     suite.check(eager_lead && snapshots_near_(eager_lead.value_, captured_lead),
                 "[{}] captured replay lands on the eager run (C)", label);
 }
@@ -572,19 +576,19 @@ static void graph_capture(test_suite_t &suite, world_health_t &health, tier_t ti
     if (!prepared) return suite.check(false, "capture preamble: {}", prepared.description_);
     if (expected_t first = trainer.forward_graphs[0].launch(trainer.streams[0].get()); !first)
         return suite.check(false, "first replay: {}", first.description_);
-    expected<array<bf16_t>> first_grad = snapshot_grad_(lead, trainer.streams[0]);
+    expected<st::basic_vector<bf16_t>> first_grad = snapshot_grad_(lead, trainer.streams[0]);
     if (expected_t second = trainer.forward_graphs[0].launch(trainer.streams[0].get()); !second)
         return suite.check(false, "second replay: {}", second.description_);
-    expected<array<bf16_t>> second_grad = snapshot_grad_(lead, trainer.streams[0]);
+    expected<st::basic_vector<bf16_t>> second_grad = snapshot_grad_(lead, trainer.streams[0]);
     suite.check(first_grad && second_grad && snapshots_near_(first_grad.value_, second_grad.value_),
                 "two captured replays agree");
 }
 
 /** Download one replica's @b [groups] Float32 temperatures, β then bias, into @p host . */
 [[nodiscard]] static bool read_temperatures_(base_replica_t &replica, gpu_stream_t &stream,
-                                             array<f32_t> &host) noexcept {
+                                             st::basic_vector<f32_t> &host) noexcept {
     std::size_t const groups = replica.token_inverse_temperatures.numel();
-    if (host.resize_uninitialized(2u * groups) != status_t::success_k) return false;
+    if (st::failed(host.resize(st::assume_uninitialized, 2u * groups))) return false;
     f32r1_tensor_pinned_t staging = f32r1_tensor_pinned_t::uninitialized({2u * groups}, pinned_alloc<f32_t> {}).value;
     if (!staging) return false;
     f32r1_span_t const halves = staging.span();
@@ -608,7 +612,7 @@ static void late_interaction_resume(test_suite_t &suite, world_health_t &health,
     config.late_interaction.width = 32;
     config.capture = eager_k;
     sz::string_view_t const path = "/tmp/uform_test_late_interaction_resume.safetensors";
-    array<f32_t> started, continued, resumed;
+    st::basic_vector<f32_t> started, continued, resumed;
     {
         trainer_t trainer;
         if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
@@ -660,9 +664,9 @@ int main(int, char **argv) {
         suite.skip("sweep", no_cuda_device_k);
         return suite.finish();
     }
-    array<i32_t> devices;
+    st::basic_vector<i32_t> devices;
     for (int device = 0; device != device_count; ++device)
-        if (devices.push_back(static_cast<i32_t>(device)) != status_t::success_k) {
+        if (st::failed(devices.push_back(static_cast<i32_t>(device)))) {
             suite.check(false, "device table allocation failed");
             return suite.finish();
         }
@@ -678,7 +682,7 @@ int main(int, char **argv) {
     if (char const *job = std::getenv("UFORM_JOB_ID"); job != nullptr)
         options.job = sz::string_view_t {job, std::strlen(job)};
     mesh_t wide_mesh;
-    if (expected_t joined = mesh_t::make(wide_mesh, options, devices.view()); !joined) {
+    if (expected_t joined = mesh_t::make(wide_mesh, options, devices); !joined) {
         suite.check(false, "mesh bootstrap: {}", joined.description_);
         return suite.finish();
     }
@@ -687,8 +691,8 @@ int main(int, char **argv) {
         suite.check(false, "narrowed mesh: {}", narrowed.description_);
         return suite.finish();
     }
-    tier_t const wide {wide_mesh, devices.view()};
-    tier_t const cheap {cheap_mesh, devices.view().first(1)};
+    tier_t const wide {wide_mesh, devices};
+    tier_t const cheap {cheap_mesh, std::span<i32_t const> {devices}.first(1)};
 
     world_health_t health;
     suite.run("capture/replay", graph_capture, health, cheap);

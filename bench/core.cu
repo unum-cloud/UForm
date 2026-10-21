@@ -16,7 +16,7 @@
 
 #include <cuda.h> // `cuInit`, `cuMemcpyHtoD`
 
-#include "core/array.hpp"                // `array`
+#include "core/types.hpp"                // `st::basic_vector`
 #include "core/contrastive_segments.cuh" // `contrastive_segments_t`, `contrastive_relations_t`
 #include "core/contrastive_tokens.cuh"   // `contrastive_tokens_t`
 #include "core/encoder_tower.hpp"        // `encoder_tower_bf16_t`
@@ -39,8 +39,8 @@ inline constexpr u32_t segments_k = rows_k * segments_per_row_k;
 
 /** Uploads @p count BFloat16 values in @b [-0.05,0.05) to @p device , keyed by @p salt . */
 [[nodiscard]] static expected_t upload_keyed_(bf16_t *device, std::size_t count, u64_t seed, u64_t salt) noexcept {
-    array<bf16_t> staging;
-    if (staging.resize(count) != status_t::success_k)
+    st::basic_vector<bf16_t> staging;
+    if (st::failed(staging.resize(count)))
         return expected_t::fail(status_t::bad_alloc_k, "staging {} scalars failed", count);
     for (std::size_t index = 0; index != count; ++index) {
         f32_t const uniform = static_cast<f32_t>(splitmix64_hash_t {}(seed, salt, index) >> 40) * 0x1.0p-24f;
@@ -71,7 +71,7 @@ static void tower_forward_backward(loop_t &loop, u64_t seed) {
     multimodal_batch_shape_t const shape {rows_k, segments_k, columns_k};
     expected<encoder_tower_bf16_t> tower = encoder_tower_bf16_t::make(*arena, config, shape);
     if (!tower) return loop.fail(tower.description_.view());
-    array<differentiable_weights_t> weights;
+    st::basic_vector<differentiable_weights_t> weights;
     if (expected_t filled = tower->fill(weights); !filled) return loop.fail(filled.description_.view());
     for (std::size_t matrix = 0; matrix != weights.size(); ++matrix)
         if (expected_t seeded = upload_keyed_(weights[matrix].weights.data(),
@@ -91,8 +91,8 @@ static void tower_forward_backward(loop_t &loop, u64_t seed) {
         modalities[segment] = modality_t::text_k;
     }
     offsets[segments_k] = segments_k * segment_tokens;
-    array<token_id_t> tokens;
-    if (tokens.resize(rows_k * columns_k) != status_t::success_k) return loop.fail("token staging failed");
+    st::basic_vector<token_id_t> tokens;
+    if (st::failed(tokens.resize(rows_k * columns_k))) return loop.fail("token staging failed");
     for (std::size_t token = 0; token != tokens.size(); ++token)
         tokens[token] = static_cast<token_id_t>(splitmix64_hash_t {}(seed, token) % 256u);
     if (cuMemcpyHtoD(device_address(batch->segment_offsets.data()), offsets, sizeof(offsets)) != CUDA_SUCCESS ||
@@ -182,15 +182,14 @@ static void contrastive_tokens(loop_t &loop, u64_t seed) {
     if (!loss) return loop.fail(loss.description_.view());
 
     // Query i attracts document i; every other document repels it at the ambient weight.
-    array<u32_t> offsets, attract_offsets, attract_ids, repel_offsets;
-    array<f32_t> attract_scores;
-    if (offsets.resize(segments + 1u) != status_t::success_k ||
-        attract_offsets.resize(segments + 1u) != status_t::success_k ||
-        repel_offsets.resize(segments + 1u) != status_t::success_k ||
-        attract_ids.resize(queries_k) != status_t::success_k || attract_scores.resize(queries_k) != status_t::success_k)
+    st::basic_vector<u32_t> offsets, attract_offsets, attract_ids, repel_offsets;
+    st::basic_vector<f32_t> attract_scores;
+    if (st::failed(offsets.resize(segments + 1u)) || st::failed(attract_offsets.resize(segments + 1u)) ||
+        st::failed(repel_offsets.resize(segments + 1u)) || st::failed(attract_ids.resize(queries_k)) ||
+        st::failed(attract_scores.resize(queries_k)))
         return loop.fail("host staging failed");
-    array<late_interaction_side_t> sides;
-    if (sides.resize(segments) != status_t::success_k) return loop.fail("host staging failed");
+    st::basic_vector<late_interaction_side_t> sides;
+    if (st::failed(sides.resize(segments))) return loop.fail("host staging failed");
     for (u32_t segment = 0; segment != segments; ++segment) {
         bool const query = segment < queries_k;
         sides[segment] = query ? late_interaction_side_t::query_k : late_interaction_side_t::document_k;
@@ -214,9 +213,10 @@ static void contrastive_tokens(loop_t &loop, u64_t seed) {
     cuMemcpyHtoD(device_address(sides_device), sides.data(), segments * sizeof(late_interaction_side_t));
     expected<contrastive_relations_t> relations = contrastive_relations_t::make(*arena, segments, queries_k);
     if (!relations) return loop.fail(relations.description_.view());
-    if (expected_t staged = relations->upload({attract_offsets.view(), attract_ids.view(), attract_scores.view()},
-                                              {repel_offsets.view(), {}, {}}, {}, {}, {}, {}, {}, segments, 0, 1.0f,
-                                              *stream);
+    if (expected_t staged = relations->upload(
+            {std::span<u32_t const> {attract_offsets}, std::span<u32_t const> {attract_ids},
+             std::span<f32_t const> {attract_scores}},
+            {std::span<u32_t const> {repel_offsets}, {}, {}}, {}, {}, {}, {}, {}, segments, 0, 1.0f, *stream);
         !staged)
         return loop.fail(staged.description_.view());
     multimodal_batch_view_t batch;

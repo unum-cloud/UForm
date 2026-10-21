@@ -39,10 +39,10 @@
 
 #include <span> // `std::span` — a caller-owned checkpoint image
 
-#include <numkong/types.h> // `nk_bf16_t`
+#include <numkong/types.h>                 // `nk_bf16_t`
+#include <smashtable/basic_hash_table.hpp> // `hash_map` — every entry's position by its name's hash
 
-#include "core/types.hpp" // `expected`, `expected_t`, `status_t`, `sz::string_t`
-#include "core/array.hpp" // `array` — the entry tables and the payload
+#include "core/types.hpp" // `expected`, `expected_t`, `status_t`, `sz::string_t`, `st::basic_vector`
 
 namespace unum::uform::core {
 
@@ -133,17 +133,20 @@ struct checkpoint_to_save_t {
 
     /** Every inserted tensor's bytes back-to-back in insertion order — `save` streams them to disk
      *  in a single write. */
-    array<b8_t> payload_ {};
+    st::basic_vector<b8_t> payload_ {};
 
     /** The name / shape / offset record per inserted tensor. */
-    array<checkpoint_entry_t> entries_ {};
+    st::basic_vector<checkpoint_entry_t> entries_ {};
+
+    /** Each entry's position in @ref entries_ by its name's hash, for the duplicate check. */
+    st::hash_map<u64_t, u32_t> index_ {};
 
     /** The metadata pairs, in insertion order. */
-    array<checkpoint_metadata_t> metadata_ {};
+    st::basic_vector<checkpoint_metadata_t> metadata_ {};
 
     /** The yyjson pool `save` serializes the header in — grown lazily, settled after the
      *  first save. */
-    array<char> scratch_ {};
+    st::basic_vector<char> scratch_ {};
 };
 
 /** A read-only file mapping, unmapped on destruction; empty for a checkpoint viewed in caller memory. */
@@ -214,13 +217,16 @@ struct checkpoint_to_load_t {
     b8_t const *payload_ = nullptr;
 
     /** The name / dtype / shape / offset record per indexed tensor. */
-    array<checkpoint_entry_t> entries_ {};
+    st::basic_vector<checkpoint_entry_t> entries_ {};
+
+    /** Each entry's position in @ref entries_ by its name's hash, for @ref find_ . */
+    st::hash_map<u64_t, u32_t> index_ {};
 
     /** The entry named @p name in @p dtype , or null. */
     [[nodiscard]] checkpoint_entry_t const *find_(sz::string_view_t name, checkpoint_dtype_t dtype) const noexcept;
 
     /** The metadata pairs. */
-    array<checkpoint_metadata_t> metadata_ {};
+    st::basic_vector<checkpoint_metadata_t> metadata_ {};
 };
 
 } // namespace unum::uform::core

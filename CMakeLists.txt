@@ -158,9 +158,15 @@ set(NUMKONG_BUILD_ROCM ${UFORM_BUILD_ROCM})
 set(NUMKONG_CUDA_ARCHITECTURES "${UFORM_CUDA_ARCHITECTURES}")
 set(NUMKONG_BUILD_TEST OFF)
 set(NUMKONG_BUILD_BENCH OFF)
-uform_sibling(numkong https://github.com/ashvardanian/NumKong f9375dbfad6652d705b6792aeb21fae997a934ea)
-uform_sibling(stringzilla https://github.com/ashvardanian/StringZilla afac5997e3fb15fd1586eca6724f9dacea152cb0)
-uform_sibling(forkunion https://github.com/ashvardanian/ForkUnion 606eb35bad36e720116f9ab0b83299543b50c3b1)
+uform_sibling(numkong https://github.com/ashvardanian/NumKong 2dea1586c8c26d1ce9de230b0165078480c63a9a)
+uform_sibling(stringzilla https://github.com/ashvardanian/StringZilla c560b106da8f91e9d10351e9a102ec97e279c5e9)
+uform_sibling(forkunion https://github.com/ashvardanian/ForkUnion 4d4bda36f65511a5281984b58df2c87795b98076)
+
+# SmashTable's containers, header-only
+set(SMASHTABLE_BUILD_TEST OFF)
+set(SMASHTABLE_BUILD_CUDA OFF)
+set(SMASHTABLE_INSTALL OFF)
+uform_sibling(smashtable https://github.com/ashvardanian/SmashTable 811203963268ce10bb480b5059c7f0803b970aa0)
 
 FetchContent_Declare(
     yyjson

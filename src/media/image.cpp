@@ -12,12 +12,11 @@
 #include <turbojpeg.h>   // vendor-boundary: JPEG decode with DCT scaling, reporting corrupt streams
 #include <webp/decode.h> // vendor-boundary: WebP decode
 
-#include "core/array.hpp" // `array` — the decode scratch
+#include "core/types.hpp" // `st::basic_vector` — the decode scratch
 #include "media/image.hpp"
 
 namespace um = unum::uform::media;
 using namespace um;
-using uc::array;
 
 /** Load a big-endian unsigned integer from @p bytes — one unaligned load, then a byte swap on a little-endian
  *  host. */
@@ -185,8 +184,8 @@ expected_t um::decode_image(std::span<b8_t const> encoded, image_plan_t const &p
         return expected_t::fail(status_t::shape_unsupported_k, "cells [{},{}] do not match the planned grid [{},{}]",
                                 out.extent(0), out.extent(1), plan.grid.rows, plan.grid.columns);
     std::size_t const bytes = static_cast<std::size_t>(plan.decoded.width) * plan.decoded.height * image_channels_k;
-    array<pixel_t> decoded;
-    if (decoded.resize_uninitialized(bytes) != status_t::success_k)
+    st::basic_vector<pixel_t> decoded;
+    if (st::failed(decoded.resize(st::assume_uninitialized, bytes)))
         return expected_t::fail(status_t::bad_alloc_k, "decoded pixel allocation failed ({} bytes)", bytes);
     pixel_image_span_t const pixels {decoded.data(), {plan.decoded.height, plan.decoded.width, image_channels_k}};
     if (expected_t decoded_rgba = decode_image_rgba(encoded, plan.format, pixels); !decoded_rgba) return decoded_rgba;

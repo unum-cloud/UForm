@@ -45,8 +45,8 @@ struct uform_trainer_handle_t {
     std::unique_ptr<ut::items_source_t> items;
 
     /** One step's modalities in the engine's spelling, and its embeddings before they land in the arena. */
-    array<modality_t> modalities;
-    array<b8_t> embeddings;
+    st::basic_vector<modality_t> modalities;
+    st::basic_vector<b8_t> embeddings;
 };
 
 /** The C status a training failure crosses into: an objective or a modality the run left out is unsupported. */
@@ -60,9 +60,9 @@ struct uform_trainer_handle_t {
 }
 
 /** The device ordinals of a VRAM @p executor , the members of its mesh. */
-[[nodiscard]] static bool devices_of(uform_executor_t executor, array<i32_t> &devices) noexcept {
+[[nodiscard]] static bool devices_of(uform_executor_t executor, st::basic_vector<i32_t> &devices) noexcept {
     for (vram_device_t const &device : std::get<vram_executor_t>(executor->executor).devices)
-        if (devices.push_back(device.ordinal) != core::status_t::success_k) return false;
+        if (st::failed(devices.push_back(i32_t {device.ordinal}))) return false;
     return true;
 }
 
@@ -76,7 +76,7 @@ struct uform_trainer_handle_t {
 [[nodiscard]] static std::unique_ptr<uform_mesh_handle_t> bootstrap(uform_executor_t executor,
                                                                     uform_mesh_options_t const &options,
                                                                     uform_outcome_t *outcome) noexcept {
-    array<i32_t> devices;
+    st::basic_vector<i32_t> devices;
     if (!devices_of(executor, devices))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the devices"), nullptr;
     std::unique_ptr<uform_mesh_handle_t> handle {new (std::nothrow) uform_mesh_handle_t {}};
@@ -90,7 +90,7 @@ struct uform_trainer_handle_t {
     engine.directory = text_of(options.directory);
     engine.job = text_of(options.job);
     engine.timeout_seconds = options.timeout_seconds > 0.0 ? options.timeout_seconds : 120.0;
-    if (core::expected_t const joined = ut::mesh_t::make(*handle->mesh, engine, devices.view()); !joined)
+    if (core::expected_t const joined = ut::mesh_t::make(*handle->mesh, engine, devices); !joined)
         return propagate_error(train_status_of(joined), outcome, "The mesh bootstrap failed"), nullptr;
     handle->executor = executor;
     return handle;
@@ -246,11 +246,11 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t *arguments) {
     finish_calls_using(arguments->mesh);
     core::mesh_topology_t const &topology = arguments->mesh->mesh->topology;
     core::mesh_shape_t const &shape = topology.shape;
-    array<i32_t> devices;
+    st::basic_vector<i32_t> devices;
     if (!devices_of(arguments->mesh->executor, devices))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the devices"), void();
     core::expected<core::multimem_tier_choice_t> tier = core::multimem_tier_choice_t::make(
-        shape.gpus_per_multimem_domain, devices.view());
+        shape.gpus_per_multimem_domain, devices);
     if (!tier)
         return propagate_error(status_of(tier.status_), outcome, "The multimem tier could not be probed"), void();
     uform_mesh_description_t &description = *arguments->description;
@@ -296,13 +296,12 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t *arguments) 
         if (!own) return;
         handle->mesh = std::move(own);
     }
-    array<i32_t> devices;
+    st::basic_vector<i32_t> devices;
     handle->trainer.reset(new (std::nothrow) ut::trainer_t {});
     handle->items.reset(new (std::nothrow) ut::items_source_t {});
     if (!handle->trainer || !handle->items || !devices_of(executor, devices))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the trainer"), void();
-    if (core::expected_t const built = ut::trainer_t::make(*handle->trainer, mesh_of(*handle), config, devices.view());
-        !built)
+    if (core::expected_t const built = ut::trainer_t::make(*handle->trainer, mesh_of(*handle), config, devices); !built)
         return propagate_error(train_status_of(built), outcome, "The trainer could not be built"), void();
     if (arguments->resume.length) {
         if (core::expected_t const resumed = handle->trainer->resume(text_of(arguments->resume)); !resumed)
@@ -315,8 +314,8 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t *arguments) 
     if (core::expected_t const sourced = ut::items_source_t::make(*handle->items, *handle->trainer); !sourced)
         return propagate_error(train_status_of(sourced), outcome, "The items source could not be built"), void();
     std::size_t const segments = devices.size() * config.batch.max_segments_per_gpu;
-    if (handle->modalities.resize(segments) != core::status_t::success_k ||
-        handle->embeddings.resize(segments * config.hidden * sizeof(f32_t)) != core::status_t::success_k)
+    if (st::failed(handle->modalities.resize(segments)) ||
+        st::failed(handle->embeddings.resize(segments * config.hidden * sizeof(f32_t))))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the step columns"), void();
     if (arguments->mesh) arguments->mesh->trainers.fetch_add(1, std::memory_order_acq_rel);
     *arguments->trainer = handle.release();

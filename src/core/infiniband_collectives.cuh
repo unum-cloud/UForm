@@ -434,11 +434,11 @@ struct host_page_registry_t {
                 free_entry = entry;
                 return status_t::success_k;
             }
-        return pages_.push_back(entry);
+        return st::failed(pages_.push_back(std::move(entry))) ? status_t::bad_alloc_k : status_t::success_k;
     }
 
     /** The page table — a handful of entries, walked linearly. */
-    array<host_page_registration_t> pages_ {};
+    st::basic_vector<host_page_registration_t> pages_ {};
 };
 
 /** One acquired page range a mapping must release — the exact @c (host,span) it passed to
@@ -1235,14 +1235,14 @@ struct infiniband_reach_t {
     b8r1_tensor_registrable_t heap_ {};
 
     /** One connected RC endpoint per round; the two mapping tables below layer onto them. */
-    array<infiniband_endpoint_t> endpoints_ {};
+    st::basic_vector<infiniband_endpoint_t> endpoints_ {};
 
     /** Per-round device-initiated send paths, owning the GPU registrations of each queue pair's
      *  work queue, doorbell record, and BlueFlame register. */
-    array<infiniband_queue_mapping_t> queues_ {};
+    st::basic_vector<infiniband_queue_mapping_t> queues_ {};
 
     /** Per-round completion parsers, owning the GPU registrations of each ring + doorbell. */
-    array<infiniband_completion_mapping_t> completions_ {};
+    st::basic_vector<infiniband_completion_mapping_t> completions_ {};
 
     /** The device link table the doorbell kernels index by round. */
     infiniband_links_tensor_t links_ {};

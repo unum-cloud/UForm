@@ -249,7 +249,7 @@ struct items_source_t final : batch_source_t {
     multimodal_batch_mixer_t mixer_ {};
 
     /** Per item: its tokens and the device segment it was packed into. */
-    array<u32_t> tokens_ {}, placements_ {}, destinations_ {}, order_ {};
+    st::basic_vector<u32_t> tokens_ {}, placements_ {}, destinations_ {}, order_ {};
 
     /** @b [gpus,segments] per routed segment: its world source, then the item it carries. */
     u32r2_tensor_pinned_t sources_ {};
@@ -260,12 +260,12 @@ struct items_source_t final : batch_source_t {
     /** One device's attract, repel and ignore sets rebuilt on host, and the live length of every
      *  mesh vertex. */
     contrastive_edges_pinned_t edges_ {};
-    array<u32_t> lengths_ {};
-    array<temperature_group_t> groups_ {};
+    st::basic_vector<u32_t> lengths_ {};
+    st::basic_vector<temperature_group_t> groups_ {};
 
     /** The decode window of one recording, and the @b [gpus,segments,hidden] pooled vertices
      *  downloaded for the embeddings. */
-    array<f32_t> window_ {};
+    st::basic_vector<f32_t> window_ {};
     nk::tensor<bf16_t, pinned_alloc<bf16_t>, 3> pooled_ {};
 };
 
@@ -280,7 +280,7 @@ struct trainer_t {
     mesh_t *mesh = nullptr;
 
     /** The device ordinals this process drives. */
-    array<i32_t> devices {};
+    st::basic_vector<i32_t> devices {};
 
     /** The measured envelope @ref config 's batch was sized from. */
     envelope_t envelope {};

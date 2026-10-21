@@ -545,12 +545,11 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
         return result_t::fail(status_t::cuda_error_k, "member heap reset did not land");
     member.round_ = std::move(counter.value_);
-    if (member.endpoints_.resize(layout.rounds) != status_t::success_k ||
-        member.queues_.resize(layout.rounds) != status_t::success_k ||
-        member.completions_.resize(layout.rounds) != status_t::success_k)
+    if (st::failed(member.endpoints_.resize(layout.rounds)) || st::failed(member.queues_.resize(layout.rounds)) ||
+        st::failed(member.completions_.resize(layout.rounds)))
         return result_t::fail(status_t::bad_alloc_k, "member tables failed ({} rounds)", layout.rounds);
-    array<infiniband_link_t> host_links {};
-    if (host_links.resize(layout.rounds) != status_t::success_k)
+    st::basic_vector<infiniband_link_t> host_links {};
+    if (st::failed(host_links.resize(layout.rounds)))
         return result_t::fail(status_t::bad_alloc_k, "host link staging failed");
 
     b8r1_span_t const heap_span {member.heap_.data(), heap_bytes};
@@ -621,7 +620,7 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
         link.wait_nanoseconds = static_cast<u64_t>(timeout_seconds * 1e9);
         host_links[round] = link;
     }
-    if (CUresult result = cuMemcpyHtoD(device_address(member.links_.data()), host_links.view().data(),
+    if (CUresult result = cuMemcpyHtoD(device_address(member.links_.data()), host_links.data(),
                                        layout.rounds * sizeof(infiniband_link_t));
         result != CUDA_SUCCESS)
         return cuda_failure<infiniband_reach_t>(result, "link table upload failed");

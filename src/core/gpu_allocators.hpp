@@ -46,8 +46,7 @@
 #include <cuda_bf16.h> // `__nv_bfloat16` behind the `bf16_t` alias
 #include <cuda_fp8.h>  // `__nv_fp8_e4m3` behind the `e4m3_t` alias
 
-#include "core/types.hpp" // `expected`, `status_t`
-#include "core/array.hpp" // `array` for exception-free chunk bookkeeping
+#include "core/types.hpp" // `expected`, `status_t`, `st::basic_vector` for exception-free chunk bookkeeping
 
 namespace unum::uform::core {
 
@@ -198,11 +197,11 @@ struct gpu_arena_t {
     int device_ = 0;
 
     /** Mapped chunks, in mapping order, for teardown. */
-    array<physical_chunk_t> chunks_ {};
+    st::basic_vector<physical_chunk_t> chunks_ {};
 
     /** Peer devices named in @c visible_to at @ref make — baked configuration every chunk
      *  (present and future) is granted to; nothing appends to it after construction. */
-    array<i32_t> visible_to_ {};
+    st::basic_vector<i32_t> visible_to_ {};
 
   private:
     gpu_arena_t() noexcept = default;
@@ -264,7 +263,7 @@ struct gpu_arena_t {
                 return expected<gpu_arena_t>::fail(status_t::shape_unsupported_k,
                                                    "device {} cannot read the arena of device {}: no P2P path", peer,
                                                    device);
-            if (arena.visible_to_.push_back(peer) != status_t::success_k)
+            if (st::failed(arena.visible_to_.push_back(i32_t {peer})))
                 return expected<gpu_arena_t>::fail(status_t::bad_alloc_k, "peer table allocation failed");
         }
         CUmemAllocationProp properties = allocation_properties_(device);
@@ -296,7 +295,7 @@ struct gpu_arena_t {
      *  and fail loudly — visibility is never granted after construction. */
     [[nodiscard]] bool is_visible_to(int device) const noexcept {
         if (device == device_) return true;
-        for (i32_t const peer : visible_to_.view())
+        for (i32_t const peer : visible_to_)
             if (peer == device) return true;
         return false;
     }
@@ -394,7 +393,7 @@ struct gpu_arena_t {
                 return result;
             }
             // Every chunk honors the `visible_to_` set baked at make.
-            for (i32_t const peer : visible_to_.view()) {
+            for (i32_t const peer : visible_to_) {
                 CUmemAccessDesc peer_access {};
                 peer_access.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
                 peer_access.location.id = peer;
@@ -406,7 +405,7 @@ struct gpu_arena_t {
                     return result;
                 }
             }
-            if (chunks_.push_back({handle, chunk_bytes}) != status_t::success_k) {
+            if (st::failed(chunks_.push_back({handle, chunk_bytes}))) {
                 cuMemUnmap(base_ + mapped_bytes_, chunk_bytes);
                 cuMemRelease(handle);
                 return CUDA_ERROR_OUT_OF_MEMORY; // Host-side chunk-table growth failed.
@@ -423,7 +422,7 @@ struct gpu_arena_t {
         for (physical_chunk_t const &chunk : chunks_) cuMemRelease(chunk.handle);
         cuMemAddressFree(base_, reserved_bytes_);
         base_ = 0;
-        chunks_.reset();
+        chunks_ = {};
         reserved_bytes_ = mapped_bytes_ = used_bytes_ = 0;
     }
 };
@@ -433,7 +432,7 @@ struct gpu_arena_t {
  *      arena allocations without the bespoke allocation spelling.
  *
  *  @c nk::tensor<f32_t,gpu_arena_alloc<f32_t>,2>::uninitialized({rows,cols},gpu_arena_alloc<f32_t>{arena})
- *  allocates — and grows the arena — automatically; @ref array composes the same way.
+ *  allocates — and grows the arena — automatically; @c st::basic_vector composes the same way.
  *
  *  Deallocation is deliberately a no-op: a bump arena reclaims through @ref gpu_arena_t::rewind /
  *  @ref gpu_arena_t::release , never per buffer — so a container backed by this allocator must not outlive

@@ -32,8 +32,7 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor`, `nk::tensor_span` — the device row table
 
-#include "core/types.hpp"                // `expected`, `expected_t`, `status_t`, the scalar aliases
-#include "core/array.hpp"                // `array` — the per-probe host tables
+#include "core/types.hpp"                // `expected`, `expected_t`, `status_t`, the scalar aliases, `st::basic_vector`
 #include "core/gpu_allocators.hpp"       // `gpu_arena_t`, `gpu_arena_alloc`
 #include "core/schedule.cuh"             // `gpu_stream_t`
 #include "core/multimem_collectives.cuh" // `multimem_member_t` — the round probe's subject
@@ -196,13 +195,13 @@ struct telemetry_ledger_t {
     nk::tensor<telemetry_row_t, gpu_arena_alloc<telemetry_row_t>, 1> rows_ {};
 
     /** Owned per-probe labels, row order. */
-    array<sz::string_t> names_ {};
+    st::basic_vector<sz::string_t> names_ {};
 
     /** Per-probe policies, baked into every enqueue. */
-    array<telemetry_policy_t> policies_ {};
+    st::basic_vector<telemetry_policy_t> policies_ {};
 
     /** Per-probe host loss statistics, row order. */
-    array<telemetry_loss_stats_t> loss_stats_ {};
+    st::basic_vector<telemetry_loss_stats_t> loss_stats_ {};
 };
 
 } // namespace unum::uform::core

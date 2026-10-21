@@ -18,7 +18,7 @@ target_include_directories(uform_host PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${PR
 if (NOT UFORM_BUILD_CUDA)
     target_sources(uform_host PRIVATE train_absent.cpp)
 endif ()
-target_link_libraries(uform_host PUBLIC numkong::static forkunion::header stringzilla::static yyjson)
+target_link_libraries(uform_host PUBLIC numkong::static forkunion::header stringzilla::static smashtable::header yyjson)
 
 # The host decoders and the verbs over encoded files, over the codecs the top-level file discovers; WebAssembly takes
 # already-decoded media instead, and its verbs over files report themselves unsupported.
@@ -137,7 +137,9 @@ if (UFORM_BUILD_CUDA)
     )
     add_library(uform::core ALIAS uform_core)
     target_include_directories(uform_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(uform_core PUBLIC numkong::static stringzilla::static yyjson CUDA::cuda_driver)
+    target_link_libraries(
+        uform_core PUBLIC numkong::static stringzilla::static smashtable::header yyjson CUDA::cuda_driver
+    )
     target_compile_features(uform_core PUBLIC cxx_std_23)
     # NumKong accessors are `constexpr` for device-callability; `nvcc` needs the (long-stable) flag to allow it.
     target_compile_options(uform_core PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
@@ -231,7 +233,9 @@ set(uform_amd_inference_kernels_ nullptr)
 if (UFORM_BUILD_CUDA)
     add_library(uform_nvidia_inference OBJECT inference/vram_nvidia_kernels.cu)
     target_include_directories(uform_nvidia_inference PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(uform_nvidia_inference PRIVATE numkong::static forkunion::header stringzilla::static)
+    target_link_libraries(
+        uform_nvidia_inference PRIVATE numkong::static forkunion::header stringzilla::static smashtable::header
+    )
     target_link_libraries(uform_nvidia_inference PUBLIC CUDA::cuda_driver)
     target_compile_options(uform_nvidia_inference PRIVATE --expt-relaxed-constexpr)
     set_target_properties(uform_nvidia_inference PROPERTIES CUDA_VISIBILITY_PRESET hidden)
@@ -240,7 +244,9 @@ endif ()
 if (UFORM_BUILD_ROCM)
     add_library(uform_amd_inference OBJECT inference/vram_amd_kernels.hip)
     target_include_directories(uform_amd_inference PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(uform_amd_inference PRIVATE numkong::static forkunion::header stringzilla::static)
+    target_link_libraries(
+        uform_amd_inference PRIVATE numkong::static forkunion::header stringzilla::static smashtable::header
+    )
     set_target_properties(uform_amd_inference PROPERTIES HIP_VISIBILITY_PRESET hidden)
     set(uform_amd_inference_kernels_ &vram_amd_kernels_k)
 endif ()

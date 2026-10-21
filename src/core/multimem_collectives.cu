@@ -165,7 +165,7 @@ expected<multimem_tier_choice_t> multimem_tier_choice_t::make(u32_t member_count
     for (i32_t const device : local_devices) {
         expected<multimem_switch_module_t> bundle = multimem_switch_module_t::load(device);
         if (!bundle) {
-            choice.modules.reset();
+            choice.modules = {};
             if (!format_into(choice.reason,
                              "peer-read: device {} has switch multicast, but the switch kernels do not " //
                              "load on it: {}",
@@ -173,7 +173,7 @@ expected<multimem_tier_choice_t> multimem_tier_choice_t::make(u32_t member_count
                 return result_t::fail(status_t::bad_alloc_k, "tier reason formatting failed");
             return result_t {std::move(choice)};
         }
-        if (choice.modules.push_back(std::move(bundle.value_)) != status_t::success_k)
+        if (st::failed(choice.modules.push_back(std::move(bundle.value_))))
             return result_t::fail(status_t::bad_alloc_k, "switch module table allocation failed");
     }
     choice.tier = multimem_tier_t::switch_reduced_k;
@@ -212,8 +212,7 @@ expected<gpu_symmetric_arena_t> gpu_symmetric_arena_t::make(std::span<i32_t cons
     gpu_symmetric_arena_t arena;
     arena.handle_type_ = handle_type.value_;
     arena.bytes_per_member_ = bytes_per_member;
-    if (arena.devices_.assign(local_devices) != status_t::success_k ||
-        arena.handles_.resize(member_count) != status_t::success_k)
+    if (st::failed(arena.devices_.assign(local_devices)) || st::failed(arena.handles_.resize(member_count)))
         return result_t::fail(status_t::bad_alloc_k, "member table allocation failed ({} of {})", local_devices.size(),
                               member_count);
 
@@ -252,8 +251,7 @@ expected<gpu_symmetric_arena_t> gpu_symmetric_arena_t::make(std::span<i32_t cons
             return cuda_failure<gpu_symmetric_arena_t>(result, "slice mapping failed (member={})", member);
         }
         arena.handles_[member] = handle;
-        if (expected_t granted = grant_local_access_(slice, arena.member_stride_, arena.devices_.view(), member);
-            !granted)
+        if (expected_t granted = grant_local_access_(slice, arena.member_stride_, arena.devices_, member); !granted)
             return result_t::fail(std::move(granted));
     }
     return result_t {std::move(arena)};
@@ -285,7 +283,7 @@ expected_t gpu_symmetric_arena_t::adopt_peer(std::size_t member, CUmemFabricHand
         return cuda_failure(result, "peer slice mapping failed (member={})", member);
     }
     handles_[member] = imported;
-    return grant_local_access_(slice, member_stride_, devices_.view(), static_cast<u32_t>(member));
+    return grant_local_access_(slice, member_stride_, devices_, static_cast<u32_t>(member));
 }
 
 expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, std::span<i32_t const> local_devices,

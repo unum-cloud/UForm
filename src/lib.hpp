@@ -37,8 +37,8 @@
 #include <numkong/memory.h>       // `nk_allocator_t`, `nk_allocator_init_heap`
 #include <numkong/memory.hpp>     // `nk::stream_t` - the stream an executor owns
 
-#include "core/array.hpp"      // `array`, `per_gpu_array`
-#include "core/types.hpp"      // `status_t`, the integer aliases, `sz::string_view_t`
+#include "core/array.hpp"      // `per_gpu_array`
+#include "core/types.hpp"      // `status_t`, the integer aliases, `sz::string_view_t`, `st::basic_vector`
 #include "inference/tower.hpp" // `tower_t`, `geometry_t`, `precision_t` - what a model owns
 #include "uform/uform.h"       // every argument structure
 
@@ -47,8 +47,8 @@ namespace unum::uform {
 namespace fu = ashvardanian::forkunion;
 namespace nk = ashvardanian::numkong;
 namespace sz = ashvardanian::stringzilla;
+namespace st = ashvardanian::smashtable;
 
-using core::array;
 using core::b8_t;
 using core::i32_t;
 using core::per_gpu_array;
@@ -267,7 +267,7 @@ class chunked_arena_t {
         if (!policy_.allocate) return nullptr;
         arena_chunk_t const chunk {static_cast<b8_t *>(policy_.allocate(capacity, policy_.handle, stream_)), capacity};
         if (!chunk.data) return nullptr;
-        if (chunks_.push_back(chunk) != core::status_t::success_k)
+        if (st::failed(chunks_.push_back(arena_chunk_t {chunk})))
             return policy_.free(chunk.data, chunk.capacity, policy_.handle, stream_), nullptr;
         current_ = chunks_.size() - 1, used_ = aligned;
         return chunk.data;
@@ -287,7 +287,7 @@ class chunked_arena_t {
 
     /** Bytes the chunks may span together, or zero for no ceiling. */
     std::size_t limit_;
-    array<arena_chunk_t> chunks_;
+    st::basic_vector<arena_chunk_t> chunks_;
 
     /** The chunk being filled, and the bytes of it already handed out since the last rewind. */
     std::size_t current_ = 0;
@@ -327,7 +327,7 @@ struct ram_executor_t {
     nk_capability_t capabilities = 0;
 
     /** The NUMA nodes the executor's models place their bytes in. */
-    array<i32_t> memory_domains;
+    st::basic_vector<i32_t> memory_domains;
 };
 
 /** One GPU of a VRAM executor: its stream, and the scratch its calls rewind. */
@@ -528,7 +528,7 @@ namespace uf = unum::uform;
 struct uform_executor_handle_t {
 
     /** One entry per call it tracks at once, sized at creation, so a submission never allocates. */
-    uf::array<uf::deferred_call_t> deferred;
+    uf::st::basic_vector<uf::deferred_call_t> deferred;
 
     /** The next listed executor, so a wait or a free finds the calls naming its handle. */
     uform_executor_handle_t *next_listed = nullptr;

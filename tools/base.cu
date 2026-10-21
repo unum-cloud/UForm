@@ -100,14 +100,13 @@ using namespace unum::uform::train;
     if (cuInit(0) != CUDA_SUCCESS) return fail_out_("cuInit failed");
     int device_count = 0;
     if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) return fail_out_("no CUDA devices");
-    array<i32_t> devices;
+    st::basic_vector<i32_t> devices;
     for (int device = 0; device != device_count; ++device)
-        if (devices.push_back(static_cast<i32_t>(device)) != status_t::success_k)
+        if (st::failed(devices.push_back(static_cast<i32_t>(device))))
             return fail_out_("device table allocation failed");
 
     mesh_t mesh;
-    if (expected_t joined = mesh_t::make(mesh, options, devices.view()); !joined)
-        return fail_out_(joined.description_.view());
+    if (expected_t joined = mesh_t::make(mesh, options, devices); !joined) return fail_out_(joined.description_.view());
     fmt::println("uform_base: tokens{}{}{} mixture, {} GPU(s), host_domain {} of {}",
                  config.batch.contains(modality_t::image_k) ? "+image" : "",
                  config.batch.contains(modality_t::video_k) ? "+video" : "",
@@ -137,7 +136,7 @@ using namespace unum::uform::train;
     }
 
     trainer_t trainer;
-    if (expected_t built = trainer_t::make(trainer, mesh, config, devices.view()); !built)
+    if (expected_t built = trainer_t::make(trainer, mesh, config, devices); !built)
         return fail_out_(built.description_.view());
     envelope_t const &envelope = trainer.envelope;
     f64_t const mebibyte = 1024.0 * 1024.0;
@@ -185,7 +184,7 @@ int main(int argc, char **argv) {
         if (!read) return fail_out_(read.description_.view());
         mixture = std::move(read.value_);
         bool queried = false;
-        for (mixture_entry_t const &entry : mixture.datasets.view())
+        for (mixture_entry_t const &entry : mixture.datasets)
             for (late_interaction_side_t const side : {entry.sides.anchor, entry.sides.positive, entry.sides.negative})
                 queried |= side == late_interaction_side_t::query_k ||
                            side == late_interaction_side_t::query_and_document_k;

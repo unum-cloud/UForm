@@ -243,7 +243,7 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
     if (count == 0) return result_t::fail(status_t::invalid_input_k, "an optimizer needs weights");
     adafactor_t optimizer;
     optimizer.config_ = config;
-    if (optimizer.states_.resize(count) != status_t::success_k || optimizer.names_.resize(count) != status_t::success_k)
+    if (st::failed(optimizer.states_.resize(count)) || st::failed(optimizer.names_.resize(count)))
         return result_t::fail(status_t::bad_alloc_k, "state table allocation failed ({})", count);
     std::size_t moment_scalars = 0, master_scalars = 0, gradient_scalars = 0;
     for (std::size_t index = 0; index != count; ++index) {
@@ -294,15 +294,15 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
 }
 
 expected_t adafactor_t::save(checkpoint_to_save_t &checkpoint, gpu_stream_t &stream) const noexcept {
-    array<f32_t> moments, masters, first_moments;
-    if (moments.resize_uninitialized(moments_.numel()) != status_t::success_k ||
-        masters.resize_uninitialized(masters_.numel()) != status_t::success_k ||
-        first_moments.resize_uninitialized(first_moments_.numel()) != status_t::success_k)
+    st::basic_vector<f32_t> moments, masters, first_moments;
+    if (st::failed(moments.resize(st::assume_uninitialized, moments_.numel())) ||
+        st::failed(masters.resize(st::assume_uninitialized, masters_.numel())) ||
+        st::failed(first_moments.resize(st::assume_uninitialized, first_moments_.numel())))
         return expected_t::fail(status_t::bad_alloc_k, "optimizer state staging failed");
-    expected_t staged = copy_device_to_host(moments_.view(), moments.span(), stream);
-    if (staged) staged = copy_device_to_host(masters_.view(), masters.span(), stream);
+    expected_t staged = copy_device_to_host(moments_.view(), std::span<f32_t> {moments}, stream);
+    if (staged) staged = copy_device_to_host(masters_.view(), std::span<f32_t> {masters}, stream);
     if (staged && !first_moments_.empty())
-        staged = copy_device_to_host(first_moments_.view(), first_moments.span(), stream);
+        staged = copy_device_to_host(first_moments_.view(), std::span<f32_t> {first_moments}, stream);
     if (!staged) return staged;
     if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
         return cuda_failure(result, "optimizer state download failed");
@@ -608,10 +608,11 @@ expected_t adafactor_temperatures_t::step(f32r1_span_t inverse_temperatures, f32
 }
 
 expected_t adafactor_temperatures_t::save(checkpoint_to_save_t &checkpoint, gpu_stream_t &stream) const noexcept {
-    array<f32_t> moments;
-    if (moments.resize_uninitialized(moments_.numel()) != status_t::success_k)
+    st::basic_vector<f32_t> moments;
+    if (st::failed(moments.resize(st::assume_uninitialized, moments_.numel())))
         return expected_t::fail(status_t::bad_alloc_k, "temperature moments staging failed");
-    if (expected_t copied = copy_device_to_host(moments_.view(), moments.span(), stream); !copied) return copied;
+    if (expected_t copied = copy_device_to_host(moments_.view(), std::span<f32_t> {moments}, stream); !copied)
+        return copied;
     if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
         return cuda_failure(result, "temperature moments download failed");
     return checkpoint.insert(key_.view(), f32r2_view_t {moments.data(), 1, moments.size()});

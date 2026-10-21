@@ -31,8 +31,7 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "core/types.hpp"            // `expected`, `expected_t`, `status_t`, the scalar aliases
-#include "core/array.hpp"            // `array` — the parameter-table append
+#include "core/types.hpp"            // `expected`, `expected_t`, `status_t`, the scalar aliases, `st::basic_vector`
 #include "core/gpu_allocators.hpp"   // `gpu_arena_t`, `gpu_arena_alloc`
 #include "core/schedule.cuh"         // `gpu_stream_t`, the NumKong products, the view aliases
 #include "core/multimodal_batch.hpp" // `modality_t`, `modality_view_t` — the per-segment routing tag
@@ -226,7 +225,7 @@ struct masked_tokens_t {
 
     /** Append the decoder weight to @p weights under the checkpoint name @p name — the owning
      *  replica spells the instance name, since one head class may serve several modalities. */
-    [[nodiscard]] expected_t fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept;
+    [[nodiscard]] expected_t fill(sz::string_view_t name, st::basic_vector<differentiable_weights_t> &weights) noexcept;
 
     /** The decoder weights @b [vocabulary·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> decoder_weights() noexcept { return decoder_weight_.span().flatten<1>(); }
@@ -329,7 +328,7 @@ struct masked_patches_t {
 
     /** Append the recon weight to @p weights under the checkpoint name @p name — the owning
      *  replica spells the instance name, since one head class may serve several modalities. */
-    [[nodiscard]] expected_t fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept;
+    [[nodiscard]] expected_t fill(sz::string_view_t name, st::basic_vector<differentiable_weights_t> &weights) noexcept;
 
     /** The recon weights @b [patch_pixels·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> recon_weights() noexcept { return recon_weight_.span().flatten<1>(); }
@@ -429,7 +428,7 @@ struct masked_frames_t {
 
     /** Append the recon weight to @p weights under the checkpoint name @p name — the owning
      *  replica spells the instance name, since one head class may serve several modalities. */
-    [[nodiscard]] expected_t fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept;
+    [[nodiscard]] expected_t fill(sz::string_view_t name, st::basic_vector<differentiable_weights_t> &weights) noexcept;
 
     /** The recon weights @b [chunk_samples·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> recon_weights() noexcept { return recon_weight_.span().flatten<1>(); }

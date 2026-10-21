@@ -22,6 +22,7 @@
 
 #include <numkong/tensor.hpp>          // `nk::tensor_span`, `nk::tensor_view` — the rank-tagged borrows
 #include <stringzilla/stringzilla.hpp> // `sz::string_t` — the exception-free diagnostics carrier
+#include <smashtable/basic_vector.hpp> // `st::basic_vector` — the exception-free growable array
 
 /** `std::format` support for StringZilla slices, so diagnostics interpolate them directly —
  *  no conversion shims at call sites. */
@@ -44,6 +45,7 @@ namespace unum::uform::core {
 
 namespace sz = ashvardanian::stringzilla;
 namespace nk = ashvardanian::numkong;
+namespace st = ashvardanian::smashtable;
 
 using b8_t = std::byte;
 

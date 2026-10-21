@@ -110,26 +110,28 @@ static __global__ void pair_segments_kernel_(
 }
 
 /** Land the device offsets @p offsets on the host into @p landed . */
-[[nodiscard]] static expected_t land_offsets_(u64r1_view_t offsets, array<u64_t> &landed,
+[[nodiscard]] static expected_t land_offsets_(u64r1_view_t offsets, st::basic_vector<u64_t> &landed,
                                               gpu_stream_t &stream) noexcept {
-    if (landed.resize_uninitialized(offsets.extent(0)) != status_t::success_k)
+    if (st::failed(landed.resize(st::assume_uninitialized, offsets.extent(0))))
         return expected_t::fail(status_t::bad_alloc_k, "offset landing failed ({} entries)", offsets.extent(0));
-    return copy_device_to_host(offsets, landed.span(), stream);
+    return copy_device_to_host(offsets, std::span<u64_t> {landed}, stream);
 }
 
 /** Land the device bytes @p payload on the host into @p landed . */
-[[nodiscard]] static expected_t land_bytes_(b8r1_view_t payload, array<char> &landed, gpu_stream_t &stream) noexcept {
-    if (landed.resize_uninitialized(payload.extent(0)) != status_t::success_k)
+[[nodiscard]] static expected_t land_bytes_(b8r1_view_t payload, st::basic_vector<char> &landed,
+                                            gpu_stream_t &stream) noexcept {
+    if (st::failed(landed.resize(st::assume_uninitialized, payload.extent(0))))
         return expected_t::fail(status_t::bad_alloc_k, "byte landing failed ({} bytes)", payload.extent(0));
-    return copy_device_to_host<b8_t>(payload, std::as_writable_bytes(landed.span()), stream);
+    return copy_device_to_host<b8_t>(payload, std::as_writable_bytes(std::span<char> {landed}), stream);
 }
 
 /** Land the device values of a @c list<int32> column, @p payload , on the host into @p landed . */
-[[nodiscard]] static expected_t land_rows_(b8r1_view_t payload, array<i32_t> &landed, gpu_stream_t &stream) noexcept {
+[[nodiscard]] static expected_t land_rows_(b8r1_view_t payload, st::basic_vector<i32_t> &landed,
+                                           gpu_stream_t &stream) noexcept {
     std::size_t const values = payload.extent(0) / sizeof(i32_t);
-    if (landed.resize_uninitialized(values) != status_t::success_k)
+    if (st::failed(landed.resize(st::assume_uninitialized, values)))
         return expected_t::fail(status_t::bad_alloc_k, "row landing failed ({} rows)", values);
-    return copy_device_to_host<b8_t>(payload, std::as_writable_bytes(landed.span()), stream);
+    return copy_device_to_host<b8_t>(payload, std::as_writable_bytes(std::span<i32_t> {landed}), stream);
 }
 
 /** A row's run of elements in a column: the first one and their count. */
@@ -138,7 +140,7 @@ struct elements_t {
 };
 
 /** Row @p row 's elements of a list column with @p groups , or the row itself of a flat one. */
-[[nodiscard]] static elements_t elements_of_(array<u64_t> const &groups, u64_t row) noexcept {
+[[nodiscard]] static elements_t elements_of_(st::basic_vector<u64_t> const &groups, u64_t row) noexcept {
     if (groups.empty()) return {row, 1u};
     return {groups[row], groups[row + 1] - groups[row]};
 }
@@ -166,10 +168,8 @@ expected<paired_loader_parquet_t> paired_loader_parquet_t::make(
         return result_t::fail(status_t::bad_alloc_k, "column name staging failed");
 
     std::size_t const shards = loader.absolute_paths_.size();
-    if (loader.row_prefix_.resize(shards + 1) != status_t::success_k ||
-        loader.shard_first_group_.resize(shards + 1) != status_t::success_k ||
-        loader.shard_keys_.resize(shards) != status_t::success_k ||
-        loader.group_prefix_.push_back(0) != status_t::success_k)
+    if (st::failed(loader.row_prefix_.resize(shards + 1)) || st::failed(loader.shard_first_group_.resize(shards + 1)) ||
+        st::failed(loader.shard_keys_.resize(shards)) || st::failed(loader.group_prefix_.push_back(0)))
         return result_t::fail(status_t::bad_alloc_k, "shard table allocation failed ({} shards)", shards);
     // A media negative names any row of its shard, so such a loader reads whole shards.
     bool const whole_shards = !config.negative.empty() && modality != modality_t::text_k;
@@ -186,11 +186,11 @@ expected<paired_loader_parquet_t> paired_loader_parquet_t::make(
             return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
         std::size_t first_row = 0;
         for (std::size_t group = 0; group != metadata->group_rows.size(); ++group) {
-            if (loader.group_prefix_.push_back(loader.group_prefix_[loader.group_shard_.size()] +
-                                               metadata->group_complete_rows[group]) != status_t::success_k ||
-                loader.group_shard_.push_back(index) != status_t::success_k ||
-                loader.group_rows_.push_back(metadata->group_rows[group]) != status_t::success_k ||
-                loader.group_first_row_.push_back(first_row) != status_t::success_k)
+            if (st::failed(loader.group_prefix_.push_back(loader.group_prefix_[loader.group_shard_.size()] +
+                                                          metadata->group_complete_rows[group])) ||
+                st::failed(loader.group_shard_.push_back(std::size_t {index})) ||
+                st::failed(loader.group_rows_.push_back(std::size_t {metadata->group_rows[group]})) ||
+                st::failed(loader.group_first_row_.push_back(std::size_t {first_row})))
                 return result_t::fail(status_t::bad_alloc_k, "row-group table append failed");
             first_row += metadata->group_rows[group];
         }
@@ -248,9 +248,9 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
     std::size_t const total_rows = group_prefix_[group_count];
     bool const whole_shards = negatives && media;
     constexpr splitmix64_hash_t hash {};
-    array<sz::string_view_t> picked_paths;
-    array<std::size_t> picked_shards, picked_ids;
-    array<array<u32_t>> picked_groups;
+    st::basic_vector<sz::string_view_t> picked_paths;
+    st::basic_vector<std::size_t> picked_shards, picked_ids;
+    st::basic_vector<st::basic_vector<u32_t>> picked_groups;
     std::size_t pooled_estimate = 0, attempt = 0;
     while ((pooled_estimate < total_pairs || picked_paths.size() < floor_files) && pooled_estimate < total_rows) {
         std::size_t const position = hash(seed_, training_step, gpu_rank, file_draw_salt_k, attempt) % total_rows;
@@ -262,47 +262,46 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
         auto const found = std::find(picked_shards.begin(), picked_shards.end(), shard);
         if (found != picked_shards.end() && (whole_shards || pooled_estimate >= total_pairs)) continue;
         std::size_t const pick = static_cast<std::size_t>(found - picked_shards.begin());
-        if (found == picked_shards.end() &&
-            (picked_shards.push_back(shard) != status_t::success_k ||
-             picked_paths.push_back(absolute_paths_[shard].view()) != status_t::success_k ||
-             picked_groups.push_back(array<u32_t> {}) != status_t::success_k))
+        if (found == picked_shards.end() && (st::failed(picked_shards.push_back(std::size_t {shard})) ||
+                                             st::failed(picked_paths.push_back(absolute_paths_[shard].view())) ||
+                                             st::failed(picked_groups.push_back(st::basic_vector<u32_t> {}))))
             return expected_t::fail(status_t::bad_alloc_k, "shard pick append failed");
         std::size_t const first = whole_shards ? shard_first_group_[shard] : group;
         std::size_t const last = whole_shards ? shard_first_group_[shard + 1] : group + 1;
         for (std::size_t taken = first; taken != last; ++taken) {
-            if (picked_ids.push_back(taken) != status_t::success_k ||
-                picked_groups[pick].push_back(static_cast<u32_t>(taken - shard_first_group_[shard])) !=
-                    status_t::success_k)
+            if (st::failed(picked_ids.push_back(std::size_t {taken})) ||
+                st::failed(picked_groups[pick].push_back(static_cast<u32_t>(taken - shard_first_group_[shard]))))
                 return expected_t::fail(status_t::bad_alloc_k, "row-group pick append failed");
             pooled_estimate += group_prefix_[taken + 1] - group_prefix_[taken];
         }
     }
-    for (array<u32_t> &groups : picked_groups) std::sort(groups.begin(), groups.end()); // cuDF reads them ascending
+    for (st::basic_vector<u32_t> &groups : picked_groups)
+        std::sort(groups.begin(), groups.end()); // cuDF reads them ascending
 
     // Each read group's first reservoir row and first shard-local row, and each pick's first read:
     // the reservoir holds the picks in order and each pick's groups ascending.
-    array<std::size_t> read_bases, read_starts, pick_reads;
+    st::basic_vector<std::size_t> read_bases, read_starts, pick_reads;
     std::size_t reservoir_rows = 0;
     for (std::size_t pick = 0; pick != picked_shards.size(); ++pick) {
-        if (pick_reads.push_back(read_bases.size()) != status_t::success_k)
+        if (st::failed(pick_reads.push_back(read_bases.size())))
             return expected_t::fail(status_t::bad_alloc_k, "read table append failed");
         for (u32_t const local : picked_groups[pick]) {
             std::size_t const group = shard_first_group_[picked_shards[pick]] + local;
-            if (read_bases.push_back(reservoir_rows) != status_t::success_k ||
-                read_starts.push_back(group_first_row_[group]) != status_t::success_k)
+            if (st::failed(read_bases.push_back(std::size_t {reservoir_rows})) ||
+                st::failed(read_starts.push_back(std::size_t {group_first_row_[group]})))
                 return expected_t::fail(status_t::bad_alloc_k, "read table append failed");
             reservoir_rows += group_rows_[group];
         }
     }
-    if (pick_reads.push_back(read_bases.size()) != status_t::success_k ||
-        read_bases.push_back(reservoir_rows) != status_t::success_k)
+    if (st::failed(pick_reads.push_back(read_bases.size())) ||
+        st::failed(read_bases.push_back(std::size_t {reservoir_rows})))
         return expected_t::fail(status_t::bad_alloc_k, "read table append failed");
 
     sz::string_view_t names[4] = {anchor_.view(), positive_.view(), negative_.view(), {}};
     names[roles] = key_.view();
     std::size_t const read_columns = key_.empty() ? roles : roles + 1u;
-    auto reservoir_read = parquet_file_t::make(*storage_, picked_paths.view(), {names, read_columns},
-                                               picked_groups.view(), gpu_stream);
+    auto reservoir_read = parquet_file_t::make(*storage_, picked_paths, {names, read_columns}, picked_groups,
+                                               gpu_stream);
     if (!reservoir_read) return expected_t::fail(std::move(reservoir_read));
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();
@@ -315,10 +314,11 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
     switch_to_gpu_t gpu_scope {gpu_stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
     // Text negatives are strings grouped per row; media negatives are rows grouped by list offsets.
-    array<u64_t> anchor_offsets, anchor_groups, positive_offsets, positive_groups, negative_offsets, negative_groups;
-    array<i32_t> negative_rows;
-    array<u64_t> key_offsets;
-    array<char> key_bytes;
+    st::basic_vector<u64_t> anchor_offsets, anchor_groups, positive_offsets, positive_groups, negative_offsets,
+        negative_groups;
+    st::basic_vector<i32_t> negative_rows;
+    st::basic_vector<u64_t> key_offsets;
+    st::basic_vector<char> key_bytes;
     expected_t landed = land_offsets_(anchors.offsets, anchor_offsets, gpu_stream);
     if (landed) landed = land_offsets_(positives.offsets, positive_offsets, gpu_stream);
     if (landed && !reservoir.groups(0).empty()) landed = land_offsets_(reservoir.groups(0), anchor_groups, gpu_stream);
@@ -344,13 +344,13 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
 
     // Every pair on the host: a keyed bijection over the pool picks the rows, and a key per draw
     // picks the element of a list. A row missing any role is passed over.
-    auto const is_empty = [](array<u64_t> const &offsets, u64_t element) noexcept {
+    auto const is_empty = [](st::basic_vector<u64_t> const &offsets, u64_t element) noexcept {
         return offsets[element + 1] == offsets[element];
     };
     u64_t const row_key = hash(seed_, gpu_rank, row_draw_salt_k);
-    array<u64_t> drawn, keys;
-    if (drawn.resize_uninitialized(roles * total_pairs) != status_t::success_k ||
-        keys.resize_uninitialized(total_pairs) != status_t::success_k)
+    st::basic_vector<u64_t> drawn, keys;
+    if (st::failed(drawn.resize(st::assume_uninitialized, roles * total_pairs)) ||
+        st::failed(keys.resize(st::assume_uninitialized, total_pairs)))
         return expected_t::fail(status_t::bad_alloc_k, "pair draw allocation failed ({} pairs)", total_pairs);
     u64r2_span_t const drawn_roles {drawn.data(), roles, total_pairs};
     // A pool smaller than the fill's pairs repeats in fresh keyed passes, and a pass that adds no
@@ -412,19 +412,22 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
         return expected_t::fail(status_t::shape_unsupported_k,
                                 "{} pooled rows across {} files hold {} complete pairs, fewer than the {} needed",
                                 pooled_rows, picked_paths.size(), found, total_pairs);
-    array<u64_t, gpu_alloc<u64_t>> drawn_on_gpu {gpu_alloc<u64_t> {gpu_stream.get()}},
+    st::basic_vector<u64_t, gpu_alloc<u64_t>> drawn_on_gpu {gpu_alloc<u64_t> {gpu_stream.get()}},
         keys_on_gpu {gpu_alloc<u64_t> {gpu_stream.get()}};
-    array<b8_t, gpu_alloc<b8_t>> prefixes {gpu_alloc<b8_t> {gpu_stream.get()}};
+    st::basic_vector<b8_t, gpu_alloc<b8_t>> prefixes {gpu_alloc<b8_t> {gpu_stream.get()}};
     std::size_t const anchor_prefix_bytes = anchor_prefix_.size(), positive_prefix_bytes = positive_prefix_.size();
-    if (drawn_on_gpu.resize_uninitialized(drawn.size()) != status_t::success_k ||
-        keys_on_gpu.resize_uninitialized(keys.size()) != status_t::success_k ||
-        prefixes.resize_uninitialized(std::max<std::size_t>(anchor_prefix_bytes + positive_prefix_bytes, 1u)) !=
-            status_t::success_k)
+    if (st::failed(drawn_on_gpu.resize(st::assume_uninitialized, drawn.size())) ||
+        st::failed(keys_on_gpu.resize(st::assume_uninitialized, keys.size())) ||
+        st::failed(prefixes.resize(st::assume_uninitialized,
+                                   std::max<std::size_t>(anchor_prefix_bytes + positive_prefix_bytes, 1u))))
         return expected_t::fail(status_t::bad_alloc_k, "pair index allocation failed ({} pairs)", total_pairs);
     b8r1_span_t const anchor_prefix {prefixes.data(), anchor_prefix_bytes};
     b8r1_span_t const positive_prefix {prefixes.data() + anchor_prefix_bytes, positive_prefix_bytes};
-    expected_t uploaded = copy_host_to_device<u64_t>(drawn.view(), drawn_on_gpu.span(), gpu_stream);
-    if (uploaded) uploaded = copy_host_to_device<u64_t>(keys.view(), keys_on_gpu.span(), gpu_stream);
+    expected_t uploaded = copy_host_to_device<u64_t>(std::span<u64_t const> {drawn}, std::span<u64_t> {drawn_on_gpu},
+                                                     gpu_stream);
+    if (uploaded)
+        uploaded = copy_host_to_device<u64_t>(std::span<u64_t const> {keys}, std::span<u64_t> {keys_on_gpu},
+                                              gpu_stream);
     if (uploaded)
         uploaded = copy_host_to_device<b8_t>(std::as_bytes(std::span {anchor_prefix_.data(), anchor_prefix_bytes}),
                                              anchor_prefix, gpu_stream);
@@ -437,7 +440,8 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
     nk::tensor_view<u64_t, 3> const drawn_on_gpu_batches {drawn_on_gpu.data(), {roles, unroll, pairs}};
 
     // A media role decodes through the host-landed offsets; a text role packs on the device.
-    column_view_t const positive_tape = media ? column_view_t {positives.payload, positive_offsets.view()} : positives;
+    column_view_t const positive_tape =
+        media ? column_view_t {positives.payload, std::span<u64_t const> {positive_offsets}} : positives;
     column_view_t const negative_tape = media ? positive_tape : listed_negatives;
     u32_t const shape_width = modality_ == modality_t::image_k ? 2u : modality_ == modality_t::video_k ? 3u : 0u;
     for (std::size_t batch = 0; batch != unroll; ++batch) {
@@ -447,7 +451,7 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
 
         // A role's text rows, walked the way the packing kernel will: cut at the row width, never
         // crossing a row.
-        auto const walk = [&](u32_t role, array<u64_t> const &offsets, std::size_t prefix_bytes) noexcept {
+        auto const walk = [&](u32_t role, st::basic_vector<u64_t> const &offsets, std::size_t prefix_bytes) noexcept {
             std::size_t cursor = 0;
             for (std::size_t pair = 0; pair != pairs; ++pair) {
                 u64_t const element = drawn_batches[role, batch, pair];
@@ -474,15 +478,15 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
 
         // One scratch table row per role: offsets, lengths, modalities and, for images and videos,
         // the positive and negative media shapes.
-        array<u32_t, gpu_alloc<u32_t>> offsets {gpu_alloc<u32_t> {gpu_stream.get()}};
-        array<u32_t, gpu_alloc<u32_t>> lengths {gpu_alloc<u32_t> {gpu_stream.get()}};
-        array<modality_t, gpu_alloc<modality_t>> modalities {gpu_alloc<modality_t> {gpu_stream.get()}};
-        array<u16_t, gpu_alloc<u16_t>> media_shapes {gpu_alloc<u16_t> {gpu_stream.get()}};
-        if (offsets.resize_uninitialized(roles * (pairs + 1)) != status_t::success_k ||
-            lengths.resize_uninitialized(roles * pairs) != status_t::success_k ||
-            modalities.resize_uninitialized(roles * pairs) != status_t::success_k ||
-            media_shapes.resize_uninitialized(std::max<std::size_t>(2 * pairs * shape_width, 1u)) !=
-                status_t::success_k)
+        st::basic_vector<u32_t, gpu_alloc<u32_t>> offsets {gpu_alloc<u32_t> {gpu_stream.get()}};
+        st::basic_vector<u32_t, gpu_alloc<u32_t>> lengths {gpu_alloc<u32_t> {gpu_stream.get()}};
+        st::basic_vector<modality_t, gpu_alloc<modality_t>> modalities {gpu_alloc<modality_t> {gpu_stream.get()}};
+        st::basic_vector<u16_t, gpu_alloc<u16_t>> media_shapes {gpu_alloc<u16_t> {gpu_stream.get()}};
+        if (st::failed(offsets.resize(st::assume_uninitialized, roles * (pairs + 1))) ||
+            st::failed(lengths.resize(st::assume_uninitialized, roles * pairs)) ||
+            st::failed(modalities.resize(st::assume_uninitialized, roles * pairs)) ||
+            st::failed(
+                media_shapes.resize(st::assume_uninitialized, std::max<std::size_t>(2 * pairs * shape_width, 1u))))
             return expected_t::fail(status_t::bad_alloc_k, "pair table allocation failed ({} pairs)", pairs);
         u32r2_span_t const role_offsets {offsets.data(), roles, pairs + 1}, role_lengths {lengths.data(), roles, pairs};
         nk::tensor_span<modality_t, 2> const role_modalities {modalities.data(), roles, pairs};

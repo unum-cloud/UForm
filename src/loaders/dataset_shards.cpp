@@ -35,7 +35,7 @@
 
 #include "loaders/dataset_shards.hpp"
 
-#include "core/array.hpp"          // `array` — the owned per-column table
+#include "core/types.hpp"          // `st::basic_vector` — the owned per-column table
 #include "core/gpu_allocators.hpp" // `device_address` — the tar gather's copy endpoints
 
 namespace uc = unum::uform::core;
@@ -74,7 +74,7 @@ struct column_span_t {
  *  offsets) and one @ref column_span_t per requested column, in request order. */
 struct parquet_file_t::state_t {
     std::unique_ptr<cudf::table> table;
-    array<column_span_t> columns;
+    st::basic_vector<column_span_t> columns;
     rmm::device_buffer tar_payload; // the members a tar-backed column gathers, back to back
 };
 
@@ -208,14 +208,13 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
     rmm::device_buffer &payload) {
     using result_t = expected<column_span_t>;
     std::size_t const rows = static_cast<std::size_t>(byte_offsets.size());
-    array<i64_t> offsets, lengths;
-    array<u64_t> bounds;
-    array<CUdeviceptr> sources, destinations;
-    array<std::size_t> sizes, row_runs, run_starts, run_ends, run_members, run_bases;
-    if (offsets.resize(rows) != status_t::success_k || lengths.resize(rows) != status_t::success_k ||
-        bounds.resize(rows + 1) != status_t::success_k || sources.resize(rows) != status_t::success_k ||
-        destinations.resize(rows) != status_t::success_k || sizes.resize(rows) != status_t::success_k ||
-        row_runs.resize(rows) != status_t::success_k)
+    st::basic_vector<i64_t> offsets, lengths;
+    st::basic_vector<u64_t> bounds;
+    st::basic_vector<CUdeviceptr> sources, destinations;
+    st::basic_vector<std::size_t> sizes, row_runs, run_starts, run_ends, run_members, run_bases;
+    if (st::failed(offsets.resize(rows)) || st::failed(lengths.resize(rows)) || st::failed(bounds.resize(rows + 1)) ||
+        st::failed(sources.resize(rows)) || st::failed(destinations.resize(rows)) || st::failed(sizes.resize(rows)) ||
+        st::failed(row_runs.resize(rows)))
         return result_t::fail(status_t::bad_alloc_k, "tar index allocation failed ({} rows)", rows);
     if (cuMemcpyDtoHAsync(offsets.data(), device_address(byte_offsets.data<i64_t>()), rows * sizeof(i64_t),
                           stream.value()) != CUDA_SUCCESS ||
@@ -271,15 +270,15 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
                 run_ends[run] = member_end;
                 run_members[run] += member_end - member_begin;
             }
-            else if (run_starts.push_back(member_begin) != status_t::success_k ||
-                     run_ends.push_back(member_end) != status_t::success_k ||
-                     run_members.push_back(member_end - member_begin) != status_t::success_k)
+            else if (st::failed(run_starts.push_back(std::size_t {member_begin})) ||
+                     st::failed(run_ends.push_back(std::size_t {member_end})) ||
+                     st::failed(run_members.push_back(member_end - member_begin)))
                 return result_t::fail(status_t::bad_alloc_k, "tar run allocation failed for {}", paths[shard]);
             row_runs[row] = run_ends.size() - 1;
         }
         std::size_t staged_bytes = 0;
         for (std::size_t run = 0; run != run_ends.size(); ++run) {
-            if (run_bases.push_back(staged_bytes) != status_t::success_k)
+            if (st::failed(run_bases.push_back(std::size_t {staged_bytes})))
                 return result_t::fail(status_t::bad_alloc_k, "tar run allocation failed for {}", paths[shard]);
             staged_bytes += run_ends[run] - run_starts[run];
         }
@@ -322,13 +321,14 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
                                               std::span<sz::string_view_t const> paths,
                                               std::span<sz::string_view_t const> columns,
                                               gpu_stream_t &stream) noexcept {
-    return make(storage, paths, columns, std::span<array<u32_t> const> {}, stream); // every row group
+    return make(storage, paths, columns, std::span<st::basic_vector<u32_t> const> {}, stream); // every row group
 }
 
 expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &,
                                               std::span<sz::string_view_t const> paths,
                                               std::span<sz::string_view_t const> columns,
-                                              std::span<array<u32_t> const> row_groups, gpu_stream_t &stream) noexcept {
+                                              std::span<st::basic_vector<u32_t> const> row_groups,
+                                              gpu_stream_t &stream) noexcept {
     using result_t = expected<parquet_file_t>;
     if (paths.empty() || columns.empty())
         return result_t::fail(status_t::invalid_input_k, "a read needs at least one shard path and one column");
@@ -390,7 +390,7 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
         parts.clear();
 
         auto state = std::make_unique<state_t>();
-        if (state->columns.resize(columns.size()) != status_t::success_k)
+        if (st::failed(state->columns.resize(columns.size())))
             return result_t::fail(status_t::bad_alloc_k, "column table allocation failed ({} columns)", columns.size());
         cudf::table_view const table = whole->view();
         bool const tar_backed = names.size() != columns.size();
@@ -430,11 +430,9 @@ expected<parquet_length_metadata_t> parquet_file_t::table_metadata(
         cudf::io::parquet::FileMetaData const &footer = footers.front();
         std::size_t const groups = footer.row_groups.size();
         parquet_length_metadata_t length {static_cast<std::size_t>(footer.num_rows), 0, {}, {}};
-        array<std::size_t> spans;
-        if (length.group_rows.resize(groups) != status_t::success_k ||
-            length.group_bytes.resize(groups) != status_t::success_k ||
-            length.group_complete_rows.resize(groups) != status_t::success_k ||
-            spans.resize(groups) != status_t::success_k)
+        st::basic_vector<std::size_t> spans;
+        if (st::failed(length.group_rows.resize(groups)) || st::failed(length.group_bytes.resize(groups)) ||
+            st::failed(length.group_complete_rows.resize(groups)) || st::failed(spans.resize(groups)))
             return result_t::fail(status_t::bad_alloc_k, "row-group table allocation failed for {}", path);
         bool tar_backed = false;
         // A named column the shard lacks leaves every row incomplete.
@@ -718,29 +716,29 @@ expected<std::size_t> ul::file_size_bytes(sz::string_view_t path) noexcept {
     return ::stat(path.c_str(), &info) == 0 && S_ISDIR(info.st_mode);
 }
 
-expected<array<sz::string_t>> ul::expand_glob(sz::string_view_t path_or_glob) noexcept {
-    using result_t = expected<array<sz::string_t>>;
+expected<st::basic_vector<sz::string_t>> ul::expand_glob(sz::string_view_t path_or_glob) noexcept {
+    using result_t = expected<st::basic_vector<sz::string_t>>;
 
     // Wildcards may sit in ANY component — the mixture manifests spell mid-path patterns like
     // `data/*/train/*.parquet` — so the expansion walks the path left to right, forking the running
     // directory prefixes at every patterned component and matching files at the last one. A forked
     // branch that lacks a later component simply contributes nothing; only a wholly empty match fails.
-    array<sz::string_view_t> components;
+    st::basic_vector<sz::string_view_t> components;
     for (sz::string_view_t component : path_or_glob.split(sz::byteset_t {"/", 1}))
-        if (!component.empty() && components.push_back(component) != status_t::success_k)
+        if (!component.empty() && st::failed(components.push_back(std::move(component))))
             return result_t::fail(status_t::bad_alloc_k, "glob component table allocation failed");
     if (components.size() == 0) return result_t::fail(status_t::invalid_input_k, "no files match {}", path_or_glob);
 
     bool const absolute = path_or_glob.starts_with(sz::string_view_t {"/", 1});
-    array<sz::string_t> prefixes;
+    st::basic_vector<sz::string_t> prefixes;
     {
         sz::string_t seed_prefix;
         if (sz::failed(seed_prefix.assign(absolute ? sz::string_view_t {"/", 1} : sz::string_view_t {".", 1})) ||
-            prefixes.push_back(std::move(seed_prefix)) != status_t::success_k)
+            st::failed(prefixes.push_back(std::move(seed_prefix))))
             return result_t::fail(status_t::bad_alloc_k, "glob prefix allocation failed");
     }
 
-    array<sz::string_t> paths;
+    st::basic_vector<sz::string_t> paths;
     sz::byteset_t const wildcards {"*?[", 3};
     for (std::size_t level = 0; level != components.size(); ++level) {
         sz::string_view_t const component = components[level];
@@ -764,9 +762,9 @@ expected<array<sz::string_t>> ul::expand_glob(sz::string_view_t path_or_glob) no
         if (sz::failed(pattern_text.assign(component)))
             return result_t::fail(status_t::bad_alloc_k, "glob pattern allocation failed");
         // `**` keeps each prefix and adds every real directory below, as a symlink could loop.
-        array<sz::string_t> next_prefixes;
+        st::basic_vector<sz::string_t> next_prefixes;
         if (recursive) next_prefixes = std::move(prefixes);
-        array<sz::string_t> const &walked = recursive ? next_prefixes : prefixes;
+        st::basic_vector<sz::string_t> const &walked = recursive ? next_prefixes : prefixes;
         for (std::size_t index = 0; index != walked.size(); ++index) {
             ::DIR *const handle = ::opendir(walked[index].c_str());
             if (handle == nullptr) continue; // a forked branch without this component matches nothing
@@ -784,8 +782,7 @@ expected<array<sz::string_t>> ul::expand_glob(sz::string_view_t path_or_glob) no
                 bool const resolves = entry->d_type == DT_LNK || entry->d_type == DT_UNKNOWN;
                 bool const is_directory = entry->d_type == DT_DIR || (!recursive && resolves && is_directory_(full));
                 if (last == is_directory) continue; // files close the walk; directories continue it
-                if ((last ? paths.push_back(std::move(full)) : next_prefixes.push_back(std::move(full))) !=
-                    status_t::success_k) {
+                if (st::failed(last ? paths.push_back(std::move(full)) : next_prefixes.push_back(std::move(full)))) {
                     ::closedir(handle);
                     return result_t::fail(status_t::bad_alloc_k, "path string allocation failed");
                 }

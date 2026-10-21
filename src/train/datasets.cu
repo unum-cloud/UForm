@@ -120,11 +120,11 @@ expected<mixture_t> mixture_t::read(sz::string_view_t path) noexcept {
         yyjson_arr_foreach(datasets, index, count, object) {
             mixture_entry_t entry;
             if (expected_t read = read_entry_(object, entry); !read) return read;
-            if (mixture.datasets.push_back(std::move(entry)) != status_t::success_k)
+            if (st::failed(mixture.datasets.push_back(std::move(entry))))
                 return expected_t::fail(status_t::bad_alloc_k, "dataset table allocation failed");
         }
         u32_t pairs = 0;
-        for (mixture_entry_t const &entry : mixture.datasets.view()) pairs += !entry.anchor.empty();
+        for (mixture_entry_t const &entry : mixture.datasets) pairs += !entry.anchor.empty();
         if (pairs != 0 && pairs != mixture.datasets.size())
             return expected_t::fail(status_t::invalid_input_k, "pairs and plain text share the mixture");
         return {};
@@ -135,7 +135,7 @@ expected<mixture_t> mixture_t::read(sz::string_view_t path) noexcept {
 }
 
 bool mixture_t::names(modality_t modality) const noexcept {
-    for (mixture_entry_t const &entry : datasets.view())
+    for (mixture_entry_t const &entry : datasets)
         if (!entry.media.empty() && entry.modality == modality) return true;
     return false;
 }
@@ -143,7 +143,7 @@ bool mixture_t::names(modality_t modality) const noexcept {
 multimodal_batch_shape_t mixture_t::shape(multimodal_batch_shape_t shape) const noexcept {
     // The paired loader's bag holds an anchor and a positive, and a negative when the entry names
     // one.
-    std::span<mixture_entry_t const> const entries = datasets.view();
+    std::span<mixture_entry_t const> const entries = datasets;
     if (!entries.empty() && !entries[0].anchor.empty())
         shape.max_bag_segments = std::any_of(entries.begin(), entries.end(),
                                              [](mixture_entry_t const &entry) { return !entry.negative.empty(); })
@@ -160,7 +160,7 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
                                   std::size_t batches_per_fill) noexcept {
     multimodal_batch_shape_t const &shape = config.batch;
     placed.mixture_ = std::move(mixture);
-    std::span<mixture_entry_t const> const entries = placed.mixture_.datasets.view();
+    std::span<mixture_entry_t const> const entries = placed.mixture_.datasets;
     bool const pairs = !entries.empty() && !entries[0].anchor.empty();
 
     if (pairs && fu::failed(placed.pool_.spawn(fu::allowed_cores_count())))
@@ -168,11 +168,11 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
 
     auto adopt = [&](auto loader) noexcept -> expected_t {
         if (!loader) return expected_t::fail(std::move(loader));
-        if (placed.loaders_.push_back(std::move(loader.value_)) != status_t::success_k)
+        if (st::failed(placed.loaders_.push_back(std::move(loader.value_))))
             return expected_t::fail(status_t::bad_alloc_k, "loader table allocation failed");
         return {};
     };
-    if (placed.weight_prefix_.push_back(0.0) != status_t::success_k)
+    if (st::failed(placed.weight_prefix_.push_back(0.0)))
         return expected_t::fail(status_t::bad_alloc_k, "weight table allocation failed");
     for (mixture_entry_t const &entry : entries) {
         sz::string_view_t const glob = entry.glob.view();
@@ -196,12 +196,12 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
                                                entry.anchor_prefix.view(), entry.positive_prefix.view(), entry.sides},
                                               entry.modality, shape));
         if (!made) return expected_t::fail(made.status_, "{}: {}", entry.name.view(), made.description_.view());
-        if (placed.weight_prefix_.push_back(placed.weight_prefix_[placed.weight_prefix_.size() - 1] + entry.weight) !=
-            status_t::success_k)
+        if (st::failed(placed.weight_prefix_.push_back(placed.weight_prefix_[placed.weight_prefix_.size() - 1] +
+                                                       entry.weight)))
             return expected_t::fail(status_t::bad_alloc_k, "weight table allocation failed");
     }
     reservoir_bound_t reservoir;
-    for (loader_t const &loader : placed.loaders_.view())
+    for (loader_t const &loader : placed.loaders_)
         std::visit([&](auto const &typed) noexcept { reservoir.charge(typed.reservoir()); }, loader);
     // One fill pools the rows of every batch it packs, so the per-row term scales with them.
     config.reservoir_fixed_bytes = reservoir.fixed_bytes;
@@ -213,7 +213,7 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer, 
     trainer_config_t const &config = trainer.config;
     multimodal_batch_shape_t shape = config.batch;
     std::size_t const gpus = trainer.replicas.size(), segments = shape.max_segments_per_gpu;
-    std::span<mixture_entry_t const> const entries = placed.mixture_.datasets.view();
+    std::span<mixture_entry_t const> const entries = placed.mixture_.datasets;
     // A pair spends two segments and a triplet three, each in one bag, so pairs bound the bags.
     if (!entries.empty() && !entries[0].anchor.empty()) {
         std::size_t const lanes = std::min(shape.max_rows_per_gpu, shape.max_segments_per_gpu);
@@ -223,12 +223,12 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer, 
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {trainer.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-        array<multimodal_batch_on_gpu_t> filled;
+        st::basic_vector<multimodal_batch_on_gpu_t> filled;
         for (std::size_t batch_index = 0; batch_index != batches_per_fill; ++batch_index) {
             expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(
                 gpu_arena_alloc_t {trainer.arenas[member]}, shape);
             if (!batch) return expected_t::fail(std::move(batch));
-            if (filled.push_back(std::move(batch.value_)) != status_t::success_k)
+            if (st::failed(filled.push_back(std::move(batch.value_))))
                 return expected_t::fail(status_t::bad_alloc_k, "batch table allocation failed");
         }
         if (placed.filled_.push_back(std::move(filled)) != status_t::success_k ||

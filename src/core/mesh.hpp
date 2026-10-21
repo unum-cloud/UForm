@@ -95,8 +95,8 @@
 
 #include <stringzilla/stringzilla.hpp> // `sz::string_t`, `sz::string_view_t` — exception-free text handling
 
-#include "core/types.hpp"          // `expected`, `expected_t`, `status_t`, `format_into`
-#include "core/array.hpp"          // `array` for the exception-free host_domain table
+#include "core/types.hpp"          // `expected`, `expected_t`, `status_t`, `format_into`, `st::basic_vector`
+#include "core/array.hpp"          // `per_gpu_array` for the device UUIDs
 #include "core/gpu_allocators.hpp" // `cuda_failure`
 
 namespace unum::uform::core {
@@ -274,7 +274,8 @@ inline constexpr std::size_t device_name_capacity_k = 64u;
 inline constexpr char mesh_schema_k[] = "uform.mesh.1";
 
 /** One host_domain's published facts — the payload of the bootstrap exchange, one entry per
- *  host_domain in @ref mesh_topology_t::host_domains . POD so the table is @ref array -friendly. */
+ *  host_domain in @ref mesh_topology_t::host_domains . POD, so an @c st::basic_vector holds the
+ *  table. */
 struct mesh_host_domain_t {
 
     /** The host_domain's index in @c [0,host_domain_count) — identity from the launcher, never derived. */
@@ -355,7 +356,7 @@ struct mesh_topology_t {
     u32_t host_domain_index = 0;
 
     /** Every host_domain's published facts, indexed by host_domain index. */
-    array<mesh_host_domain_t> host_domains {};
+    st::basic_vector<mesh_host_domain_t> host_domains {};
 
     /** The resolved @c <directory>/<job_id> exchange root; empty in a single-host_domain world. */
     sz::string_t exchange_directory {};
@@ -437,7 +438,7 @@ struct mesh_topology_t {
         mesh_topology_t topology;
         topology.shape = shape.value_;
         topology.host_domain_index = host_domain_index;
-        if (topology.host_domains.resize(host_domain_count) != status_t::success_k)
+        if (st::failed(topology.host_domains.resize(host_domain_count)))
             return expected<mesh_topology_t>::fail(
                 status_t::bad_alloc_k, "host_domain table allocation failed (host_domains={})", host_domain_count);
         topology.host_domains[host_domain_index] = probed.value_.facts;
@@ -714,7 +715,7 @@ struct mesh_topology_t {
 
     /** Assemble the manifest payload from a complete table — the exact inverse of
      *  @ref parse_manifest_ . @c false only on allocation failure. */
-    [[nodiscard]] static bool build_manifest_(sz::string_t &text, array<mesh_host_domain_t> const &table,
+    [[nodiscard]] static bool build_manifest_(sz::string_t &text, st::basic_vector<mesh_host_domain_t> const &table,
                                               mesh_shape_t const &shape, sz::string_view_t job) noexcept {
         bool built = format_into(text, "schema {}\njob {}\nmultimem {}\n", mesh_schema_k, job,
                                  shape.gpus_per_multimem_domain);
@@ -731,7 +732,7 @@ struct mesh_topology_t {
      *  be present. Emits no diagnostics — the caller owns the message, with the whole payload in it. */
     [[nodiscard]] static bool parse_manifest_(sz::string_view_t payload, sz::string_view_t job,
                                               u32_t gpus_per_multimem_domain,
-                                              array<mesh_host_domain_t> &table) noexcept {
+                                              st::basic_vector<mesh_host_domain_t> &table) noexcept {
         auto take_token = [](sz::string_view_t &row) noexcept {
             // Pop the leading space-separated token off the row with the partition API.
             auto [token, match, rest] = row.partition(' ');
@@ -775,14 +776,14 @@ struct mesh_topology_t {
     [[nodiscard]] expected_t collect_world_as_lead_(sz::string_view_t job, local_probe_t const &probed,
                                                     f64_t timeout_seconds) noexcept {
         mesh_host_domain_t const &self = probed.facts;
-        array<claimed_gpu_t> claimed;
+        st::basic_vector<claimed_gpu_t> claimed;
         // The world's physical GPU identities, this host_domain's first; sorted once at the end to prove
         // none is claimed twice — O(world log world), never a pairwise scan.
-        if (claimed.reserve(shape.gpus_per_colocated_domain) != status_t::success_k)
+        if (st::failed(claimed.reserve(shape.gpus_per_colocated_domain)))
             return expected_t::fail(status_t::bad_alloc_k, "GPU-uniqueness table allocation failed ({} GPUs)",
                                     shape.gpus_per_colocated_domain);
         for (CUuuid const &uuid : probed.uuids.view())
-            if (claimed.push_back({uuid, 0u}) != status_t::success_k)
+            if (st::failed(claimed.push_back({uuid, 0u})))
                 return expected_t::fail(status_t::bad_alloc_k, "GPU-uniqueness table push failed");
 
         for (u32_t peer_index = 1; peer_index != host_domain_count(); ++peer_index) {
@@ -831,7 +832,7 @@ struct mesh_topology_t {
                 if (!parse_uuid_(token, uuid))
                     return expected_t::fail(status_t::io_error_k,
                                             "host_domain {} published a malformed GPU uuid \"{}\"", peer_index, token);
-                if (claimed.push_back({uuid, peer_index}) != status_t::success_k)
+                if (st::failed(claimed.push_back({uuid, peer_index})))
                     return expected_t::fail(status_t::bad_alloc_k, "GPU-uniqueness table push failed");
                 ++peer_uuids;
             }

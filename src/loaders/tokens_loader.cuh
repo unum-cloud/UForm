@@ -123,15 +123,15 @@ struct tokens_loader_parquet_t {
      *  @param[in] training_step The step the draw is keyed by.
      *  @param[in] target_segments The number of rows the pooled shards must cover.
      */
-    [[nodiscard]] expected<array<sz::string_view_t>> drawn_shards(u32_t gpu_rank, u32_t training_step,
-                                                                  std::size_t target_segments) const noexcept;
+    [[nodiscard]] expected<st::basic_vector<sz::string_view_t>> drawn_shards(
+        u32_t gpu_rank, u32_t training_step, std::size_t target_segments) const noexcept;
 
   private:
 
     /** The shards one fill reads and, per shard, the ascending row groups it decodes. */
     struct picked_groups_t {
-        array<sz::string_view_t> paths {};
-        array<array<u32_t>> groups {};
+        st::basic_vector<sz::string_view_t> paths {};
+        st::basic_vector<st::basic_vector<u32_t>> groups {};
     };
 
     /** The keyed weighted pick shared by @ref fill and @ref drawn_shards : draw distinct row groups
@@ -145,7 +145,7 @@ struct tokens_loader_parquet_t {
     gpu_direct_storage_session_t *storage_ = nullptr;
 
     /** The dataset's Parquet shard paths — borrowed from the composition root. */
-    array<sz::string_t> absolute_paths_ {};
+    st::basic_vector<sz::string_t> absolute_paths_ {};
 
     /** The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
@@ -154,10 +154,10 @@ struct tokens_loader_parquet_t {
      *  draw's search table (an @c upper_bound maps a keyed row position to its owning group) and,
      *  at its back, the dataset's total rows. Read once per dataset; shared across every GPU the
      *  loader serves. */
-    array<std::size_t> group_prefix_ {};
+    st::basic_vector<std::size_t> group_prefix_ {};
 
     /** @b [groups] each row group's shard and its index within that shard. */
-    array<u32_t> group_shard_ {}, group_index_ {};
+    st::basic_vector<u32_t> group_shard_ {}, group_index_ {};
 
     /** The device bytes a fill's reservoir can take, from the footers. */
     reservoir_bound_t reservoir_ {};
@@ -220,14 +220,14 @@ struct tokens_loader_jsonl_t {
     gpu_direct_storage_session_t *storage_ = nullptr;
 
     /** The dataset's JSONL shard paths — owned, expanded from the glob at @ref make . */
-    array<sz::string_t> absolute_paths_ {};
+    st::basic_vector<sz::string_t> absolute_paths_ {};
 
     /** The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
 
     /** @b [shards+1] cumulative @b byte sizes — the weighted file draw's search table. JSONL has
      *  no footer, so bytes (not rows) weigh the draw; the true row counts come from the decode. */
-    array<std::size_t> byte_prefix_ {};
+    st::basic_vector<std::size_t> byte_prefix_ {};
 
     /** The device bytes the two largest files take; with no footer, no per-row term. */
     reservoir_bound_t reservoir_ {};
@@ -296,14 +296,14 @@ struct tokens_loader_csv_t {
     gpu_direct_storage_session_t *storage_ = nullptr;
 
     /** The dataset's CSV shard paths — owned, expanded from the glob at @ref make . */
-    array<sz::string_t> absolute_paths_ {};
+    st::basic_vector<sz::string_t> absolute_paths_ {};
 
     /** The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
 
     /** @b [shards+1] cumulative @b byte sizes — the weighted file draw's search table. CSV has no
      *  footer, so bytes (not rows) weigh the draw; the true row counts come from the decode. */
-    array<std::size_t> byte_prefix_ {};
+    st::basic_vector<std::size_t> byte_prefix_ {};
 
     /** The device bytes the two largest files take; with no footer, no per-row term. */
     reservoir_bound_t reservoir_ {};

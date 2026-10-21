@@ -114,14 +114,14 @@ static bool encode(test_suite_t &suite, uc::checkpoint_to_load_t const &checkpoi
 
     uc::expected<std::size_t> bytes = tower->scratch_bytes(tokens, items_k, capabilities);
     if (!bytes) return suite.check(false, "scratch: {}", bytes.description_), false;
-    uc::array<uc::b8_t, nk::allocator<uc::b8_t>> scratch {nk::allocator<uc::b8_t> {scratch_policy, stream}};
-    uc::array<float, nk::allocator<float>> shared_states {nk::allocator<float> {allocator}},
+    st::basic_vector<uc::b8_t, nk::allocator<uc::b8_t>> scratch {nk::allocator<uc::b8_t> {scratch_policy, stream}};
+    st::basic_vector<float, nk::allocator<float>> shared_states {nk::allocator<float> {allocator}},
         shared_embeddings {nk::allocator<float> {allocator}};
-    if (scratch.resize_uninitialized(*bytes) != uc::status_t::success_k ||
-        shared_states.resize_uninitialized(tokens * geometry.hidden) != uc::status_t::success_k ||
-        shared_embeddings.resize_uninitialized(items_k * geometry.hidden) != uc::status_t::success_k)
+    if (st::failed(scratch.resize(st::assume_uninitialized, *bytes)) ||
+        st::failed(shared_states.resize(st::assume_uninitialized, tokens * geometry.hidden)) ||
+        st::failed(shared_embeddings.resize(st::assume_uninitialized, items_k * geometry.hidden)))
         return suite.check(false, "scratch and outputs allocation failed"), false;
-    placement.scratch = scratch.span();
+    placement.scratch = scratch;
     outputs_t const outputs {shared_embeddings.data(), shared_states.data(), nk_f32_k};
     uc::expected_t encoded = on_device ? tower->encode(batch->view(), outputs, placement)
                                        : tower->encode(batch->view(), outputs, placement, pool);

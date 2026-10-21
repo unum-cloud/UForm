@@ -62,8 +62,7 @@
 #include <numkong/dots.h>     // `nk_dots_pack_bf16_best`, `nk_dots_packed_bf16_best` — every matrix product
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span` for the typed transfer helpers
 
-#include "core/types.hpp"          // `expected`, `expected_t`, `status_t`
-#include "core/array.hpp"          // `array` for the node-guard walk
+#include "core/types.hpp"          // `expected`, `expected_t`, `status_t`, `st::basic_vector` for the node-guard walk
 #include "core/gpu_allocators.hpp" // `gpu_arena_alloc`, `bf16_t`, `cuda_failure`
 
 namespace unum::uform::core {
@@ -575,8 +574,8 @@ struct gpu_replay_graph_t {
 
         CUstream const trunk = streams.front();
         CUevent fork_event = nullptr;
-        array<CUevent> join_events;
-        if (join_events.resize(streams.size() - 1u) != status_t::success_k)
+        st::basic_vector<CUevent> join_events;
+        if (st::failed(join_events.resize(streams.size() - 1u)))
             return expected<gpu_replay_graph_t>::fail(status_t::bad_alloc_k,
                                                       "join-event table allocation failed (ranks={})", streams.size());
         expected_t outcome = make_event_for_(trunk, fork_event);
@@ -662,8 +661,8 @@ struct gpu_replay_graph_t {
         if (CUresult result = cuGraphGetNodes(graph, nullptr, &node_count); result != CUDA_SUCCESS)
             return cuda_failure(result, "graph node query failed");
         if (node_count == 0) return {};
-        array<CUgraphNode> nodes;
-        if (nodes.resize_uninitialized(node_count) != status_t::success_k)
+        st::basic_vector<CUgraphNode> nodes;
+        if (st::failed(nodes.resize(st::assume_uninitialized, node_count)))
             return expected_t::fail(status_t::bad_alloc_k, "graph node table allocation failed (nodes={})", node_count);
         if (CUresult result = cuGraphGetNodes(graph, nodes.data(), &node_count); result != CUDA_SUCCESS)
             return cuda_failure(result, "graph node listing failed");

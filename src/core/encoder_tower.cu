@@ -589,7 +589,7 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, en
     }
 
     // The block stack, over one scratch wide enough for the entries' and the head's weight gradients too.
-    if (tower.blocks_.resize(config.depth) != status_t::success_k)
+    if (st::failed(tower.blocks_.resize(config.depth)))
         return result_t::fail(status_t::bad_alloc_k, "block table allocation failed ({})", config.depth);
     u32_t const entry_scalars[3] = {image_patch_scalars, video_tube_scalars, audio_frame_scalars};
     expected<transformer_scratch_t> scratch = transformer_scratch_t::make(arena, config.block, entry_scalars,
@@ -622,8 +622,8 @@ expected<tower_pool_t> tower_pool_t::make(gpu_arena_t &arena, transformer_block_
                                                                     pool.capabilities_, &packed_bytes);
         status != nk_success_k)
         return result_t::fail(status_t::cuda_error_k, "pool pack sizing failed: {}", nk_status_name(status));
-    array<u32_t> host;
-    if (host.resize(segments + 1u) != status_t::success_k)
+    st::basic_vector<u32_t> host;
+    if (st::failed(host.resize(segments + 1u)))
         return result_t::fail(status_t::bad_alloc_k, "pool staging allocation failed ({} segments)", segments);
     for (std::size_t segment = 0; segment <= segments; ++segment) host[segment] = static_cast<u32_t>(segment);
 
@@ -924,16 +924,15 @@ expected_t tower_token_head_t::backward(bf16r2_view_t vectors_grad, multimodal_b
     return staged;
 }
 
-expected_t tower_token_head_t::fill(array<differentiable_weights_t> &weights) noexcept {
+expected_t tower_token_head_t::fill(st::basic_vector<differentiable_weights_t> &weights) noexcept {
     std::size_t const hidden = norm_scale_.extent(0);
     differentiable_weights_t norm {{},
                                    bf16r2_span_t {norm_scale_.data(), 1u, hidden},
                                    bf16r2_view_t {norm_scale_grad_.data(), 1u, hidden}};
     differentiable_weights_t projection {{}, projection_.span(), projection_grad_.view()};
     if (sz::failed(norm.name.assign("token_head.norm")) ||
-        sz::failed(projection.name.assign("token_head.projection")) ||
-        weights.push_back(std::move(norm)) != status_t::success_k ||
-        weights.push_back(std::move(projection)) != status_t::success_k)
+        sz::failed(projection.name.assign("token_head.projection")) || st::failed(weights.push_back(std::move(norm))) ||
+        st::failed(weights.push_back(std::move(projection))))
         return expected_t::fail(status_t::bad_alloc_k, "weight table overflowed");
     return {};
 }
@@ -1295,7 +1294,7 @@ expected_t encoder_tower_bf16_t::pack_weights(gpu_stream_t &stream) noexcept {
     return packed;
 }
 
-expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) noexcept {
+expected_t encoder_tower_bf16_t::fill(st::basic_vector<differentiable_weights_t> &weights) noexcept {
     u32_t const hidden = config_.block.hidden;
     u32_t const ffn = config_.block.ffn_expansion * hidden;
     // Every weight joins under the checkpoint name the tower spells for it — the composition root adds only
@@ -1305,7 +1304,7 @@ expected_t encoder_tower_bf16_t::fill(array<differentiable_weights_t> &weights) 
     auto push = [&weights](sz::string_view_t name, bf16r2_span_t weight, bf16r2_view_t grad) noexcept {
         differentiable_weights_t entry {{}, weight, grad};
         if (sz::failed(entry.name.assign(name))) return status_t::bad_alloc_k;
-        return weights.push_back(std::move(entry));
+        return st::failed(weights.push_back(std::move(entry))) ? status_t::bad_alloc_k : status_t::success_k;
     };
     auto push_flat = [&push](sz::string_view_t name, bf16r1_span_t weight, bf16r1_view_t grad, std::size_t rows,
                              std::size_t cols) noexcept {
@@ -1406,7 +1405,7 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
     gpu_arena_alloc<i16_t> i16_alloc {arena};
 
     // The block stack quantizes per layer; everything else below is a BFloat16 snapshot.
-    if (twin.blocks_.resize(config_.depth) != status_t::success_k)
+    if (st::failed(twin.blocks_.resize(config_.depth)))
         return result_t::fail(status_t::bad_alloc_k, "twin block table allocation failed ({})", config_.depth);
     for (u32_t layer_index = 0; layer_index != config_.depth; ++layer_index) {
         expected<transformer_block_e4m3_t> block = blocks_[layer_index].quantize_weights(arena, stream);

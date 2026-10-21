@@ -640,7 +640,7 @@ struct distributed_contrastive_segments_t {
     infiniband_all_gather<bf16_t> gather_buffer_ {};
 
     /** Every rank's @b [subgraphs] subgraph table, baked at @ref make . */
-    per_gpu_array<array<gpu_subgraph_t>> subgraph_tables_ {};
+    per_gpu_array<st::basic_vector<gpu_subgraph_t>> subgraph_tables_ {};
 
     /** @b [gpus] tower views each rank stages into the world tower — populated only with
      *  @ref world_tower_window_ ; otherwise the tables read the same views in place. */

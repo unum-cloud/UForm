@@ -98,10 +98,11 @@ static i64_t video_memory_seek_(void *opaque, i64_t offset, int whence) noexcept
 /** Append @p packet to @p clip 's stream and record where the next one starts. */
 [[nodiscard]] static status_t append_packet_(demuxed_t &clip, std::span<b8_t const> packet) noexcept {
     std::size_t const previous = clip.annex_b.size();
-    if (clip.annex_b.resize_uninitialized(previous + packet.size()) != status_t::success_k)
+    if (st::failed(clip.annex_b.resize(st::assume_uninitialized, previous + packet.size())))
         return status_t::bad_alloc_k;
     std::copy(packet.begin(), packet.end(), clip.annex_b.data() + previous);
-    return clip.packet_offsets.push_back(static_cast<u64_t>(clip.annex_b.size()));
+    return st::failed(clip.packet_offsets.push_back(static_cast<u64_t>(clip.annex_b.size()))) ? status_t::bad_alloc_k
+                                                                                              : status_t::success_k;
 }
 
 /** The payload bytes of the libav @p packet . */
@@ -150,7 +151,7 @@ expected<demuxed_t> um::demux_video(std::span<b8_t const> container) noexcept {
     using result_t = expected<demuxed_t>;
     demuxed_t clip;
     if (container.empty()) return result_t::fail(status_t::invalid_input_k, "empty video container");
-    if (clip.packet_offsets.push_back(0u) != status_t::success_k)
+    if (st::failed(clip.packet_offsets.push_back(0u)))
         return result_t::fail(status_t::bad_alloc_k, "packet table allocation failed");
     if (looks_like_annex_b_(container)) {
         // A raw elementary stream carries no dimensions until decoded.
@@ -306,7 +307,7 @@ struct frame_sampler_ {
     u32_t height = 0;
 
     /** One planned frame as packed @b [height,width,3] RGB. */
-    array<pixel_t> rgb {};
+    st::basic_vector<pixel_t> rgb {};
 
     /** The first failure, or @c success_k while decoding continues. */
     status_t status = status_t::success_k;
@@ -393,8 +394,8 @@ expected_t um::decode_video_frames(demuxed_t const &clip, video_grid_t grid, vid
     sampler.stride = std::max<u32_t>(shape.frame_stride, 1u);
     sampler.width = grid.patch_columns * shape.patch_side;
     sampler.height = grid.patch_rows * shape.patch_side;
-    if (sampler.rgb.resize_uninitialized(static_cast<std::size_t>(sampler.width) * sampler.height * video_channels_k) !=
-        status_t::success_k)
+    if (st::failed(sampler.rgb.resize(st::assume_uninitialized,
+                                      static_cast<std::size_t>(sampler.width) * sampler.height * video_channels_k)))
         return expected_t::fail(status_t::bad_alloc_k, "RGB frame allocation failed ({}x{})", sampler.width,
                                 sampler.height);
 

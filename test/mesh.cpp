@@ -108,7 +108,7 @@ static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
     fs::create_directories(directory, error);
 
     mesh_topology_t topology;
-    if (topology.host_domains.resize(2) != status_t::success_k) return suite.check(false, "topology table alloc");
+    if (st::failed(topology.host_domains.resize(2))) return suite.check(false, "topology table alloc");
     topology.host_domain_index = 0;
     (void)format_into(topology.exchange_directory, "{}", directory.c_str());
 
@@ -130,7 +130,7 @@ static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
 /** A hand-built two-host_domain topology over @p directory , as host_domain @p index : what
  *  `bootstrap` assembles, without the GPU probe the rendezvous itself never needs. */
 static bool two_host_topology(mesh_topology_t &topology, fs::path const &directory, u32_t index) {
-    if (topology.host_domains.resize(2) != status_t::success_k) return false;
+    if (st::failed(topology.host_domains.resize(2))) return false;
     topology.shape = mesh_shape_t {1u, 1u, 2u};
     topology.host_domain_index = index;
     return format_into(topology.exchange_directory, "{}", directory.c_str());

@@ -30,8 +30,7 @@
 #include <numkong/capabilities.h> // `nk_capability_t`, `nk_stream_t`
 #include <numkong/memory.hpp>     // `nk::aligned_allocator` — packs on NumKong's alignment
 
-#include "core/types.hpp"            // `expected`, `expected_t`, the scalar aliases
-#include "core/array.hpp"            // `array` — the owned weights
+#include "core/types.hpp"            // `expected`, `expected_t`, the scalar aliases, `st::basic_vector`
 #include "core/checkpoint.hpp"       // `checkpoint_to_load_t`
 #include "core/multimodal_batch.hpp" // `multimodal_batch_view_t`
 #include "inference/geometry.hpp"    // `geometry_t`
@@ -75,7 +74,7 @@ struct outputs_t {
 
 /** An array in the memory a tower runs from: NumKong's aligned heap on the CPU, a device's own memory on a GPU. */
 template <typename value_type_>
-using placed_array = uc::array<value_type_, nk::allocator<value_type_>>;
+using placed_array = st::basic_vector<value_type_, nk::allocator<value_type_>>;
 
 /** NumKong pack bytes, aligned for every backend. */
 using packed_bytes_t = placed_array<b8_t>;
@@ -166,7 +165,7 @@ struct tower_t {
 
     geometry_t geometry_ {};
     precision_t precision_ = precision_t::bf16_k;
-    uc::array<block_weights_t> blocks_ {};
+    st::basic_vector<block_weights_t> blocks_ {};
     entry_weights_t entries_ {};
     pool_weights_t pool_ {};
 

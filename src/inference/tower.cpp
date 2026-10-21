@@ -149,7 +149,7 @@ struct placer_t {
                                    sz::string_view_t what) const noexcept {
         target = placed_array<value_type_> {nk::allocator<value_type_> {allocator}};
         if (values.empty()) return {};
-        if (target.resize_uninitialized(values.size()) != status_t::success_k)
+        if (st::failed(target.resize(st::assume_uninitialized, values.size())))
             return expected_t::fail(status_t::bad_alloc_k, "{} allocation failed ({} bytes)", what,
                                     values.size_bytes());
         if (device) return checked_(device->copy(target.data(), values.data(), values.size_bytes(), stream), what);
@@ -164,8 +164,8 @@ struct placer_t {
                                             placed_array<f32_t> &gain) noexcept {
     expected<bf16r2_view_t> tensor = lookup_(checkpoint, name, 1, width);
     if (!tensor) return expected_t::fail(std::move(tensor));
-    uc::array<f32_t> wide;
-    if (wide.resize_uninitialized(width) != status_t::success_k)
+    st::basic_vector<f32_t> wide;
+    if (st::failed(wide.resize(st::assume_uninitialized, width)))
         return expected_t::fail(status_t::bad_alloc_k, "{} widening failed", name);
     expected_t widened = checked_(
         nk_cast_best(tensor->data(), nk_bf16_k, wide.data(), nk_f32_k, width, placer.host, nullptr), name);
@@ -187,7 +187,7 @@ struct placer_t {
         return expected_t::fail(status_t::other_k, "pack sizing [{}x{}] failed: {}", outputs, inputs,
                                 nk_status_name(status));
     packed.bytes = packed_bytes_t {placer.allocator};
-    if (packed.bytes.resize_uninitialized(bytes) != status_t::success_k)
+    if (st::failed(packed.bytes.resize(st::assume_uninitialized, bytes)))
         return expected_t::fail(status_t::bad_alloc_k, "pack allocation failed ({} bytes)", bytes);
     if (precision == precision_t::bf16_k) {
         placed_array<nk_bf16_t> operand;
@@ -197,10 +197,10 @@ struct placer_t {
                                                packed.bytes.data(), 0, outputs, placer.capabilities, placer.stream),
                         "packing");
     }
-    uc::array<f32_t> wide;
-    uc::array<nk_e4m3_t> shadow;
-    if (wide.resize_uninitialized(scalars) != status_t::success_k ||
-        shadow.resize_uninitialized(scalars) != status_t::success_k)
+    st::basic_vector<f32_t> wide;
+    st::basic_vector<nk_e4m3_t> shadow;
+    if (st::failed(wide.resize(st::assume_uninitialized, scalars)) ||
+        st::failed(shadow.resize(st::assume_uninitialized, scalars)))
         return expected_t::fail(status_t::bad_alloc_k, "quantization staging failed ({} scalars)", scalars);
     status = nk_cast_best(weight.data(), nk_bf16_k, wide.data(), nk_f32_k, scalars, placer.host, nullptr);
     f32_t largest = 0.0f;
@@ -254,7 +254,7 @@ expected<tower_t> tower_t::make(uc::checkpoint_to_load_t const &checkpoint, geom
     tower.geometry_ = geometry;
     tower.precision_ = precision;
 
-    if (tower.blocks_.resize(geometry.depth) != status_t::success_k)
+    if (st::failed(tower.blocks_.resize(geometry.depth)))
         return result_t::fail(status_t::bad_alloc_k, "block table allocation failed ({})", geometry.depth);
     sz::string_t name;
     sz::string_view_t const parts[4] = {"qkv", "out", "gate_up", "down"};

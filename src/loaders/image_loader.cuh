@@ -246,7 +246,7 @@ struct image_loader_parquet_t {
     cpu_decode_pool_t *pool_ = nullptr;
 
     /** The dataset's Parquet shard paths, sorted by the glob — owned. */
-    array<sz::string_t> absolute_paths_ {};
+    st::basic_vector<sz::string_t> absolute_paths_ {};
 
     /** The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
@@ -254,7 +254,7 @@ struct image_loader_parquet_t {
     /** @b [shards+1] cumulative footer row counts — the weighted file draw's search table (an
      *  @c upper_bound maps a keyed row position to its owning file) and, at its back, the dataset's
      *  total rows. Read once per dataset; shared across every GPU the loader serves. */
-    array<std::size_t> row_prefix_ {};
+    st::basic_vector<std::size_t> row_prefix_ {};
 
     /** The image modality's geometry ( @c patch_side , @c channels ) every @ref fill hands the decode as its
      *  one representation — fixed at @ref make . */

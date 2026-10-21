@@ -324,13 +324,13 @@ expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t c
     return staged;
 }
 
-expected_t masked_tokens_t::fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept {
+expected_t masked_tokens_t::fill(sz::string_view_t name, st::basic_vector<differentiable_weights_t> &weights) noexcept {
     differentiable_weights_t weight;
     if (sz::failed(weight.name.assign(name)))
         return expected_t::fail(status_t::bad_alloc_k, "weight name assignment failed");
     weight.weights = decoder_weight_.span();
     weight.weights_grad = decoder_weight_grad_.view();
-    if (weights.push_back(std::move(weight)) != status_t::success_k)
+    if (st::failed(weights.push_back(std::move(weight))))
         return expected_t::fail(status_t::bad_alloc_k, "weight table growth failed");
     return {};
 }
@@ -568,13 +568,14 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
     return staged;
 }
 
-expected_t masked_patches_t::fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept {
+expected_t masked_patches_t::fill(sz::string_view_t name,
+                                  st::basic_vector<differentiable_weights_t> &weights) noexcept {
     differentiable_weights_t weight;
     if (sz::failed(weight.name.assign(name)))
         return expected_t::fail(status_t::bad_alloc_k, "weight name assignment failed");
     weight.weights = recon_weight_.span();
     weight.weights_grad = recon_weight_grad_.view();
-    if (weights.push_back(std::move(weight)) != status_t::success_k)
+    if (st::failed(weights.push_back(std::move(weight))))
         return expected_t::fail(status_t::bad_alloc_k, "weight table growth failed");
     return {};
 }
@@ -770,13 +771,13 @@ expected_t masked_frames_t::operator()(bf16r2_view_t normalized, f32r2_view_t cl
     return staged;
 }
 
-expected_t masked_frames_t::fill(sz::string_view_t name, array<differentiable_weights_t> &weights) noexcept {
+expected_t masked_frames_t::fill(sz::string_view_t name, st::basic_vector<differentiable_weights_t> &weights) noexcept {
     differentiable_weights_t weight;
     if (sz::failed(weight.name.assign(name)))
         return expected_t::fail(status_t::bad_alloc_k, "weight name assignment failed");
     weight.weights = recon_weight_.span();
     weight.weights_grad = recon_weight_grad_.view();
-    if (weights.push_back(std::move(weight)) != status_t::success_k)
+    if (st::failed(weights.push_back(std::move(weight))))
         return expected_t::fail(status_t::bad_alloc_k, "weight table growth failed");
     return {};
 }

@@ -17,6 +17,7 @@ namespace unum::uform::media {
 
 namespace uc = unum::uform::core;
 namespace nk = ashvardanian::numkong;
+namespace st = ashvardanian::smashtable;
 
 using uc::f64_t;
 using uc::u16_t;

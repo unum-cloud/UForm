@@ -72,7 +72,7 @@ struct mixture_t {
     sz::string_t name {};
 
     /** The datasets in file order. */
-    array<mixture_entry_t> datasets {};
+    st::basic_vector<mixture_entry_t> datasets {};
 
     /**
      *  @brief Parse the mixture JSON at @p path .
@@ -138,17 +138,17 @@ struct dataset_source_t final : batch_source_t {
     loaders::cpu_decode_pool_t pool_ {};
 
     /** One loader per entry, in entry order. */
-    array<loader_t> loaders_ {};
+    st::basic_vector<loader_t> loaders_ {};
 
     /** @b [entries+1] cumulative weights, the entry draw's search table. */
-    array<f64_t> weight_prefix_ {};
+    st::basic_vector<f64_t> weight_prefix_ {};
 
     /** Every GPU's decoder sessions, present when an entry's media need them. */
     per_gpu_array<loaders::nvjpeg_session_t> jpeg_ {};
     per_gpu_array<loaders::nvdec_session_t> nvdec_ {};
 
     /** Every GPU's @c batches_per_fill filled batches, which one fill packs from one shard read. */
-    per_gpu_array<array<multimodal_batch_on_gpu_t>> filled_ {};
+    per_gpu_array<st::basic_vector<multimodal_batch_on_gpu_t>> filled_ {};
 
     /** Every GPU's batch of this step, swapped in from @ref filled_ for the mixer and out after. */
     per_gpu_array<multimodal_batch_on_gpu_t> loaded_ {};

@@ -39,7 +39,6 @@
 #include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the borrowed CPU-decode pool
 
 #include "core/types.hpp"             // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
-#include "core/array.hpp"             // `array` — the per-fill index scratch
 #include "core/gpu_allocators.hpp"    // `pinned_alloc` — the decode's host tapes
 #include "core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
 #include "core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t` — the decode target
@@ -144,7 +143,7 @@ struct audio_loader_parquet_t {
     cpu_decode_pool_t *pool_ = nullptr;
 
     /** The dataset's Parquet shard paths, sorted by the glob — owned. */
-    array<sz::string_t> absolute_paths_ {};
+    st::basic_vector<sz::string_t> absolute_paths_ {};
 
     /** The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
@@ -152,7 +151,7 @@ struct audio_loader_parquet_t {
     /** @b [shards+1] cumulative footer row counts — the weighted file draw's search table (an
      *  @c upper_bound maps a keyed row position to its owning file) and, at its back, the dataset's total
      *  rows. Read once per dataset; shared across every GPU the loader serves. */
-    array<std::size_t> row_prefix_ {};
+    st::basic_vector<std::size_t> row_prefix_ {};
 
     /** The audio modality's geometry ( @c chunk_samples , @c sample_rate ) every @ref fill hands the
      *  decode — fixed at @ref make . */
