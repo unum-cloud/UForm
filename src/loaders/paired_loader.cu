@@ -444,6 +444,21 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
         media ? column_view_t {positives.payload, std::span<u64_t const> {positive_offsets}} : positives;
     column_view_t const negative_tape = media ? positive_tape : listed_negatives;
     u32_t const shape_width = modality_ == modality_t::image_k ? 2u : modality_ == modality_t::video_k ? 3u : 0u;
+    // One scratch table row per role: offsets, lengths, modalities and, for images and videos, the
+    // positive and negative media shapes; every batch reuses them in stream order.
+    st::basic_vector<u32_t, gpu_alloc<u32_t>> offsets {gpu_alloc<u32_t> {gpu_stream.get()}};
+    st::basic_vector<u32_t, gpu_alloc<u32_t>> lengths {gpu_alloc<u32_t> {gpu_stream.get()}};
+    st::basic_vector<modality_t, gpu_alloc<modality_t>> modalities {gpu_alloc<modality_t> {gpu_stream.get()}};
+    st::basic_vector<u16_t, gpu_alloc<u16_t>> media_shapes {gpu_alloc<u16_t> {gpu_stream.get()}};
+    if (st::failed(offsets.resize(st::assume_uninitialized, roles * (pairs + 1))) ||
+        st::failed(lengths.resize(st::assume_uninitialized, roles * pairs)) ||
+        st::failed(modalities.resize(st::assume_uninitialized, roles * pairs)) ||
+        st::failed(media_shapes.resize(st::assume_uninitialized, std::max<std::size_t>(2 * pairs * shape_width, 1u))))
+        return expected_t::fail(status_t::bad_alloc_k, "pair table allocation failed ({} pairs)", pairs);
+    u32r2_span_t const role_offsets {offsets.data(), roles, pairs + 1}, role_lengths {lengths.data(), roles, pairs};
+    nk::tensor_span<modality_t, 2> const role_modalities {modalities.data(), roles, pairs};
+    nk::tensor_span<u16_t, 3> const media_shape_tables {media_shapes.data(),
+                                                        {std::size_t {2}, pairs, std::size_t {shape_width}}};
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t &loaded = batches[batch];
         if (loaded.tokens.extent(0) != rows || loaded.segment_lengths.extent(0) != segments)
@@ -475,23 +490,6 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
                 return expected_t::fail(status_t::shape_unsupported_k, "{} pairs of texts need {} of the {} rows",
                                         pairs, positive_rows + negative_rows_count + anchor_rows, rows);
         }
-
-        // One scratch table row per role: offsets, lengths, modalities and, for images and videos,
-        // the positive and negative media shapes.
-        st::basic_vector<u32_t, gpu_alloc<u32_t>> offsets {gpu_alloc<u32_t> {gpu_stream.get()}};
-        st::basic_vector<u32_t, gpu_alloc<u32_t>> lengths {gpu_alloc<u32_t> {gpu_stream.get()}};
-        st::basic_vector<modality_t, gpu_alloc<modality_t>> modalities {gpu_alloc<modality_t> {gpu_stream.get()}};
-        st::basic_vector<u16_t, gpu_alloc<u16_t>> media_shapes {gpu_alloc<u16_t> {gpu_stream.get()}};
-        if (st::failed(offsets.resize(st::assume_uninitialized, roles * (pairs + 1))) ||
-            st::failed(lengths.resize(st::assume_uninitialized, roles * pairs)) ||
-            st::failed(modalities.resize(st::assume_uninitialized, roles * pairs)) ||
-            st::failed(
-                media_shapes.resize(st::assume_uninitialized, std::max<std::size_t>(2 * pairs * shape_width, 1u))))
-            return expected_t::fail(status_t::bad_alloc_k, "pair table allocation failed ({} pairs)", pairs);
-        u32r2_span_t const role_offsets {offsets.data(), roles, pairs + 1}, role_lengths {lengths.data(), roles, pairs};
-        nk::tensor_span<modality_t, 2> const role_modalities {modalities.data(), roles, pairs};
-        nk::tensor_span<u16_t, 3> const media_shape_tables {media_shapes.data(),
-                                                            {std::size_t {2}, pairs, std::size_t {shape_width}}};
 
         // Positives over the leading rows, negatives over the next, anchors over the trailing ones.
         auto const fill_role = [&](u32_t role, std::size_t row_begin, std::size_t row_end, column_view_t tape,

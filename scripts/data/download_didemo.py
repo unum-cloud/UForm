@@ -212,6 +212,8 @@ def repack_shard(tar_path: str, captions_json: str, *, keep_raw: bool, overwrite
             if len(columns["mp4"]) == ROW_GROUP_SIZE:
                 writer.write_table(pa.table(columns, schema=schema))
                 columns = {name: [] for name in schema.names}
+                # A row group of multi-megabyte clips is ~1 GB, which Arrow's pool otherwise keeps.
+                pa.default_memory_pool().release_unused()
         if columns["mp4"]:
             writer.write_table(pa.table(columns, schema=schema))
 

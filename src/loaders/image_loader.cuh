@@ -43,7 +43,6 @@
 #include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the borrowed CPU-decode pool
 
 #include "core/types.hpp"             // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
-#include "core/array.hpp"             // `array` — the per-fill index scratch
 #include "core/gpu_allocators.hpp"    // `pinned_alloc` — the non-JPEG fallback's host tapes
 #include "core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
 #include "core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t` — the decode target
@@ -62,21 +61,11 @@ using media::pixel_patches_span_t;
  *  one per run, owned at the composition root (the @b only sanctioned host-thread pool), borrowed here. */
 using cpu_decode_pool_t = ashvardanian::forkunion::flat_pool_t;
 
-/** Which nvJPEG device backend @ref nvjpeg_session_t::make landed. Only the hardware engine honors the
- *  decode-time scale factor, so @ref decode_images gates scaling on it — a named tier, never a bool. */
-enum class nvjpeg_backend_t : u8_t {
-
-    /** The hardware decode engine — device bitstream input, honors the decode-time scale factor. */
-    hardware_k = 0,
-
-    /** The GPU-hybrid fallback — device bitstream input, no per-image scale factor. */
-    gpu_hybrid_k = 1,
-};
-
-/** One JPEG batch entry: the compressed bitstream and length, the plan it maps back to (for fallback
- *  marking and RGBA expansion), its byte offset into the packed-RGB scratch, its decode scale, and the
- *  interleaved-RGB destination wired once that scratch is allocated — the session's decode input item, whose
- *  parallel arrays @ref nvjpeg_session_t::decode_jpeg_batch fills straight from an owning table of these. */
+/** One JPEG batch entry: the compressed bitstream and length, the plan it maps back to (for
+ *  fallback marking and RGBA expansion), its byte offset into the packed-RGB scratch, and the
+ *  interleaved-RGB destination wired once that scratch is allocated. It is the session's decode
+ *  input item: @ref nvjpeg_session_t::decode_jpeg_batch fills nvJPEG's parallel arrays straight
+ *  from an owning table of these. */
 struct jpeg_entry_t {
 
     /** Device bitstream pointer into the reservoir tape. */
@@ -90,9 +79,6 @@ struct jpeg_entry_t {
 
     /** The entry's byte offset into the packed-RGB scratch. */
     std::size_t rgb_offset;
-
-    /** The decode scale factor for this entry. */
-    nvjpegScaleFactor_t scale;
 
     /** The interleaved-RGB destination, wired once the RGB scratch is allocated. */
     nvjpegImage_t destination;
@@ -112,8 +98,7 @@ struct nvjpeg_session_t {
     nvjpeg_session_t(nvjpeg_session_t const &) = delete;
     nvjpeg_session_t &operator=(nvjpeg_session_t const &) = delete;
     nvjpeg_session_t(nvjpeg_session_t &&other) noexcept
-        : handle_(std::exchange(other.handle_, nullptr)), jpeg_state_(std::exchange(other.jpeg_state_, nullptr)),
-          backend_(other.backend_) {}
+        : handle_(std::exchange(other.handle_, nullptr)), jpeg_state_(std::exchange(other.jpeg_state_, nullptr)) {}
     nvjpeg_session_t &operator=(nvjpeg_session_t &&other) noexcept;
     ~nvjpeg_session_t() noexcept;
 
@@ -121,16 +106,12 @@ struct nvjpeg_session_t {
      *  setup. The whole thing is the two handles; every fill's staging is a per-call local. */
     [[nodiscard]] static expected<nvjpeg_session_t> make() noexcept;
 
-    /** Which device backend the handle drives — only @ref nvjpeg_backend_t::hardware_k honors the
-     *  decode-time scale factor, so @ref decode_images gates scaling on it. */
-    [[nodiscard]] nvjpeg_backend_t backend() const noexcept { return backend_; }
-
     /**
      *  @brief Decode one assembled JPEG batch — the session's nvJPEG-only slice of @ref decode_images .
      *
      *  Fails as a whole (the batch is atomic), leaving the caller to route a rejected batch to the CPU.
      *
-     *  @param[in] entries The batch's decode entries — each a bitstream, length, RGB destination, and scale;
+     *  @param[in] entries The batch's decode entries, each a bitstream, length and destination;
      *      the method fills nvJPEG's parallel arrays straight from them at the vendor boundary.
      *  @param[inout] stream The stream the decode enqueues on.
      */
@@ -143,9 +124,6 @@ struct nvjpeg_session_t {
 
     /** The batched-decode state, re-initialized per decode to that fill's JPEG count. */
     nvjpegJpegState_t jpeg_state_ = nullptr;
-
-    /** Which device backend @ref make landed — defaults to the GPU-hybrid fallback. */
-    nvjpeg_backend_t backend_ = nvjpeg_backend_t::gpu_hybrid_k;
 };
 
 /**

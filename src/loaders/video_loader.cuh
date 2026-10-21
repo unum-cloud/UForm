@@ -37,7 +37,7 @@
  *  derived from the clip's decoded native resolution ( @ref derive_triple_ ), never a fixed budget. The common
  *  single-representation (Omni) config is one decode per clip. Representations of one clip differ only in
  *  @c frame_stride and (almost always) share their spatial target, so the drive decodes each clip @b once per
- *  distinct spatial target — keeping every frame at temporal_stride 1 in a shared buffer — and each representation
+ *  distinct spatial target — keeping every frame in a shared buffer — and each representation
  *  temporally subsamples those frames by its own @c frame_stride when the tile kernel gathers its tubes. A
  *  multi-representation config therefore pays one decode per distinct @c (patch_rows,patch_cols) , not one per job.
  *

@@ -18,7 +18,7 @@
 
 #include <forkunion.hpp> // vendor-boundary: the host-CPU decode worker pool
 
-#include "media/planning.hpp" // the budget, factor pair, decode scale and center crop
+#include "media/planning.hpp" // the budget, factor pair and center crop
 #include "media/image.hpp"    // the triage probe and the CPU-fallback decode
 #include "loaders/image_loader.cuh"
 
@@ -127,12 +127,13 @@ static __global__ void gather_headers_kernel_(gather_entry_t const *entries, b8_
  *  @brief Where one plan's pixels are decoded — the single knob that routes the JPEG-device vs CPU-fallback
  *      split.
  *
- *  The invariant lives here and nowhere else: a plan is @c jpeg_device_k iff its format is JPEG @b and
- *  the device batch was accepted; every other plan (PNG / WebP from the start, or a JPEG whose batch nvJPEG
- *  rejected) is @c cpu_fallback_k . @ref triage_images_ sets the format-driven default, and a rejected batch
- *  flips its every JPEG entry to @c cpu_fallback_k in @ref decode_jpeg_plans_ — at the @c decoded scale
- *  already chosen, so the CPU decode fills the very same @c decoded -sized scratch region.
- *  @ref decode_cpu_plans_ then decodes exactly the @c cpu_fallback_k plans. A named route, never a bool.
+ *  The invariant lives here and nowhere else: a plan is @c jpeg_device_k iff its format is JPEG
+ *  @b and the device batch was accepted; every other plan, PNG or WebP from the start or a JPEG
+ *  whose batch nvJPEG rejected, is @c cpu_fallback_k . @ref triage_images_ sets the format-driven
+ *  default, and a rejected batch flips its every JPEG entry to @c cpu_fallback_k in
+ *  @ref decode_jpeg_plans_ , so the CPU decode fills the very same native-sized scratch region.
+ *  @ref decode_cpu_plans_ then decodes exactly the @c cpu_fallback_k plans. A named route, never a
+ *  bool.
  */
 enum class route_t : u8_t {
 
@@ -148,30 +149,22 @@ enum class route_t : u8_t {
     dropped_k = 2,
 };
 
-/** One drawn image's decode plan: its format and native size, the size it actually decodes to in the
- *  scratch (scaled for a hardware JPEG, native otherwise), that image's byte offset, the target patch
- *  factorization, the nvJPEG scale, and which road it decodes on. */
+/** One drawn image's decode plan: its format and native size, that image's byte offset into the
+ *  scratch, the target patch factorization, and which road it decodes on. */
 struct image_plan_t {
 
     /** The compressed format decided by the blob's magic bytes. */
     image_format_t format = format_unknown_k;
 
-    /** The image's full encoded resolution, read from its header. */
+    /** The image's full encoded resolution, read from its header, which it decodes at and the NPP
+     *  resize takes as input. */
     image_extent_t native {};
 
-    /** What actually lands in the scratch and sizes its RGBA region: @c native , or shrunk by the decode
-     *  scale for a JPEG (nvJPEG's hardware scale, or libjpeg's scaled fallback) — the NPP resize's input. */
-    image_extent_t decoded {};
-
-    /** This image's byte offset into the @c decoded -sized RGBA scratch. */
+    /** This image's byte offset into the native-sized RGBA scratch. */
     std::size_t scratch_offset = 0;
 
     /** The target patch factorization the resize/tile scatter honors. */
     patch_grid_t grid {};
-
-    /** The decode scale — NONE unless a JPEG shrinks toward its target (nvJPEG hardware or libjpeg
-     *  fallback); a @c decoded -shrinking scale the CPU fallback honors so its output still fits the region. */
-    nvjpegScaleFactor_t scale = NVJPEG_SCALE_NONE;
 
     /** Which road the image decodes on — its format-driven default, flipped to @c cpu_fallback_k for a
      *  JPEG whose device batch was rejected (see @ref route_t for the invariant). */
@@ -183,7 +176,6 @@ nvjpeg_session_t &nvjpeg_session_t::operator=(nvjpeg_session_t &&other) noexcept
         this->~nvjpeg_session_t();
         handle_ = std::exchange(other.handle_, nullptr);
         jpeg_state_ = std::exchange(other.jpeg_state_, nullptr);
-        backend_ = other.backend_;
     }
     return *this;
 }
@@ -199,11 +191,10 @@ expected<nvjpeg_session_t> nvjpeg_session_t::make() noexcept {
     using result_t = expected<nvjpeg_session_t>;
     nvjpeg_session_t session;
     nvjpegHandle_t &handle = session.handle_;
-    // The hardware backend takes device-resident bitstreams, honors the decode-time scale factor, and is the
-    // fast path; fall back to the GPU-hybrid device backend (also device input, no scale) where it is absent.
-    if (nvjpegCreateEx(NVJPEG_BACKEND_HARDWARE_DEVICE, nullptr, nullptr, 0, &handle) == NVJPEG_STATUS_SUCCESS)
-        session.backend_ = nvjpeg_backend_t::hardware_k;
-    else if (nvjpegCreateEx(NVJPEG_BACKEND_GPU_HYBRID_DEVICE, nullptr, nullptr, 0, &handle) != NVJPEG_STATUS_SUCCESS)
+    // The hardware backend takes device-resident bitstreams and is the fast path; fall back to the
+    // GPU-hybrid device backend, also device input, where it is absent.
+    if (nvjpegCreateEx(NVJPEG_BACKEND_HARDWARE_DEVICE, nullptr, nullptr, 0, &handle) != NVJPEG_STATUS_SUCCESS &&
+        nvjpegCreateEx(NVJPEG_BACKEND_GPU_HYBRID_DEVICE, nullptr, nullptr, 0, &handle) != NVJPEG_STATUS_SUCCESS)
         return result_t::fail(status_t::cuda_error_k, "nvJPEG device backend unavailable");
     if (nvjpegJpegStateCreate(handle, &session.jpeg_state_) != NVJPEG_STATUS_SUCCESS)
         return result_t::fail(status_t::cuda_error_k, "nvJPEG state creation failed");
@@ -229,31 +220,10 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
     if (nvjpegDecodeBatchedInitialize(handle_, jpeg_state_, static_cast<int>(count), 1, NVJPEG_OUTPUT_RGBI) !=
         NVJPEG_STATUS_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "nvJPEG batch init failed ({} images)", count);
-    // The hybrid backend ignores per-image params — a plain batched decode at full scale.
-    if (backend_ != nvjpeg_backend_t::hardware_k)
-        return nvjpegDecodeBatched(handle_, jpeg_state_, data.data(), lengths.data(), destinations.data(),
-                                   stream.get()) == NVJPEG_STATUS_SUCCESS
-                   ? expected_t {}
-                   : expected_t::fail(status_t::cuda_error_k, "nvJPEG batched decode failed");
-    // Hardware path: one decode-params object per image carries its scale factor.
-    st::basic_vector<nvjpegDecodeParams_t> params;
-    if (st::failed(params.resize(count)))
-        return expected_t::fail(status_t::bad_alloc_k, "nvJPEG decode-params allocation failed");
-    std::size_t created = 0;
-    expected_t outcome {};
-    for (created = 0; created != count; ++created) {
-        if (nvjpegDecodeParamsCreate(handle_, &params[created]) != NVJPEG_STATUS_SUCCESS) {
-            outcome = expected_t::fail(status_t::cuda_error_k, "nvJPEG decode-params create failed");
-            break;
-        }
-        nvjpegDecodeParamsSetOutputFormat(params[created], NVJPEG_OUTPUT_RGBI);
-        nvjpegDecodeParamsSetScaleFactor(params[created], entries[created].scale);
-    }
-    if (outcome && nvjpegDecodeBatchedEx(handle_, jpeg_state_, data.data(), lengths.data(), destinations.data(),
-                                         params.data(), stream.get()) != NVJPEG_STATUS_SUCCESS)
-        outcome = expected_t::fail(status_t::cuda_error_k, "nvJPEG batched decode (scaled) failed");
-    for (std::size_t index = 0; index != created; ++index) nvjpegDecodeParamsDestroy(params[index]);
-    return outcome;
+    if (nvjpegDecodeBatched(handle_, jpeg_state_, data.data(), lengths.data(), destinations.data(), stream.get()) !=
+        NVJPEG_STATUS_SUCCESS)
+        return expected_t::fail(status_t::cuda_error_k, "nvJPEG batched decode failed");
+    return {};
 }
 
 /** Fill an @c NppStreamContext from the driver — NPP needs the device's launch limits, which come
@@ -391,9 +361,8 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
         // decode at a DCT scale writes past its scaled extent, overwriting the images after it.
         bool const jpeg = plan.format == format_jpeg_k;
         plan.route = jpeg ? route_t::jpeg_device_k : route_t::cpu_fallback_k;
-        plan.decoded = plan.native;
         plan.scratch_offset = scratch_bytes;
-        scratch_bytes += static_cast<std::size_t>(plan.decoded.width) * plan.decoded.height * image_channels_k;
+        scratch_bytes += static_cast<std::size_t>(plan.native.width) * plan.native.height * image_channels_k;
     }
     return result_t {scratch_bytes};
 }
@@ -425,10 +394,10 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
     }
 }
 
-/** Decode the plan's JPEG rows through @p jpeg into a packed RGB scratch, then widen each into its RGBA
- *  scratch region ( @ref rgb_to_rgba_kernel_ , alpha @c=255 ) — nvJPEG emits no alpha. A rejected batch is
- *  not fatal: every JPEG entry flips to @c route_t::cpu_fallback_k keeping its scaled @c decoded extent, so
- *  the CPU fallback shrinks to the same @c decoded -sized scratch region it would have filled. */
+/** Decode the plan's JPEG rows through @p jpeg into a packed RGB scratch, then widen each into its
+ *  RGBA scratch region ( @ref rgb_to_rgba_kernel_ , alpha @c=255 ) — nvJPEG emits no alpha. A
+ *  rejected batch is not fatal: every JPEG entry flips to @c route_t::cpu_fallback_k , and the CPU
+ *  fallback fills the same native-sized scratch region it would have filled. */
 [[nodiscard]] static expected_t decode_jpeg_plans_(nvjpeg_session_t &jpeg, std::span<image_plan_t> plans, u8_t *scratch,
                                                    column_view_t tape, u64r1_view_t drawn_rows,
                                                    gpu_stream_t &stream) noexcept {
@@ -439,9 +408,8 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
         image_plan_t const &plan = plans[index];
         if (plan.format != format_jpeg_k) continue;
         auto const blob = tape[drawn_rows[index]];
-        std::size_t const pixels = static_cast<std::size_t>(plan.decoded.width) * plan.decoded.height;
-        if (st::failed(entries.push_back(
-                jpeg_entry_t {blob.data(), blob.size(), index, rgb_bytes, plan.scale, nvjpegImage_t {}})))
+        std::size_t const pixels = static_cast<std::size_t>(plan.native.width) * plan.native.height;
+        if (st::failed(entries.push_back(jpeg_entry_t {blob.data(), blob.size(), index, rgb_bytes, nvjpegImage_t {}})))
             return expected_t::fail(status_t::bad_alloc_k, "JPEG batch table growth failed");
         rgb_bytes += pixels * rgb_channels_k;
     }
@@ -458,11 +426,10 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
         jpeg_entry_t &entry = entries[index];
         image_plan_t const &plan = plans[entry.plan_index];
         entry.destination.channel[0] = rgb_base + entry.rgb_offset;
-        entry.destination.pitch[0] = static_cast<std::size_t>(plan.decoded.width) * rgb_channels_k;
+        entry.destination.pitch[0] = static_cast<std::size_t>(plan.native.width) * rgb_channels_k;
     }
-    if (expected_t decoded = jpeg.decode_jpeg_batch(entries.view(), stream); !decoded) {
-        // Route every JPEG to the CPU pool but keep its scaled `decoded` extent and `scale`, so the CPU
-        // decode shrinks to fit the `decoded`-sized scratch region triage laid out for it.
+    if (expected_t decoded = jpeg.decode_jpeg_batch(entries, stream); !decoded) {
+        // Route every JPEG to the CPU pool, which fills the region triage laid out for it.
         for (std::size_t index = 0; index != entries.size(); ++index)
             plans[entries[index].plan_index].route = route_t::cpu_fallback_k;
         return {};
@@ -478,7 +445,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
     for (std::size_t index = 0; index != entries.size(); ++index) {
         jpeg_entry_t const &entry = entries[index];
         image_plan_t const &plan = plans[entry.plan_index];
-        std::size_t const pixels = static_cast<std::size_t>(plan.decoded.width) * plan.decoded.height;
+        std::size_t const pixels = static_cast<std::size_t>(plan.native.width) * plan.native.height;
         host_expand[index] = rgba_expand_entry_t {{rgb_base + entry.rgb_offset, pixels, 3},
                                                   {scratch + plan.scratch_offset, pixels, 4}};
     }
@@ -495,8 +462,8 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
 }
 
 /** Decode the plan's @c cpu_fallback_k rows (PNG, WebP, and any rejected JPEG) on @p pool : one pinned blob
- *  hop in, an RGBA decode per worker at the plan's @c decoded extent (native for PNG / WebP, the scaled
- *  size for a rejected hardware JPEG), then one bulk host-to-device copy into each scratch region. */
+ *  hop in, an RGBA decode per worker at the plan's @c native extent, then one bulk host-to-device
+ *  copy into each scratch region. */
 [[nodiscard]] static expected_t decode_cpu_plans_(cpu_decode_pool_t &pool, std::span<image_plan_t> plans, u8_t *scratch,
                                                   column_view_t tape, u64r1_view_t drawn_rows,
                                                   gpu_stream_t &stream) noexcept {
@@ -523,9 +490,8 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
         image_plan_t const &plan = plans[index];
         if (plan.route != route_t::cpu_fallback_k) continue;
         std::size_t const length = tape[drawn_rows[index]].size();
-        std::size_t const pixels = static_cast<std::size_t>(plan.decoded.width) * plan.decoded.height *
-                                   image_channels_k;
-        if (st::failed(tasks.push_back(cpu_task_t {index, blob_bytes, length, pixel_bytes, pixels})))
+        std::size_t const pixels = static_cast<std::size_t>(plan.native.width) * plan.native.height * image_channels_k;
+        if (st::failed(tasks.push_back({index, blob_bytes, length, pixel_bytes, pixels})))
             return expected_t::fail(status_t::bad_alloc_k, "CPU task list growth failed");
         blob_bytes += length;
         pixel_bytes += pixels;
@@ -559,7 +525,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
         image_plan_t const &plan = plan_base[task.plan_index];
         std::span<b8_t const> const encoded {blob_base + task.blob_offset, task.blob_length};
         um::pixel_image_span_t const destination {pixel_base + task.pixel_offset,
-                                                  {plan.decoded.height, plan.decoded.width, image_channels_k}};
+                                                  {plan.native.height, plan.native.width, image_channels_k}};
         result_base[index] = um::decode_image_rgba(encoded, plan.format, destination) ? 1u : 0u;
     });
     for (std::size_t index = 0; index != tasks.size(); ++index) {
@@ -669,7 +635,7 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
     for (std::size_t index = 0; index != images; ++index) {
         image_plan_t const &plan = plans[index];
         if (plan.route == route_t::dropped_k) continue; // a triage-dropped blob PADs — nothing to resize
-        image_extent_t const source = plan.decoded;
+        image_extent_t const source = plan.native;
         image_extent_t const target {u32_t(plan.grid.columns) * patch_size, u32_t(plan.grid.rows) * patch_size};
         NppiSize const source_size {static_cast<int>(source.width), static_cast<int>(source.height)};
         NppiSize const target_size {static_cast<int>(target.width), static_cast<int>(target.height)};
@@ -757,9 +723,8 @@ expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, co
         !segmented)
         return segmented;
 
-    // One decoded-sized RGBA device scratch holds every image's decoded pixels, laid out by drawn order (a
-    // hardware JPEG's region is sized to its scaled output, not native) — owning, so it frees itself after the
-    // resize's sync.
+    // One native-sized RGBA device scratch holds every image's decoded pixels, laid out by drawn
+    // order — owning, so it frees itself after the resize's sync.
     st::basic_vector<u8_t, gpu_alloc<u8_t>> scratch {gpu_alloc<u8_t> {stream.get()}};
     if (st::failed(scratch.resize(st::assume_uninitialized, scratch_bytes.value_)))
         return expected_t::fail(status_t::bad_alloc_k, "decoded pixel scratch allocation failed ({} bytes)",

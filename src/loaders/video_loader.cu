@@ -75,12 +75,6 @@ struct video_decode_context_t {
     /** Frames converted and written so far — the running index into @c frames_base . */
     std::size_t frames_decoded = 0;
 
-    /** Displayed frames seen so far — drives the @c temporal_stride subsampling independent of keeps. */
-    std::size_t frames_displayed = 0;
-
-    /** Keep every @c temporal_stride -th displayed frame — the representation's explicit temporal density. */
-    std::size_t temporal_stride = 1;
-
     /** The clip's grid target height in pixels: @c patch_rows·P . */
     std::size_t height = 0;
 
@@ -181,7 +175,7 @@ static __global__ void nv12_to_interleaved_rgb_kernel_(pixel_t const *nv12_luma,
 
 /** Per-job source bookkeeping for the sub-row tube scatter — one entry per (clip,representation) segment. Its
  *  frames live in the clip's shared decode-group buffer at @c frames_offset (all of the clip's frames at this
- *  segment's @c (pr·P,pc·P) spatial target, temporal_stride 1); the segment subsamples that buffer temporally by
+ *  segment's @c (pr·P,pc·P) spatial target); the segment subsamples that buffer temporally by
  *  @c frame_stride and lands its tubes at @c (dest_row,dest_column_begin) in the batch grid. A dropped/short
  *  segment carries @c length==0 and contributes nothing. */
 struct tile_job_t {
@@ -265,8 +259,8 @@ static __global__ void tile_tubes_kernel_(pixel_t *tiled, pixel_t const *frames,
         u32_t const spatial_index = column - temporal_group * spatial;
         u32_t const patch_row = spatial_index / patch_cols;
         u32_t const patch_col = spatial_index - patch_row * patch_cols;
-        // The shared decode-group buffer holds every decoded frame (temporal_stride 1); this representation
-        // subsamples it by `frame_stride`, so compact frame `tg·tube_frames+t` sits at group frame `·frame_stride`.
+        // The shared decode-group buffer holds every decoded frame, subsampled here by
+        // `frame_stride`: compact frame `tg·tube_frames+t` sits at group frame `·frame_stride`.
         std::size_t const compact_frame = static_cast<std::size_t>(temporal_group) * tube_frames + tube_frame;
         std::size_t const source_frame = compact_frame * info.frame_stride;
         std::size_t const frame_width = static_cast<std::size_t>(patch_cols) * patch_size;
@@ -408,8 +402,6 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
     codec_entry_t &entry = engine->entries[static_cast<std::size_t>(context->codec)];
     if (entry.decoder == nullptr) return 0;
     if (context->frames_decoded >= context->frames_requested) return 1;
-    std::size_t const this_display = context->frames_displayed++;
-    if (context->temporal_stride > 1u && (this_display % context->temporal_stride) != 0u) return 1;
 
     CUVIDPROCPARAMS proc_params {};
     proc_params.progressive_frame = display_info->progressive_frame;
@@ -610,7 +602,7 @@ struct video_grid_geometry_t {
 /** One decode unit: a clip decoded once for a distinct spatial target @c (patch_rows,patch_cols) , shared by
  *  every representation of that clip whose factorization lands on that target (they differ only in
  *  @c frame_stride , a temporal subsample the tile applies). The group owns a contiguous frame buffer holding
- *  @c frames_to_decode frames at @c (patch_rows·P,patch_cols·P,C) , temporal_stride 1; the drive decodes the clip's
+ *  @c frames_to_decode frames at @c (patch_rows·P,patch_cols·P,C) ; the drive decodes the clip's
  *  elementary stream into it once, and each of the clip's tile jobs at this target reads back through it. */
 struct decode_group_t {
 
@@ -900,7 +892,7 @@ struct engine_cursor_t {
     std::size_t const group_count = drive.groups.size();
     nvdec_engine_t &engine = state->engines[e];
     for (; group < group_count; group += engine_count) {
-        // A group decodes one clip's elementary stream once, keeping every frame (temporal_stride 1) at its (pr,pc)
+        // A group decodes one clip's elementary stream once, keeping every frame at its (pr,pc)
         // spatial target; the clip's representations subsample the shared frames per their frame_stride in the tile.
         decode_group_t const &unit = drive.groups[group];
         demuxed_t const &decoded = drive.demuxed[unit.clip];
@@ -912,7 +904,6 @@ struct engine_cursor_t {
         video_decode_context_t &context = drive.contexts[group];
         context.frames_base = drive.frames_base + unit.frames_offset;
         context.frames_requested = unit.frames_to_decode;
-        context.temporal_stride = 1u; // decode-once keeps every displayed frame; reps subsample in the tile
         context.height = static_cast<std::size_t>(unit.patch_rows) * drive.patch_size;
         context.width = static_cast<std::size_t>(unit.patch_cols) * drive.patch_size;
         context.codec = decoded.codec;

@@ -291,6 +291,24 @@ expected<st::basic_vector<sz::string_view_t>> tokens_loader_parquet_t::drawn_sha
     return expected<st::basic_vector<sz::string_view_t>> {std::move(picked->paths)};
 }
 
+/** Weigh footerless @p paths by byte size, POSIX @c stat , into @p byte_prefix , the weighted file
+ *  draw's running prefix, and charge each file's bytes to @p reservoir . */
+[[nodiscard]] static expected_t weigh_by_bytes_(std::span<sz::string_t const> paths,
+                                                st::basic_vector<std::size_t> &byte_prefix,
+                                                reservoir_bound_t &reservoir) noexcept {
+    if (st::failed(byte_prefix.resize(paths.size() + 1)))
+        return expected_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)", paths.size());
+    byte_prefix[0] = 0;
+    for (std::size_t index = 0; index != paths.size(); ++index) {
+        auto bytes = file_size_bytes(paths[index]);
+        if (!bytes) return expected_t::fail(std::move(bytes));
+        if (*bytes == 0) return expected_t::fail(status_t::invalid_input_k, "shard {} is empty", paths[index]);
+        byte_prefix[index + 1] = byte_prefix[index] + *bytes;
+        reservoir.charge(parquet_length_metadata_t {0, *bytes});
+    }
+    return {};
+}
+
 expected<tokens_loader_jsonl_t> tokens_loader_jsonl_t::make(gpu_direct_storage_session_t &session,
                                                             sz::string_view_t path_or_glob, u64_t seed) noexcept {
     using result_t = expected<tokens_loader_jsonl_t>;
@@ -305,18 +323,8 @@ expected<tokens_loader_jsonl_t> tokens_loader_jsonl_t::make(gpu_direct_storage_s
     loader.seed_ = seed;
 
     // No footer — weigh files by byte size (POSIX stat), a running prefix for the weighted file draw.
-    if (st::failed(loader.byte_prefix_.resize(loader.absolute_paths_.size() + 1)))
-        return result_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)",
-                              loader.absolute_paths_.size());
-    loader.byte_prefix_[0] = 0;
-    for (std::size_t index = 0; index != loader.absolute_paths_.size(); ++index) {
-        auto bytes = file_size_bytes(loader.absolute_paths_[index]);
-        if (!bytes) return result_t::fail(std::move(bytes));
-        if (*bytes == 0)
-            return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
-        loader.byte_prefix_[index + 1] = loader.byte_prefix_[index] + *bytes;
-        loader.reservoir_.charge(parquet_length_metadata_t {0, *bytes});
-    }
+    if (expected_t weighed = weigh_by_bytes_(loader.absolute_paths_, loader.byte_prefix_, loader.reservoir_); !weighed)
+        return result_t::fail(std::move(weighed));
     return result_t {std::move(loader)};
 }
 
@@ -382,18 +390,8 @@ expected<tokens_loader_csv_t> tokens_loader_csv_t::make(gpu_direct_storage_sessi
     loader.seed_ = seed;
 
     // No footer — weigh files by byte size (POSIX stat), a running prefix for the weighted file draw.
-    if (st::failed(loader.byte_prefix_.resize(loader.absolute_paths_.size() + 1)))
-        return result_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)",
-                              loader.absolute_paths_.size());
-    loader.byte_prefix_[0] = 0;
-    for (std::size_t index = 0; index != loader.absolute_paths_.size(); ++index) {
-        auto bytes = file_size_bytes(loader.absolute_paths_[index]);
-        if (!bytes) return result_t::fail(std::move(bytes));
-        if (*bytes == 0)
-            return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
-        loader.byte_prefix_[index + 1] = loader.byte_prefix_[index] + *bytes;
-        loader.reservoir_.charge(parquet_length_metadata_t {0, *bytes});
-    }
+    if (expected_t weighed = weigh_by_bytes_(loader.absolute_paths_, loader.byte_prefix_, loader.reservoir_); !weighed)
+        return result_t::fail(std::move(weighed));
     return result_t {std::move(loader)};
 }
 

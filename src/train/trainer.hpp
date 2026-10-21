@@ -248,8 +248,8 @@ struct items_source_t final : batch_source_t {
     per_gpu_array<multimodal_batch_on_cpu_t> staged_ {};
     multimodal_batch_mixer_t mixer_ {};
 
-    /** Per item: its tokens and the device segment it was packed into. */
-    st::basic_vector<u32_t> tokens_ {}, placements_ {}, destinations_ {}, order_ {};
+    /** Per item: its tokens, its destination vertex and its packing order. */
+    st::basic_vector<u32_t> tokens_ {}, destinations_ {}, order_ {};
 
     /** @b [gpus,segments] per routed segment: its world source, then the item it carries. */
     u32r2_tensor_pinned_t sources_ {};

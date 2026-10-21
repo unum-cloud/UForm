@@ -973,7 +973,6 @@ expected_t items_source_t::make(items_source_t &placed, trainer_t &trainer) noex
                                   ? config.contrastive.max_edges_per_gpu
                                   : relation_edges_capacity(static_cast<u32_t>(segments), shape.max_bag_segments);
     bool allocated = !st::failed(placed.tokens_.resize(total_segments)) &&
-                     !st::failed(placed.placements_.resize(total_segments)) &&
                      !st::failed(placed.destinations_.resize(total_segments)) &&
                      !st::failed(placed.order_.resize(total_segments));
     placed.packed_items_ = u32r2_tensor_pinned_t::uninitialized({gpus, segments}, pinned_alloc<u32_t> {}).value;
@@ -1057,7 +1056,6 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
         tokens_[item] = static_cast<u32_t>(kept);
         report.truncated += spanned > kept;
         order_[item] = static_cast<u32_t>(item);
-        placements_[item] = absent_k;
     }
     if (items.bags)
         std::sort(order_.begin(), order_.begin() + count, [&](u32_t left, u32_t right) noexcept {
@@ -1105,7 +1103,6 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
             staged.segment_lengths[segment] = kept;
             staged.segment_modality[segment] = modality;
             staged.segment_bag[segment] = used_bags[device];
-            placements_[item] = static_cast<u32_t>(device * segments + segment);
             packed_items_[device, segment] = item;
             std::size_t const cells = staged.tokens.numel();
             auto const run = nk::range(offset, offset + kept);
