@@ -410,6 +410,7 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
         else if (flag == "--warmup-steps") taken = number(config.warmup_steps);
         else if (flag == "--seed") taken = number(config.seed);
         else if (flag == "--nvdec-engines") taken = number(config.nvdec_engines);
+        else if (flag == "--batches-per-fill") taken = number(config.batches_per_fill) && config.batches_per_fill > 0;
         else if (flag == "--objective") {
             if (value == "masked") config.objective = objective_t::masked_k;
             else if (value == "contrastive") config.objective = objective_t::contrastive_k;

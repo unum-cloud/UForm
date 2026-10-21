@@ -168,17 +168,19 @@ struct footprint_t {
     step_report_t report;
     if (expected_t stepped = probe.step(source, optimizer_step_t {0}, report); !stepped) return stepped;
     if (expected_t drained = probe.synchronize(); !drained) return drained;
-    // A data source loads every GPU's batch and mixes it from the arenas after the trainer, so
-    // the probe allocates the same, and the fit carries them per row.
-    per_gpu_array<multimodal_batch_on_gpu_t> loaded;
+    // A data source fills every GPU's batches for the next steps and mixes them from the arenas
+    // after the trainer, so the probe allocates the same, and the fit carries them per row.
+    array<multimodal_batch_on_gpu_t> filled;
     for (std::size_t member = 0; member != devices.size(); ++member) {
         switch_to_gpu_t gpu_scope {probe.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-        expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(
-            gpu_arena_alloc_t {probe.arenas[member]}, config.batch);
-        if (!batch) return expected_t::fail(std::move(batch));
-        if (loaded.push_back(std::move(batch.value_)) != status_t::success_k)
-            return expected_t::fail(status_t::bad_alloc_k, "batch table full");
+        for (u32_t batch_index = 0; batch_index != config.batches_per_fill; ++batch_index) {
+            expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(
+                gpu_arena_alloc_t {probe.arenas[member]}, config.batch);
+            if (!batch) return expected_t::fail(std::move(batch));
+            if (filled.push_back(std::move(batch.value_)) != status_t::success_k)
+                return expected_t::fail(status_t::bad_alloc_k, "batch table allocation failed");
+        }
     }
     expected<multimodal_batch_mixer_t> mixer = multimodal_batch_mixer_t::make(
         probe.domain, mesh.colocated, probe.arenas, config.batch, config.seed, probe.streams, mesh.timeout_seconds);

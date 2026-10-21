@@ -106,12 +106,15 @@ struct dataset_source_t final : batch_source_t {
      *  @p trainer 's arenas. */
     [[nodiscard]] static expected_t make(dataset_source_t &placed, trainer_t &trainer) noexcept;
 
-    /** Each GPU draws an entry by weight, keyed by the run seed, the epoch and its world
-     *  coordinate, and fills its loaded batch from it; the mixer then routes every loaded batch
-     *  into the replicas. */
+    /** Take every GPU's next filled batch, filling the next @c batches_per_fill of them first once
+     *  the last are taken; the mixer then routes them into the replicas. */
     [[nodiscard]] expected_t fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept override;
 
   private:
+
+    /** Each GPU draws an entry by weight, keyed by the run seed, @p data_epoch and its world
+     *  coordinate, and fills its next @c batches_per_fill batches from one shard read. */
+    [[nodiscard]] expected_t fill_batches_(trainer_t &trainer, data_epoch_t data_epoch) noexcept;
 
     /** Rebuild every replica's relations over the world's vertices, PAD read off the mixer's world
      *  lengths: the segments of a bag attract each other, and text alone keeps self-edges. */
@@ -136,8 +139,14 @@ struct dataset_source_t final : batch_source_t {
     per_gpu_array<loaders::nvjpeg_session_t> jpeg_ {};
     per_gpu_array<loaders::nvdec_session_t> nvdec_ {};
 
-    /** Every GPU's loaded batch, which the mixer routes into the replicas. */
+    /** Every GPU's @c batches_per_fill filled batches, which one fill packs from one shard read. */
+    per_gpu_array<array<multimodal_batch_on_gpu_t>> filled_ {};
+
+    /** Every GPU's batch of this step, swapped in from @ref filled_ for the mixer and out after. */
     per_gpu_array<multimodal_batch_on_gpu_t> loaded_ {};
+
+    /** The next of the filled batches a step takes; at @c batches_per_fill the next step fills. */
+    std::size_t next_batch_ = 0;
     multimodal_batch_mixer_t mixer_ {};
 
     /** @b [gpus,segments] every mixed segment's bag and length across this process's GPUs, landed

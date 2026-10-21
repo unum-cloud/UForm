@@ -5,6 +5,7 @@
  *  @brief The mixture reader and the dataset source declared in @c src/train/datasets.hpp .
  */
 #include <algorithm> // `std::upper_bound`, `std::min`, `std::max`, `std::any_of`
+#include <utility>   // `std::swap` — a step's batches into the mixer's table and back
 
 #include <cuda.h> // `cuStreamSynchronize`
 
@@ -180,8 +181,9 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
     reservoir_bound_t reservoir;
     for (loader_t const &loader : placed.loaders_.view())
         std::visit([&](auto const &typed) noexcept { reservoir.charge(typed.reservoir()); }, loader);
+    // One fill pools the rows of every batch it packs, so the per-row term scales with them.
     config.reservoir_fixed_bytes = reservoir.fixed_bytes;
-    config.reservoir_row_bytes = reservoir.row_bytes;
+    config.reservoir_row_bytes = reservoir.row_bytes * config.batches_per_fill;
     return {};
 }
 
@@ -201,10 +203,16 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer) 
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {trainer.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-        expected<multimodal_batch_on_gpu_t> loaded = multimodal_batch_on_gpu_t::make(
-            gpu_arena_alloc_t {trainer.arenas[member]}, shape);
-        if (!loaded) return expected_t::fail(std::move(loaded));
-        if (placed.loaded_.push_back(std::move(loaded.value_)) != status_t::success_k)
+        array<multimodal_batch_on_gpu_t> filled;
+        for (u32_t batch_index = 0; batch_index != config.batches_per_fill; ++batch_index) {
+            expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(
+                gpu_arena_alloc_t {trainer.arenas[member]}, shape);
+            if (!batch) return expected_t::fail(std::move(batch));
+            if (filled.push_back(std::move(batch.value_)) != status_t::success_k)
+                return expected_t::fail(status_t::bad_alloc_k, "batch table allocation failed");
+        }
+        if (placed.filled_.push_back(std::move(filled)) != status_t::success_k ||
+            placed.loaded_.push_back(multimodal_batch_on_gpu_t {}) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "batch table full");
         if (placed.mixture_.names(modality_t::image_k)) {
             expected<nvjpeg_session_t> jpeg = nvjpeg_session_t::make();
@@ -225,6 +233,7 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer) 
         trainer.mesh->timeout_seconds);
     if (!mixer) return expected_t::fail(std::move(mixer));
     placed.mixer_ = std::move(mixer.value_);
+    placed.next_batch_ = config.batches_per_fill;
 
     if (!config.contrasts()) return {};
     placed.bags_ = u32r2_tensor_pinned_t::uninitialized({gpus, segments}, pinned_alloc<u32_t> {}).value;
@@ -238,6 +247,24 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer) 
 }
 
 expected_t dataset_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &) noexcept {
+    std::size_t const gpus = trainer.replicas.size();
+    if (next_batch_ == trainer.config.batches_per_fill) {
+        if (expected_t filled = fill_batches_(trainer, data_epoch); !filled) return filled;
+        next_batch_ = 0;
+    }
+    // The mixer reads one batch per GPU side by side, so this step's batches swap in and back out.
+    for (std::size_t member = 0; member != gpus; ++member) std::swap(loaded_[member], filled_[member][next_batch_]);
+    expected_t mixed;
+    for (std::size_t member = 0; member != gpus && mixed; ++member)
+        mixed = mixer_(member, data_epoch, loaded_.view(), trainer.replicas[member].batch, trainer.streams[member]);
+    for (std::size_t member = 0; member != gpus; ++member) std::swap(loaded_[member], filled_[member][next_batch_]);
+    ++next_batch_;
+    if (!mixed) return mixed;
+    if (!trainer.config.contrasts()) return {};
+    return relate_(trainer);
+}
+
+expected_t dataset_source_t::fill_batches_(trainer_t &trainer, data_epoch_t data_epoch) noexcept {
     trainer_config_t const &config = trainer.config;
     u32_t const first = trainer.mesh->topology.first_gpu_index();
     f64_t const total_weight = weight_prefix_[weight_prefix_.size() - 1];
@@ -251,7 +278,7 @@ expected_t dataset_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch, s
             loaders_.size() - 1);
         mixture_entry_t const &dataset = mixture_.datasets[entry];
         gpu_stream_t &stream = trainer.streams[member];
-        std::span<multimodal_batch_on_gpu_t> const batches {&loaded_[member], 1};
+        std::span<multimodal_batch_on_gpu_t> const batches = filled_[member].span();
         u32_t const step = data_epoch.ordinal;
         expected_t filled;
         if (auto *parquet = std::get_if<tokens_loader_parquet_t>(&loaders_[entry]))
@@ -277,14 +304,7 @@ expected_t dataset_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch, s
             return expected_t::fail(filled.status_, "{} on GPU {}: {}", dataset.name.view(), gpu_index,
                                     filled.description_.view());
     }
-    std::span<multimodal_batch_on_gpu_t const> const loaded = loaded_.view();
-    for (std::size_t member = 0; member != trainer.replicas.size(); ++member)
-        if (expected_t mixed = mixer_(member, data_epoch, loaded, trainer.replicas[member].batch,
-                                      trainer.streams[member]);
-            !mixed)
-            return mixed;
-    if (!config.contrasts()) return {};
-    return relate_(trainer);
+    return {};
 }
 
 expected_t dataset_source_t::relate_(trainer_t &trainer) noexcept {
