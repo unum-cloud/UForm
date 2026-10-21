@@ -100,14 +100,20 @@ if (UFORM_BUILD_CUDA)
         target_sources(${target} PRIVATE ${stub_})
     endfunction ()
 
-    # The configured generations that run `multimem`, Hopper and the Blackwell datacenter parts, each compiled for its own
-    # code alone, and both under "native".
+    # The configured codes that run `multimem`: those NumKong's cached Hopper and datacenter-Blackwell capabilities list,
+    # with or without CMake's "-real" or "-virtual", each compiled for its own code alone; "native" takes both families.
     set(uform_multicast_codes_)
-    if ("90a-real" IN_LIST UFORM_CUDA_ARCHITECTURES OR "native" IN_LIST UFORM_CUDA_ARCHITECTURES)
-        list(APPEND uform_multicast_codes_ 90a-real)
-    endif ()
-    if ("100f-real" IN_LIST UFORM_CUDA_ARCHITECTURES OR "native" IN_LIST UFORM_CUDA_ARCHITECTURES)
-        list(APPEND uform_multicast_codes_ 100f-real)
+    foreach (multicast_architecture_ IN LISTS nk_target_hopper_architectures nk_target_blackwell_architectures)
+        foreach (architecture_ IN LISTS UFORM_CUDA_ARCHITECTURES)
+            if (architecture_ MATCHES "^${multicast_architecture_}(-real|-virtual)?$"
+                AND NOT "${multicast_architecture_}-real" IN_LIST uform_multicast_codes_
+            )
+                list(APPEND uform_multicast_codes_ ${multicast_architecture_}-real)
+            endif ()
+        endforeach ()
+    endforeach ()
+    if ("native" IN_LIST UFORM_CUDA_ARCHITECTURES)
+        set(uform_multicast_codes_ 90a-real 100f-real)
     endif ()
 
     # `src/core` → `uform::core`: one static library for the whole core cell, compiled once, never per consumer.

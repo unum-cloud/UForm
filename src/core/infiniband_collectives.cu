@@ -535,12 +535,15 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
     if (!member.heap_ || !member.links_ || !member.round_scalar_)
         return result_t::fail(status_t::bad_alloc_k, "member heap / table allocation failed ({} bytes, arena_used={})",
                               heap_bytes, arena.used());
-    if (cuMemsetD8(device_address(member.heap_.data()), 0, heap_bytes) != CUDA_SUCCESS ||
-        cuMemsetD8(device_address(member.round_scalar_.data()), 0, sizeof(u32_t)) != CUDA_SUCCESS)
+    // The heap zero and the round seed share the member's stream and land before any partner can
+    // write: on the legacy stream the zero could follow the seed, so the sides disagreed on parity.
+    if (cuMemsetD8Async(device_address(member.heap_.data()), 0, heap_bytes, stream.get()) != CUDA_SUCCESS)
         return result_t::fail(status_t::cuda_error_k, "member heap reset failed");
     expected<barrier_round_t> counter = barrier_round_t::make(u32r1_span_t {member.round_scalar_.data(), 1},
                                                               layout.rounds, stream);
     if (!counter) return result_t::fail(std::move(counter));
+    if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+        return result_t::fail(status_t::cuda_error_k, "member heap reset did not land");
     member.round_ = std::move(counter.value_);
     if (member.endpoints_.resize(layout.rounds) != status_t::success_k ||
         member.queues_.resize(layout.rounds) != status_t::success_k ||
