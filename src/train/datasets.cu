@@ -38,6 +38,18 @@ using namespace unum::uform::train;
     return {};
 }
 
+/** Read a @c query key into @p sides : the named role queries; the bag's others are documents. */
+[[nodiscard]] static expected_t read_query_sides_(yyjson_val *value, role_sides_t &sides) noexcept {
+    if (!yyjson_is_str(value)) return expected_t::fail(status_t::invalid_input_k, "\"query\" is not a string");
+    sz::string_view_t const query {yyjson_get_str(value), yyjson_get_len(value)};
+    using side_t = late_interaction_side_t;
+    if (query == "anchor") sides = {side_t::query_k, side_t::document_k, side_t::document_k};
+    else if (query == "positives") sides = {side_t::document_k, side_t::query_k, side_t::document_k};
+    else if (query == "both") sides = {side_t::query_and_document_k, side_t::query_and_document_k, side_t::document_k};
+    else return expected_t::fail(status_t::invalid_input_k, "\"query\" is {}, not anchor, positives or both", query);
+    return {};
+}
+
 /** Parse one entry of the @c datasets array into @p entry . */
 [[nodiscard]] static expected_t read_entry_(yyjson_val *object, mixture_entry_t &entry) noexcept {
     if (!yyjson_is_obj(object)) return expected_t::fail(status_t::invalid_input_k, "a dataset is not an object");
@@ -55,6 +67,7 @@ using namespace unum::uform::train;
         else if (name == "negative") read = read_string_(value, "negative", entry.negative);
         else if (name == "anchor_prefix") read = read_string_(value, "anchor_prefix", entry.anchor_prefix);
         else if (name == "positive_prefix") read = read_string_(value, "positive_prefix", entry.positive_prefix);
+        else if (name == "query") read = read_query_sides_(value, entry.sides);
         else if (name == "weight") {
             if (!yyjson_is_num(value)) return expected_t::fail(status_t::invalid_input_k, "\"weight\" is not a number");
             entry.weight = yyjson_get_num(value);
@@ -179,7 +192,7 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
             made = adopt(
                 paired_loader_parquet_t::make(session, glob, config.seed, placed.pool_,
                                               {entry.anchor.view(), entry.positive.view(), entry.negative.view(),
-                                               entry.anchor_prefix.view(), entry.positive_prefix.view()},
+                                               entry.anchor_prefix.view(), entry.positive_prefix.view(), entry.sides},
                                               entry.modality, shape));
         if (!made) return expected_t::fail(made.status_, "{}: {}", entry.name.view(), made.description_.view());
         if (placed.weight_prefix_.push_back(placed.weight_prefix_[placed.weight_prefix_.size() - 1] + entry.weight) !=

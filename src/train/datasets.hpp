@@ -56,6 +56,10 @@ struct mixture_entry_t {
     /** The bytes every anchor starts with, and every positive and negative text. */
     sz::string_t anchor_prefix {}, positive_prefix {};
 
+    /** The late-interaction side of each role, from the @c query key: @c "anchor" , @c "positives"
+     *  or @c "both" queries and the bag's other roles are documents; none without the key. */
+    loaders::role_sides_t sides {};
+
     /** The modality of @ref media , told by its name; @c text_k for a text entry or a text pair. */
     modality_t modality = modality_t::text_k;
 };

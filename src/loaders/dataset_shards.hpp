@@ -67,6 +67,10 @@ struct parquet_length_metadata_t {
 
     /** @b [groups] each row group's rows and summed uncompressed bytes, for partial reads. */
     array<std::size_t> group_rows {}, group_bytes {};
+
+    /** @b [groups] each row group's rows that no null leaf of the named columns leaves incomplete,
+     *  at least; every row when no column is named. */
+    array<std::size_t> group_complete_rows {};
 };
 
 /** The device bytes a fill's reservoir can take outside the arena, @c fixed_bytes+rows·row_bytes
@@ -143,10 +147,11 @@ struct parquet_file_t {
                                                        gpu_stream_t &stream) noexcept;
 
     /** Read only the shard's Parquet footer at @p path — @c num_rows , the @b whole table's summed
-     *  column-chunk byte size and each row group's rows and bytes — never touching the row groups'
-     *  pages or the GPU. */
-    [[nodiscard]] static expected<parquet_length_metadata_t> table_metadata(gpu_direct_storage_session_t const &storage,
-                                                                            sz::string_view_t path) noexcept;
+     *  column-chunk byte size, and each row group's rows, bytes and rows @p complete_columns all
+     *  fill — never touching the row groups' pages or the GPU. */
+    [[nodiscard]] static expected<parquet_length_metadata_t> table_metadata(
+        gpu_direct_storage_session_t const &storage, sz::string_view_t path,
+        std::span<sz::string_view_t const> complete_columns = {}) noexcept;
 
     /** Read only the shard's Parquet footer at @p path — @c num_rows and @p column 's summed
      *  column-chunk byte size — never touching the row groups or the GPU. */

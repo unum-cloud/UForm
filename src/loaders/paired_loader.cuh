@@ -43,6 +43,13 @@
 
 namespace unum::uform::loaders {
 
+/** The late-interaction side each role of a bag plays, from the mixture entry's @c query key. */
+struct role_sides_t {
+    late_interaction_side_t anchor = late_interaction_side_t::none_k;
+    late_interaction_side_t positive = late_interaction_side_t::none_k;
+    late_interaction_side_t negative = late_interaction_side_t::none_k;
+};
+
 /** The columns a paired loader reads — a different config is a different loader. */
 struct paired_loader_parquet_config_t {
 
@@ -59,6 +66,9 @@ struct paired_loader_parquet_config_t {
 
     /** The bytes every anchor starts with, and every positive and negative text. */
     sz::string_view_t anchor_prefix {}, positive_prefix {};
+
+    /** The late-interaction side of each role; all @c none_k when the entry names no @c query . */
+    role_sides_t sides {};
 };
 
 /**
@@ -151,11 +161,31 @@ struct paired_loader_parquet_t {
     /** The bytes every anchor starts with, and every positive and negative text. */
     sz::string_t anchor_prefix_ {}, positive_prefix_ {};
 
+    /** The late-interaction side each role's segments carry. */
+    role_sides_t sides_ {};
+
+    /** The sample-key column, which names one media across rows, empty when shards carry none. */
+    sz::string_t key_ {};
+
     /** The run seed keying the file, row and caption draws. */
     u64_t seed_ = 0;
 
-    /** @b [shards+1] cumulative footer row counts, the weighted file draw's search table. */
+    /** @b [shards+1] cumulative footer row counts, bounding a media negative's shard-local row. */
     array<std::size_t> row_prefix_ {};
+
+    /** @b [groups+1] cumulative complete rows of every row group over the shards in order, the
+     *  weighted draw's search table, and @b [shards+1] each shard's first group in it. */
+    array<std::size_t> group_prefix_ {}, shard_first_group_ {};
+
+    /** @b [groups] each row group's shard, rows, and first shard-local row. */
+    array<std::size_t> group_shard_ {}, group_rows_ {}, group_first_row_ {};
+
+    /** The shards with a complete row, which bound the draw's floor of two. */
+    std::size_t drawable_shards_ = 0;
+
+    /** @b [shards] each shard path's hash, which a row's sample key folds with its shard-local row,
+     *  so every entry that reads one shard keys its rows alike. */
+    array<u64_t> shard_keys_ {};
 
     /** The device bytes a fill's reservoir can take, from the footers. */
     reservoir_bound_t reservoir_ {};

@@ -5,10 +5,13 @@
  *  @file src/loaders/dataset_shards.cpp
  */
 
+#include <cstring> // `std::memcpy` — a footer statistic's bytes
+
 #include <dirent.h>   // vendor-boundary: POSIX `opendir` / `readdir` — the raw directory scan, no glob to link
 #include <sys/stat.h> // vendor-boundary: POSIX `stat` — the footerless formats' byte-size file weight
 
 #include <algorithm> // `std::sort` — the deterministic shard order, `std::find_if` — a sidecar's missing column
+#include <limits>    // `std::numeric_limits` — a statistic-less group's unbounded span
 #include <span>      // `std::span` — the borrowed payload / offsets
 #include <string>
 #include <vector>
@@ -16,11 +19,11 @@
 #include <fnmatch.h> // vendor-boundary: POSIX `fnmatch` — the shard filename pattern match
 #include <cudf/column/column.hpp>
 #include <cudf/column/column_view.hpp>
-#include <cudf/concatenate.hpp>         // `cudf::concatenate` — merge decoded JSONL shards into one field
+#include <cudf/concatenate.hpp>         // `cudf::concatenate` — merge decoded shards into one table
 #include <cudf/io/csv.hpp>              // `cudf::io::read_csv`, `csv_reader_options`
 #include <cudf/io/json.hpp>             // `cudf::io::read_json`, `json_reader_options`
 #include <cudf/io/parquet.hpp>          // `cudf::io::read_parquet`, `parquet_reader_options`
-#include <cudf/io/parquet_metadata.hpp> // `cudf::io::read_parquet_metadata`, `parquet_metadata`
+#include <cudf/io/parquet_metadata.hpp> // `read_parquet_metadata`, `read_parquet_footers`
 #include <cudf/io/types.hpp>            // `cudf::io::source_info`
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/strings/strings_column_view.hpp>
@@ -180,6 +183,14 @@ static void widen_offsets_(cudf::column_view const &offsets, rmm::cuda_stream_vi
 inline constexpr char tar_offset_column_k[] = "tar_byte_offset";
 inline constexpr char tar_length_column_k[] = "tar_byte_length";
 
+/** Decode a footer statistic's little-endian 64-bit integer into @p value ; false when the writer
+ *  kept none. */
+[[nodiscard]] static bool statistic_(auto const &bytes, i64_t &value) noexcept {
+    if (!bytes || bytes->size() != sizeof(i64_t)) return false;
+    std::memcpy(&value, bytes->data(), sizeof(i64_t));
+    return true;
+}
+
 /** The tar beside the Parquet sidecar at @p path : the same stem with a @c .tar suffix. */
 [[nodiscard]] static bool tar_path_of_(sz::string_view_t path, sz::string_t &tar) noexcept {
     sz::string_view_t const sidecar_suffix {".parquet"};
@@ -200,10 +211,11 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
     array<i64_t> offsets, lengths;
     array<u64_t> bounds;
     array<CUdeviceptr> sources, destinations;
-    array<std::size_t> sizes;
+    array<std::size_t> sizes, row_runs, run_starts, run_ends, run_members, run_bases;
     if (offsets.resize(rows) != status_t::success_k || lengths.resize(rows) != status_t::success_k ||
         bounds.resize(rows + 1) != status_t::success_k || sources.resize(rows) != status_t::success_k ||
-        destinations.resize(rows) != status_t::success_k || sizes.resize(rows) != status_t::success_k)
+        destinations.resize(rows) != status_t::success_k || sizes.resize(rows) != status_t::success_k ||
+        row_runs.resize(rows) != status_t::success_k)
         return result_t::fail(status_t::bad_alloc_k, "tar index allocation failed ({} rows)", rows);
     if (cuMemcpyDtoHAsync(offsets.data(), device_address(byte_offsets.data<i64_t>()), rows * sizeof(i64_t),
                           stream.value()) != CUDA_SUCCESS ||
@@ -239,14 +251,45 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
             !std::equal(extension.begin(), extension.end(), name_end - extension.size()))
             return result_t::fail(status_t::invalid_input_k, "{} has no column {}, nor tar members named for it",
                                   paths[shard], extension);
-        rmm::device_buffer staging {source->size(), stream};
-        source->device_read(0, staging.size(), static_cast<std::uint8_t *>(staging.data()), stream);
+        // Members stage in runs of the tar, and a run ends where the gap to the next member exceeds
+        // the member bytes it holds, so staging stays under twice the members gathered.
+        run_starts.clear();
+        run_ends.clear();
+        run_members.clear();
+        run_bases.clear();
         for (std::size_t row = row_begin; row != row_end; ++row) {
             if (offsets[row] < 0 || lengths[row] <= 0 ||
-                static_cast<std::size_t>(offsets[row] + lengths[row]) > staging.size())
+                static_cast<std::size_t>(offsets[row] + lengths[row]) > source->size())
                 return result_t::fail(status_t::invalid_input_k, "row {} of {} names no member of its {}-byte tar",
-                                      row - row_begin, paths[shard], staging.size());
-            sources[row] = device_address(static_cast<b8_t const *>(staging.data()) + offsets[row]);
+                                      row - row_begin, paths[shard], source->size());
+            std::size_t const member_begin = static_cast<std::size_t>(offsets[row]);
+            std::size_t const member_end = member_begin + static_cast<std::size_t>(lengths[row]);
+            std::size_t const run = run_ends.size() - 1;
+            bool const extends = !run_ends.empty() && member_begin >= run_ends[run] &&
+                                 member_begin - run_ends[run] <= run_members[run];
+            if (extends) {
+                run_ends[run] = member_end;
+                run_members[run] += member_end - member_begin;
+            }
+            else if (run_starts.push_back(member_begin) != status_t::success_k ||
+                     run_ends.push_back(member_end) != status_t::success_k ||
+                     run_members.push_back(member_end - member_begin) != status_t::success_k)
+                return result_t::fail(status_t::bad_alloc_k, "tar run allocation failed for {}", paths[shard]);
+            row_runs[row] = run_ends.size() - 1;
+        }
+        std::size_t staged_bytes = 0;
+        for (std::size_t run = 0; run != run_ends.size(); ++run) {
+            if (run_bases.push_back(staged_bytes) != status_t::success_k)
+                return result_t::fail(status_t::bad_alloc_k, "tar run allocation failed for {}", paths[shard]);
+            staged_bytes += run_ends[run] - run_starts[run];
+        }
+        rmm::device_buffer staging {staged_bytes, stream};
+        std::uint8_t *const staged = static_cast<std::uint8_t *>(staging.data());
+        for (std::size_t run = 0; run != run_ends.size(); ++run)
+            source->device_read(run_starts[run], run_ends[run] - run_starts[run], staged + run_bases[run], stream);
+        for (std::size_t row = row_begin; row != row_end; ++row) {
+            std::size_t const run = row_runs[row];
+            sources[row] = device_address(staged + run_bases[run] + (offsets[row] - run_starts[run]));
             destinations[row] = device_address(static_cast<b8_t const *>(payload.data()) + bounds[row]);
             sizes[row] = static_cast<std::size_t>(lengths[row]);
         }
@@ -319,41 +362,51 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
             names.emplace_back(tar_length_column_k);
         }
 
-        // KvikIO / GDS reads only the named columns' chunks straight to device; multiple shards decode
-        // into one concatenated table, and decode is on the GPU.
-        auto options = cudf::io::parquet_reader_options::builder(cudf::io::source_info {std::move(path_texts)})
-                           .column_names(names)
-                           .build();
-        if (!row_groups.empty()) {
-            std::vector<std::vector<cudf::size_type>> groups(row_groups.size()); // vendor-boundary
-            for (std::size_t path = 0; path != row_groups.size(); ++path)
-                groups[path].assign(row_groups[path].begin(), row_groups[path].end());
-            options.set_row_groups(std::move(groups));
+        // KvikIO / GDS reads only the named columns' chunks straight to device, and decode is on
+        // the GPU. Each shard reads alone, since cuDF reads several only when every column matches,
+        // and the shards' tables concatenate.
+        std::vector<std::unique_ptr<cudf::table>> parts; // vendor-boundary
+        std::vector<cudf::table_view> part_views;        // vendor-boundary
+        std::vector<std::size_t> rows_per_shard;         // vendor-boundary
+        for (std::size_t path = 0; path != path_texts.size(); ++path) {
+            auto options = cudf::io::parquet_reader_options::builder(cudf::io::source_info {path_texts[path]})
+                               .column_names(names)
+                               .build();
+            if (!row_groups.empty()) {
+                std::vector<cudf::size_type> groups; // vendor-boundary
+                groups.assign(row_groups[path].begin(), row_groups[path].end());
+                options.set_row_groups({std::move(groups)});
+            }
+            auto loaded = cudf::io::read_parquet(options, cudf_stream);
+            if (loaded.tbl == nullptr || static_cast<std::size_t>(loaded.tbl->num_columns()) != names.size())
+                return result_t::fail(status_t::invalid_input_k, "read of {} returned {} of {} requested columns",
+                                      paths[path], loaded.tbl == nullptr ? 0 : loaded.tbl->num_columns(), names.size());
+            rows_per_shard.push_back(static_cast<std::size_t>(loaded.tbl->num_rows()));
+            part_views.push_back(loaded.tbl->view());
+            parts.push_back(std::move(loaded.tbl));
         }
-        auto loaded = cudf::io::read_parquet(options, cudf_stream);
-        if (loaded.tbl == nullptr || static_cast<std::size_t>(loaded.tbl->num_columns()) != names.size())
-            return result_t::fail(status_t::invalid_input_k, "read returned {} of {} requested columns",
-                                  loaded.tbl == nullptr ? 0 : loaded.tbl->num_columns(), names.size());
+        std::unique_ptr<cudf::table> whole = parts.size() == 1 ? std::move(parts.front())
+                                                               : cudf::concatenate(part_views, cudf_stream);
+        parts.clear();
 
         auto state = std::make_unique<state_t>();
         if (state->columns.resize(columns.size()) != status_t::success_k)
             return result_t::fail(status_t::bad_alloc_k, "column table allocation failed ({} columns)", columns.size());
-        cudf::table_view const table = loaded.tbl->view();
+        cudf::table_view const table = whole->view();
         bool const tar_backed = names.size() != columns.size();
         for (std::size_t index = 0; index != columns.size(); ++index) {
             cudf::column_view const read = table.column(static_cast<cudf::size_type>(index));
             expected<column_span_t> column =
                 tar_backed && index == tar_column
                     ? read_tar_members_(read, table.column(static_cast<cudf::size_type>(columns.size())),
-                                        columns[index], paths, loaded.metadata.num_rows_per_source, cudf_stream,
-                                        state->tar_payload)
+                                        columns[index], paths, rows_per_shard, cudf_stream, state->tar_payload)
                     : adopt_flat_(flatten_column_(read, columns[index], cudf_stream), cudf_stream);
             if (!column) return result_t::fail(std::move(column));
             state->columns[index] = std::move(column.value_);
         }
         // Adopt the table: the borrowed payload / native-offset spans stay valid, now owned by the file,
         // and free stream-ordered on destruction.
-        state->table = std::move(loaded.tbl);
+        state->table = std::move(whole);
         return result_t {parquet_file_t {std::move(state)}};
     }
     catch (std::exception const &error) {
@@ -364,36 +417,78 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
     }
 }
 
-expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_storage_session_t const &,
-                                                                   sz::string_view_t path) noexcept {
+expected<parquet_length_metadata_t> parquet_file_t::table_metadata(
+    gpu_direct_storage_session_t const &, sz::string_view_t path,
+    std::span<sz::string_view_t const> complete_columns) noexcept {
     using result_t = expected<parquet_length_metadata_t>;
     try {
-        // Footer only — no row-group decode: the row count and the whole table's uncompressed byte size.
-        cudf::io::parquet_metadata const meta = cudf::io::read_parquet_metadata(
-            cudf::io::source_info {std::string {path.data(), path.size()}}); // vendor-boundary
-        auto const &group_metadata = meta.rowgroup_metadata();               // vendor-boundary
-        std::size_t const groups = group_metadata.size();
-        parquet_length_metadata_t length {static_cast<std::size_t>(meta.num_rows()), 0, {}, {}};
+        // Footer only — no page decode: every row group's rows and uncompressed bytes.
+        std::unique_ptr<cudf::io::datasource> const sources[1] = {
+            cudf::io::datasource::create(std::string {std::string_view {path}})}; // vendor-boundary
+        std::vector<cudf::io::parquet::FileMetaData> footers;                     // vendor-boundary
+        footers = cudf::io::read_parquet_footers(sources);
+        cudf::io::parquet::FileMetaData const &footer = footers.front();
+        std::size_t const groups = footer.row_groups.size();
+        parquet_length_metadata_t length {static_cast<std::size_t>(footer.num_rows), 0, {}, {}};
+        array<std::size_t> spans;
         if (length.group_rows.resize(groups) != status_t::success_k ||
-            length.group_bytes.resize(groups) != status_t::success_k)
+            length.group_bytes.resize(groups) != status_t::success_k ||
+            length.group_complete_rows.resize(groups) != status_t::success_k ||
+            spans.resize(groups) != status_t::success_k)
             return result_t::fail(status_t::bad_alloc_k, "row-group table allocation failed for {}", path);
+        bool tar_backed = false;
+        // A named column the shard lacks leaves every row incomplete.
+        bool const complete = std::all_of(
+            complete_columns.begin(), complete_columns.end(), [&](sz::string_view_t column) {
+                return column.empty() ||
+                       std::any_of(footer.schema.begin(), footer.schema.end(),
+                                   [&](auto const &element) { return std::string_view {column} == element.name; });
+            });
         for (std::size_t group = 0; group != groups; ++group) {
-            length.group_rows[group] = static_cast<std::size_t>(group_metadata[group].at("num_rows"));
+            cudf::io::parquet::RowGroup const &row_group = footer.row_groups[group];
+            length.group_rows[group] = static_cast<std::size_t>(row_group.num_rows);
             length.group_bytes[group] = 0;
+            std::size_t incomplete_rows = 0;
+            // A sidecar group's members span from its least offset to its greatest plus its longest
+            // member, or the whole tar when the writer kept no statistics.
+            i64_t first_member = 0, last_member = 0, longest_member = 0;
+            std::size_t statistics = 0;
+            for (cudf::io::parquet::ColumnChunk const &chunk : row_group.columns) {
+                cudf::io::parquet::ColumnChunkMetaData const &chunk_metadata = chunk.meta_data;
+                length.group_bytes[group] += static_cast<std::size_t>(chunk_metadata.total_uncompressed_size);
+                if (chunk_metadata.path_in_schema.empty()) continue;
+                std::string const &name = chunk_metadata.path_in_schema.front(); // vendor-boundary
+                bool const named = std::any_of(
+                    complete_columns.begin(), complete_columns.end(),
+                    [&](sz::string_view_t column) { return std::string_view {column} == name; });
+                if (named && chunk_metadata.statistics.null_count)
+                    incomplete_rows += static_cast<std::size_t>(*chunk_metadata.statistics.null_count);
+                if (chunk_metadata.path_in_schema.size() != 1) continue;
+                if (name == tar_offset_column_k) {
+                    tar_backed = true;
+                    statistics += statistic_(chunk_metadata.statistics.min_value, first_member);
+                    statistics += statistic_(chunk_metadata.statistics.max_value, last_member);
+                }
+                else if (name == tar_length_column_k)
+                    statistics += statistic_(chunk_metadata.statistics.max_value, longest_member);
+            }
+            length.group_complete_rows[group] =
+                complete ? length.group_rows[group] - std::min(incomplete_rows, length.group_rows[group]) : 0;
+            spans[group] = statistics == 3 ? static_cast<std::size_t>(last_member + longest_member - first_member)
+                                           : std::numeric_limits<std::size_t>::max();
+            length.bytes += length.group_bytes[group];
         }
-        for (auto const &column : meta.columnchunk_metadata()) // vendor-boundary
-            for (std::size_t group = 0; group != column.second.size() && group != groups; ++group)
-                length.group_bytes[group] += static_cast<std::size_t>(column.second[group]);
-        for (std::size_t group = 0; group != groups; ++group) length.bytes += length.group_bytes[group];
-        // A sidecar's members live in its sibling tar, which a read stages on the device whole.
-        if (meta.columnchunk_metadata().contains(tar_offset_column_k)) {
-            sz::string_t tar;
-            if (!tar_path_of_(path, tar))
-                return result_t::fail(status_t::bad_alloc_k, "tar path allocation failed for {}", path);
-            expected<std::size_t> tar_bytes = file_size_bytes(tar.view());
-            if (!tar_bytes) return result_t::fail(std::move(tar_bytes));
-            length.bytes += *tar_bytes;
-        }
+        if (!tar_backed) return result_t {std::move(length)};
+
+        // A whole-shard read stages the whole tar, and a group's read at most its span.
+        sz::string_t tar;
+        if (!tar_path_of_(path, tar))
+            return result_t::fail(status_t::bad_alloc_k, "tar path allocation failed for {}", path);
+        expected<std::size_t> tar_bytes = file_size_bytes(tar.view());
+        if (!tar_bytes) return result_t::fail(std::move(tar_bytes));
+        length.bytes += *tar_bytes;
+        for (std::size_t group = 0; group != groups; ++group)
+            length.group_bytes[group] += std::min(spans[group], *tar_bytes);
         return result_t {std::move(length)};
     }
     catch (std::exception const &error) {

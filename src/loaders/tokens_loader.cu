@@ -167,6 +167,12 @@ expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view
                                             loaded.segment_modality.span(), gpu_stream);
             !packed)
             return packed;
+        // A document names no role, key, prefix or late-interaction side; none keeps stale bytes.
+        expected_t cleared = zero_async(loaded.segment_side.span(), gpu_stream);
+        if (cleared) cleared = zero_async(loaded.segment_role.span(), gpu_stream);
+        if (cleared) cleared = zero_async(loaded.segment_key.span(), gpu_stream);
+        if (cleared) cleared = zero_async(loaded.segment_prefix_length.span(), gpu_stream);
+        if (!cleared) return cleared;
     }
     return {};
 }

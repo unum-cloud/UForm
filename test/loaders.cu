@@ -62,6 +62,7 @@ using u16r2_tensor_pinned_t = nk::tensor<u16_t, pinned_alloc<u16_t>, 2>;
 using f32r2_tensor_pinned_t = nk::tensor<f32_t, pinned_alloc<f32_t>, 2>;
 using modr1_tensor_pinned_t = nk::tensor<modality_t, pinned_alloc<modality_t>, 1>;
 using pixelr2_tensor_pinned_t = nk::tensor<pixel_t, pinned_alloc<pixel_t>, 2>;
+using pixelr1_tensor_pinned_t = nk::tensor<pixel_t, pinned_alloc<pixel_t>, 1>;
 
 // Fixtures: a fabricated device tape and the environment-variable media reader.
 
@@ -716,6 +717,84 @@ static void run_image_decode(test_suite_t &suite, sz::string_view_t label, array
     suite.check(max_alpha <= 255u, "[{}] alpha channel must be a valid byte", label); // shape-agnostic
 }
 
+/** Decode every @p blobs image in one batch, then each alone with the same shape, and require each
+ *  image's patches to match bit for bit, so no image's decode writes into another's region. */
+static void image_batch_matches_single(test_suite_t &suite, std::span<array<b8_t> const> blobs, gpu_arena_t &arena,
+                                       gpu_stream_t &stream, cpu_decode_pool_t &pool, nvjpeg_session_t &jpeg) {
+    if (blobs.size() < 2) return suite.skip("needs at least two UFORM_TEST_IMAGE fixtures");
+    u32_t const columns = 256u, patch = 16u, channels = 4u, images = static_cast<u32_t>(blobs.size());
+    std::size_t const cell_pixels = std::size_t {patch} * patch * channels;
+    multimodal_batch_shape_t shape {};
+    shape.max_rows_per_gpu = images;
+    shape.max_segments_per_gpu = images;
+    shape.max_columns_per_row = columns;
+    shape.image.patch_side = patch;
+    shape.image.channels = channels;
+    array<std::span<b8_t const>> views;
+    for (array<b8_t> const &blob : blobs)
+        if (views.push_back(blob.view()) != status_t::success_k) return suite.check(false, "blob view append");
+    auto tape_made = fabricated_tape_t::make(arena, stream, views.view());
+    if (!tape_made) return suite.check(false, "image tape: {}", to_string(tape_made.status_));
+    fabricated_tape_t tape = std::move(tape_made.value_);
+    image_batch_shape_t const representation {patch, channels};
+
+    // One decode of `drawn` into a fresh batch, landing its offsets, lengths and cell pixels.
+    struct landed_t {
+        u32r1_tensor_pinned_t offsets, lengths;
+        pixelr1_tensor_pinned_t pixels;
+    };
+    auto decode = [&](std::span<u64_t const> drawn, landed_t &landed) -> bool {
+        auto made = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {arena}, shape);
+        if (!made) return false;
+        multimodal_batch_on_gpu_t batch = std::move(made.value_);
+        if (!decode_images(jpeg, pool, tape.view(), drawn, {&representation, 1}, batch.images.span(),
+                           batch.image_shapes.span(), batch.segment_offsets.span(), batch.segment_lengths.span(),
+                           batch.segment_modality.span(), stream))
+            return false;
+        landed.offsets = u32r1_tensor_pinned_t::zeros({images + 1u}, pinned_alloc<u32_t> {}).value;
+        landed.lengths = u32r1_tensor_pinned_t::zeros({images}, pinned_alloc<u32_t> {}).value;
+        landed.pixels = pixelr1_tensor_pinned_t::zeros({batch.images.numel()}, pinned_alloc<pixel_t> {}).value;
+        return landed.offsets && landed.lengths && landed.pixels &&
+               copy_device_to_host(batch.segment_offsets.view(), landed.offsets.span(), stream) &&
+               copy_device_to_host(batch.segment_lengths.view(), landed.lengths.span(), stream) &&
+               copy_device_to_host(batch.images.view().flatten<1>(), landed.pixels.span(), stream) &&
+               cuStreamSynchronize(stream.get()) == CUDA_SUCCESS;
+    };
+    array<u64_t> drawn;
+    for (u64_t row = 0; row != images; ++row)
+        if (drawn.push_back(row) != status_t::success_k) return suite.check(false, "drawn row append");
+    landed_t together;
+    if (!decode(drawn.view(), together)) return suite.check(false, "the batched decode should succeed");
+    array<landed_t> singles;
+    for (u32_t image = 0; image != images; ++image) {
+        landed_t alone;
+        if (!decode(drawn.view().subspan(image, 1), alone) ||
+            singles.push_back(std::move(alone)) != status_t::success_k)
+            return suite.check(false, "image {} decoded alone should succeed", image);
+    }
+    // The mean absolute pixel difference between batched `image` and single decode `single`.
+    auto distance = [&](u32_t image, u32_t single) noexcept -> double {
+        landed_t const &alone = singles[single];
+        std::size_t const values = std::size_t {std::min(together.lengths[image], alone.lengths[0])} * cell_pixels;
+        double total = 0;
+        for (std::size_t value = 0; value != values; ++value)
+            total += std::abs(double(together.pixels[std::size_t {together.offsets[image]} * cell_pixels + value]) -
+                              double(alone.pixels[std::size_t {alone.offsets[0]} * cell_pixels + value]));
+        return values ? total / double(values) : 0.0;
+    };
+    for (u32_t image = 0; image != images; ++image) {
+        double const own = distance(image, image);
+        u32_t nearest = image;
+        for (u32_t single = 0; single != images; ++single)
+            if (distance(image, single) < distance(image, nearest)) nearest = single;
+        suite.check(own == 0.0 && together.lengths[image] == singles[image].lengths[0],
+                    "image {} of {} must decode the same in a batch as alone: mean |diff| {:.3f}, " //
+                    "nearest single {} at {:.3f}, cells {} vs {}",
+                    image, images, own, nearest, distance(image, nearest), together.lengths[image],
+                    singles[image].lengths[0]);
+    }
+}
+
 /**
  *  @brief Decode @p clip into one video batch, one representation per entry of @p frame_strides , and assert each
  *      emits a @c video_k segment whose derived @c (temporal_groups,patch_rows,patch_cols) is self-consistent and
@@ -1056,9 +1135,13 @@ int main(int, char **argv) {
                 to_string(jpeg_made.status_));
     if (jpeg_made) {
         nvjpeg_session_t jpeg = std::move(jpeg_made.value_);
+        array<array<b8_t>> image_blobs;
         for_each_env_input("UFORM_TEST_IMAGE", [&](sz::string_view_t path) {
             suite.run("image_decode", run_image_decode, "env-image", read_fixture(path), arena, stream, pool, jpeg);
+            (void)image_blobs.push_back(read_fixture(path));
         });
+        suite.run("image_batch_matches_single", image_batch_matches_single, image_blobs.view(), arena, stream, pool,
+                  jpeg);
         suite.run("multimodal_packet_routes", multimodal_packet_routes, arena, stream, pool, jpeg,
                   first_env_fixture("UFORM_TEST_AUDIO"), first_env_fixture("UFORM_TEST_IMAGE"));
     }

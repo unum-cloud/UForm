@@ -354,8 +354,21 @@ extern "C" int CUDAAPI on_video_sequence(void *user_data, CUVIDEOFORMAT *format)
         engine->cuvid->cuvidDestroyDecoder(entry.decoder);
         entry.decoder = nullptr;
     }
-    unsigned long const decoder_max_width = std::max<unsigned long>(engine->max_width, format->coded_width);
-    unsigned long const decoder_max_height = std::max<unsigned long>(engine->max_height, format->coded_height);
+    unsigned long decoder_max_width = std::max<unsigned long>(engine->max_width, format->coded_width);
+    unsigned long decoder_max_height = std::max<unsigned long>(engine->max_height, format->coded_height);
+    // The engine's bound follows the grid's width, which can pass what NVDEC decodes, and a decoder
+    // asked for more than its codec's maximum fails to create.
+    CUVIDDECODECAPS caps {};
+    caps.eCodecType = to_nvdec_codec(context->codec);
+    caps.eChromaFormat = format->chroma_format;
+    caps.nBitDepthMinus8 = format->bit_depth_luma_minus8;
+    if (engine->cuvid->cuvidGetDecoderCaps(&caps) != CUDA_SUCCESS || !caps.bIsSupported ||
+        format->coded_width > caps.nMaxWidth || format->coded_height > caps.nMaxHeight) {
+        context->status = status_t::shape_unsupported_k;
+        return 0;
+    }
+    decoder_max_width = std::min<unsigned long>(decoder_max_width, caps.nMaxWidth);
+    decoder_max_height = std::min<unsigned long>(decoder_max_height, caps.nMaxHeight);
     // Honor the stream's minimum DPB depth — high-reference HEVC / AV1 needs more surfaces than the baseline, and a
     // decoder built below `min_num_decode_surfaces` faults. Cap at the ceiling the engine's parser was built to index
     // so decoder and parser never disagree.
@@ -964,6 +977,13 @@ struct engine_cursor_t {
             CUvideoparser const parser = engine.entries[static_cast<std::size_t>(engine.current->codec)].parser;
             engine.cuvid->cuvidParseVideoData(parser, &packet);
             cursor.pending = cursor.pending.subspan(take);
+            // A clip with every requested frame ends here; the rest would decode to be dropped.
+            if (!cursor.pending.empty() && engine.current->frames_decoded >= engine.current->frames_requested) {
+                CUVIDSOURCEDATAPACKET end {};
+                end.flags = CUVID_PKT_ENDOFSTREAM;
+                engine.cuvid->cuvidParseVideoData(parser, &end);
+                cursor.pending = {};
+            }
             if (cursor.pending.empty()) { // fed EOS — retire this group, advance to the engine's next (or drain)
                 engine.current = nullptr;
                 cursor.group_index += engine_count;

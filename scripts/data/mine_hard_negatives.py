@@ -1,6 +1,7 @@
 # /// script
 # requires-python = ">=3.12"
 # dependencies = [
+#     "av",
 #     "pillow>=10.0",
 #     "pyarrow>=21.0.0",
 #     "torch",

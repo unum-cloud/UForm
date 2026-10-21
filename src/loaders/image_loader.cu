@@ -283,15 +283,14 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
     return result_t {context};
 }
 
-/** Triage every drawn blob on the host: sniff its format and native size off a header prefix, derive
- *  its column budget (from native resolution, clamped so many images share a row) and its factor pair
- *  (left in @c plan.grid , landed device-side later by @ref image_segments_kernel_ ) and — for a hardware
- *  JPEG — its decode scale, and lay out the @c decoded -sized RGBA scratch regions (a scaled hardware JPEG
- *  needs only its shrunk pixels; a CPU-fallback plan's @c decoded equals its native size). @p tape slices
- *  the reservoir (device bytes, host offsets) via @c tape[row] . Returns the scratch byte total. One
- *  header hop and one sync per round, a round per JPEG metadata segment past the first window. */
-[[nodiscard]] static expected<std::size_t> triage_images_(bool hardware, column_view_t tape, u64r1_view_t drawn_rows,
-                                                          u32_t patch_size, u32_t max_columns, u32_t max_segments,
+/** Triage every drawn blob on the host: sniff its format and native size off a header prefix,
+ *  derive its column budget (from native resolution, clamped so many images share a row) and its
+ *  factor pair (left in @c plan.grid , landed device-side later by @ref image_segments_kernel_ ),
+ *  and lay out the native-sized RGBA scratch regions. @p tape slices the reservoir (device bytes,
+ *  host offsets) via @c tape[row] . Returns the scratch byte total. One header hop and one sync per
+ *  round, a round per JPEG metadata segment past the first window. */
+[[nodiscard]] static expected<std::size_t> triage_images_(column_view_t tape, u64r1_view_t drawn_rows, u32_t patch_size,
+                                                          u32_t max_columns, u32_t max_segments,
                                                           std::span<image_plan_t> plans,
                                                           gpu_stream_t &stream) noexcept {
     using result_t = expected<std::size_t>;
@@ -386,15 +385,11 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
         // lands in `image_shapes` on the device (via the segment kernel), never host-written to arena memory.
         u32_t const budget = um::image_patch_budget(plan.native, patch_size, max_columns, max_segments);
         plan.grid = um::image_patch_grid(budget, plan.native);
-        // The RGBA scratch region is sized by `decoded`, not `native`: a hardware JPEG shrinks toward its
-        // target at decode (down to ~1/64 the pixels), so a native region would over-allocate up to 64x. A CPU
-        // fallback plan (PNG / WebP, or a rejected JPEG) keeps `decoded == native`, so it still fits.
-        image_extent_t const target {u32_t(plan.grid.columns) * patch_size, u32_t(plan.grid.rows) * patch_size};
+        // Every JPEG decodes at native size and the resize alone shrinks it: a batched hardware
+        // decode at a DCT scale writes past its scaled extent, overwriting the images after it.
         bool const jpeg = plan.format == format_jpeg_k;
         plan.route = jpeg ? route_t::jpeg_device_k : route_t::cpu_fallback_k;
-        plan.scale = jpeg && hardware ? static_cast<nvjpegScaleFactor_t>(um::image_decode_scale(plan.native, target))
-                                      : NVJPEG_SCALE_NONE;
-        plan.decoded = um::image_decoded_extent(plan.native, static_cast<u32_t>(plan.scale));
+        plan.decoded = plan.native;
         plan.scratch_offset = scratch_bytes;
         scratch_bytes += static_cast<std::size_t>(plan.decoded.width) * plan.decoded.height * image_channels_k;
     }
@@ -740,8 +735,7 @@ expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, co
     if (plans.resize(images) != status_t::success_k)
         return expected_t::fail(status_t::bad_alloc_k, "image plan allocation failed");
     std::span<image_plan_t> const plan_span {plans.data(), images};
-    auto scratch_bytes = triage_images_(jpeg.backend() == nvjpeg_backend_t::hardware_k, tape, drawn_rows, patch_size,
-                                        columns_per_row, max_segments, plan_span, stream);
+    auto scratch_bytes = triage_images_(tape, drawn_rows, patch_size, columns_per_row, max_segments, plan_span, stream);
     if (!scratch_bytes) return expected_t::fail(std::move(scratch_bytes));
 
     // Land the host-computed factor pairs device-side and walk the token cursor: it writes image_shapes ,
