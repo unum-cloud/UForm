@@ -62,42 +62,42 @@ set_target_properties(
 if (UFORM_BUILD_CUDA)
     set(CMAKE_JOB_POOL_COMPILE uform_cuda_units)
 
-    # Compiles @p source device-only, with @p target's includes, definitions and options, into a fatbin of the CUDA
-    # architectures `CODES` lists, and links it into @p target in a read-only section through an assembler stub, under
+    # Compiles @p source_ device-only, with @p target_'s includes, definitions and options, into a fatbin of the CUDA
+    # architectures `CODES` lists, and links it into @p target_ in a read-only section through an assembler stub, under
     # `<name>_bundle_start` and `<name>_bundle_end`, so it travels into archives too. With no codes the bundle is empty,
     # and every device refuses to load it.
-    function (uform_gpu_bundle target name source)
-        cmake_parse_arguments(arg "" "" "CODES" ${ARGN})
-        set(bundle_ ${CMAKE_CURRENT_BINARY_DIR}/bundles/${name}.fatbin)
+    function (uform_gpu_bundle target_ name_ source_)
+        cmake_parse_arguments(PARSE_ARGV 3 arg "" "" "CODES")
+        set(bundle_ ${CMAKE_CURRENT_BINARY_DIR}/bundles/${name_}.fatbin)
         if (arg_CODES)
-            add_library(${name}_device OBJECT ${source})
+            add_library(${name_}_device OBJECT ${source_})
             set_target_properties(
-                ${name}_device PROPERTIES CUDA_ARCHITECTURES "${arg_CODES}" CUDA_FATBIN_COMPILATION ON
+                ${name_}_device PROPERTIES CUDA_ARCHITECTURES "${arg_CODES}" CUDA_FATBIN_COMPILATION ON
             )
-            target_include_directories(${name}_device PRIVATE $<TARGET_PROPERTY:${target},INCLUDE_DIRECTORIES>)
-            target_compile_definitions(${name}_device PRIVATE $<TARGET_PROPERTY:${target},COMPILE_DEFINITIONS>)
-            target_compile_options(${name}_device PRIVATE $<TARGET_PROPERTY:${target},COMPILE_OPTIONS>)
-            add_dependencies(${target} ${name}_device)
+            target_include_directories(${name_}_device PRIVATE $<TARGET_PROPERTY:${target_},INCLUDE_DIRECTORIES>)
+            target_compile_definitions(${name_}_device PRIVATE $<TARGET_PROPERTY:${target_},COMPILE_DEFINITIONS>)
+            target_compile_options(${name_}_device PRIVATE $<TARGET_PROPERTY:${target_},COMPILE_OPTIONS>)
+            add_dependencies(${target_} ${name_}_device)
             # The fatbin lands at the one path the stub includes and depends on, as neither takes a generator
             # expression.
             add_custom_command(
                 OUTPUT ${bundle_}
-                COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_OBJECTS:${name}_device> ${bundle_}
-                DEPENDS $<TARGET_OBJECTS:${name}_device>
+                COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_OBJECTS:${name_}_device> ${bundle_}
+                DEPENDS $<TARGET_OBJECTS:${name_}_device>
                 VERBATIM
             )
         else ()
             file(WRITE ${bundle_} "")
         endif ()
-        set(stub_ ${CMAKE_CURRENT_BINARY_DIR}/bundles/${name}_bundle.S)
+        set(stub_ ${CMAKE_CURRENT_BINARY_DIR}/bundles/${name_}_bundle.S)
         file(
             WRITE ${stub_}
-            ".section .rodata\n.balign 4096\n.globl ${name}_bundle_start\n${name}_bundle_start:\n"
-            ".incbin \"${bundle_}\"\n.globl ${name}_bundle_end\n${name}_bundle_end:\n"
+            ".section .rodata\n.balign 4096\n.globl ${name_}_bundle_start\n${name_}_bundle_start:\n"
+            ".incbin \"${bundle_}\"\n.globl ${name_}_bundle_end\n${name_}_bundle_end:\n"
             ".section .note.GNU-stack,\"\",@progbits\n"
         )
         set_source_files_properties(${stub_} PROPERTIES LANGUAGE ASM OBJECT_DEPENDS ${bundle_})
-        target_sources(${target} PRIVATE ${stub_})
+        target_sources(${target_} PRIVATE ${stub_})
     endfunction ()
 
     # The configured codes that run `multimem`: those NumKong's cached Hopper and datacenter-Blackwell capabilities list,
@@ -141,7 +141,7 @@ if (UFORM_BUILD_CUDA)
     target_compile_features(uform_core PUBLIC cxx_std_23)
     # NumKong accessors are `constexpr` for device-callability; `nvcc` needs the (long-stable) flag to allow it.
     target_compile_options(uform_core PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-    if (UFORM_INFINIBAND_ENABLED)
+    if (uform_infiniband_enabled_)
         target_compile_definitions(uform_core PUBLIC UFORM_WITH_INFINIBAND=1)
         target_include_directories(uform_core PUBLIC "${UFORM_IBVERBS_INCLUDE_DIR}")
         target_link_libraries(uform_core PUBLIC "${UFORM_IBVERBS_LIBRARY}" "${UFORM_MLX5_LIBRARY}")
@@ -188,9 +188,9 @@ if (UFORM_BUILD_CUDA)
     target_link_libraries(uform_loaders PRIVATE uform_cudf)
     target_include_directories(
         uform_loaders SYSTEM BEFORE
-        PRIVATE "${_uform_cudf_prefix}/libcudf/include/rapids" "${_uform_cudf_prefix}/libcudf/include"
-                "${_uform_cudf_prefix}/librmm/include" "${_uform_cudf_prefix}/libkvikio/include"
-                "${_uform_cudf_prefix}/rapids_logger/include"
+        PRIVATE "${uform_cudf_prefix_}/libcudf/include/rapids" "${uform_cudf_prefix_}/libcudf/include"
+                "${uform_cudf_prefix_}/librmm/include" "${uform_cudf_prefix_}/libkvikio/include"
+                "${uform_cudf_prefix_}/rapids_logger/include"
     )
 
     # cuFile GPU Direct Storage.
@@ -226,8 +226,8 @@ endif ()
 # Each GPU vendor's inference kernels, one object library per vendor, which `c/` links into both library flavors beside
 # `uform_host`. The vendor table the tower dispatches through is generated, so it names exactly the vendors this build
 # compiles, and keeps their objects referenced when a consumer links the archive.
-set(UFORM_NVIDIA_INFERENCE_KERNELS nullptr)
-set(UFORM_AMD_INFERENCE_KERNELS nullptr)
+set(uform_nvidia_inference_kernels_ nullptr)
+set(uform_amd_inference_kernels_ nullptr)
 if (UFORM_BUILD_CUDA)
     add_library(uform_nvidia_inference OBJECT inference/vram_nvidia_kernels.cu)
     target_include_directories(uform_nvidia_inference PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -235,14 +235,14 @@ if (UFORM_BUILD_CUDA)
     target_link_libraries(uform_nvidia_inference PUBLIC CUDA::cuda_driver)
     target_compile_options(uform_nvidia_inference PRIVATE --expt-relaxed-constexpr)
     set_target_properties(uform_nvidia_inference PROPERTIES CUDA_VISIBILITY_PRESET hidden)
-    set(UFORM_NVIDIA_INFERENCE_KERNELS &vram_nvidia_kernels_k)
+    set(uform_nvidia_inference_kernels_ &vram_nvidia_kernels_k)
 endif ()
 if (UFORM_BUILD_ROCM)
     add_library(uform_amd_inference OBJECT inference/vram_amd_kernels.hip)
     target_include_directories(uform_amd_inference PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_link_libraries(uform_amd_inference PRIVATE numkong::static forkunion::header stringzilla::static)
     set_target_properties(uform_amd_inference PROPERTIES HIP_VISIBILITY_PRESET hidden)
-    set(UFORM_AMD_INFERENCE_KERNELS &vram_amd_kernels_k)
+    set(uform_amd_inference_kernels_ &vram_amd_kernels_k)
 endif ()
 file(
     CONFIGURE
@@ -252,7 +252,7 @@ file(
     [=[#include "inference/entries.hpp"
 
 namespace ui = unum::uform::inference;
-ui::device_kernels_t const *const ui::device_kernels_k[2] = {@UFORM_NVIDIA_INFERENCE_KERNELS@, @UFORM_AMD_INFERENCE_KERNELS@};
+ui::device_kernels_t const *const ui::device_kernels_k[2] = {@uform_nvidia_inference_kernels_@, @uform_amd_inference_kernels_@};
 ]=]
     @ONLY
 )

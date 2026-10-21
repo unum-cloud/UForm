@@ -7,6 +7,7 @@
 # referenced, which is the entire C interface. For the same reason the archive carries its dependencies' objects, so
 # no consumer hunts yyjson, NumKong or StringZilla archives out of the dependency tree to link one of ours.
 add_library(uform_shared SHARED)
+add_library(uform::shared ALIAS uform_shared)
 target_link_libraries(uform_shared PRIVATE uform_host)
 # The archives it links were compiled with default visibility, so only the linker can keep their symbols in.
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -16,6 +17,7 @@ add_library(
     uform_static STATIC $<TARGET_OBJECTS:uform_host> $<TARGET_OBJECTS:yyjson> $<TARGET_OBJECTS:numkong_static>
                         $<TARGET_OBJECTS:stringzilla_static>
 )
+add_library(uform::static ALIAS uform_static)
 target_include_directories(uform_shared PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 target_include_directories(uform_static PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
 # The system codecs the host decoders call stay shared libraries, which an archive can only name to its consumers.
@@ -35,7 +37,7 @@ endif ()
 # NumKong compiles each GPU generation into an object library of its own beside its archive's objects, which the
 # archive therefore takes one by one.
 foreach (
-    numkong_unit IN
+    numkong_unit_ IN
     ITEMS cuda
           ampere
           ada
@@ -48,8 +50,8 @@ foreach (
           cdna4
           cdna5
 )
-    if (TARGET numkong_${numkong_unit}_)
-        target_sources(uform_static PRIVATE $<TARGET_OBJECTS:numkong_${numkong_unit}_>)
+    if (TARGET numkong_${numkong_unit_}_)
+        target_sources(uform_static PRIVATE $<TARGET_OBJECTS:numkong_${numkong_unit_}_>)
     endif ()
 endforeach ()
 # Each GPU vendor's inference kernels join both flavors, and the archive names that vendor's runtime to its consumers.
@@ -70,7 +72,10 @@ if (TARGET uform_amd_inference)
     target_link_libraries(uform_static INTERFACE hip::host)
 endif ()
 set_target_properties(
-    uform_shared uform_static PROPERTIES LINKER_LANGUAGE CXX C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden
+    uform_shared uform_static
+    PROPERTIES LINKER_LANGUAGE CXX
+               C_VISIBILITY_PRESET hidden
+               CXX_VISIBILITY_PRESET hidden
 )
 
 # The test is C, so it reaches the C++ runtime and the host's thread library through the archive's link language.

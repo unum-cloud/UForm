@@ -6,21 +6,25 @@
 #
 # The file names match what `c/` produces - `libuform_shared` and `libuform_static` - and land in a directory of their
 # own, so a suite chooses an implementation with one `-L` and the two libraries can never shadow one another.
-set(UFORM_STUB_SOURCES types.cpp model.cpp encode.cpp train.cpp)
+set(uform_stub_sources_ types.cpp model.cpp encode.cpp train.cpp)
 
 find_package(Threads REQUIRED)
 
-add_library(uform_shared_stub SHARED ${UFORM_STUB_SOURCES})
-add_library(uform_static_stub STATIC ${UFORM_STUB_SOURCES})
+add_library(uform_shared_stub SHARED ${uform_stub_sources_})
+add_library(uform_static_stub STATIC ${uform_stub_sources_})
 add_library(${PROJECT_NAME}::shared_stub ALIAS uform_shared_stub)
 add_library(${PROJECT_NAME}::static_stub ALIAS uform_static_stub)
 
-foreach (TARGET_NAME uform_shared_stub uform_static_stub)
-    target_include_directories(${TARGET_NAME} PUBLIC ${PROJECT_SOURCE_DIR}/c PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_link_libraries(${TARGET_NAME} PRIVATE Threads::Threads)
-    target_compile_definitions(${TARGET_NAME} PRIVATE UFORM_EXPORTING)
+foreach (target_ uform_shared_stub uform_static_stub)
+    target_include_directories(
+        ${target_}
+        PUBLIC ${PROJECT_SOURCE_DIR}/c
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(${target_} PRIVATE Threads::Threads)
+    target_compile_definitions(${target_} PRIVATE UFORM_EXPORTING)
     set_target_properties(
-        ${TARGET_NAME}
+        ${target_}
         PROPERTIES PREFIX "lib"
                    POSITION_INDEPENDENT_CODE ON
                    CXX_VISIBILITY_PRESET hidden
@@ -29,12 +33,12 @@ foreach (TARGET_NAME uform_shared_stub uform_static_stub)
                    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/stub"
     )
     # A root may pin every configuration's directory too, and those outrank the plain ones above.
-    foreach (STUB_CONFIGURATION DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    foreach (configuration_ DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
         set_target_properties(
-            ${TARGET_NAME}
-            PROPERTIES LIBRARY_OUTPUT_DIRECTORY_${STUB_CONFIGURATION} "${CMAKE_BINARY_DIR}/stub"
-                       ARCHIVE_OUTPUT_DIRECTORY_${STUB_CONFIGURATION} "${CMAKE_BINARY_DIR}/stub"
-                       RUNTIME_OUTPUT_DIRECTORY_${STUB_CONFIGURATION} "${CMAKE_BINARY_DIR}/stub"
+            ${target_}
+            PROPERTIES LIBRARY_OUTPUT_DIRECTORY_${configuration_} "${CMAKE_BINARY_DIR}/stub"
+                       ARCHIVE_OUTPUT_DIRECTORY_${configuration_} "${CMAKE_BINARY_DIR}/stub"
+                       RUNTIME_OUTPUT_DIRECTORY_${configuration_} "${CMAKE_BINARY_DIR}/stub"
         )
     endforeach ()
 endforeach ()

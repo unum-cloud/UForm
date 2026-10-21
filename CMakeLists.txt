@@ -56,10 +56,10 @@ set(UFORM_CUDA_ARCHITECTURES
 set(CMAKE_CUDA_ARCHITECTURES "${UFORM_CUDA_ARCHITECTURES}")
 
 # Leverage `ccache` for incremental compilation
-find_program(CCACHE_PROGRAM ccache)
-if (CCACHE_PROGRAM)
-    set(CMAKE_CXX_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
-    set(CMAKE_CUDA_COMPILER_LAUNCHER "${CCACHE_PROGRAM}")
+find_program(UFORM_CCACHE_PROGRAM ccache)
+if (UFORM_CCACHE_PROGRAM)
+    set(CMAKE_CXX_COMPILER_LAUNCHER "${UFORM_CCACHE_PROGRAM}")
+    set(CMAKE_CUDA_COMPILER_LAUNCHER "${UFORM_CCACHE_PROGRAM}")
 endif ()
 
 # Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any
@@ -69,10 +69,10 @@ if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     execute_process(
         COMMAND git config core.hooksPath .githooks
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        RESULT_VARIABLE _uform_hooks_status
+        RESULT_VARIABLE uform_hooks_status_
         OUTPUT_QUIET ERROR_QUIET
     )
-    if (_uform_hooks_status EQUAL 0)
+    if (uform_hooks_status_ EQUAL 0)
         message(STATUS "uform: Git hooks enabled (core.hooksPath -> .githooks)")
     endif ()
 endif ()
@@ -137,17 +137,17 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/find_library.cmake")
 # Source dependencies. NumKong spans the tensor substrate, StringZilla parses exchange payloads, ForkUnion is the
 # host-side demux and decode thread pool, yyjson reads checkpoint headers. The first three are submodules: a recursive
 # clone builds them in place, any other clone fetches the pins below, which match the submodule commits. `FETCHCONTENT_SOURCE_DIR_<NAME>` points any of them at a local checkout.
-function (uform_sibling NAME REPOSITORY TAG)
-    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${NAME}/CMakeLists.txt")
-        add_subdirectory(${NAME})
+function (uform_sibling name_ repository_ tag_)
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${name_}/CMakeLists.txt")
+        add_subdirectory(${name_})
     else ()
-        message(STATUS "uform: ${NAME} submodule absent, fetching ${TAG}")
+        message(STATUS "uform: ${name_} submodule absent, fetching ${tag_}")
         FetchContent_Declare(
-            ${NAME}
-            GIT_REPOSITORY ${REPOSITORY}
-            GIT_TAG ${TAG}
+            ${name_}
+            GIT_REPOSITORY ${repository_}
+            GIT_TAG ${tag_}
         )
-        FetchContent_MakeAvailable(${NAME})
+        FetchContent_MakeAvailable(${name_})
     endif ()
 endfunction ()
 
@@ -206,7 +206,7 @@ set_property(CACHE UFORM_WITH_INFINIBAND PROPERTY STRINGS ON OFF AUTO)
 
 if (UFORM_BUILD_CUDA)
     include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/probe_infiniband.cmake")
-    uform_probe_infiniband()
+    uform_probe_infiniband(uform_infiniband_enabled_)
 
     # The loaders' vendor dependencies below are available on every NVIDIA target and are hard-required, discovered
     # through the layered `uform_find_library` search (the RAPIDS / NVIDIA cu13 Python wheels, then system paths). A
@@ -219,14 +219,14 @@ if (UFORM_BUILD_CUDA)
         CACHE PATH "Directory holding libcudf/lib64, librmm/lib64, ... overriding the wheel discovery"
     )
     if (UFORM_CUDF_ROOT)
-        set(_uform_cudf_prefix "${UFORM_CUDF_ROOT}")
+        set(uform_cudf_prefix_ "${UFORM_CUDF_ROOT}")
     else ()
-        set(_uform_cudf_prefix "${UFORM_SITE_PACKAGES}")
+        set(uform_cudf_prefix_ "${uform_wheel_site_packages_}")
     endif ()
-    if (NOT (_uform_cudf_prefix AND EXISTS "${_uform_cudf_prefix}/libcudf/lib64/libcudf.so"))
+    if (NOT (uform_cudf_prefix_ AND EXISTS "${uform_cudf_prefix_}/libcudf/lib64/libcudf.so"))
         message(
             FATAL_ERROR
-                "uform: libcudf not found under '${_uform_cudf_prefix}'. Install the RAPIDS cu13 wheel:\n"
+                "uform: libcudf not found under '${uform_cudf_prefix_}'. Install the RAPIDS cu13 wheel:\n"
                 "  uv venv .venv && uv pip install --python .venv --extra-index-url https://pypi.nvidia.com libcudf-cu13\n"
                 "or pass -DUFORM_CUDF_ROOT=<prefix holding libcudf/lib64>."
         )
@@ -236,13 +236,13 @@ if (UFORM_BUILD_CUDA)
     target_link_options(uform_cudf INTERFACE "LINKER:--no-as-needed" "LINKER:--disable-new-dtags")
     target_link_libraries(
         uform_cudf
-        INTERFACE "${_uform_cudf_prefix}/libcudf/lib64/libcudf.so"
-                  "${_uform_cudf_prefix}/librmm/lib64/librmm.so"
-                  "${_uform_cudf_prefix}/libkvikio/lib64/libkvikio.so"
-                  "${_uform_cudf_prefix}/nvidia/libnvcomp/lib64/libnvcomp.so.5"
-                  "${_uform_cudf_prefix}/rapids_logger/lib64/librapids_logger.so"
+        INTERFACE "${uform_cudf_prefix_}/libcudf/lib64/libcudf.so"
+                  "${uform_cudf_prefix_}/librmm/lib64/librmm.so"
+                  "${uform_cudf_prefix_}/libkvikio/lib64/libkvikio.so"
+                  "${uform_cudf_prefix_}/nvidia/libnvcomp/lib64/libnvcomp.so.5"
+                  "${uform_cudf_prefix_}/rapids_logger/lib64/librapids_logger.so"
     )
-    message(STATUS "uform: libcudf loaders from ${_uform_cudf_prefix}/libcudf")
+    message(STATUS "uform: libcudf loaders from ${uform_cudf_prefix_}/libcudf")
 
     # cuFile: GPU Direct Storage — the byte tape's primary fill path. Ships with the CUDA toolkit, so hard-required; the
     # POSIX fallback is compiled either way and the runtime drops to it when GDS is unavailable on the filesystem.
@@ -282,6 +282,7 @@ endif ()
 set_property(GLOBAL APPEND PROPERTY JOB_POOLS uform_cuda_units=3)
 
 # The suites precede `c/`, whose C tests load the checkpoint fixture `test/` writes.
+set(uform_bundled_files_)
 add_subdirectory(src)
 if (UFORM_BUILD_TEST)
     add_subdirectory(test)
@@ -298,7 +299,7 @@ endif ()
 if (uform_bundled_files_)
     add_custom_target(
         uform_bundle
-        COMMAND ${CMAKE_COMMAND} "-DBUNDLE_DIR=${PROJECT_BINARY_DIR}/runtime-bundle" -P
+        COMMAND ${CMAKE_COMMAND} "-DUFORM_BUNDLE_DIR=${PROJECT_BINARY_DIR}/runtime-bundle" -P
                 "${PROJECT_SOURCE_DIR}/cmake/bundle_runtime.cmake" -- ${uform_bundled_files_}
         COMMENT "Bundling executables with their runtime closure into runtime-bundle/"
         VERBATIM

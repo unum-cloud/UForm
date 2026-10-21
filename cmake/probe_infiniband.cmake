@@ -7,14 +7,14 @@
 #   ON              probe; `FATAL_ERROR` naming the missing piece if the transport cannot be built.
 #   OFF             skip the probe; the wire PODs still compile and the collectives fail loudly at runtime.
 #
-# On success the caller receives `UFORM_INFINIBAND_ENABLED` plus the cached `UFORM_IBVERBS_INCLUDE_DIR` /
+# On success the caller's @p output_ turns on, beside the cached `UFORM_IBVERBS_INCLUDE_DIR` /
 # `UFORM_IBVERBS_LIBRARY` / `UFORM_MLX5_LIBRARY` (`find_*` results are cache entries, already global).
 #
-# Naming: `UFORM_*` are public cache variables, `_uform_*` are internal.
+# Naming: `UFORM_*` are public cache variables, `uform_*_` are internal, and parameters and locals end in `_`.
 
-function (uform_probe_infiniband)
+function (uform_probe_infiniband output_)
     if (UFORM_WITH_INFINIBAND STREQUAL "OFF")
-        set(UFORM_INFINIBAND_ENABLED
+        set(${output_}
             OFF
             PARENT_SCOPE
         )
@@ -30,7 +30,7 @@ function (uform_probe_infiniband)
         AND UFORM_IBVERBS_LIBRARY
         AND UFORM_MLX5_LIBRARY
     )
-        set(UFORM_INFINIBAND_ENABLED
+        set(${output_}
             ON
             PARENT_SCOPE
         )
@@ -43,7 +43,7 @@ function (uform_probe_infiniband)
                 "Install the MLNX OFED stack (libibverbs-dev + libmlx5), or pass -DUFORM_WITH_INFINIBAND=OFF."
         )
     else ()
-        set(UFORM_INFINIBAND_ENABLED
+        set(${output_}
             OFF
             PARENT_SCOPE
         )

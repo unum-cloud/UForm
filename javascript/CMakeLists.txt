@@ -4,9 +4,9 @@
 # stand-in travels inside them.
 
 if (TARGET uform_static)
-    set(UFORM_JAVASCRIPT_LIBRARY uform_static)
+    set(uform_javascript_library_ uform_static)
 elseif (TARGET uform_static_stub)
-    set(UFORM_JAVASCRIPT_LIBRARY uform_static_stub)
+    set(uform_javascript_library_ uform_static_stub)
 else ()
     message(FATAL_ERROR "The JavaScript SDK links the C interface; configure with `-DUFORM_BUILD_LIB_C=1`.")
 endif ()
@@ -14,7 +14,7 @@ endif ()
 if (EMSCRIPTEN)
     # Every verb the TypeScript side calls is a root of the link, so the archive members defining them are kept. The
     # names are Emscripten's, with the leading underscore of a C symbol.
-    set(UFORM_WASM_EXPORTS
+    set(uform_wasm_exports_
         _malloc
         _free
         _uform_outcome_status
@@ -45,7 +45,7 @@ if (EMSCRIPTEN)
         CONTENT "/* Every symbol comes from the archive. */\n"
     )
     add_executable(uform_wasm "${CMAKE_CURRENT_BINARY_DIR}/uform_wasm.c")
-    target_link_libraries(uform_wasm PRIVATE ${UFORM_JAVASCRIPT_LIBRARY})
+    target_link_libraries(uform_wasm PRIVATE ${uform_javascript_library_})
     set_target_properties(
         uform_wasm
         PROPERTIES OUTPUT_NAME "uform"
@@ -61,7 +61,7 @@ if (EMSCRIPTEN)
         "-sALLOW_MEMORY_GROWTH"
         "-sALLOW_TABLE_GROWTH"
         "-sENVIRONMENT=web,worker,node"
-        "-sEXPORTED_FUNCTIONS=$<JOIN:${UFORM_WASM_EXPORTS},$<COMMA>>"
+        "-sEXPORTED_FUNCTIONS=$<JOIN:${uform_wasm_exports_},$<COMMA>>"
         "-sEXPORTED_RUNTIME_METHODS=HEAPU8,UTF8ToString,addFunction,removeFunction"
     )
     return()
@@ -88,7 +88,7 @@ set_target_properties(
 
 target_include_directories(uform_node PRIVATE ${CMAKE_JS_INC} ${PROJECT_SOURCE_DIR}/c ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(uform_node PRIVATE NAPI_VERSION=8)
-target_link_libraries(uform_node PRIVATE ${CMAKE_JS_LIB} ${UFORM_JAVASCRIPT_LIBRARY})
+target_link_libraries(uform_node PRIVATE ${CMAKE_JS_LIB} ${uform_javascript_library_})
 
 if (MSVC)
     target_compile_options(uform_node PRIVATE /Zc:preprocessor)

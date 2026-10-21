@@ -2,9 +2,9 @@
 # object. `scikit-build-core` drives this from `pyproject.toml`.
 
 if (TARGET uform_static)
-    set(UFORM_PYTHON_LIBRARY uform_static)
+    set(uform_python_library_ uform_static)
 elseif (TARGET uform_static_stub)
-    set(UFORM_PYTHON_LIBRARY uform_static_stub)
+    set(uform_python_library_ uform_static_stub)
 else ()
     message(FATAL_ERROR "The Python SDK links the C interface; configure with `-DUFORM_BUILD_LIB_C=ON`.")
 endif ()
@@ -34,7 +34,7 @@ set_target_properties(
 # The library is C++, so the C++ driver links the extension and brings the standard library along.
 set_target_properties(uform_python PROPERTIES LINKER_LANGUAGE CXX)
 target_include_directories(uform_python PRIVATE ${PROJECT_SOURCE_DIR}/c ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(uform_python PRIVATE ${UFORM_PYTHON_LIBRARY})
+target_link_libraries(uform_python PRIVATE ${uform_python_library_})
 
 # CPython's own symbols come from the interpreter, so they are absent at link time and the linker must not insist.
 if (APPLE)
