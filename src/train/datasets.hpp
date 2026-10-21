@@ -116,9 +116,13 @@ struct dataset_source_t final : batch_source_t {
 
   private:
 
-    /** Each GPU draws an entry by weight, keyed by the run seed, @p data_epoch and its world
-     *  coordinate, and fills its next @c batches_per_fill batches from one shard read. */
+    /** Each GPU's batches draw an entry each by weight, keyed by the run seed, @p data_epoch , the
+     *  GPU's world coordinate and the batch, and those sharing an entry fill from one read. */
     [[nodiscard]] expected_t fill_batches_(trainer_t &trainer, data_epoch_t data_epoch) noexcept;
+
+    /** Fill @p batches of GPU @p member from mixture entry @p entry , one read for the run. */
+    [[nodiscard]] expected_t fill_run_(trainer_t &trainer, std::size_t member, std::size_t entry,
+                                       std::span<multimodal_batch_on_gpu_t> batches, data_epoch_t data_epoch) noexcept;
 
     /** Rebuild every replica's relations over the world's vertices, PAD read off the mixer's world
      *  lengths: the segments of a bag attract each other, and text alone keeps self-edges. */
@@ -151,6 +155,12 @@ struct dataset_source_t final : batch_source_t {
 
     /** The next of the filled batches a step takes; at @c batches_per_fill the next step fills. */
     std::size_t next_batch_ = 0;
+
+    /** The data epoch of the last fill, keying the order its batches are taken in. */
+    data_epoch_t filled_epoch_ {};
+
+    /** @b [batches_per_fill] the entry each filled batch draws, sorted so one read packs a run. */
+    array<std::size_t> batch_entries_ {};
     multimodal_batch_mixer_t mixer_ {};
 
     /** @b [gpus,segments] every mixed segment's bag, length and role across this process's GPUs,

@@ -4,7 +4,7 @@
  *  @date October 18, 2026
  *  @brief The mixture reader and the dataset source declared in @c src/train/datasets.hpp .
  */
-#include <algorithm> // `std::upper_bound`, `std::min`, `std::max`, `std::any_of`
+#include <algorithm> // `std::upper_bound`, `std::min`, `std::max`, `std::any_of`, `std::sort`
 #include <utility>   // `std::swap` — a step's batches into the mixer's table and back
 
 #include <cuda.h> // `cuStreamSynchronize`
@@ -253,6 +253,8 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer) 
     if (!mixer) return expected_t::fail(std::move(mixer));
     placed.mixer_ = std::move(mixer.value_);
     placed.next_batch_ = config.batches_per_fill;
+    if (placed.batch_entries_.resize(config.batches_per_fill) != status_t::success_k)
+        return expected_t::fail(status_t::bad_alloc_k, "batch entry table allocation failed");
 
     if (!config.contrasts()) return {};
     u32_t const edges = config.contrastive.max_edges_per_gpu
@@ -274,16 +276,20 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer) 
 
 expected_t dataset_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &) noexcept {
     std::size_t const gpus = trainer.replicas.size();
-    if (next_batch_ == trainer.config.batches_per_fill) {
+    std::size_t const batches_per_fill = trainer.config.batches_per_fill;
+    if (next_batch_ == batches_per_fill) {
         if (expected_t filled = fill_batches_(trainer, data_epoch); !filled) return filled;
         next_batch_ = 0;
+        filled_epoch_ = data_epoch;
     }
+    // Batches drawing one entry pack side by side, so steps take them in a keyed order instead.
+    std::size_t const batch = epoch_permutation(trainer.config.seed, filled_epoch_, next_batch_, batches_per_fill);
     // The mixer reads one batch per GPU side by side, so this step's batches swap in and back out.
-    for (std::size_t member = 0; member != gpus; ++member) std::swap(loaded_[member], filled_[member][next_batch_]);
+    for (std::size_t member = 0; member != gpus; ++member) std::swap(loaded_[member], filled_[member][batch]);
     expected_t mixed;
     for (std::size_t member = 0; member != gpus && mixed; ++member)
         mixed = mixer_(member, data_epoch, loaded_.view(), trainer.replicas[member].batch, trainer.streams[member]);
-    for (std::size_t member = 0; member != gpus; ++member) std::swap(loaded_[member], filled_[member][next_batch_]);
+    for (std::size_t member = 0; member != gpus; ++member) std::swap(loaded_[member], filled_[member][batch]);
     ++next_batch_;
     if (!mixed) return mixed;
     if (!trainer.config.contrasts()) return {};
@@ -295,41 +301,59 @@ expected_t dataset_source_t::fill_batches_(trainer_t &trainer, data_epoch_t data
     u32_t const first = trainer.mesh->topology.first_gpu_index();
     f64_t const total_weight = weight_prefix_[weight_prefix_.size() - 1];
     constexpr splitmix64_hash_t hash {};
+    std::size_t const batches_per_fill = config.batches_per_fill;
     for (std::size_t member = 0; member != trainer.replicas.size(); ++member) {
         u32_t const gpu_index = first + static_cast<u32_t>(member);
-        f64_t const draw = static_cast<f64_t>(hash(config.seed, data_epoch.ordinal, gpu_index) >> 11) * 0x1.0p-53 *
-                           total_weight;
-        std::size_t const entry = std::min<std::size_t>(
-            std::upper_bound(weight_prefix_.begin(), weight_prefix_.end(), draw) - weight_prefix_.begin() - 1,
-            loaders_.size() - 1);
-        mixture_entry_t const &dataset = mixture_.datasets[entry];
-        gpu_stream_t &stream = trainer.streams[member];
-        std::span<multimodal_batch_on_gpu_t> const batches = filled_[member].span();
-        u32_t const step = data_epoch.ordinal;
-        expected_t filled;
-        if (auto *parquet = std::get_if<tokens_loader_parquet_t>(&loaders_[entry]))
-            filled = parquet->fill(stream, {dataset.text.view()}, gpu_index, step, batches);
-        else if (auto *jsonl = std::get_if<tokens_loader_jsonl_t>(&loaders_[entry]))
-            filled = jsonl->fill(stream, {dataset.text.view()}, gpu_index, step, batches);
-        else if (auto *csv = std::get_if<tokens_loader_csv_t>(&loaders_[entry])) {
-            // A `.txt` shard is one document per line: a headerless table of one column, as no line
-            // holds a tab.
-            tokens_base_loader_csv_config_t text {dataset.text.view()};
-            if (dataset.glob.view().ends_with(".txt")) text.delimiter = '\t', text.header = csv_header_t::positional_k;
-            filled = csv->fill(stream, text, gpu_index, step, batches);
+        // Each filled batch draws its own entry; batches drawing one entry pack from one read.
+        for (std::size_t batch = 0; batch != batches_per_fill; ++batch) {
+            f64_t const draw = static_cast<f64_t>(hash(config.seed, data_epoch.ordinal, gpu_index, batch) >> 11) *
+                               0x1.0p-53 * total_weight;
+            batch_entries_[batch] = std::min<std::size_t>(
+                std::upper_bound(weight_prefix_.begin(), weight_prefix_.end(), draw) - weight_prefix_.begin() - 1,
+                loaders_.size() - 1);
         }
-        else {
-            paired_loader_parquet_t &paired = std::get<paired_loader_parquet_t>(loaders_[entry]);
-            if (paired.modality() == modality_t::image_k)
-                filled = paired.fill(stream, jpeg_[member], gpu_index, step, batches);
-            else if (paired.modality() == modality_t::video_k)
-                filled = paired.fill(stream, nvdec_[member], gpu_index, step, batches);
-            else filled = paired.fill(stream, gpu_index, step, batches);
+        std::sort(batch_entries_.begin(), batch_entries_.end());
+        for (std::size_t run_begin = 0, run_end = 0; run_begin != batches_per_fill; run_begin = run_end) {
+            while (run_end != batches_per_fill && batch_entries_[run_end] == batch_entries_[run_begin]) ++run_end;
+            if (expected_t filled = fill_run_(trainer, member, batch_entries_[run_begin],
+                                              filled_[member].span().subspan(run_begin, run_end - run_begin),
+                                              data_epoch);
+                !filled)
+                return filled;
         }
-        if (!filled)
-            return expected_t::fail(filled.status_, "{} on GPU {}: {}", dataset.name.view(), gpu_index,
-                                    filled.description_.view());
     }
+    return {};
+}
+
+expected_t dataset_source_t::fill_run_(trainer_t &trainer, std::size_t member, std::size_t entry,
+                                       std::span<multimodal_batch_on_gpu_t> batches, data_epoch_t data_epoch) noexcept {
+    u32_t const gpu_index = trainer.mesh->topology.first_gpu_index() + static_cast<u32_t>(member);
+    mixture_entry_t const &dataset = mixture_.datasets[entry];
+    gpu_stream_t &stream = trainer.streams[member];
+    u32_t const step = data_epoch.ordinal;
+    expected_t filled;
+    if (auto *parquet = std::get_if<tokens_loader_parquet_t>(&loaders_[entry]))
+        filled = parquet->fill(stream, {dataset.text.view()}, gpu_index, step, batches);
+    else if (auto *jsonl = std::get_if<tokens_loader_jsonl_t>(&loaders_[entry]))
+        filled = jsonl->fill(stream, {dataset.text.view()}, gpu_index, step, batches);
+    else if (auto *csv = std::get_if<tokens_loader_csv_t>(&loaders_[entry])) {
+        // A `.txt` shard is one document per line: a headerless table of one column, as no line
+        // holds a tab.
+        tokens_base_loader_csv_config_t text {dataset.text.view()};
+        if (dataset.glob.view().ends_with(".txt")) text.delimiter = '\t', text.header = csv_header_t::positional_k;
+        filled = csv->fill(stream, text, gpu_index, step, batches);
+    }
+    else {
+        paired_loader_parquet_t &paired = std::get<paired_loader_parquet_t>(loaders_[entry]);
+        if (paired.modality() == modality_t::image_k)
+            filled = paired.fill(stream, jpeg_[member], gpu_index, step, batches);
+        else if (paired.modality() == modality_t::video_k)
+            filled = paired.fill(stream, nvdec_[member], gpu_index, step, batches);
+        else filled = paired.fill(stream, gpu_index, step, batches);
+    }
+    if (!filled)
+        return expected_t::fail(filled.status_, "{} on GPU {}: {}", dataset.name.view(), gpu_index,
+                                filled.description_.view());
     return {};
 }
 
