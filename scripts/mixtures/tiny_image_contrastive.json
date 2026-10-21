@@ -1,5 +1,5 @@
 {
-  "mixture": "tiny_image_caption",
+  "mixture": "tiny_image_contrastive",
   "datasets": [
     {
       "name": "rsicd_train",

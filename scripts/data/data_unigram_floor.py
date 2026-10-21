@@ -96,9 +96,9 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=7)
     args = parser.parse_args()
 
-    # `resolve_mixture("text_base")` yields `(resolved_glob, weight, text_field)` — the same tuple the
-    # deleted `TextMaskLoader` consumed; we now read those globs ourselves as the byte source.
-    mixture = resolve_mixture("text_base")
+    # `resolve_mixture("text_masked")` yields `(resolved_glob, weight, text_field)`; we read those globs
+    # ourselves as the byte source.
+    mixture = resolve_mixture("text_masked")
     rng = np.random.default_rng(args.seed)
     weights = np.array([weight for _glob, weight, _field in mixture], dtype=np.float64)
     weights = weights / weights.sum()
@@ -132,7 +132,7 @@ def main() -> int:
             total_positions += int(sequence.size)
             total_mask_positions += int(mask_active.sum())
 
-    print(f"\nDataset unigram floor: text_base, {args.batches} batches x {args.batch_size} x {args.max_seq}")
+    print(f"\nDataset unigram floor: text_masked, {args.batches} batches x {args.batch_size} x {args.max_seq}")
     print(f"  total positions seen         : {total_positions:,}")
     print(f"  total mask-active positions  : {total_mask_positions:,}  ({total_mask_positions / total_positions:.1%})")
     print(f"  total target tokens counted  : {total_targets:,}")

@@ -128,11 +128,18 @@ struct tokens_loader_parquet_t {
 
   private:
 
-    /** The keyed weighted file pick shared by @ref fill and @ref drawn_shards : draw distinct shards
-     *  with probability proportional to their row count, keyed by @c (seed,step,rank) , until the pool
-     *  covers @p target_segments rows (≥2 shards unless the dataset is one). Pure over the footer table. */
-    [[nodiscard]] expected<array<sz::string_view_t>> pick_shards_(u32_t gpu_rank, u32_t training_step,
-                                                                  std::size_t target_segments) const noexcept;
+    /** The shards one fill reads and, per shard, the ascending row groups it decodes. */
+    struct picked_groups_t {
+        array<sz::string_view_t> paths {};
+        array<array<u32_t>> groups {};
+    };
+
+    /** The keyed weighted pick shared by @ref fill and @ref drawn_shards : draw distinct row groups
+     *  with probability proportional to their row count, keyed by @c (seed,step,rank) , until the
+     *  pool covers @p target_segments rows from ≥2 shards, unless the dataset is one. Pure over the
+     *  footers. */
+    [[nodiscard]] expected<picked_groups_t> pick_groups_(u32_t gpu_rank, u32_t training_step,
+                                                         std::size_t target_segments) const noexcept;
 
     /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
     gpu_direct_storage_session_t *storage_ = nullptr;
@@ -143,10 +150,14 @@ struct tokens_loader_parquet_t {
     /** The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
 
-    /** @b [shards+1] cumulative footer row counts — the weighted file draw's search table (an
-     *  @c upper_bound maps a keyed row position to its owning file) and, at its back, the dataset's
-     *  total rows. Read once per dataset; shared across every GPU the loader serves. */
-    array<std::size_t> row_prefix_ {};
+    /** @b [groups+1] cumulative row-group row counts over every shard in order — the weighted
+     *  draw's search table (an @c upper_bound maps a keyed row position to its owning group) and,
+     *  at its back, the dataset's total rows. Read once per dataset; shared across every GPU the
+     *  loader serves. */
+    array<std::size_t> group_prefix_ {};
+
+    /** @b [groups] each row group's shard and its index within that shard. */
+    array<u32_t> group_shard_ {}, group_index_ {};
 
     /** The device bytes a fill's reservoir can take, from the footers. */
     reservoir_bound_t reservoir_ {};

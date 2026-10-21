@@ -108,9 +108,9 @@ Each rung below must pass before the next one runs, and every command runs from 
 5. The Base conformance suite on one node, then across both:
    `sbatch --nodes=1 --export=ALL,UFORM_TEST_BINARY=build_release/uform_test_base scripts/slurm/test_base-4-8-16.sbatch`, then the same with `--nodes=2`.
 6. Training on the tiny mixtures, one node of 8 GPUs first, then both nodes:
-   `srun --nodes=1 --ntasks=1 --gpus-per-node=8 --exclusive build_release/uform_base --mixture scripts/data/tiny_text.json --objective masked --steps 50`, then
-   `sbatch --export=ALL,UFORM_BASE_BIN=build_release/uform_base scripts/slurm/base-2-8-16.sbatch` for the masked objective on `tiny_text.json`, and
-   `sbatch --export=ALL,UFORM_BASE_BIN=build_release/uform_base,UFORM_MIXTURE=scripts/data/tiny_image_caption.json,UFORM_OBJECTIVE=joint scripts/slurm/base-2-8-16.sbatch` for the contrastive pairs.
+   `srun --nodes=1 --ntasks=1 --gpus-per-node=8 --exclusive build_release/uform_base --mixture scripts/mixtures/tiny_text_masked.json --objective masked --steps 50`, then
+   `sbatch --export=ALL,UFORM_BASE_BIN=build_release/uform_base scripts/slurm/base-2-8-16.sbatch` for the masked objective on `tiny_text_masked.json`, and
+   `sbatch --export=ALL,UFORM_BASE_BIN=build_release/uform_base,UFORM_MIXTURE=scripts/mixtures/tiny_image_contrastive.json,UFORM_OBJECTIVE=joint scripts/slurm/base-2-8-16.sbatch` for the contrastive pairs.
 
 The contrastive line of the training log is the whole world's loss, both nodes' summands added, so the two processes print the same value.
 

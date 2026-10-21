@@ -8,7 +8,7 @@
 #include <dirent.h>   // vendor-boundary: POSIX `opendir` / `readdir` — the raw directory scan, no glob to link
 #include <sys/stat.h> // vendor-boundary: POSIX `stat` — the footerless formats' byte-size file weight
 
-#include <algorithm> // `std::sort` — the deterministic shard order
+#include <algorithm> // `std::sort` — the deterministic shard order, `std::find_if` — a sidecar's missing column
 #include <span>      // `std::span` — the borrowed payload / offsets
 #include <string>
 #include <vector>
@@ -25,12 +25,15 @@
 #include <cudf/lists/lists_column_view.hpp>
 #include <cudf/strings/strings_column_view.hpp>
 #include <cudf/table/table.hpp>
-#include <cudf/unary.hpp> // `cudf::cast` — the one offset widening
+#include <cudf/unary.hpp>         // `cudf::cast` — the one offset widening
+#include <cudf/io/datasource.hpp> // `cudf::io::datasource` — a sidecar's tar, read to the device whole
 #include <rmm/cuda_stream_view.hpp>
+#include <rmm/device_buffer.hpp> // `rmm::device_buffer` — the gathered tar members
 
 #include "loaders/dataset_shards.hpp"
 
-#include "core/array.hpp" // `array` — the owned per-column table
+#include "core/array.hpp"          // `array` — the owned per-column table
+#include "core/gpu_allocators.hpp" // `device_address` — the tar gather's copy endpoints
 
 namespace uc = unum::uform::core;
 namespace ul = unum::uform::loaders;
@@ -69,6 +72,7 @@ struct column_span_t {
 struct parquet_file_t::state_t {
     std::unique_ptr<cudf::table> table;
     array<column_span_t> columns;
+    rmm::device_buffer tar_payload; // the members a tar-backed column gathers, back to back
 };
 
 parquet_file_t::parquet_file_t() noexcept = default;
@@ -160,19 +164,134 @@ static void widen_offsets_(cudf::column_view const &offsets, rmm::cuda_stream_vi
     span = {owner->view().data<u64_t>(), static_cast<std::size_t>(offsets.size())};
 }
 
+/** Widen a flattened column's offsets into an owned @ref column_span_t — the decode tail every
+ *  reader shares once cuDF hands back a @ref flat_column_t . */
+[[nodiscard]] static expected<column_span_t> adopt_flat_(expected<flat_column_t> flat, rmm::cuda_stream_view stream) {
+    if (!flat) return expected<column_span_t>::fail(std::move(flat));
+    column_span_t column;
+    column.payload = flat->payload;
+    widen_offsets_(flat->offsets, stream, column.offsets, column.widened_offsets);
+    if (flat->groups.type().id() != cudf::type_id::EMPTY)
+        widen_offsets_(flat->groups, stream, column.groups, column.widened_groups);
+    return expected<column_span_t> {std::move(column)};
+}
+
+/** The sidecar's byte index of each row's member in the sibling tar: its offset and its length. */
+inline constexpr char tar_offset_column_k[] = "tar_byte_offset";
+inline constexpr char tar_length_column_k[] = "tar_byte_length";
+
+/** The tar beside the Parquet sidecar at @p path : the same stem with a @c .tar suffix. */
+[[nodiscard]] static bool tar_path_of_(sz::string_view_t path, sz::string_t &tar) noexcept {
+    sz::string_view_t const sidecar_suffix {".parquet"};
+    if (path.ends_with(sidecar_suffix)) path.remove_suffix(sidecar_suffix.size());
+    return format_into(tar, "{}.tar", path);
+}
+
+/** Gather every row's @p extension member into @p payload back to back, one shard at a time: its
+ *  sibling tar is read to the device whole, and one batch copies out the members its rows index.
+ *  Rows follow the shards in @p paths order, @p rows_per_shard of each, as cuDF concatenates
+ *  them. */
+[[nodiscard]] static expected<column_span_t> read_tar_members_(
+    cudf::column_view byte_offsets, cudf::column_view byte_lengths, sz::string_view_t extension,
+    std::span<sz::string_view_t const> paths, std::span<std::size_t const> rows_per_shard, rmm::cuda_stream_view stream,
+    rmm::device_buffer &payload) {
+    using result_t = expected<column_span_t>;
+    std::size_t const rows = static_cast<std::size_t>(byte_offsets.size());
+    array<i64_t> offsets, lengths;
+    array<u64_t> bounds;
+    array<CUdeviceptr> sources, destinations;
+    array<std::size_t> sizes;
+    if (offsets.resize(rows) != status_t::success_k || lengths.resize(rows) != status_t::success_k ||
+        bounds.resize(rows + 1) != status_t::success_k || sources.resize(rows) != status_t::success_k ||
+        destinations.resize(rows) != status_t::success_k || sizes.resize(rows) != status_t::success_k)
+        return result_t::fail(status_t::bad_alloc_k, "tar index allocation failed ({} rows)", rows);
+    if (cuMemcpyDtoHAsync(offsets.data(), device_address(byte_offsets.data<i64_t>()), rows * sizeof(i64_t),
+                          stream.value()) != CUDA_SUCCESS ||
+        cuMemcpyDtoHAsync(lengths.data(), device_address(byte_lengths.data<i64_t>()), rows * sizeof(i64_t),
+                          stream.value()) != CUDA_SUCCESS ||
+        cuStreamSynchronize(stream.value()) != CUDA_SUCCESS)
+        return result_t::fail(status_t::cuda_error_k, "tar index landing failed ({} rows)", rows);
+
+    // The members land back to back in row order, so each one starts at the running sum of lengths.
+    bounds[0] = 0;
+    for (std::size_t row = 0; row != rows; ++row) bounds[row + 1] = bounds[row] + static_cast<u64_t>(lengths[row]);
+    payload = rmm::device_buffer {bounds[rows], stream};
+
+    CUmemcpyAttributes attributes {};
+    attributes.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
+    std::size_t attribute_index = 0;
+    std::size_t row_begin = 0;
+    for (std::size_t shard = 0; shard != paths.size(); ++shard) {
+        std::size_t const row_end = row_begin + rows_per_shard[shard];
+        sz::string_t tar;
+        if (!tar_path_of_(paths[shard], tar))
+            return result_t::fail(status_t::bad_alloc_k, "tar path allocation failed for {}", paths[shard]);
+        auto source = cudf::io::datasource::create(std::string {tar.c_str()}); // vendor-boundary
+        if (!source->supports_device_read())
+            return result_t::fail(status_t::io_error_k, "the tar beside {} cannot be read to the device", paths[shard]);
+        // Members are named `<key>.<column>`, as in WebDataset; a tar of other members means the
+        // shard simply lacks the column, which must fail rather than read image bytes as text.
+        std::uint8_t member_name[100] = {}; // the USTAR header's name field
+        source->host_read(0, sizeof(member_name), member_name);
+        std::uint8_t const *const name_end = std::find(member_name, member_name + sizeof(member_name), 0);
+        std::size_t const name_bytes = static_cast<std::size_t>(name_end - member_name);
+        if (name_bytes <= extension.size() || member_name[name_bytes - extension.size() - 1] != '.' ||
+            !std::equal(extension.begin(), extension.end(), name_end - extension.size()))
+            return result_t::fail(status_t::invalid_input_k, "{} has no column {}, nor tar members named for it",
+                                  paths[shard], extension);
+        rmm::device_buffer staging {source->size(), stream};
+        source->device_read(0, staging.size(), static_cast<std::uint8_t *>(staging.data()), stream);
+        for (std::size_t row = row_begin; row != row_end; ++row) {
+            if (offsets[row] < 0 || lengths[row] <= 0 ||
+                static_cast<std::size_t>(offsets[row] + lengths[row]) > staging.size())
+                return result_t::fail(status_t::invalid_input_k, "row {} of {} names no member of its {}-byte tar",
+                                      row - row_begin, paths[shard], staging.size());
+            sources[row] = device_address(static_cast<b8_t const *>(staging.data()) + offsets[row]);
+            destinations[row] = device_address(static_cast<b8_t const *>(payload.data()) + bounds[row]);
+            sizes[row] = static_cast<std::size_t>(lengths[row]);
+        }
+        // KvikIO writes the next tar from the host, out of stream order, so these copies finish
+        // before the staging they read is freed for it.
+        if ((row_end != row_begin && cuMemcpyBatchAsync(destinations.data() + row_begin, sources.data() + row_begin,
+                                                        sizes.data() + row_begin, row_end - row_begin, &attributes,
+                                                        &attribute_index, 1, stream.value()) != CUDA_SUCCESS) ||
+            cuStreamSynchronize(stream.value()) != CUDA_SUCCESS)
+            return result_t::fail(status_t::cuda_error_k, "tar member gather failed for {}", paths[shard]);
+        row_begin = row_end;
+    }
+
+    column_span_t column;
+    column.widened_offsets = std::make_unique<cudf::column>(
+        cudf::data_type {cudf::type_id::UINT64}, static_cast<cudf::size_type>(rows + 1),
+        rmm::device_buffer {bounds.data(), (rows + 1) * sizeof(u64_t), stream}, rmm::device_buffer {}, 0);
+    column.offsets = {column.widened_offsets->view().data<u64_t>(), rows + 1};
+    column.payload = {static_cast<b8_t const *>(payload.data()), payload.size()};
+    return result_t {std::move(column)};
+}
+
 expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &storage, sz::string_view_t path,
                                               std::span<sz::string_view_t const> columns,
-                                              gpu_stream_t const &stream) noexcept {
+                                              gpu_stream_t &stream) noexcept {
     return make(storage, {&path, 1}, columns, stream); // The single-shard convenience over the concatenating read.
+}
+
+expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &storage,
+                                              std::span<sz::string_view_t const> paths,
+                                              std::span<sz::string_view_t const> columns,
+                                              gpu_stream_t &stream) noexcept {
+    return make(storage, paths, columns, std::span<array<u32_t> const> {}, stream); // every row group
 }
 
 expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &,
                                               std::span<sz::string_view_t const> paths,
                                               std::span<sz::string_view_t const> columns,
-                                              gpu_stream_t const &stream) noexcept {
+                                              std::span<array<u32_t> const> row_groups, gpu_stream_t &stream) noexcept {
     using result_t = expected<parquet_file_t>;
     if (paths.empty() || columns.empty())
         return result_t::fail(status_t::invalid_input_k, "a read needs at least one shard path and one column");
+    if (!row_groups.empty() && row_groups.size() != paths.size())
+        return result_t::fail(status_t::invalid_input_k, "{} row-group lists for {} shards", row_groups.size(),
+                              paths.size());
     try {
         std::vector<std::string> path_texts; // vendor-boundary: cuDF's source_info takes std::strings
         std::vector<std::string> names;      // vendor-boundary: cuDF's column selector takes std::strings
@@ -180,33 +299,57 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
         names.reserve(columns.size());
         for (sz::string_view_t path : paths) path_texts.emplace_back(path.data(), path.size());
         for (sz::string_view_t column : columns) names.emplace_back(column.data(), column.size());
+        switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
+        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed for the read");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
+
+        // A column the sidecar lacks is each row's member of its sibling tar, read through the byte
+        // index, whose two columns take its place and the end of the read.
+        auto const footer = cudf::io::read_parquet_metadata(cudf::io::source_info {path_texts.front()});
+        auto const &fields = footer.schema().root().children();
+        auto const has_field = [&](std::string_view name) {
+            std::string_view const top = name.substr(0, name.find('.')); // a dotted name selects a struct's leaf
+            return std::any_of(fields.begin(), fields.end(), [&](auto const &field) { return field.name() == top; });
+        };
+        auto const missing = std::find_if(names.begin(), names.end(),
+                                          [&](auto const &name) { return !has_field(name); });
+        std::size_t const tar_column = static_cast<std::size_t>(missing - names.begin());
+        if (missing != names.end() && has_field(tar_offset_column_k)) {
+            *missing = tar_offset_column_k;
+            names.emplace_back(tar_length_column_k);
+        }
 
         // KvikIO / GDS reads only the named columns' chunks straight to device; multiple shards decode
         // into one concatenated table, and decode is on the GPU.
         auto options = cudf::io::parquet_reader_options::builder(cudf::io::source_info {std::move(path_texts)})
                            .column_names(names)
                            .build();
+        if (!row_groups.empty()) {
+            std::vector<std::vector<cudf::size_type>> groups(row_groups.size()); // vendor-boundary
+            for (std::size_t path = 0; path != row_groups.size(); ++path)
+                groups[path].assign(row_groups[path].begin(), row_groups[path].end());
+            options.set_row_groups(std::move(groups));
+        }
         auto loaded = cudf::io::read_parquet(options, cudf_stream);
-        if (loaded.tbl == nullptr || static_cast<std::size_t>(loaded.tbl->num_columns()) != columns.size())
+        if (loaded.tbl == nullptr || static_cast<std::size_t>(loaded.tbl->num_columns()) != names.size())
             return result_t::fail(status_t::invalid_input_k, "read returned {} of {} requested columns",
-                                  loaded.tbl == nullptr ? 0 : loaded.tbl->num_columns(), columns.size());
+                                  loaded.tbl == nullptr ? 0 : loaded.tbl->num_columns(), names.size());
 
         auto state = std::make_unique<state_t>();
         if (state->columns.resize(columns.size()) != status_t::success_k)
             return result_t::fail(status_t::bad_alloc_k, "column table allocation failed ({} columns)", columns.size());
+        cudf::table_view const table = loaded.tbl->view();
+        bool const tar_backed = names.size() != columns.size();
         for (std::size_t index = 0; index != columns.size(); ++index) {
-            auto flat = flatten_column_(loaded.tbl->view().column(static_cast<cudf::size_type>(index)), columns[index],
-                                        cudf_stream);
-            if (!flat) return result_t::fail(std::move(flat));
-
-            // 64-bit offsets everywhere, both levels: borrow cuDF's when already i64, else keep the
-            // column cuDF's own `cast` produced — the offsets stay in a cuDF-owned buffer, no copy.
-            column_span_t &column = state->columns[index];
-            column.payload = flat->payload;
-            widen_offsets_(flat->offsets, cudf_stream, column.offsets, column.widened_offsets);
-            if (flat->groups.type().id() != cudf::type_id::EMPTY)
-                widen_offsets_(flat->groups, cudf_stream, column.groups, column.widened_groups);
+            cudf::column_view const read = table.column(static_cast<cudf::size_type>(index));
+            expected<column_span_t> column =
+                tar_backed && index == tar_column
+                    ? read_tar_members_(read, table.column(static_cast<cudf::size_type>(columns.size())),
+                                        columns[index], paths, loaded.metadata.num_rows_per_source, cudf_stream,
+                                        state->tar_payload)
+                    : adopt_flat_(flatten_column_(read, columns[index], cudf_stream), cudf_stream);
+            if (!column) return result_t::fail(std::move(column));
+            state->columns[index] = std::move(column.value_);
         }
         // Adopt the table: the borrowed payload / native-offset spans stay valid, now owned by the file,
         // and free stream-ordered on destruction.
@@ -228,10 +371,30 @@ expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_st
         // Footer only — no row-group decode: the row count and the whole table's uncompressed byte size.
         cudf::io::parquet_metadata const meta = cudf::io::read_parquet_metadata(
             cudf::io::source_info {std::string {path.data(), path.size()}}); // vendor-boundary
-        std::size_t bytes = 0;
+        auto const &group_metadata = meta.rowgroup_metadata();               // vendor-boundary
+        std::size_t const groups = group_metadata.size();
+        parquet_length_metadata_t length {static_cast<std::size_t>(meta.num_rows()), 0, {}, {}};
+        if (length.group_rows.resize(groups) != status_t::success_k ||
+            length.group_bytes.resize(groups) != status_t::success_k)
+            return result_t::fail(status_t::bad_alloc_k, "row-group table allocation failed for {}", path);
+        for (std::size_t group = 0; group != groups; ++group) {
+            length.group_rows[group] = static_cast<std::size_t>(group_metadata[group].at("num_rows"));
+            length.group_bytes[group] = 0;
+        }
         for (auto const &column : meta.columnchunk_metadata()) // vendor-boundary
-            for (auto const chunk_bytes : column.second) bytes += static_cast<std::size_t>(chunk_bytes);
-        return result_t {parquet_length_metadata_t {static_cast<std::size_t>(meta.num_rows()), bytes}};
+            for (std::size_t group = 0; group != column.second.size() && group != groups; ++group)
+                length.group_bytes[group] += static_cast<std::size_t>(column.second[group]);
+        for (std::size_t group = 0; group != groups; ++group) length.bytes += length.group_bytes[group];
+        // A sidecar's members live in its sibling tar, which a read stages on the device whole.
+        if (meta.columnchunk_metadata().contains(tar_offset_column_k)) {
+            sz::string_t tar;
+            if (!tar_path_of_(path, tar))
+                return result_t::fail(status_t::bad_alloc_k, "tar path allocation failed for {}", path);
+            expected<std::size_t> tar_bytes = file_size_bytes(tar.view());
+            if (!tar_bytes) return result_t::fail(std::move(tar_bytes));
+            length.bytes += *tar_bytes;
+        }
+        return result_t {std::move(length)};
     }
     catch (std::exception const &error) {
         return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
@@ -266,17 +429,6 @@ expected<parquet_length_metadata_t> parquet_file_t::column_metadata(gpu_direct_s
     }
 }
 
-/** Widen a flattened column's offsets into an owned @ref column_span_t — the decode tail both
- *  readers share once cuDF hands back a @ref flat_column_t . */
-static column_span_t adopt_flat_(flat_column_t const &flat, rmm::cuda_stream_view stream) {
-    column_span_t column;
-    column.payload = flat.payload;
-    widen_offsets_(flat.offsets, stream, column.offsets, column.widened_offsets);
-    if (flat.groups.type().id() != cudf::type_id::EMPTY)
-        widen_offsets_(flat.groups, stream, column.groups, column.widened_groups);
-    return column;
-}
-
 /** A decoded JSONL field: the owned cuDF column — extracted from a shard's table, or the
  *  concatenation of several — and its flattened device spans. */
 struct jsonl_file_t::state_t {
@@ -301,9 +453,11 @@ std::span<u64_t const> jsonl_file_t::groups() const noexcept {
 }
 
 expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, sz::string_view_t path,
-                                          sz::string_view_t field, gpu_stream_t const &stream) noexcept {
+                                          sz::string_view_t field, gpu_stream_t &stream) noexcept {
     using result_t = expected<jsonl_file_t>;
     try {
+        switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
+        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed for the read");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
         // One JSON object per line; KvikIO / GDS streams the bytes, cuDF decodes on the GPU.
         auto options = cudf::io::json_reader_options::builder(
@@ -329,9 +483,9 @@ expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, 
         std::vector<std::unique_ptr<cudf::column>> released = loaded.tbl->release(); // vendor-boundary
         auto state = std::make_unique<state_t>();
         state->field = std::move(released[field_index]);
-        auto flat = flatten_column_(state->field->view(), field, cudf_stream);
-        if (!flat) return result_t::fail(std::move(flat));
-        state->span = adopt_flat_(*flat, cudf_stream);
+        auto span = adopt_flat_(flatten_column_(state->field->view(), field, cudf_stream), cudf_stream);
+        if (!span) return result_t::fail(std::move(span));
+        state->span = std::move(span.value_);
         return result_t {jsonl_file_t {std::move(state)}};
     }
     catch (std::exception const &error) {
@@ -342,19 +496,22 @@ expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, 
     }
 }
 
-expected<jsonl_file_t> jsonl_file_t::concat(std::span<jsonl_file_t const> parts, gpu_stream_t const &stream) noexcept {
+expected<jsonl_file_t> jsonl_file_t::concat(std::span<jsonl_file_t const> parts, gpu_stream_t &stream) noexcept {
     using result_t = expected<jsonl_file_t>;
     if (parts.empty()) return result_t::fail(status_t::invalid_input_k, "JSONL concat needs at least one shard");
     try {
+        switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
+        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed for the read");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
         std::vector<cudf::column_view> fields; // vendor-boundary: cudf::concatenate takes a column-view list
         fields.reserve(parts.size());
         for (jsonl_file_t const &part : parts) fields.push_back(part.state_->field->view());
         auto state = std::make_unique<state_t>();
         state->field = cudf::concatenate(fields, cudf_stream); // one copy into a single owned field column
-        auto flat = flatten_column_(state->field->view(), sz::string_view_t {"jsonl", 5}, cudf_stream);
-        if (!flat) return result_t::fail(std::move(flat));
-        state->span = adopt_flat_(*flat, cudf_stream);
+        auto span = adopt_flat_(flatten_column_(state->field->view(), sz::string_view_t {"jsonl", 5}, cudf_stream),
+                                cudf_stream);
+        if (!span) return result_t::fail(std::move(span));
+        state->span = std::move(span.value_);
         return result_t {jsonl_file_t {std::move(state)}};
     }
     catch (std::exception const &error) {
@@ -387,9 +544,11 @@ std::span<u64_t const> csv_file_t::groups() const noexcept {
 
 expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::string_view_t path,
                                       sz::string_view_t column, char delimiter, csv_header_t header,
-                                      gpu_stream_t const &stream) noexcept {
+                                      gpu_stream_t &stream) noexcept {
     using result_t = expected<csv_file_t>;
     try {
+        switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
+        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed for the read");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
         std::string const name {column.data(), column.size()}; // vendor-boundary
         // Read only the wanted column, forced to string so type inference cannot surprise us; KvikIO /
@@ -410,9 +569,9 @@ expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::
         std::vector<std::unique_ptr<cudf::column>> released = loaded.tbl->release(); // vendor-boundary
         auto state = std::make_unique<state_t>();
         state->field = std::move(released[0]);
-        auto flat = flatten_column_(state->field->view(), column, cudf_stream);
-        if (!flat) return result_t::fail(std::move(flat));
-        state->span = adopt_flat_(*flat, cudf_stream);
+        auto span = adopt_flat_(flatten_column_(state->field->view(), column, cudf_stream), cudf_stream);
+        if (!span) return result_t::fail(std::move(span));
+        state->span = std::move(span.value_);
         return result_t {csv_file_t {std::move(state)}};
     }
     catch (std::exception const &error) {
@@ -423,19 +582,22 @@ expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::
     }
 }
 
-expected<csv_file_t> csv_file_t::concat(std::span<csv_file_t const> parts, gpu_stream_t const &stream) noexcept {
+expected<csv_file_t> csv_file_t::concat(std::span<csv_file_t const> parts, gpu_stream_t &stream) noexcept {
     using result_t = expected<csv_file_t>;
     if (parts.empty()) return result_t::fail(status_t::invalid_input_k, "CSV concat needs at least one shard");
     try {
+        switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
+        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed for the read");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
         std::vector<cudf::column_view> columns; // vendor-boundary: cudf::concatenate takes a column-view list
         columns.reserve(parts.size());
         for (csv_file_t const &part : parts) columns.push_back(part.state_->field->view());
         auto state = std::make_unique<state_t>();
         state->field = cudf::concatenate(columns, cudf_stream); // one copy into a single owned column
-        auto flat = flatten_column_(state->field->view(), sz::string_view_t {"csv", 3}, cudf_stream);
-        if (!flat) return result_t::fail(std::move(flat));
-        state->span = adopt_flat_(*flat, cudf_stream);
+        auto span = adopt_flat_(flatten_column_(state->field->view(), sz::string_view_t {"csv", 3}, cudf_stream),
+                                cudf_stream);
+        if (!span) return result_t::fail(std::move(span));
+        state->span = std::move(span.value_);
         return result_t {csv_file_t {std::move(state)}};
     }
     catch (std::exception const &error) {

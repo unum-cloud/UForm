@@ -48,20 +48,20 @@ MIXTURES: dict[str, list[tuple[str, float]]] = {
 #: constant the trainer defaults to), example (a concrete known-good arg), notes.
 _TRAINERS: list[dict] = [
     {
-        "cli": "python -m python_train --task text_base",
-        "task": "MLM (masked language model) — text_base recipe of the unified trainer",
-        "data_arg": "driven by the text_base mixture (scripts/data/text_base.json)",
-        "mixture": "text_base (scripts/data/text_base.json)",
-        "example": "--config text-tiny --total-steps 50000",
-        "notes": "Single-text i18n mixture; weighted glob of parquet / jsonl shards.",
+        "cli": "uform_base --mixture scripts/mixtures/text_masked.json --objective masked",
+        "task": "Base: span-masked byte modelling over the text_masked mixture",
+        "data_arg": "--mixture scripts/mixtures/text_masked.json",
+        "mixture": "text_masked (scripts/mixtures/text_masked.json)",
+        "example": "--hidden 512 --depth 12 --columns 2048 --steps 50000",
+        "notes": "Multilingual web, wiki, Q&A and code text; weighted globs of parquet shards.",
     },
     {
-        "cli": "python -m python_train --task text_contrastive",
-        "task": "Matryoshka SigLIP embedder — text_contrastive recipe of the unified trainer",
-        "data_arg": "driven by the text_contrastive mixture (scripts/data/text_contrastive.json)",
-        "mixture": "text_contrastive (scripts/data/text_contrastive.json)",
-        "example": "--config text-tiny --warm-start-from <mlm.safetensors>",
-        "notes": "Paired (anchor, positive) data; in-batch negatives.",
+        "cli": "uform_base --mixture scripts/mixtures/text_contrastive.json --objective contrastive",
+        "task": "Embedder: Matryoshka SigLIP over the text_contrastive mixture",
+        "data_arg": "--mixture scripts/mixtures/text_contrastive.json",
+        "mixture": "text_contrastive (scripts/mixtures/text_contrastive.json)",
+        "example": "--hidden 512 --depth 12 --resume <Base checkpoint>",
+        "notes": "Paired (anchor, positive) text with optional hard negatives; every unnamed pair repels.",
     },
 ]
 

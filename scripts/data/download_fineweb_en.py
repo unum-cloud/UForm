@@ -5,7 +5,7 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download FineWeb: English web MLM corpus (`text`) — the 100BT-sample slice used by text_base."""
+"""Download FineWeb: English web MLM corpus (`text`) — the 100BT-sample slice used by text_masked."""
 from acquire import acquire
 
 if __name__ == "__main__":

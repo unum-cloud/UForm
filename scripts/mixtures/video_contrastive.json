@@ -1,5 +1,5 @@
 {
-  "mixture": "video_caption",
+  "mixture": "video_contrastive",
   "datasets": [
     {
       "name": "msrvtt_captions",

@@ -1,5 +1,5 @@
 {
-  "mixture": "tiny_audio_caption",
+  "mixture": "tiny_audio_contrastive",
   "datasets": [
     {
       "name": "clotho_train",

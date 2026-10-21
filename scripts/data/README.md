@@ -1,7 +1,7 @@
 # Datasets
 
 UForm trains from public corpora across text, images, video, audio, 3D, and robotics.
-Every corpus is referenced by name through the mixture JSONs — five per-mixture recipes (`scripts/data/{text_base,text_contrastive,image_caption,video_caption,audio_caption}.json`) that are the language-neutral column contract read by both the Python acquisition and the C++ trainer, parsed by `scripts/data/mixtures.py`; run `uv run scripts/data/list_registry.py` for the live name-to-glob-to-mixture mapping.
+Every corpus is referenced by name through the mixture JSONs — five per-mixture recipes (`scripts/mixtures/{text_masked,text_contrastive,image_contrastive,video_contrastive,audio_contrastive}.json`) that are the language-neutral column contract read by both the Python acquisition and the C++ trainer, parsed by `scripts/data/mixtures.py`; run `uv run scripts/data/list_registry.py` for the live name-to-glob-to-mixture mapping.
 This page is the modality-organized catalog of what those names point to, including the corpora staged for upcoming tiers.
 
 A checkbox marks whether the repository already has parsing code for the dataset: ✅ a mixture entry with a working downloader and a modality loader, 🔜 planned but not parseable yet — a wishlist row awaiting a downloader or loader, or a corpus not yet added.
@@ -265,6 +265,8 @@ CSAM is entirely out of scope.
 - ✅ [Visual Genome][visualgenome]: image-text; parquet; \~108K images, dense region descriptions (≤16 per image, multi-positive) ²
 - ✅ [Flickr30k][flickr30k]: image-text; parquet; caption retrieval; Entities variant is phrase → bbox, gated ¹
 - ✅ [Fashion-IQ][fashioniq]: image-text; parquet; composed retrieval; SIMPLIFIED to (modifier caption, target image) ³
+- 🔜 [FineHARD][finehard]: region-text; URL/JSON → parquet; 12M images, 40M described boxes, 10M hard negatives; Apache-2.0 tag, source-image rights separate; images fetched with img2dataset
+- 🔜 [STRAP][strap]: region-text; annotation parquet; 2M images, 10.35M objects; no image bytes; CC BY 4.0 tag conflicts with research-only / no-redistribution access terms
 
 > ¹ The plain `nlphuji/flickr30k` captions mirror is parquet; the Flickr30k-Entities grounding variant (276K phrase → bbox links) is a separate, gated artifact.
 > ² Acquired via `uv run scripts/data/download_visual_genome.py` (the `hf_snapshot` source kind, nirmalendu01/visual_genome mirror, image bytes inline), flattening up to 16 region descriptions per image into a `captions` list<string>; the bbox/relation graph stays out of scope.
@@ -275,6 +277,8 @@ CSAM is entirely out of scope.
 
 [visualgenome]: https://homes.cs.washington.edu/~ranjay/visualgenome/
 [flickr30k]: https://huggingface.co/datasets/nlphuji/flickr30k
+[finehard]: https://huggingface.co/datasets/qihoo360/FineHARD
+[strap]: https://huggingface.co/datasets/vrg-prague/STRAP
 
 ### VLM Instructions
 
@@ -347,6 +351,10 @@ CSAM is entirely out of scope.
 - ✅ [ActivityNet Captions][activitynet]: video-text; YouTube fetch → parquet; \~15K videos, \~3.65 dense captions each ⁶
 - 🔜 [Something-Something v2][somethingv2]: video, action; webm → parquet; temporal action, 220K clips
 - ✅ [HowTo100M][howto100m]: video-text; YouTube fetch → parquet; \~136M narrated clips, per-clip ASR captions ³
+- 🔜 [HowToGround1M][howtoground1m] / [iGround][iground]: grounded video-text; JSONL → parquet; automatic / manual box supervision; media acquired separately; CC BY-NC-SA 4.0, non-commercial
+- 🔜 [ViCaS][vicas]: grounded video-text; JSON/masks → parquet; captions and tracked masks; official release excludes videos; repository CC0, dataset card CC variant and source-video terms need clarification
+- 🔜 [VideoRefer-700K][videorefer]: region-video-text; JSON/video archives → parquet; Panda media included, other source-media coverage unverified; Apache-2.0 tag conflicts with Panda-70M non-commercial research terms
+- 🔜 [BOSTVG][bostvg]: multi-object video grounding; video ZIP/JSON → parquet; 10,018 videos with tube annotations; research-only per paper, no explicit release license
 
 > ¹ Fetched and repacked on demand via `uv run scripts/data/download_msrvtt.py` (its media-fetch downloader) because the license blocks redistribution, with an in-batch shuffle synthesizing rerank negatives.
 > ² Repacked to parquet by the `webdataset` source kind (Panda-70M's tars), the `hf_snapshot` source kind (WebVid's snapshot parquet), or its media-fetch downloader (Kinetics-400's CSV-joined action label); WebVid is Shutterstock-licensed stock video.
@@ -367,6 +375,11 @@ CSAM is entirely out of scope.
 [kinetics]: https://github.com/cvdfoundation/kinetics-dataset
 [somethingv2]: https://developer.qualcomm.com/software/ai-datasets/something-something
 [howto100m]: https://www.di.ens.fr/willow/research/howto100m/
+[howtoground1m]: https://huggingface.co/datasets/ekazakos/HowToGround1M
+[iground]: https://huggingface.co/datasets/ekazakos/iGround
+[vicas]: https://github.com/Ali2500/ViCaS
+[videorefer]: https://huggingface.co/datasets/DAMO-NLP-SG/VideoRefer-700K
+[bostvg]: https://huggingface.co/datasets/Jelly3000/OmniSTVG
 
 ## Audio
 

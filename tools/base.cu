@@ -13,7 +13,7 @@
  *  alone on the synthetic draw — span-masked byte pretraining, the "Uniform Byte Models" root the
  *  Reranker and Embedder warm-start from — and @c --mixture @c omni adds the raw-media
  *  masked-autoencoder heads (image / video patches, 1-D audio frames) over one heterogeneous batch.
- *  A @c --mixture path to a mixture JSON in @c scripts/data trains on its datasets instead,
+ *  A @c --mixture path to a mixture JSON in @c scripts/mixtures trains on its datasets instead,
  *  lighting the media slices its entries name. @c --eager drops the model-region capture.
  */
 #include <cstdlib> // `::setenv`, `std::getenv` — the launcher-contract boundary

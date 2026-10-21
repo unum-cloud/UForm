@@ -10,7 +10,7 @@
 # The run reads its data from a mixture JSON and its losses from the objective; both ride the environment so
 # one committed runner serves every rung of the ladder in scripts/slurm/README.md:
 #
-#   UFORM_MIXTURE          — a scripts/data/*.json mixture, tiny_text.json by default
+#   UFORM_MIXTURE          — a scripts/mixtures/*.json mixture, tiny_text_masked.json by default
 #   UFORM_OBJECTIVE        — masked, contrastive or joint; masked by default
 #   UFORM_STEPS            — optimizer steps, 200 by default
 #   UFORM_CHECKPOINT_EVERY — steps between checkpoints beside the final one, 100 by default
@@ -53,7 +53,7 @@ if [[ -n "${UFORM_ROWS:-}" ]]; then optional+=(--rows "${UFORM_ROWS}"); fi
 if [[ -n "${UFORM_RESUME:-}" ]]; then optional+=(--resume "${UFORM_RESUME}"); fi
 if [[ -n "${UFORM_NVDEC_ENGINES:-}" ]]; then optional+=(--nvdec-engines "${UFORM_NVDEC_ENGINES}"); fi
 
-mixture="${UFORM_MIXTURE:-scripts/data/tiny_text.json}"
+mixture="${UFORM_MIXTURE:-scripts/mixtures/tiny_text_masked.json}"
 objective="${UFORM_OBJECTIVE:-masked}"
 echo "uform-base-2-8-16: ${UFORM_HOST_DOMAIN_COUNT} nodes x ${UFORM_GPUS_PER_MULTIMEM_DOMAIN} GPUs, ${objective} on ${mixture}"
 

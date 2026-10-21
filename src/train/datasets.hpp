@@ -3,8 +3,8 @@
  *  @author Ash Vardanian
  *  @date October 18, 2026
  *  @brief Real data for a run: @ref mixture_t , the weighted datasets a mixture JSON in
- *      @c scripts/data names, and @ref dataset_source_t , the batch source that loads them through
- *      the loaders and the mixer.
+ *      @c scripts/mixtures names, and @ref dataset_source_t , the batch source that loads them
+ *      through the loaders and the mixer.
  *
  *  Linked into the @c uform_base binary alone, since the C library links neither the loaders nor
  *  cuDF.
@@ -60,7 +60,7 @@ struct mixture_entry_t {
     modality_t modality = modality_t::text_k;
 };
 
-/** A weighted list of datasets, one mixture JSON in @c scripts/data . */
+/** A weighted list of datasets, one mixture JSON in @c scripts/mixtures . */
 struct mixture_t {
 
     /** The mixture's name. */

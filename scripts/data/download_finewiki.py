@@ -5,7 +5,7 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download FineWiki: 325-language Wikipedia MLM corpus (`text`) used by text_base."""
+"""Download FineWiki: 325-language Wikipedia MLM corpus (`text`) used by text_masked."""
 from acquire import acquire
 
 if __name__ == "__main__":

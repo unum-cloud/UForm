@@ -1,5 +1,5 @@
 {
-  "mixture": "audio_caption",
+  "mixture": "audio_contrastive",
   "datasets": [
     {
       "name": "audiocaps",

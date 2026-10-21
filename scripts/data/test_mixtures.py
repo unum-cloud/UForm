@@ -4,7 +4,7 @@
 # ///
 """Catalog validator for the five per-mixture training JSONs — stdlib only, no cuDF / pyarrow.
 
-The mixture JSONs (`scripts/data/{text_base,text_contrastive,image_caption,video_caption,audio_caption}.json`)
+The mixture JSONs (`scripts/mixtures/{text_masked,text_contrastive,image_contrastive,video_contrastive,audio_contrastive}.json`)
 are the language-neutral column contract both the Python acquisition and the C++ trainer read. This module
 checks that contract holds without touching any GPU or parquet dependency: it asserts the files parse, that
 every dataset entry carries the fields the loaders need, that a dataset's columns agree across the mixtures
@@ -30,16 +30,16 @@ from pathlib import Path
 
 import mixtures
 
-#: `scripts/data/` holds both the `download_*.py` scripts and the mixture JSONs.
+#: `scripts/data/` holds the `download_*.py` scripts; the mixture JSONs sit beside it in `scripts/mixtures/`.
 pkg_dir = Path(__file__).resolve().parent
 
 #: The five mixtures whose JSONs form the column contract; the file basename is `<name>.json`.
 expected_mixtures = (
-    "text_base",
+    "text_masked",
     "text_contrastive",
-    "image_caption",
-    "video_caption",
-    "audio_caption",
+    "image_contrastive",
+    "video_contrastive",
+    "audio_contrastive",
 )
 
 #: The dataset-entry keys whose values are actual parquet column names (mirrors `mixtures.column_fields`).
@@ -67,7 +67,7 @@ weight_sum_tolerance = 0.1
 
 def _mixture_path(name: str) -> Path:
     """The on-disk JSON path for one mixture."""
-    return pkg_dir / f"{name}.json"
+    return mixtures.mixtures_dir / f"{name}.json"
 
 
 def _load_mixture(name: str) -> dict:

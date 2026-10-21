@@ -5,7 +5,7 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download Hacker News: item corpus whose comment/story `text` feeds the text_base MLM blend."""
+"""Download Hacker News: item corpus whose comment/story `text` feeds the text_masked mixture."""
 from acquire import acquire
 
 if __name__ == "__main__":

@@ -5,12 +5,12 @@
 #     "pyarrow>=21.0.0",
 # ]
 # ///
-"""Download CodeSearchNet: function bodies (`func_code_string`) for the text_base code-MLM blend."""
+"""Download CodeSearchNet: function bodies (`func_code_string`) for the code share of the text_masked mixture."""
 from acquire import acquire
 
 if __name__ == "__main__":
     # Every config (`all/`, `python/`, `java/`, ...) ships `func_code_string` — pure passthrough. The
-    # text_base mixture reads only the `all/train-*.parquet` split; the per-language configs ride along.
+    # text_masked mixture reads only the `all/train-*.parquet` split; the per-language configs ride along.
     raise SystemExit(
         acquire(
             "code_search_net_text",

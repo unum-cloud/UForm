@@ -8,7 +8,7 @@
  *  lengths under the segments-never-cross-rows rule, then a CTA-per-segment gather. The row draw is a third
  *  kernel — a keyed permutation of the pooled files' rows, without replacement.
  */
-#include <algorithm> // `std::min` (floor), `std::upper_bound` (weighted file pick), `std::find` (dedup)
+#include <algorithm> // `std::min` (floor), `std::upper_bound` (weighted group pick), `std::find` (dedup), `std::sort`
 
 #include "loaders/tokens_loader.cuh"
 
@@ -184,20 +184,25 @@ expected<tokens_loader_parquet_t> tokens_loader_parquet_t::make(gpu_direct_stora
     loader.absolute_paths_ = std::move(paths.value_);
     loader.seed_ = seed;
 
-    // Footer only — host-side, no GPU, column-agnostic: a running prefix of each file's row count, the
-    // weighted file draw's search table. The column is chosen per fill, so this reads the whole-table
-    // footer, not a per-column one.
-    if (loader.row_prefix_.resize(loader.absolute_paths_.size() + 1) != status_t::success_k)
-        return result_t::fail(status_t::bad_alloc_k, "shard prefix allocation failed ({} shards)",
-                              loader.absolute_paths_.size());
-    loader.row_prefix_[0] = 0;
+    // Footer only — host-side, no GPU, column-agnostic: a running prefix of each row group's row
+    // count, the weighted draw's search table. The column is chosen per fill, so this reads the
+    // whole-table footer, not a per-column one.
+    if (loader.group_prefix_.push_back(0) != status_t::success_k)
+        return result_t::fail(status_t::bad_alloc_k, "row-group prefix allocation failed");
     for (std::size_t index = 0; index != loader.absolute_paths_.size(); ++index) {
         auto metadata = parquet_file_t::table_metadata(session, loader.absolute_paths_[index]);
         if (!metadata) return result_t::fail(std::move(metadata));
         if (metadata->rows == 0)
             return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
-        loader.row_prefix_[index + 1] = loader.row_prefix_[index] + metadata->rows;
-        loader.reservoir_.charge(*metadata);
+        for (std::size_t group = 0; group != metadata->group_rows.size(); ++group) {
+            if (metadata->group_rows[group] == 0) continue;
+            if (loader.group_prefix_.push_back(loader.group_prefix_[loader.group_shard_.size()] +
+                                               metadata->group_rows[group]) != status_t::success_k ||
+                loader.group_shard_.push_back(static_cast<u32_t>(index)) != status_t::success_k ||
+                loader.group_index_.push_back(static_cast<u32_t>(group)) != status_t::success_k)
+                return result_t::fail(status_t::bad_alloc_k, "row-group table append failed");
+        }
+        loader.reservoir_.charge_groups(*metadata);
     }
     return result_t {std::move(loader)};
 }
@@ -212,62 +217,71 @@ expected_t tokens_loader_parquet_t::fill(gpu_stream_t &gpu_stream, tokens_base_l
         return expected_t::fail(status_t::shape_unsupported_k, "the batch carries no segment capacity");
     std::size_t const total_segments = unroll * documents;
 
-    // Open distinct files with the keyed weighted draw shared with `drawn_shards`, then decode them into one
-    // device reservoir; the true pool size is the decoded row count.
-    auto picked = pick_shards_(gpu_rank, training_step, total_segments);
+    // Pick row groups with the keyed weighted draw shared with `drawn_shards`, then decode only
+    // them into one device reservoir; the true pool size is the decoded row count.
+    auto picked = pick_groups_(gpu_rank, training_step, total_segments);
     if (!picked) return expected_t::fail(std::move(picked));
-    array<sz::string_view_t> const picked_paths = std::move(picked.value_);
-    std::size_t const picked_count = picked_paths.size();
     constexpr splitmix64_hash_t hash {};
 
-    auto reservoir_read = parquet_file_t::make(*storage_, picked_paths.view(), {&config.column, 1}, gpu_stream);
+    auto reservoir_read = parquet_file_t::make(*storage_, picked->paths.view(), {&config.column, 1},
+                                               picked->groups.view(), gpu_stream);
     if (!reservoir_read) return expected_t::fail(std::move(reservoir_read));
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();
     if (pooled_rows < total_segments)
         return expected_t::fail(status_t::shape_unsupported_k,
                                 "{} pooled rows across {} files cover fewer than the {} segments this fill needs",
-                                pooled_rows, picked_count, total_segments);
+                                pooled_rows, picked->paths.size(), total_segments);
 
     // Draw the pool's rows and pack every batch — shared with the JSONL loader.
     return pack_reservoir_(reservoir.column(0), pooled_rows, hash(seed_, gpu_rank, row_draw_salt_k),
                            data_epoch_t {training_step}, batches, gpu_stream);
 }
 
-expected<array<sz::string_view_t>> tokens_loader_parquet_t::pick_shards_(u32_t gpu_rank, u32_t training_step,
-                                                                         std::size_t target_segments) const noexcept {
-    using result_t = expected<array<sz::string_view_t>>;
-    std::size_t const shard_count = absolute_paths_.size();
-    std::size_t const floor_files = std::min<std::size_t>(2, shard_count);
-    std::size_t const total_rows = row_prefix_[shard_count];
+expected<tokens_loader_parquet_t::picked_groups_t> tokens_loader_parquet_t::pick_groups_(
+    u32_t gpu_rank, u32_t training_step, std::size_t target_segments) const noexcept {
+    using result_t = expected<picked_groups_t>;
+    std::size_t const group_count = group_shard_.size();
+    std::size_t const floor_files = std::min<std::size_t>(2, absolute_paths_.size());
+    std::size_t const total_rows = group_prefix_[group_count];
     constexpr splitmix64_hash_t hash {};
 
-    // A keyed row position over the whole dataset binary-searches the prefix to its owning file; distinct files
-    // accumulate until the pool covers the target, never fewer than two unless the dataset is one file.
-    array<sz::string_view_t> picked_paths;
-    array<std::size_t> picked_shards;
-    if (picked_paths.reserve(shard_count) != status_t::success_k ||
-        picked_shards.reserve(shard_count) != status_t::success_k)
-        return result_t::fail(status_t::bad_alloc_k, "file pick allocation failed");
+    // A keyed row position over the whole dataset binary-searches the prefix to its owning group;
+    // distinct groups accumulate until the pool covers the target, then only a new shard's group
+    // meets the floor of two, so a fill reads at most one group past its rows and one more.
+    picked_groups_t picked;
+    array<std::size_t> picked_ids;
+    array<u32_t> picked_shards;
     std::size_t pooled_estimate = 0, attempt = 0;
-    while ((pooled_estimate < target_segments || picked_paths.size() < floor_files) &&
-           picked_paths.size() < shard_count) {
+    while ((pooled_estimate < target_segments || picked.paths.size() < floor_files) &&
+           picked_ids.size() < group_count) {
         std::size_t const position = hash(seed_, training_step, gpu_rank, file_draw_salt_k, attempt) % total_rows;
         ++attempt;
-        std::size_t const file = static_cast<std::size_t>(
-            std::upper_bound(row_prefix_.begin(), row_prefix_.end(), position) - row_prefix_.begin() - 1);
-        if (std::find(picked_shards.begin(), picked_shards.end(), file) != picked_shards.end()) continue;
-        if (picked_shards.push_back(file) != status_t::success_k ||
-            picked_paths.push_back(absolute_paths_[file]) != status_t::success_k)
-            return result_t::fail(status_t::bad_alloc_k, "file pick append failed");
-        pooled_estimate += row_prefix_[file + 1] - row_prefix_[file];
+        std::size_t const group = static_cast<std::size_t>(
+            std::upper_bound(group_prefix_.begin(), group_prefix_.end(), position) - group_prefix_.begin() - 1);
+        if (std::find(picked_ids.begin(), picked_ids.end(), group) != picked_ids.end()) continue;
+        u32_t const shard = group_shard_[group];
+        auto const found = std::find(picked_shards.begin(), picked_shards.end(), shard);
+        if (found != picked_shards.end() && pooled_estimate >= target_segments) continue;
+        std::size_t const pick = static_cast<std::size_t>(found - picked_shards.begin());
+        if (found == picked_shards.end() && (picked_shards.push_back(shard) != status_t::success_k ||
+                                             picked.paths.push_back(absolute_paths_[shard]) != status_t::success_k ||
+                                             picked.groups.push_back(array<u32_t> {}) != status_t::success_k))
+            return result_t::fail(status_t::bad_alloc_k, "shard pick append failed");
+        if (picked_ids.push_back(group) != status_t::success_k ||
+            picked.groups[pick].push_back(group_index_[group]) != status_t::success_k)
+            return result_t::fail(status_t::bad_alloc_k, "row-group pick append failed");
+        pooled_estimate += group_prefix_[group + 1] - group_prefix_[group];
     }
-    return result_t {std::move(picked_paths)};
+    for (array<u32_t> &groups : picked.groups) std::sort(groups.begin(), groups.end()); // cuDF reads them ascending
+    return result_t {std::move(picked)};
 }
 
 expected<array<sz::string_view_t>> tokens_loader_parquet_t::drawn_shards(u32_t gpu_rank, u32_t training_step,
                                                                          std::size_t target_segments) const noexcept {
-    return pick_shards_(gpu_rank, training_step, target_segments);
+    auto picked = pick_groups_(gpu_rank, training_step, target_segments);
+    if (!picked) return expected<array<sz::string_view_t>>::fail(std::move(picked));
+    return expected<array<sz::string_view_t>> {std::move(picked->paths)};
 }
 
 expected<tokens_loader_jsonl_t> tokens_loader_jsonl_t::make(gpu_direct_storage_session_t &session,

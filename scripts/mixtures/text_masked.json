@@ -1,5 +1,5 @@
 {
-  "mixture": "text_base",
+  "mixture": "text_masked",
   "datasets": [
     {
       "name": "fineweb_2",

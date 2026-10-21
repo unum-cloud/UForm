@@ -1,5 +1,5 @@
 {
-  "mixture": "tiny_text",
+  "mixture": "tiny_text_masked",
   "datasets": [
     {
       "name": "xlsum",

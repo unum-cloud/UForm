@@ -2,7 +2,7 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""Thin, cuDF-free reader over the per-mixture training JSONs (one flat `scripts/data/<mixture>.json`).
+"""Thin, cuDF-free reader over the per-mixture training JSONs (one flat `scripts/mixtures/<mixture>.json`).
 
 A mixture JSON is the language-neutral recipe both Python acquisition and C++ training read: a weighted
 list of datasets, each carrying its shard `glob` and the parquet column names it exposes (`text` for the
@@ -26,9 +26,9 @@ import json
 from functools import cache
 from pathlib import Path
 
-#: The repo root a relative `glob` anchors under, and the `scripts/data/` directory holding the mixture JSONs.
+#: The repo root a relative `glob` anchors under, and the `scripts/mixtures/` directory holding the mixture JSONs.
 project_root = Path(__file__).resolve().parents[2]
-mixtures_dir = Path(__file__).resolve().parent
+mixtures_dir = project_root / "scripts" / "mixtures"
 
 #: The dataset-entry keys whose VALUES are actual parquet column names; their union is a dataset's column
 #: contract. `text` is the MLM document column; the other four are the contrastive relation columns.
@@ -45,7 +45,7 @@ def _resolve_glob(glob: str) -> str:
 
 @cache
 def mixtures() -> dict[str, dict]:
-    """The `mixture_name -> parsed-mixture` mapping over every `scripts/data/*.json` with a `"mixture"` key."""
+    """The `mixture_name -> parsed-mixture` mapping over every `scripts/mixtures/*.json` with a `"mixture"` key."""
     parsed: dict[str, dict] = {}
     for path in sorted(mixtures_dir.glob("*.json")):
         data = json.loads(path.read_text())

@@ -133,10 +133,10 @@ def _cap_per_group(shards: list[str], per_group: int) -> list[str]:
     return kept
 
 
-#: img2dataset writes the fetched image bytes under `jpg` and the passed-through caption under `caption`, the
-#: same pair the WebDataset image sets (cc12m / laion_cc3m) commit — so a crawled shard is schema-identical to
-#: a muxed one and drops straight into the `image_caption` mixture (`anchor=caption`, `positive=media=jpg`).
 _CRAWL_IMAGE_COLUMN = "jpg"
+"""img2dataset writes the fetched image bytes under `jpg` and the passed-through caption under `caption`, the
+same pair the WebDataset image sets (cc12m / laion_cc3m) commit — so a crawled shard is schema-identical to
+a muxed one and drops straight into the `image_contrastive` mixture (`anchor=caption`, `positive=media=jpg`)."""
 _CRAWL_CAPTION_COLUMN = "caption"
 
 
