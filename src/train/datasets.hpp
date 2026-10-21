@@ -16,9 +16,10 @@
  *  entry names its anchor text column in @c anchor and its positive in @c positive : another text,
  *  or media also named in @c media , the column's name telling the modality. A paired entry may
  *  name hard negatives in @c negative , and text prefixes in @c anchor_prefix and
- *  @c positive_prefix . Every step each GPU draws one entry by weight and fills its batch from it.
- *  Pairs route as bags, so one mixture never mixes them with plain text, whose segments route
- *  alone.
+ *  @c positive_prefix . Each GPU draws one entry by weight per fill and packs its next
+ *  @c batches_per_fill batches from it, refilling on its own phase of that period, so the mixer's
+ *  world-wide shuffle sees datasets rotate a few GPUs at a time. Pairs route as bags, so one
+ *  mixture never mixes them with plain text, whose segments route alone.
  */
 #pragma once
 
@@ -110,19 +111,15 @@ struct dataset_source_t final : batch_source_t {
      *  @p trainer 's arenas. */
     [[nodiscard]] static expected_t make(dataset_source_t &placed, trainer_t &trainer) noexcept;
 
-    /** Take every GPU's next filled batch, filling the next @c batches_per_fill of them first once
-     *  the last are taken; the mixer then routes them into the replicas. */
+    /** Take every GPU's batch of this step, refilling a GPU whose period starts here; the mixer
+     *  then routes them into the replicas. */
     [[nodiscard]] expected_t fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept override;
 
   private:
 
-    /** Each GPU's batches draw an entry each by weight, keyed by the run seed, @p data_epoch , the
-     *  GPU's world coordinate and the batch, and those sharing an entry fill from one read. */
-    [[nodiscard]] expected_t fill_batches_(trainer_t &trainer, data_epoch_t data_epoch) noexcept;
-
-    /** Fill @p batches of GPU @p member from mixture entry @p entry , one read for the run. */
-    [[nodiscard]] expected_t fill_run_(trainer_t &trainer, std::size_t member, std::size_t entry,
-                                       std::span<multimodal_batch_on_gpu_t> batches, data_epoch_t data_epoch) noexcept;
+    /** GPU @p member draws one entry by weight, keyed by the run seed, @p data_epoch and its world
+     *  coordinate, and packs its @c batches_per_fill batches from one read of it. */
+    [[nodiscard]] expected_t fill_member_(trainer_t &trainer, std::size_t member, data_epoch_t data_epoch) noexcept;
 
     /** Rebuild every replica's relations over the world's vertices, PAD read off the mixer's world
      *  lengths: the segments of a bag attract each other, and text alone keeps self-edges. */
@@ -153,14 +150,13 @@ struct dataset_source_t final : batch_source_t {
     /** Every GPU's batch of this step, swapped in from @ref filled_ for the mixer and out after. */
     per_gpu_array<multimodal_batch_on_gpu_t> loaded_ {};
 
-    /** The next of the filled batches a step takes; at @c batches_per_fill the next step fills. */
-    std::size_t next_batch_ = 0;
+    /** Every GPU's phase in the fill period, its world coordinate's share of it, so the GPUs refill
+     *  on different steps. */
+    per_gpu_array<std::size_t> phases_ {};
 
-    /** The data epoch of the last fill, keying the order its batches are taken in. */
-    data_epoch_t filled_epoch_ {};
-
-    /** @b [batches_per_fill] the entry each filled batch draws, sorted so one read packs a run. */
-    array<std::size_t> batch_entries_ {};
+    /** The steps this source served since @ref make , counting the period even for a held-out
+     *  source called at sparse epochs; the first refills every GPU. */
+    std::size_t served_steps_ = 0;
     multimodal_batch_mixer_t mixer_ {};
 
     /** @b [gpus,segments] every mixed segment's bag, length and role across this process's GPUs,
