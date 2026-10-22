@@ -448,10 +448,24 @@ expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
         f32r1_tensor_arena_t::uninitialized({std::max(widest, inputs) * hidden}, f32_alloc).value;
     scratch.packed_input = b8r1_tensor_arena_t::uninitialized({packed_bytes}, b8_alloc).value;
     scratch.weight_gradient_workspace = b8r1_tensor_arena_t::uninitialized({workspace_bytes}, b8_alloc).value;
+    std::size_t const heads = hidden / transformer_head_dim_k;
+    scratch.qkv_products = f32r2_tensor_arena_t::uninitialized({tokens, 3 * hidden}, f32_alloc).value;
+    scratch.attn_residual = f32r2_tensor_arena_t::uninitialized({tokens, hidden}, f32_alloc).value;
+    scratch.gate_up_products = f32r2_tensor_arena_t::uninitialized({tokens, 2 * ffn}, f32_alloc).value;
+    scratch.attention_products = f32r2_tensor_arena_t::uninitialized({tokens, hidden}, f32_alloc).value;
+    scratch.normalized = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
+    scratch.attn_output = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
+    scratch.mlp_normalized = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
+    scratch.silu_up = bf16r2_tensor_arena_t::uninitialized({tokens, ffn}, bf16_alloc).value;
+    scratch.qkv = bf16r2_tensor_arena_t::uninitialized({tokens, 3 * hidden}, bf16_alloc).value;
+    scratch.softmax_log_sum_exp = f32r1_tensor_arena_t::uninitialized({tokens * heads}, f32_alloc).value;
     if (!scratch.products || !scratch.residual_grad || !scratch.narrowed_grad || !scratch.transposed_grad ||
         !scratch.transposed_input || !scratch.transposed_weight || !scratch.packed_qkv || !scratch.qkv_grad ||
         !scratch.packed_keys_values || !scratch.weight_grad_products || !scratch.packed_input ||
-        (workspace_bytes != 0 && !scratch.weight_gradient_workspace))
+        (workspace_bytes != 0 && !scratch.weight_gradient_workspace) || !scratch.qkv_products ||
+        !scratch.attn_residual || !scratch.gate_up_products || !scratch.attention_products || !scratch.normalized ||
+        !scratch.attn_output || !scratch.mlp_normalized || !scratch.silu_up || !scratch.qkv ||
+        !scratch.softmax_log_sum_exp)
         return result_t::fail(status_t::bad_alloc_k, "scratch allocation failed (arena_used={})", arena.used());
     return result_t {std::move(scratch)};
 }
@@ -503,23 +517,11 @@ expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &a
         !block.pre_norm_scale_grad_ || !block.post_norm_scale_grad_)
         return expected<transformer_block_bf16_t>::fail(status_t::bad_alloc_k,
                                                         "weights allocation failed (arena_used={})", arena.used());
-    // Forward stashes the backward consumes.
+    // The input the backward and its forward replay start from; other stashes are the scratch's.
     block.input_stash_ = f32r2_tensor_arena_t::uninitialized({tokens, hidden}, f32_alloc).value;
-    block.qkv_products_ = f32r2_tensor_arena_t::uninitialized({tokens, 3 * hidden}, f32_alloc).value;
-    block.attn_residual_ = f32r2_tensor_arena_t::uninitialized({tokens, hidden}, f32_alloc).value;
-    block.gate_up_products_ = f32r2_tensor_arena_t::uninitialized({tokens, 2 * ffn}, f32_alloc).value;
-    block.normalized_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
-    block.qkv_ = bf16r2_tensor_arena_t::uninitialized({tokens, 3 * hidden}, bf16_alloc).value;
-    block.attention_products_ = f32r2_tensor_arena_t::uninitialized({tokens, hidden}, f32_alloc).value;
-    block.attn_output_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
-    block.mlp_normalized_ = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
-    block.silu_up_ = bf16r2_tensor_arena_t::uninitialized({tokens, ffn}, bf16_alloc).value;
-    block.softmax_log_sum_exp_ = f32r1_tensor_arena_t::uninitialized({tokens * heads}, f32_alloc).value;
-    if (!block.input_stash_ || !block.qkv_products_ || !block.attn_residual_ || !block.gate_up_products_ ||
-        !block.normalized_ || !block.qkv_ || !block.attention_products_ || !block.attn_output_ ||
-        !block.mlp_normalized_ || !block.silu_up_ || !block.softmax_log_sum_exp_)
+    if (!block.input_stash_)
         return expected<transformer_block_bf16_t>::fail(status_t::bad_alloc_k,
-                                                        "stashes allocation failed (arena_used={})", arena.used());
+                                                        "input stash allocation failed (arena_used={})", arena.used());
 
     // Each weight packs as the forward's B operand [out,in] and, transposed, as the data gradient's [in,out].
     bf16r2_tensor_arena_t const *const weights[] = {&block.qkv_weight_, &block.out_weight_, &block.gate_up_weight_,
@@ -560,31 +562,32 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
     // <= max_tokens` check above guarantees every one of these succeeds.
 
     bool const resized = nk::succeeded(input_stash_.resize({tokens, hidden})) &&
-                         nk::succeeded(qkv_products_.resize({tokens, 3 * hidden})) &&
-                         nk::succeeded(attn_residual_.resize({tokens, hidden})) &&
-                         nk::succeeded(gate_up_products_.resize({tokens, 2 * ffn})) &&
-                         nk::succeeded(normalized_.resize({tokens, hidden})) &&
-                         nk::succeeded(qkv_.resize({tokens, 3 * hidden})) &&
-                         nk::succeeded(attention_products_.resize({tokens, hidden})) &&
-                         nk::succeeded(attn_output_.resize({tokens, hidden})) &&
-                         nk::succeeded(mlp_normalized_.resize({tokens, hidden})) &&
-                         nk::succeeded(silu_up_.resize({tokens, ffn}));
+                         nk::succeeded(scratch_->qkv_products.resize({tokens, 3 * hidden})) &&
+                         nk::succeeded(scratch_->attn_residual.resize({tokens, hidden})) &&
+                         nk::succeeded(scratch_->gate_up_products.resize({tokens, 2 * ffn})) &&
+                         nk::succeeded(scratch_->normalized.resize({tokens, hidden})) &&
+                         nk::succeeded(scratch_->qkv.resize({tokens, 3 * hidden})) &&
+                         nk::succeeded(scratch_->attention_products.resize({tokens, hidden})) &&
+                         nk::succeeded(scratch_->attn_output.resize({tokens, hidden})) &&
+                         nk::succeeded(scratch_->mlp_normalized.resize({tokens, hidden})) &&
+                         nk::succeeded(scratch_->silu_up.resize({tokens, ffn}));
     if (!resized)
         return expected_t::fail(status_t::shape_unsupported_k, "activation stashes cannot hold {} tokens (baked {})",
                                 tokens, config_.max_tokens);
 
-    // Residual stash: the backward's pre-norm derivative needs the raw input.
-    if (expected_t stashed = copy_device_to_device(f32r1_view_t {input.data(), tokens * hidden},
-                                                   f32r1_span_t {input_stash_.data(), tokens * hidden}, stream);
-        !stashed)
-        return stashed;
+    // The backward's pre-norm derivative needs the raw input; a replay already reads it from here.
+    if (input.data() != input_stash_.data())
+        if (expected_t stashed = copy_device_to_device(f32r1_view_t {input.data(), tokens * hidden},
+                                                       f32r1_span_t {input_stash_.data(), tokens * hidden}, stream);
+            !stashed)
+            return stashed;
 
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     f32_t const epsilon = config_.rms_eps;
     f32_t *const pre_scale = widened_norm_scales_.data();
     f32_t *const post_scale = pre_scale + hidden;
     std::size_t const qkv_stride = 3 * hidden * sizeof(f32_t), qkv_narrow_stride = 3 * hidden * sizeof(bf16_t);
-    bf16r2_span_t const packed_qkv = qkv_.span();
+    bf16r2_span_t const packed_qkv = scratch_->qkv.span();
 
     // The norms read Float32 γ, widened from the trained BFloat16 scales every step.
     expected_t staged = numkong_result(
@@ -597,22 +600,22 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
     // Pre-attention norm narrows the residual stream into the fused QKV product's operand.
     if (staged)
         staged = numkong_result(
-            nk_each_rmscast_bf16_best(input.data(), pre_scale, numkong_scalars(normalized_.data()), tokens, 1, hidden,
-                                      hidden * sizeof(f32_t), hidden * sizeof(bf16_t), epsilon, capabilities_,
+            nk_each_rmscast_bf16_best(input.data(), pre_scale, numkong_scalars(scratch_->normalized.data()), tokens, 1,
+                                      hidden, hidden * sizeof(f32_t), hidden * sizeof(bf16_t), epsilon, capabilities_,
                                       stream.numkong()),
             "pre-attention norm");
     if (staged)
-        staged = multiply_bf16(normalized_.view(), packed_weights_[product_qkv_k].view(), qkv_products_.span(),
-                               capabilities_, stream);
+        staged = multiply_bf16(scratch_->normalized.view(), packed_weights_[product_qkv_k].view(),
+                               scratch_->qkv_products.span(), capabilities_, stream);
     // `nk_cast` has no row stride, so narrowing V narrows whole rows; the QK-norm then overwrites the Q|K slices.
     if (staged)
-        staged = numkong_result(nk_cast_best(qkv_products_.data(), nk_f32_k, packed_qkv.data(), nk_bf16_k,
+        staged = numkong_result(nk_cast_best(scratch_->qkv_products.data(), nk_f32_k, packed_qkv.data(), nk_bf16_k,
                                              tokens * 3 * hidden, capabilities_, stream.numkong()),
                                 "QKV narrowing");
     if (staged)
         staged = numkong_result(
-            nk_each_rmscast_bf16_best(qkv_products_.data(), NUMKONG_NULL, numkong_scalars(packed_qkv.data()), tokens,
-                                      2 * heads, transformer_head_dim_k, qkv_stride, qkv_narrow_stride, epsilon,
+            nk_each_rmscast_bf16_best(scratch_->qkv_products.data(), NUMKONG_NULL, numkong_scalars(packed_qkv.data()),
+                                      tokens, 2 * heads, transformer_head_dim_k, qkv_stride, qkv_narrow_stride, epsilon,
                                       capabilities_, stream.numkong()),
             "QK-norm");
     if (!staged) return staged;
@@ -626,41 +629,43 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
     if (staged) staged = pack_keys_values_(segment_offsets, segment_lengths, stream);
     if (staged)
         staged = numkong_result(
-            nk_attention_packed_bf16_best(
-                heads, heads, transformer_head_dim_k, segment_offsets.data(), tokens, transformer_attention_scale(),
-                NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, numkong_scalars(qkv_.data()), qkv_narrow_stride,
-                scratch_->packed_keys_values.data(), attention_products_.data(), hidden * sizeof(f32_t),
-                softmax_log_sum_exp_.data(), 0, NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, capabilities_, stream.numkong()),
+            nk_attention_packed_bf16_best(heads, heads, transformer_head_dim_k, segment_offsets.data(), tokens,
+                                          transformer_attention_scale(), NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX,
+                                          numkong_scalars(scratch_->qkv.data()), qkv_narrow_stride,
+                                          scratch_->packed_keys_values.data(), scratch_->attention_products.data(),
+                                          hidden * sizeof(f32_t), scratch_->softmax_log_sum_exp.data(), 0,
+                                          NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, capabilities_, stream.numkong()),
             "attention");
     dim3 const segment_grid {static_cast<u32_t>(segment_lengths.extent(0)), 1u, 1u};
     if (staged)
         staged = launch_kernel(&transformer_zero_gaps_kernel_, segment_grid, block_shape, stream,
-                               attention_products_.span(), segment_offsets, segment_lengths);
+                               scratch_->attention_products.span(), segment_offsets, segment_lengths);
     if (staged)
-        staged = numkong_result(nk_cast_best(attention_products_.data(), nk_f32_k, attn_output_.data(), nk_bf16_k,
-                                             tokens * hidden, capabilities_, stream.numkong()),
-                                "attention narrowing");
+        staged = numkong_result(
+            nk_cast_best(scratch_->attention_products.data(), nk_f32_k, scratch_->attn_output.data(), nk_bf16_k,
+                         tokens * hidden, capabilities_, stream.numkong()),
+            "attention narrowing");
     if (!staged) return staged;
 
     // Out-projection, the residual into the Float32 stream, and the post-attention norm narrowing it.
-    staged = multiply_bf16(attn_output_.view(), packed_weights_[product_out_k].view(), attn_residual_.span(),
-                           capabilities_, stream);
+    staged = multiply_bf16(scratch_->attn_output.view(), packed_weights_[product_out_k].view(),
+                           scratch_->attn_residual.span(), capabilities_, stream);
     if (staged)
-        staged = numkong_result(nk_each_sum_f32_best(attn_residual_.data(), input.data(), tokens * hidden,
-                                                     attn_residual_.data(), capabilities_, stream.numkong()),
+        staged = numkong_result(nk_each_sum_f32_best(scratch_->attn_residual.data(), input.data(), tokens * hidden,
+                                                     scratch_->attn_residual.data(), capabilities_, stream.numkong()),
                                 "attention residual");
     if (staged)
-        staged = numkong_result(
-            nk_each_rmscast_bf16_best(attn_residual_.data(), post_scale, numkong_scalars(mlp_normalized_.data()),
-                                      tokens, 1, hidden, hidden * sizeof(f32_t), hidden * sizeof(bf16_t), epsilon,
-                                      capabilities_, stream.numkong()),
-            "post-attention norm");
+        staged = numkong_result(nk_each_rmscast_bf16_best(scratch_->attn_residual.data(), post_scale,
+                                                          numkong_scalars(scratch_->mlp_normalized.data()), tokens, 1,
+                                                          hidden, hidden * sizeof(f32_t), hidden * sizeof(bf16_t),
+                                                          epsilon, capabilities_, stream.numkong()),
+                                "post-attention norm");
 
     // SwiGLU MLP: fused gate/up product, SiLU·up in Float32 narrowed by a cast, down product, residual.
     if (staged)
-        staged = multiply_bf16(mlp_normalized_.view(), packed_weights_[product_gate_up_k].view(),
-                               gate_up_products_.span(), capabilities_, stream);
-    f32_t const *const gate = gate_up_products_.data();
+        staged = multiply_bf16(scratch_->mlp_normalized.view(), packed_weights_[product_gate_up_k].view(),
+                               scratch_->gate_up_products.span(), capabilities_, stream);
+    f32_t const *const gate = scratch_->gate_up_products.data();
     std::size_t const gate_up_stride = 2 * ffn * sizeof(f32_t);
     if (staged)
         staged = numkong_result(
@@ -668,13 +673,14 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
                                     gate_up_stride, ffn * sizeof(f32_t), 1.0f, 1.0f, capabilities_, stream.numkong()),
             "SwiGLU");
     if (staged)
-        staged = numkong_result(nk_cast_best(scratch_->products.data(), nk_f32_k, silu_up_.data(), nk_bf16_k,
+        staged = numkong_result(nk_cast_best(scratch_->products.data(), nk_f32_k, scratch_->silu_up.data(), nk_bf16_k,
                                              tokens * ffn, capabilities_, stream.numkong()),
                                 "SwiGLU narrowing");
     if (staged)
-        staged = multiply_bf16(silu_up_.view(), packed_weights_[product_down_k].view(), output, capabilities_, stream);
+        staged = multiply_bf16(scratch_->silu_up.view(), packed_weights_[product_down_k].view(), output, capabilities_,
+                               stream);
     if (staged)
-        staged = numkong_result(nk_each_sum_f32_best(output.data(), attn_residual_.data(), tokens * hidden,
+        staged = numkong_result(nk_each_sum_f32_best(output.data(), scratch_->attn_residual.data(), tokens * hidden,
                                                      output.data(), capabilities_, stream.numkong()),
                                 "MLP residual");
     return staged;
@@ -728,20 +734,20 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
     if (staged)
         staged = multiply_bf16(hidden_narrowed, packed_weights_transposed_[product_down_k].view(), silu_up_grad,
                                capabilities_, stream);
-    if (staged) staged = weight_gradient(hidden_narrowed, silu_up_.view(), down_weight_grad_.span());
+    if (staged) staged = weight_gradient(hidden_narrowed, scratch_->silu_up.view(), down_weight_grad_.span());
     // The gate/up gradient overwrites the narrowed output gradient both down-projection products consumed.
     if (staged)
         staged = launch_kernel(&transformer_swiglu_backward_kernel_, dim3 {static_cast<u32_t>(tokens), 1u, 1u},
-                               block_shape, stream, gate_up_products_.view(), f32r2_view_t {silu_up_grad},
+                               block_shape, stream, scratch_->gate_up_products.view(), f32r2_view_t {silu_up_grad},
                                gate_up_grad);
     if (staged)
         staged = multiply_bf16(gate_up_grad, packed_weights_transposed_[product_gate_up_k].view(), hidden_products,
                                capabilities_, stream);
-    if (staged) staged = weight_gradient(gate_up_grad, mlp_normalized_.view(), gate_up_weight_grad_.span());
+    if (staged) staged = weight_gradient(gate_up_grad, scratch_->mlp_normalized.view(), gate_up_weight_grad_.span());
 
     // Post-attention norm backward: the residual-stream gradient adds the output gradient.
     if (staged)
-        staged = launch_kernel(&rmscast_backward_kernel, band_grid, block_shape, stream, attn_residual_.view(),
+        staged = launch_kernel(&rmscast_backward_kernel, band_grid, block_shape, stream, scratch_->attn_residual.view(),
                                post_norm_scale_.view(), f32r2_view_t {hidden_products}, output_grad,
                                scratch.residual_grad.span(), scale_grad_partials, epsilon);
     if (staged)
@@ -756,7 +762,7 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
     if (staged)
         staged = multiply_bf16(hidden_narrowed, packed_weights_transposed_[product_out_k].view(), hidden_products,
                                capabilities_, stream);
-    if (staged) staged = weight_gradient(hidden_narrowed, attn_output_.view(), out_weight_grad_.span());
+    if (staged) staged = weight_gradient(hidden_narrowed, scratch_->attn_output.view(), out_weight_grad_.span());
 
     // Attention backward into the zeroed Float32 dQ|dK|dV rows, narrowed into the packed gradient,
     // then the inverse rotation and the QK-norm backward.
@@ -772,9 +778,9 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
         staged = numkong_result(
             nk_attention_packed_gradients_bf16_best(
                 heads, heads, transformer_head_dim_k, segment_offsets.data(), tokens, transformer_attention_scale(),
-                NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, numkong_scalars(qkv_.data()), 3 * hidden * sizeof(bf16_t),
-                scratch.packed_keys_values.data(), attention_products_.data(), hidden_products.data(),
-                hidden * sizeof(f32_t), softmax_log_sum_exp_.data(), qkv_grad.data(), qkv_grad_stride,
+                NUMKONG_SIZE_MAX, NUMKONG_SIZE_MAX, numkong_scalars(scratch_->qkv.data()), 3 * hidden * sizeof(bf16_t),
+                scratch.packed_keys_values.data(), scratch_->attention_products.data(), hidden_products.data(),
+                hidden * sizeof(f32_t), scratch_->softmax_log_sum_exp.data(), qkv_grad.data(), qkv_grad_stride,
                 qkv_grad.data() + hidden, qkv_grad.data() + 2 * hidden, qkv_grad_stride, 0, NUMKONG_SIZE_MAX,
                 NUMKONG_NULL, 0, capabilities_, stream.numkong()),
             "attention backward");
@@ -793,13 +799,14 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
                            coords, heads, inverse_sign);
     if (staged)
         staged = launch_kernel(&transformer_qk_norm_backward_kernel_, vector_grid, block_shape, stream,
-                               scratch.packed_qkv.span(), qkv_products_.view(), 2u * heads, epsilon);
+                               scratch.packed_qkv.span(), scratch_->qkv_products.view(), 2u * heads, epsilon);
 
     // QKV projection backward, then the pre-attention norm backward adding the residual-stream gradient.
     if (staged)
         staged = multiply_bf16(scratch.packed_qkv.view(), packed_weights_transposed_[product_qkv_k].view(),
                                hidden_products, capabilities_, stream);
-    if (staged) staged = weight_gradient(scratch.packed_qkv.view(), normalized_.view(), qkv_weight_grad_.span());
+    if (staged)
+        staged = weight_gradient(scratch.packed_qkv.view(), scratch_->normalized.view(), qkv_weight_grad_.span());
     if (staged)
         staged = launch_kernel(&rmscast_backward_kernel, band_grid, block_shape, stream, input_stash_.view(),
                                pre_norm_scale_.view(), f32r2_view_t {hidden_products}, scratch.residual_grad.view(),
@@ -825,7 +832,7 @@ expected_t transformer_block_bf16_t::pack_keys_values_(u32r1_view_t segment_offs
                                                        gpu_stream_t &stream) noexcept {
     u32_t const hidden = config_.hidden, heads = hidden / transformer_head_dim_k;
     std::size_t const segments = segment_lengths.extent(0), stride = 3 * hidden * sizeof(bf16_t);
-    nk_bf16_t const *const qkv = numkong_scalars(qkv_.data());
+    nk_bf16_t const *const qkv = numkong_scalars(scratch_->qkv.data());
     return numkong_result(nk_attention_pack_bf16_best(heads, transformer_head_dim_k, segment_offsets.data(),
                                                       segment_lengths.data(), segments, qkv + hidden, stride,
                                                       qkv + 2 * hidden, stride, scratch_->packed_keys_values.data(), 0,

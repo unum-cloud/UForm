@@ -26,6 +26,8 @@
  *      - @ref block_host_replay : one block's forward and attention backward over ragged, padded
  *        segments with M-RoPE coordinates on every axis against a Float64 host replay, the one
  *        check exact enough for the attention and rotary paths.
+ *      - @ref block_recompute_replays : a block's forward replayed from its input stash after
+ *        another block overwrote their shared scratch reproduces its backward bitwise.
  *
  *  The forward and the backward both round their activations to BFloat16, so a forward's loss
  *  carries a few thousandths of a nat of rounding noise and a finite difference agrees with the
@@ -643,7 +645,8 @@ static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t bet
                     f64_t const start = rows == 1 ? master[row, column] : started[row, column];
                     f64_t const clipped = clip * update_at(row, column);
                     first_moment[row, column] = beta1 * first_moment[row, column] + (1.0 - beta1) * clipped;
-                    f64_t const wanted = start - learning_rate * (beta1 != 0.0f ? first_moment[row, column] : clipped);
+                    f64_t const corrected = first_moment[row, column] / (1.0 - std::pow(f64_t(beta1), f64_t(step)));
+                    f64_t const wanted = start - learning_rate * (beta1 != 0.0f ? corrected : clipped);
                     f64_t const distance = std::fabs(got[row, column] - wanted) / bf16_spacing_(wanted);
                     worst = std::max(worst, distance);
                     off_grid += distance > 1.0 ? 1u : 0u;
@@ -761,6 +764,29 @@ static void rotate_(auto &&values, nk::tensor_view<i16_t, 1> coordinates, f64_t 
     }
 }
 
+/** Seed @p block 's matrices for unit-variance outputs from draws salted @p salt onward and its
+ *  norm scales to one, leaving the six narrowed host copies in @p weights . */
+[[nodiscard]] static bool seed_block_(transformer_block_bf16_t &block, u64_t seed, u32_t salt,
+                                      st::basic_vector<f64_t> *weights) noexcept {
+    std::size_t const hidden = block.config().hidden, ffn = block.config().ffn_expansion * hidden;
+    struct seeded_t {
+        bf16r1_span_t weights;
+        std::size_t fan_in;
+    };
+    seeded_t const seeded[] = {{block.qkv_weight(), hidden},     {block.out_weight(), hidden},
+                               {block.gate_up_weight(), hidden}, {block.down_weight(), ffn},
+                               {block.pre_norm_scale(), 0},      {block.post_norm_scale(), 0}};
+    for (u32_t matrix = 0; matrix != 6u; ++matrix) {
+        if (st::failed(weights[matrix].resize(seeded[matrix].weights.extent(0)))) return false;
+        f64_t const deviation = seeded[matrix].fan_in ? 1.0 / std::sqrt(f64_t(seeded[matrix].fan_in)) : 0.0;
+        for (std::size_t index = 0; index != weights[matrix].size(); ++index)
+            weights[matrix][index] = deviation ? keyed_uniform_(seed, salt + matrix, index) * 1.7320508 * deviation
+                                               : 1.0;
+        if (!upload_narrowed_(weights[matrix], seeded[matrix].weights.data())) return false;
+    }
+    return true;
+}
+
 /** One block over four segments in 64-token windows, every other one 40 tokens long, with two heads
  *  and M-RoPE coordinates on all three axes: its forward and its attention backward against a
  *  Float64 host replay, the output of every token, and the dQ, dK and dV every segment's softmax
@@ -787,24 +813,8 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
 
     // Weights of unit-variance outputs, unit norm scales, and unit-variance inputs and output
     // gradients.
-    struct seeded_t {
-        bf16r1_span_t weights;
-        std::size_t fan_in;
-    };
-    seeded_t const seeded[] = {{block->qkv_weight(), hidden},     {block->out_weight(), hidden},
-                               {block->gate_up_weight(), hidden}, {block->down_weight(), ffn},
-                               {block->pre_norm_scale(), 0},      {block->post_norm_scale(), 0}};
     st::basic_vector<f64_t> weights[6];
-    for (u32_t matrix = 0; matrix != 6u; ++matrix) {
-        if (st::failed(weights[matrix].resize(seeded[matrix].weights.extent(0))))
-            return suite.check(false, "staging failed");
-        f64_t const deviation = seeded[matrix].fan_in ? 1.0 / std::sqrt(f64_t(seeded[matrix].fan_in)) : 0.0;
-        for (std::size_t index = 0; index != weights[matrix].size(); ++index)
-            weights[matrix][index] =
-                deviation ? keyed_uniform_(suite.settings.seed, 32u + matrix, index) * 1.7320508 * deviation : 1.0;
-        if (!upload_narrowed_(weights[matrix], seeded[matrix].weights.data()))
-            return suite.check(false, "weights upload failed");
-    }
+    if (!seed_block_(*block, suite.settings.seed, 32u, weights)) return suite.check(false, "weights upload failed");
     st::basic_vector<f32_t> input, output_grad, output;
     st::basic_vector<f64_t> widened_input;
     st::basic_vector<u32_t> offsets, lengths;
@@ -1001,6 +1011,95 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
                     roles[role], worst_grad[role], largest_grad[role], segments);
 }
 
+/** A block's forward replayed from its own @c input() after another block's forward overwrote
+ *  their shared scratch reproduces its backward bitwise, as the tower's recomputing backward
+ *  relies on. */
+static void block_recompute_replays(test_suite_t &suite, device_t &device) {
+    switch_to_gpu_t scope {device.stream};
+    std::size_t const hidden = 256, sequence = 64, segments = 2, tokens = sequence * segments;
+    expected<gpu_arena_t> arena = gpu_arena_t::make(0, case_arena_bytes_k);
+    if (!arena) return suite.check(false, "arena: {}", arena.description_);
+    transformer_block_config_t config;
+    config.hidden = hidden;
+    config.ffn_expansion = 2;
+    config.max_tokens = tokens;
+    config.max_segments = segments;
+    config.max_segment_tokens = sequence;
+    expected<transformer_scratch_t> scratch = transformer_scratch_t::make(*arena, config, {}, 0);
+    if (!scratch) return suite.check(false, "scratch: {}", scratch.description_);
+    expected<transformer_block_bf16_t> block = transformer_block_bf16_t::make(*arena, *scratch, config);
+    if (!block) return suite.check(false, "block: {}", block.description_);
+    expected<transformer_block_bf16_t> other = transformer_block_bf16_t::make(*arena, *scratch, config);
+    if (!other) return suite.check(false, "other block: {}", other.description_);
+    expected<rope_angles_t> angles = rope_angles_t::make(*arena, sequence, rope_shape_t {},
+                                                         static_cast<f32_t>(rope_base_k));
+    if (!angles) return suite.check(false, "angles: {}", angles.description_);
+    st::basic_vector<f64_t> weights[6];
+    if (!seed_block_(*block, suite.settings.seed, 48u, weights) ||
+        !seed_block_(*other, suite.settings.seed, 56u, weights))
+        return suite.check(false, "weights upload failed");
+    st::basic_vector<f32_t> rows;
+    if (st::failed(rows.resize(3 * tokens * hidden))) return suite.check(false, "host staging failed");
+    for (std::size_t index = 0; index != rows.size(); ++index)
+        rows[index] = keyed_uniform_(suite.settings.seed, 64u, index) * 1.7320508f;
+    u32_t const offsets[] = {0, sequence, tokens}, lengths[] = {sequence, sequence * 5 / 8};
+    i16_t coordinates[tokens * 3] = {};
+    for (std::size_t token = 0; token != tokens; ++token) coordinates[token * 3] = static_cast<i16_t>(token % sequence);
+    f32_t *const device_rows = arena->allocate_object<f32_t>(3 * tokens * hidden);
+    f32_t *const device_output = arena->allocate_object<f32_t>(tokens * hidden);
+    f32_t *const device_input_grad = arena->allocate_object<f32_t>(tokens * hidden);
+    u32_t *const device_offsets = arena->allocate_object<u32_t>(segments + 1);
+    u32_t *const device_lengths = arena->allocate_object<u32_t>(segments);
+    i16_t *const device_coordinates = arena->allocate_object<i16_t>(tokens * 3);
+    cuMemcpyHtoD(device_address(device_rows), rows.data(), rows.size() * sizeof(f32_t));
+    cuMemcpyHtoD(device_address(device_offsets), offsets, sizeof(offsets));
+    cuMemcpyHtoD(device_address(device_lengths), lengths, sizeof(lengths));
+    cuMemcpyHtoD(device_address(device_coordinates), coordinates, sizeof(coordinates));
+    cuCtxSynchronize();
+    u32r1_view_t const segment_offsets {device_offsets, segments + 1}, segment_lengths {device_lengths, segments};
+    i16r2_view_t const coordinate_view {device_coordinates, tokens, 3};
+    f32r2_view_t const input {device_rows, tokens, hidden}, other_input {device_rows + tokens * hidden, tokens, hidden};
+    f32r2_view_t const output_grad {device_rows + 2 * tokens * hidden, tokens, hidden};
+    f32r2_span_t const output {device_output, tokens, hidden}, input_grad {device_input_grad, tokens, hidden};
+
+    // The first pass is the golden one; the second lets the other block overwrite the shared
+    // stashes and replays from the input stash, as `encoder_tower.cu`'s backward does.
+    bf16r1_view_t const weight_grads[] = {block->qkv_weight_grad(), block->out_weight_grad(),
+                                          block->gate_up_weight_grad(), block->down_weight_grad()};
+    st::basic_vector<f32_t> input_grads[2];
+    st::basic_vector<f64_t> grads[2][4];
+    expected_t staged = block->pack_weights(device.stream);
+    if (staged) staged = other->pack_weights(device.stream);
+    for (u32_t pass = 0; staged && pass != 2u; ++pass) {
+        staged = block->forward(input, output, segment_offsets, segment_lengths, angles->view(), coordinate_view,
+                                device.stream);
+        if (staged && pass == 1)
+            staged = other->forward(other_input, output, segment_offsets, segment_lengths, angles->view(),
+                                    coordinate_view, device.stream);
+        if (staged && pass == 1)
+            staged = block->forward(block->input(), output, segment_offsets, segment_lengths, angles->view(),
+                                    coordinate_view, device.stream);
+        if (staged)
+            staged = block->backward(output_grad, input_grad, segment_offsets, segment_lengths, angles->view(),
+                                     coordinate_view, device.stream);
+        if (!staged) break;
+        cuStreamSynchronize(device.stream.get());
+        if (st::failed(input_grads[pass].resize(tokens * hidden))) return suite.check(false, "host staging failed");
+        cuMemcpyDtoH(input_grads[pass].data(), device_address(device_input_grad), tokens * hidden * sizeof(f32_t));
+        for (u32_t matrix = 0; matrix != 4u; ++matrix)
+            if (!download_widened_(weight_grads[matrix].data(), weight_grads[matrix].extent(0), grads[pass][matrix]))
+                return suite.check(false, "gradients readback failed");
+    }
+    if (!staged) return suite.check(false, "block step: {}", staged.description_);
+    suite.check(std::memcmp(input_grads[0].data(), input_grads[1].data(), tokens * hidden * sizeof(f32_t)) == 0,
+                "the input gradient survives the replay bitwise");
+    char const *const names[] = {"qkv", "out", "gate_up", "down"};
+    for (u32_t matrix = 0; matrix != 4u; ++matrix)
+        suite.check(
+            std::memcmp(grads[0][matrix].data(), grads[1][matrix].data(), grads[0][matrix].size() * sizeof(f64_t)) == 0,
+            "the {} weight gradient survives the replay bitwise", names[matrix]);
+}
+
 int main(int, char **argv) {
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
     test_suite_t suite = test_suite_t::make(argv[0]);
@@ -1008,7 +1107,7 @@ int main(int, char **argv) {
     char const *const cases[] = {"gradients/tokens",    "gradients/omni",         "gradients/token_head",
                                  "masking/text_rows",   "masking/media_rows",     "init/chance_entropy",
                                  "adafactor/reference", "adafactor/first_moment", "adafactor/small_steps",
-                                 "block/host_replay"};
+                                 "block/host_replay",   "block/recompute_replays"};
     if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) {
         for (char const *name : cases) suite.skip(name, no_cuda_device_k);
         return suite.finish();
@@ -1030,5 +1129,6 @@ int main(int, char **argv) {
     suite.run("adafactor/first_moment", adafactor_reference, device, 0.9f);
     suite.run("adafactor/small_steps", adafactor_small_steps, device);
     suite.run("block/host_replay", block_host_replay, device);
+    suite.run("block/recompute_replays", block_recompute_replays, device);
     return suite.finish();
 }

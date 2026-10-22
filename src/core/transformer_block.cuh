@@ -284,6 +284,19 @@ struct transformer_scratch_t {
     /** The ordered depth slices of each weight gradient's product, sized for the most any of them
      *  takes. */
     b8r1_tensor_arena_t weight_gradient_workspace {};
+
+    /** The forward results a block's backward reads, shared by every block of the stack: backward
+     *  replays a block's forward from its stashed input to refill them, so one set serves every
+     *  depth. Float32: the QKV product holding the pre-norm Q and K, the attention residual, the
+     *  gate/up product, and the attention output before its cast. */
+    f32r2_tensor_arena_t qkv_products {}, attn_residual {}, gate_up_products {}, attention_products {};
+
+    /** BFloat16 A operands: the pre-attention norm output, the attention output, the post-attention
+     *  norm output, SiLU·up, and the normalized and rotated Q|K|V the attention reads. */
+    bf16r2_tensor_arena_t normalized {}, attn_output {}, mlp_normalized {}, silu_up {}, qkv {};
+
+    /** @b [tokens·heads] the attention's log-sum-exp, the backward's weights recomputed from it. */
+    f32r1_tensor_arena_t softmax_log_sum_exp {};
 };
 
 /** The training transformer block: BFloat16 products over a Float32 residual stream, forward and
@@ -314,7 +327,8 @@ struct transformer_block_bf16_t {
                                      u32r1_view_t segment_lengths, rope_angles_view_t angles, i16r2_view_t coords,
                                      gpu_stream_t &stream) noexcept;
 
-    /** One block backward, consuming the stashes @ref forward wrote — pure enqueue, capture-safe.
+    /** One block backward, consuming the stashes this block's @ref forward last wrote into the
+     *  shared scratch, so it runs right after that forward — pure enqueue, capture-safe.
      *  Weight gradients overwrite this block's buffers; @p input_grad receives the full upstream Float32
      *  token gradient and may not alias @p output_grad . */
     [[nodiscard]] expected_t backward(f32r2_view_t output_grad, f32r2_span_t input_grad, u32r1_view_t segment_offsets,
@@ -323,6 +337,9 @@ struct transformer_block_bf16_t {
 
     /** The baked geometry. */
     [[nodiscard]] transformer_block_config_t const &config() const noexcept { return config_; }
+
+    /** The input of the last @ref forward , which replaying it before @ref backward starts from. */
+    [[nodiscard]] f32r2_view_t input() const noexcept { return input_stash_.view(); }
 
     /** The four matmul weights, flattened, in declaration order — the mutable optimizer / IO
      *  boundary (initialization, checkpoint loads, updates). */
@@ -385,24 +402,10 @@ struct transformer_block_bf16_t {
     /** The two norm-scale gradients. */
     bf16r1_tensor_arena_t pre_norm_scale_grad_ {}, post_norm_scale_grad_ {};
 
-    /** Float32 forward stashes the backward reads: the residual-stream input, the QKV product holding the
-     *  pre-norm Q and K, the attention residual, and the gate/up product, all @b [tokens,·] and resized to
-     *  the step's live token count each forward. */
-    f32r2_tensor_arena_t input_stash_ {}, qkv_products_ {}, attn_residual_ {}, gate_up_products_ {};
-
-    /** BFloat16 forward stashes, every product's A operand: the pre-attention norm output, the
-     *  attention output, the post-attention norm output, and SiLU·up. */
-    bf16r2_tensor_arena_t normalized_ {}, attn_output_ {}, mlp_normalized_ {}, silu_up_ {};
-
-    /** @b [tokens,3·hidden] the normalized and rotated Q|K|V the attention reads, and its backward
-     *  again. */
-    bf16r2_tensor_arena_t qkv_ {};
-
-    /** Float32 @b [tokens,hidden] the attention output before its cast, read by its backward. */
-    f32r2_tensor_arena_t attention_products_ {};
-
-    /** @b [tokens·heads] the attention's log-sum-exp, the backward's weights recomputed from it. */
-    f32r1_tensor_arena_t softmax_log_sum_exp_ {};
+    /** @b [tokens,hidden] Float32 the residual-stream input, resized to the step's live token
+     *  count each forward: the backward's pre-norm derivative reads it, and a forward replay
+     *  starts from it. */
+    f32r2_tensor_arena_t input_stash_ {};
 
     /** Each weight @b [out,in] and its transpose @b [in,out] in NumKong's packed layout, refreshed by
      *  @ref pack_weights : the forward's and the data gradients' B operands. */

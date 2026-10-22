@@ -1220,8 +1220,14 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     f32r2_tensor_arena_t *grad_out = &token_grad_a_;
     f32r2_view_t flowing = grad_in->view();
     for (u32_t layer_index = config_.depth; layer_index != 0; --layer_index) {
-        staged = blocks_[layer_index - 1].backward(flowing, grad_out->span(), segment_offsets, segment_lengths,
-                                                   angles_.view(), coords_.view(), stream);
+        transformer_block_bf16_t &block = blocks_[layer_index - 1];
+        // The top block's stashes are still its forward's; the others replay from their input.
+        if (layer_index != config_.depth)
+            staged = block.forward(block.input(), activations_a_.span(), segment_offsets, segment_lengths,
+                                   angles_.view(), coords_.view(), stream);
+        if (staged)
+            staged = block.backward(flowing, grad_out->span(), segment_offsets, segment_lengths, angles_.view(),
+                                    coords_.view(), stream);
         if (!staged) return staged;
         flowing = grad_out->view();
         std::swap(grad_in, grad_out);

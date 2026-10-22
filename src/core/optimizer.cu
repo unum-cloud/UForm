@@ -114,8 +114,9 @@ static __global__ void adafactor_scale_kernel_(adafactor_state_t state, f32r1_vi
 
 /**
  *  @brief Apply the clipped update @c W -= @c lr·scale·G/√v , or its running mean under @p beta1
- *      when @p first_moments are kept, through the Float32 master for vector weights (the norm
- *      scales) and straight into BFloat16 otherwise, rounded stochastically under @p rounding_key .
+ *      divided by @p first_moment_correction when @p first_moments are kept, through the Float32
+ *      master for vector weights (the norm scales) and straight into BFloat16 otherwise, rounded
+ *      stochastically under @p rounding_key .
  *
  *  Every CTA folds the row-moment mean and the @p row_energies into the clip scale in the same
  *  order, so all of them agree bitwise.
@@ -125,7 +126,8 @@ static __global__ void adafactor_scale_kernel_(adafactor_state_t state, f32r1_vi
 static __global__ void adafactor_apply_kernel_(adafactor_state_t state, f32r1_view_t moments,
                                                f32r1_view_t reduced_gradients, f32r1_view_t row_energies,
                                                f32r1_span_t masters, f32_t learning_rate, f32_t clip_threshold,
-                                               u64_t rounding_key, f32r1_span_t first_moments, f32_t beta1) {
+                                               u64_t rounding_key, f32r1_span_t first_moments, f32_t beta1,
+                                               f32_t first_moment_correction) {
     u32_t const rows = static_cast<u32_t>(state.weights.extent(0));
     u32_t const cols = static_cast<u32_t>(state.weights.extent(1));
     std::size_t const scalars = static_cast<std::size_t>(rows) * cols;
@@ -149,7 +151,7 @@ static __global__ void adafactor_apply_kernel_(adafactor_state_t state, f32r1_vi
         if (!first_moments.empty()) {
             f32_t &moment = first_moments[state.gradient_offset + index];
             moment = beta1 * moment + (1.0f - beta1) * clip_scale * gradient * rsqrtf(variance);
-            step = learning_rate * moment;
+            step = learning_rate * moment / first_moment_correction;
         }
         if (rows == 1u) {
             f32_t const updated = masters[state.master_offset + index] - step;
@@ -283,9 +285,8 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
     }
     if (!optimizer.moments_ || !optimizer.masters_ || !optimizer.row_energies_)
         return result_t::fail(status_t::bad_alloc_k, "optimizer state allocation failed ({} moments)", moment_scalars);
-    if (CUresult result = cuMemsetD8(device_address(optimizer.moments_.data()), 0, moment_scalars * sizeof(f32_t));
-        result != CUDA_SUCCESS)
-        return cuda_failure<adafactor_t>(result, "moment reset failed");
+    if (expected_t zeroed = zero_async(optimizer.moments_.span(), stream); !zeroed)
+        return result_t::fail(std::move(zeroed));
     for (adafactor_state_t const &state : optimizer.states_)
         if (state.weights.extent(0) == 1u)
             if (expected_t seeded = seed_master_(state, optimizer.masters_, stream); !seeded)
@@ -366,6 +367,8 @@ expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_vi
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     ++steps_;
     f32_t const decay = std::min(config_.beta2, 1.0f - std::pow(static_cast<f32_t>(steps_), -config_.decay_exponent));
+    // Adam's bias correction, so the first steps move as far as steps without momentum.
+    f32_t const first_moment_correction = 1.0f - std::pow(config_.beta1, static_cast<f32_t>(steps_));
     for (std::size_t index = 0; index != states_.size(); ++index) {
         adafactor_state_t const &state = states_[index];
         u32_t const rows = static_cast<u32_t>(state.weights.extent(0));
@@ -380,7 +383,8 @@ expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_vi
             staged = launch_kernel(&adafactor_apply_kernel_, dim3 {grid_size_for(rows * cols), 1u, 1u}, block_shape,
                                    stream, state, moments_.view(), reduced_gradients, row_energies_.view(),
                                    masters_.span(), learning_rate, config_.clip_threshold,
-                                   splitmix64_hash_t {}(steps_, index), first_moments_.span(), config_.beta1);
+                                   splitmix64_hash_t {}(steps_, index), first_moments_.span(), config_.beta1,
+                                   first_moment_correction);
         if (!staged) return staged;
     }
     return {};

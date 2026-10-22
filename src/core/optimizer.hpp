@@ -4,7 +4,7 @@
  *  @date July 3, 2026
  *  @brief Adafactor, the memory-frugal optimizer of the uniform towers: factored Float32 second
  *      moments (one row and one column vector per matrix instead of a full moment), RMS-clipped
- *      updates, no momentum.
+ *      updates, and an optional bias-corrected first moment of the clipped update.
  *
  *  The sibling @ref distributed_adafactor_t reduces the gradients over the same two-level mesh transports
  *  the loss uses and keeps every rank's weight replica bitwise identical.
