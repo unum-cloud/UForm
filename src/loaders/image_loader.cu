@@ -75,9 +75,9 @@ static __global__ void image_segments_kernel_(patch_grid_t const *grids, u32_t l
             image_shapes[segment, 1] = grids[segment].columns;
             columns = static_cast<u32_t>(grids[segment].rows) * static_cast<u32_t>(grids[segment].columns);
         }
-        // A segment never crosses its row: jump the cursor to the next row when it would.
-        u32_t const room_in_row = columns_per_row - cursor % columns_per_row;
-        if (columns > room_in_row) cursor += room_in_row;
+        // Every image owns half a row from its start.
+        u32_t const half_row = media_cells(modality_t::image_k, columns_per_row);
+        cursor = (cursor + half_row - 1u) / half_row * half_row;
         if (cursor + columns > capacity) {
             printf("uform: loaded image batch overflows at segment %u — segment dropped\n", segment);
             columns = 0;
@@ -220,6 +220,10 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
     if (nvjpegDecodeBatchedInitialize(handle_, jpeg_state_, static_cast<int>(count), 1, NVJPEG_OUTPUT_RGBI) !=
         NVJPEG_STATUS_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "nvJPEG batch init failed ({} images)", count);
+    // The hardware backend writes the destinations from streams not ordered after `stream`, so the
+    // stream-ordered destinations, and the work that last held their memory, must retire first.
+    if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
+        return cuda_failure(result, "nvJPEG destination drain failed ({} images)", count);
     if (nvjpegDecodeBatched(handle_, jpeg_state_, data.data(), lengths.data(), destinations.data(), stream.get()) !=
         NVJPEG_STATUS_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "nvJPEG batched decode failed");
@@ -260,8 +264,7 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
  *  host offsets) via @c tape[row] . Returns the scratch byte total. One header hop and one sync per
  *  round, a round per JPEG metadata segment past the first window. */
 [[nodiscard]] static expected<std::size_t> triage_images_(column_view_t tape, u64r1_view_t drawn_rows, u32_t patch_size,
-                                                          u32_t max_columns, u32_t max_segments,
-                                                          std::span<image_plan_t> plans,
+                                                          u32_t max_columns, std::span<image_plan_t> plans,
                                                           gpu_stream_t &stream) noexcept {
     using result_t = expected<std::size_t>;
     std::size_t const images = drawn_rows.size();
@@ -353,10 +356,9 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
         }
         plan.format = probes[index].format;
         plan.native = probes[index].extent;
-        // The image's column budget is native-resolution driven, then factored toward its aspect. The grid
-        // lands in `image_shapes` on the device (via the segment kernel), never host-written to arena memory.
-        u32_t const budget = um::image_patch_budget(plan.native, patch_size, max_columns, max_segments);
-        plan.grid = um::image_patch_grid(budget, plan.native);
+        // Every image fills its half row at its own aspect. The grid lands in `image_shapes` on the
+        // device (via the segment kernel), never host-written to arena memory.
+        plan.grid = um::image_patch_grid(media_cells(modality_t::image_k, max_columns), plan.native);
         // Every JPEG decodes at native size and the resize alone shrinks it: a batched hardware
         // decode at a DCT scale writes past its scaled extent, overwriting the images after it.
         bool const jpeg = plan.format == format_jpeg_k;
@@ -702,7 +704,7 @@ expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, co
     if (st::failed(plans.resize(images)))
         return expected_t::fail(status_t::bad_alloc_k, "image plan allocation failed");
     std::span<image_plan_t> const plan_span {plans.data(), images};
-    auto scratch_bytes = triage_images_(tape, drawn_rows, patch_size, columns_per_row, max_segments, plan_span, stream);
+    auto scratch_bytes = triage_images_(tape, drawn_rows, patch_size, columns_per_row, plan_span, stream);
     if (!scratch_bytes) return expected_t::fail(std::move(scratch_bytes));
 
     // Land the host-computed factor pairs device-side and walk the token cursor: it writes image_shapes ,

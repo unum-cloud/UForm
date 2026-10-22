@@ -81,7 +81,8 @@ struct contrastive_config_t {
     /** The weight of every pair no edge names; zero repels named pairs alone. */
     f32_t ambient_repulsion_weight = 1.0f;
 
-    /** Edges one GPU's step names per edge set at most; zero derives @c max_segments_per_gpu . */
+    /** Edges one GPU's step names per edge set at most; zero derives
+     *  @ref relation_edges_capacity . */
     u32_t max_edges_per_gpu = 0;
 
     /** The pair loss over each anchor row. */
@@ -124,6 +125,23 @@ struct late_interaction_config_t {
     u32_t max_document_tokens_per_gpu = 0;
 };
 
+/** One tier: width and depth, each step of the ladder doubling exactly one, the row widths of
+ *  text-only and media runs, and the peak learning rate. */
+struct trainer_tier_t {
+    char const *name = "";
+    u32_t hidden = 0, depth = 0, text_columns = 0, media_columns = 0;
+    f32_t learning_rate = 0.0f;
+};
+
+/** Learning rates follow the 2026-10-21 width sweep at depth 12, deeper tiers' probed at launch. */
+inline constexpr trainer_tier_t trainer_tiers_k[] = {
+    {"tiny", 512u, 12u, 4096u, 1024u, 5.0e-4f},    //
+    {"small", 1024u, 12u, 4096u, 1024u, 2.0e-4f},  //
+    {"medium", 1024u, 24u, 4096u, 1024u, 2.0e-4f}, //
+    {"large", 2048u, 24u, 4096u, 1024u, 1.0e-4f},  //
+    {"xl", 2048u, 48u, 4096u, 1024u, 1.0e-4f},
+};
+
 /** One run's whole description, parsed once and threaded by const reference. The modality mixture is the
  *  @ref batch envelope itself: a media modality trains iff its nested slice is live, and the token head is
  *  present whenever the objective reconstructs. */
@@ -131,15 +149,19 @@ struct trainer_config_t {
 
     /** The batch envelope — the aggregate row / segment / column budgets plus each modality's own
      *  shape slice; a zero slice keeps that modality's tensors, tower entry, and head out of the
-     *  composition. Zero rows derive the rows and segments per GPU from a measuring pass at the
-     *  configured columns; given rows are honoured as they are. */
-    multimodal_batch_shape_t batch {0, 0, 256};
+     *  composition. Zero rows derive the rows per GPU from a measuring pass at the configured
+     *  columns, and given rows are honoured as they are; either way, zero segments follow the rows
+     *  through @ref batch_capacity . */
+    multimodal_batch_shape_t batch {0, 0, 0};
 
-    /** Transformer blocks stacked. */
-    u32_t depth = 12;
+    /** The tier the shape, row widths and learning rate come from. */
+    trainer_tier_t tier {};
 
-    /** Embedding width — a multiple of the block's head dimension. */
-    u32_t hidden = 512;
+    /** Transformer blocks stacked; set by the tier. */
+    u32_t depth = 0;
+
+    /** Embedding width, a multiple of the block's head dimension; set by the tier. */
+    u32_t hidden = 0;
 
     /** The run's length in optimizer steps, counted across resumes; the cosine spans all of
      *  them. */
@@ -238,6 +260,10 @@ struct trainer_config_t {
      *  @c reservoir_fixed_bytes+rows·reservoir_row_bytes , charged by the source from its
      *  shards. */
     std::size_t reservoir_fixed_bytes = 0, reservoir_row_bytes = 0;
+
+    /** How many segments a row of the mixture's densest entry holds, charged by the source from
+     *  its footers like the reservoir; @ref batch_capacity multiplies the rows by it. */
+    f64_t segments_per_row = 1.0;
 
     /**
      *  @brief Fold the @c --flag value pairs into a config, each flag adjusting one knob.
@@ -385,6 +411,11 @@ struct base_replica_t {
         return {&tokens_summands, &image_summands, &video_summands, &audio_summands};
     }
 };
+
+/** @p shape at @p rows rows, with as many segments as @p segments_per_row fill them, at least one
+ *  per row and at most one per cell. The only writer of the row and segment budgets. */
+[[nodiscard]] multimodal_batch_shape_t batch_capacity(multimodal_batch_shape_t shape, std::size_t rows,
+                                                      f64_t segments_per_row) noexcept;
 
 /** Re-seed every matrix of @p weights to the identical deterministic init: full matrices from a
  *  keyed hash fill of standard deviation @c 1/√fan_in , the blocks' output projections further by

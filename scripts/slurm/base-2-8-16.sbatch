@@ -4,14 +4,15 @@
 # 8 GPUs over NVLink, the two nodes joined over InfiniBand, so the mesh is {8,8,16}:
 #
 #   sbatch --partition=<p> --account=<a> \
-#          --export=ALL,UFORM_BASE_BIN=/shared/uform/uform_base,UFORM_EXCHANGE_DIR=/shared/uform/exchange \
+#          --export=ALL,UFORM_BASE_BIN=/shared/uform/uform_base,UFORM_EXCHANGE_DIR=/shared/uform/exchange,UFORM_TIER=tiny,UFORM_MIXTURE=scripts/mixtures/text_contrastive.json \
 #          scripts/slurm/base-2-8-16.sbatch
 #
-# The run reads its data from a mixture JSON and its losses from the objective; both ride the environment so
-# one committed runner serves every rung of the ladder in scripts/slurm/README.md:
+# The run reads its shape from the tier, its data from a mixture JSON and its losses from the objective; all
+# ride the environment so one committed runner serves every rung of the ladder in scripts/slurm/README.md:
 #
-#   UFORM_MIXTURE          — a scripts/mixtures/*.json mixture, tiny_text_masked.json by default
-#   UFORM_OBJECTIVE        — masked, contrastive or joint; masked by default
+#   UFORM_TIER             — tiny, small, medium, large or xl; required
+#   UFORM_MIXTURE          — a scripts/mixtures/*.json mixture; required
+#   UFORM_OBJECTIVE        — masked, contrastive or joint; contrastive by default
 #   UFORM_STEPS            — optimizer steps, 200 by default
 #   UFORM_CHECKPOINT_EVERY — steps between checkpoints beside the final one, 100 by default
 #   UFORM_ROWS             — rows per GPU, left to the measuring pass when unset
@@ -53,9 +54,10 @@ if [[ -n "${UFORM_ROWS:-}" ]]; then optional+=(--rows "${UFORM_ROWS}"); fi
 if [[ -n "${UFORM_RESUME:-}" ]]; then optional+=(--resume "${UFORM_RESUME}"); fi
 if [[ -n "${UFORM_NVDEC_ENGINES:-}" ]]; then optional+=(--nvdec-engines "${UFORM_NVDEC_ENGINES}"); fi
 
-mixture="${UFORM_MIXTURE:-scripts/mixtures/tiny_text_masked.json}"
-objective="${UFORM_OBJECTIVE:-masked}"
-echo "uform-base-2-8-16: ${UFORM_HOST_DOMAIN_COUNT} nodes x ${UFORM_GPUS_PER_MULTIMEM_DOMAIN} GPUs, ${objective} on ${mixture}"
+tier="${UFORM_TIER:?set UFORM_TIER to tiny|small|medium|large|xl}"
+mixture="${UFORM_MIXTURE:?set UFORM_MIXTURE to a scripts/mixtures/*.json}"
+objective="${UFORM_OBJECTIVE:-contrastive}"
+echo "uform-base-2-8-16: ${UFORM_HOST_DOMAIN_COUNT} nodes x ${UFORM_GPUS_PER_MULTIMEM_DOMAIN} GPUs, ${tier} ${objective} on ${mixture}"
 
 # The preflight names every environment gap in one line per node before the run spends a minute on it.
 env_binary="${UFORM_ENV_BINARY:-$(dirname "${base_binary}")/uform_test_env}"
@@ -67,6 +69,7 @@ fi
 srun --ntasks="${UFORM_HOST_DOMAIN_COUNT}" --ntasks-per-node=1 --gpu-bind=none \
     bash -c 'UFORM_HOST_DOMAIN_INDEX="${SLURM_PROCID}" exec stdbuf -oL "$@"' uform-base \
     "${base_binary}" \
+    --tier "${tier}" \
     --mixture "${mixture}" \
     --objective "${objective}" \
     --steps "${UFORM_STEPS:-200}" \

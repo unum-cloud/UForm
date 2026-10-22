@@ -156,6 +156,8 @@ if (UFORM_BUILD_CUDA)
     add_library(uform_train STATIC train/base.cu train/trainer.cu)
     add_library(uform::train ALIAS uform_train)
     target_link_libraries(uform_train PUBLIC uform::core)
+    # The envelope probe reads this process's device bytes from NVML, which ships with the driver like libcuda.
+    target_link_libraries(uform_train PRIVATE CUDA::nvml)
     # The items source plans and decodes caller media through the host decoders `uform_host` compiled.
     target_link_libraries(uform_train PRIVATE uform_host)
 

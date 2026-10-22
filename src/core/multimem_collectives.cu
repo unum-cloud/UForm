@@ -479,6 +479,9 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, s
                                      domain.flag_offset_();
         if (CUresult result = cuMemsetD8(counters, 0, 2 * sizeof(u32_t)); result != CUDA_SUCCESS)
             return cuda_failure<multimem_domain_t>(result, "arrival counter reset failed (member={})", member);
+        // The reset ran on the legacy stream, which a peer's barrier kernel never waits on.
+        if (CUresult result = cuStreamSynchronize(CU_STREAM_LEGACY); result != CUDA_SUCCESS)
+            return cuda_failure<multimem_domain_t>(result, "arrival counter reset drain failed (member={})", member);
     }
 
     // 5. Every process has finished binding before the first collective runs.

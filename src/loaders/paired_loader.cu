@@ -11,6 +11,8 @@
  *  trailing rows, and one kernel interleaves the role tables into the batch's, tagging each pair's
  *  segments with its bag.
  */
+#include <cmath> // `std::ceil`, the pairs a fill's rows hold
+
 #include <algorithm> // `std::upper_bound`, `std::find`, `std::min`
 #include <span>      // `std::as_bytes`, `std::as_writable_bytes`
 
@@ -59,8 +61,8 @@ struct pair_tags_span_t_ {
  *  negative shifted by @p negative_begin . All three share bag @c i , so the mixer routes a triplet
  *  whole and the relations read its negative as a repel edge of its anchor. The anchor and the
  *  positive carry the pair's sample key from @p pair_keys , the negative none. A text segment's
- *  prefix length is the bytes its role's prefix kept, and the segments past the pairs PAD at @p end
- *  with bag @p absent_bag . Sides stay @c none_k until mixtures name them.
+ *  prefix length is the bytes its role's prefix kept, and the segments past the first @p pairs PAD
+ *  at @p end with bag @p pairs . Sides stay @c none_k until mixtures name them.
  *
  *  @b grid_size grid-stride over the batch's segments; no dynamic shared memory.
  */
@@ -68,9 +70,9 @@ static __global__ void pair_segments_kernel_(
     u32r2_view_t role_offsets, u32r2_view_t role_lengths, nk::tensor_view<modality_t, 2> role_modalities,
     nk::tensor_view<u16_t, 3> media_shapes, u32_t anchor_begin, u32_t negative_begin, u32_t anchor_prefix_bytes,
     u32_t positive_prefix_bytes, u64r1_view_t pair_keys, role_sides_t sides, u32r1_span_t segment_offsets,
-    u32r1_span_t segment_lengths, pair_tags_span_t_ tags, segment_shapes_span_t shapes, u32_t end, u32_t absent_bag) {
+    u32r1_span_t segment_lengths, pair_tags_span_t_ tags, segment_shapes_span_t shapes, u32_t end, u32_t pairs) {
     u32_t const segments = static_cast<u32_t>(segment_lengths.extent(0));
-    u32_t const roles = static_cast<u32_t>(role_lengths.extent(0)), pairs = static_cast<u32_t>(role_lengths.extent(1));
+    u32_t const roles = static_cast<u32_t>(role_lengths.extent(0));
     u32_t const stride = gridDim.x * blockDim.x;
     for (u32_t segment = blockIdx.x * blockDim.x + threadIdx.x; segment < segments; segment += stride) {
         u32_t const pair = segment / roles, role = segment % roles;
@@ -80,7 +82,7 @@ static __global__ void pair_segments_kernel_(
             segment_offsets[segment] = end;
             segment_lengths[segment] = 0u;
             tags.modality[segment] = modality_t::text_k;
-            tags.bag[segment] = absent_bag;
+            tags.bag[segment] = pairs;
             tags.role[segment] = segment_role_t::anchor_k;
             tags.prefix_length[segment] = 0u;
         }
@@ -236,9 +238,12 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
     std::size_t const segments = batches[0].segment_lengths.extent(0);
     bool const negatives = !negative_.empty(), media = modality_ != modality_t::text_k;
     std::size_t const roles = negatives ? 3u : 2u;
-    std::size_t const pairs = std::min(rows, segments) / roles, total_pairs = unroll * pairs;
-    if (pairs == 0)
-        return expected_t::fail(status_t::shape_unsupported_k, "{} rows and {} segments hold no pair", rows, segments);
+    // Draw as many pairs as the segments and this loader's rows hold, never more than the reservoir
+    // was charged for; each batch admits the keyed prefix whose rows fit.
+    std::size_t const row_pairs = static_cast<std::size_t>(
+        std::ceil(static_cast<f64_t>(rows) * pairs_per_row(columns)));
+    std::size_t const pairs = std::min(segments / roles, row_pairs), total_pairs = unroll * pairs;
+    if (pairs == 0) return expected_t::fail(status_t::shape_unsupported_k, "{} segments hold no pair", segments);
 
     // Row groups drawn by a keyed position over the complete rows, as the text loader draws them:
     // distinct groups accumulate until they cover the pairs, then only a new shard's group meets
@@ -435,9 +440,8 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
         uploaded = copy_host_to_device<b8_t>(std::as_bytes(std::span {positive_prefix_.data(), positive_prefix_bytes}),
                                              positive_prefix, gpu_stream);
     if (!uploaded) return uploaded;
-    // The same draws per batch, `[roles, unroll, pairs]`, on the host and on the device.
+    // The draws per batch, `[roles, unroll, pairs]`, on the host.
     nk::tensor_view<u64_t, 3> const drawn_batches {drawn.data(), {roles, unroll, pairs}};
-    nk::tensor_view<u64_t, 3> const drawn_on_gpu_batches {drawn_on_gpu.data(), {roles, unroll, pairs}};
 
     // A media role decodes through the host-landed offsets; a text role packs on the device.
     column_view_t const positive_tape =
@@ -464,53 +468,79 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
         if (loaded.tokens.extent(0) != rows || loaded.segment_lengths.extent(0) != segments)
             return expected_t::fail(status_t::shape_unsupported_k, "batch {} differs from the first", batch);
 
-        // A role's text rows, walked the way the packing kernel will: cut at the row width, never
-        // crossing a row.
-        auto const walk = [&](u32_t role, st::basic_vector<u64_t> const &offsets, std::size_t prefix_bytes) noexcept {
-            std::size_t cursor = 0;
-            for (std::size_t pair = 0; pair != pairs; ++pair) {
-                u64_t const element = drawn_batches[role, batch, pair];
-                std::size_t const kept = std::min<std::size_t>(prefix_bytes + offsets[element + 1] - offsets[element],
-                                                               columns);
-                if (kept > columns - cursor % columns) cursor = round_up_to_multiple(cursor, columns);
-                cursor += kept;
-            }
-            return cursor;
+        // One text past a role's cursor, packed the way the kernel packs it: cut at the row width,
+        // never crossing a row.
+        auto const advance = [&](std::size_t cursor, u32_t role, std::size_t pair,
+                                 st::basic_vector<u64_t> const &offsets, std::size_t prefix_bytes) noexcept {
+            u64_t const element = drawn_batches[role, batch, pair];
+            std::size_t const kept = std::min<std::size_t>(prefix_bytes + offsets[element + 1] - offsets[element],
+                                                           columns);
+            if (kept > columns - cursor % columns) cursor = round_up_to_multiple(cursor, columns);
+            return cursor + kept;
         };
-        std::size_t const anchor_cells = walk(anchor_role_k, anchor_offsets, anchor_prefix_bytes);
+        // Admit whole pairs in keyed order while their rows fit: captions pack back to back, and
+        // media positives and negatives fill rows of their own, `media_cells` cells each.
+        std::size_t admitted = 0, anchor_cells = 0, positive_cells = 0, negative_cells = 0;
+        std::size_t const media_per_row = media ? columns / media_cells(modality_, static_cast<u32_t>(columns)) : 0;
+        for (; admitted != pairs; ++admitted) {
+            std::size_t const anchor = advance(anchor_cells, anchor_role_k, admitted, anchor_offsets,
+                                               anchor_prefix_bytes);
+            std::size_t positive = 0, negative = 0, needed = divide_round_up(anchor, columns);
+            if (media) needed += divide_round_up(admitted + 1, media_per_row) * (negatives ? 2u : 1u);
+            else {
+                positive = advance(positive_cells, positive_role_k, admitted, positive_offsets, positive_prefix_bytes);
+                if (negatives)
+                    negative = advance(negative_cells, negative_role_k, admitted, negative_offsets,
+                                       positive_prefix_bytes);
+                needed += divide_round_up(positive, columns) + divide_round_up(negative, columns);
+            }
+            if (needed > rows) break;
+            anchor_cells = anchor, positive_cells = positive, negative_cells = negative;
+        }
+        if (admitted == 0)
+            return expected_t::fail(status_t::shape_unsupported_k, "batch {} of {} rows fits no whole pair", batch,
+                                    rows);
         std::size_t const anchor_rows = divide_round_up(anchor_cells, columns);
         std::size_t positive_rows = rows - anchor_rows, negative_rows_count = 0;
         if (media && negatives) negative_rows_count = positive_rows - positive_rows / 2, positive_rows /= 2;
         if (!media) {
-            positive_rows = divide_round_up(walk(positive_role_k, positive_offsets, positive_prefix_bytes), columns);
-            if (negatives)
-                negative_rows_count = divide_round_up(walk(negative_role_k, negative_offsets, positive_prefix_bytes),
-                                                      columns);
-            if (positive_rows + negative_rows_count + anchor_rows > rows)
-                return expected_t::fail(status_t::shape_unsupported_k, "{} pairs of texts need {} of the {} rows",
-                                        pairs, positive_rows + negative_rows_count + anchor_rows, rows);
+            positive_rows = divide_round_up(positive_cells, columns);
+            negative_rows_count = divide_round_up(negative_cells, columns);
         }
+        // The admitted prefix of a role's per-pair tables, each a contiguous row of its table.
+        auto const drawn_of = [&](u64_t const *base, u32_t role) noexcept {
+            return u64r1_view_t {base + (role * unroll + batch) * pairs, admitted};
+        };
+        auto const offsets_of = [&](u32_t role) noexcept {
+            return u32r1_span_t {offsets.data() + role * (pairs + 1), admitted + 1};
+        };
+        auto const lengths_of = [&](u32_t role) noexcept {
+            return u32r1_span_t {lengths.data() + role * pairs, admitted};
+        };
+        auto const modalities_of = [&](u32_t role) noexcept {
+            return nk::tensor_span<modality_t, 1> {modalities.data() + role * pairs, admitted};
+        };
 
         // Positives over the leading rows, negatives over the next, anchors over the trailing ones.
         auto const fill_role = [&](u32_t role, std::size_t row_begin, std::size_t row_end, column_view_t tape,
                                    std::size_t shapes_row) noexcept -> expected_t {
             if (!media)
-                return pack_tokens(tape, drawn_on_gpu_batches[role, batch, nk::slice], positive_prefix,
-                                   loaded.tokens[nk::range(row_begin, row_end), nk::slice],
-                                   role_offsets[role, nk::slice], role_lengths[role, nk::slice],
-                                   role_modalities[role, nk::slice], gpu_stream);
-            return decode(loaded, row_begin, row_end, tape, drawn_batches[role, batch, nk::slice],
-                          media_shape_tables[shapes_row, nk::slice], role_offsets[role, nk::slice],
-                          role_lengths[role, nk::slice], role_modalities[role, nk::slice]);
+                return pack_tokens(tape, drawn_of(drawn_on_gpu.data(), role), positive_prefix,
+                                   loaded.tokens[nk::range(row_begin, row_end), nk::slice], offsets_of(role),
+                                   lengths_of(role), modalities_of(role), gpu_stream);
+            nk::tensor_span<u16_t, 2> const shapes_of_role = media_shape_tables[shapes_row, nk::slice];
+            return decode(loaded, row_begin, row_end, tape, drawn_of(drawn.data(), role),
+                          shapes_of_role[nk::range(std::size_t {0}, admitted), nk::slice], offsets_of(role),
+                          lengths_of(role), modalities_of(role));
         };
         expected_t filled = fill_role(positive_role_k, 0, positive_rows, positive_tape, 0);
         if (filled && negatives)
             filled = fill_role(negative_role_k, positive_rows, positive_rows + negative_rows_count, negative_tape, 1);
         if (filled)
-            filled = pack_tokens(anchors, drawn_on_gpu_batches[anchor_role_k, batch, nk::slice], anchor_prefix,
+            filled = pack_tokens(anchors, drawn_of(drawn_on_gpu.data(), anchor_role_k), anchor_prefix,
                                  loaded.tokens[nk::range(rows - anchor_rows, rows), nk::slice],
-                                 role_offsets[anchor_role_k, nk::slice], role_lengths[anchor_role_k, nk::slice],
-                                 role_modalities[anchor_role_k, nk::slice], gpu_stream);
+                                 offsets_of(anchor_role_k), lengths_of(anchor_role_k), modalities_of(anchor_role_k),
+                                 gpu_stream);
         if (!filled) return filled;
 
         segment_shapes_span_t const shapes = modality_ == modality_t::image_k   ? loaded.image_shapes.span()
@@ -529,9 +559,9 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
                 &pair_segments_kernel_, dim3 {grid_size_for(segments), 1u, 1u},
                 dim3 {kernel_block_size_default_k, 1u, 1u}, gpu_stream, role_offsets, role_lengths, role_modalities,
                 media_shape_tables, anchor_begin, negative_begin, static_cast<u32_t>(anchor_prefix_bytes),
-                static_cast<u32_t>(positive_prefix_bytes), u64r1_view_t {keys_on_gpu.data() + batch * pairs, pairs},
+                static_cast<u32_t>(positive_prefix_bytes), u64r1_view_t {keys_on_gpu.data() + batch * pairs, admitted},
                 sides_, loaded.segment_offsets.span(), loaded.segment_lengths.span(), tags, shapes,
-                static_cast<u32_t>(anchor_begin + anchor_cells), static_cast<u32_t>(pairs));
+                static_cast<u32_t>(anchor_begin + anchor_cells), static_cast<u32_t>(admitted));
             !paired)
             return paired;
     }

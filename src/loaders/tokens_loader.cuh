@@ -165,6 +165,9 @@ struct tokens_loader_parquet_t {
 
     /** The device bytes a fill's reservoir can take outside the arena. */
     [[nodiscard]] reservoir_bound_t reservoir() const noexcept { return reservoir_; }
+
+    /** The rows across the shards, from their footers. */
+    [[nodiscard]] std::size_t rows() const noexcept { return group_prefix_[group_prefix_.size() - 1]; }
 };
 
 /** The JSONL tokens loader's baked knobs — a different config is a different loader. */

@@ -972,6 +972,16 @@ check_function_like_macros() {
 # A bare `bool` parameter is unreadable at the call site - `setup(n, true, false)` names
 # nothing. Public headers spell the choice with a two-value enum; predicate helpers in
 # tests & benches, where the bool IS the domain, stay out of scope.
+# Rows turn into segments in one place, `batch_capacity` in src/train/base.cu, and bags in the
+# dataset source; a budget reassigned along another path drifts, as `--rows` once set segments to rows.
+check_budget_writers() {
+    case "$file" in src/train/base.cu | src/train/datasets.cu | src/train.cpp) return ;; esac
+    local writers
+    writers=$(printf '%s\n' "$added" | grep -E '\.max_(segments|bags)_per_gpu[[:space:]]*=[^=]' || true)
+    [ -z "$writers" ] || fail "$writers" \
+        "$file writes a segment or bag budget - derive it through \`batch_capacity\` in src/train/base.cu:"
+}
+
 check_boolean_parameters() {
     local flags
     flags=$(printf '%s\n' "$added" | grep -E '[(,] ?bool [a-z_]+' || true)
@@ -1926,6 +1936,7 @@ judge_path() {
         ;;&
     src/*.cuh | src/*.hpp | src/*.cu | src/*.cpp)
         check_stl_dynamic_containers
+        check_budget_writers
         ;;&
     # The harnesses, then the suites' bodies, whose harness alone writes the result lines.
     test/harness.hpp | bench/harness.hpp)

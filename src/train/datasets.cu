@@ -4,6 +4,8 @@
  *  @date October 18, 2026
  *  @brief The mixture reader and the dataset source declared in @c src/train/datasets.hpp .
  */
+#include <cmath> // `std::ceil` — the reservoir's per-row term at the mixture's density
+
 #include <algorithm> // `std::upper_bound`, `std::min`, `std::max`, `std::any_of`
 #include <utility>   // `std::swap` — a step's batches into the mixer's table and back
 
@@ -71,6 +73,11 @@ using namespace unum::uform::train;
         else if (name == "weight") {
             if (!yyjson_is_num(value)) return expected_t::fail(status_t::invalid_input_k, "\"weight\" is not a number");
             entry.weight = yyjson_get_num(value);
+        }
+        else if (name == "epochs") {
+            if (!yyjson_is_uint(value) || yyjson_get_uint(value) == 0)
+                return expected_t::fail(status_t::invalid_input_k, "\"epochs\" is not a positive integer");
+            entry.epochs = static_cast<std::size_t>(yyjson_get_uint(value));
         }
         // Read by the acquisition and mining scripts, not by the loaders.
         else if (name != "positives_per_caption" && name != "min_epochs")
@@ -151,8 +158,97 @@ multimodal_batch_shape_t mixture_t::shape(multimodal_batch_shape_t shape) const 
                                      : 2u;
     if (names(modality_t::image_k)) shape.image = image_batch_shape_t {16u};
     if (names(modality_t::video_k)) shape.video = video_batch_shape_t {16u, 3u, 2u, 1u};
-    if (names(modality_t::audio_k)) shape.audio = audio_batch_shape_t {256u, 16000u};
+    if (names(modality_t::audio_k)) shape.audio = audio_batch_shape_t {320u, 16000u};
     return shape;
+}
+
+expected<mixture_sampler_t> mixture_sampler_t::make(std::span<mixture_entry_t const> entries,
+                                                    std::span<std::size_t const> rows, std::size_t world_gpus,
+                                                    std::size_t batches_per_fill, std::size_t segments) noexcept {
+    using result_t = expected<mixture_sampler_t>;
+    mixture_sampler_t sampler;
+    sampler.entries_ = entries;
+    sampler.world_gpus_ = world_gpus, sampler.batches_per_fill_ = batches_per_fill;
+    if (st::failed(sampler.weight_prefix_.push_back(0.0)))
+        return result_t::fail(status_t::bad_alloc_k, "weight table allocation failed");
+    for (std::size_t entry = 0; entry != entries.size(); ++entry) {
+        mixture_entry_t const &dataset = entries[entry];
+        if (dataset.epochs != 0 && rows[entry] == 0)
+            return result_t::fail(status_t::invalid_input_k, "{} caps its epochs, but only Parquet footers count rows",
+                                  dataset.name.view());
+        // A fill draws as many pairs as its segments hold, or documents for plain text, whether or
+        // not its batches admit them all.
+        std::size_t const roles = dataset.anchor.empty() ? 1u : dataset.negative.empty() ? 2u : 3u;
+        if (st::failed(sampler.rows_.push_back(std::size_t {rows[entry]})) ||
+            st::failed(sampler.fill_pairs_.push_back(batches_per_fill * (segments / roles))) ||
+            st::failed(sampler.drawn_pairs_.push_back(std::size_t {0})) ||
+            st::failed(sampler.weight_prefix_.push_back(sampler.weight_prefix_[entry] + dataset.weight)))
+            return result_t::fail(status_t::bad_alloc_k, "sampler table allocation failed");
+    }
+    return result_t {std::move(sampler)};
+}
+
+std::size_t mixture_sampler_t::draw(u64_t seed, data_epoch_t data_epoch, u32_t gpu_index,
+                                    void (*report)(sz::string_view_t) noexcept) noexcept {
+    auto const capped_live = [&]() noexcept {
+        for (std::size_t entry = 0; entry != entries_.size(); ++entry)
+            if (entries_[entry].epochs != 0 && live_(entry)) return true;
+        return false;
+    };
+    // A retirement changes every later draw, so the replay walks the epochs in order, and stops
+    // once no capped entry is left to retire.
+    for (; replayed_epochs_ < data_epoch.ordinal && capped_live(); ++replayed_epochs_) {
+        bool retired = false;
+        for (std::size_t gpu = 0; gpu != world_gpus_; ++gpu) {
+            std::size_t const phase = gpu * batches_per_fill_ / world_gpus_;
+            if (replayed_epochs_ != 0 && (replayed_epochs_ + phase) % batches_per_fill_ != 0) continue;
+            std::size_t const entry = search_(seed, replayed_epochs_, static_cast<u32_t>(gpu));
+            bool const was_live = live_(entry);
+            drawn_pairs_[entry] += fill_pairs_[entry];
+            if (!was_live || live_(entry)) continue;
+            retired = true;
+            sz::string_t line;
+            if (report && format_into(line, "uform: {} retired at step {} after {} pairs ({} passes over {} rows)",
+                                      entries_[entry].name.view(), replayed_epochs_, drawn_pairs_[entry],
+                                      entries_[entry].epochs, rows_[entry]))
+                report(line.view());
+        }
+        if (retired) reweigh_(replayed_epochs_, report);
+    }
+    return search_(seed, data_epoch.ordinal, gpu_index);
+}
+
+bool mixture_sampler_t::live_(std::size_t entry) const noexcept {
+    std::size_t const epochs = entries_[entry].epochs;
+    return epochs == 0 || drawn_pairs_[entry] < epochs * rows_[entry];
+}
+
+std::size_t mixture_sampler_t::search_(u64_t seed, u32_t epoch, u32_t gpu_index) const noexcept {
+    constexpr splitmix64_hash_t hash {};
+    f64_t const draw = static_cast<f64_t>(hash(seed, epoch, gpu_index) >> 11) * 0x1.0p-53 *
+                       weight_prefix_[weight_prefix_.size() - 1];
+    return std::min<std::size_t>(
+        std::upper_bound(weight_prefix_.begin(), weight_prefix_.end(), draw) - weight_prefix_.begin() - 1,
+        entries_.size() - 1);
+}
+
+void mixture_sampler_t::reweigh_(u32_t epoch, void (*report)(sz::string_view_t) noexcept) noexcept {
+    std::size_t const entries = entries_.size();
+    // A modality with no live entry adds nothing; the draw's scale spreads its share over the rest.
+    for (std::size_t entry = 0; entry != entries; ++entry) {
+        f64_t modality_weight = 0.0, live_weight = 0.0;
+        for (std::size_t peer = 0; peer != entries; ++peer)
+            if (entries_[peer].modality == entries_[entry].modality)
+                modality_weight += entries_[peer].weight, live_weight += live_(peer) ? entries_[peer].weight : 0.0;
+        f64_t const weight = live_(entry) ? entries_[entry].weight * modality_weight / live_weight : 0.0;
+        weight_prefix_[entry + 1] = weight_prefix_[entry] + weight;
+    }
+    if (weight_prefix_[entries] > 0.0) return;
+    for (std::size_t entry = 0; entry != entries; ++entry)
+        weight_prefix_[entry + 1] = weight_prefix_[entry] + entries_[entry].weight;
+    sz::string_t line;
+    if (report && format_into(line, "uform: every entry retired at step {}, drawing by the mixture's weights", epoch))
+        report(line.view());
 }
 
 expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &config,
@@ -172,8 +268,6 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
             return expected_t::fail(status_t::bad_alloc_k, "loader table allocation failed");
         return {};
     };
-    if (st::failed(placed.weight_prefix_.push_back(0.0)))
-        return expected_t::fail(status_t::bad_alloc_k, "weight table allocation failed");
     for (mixture_entry_t const &entry : entries) {
         sz::string_view_t const glob = entry.glob.view();
         expected_t made;
@@ -196,16 +290,36 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
                                                entry.anchor_prefix.view(), entry.positive_prefix.view(), entry.sides},
                                               entry.modality, shape));
         if (!made) return expected_t::fail(made.status_, "{}: {}", entry.name.view(), made.description_.view());
-        if (st::failed(placed.weight_prefix_.push_back(placed.weight_prefix_[placed.weight_prefix_.size() - 1] +
-                                                       entry.weight)))
-            return expected_t::fail(status_t::bad_alloc_k, "weight table allocation failed");
     }
     reservoir_bound_t reservoir;
-    for (loader_t const &loader : placed.loaders_)
+    f64_t row_bytes = 0.0;
+    for (std::size_t index = 0; index != placed.loaders_.size(); ++index) {
+        loader_t const &loader = placed.loaders_[index];
         std::visit([&](auto const &typed) noexcept { reservoir.charge(typed.reservoir()); }, loader);
+        // An entry's widest row group bounds its items' bytes, a byte of text is a cell, and the
+        // densest entry sizes the segment budget: a text entry packs a row with documents, a text
+        // pair with its roles' texts, and a media pair as many to a row as `media_cells` places.
+        std::size_t const item_cells = std::visit(
+            [](auto const &typed) noexcept { return typed.reservoir().row_bytes / reservoir_bound_t::copies_k; },
+            loader);
+        f64_t const columns = static_cast<f64_t>(shape.max_columns_per_row);
+        f64_t density = 1.0, roles = 1.0;
+        if (auto const *paired = std::get_if<paired_loader_parquet_t>(&loader)) {
+            roles = entries[index].negative.empty() ? 2.0 : 3.0;
+            density = roles * paired->pairs_per_row(shape.max_columns_per_row);
+        }
+        else if (std::holds_alternative<tokens_loader_parquet_t>(loader) && item_cells != 0)
+            density = columns / static_cast<f64_t>(item_cells);
+        config.segments_per_row = std::max(config.segments_per_row, density);
+        // A fill reads one entry, so a batch row costs that entry's own source rows, a pair or a
+        // document each.
+        f64_t const entry_row_bytes = static_cast<f64_t>(
+            std::visit([](auto const &typed) noexcept { return typed.reservoir().row_bytes; }, loader));
+        row_bytes = std::max(row_bytes, entry_row_bytes * density / roles);
+    }
     // One fill pools the rows of every batch it packs, so the per-row term scales with them.
     config.reservoir_fixed_bytes = reservoir.fixed_bytes;
-    config.reservoir_row_bytes = reservoir.row_bytes * batches_per_fill;
+    config.reservoir_row_bytes = static_cast<std::size_t>(std::ceil(row_bytes * static_cast<f64_t>(batches_per_fill)));
     return {};
 }
 
@@ -215,10 +329,8 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer, 
     std::size_t const gpus = trainer.replicas.size(), segments = shape.max_segments_per_gpu;
     std::span<mixture_entry_t const> const entries = placed.mixture_.datasets;
     // A pair spends two segments and a triplet three, each in one bag, so pairs bound the bags.
-    if (!entries.empty() && !entries[0].anchor.empty()) {
-        std::size_t const lanes = std::min(shape.max_rows_per_gpu, shape.max_segments_per_gpu);
-        shape.max_bags_per_gpu = static_cast<u32_t>(lanes / 2u);
-    }
+    if (!entries.empty() && !entries[0].anchor.empty())
+        shape.max_bags_per_gpu = static_cast<u32_t>(shape.max_segments_per_gpu / 2u);
 
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {trainer.streams[member]};
@@ -259,6 +371,18 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer, 
         if (placed.phases_.push_back(world_gpu * batches_per_fill / world_gpus) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "fill phase table full");
     }
+    st::basic_vector<std::size_t> rows;
+    for (loader_t const &loader : placed.loaders_) {
+        std::size_t counted = 0;
+        if (auto const *paired = std::get_if<paired_loader_parquet_t>(&loader)) counted = paired->rows();
+        else if (auto const *parquet = std::get_if<tokens_loader_parquet_t>(&loader)) counted = parquet->rows();
+        if (st::failed(rows.push_back(std::size_t {counted})))
+            return expected_t::fail(status_t::bad_alloc_k, "row count table allocation failed");
+    }
+    expected<mixture_sampler_t> sampler = mixture_sampler_t::make(entries, rows, world_gpus, batches_per_fill,
+                                                                  segments);
+    if (!sampler) return expected_t::fail(std::move(sampler));
+    placed.sampler_ = std::move(sampler.value_);
 
     if (!config.contrasts()) return {};
     u32_t const edges = config.contrastive.max_edges_per_gpu
@@ -306,14 +430,10 @@ expected_t dataset_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch, s
 expected_t dataset_source_t::fill_member_(trainer_t &trainer, std::size_t member, data_epoch_t data_epoch) noexcept {
     trainer_config_t const &config = trainer.config;
     u32_t const gpu_index = trainer.mesh->topology.first_gpu_index() + static_cast<u32_t>(member);
-    constexpr splitmix64_hash_t hash {};
-    f64_t const draw = static_cast<f64_t>(hash(config.seed, data_epoch.ordinal, gpu_index) >> 11) * 0x1.0p-53 *
-                       weight_prefix_[weight_prefix_.size() - 1];
-    std::size_t const entry = std::min<std::size_t>(
-        std::upper_bound(weight_prefix_.begin(), weight_prefix_.end(), draw) - weight_prefix_.begin() - 1,
-        loaders_.size() - 1);
+    std::size_t const entry = sampler_.draw(config.seed, data_epoch, gpu_index,
+                                            trainer.mesh->topology.is_lead() ? &report_line : nullptr);
     mixture_entry_t const &dataset = mixture_.datasets[entry];
-    std::span<multimodal_batch_on_gpu_t> const batches = filled_[member].span();
+    std::span<multimodal_batch_on_gpu_t> const batches = filled_[member];
     gpu_stream_t &stream = trainer.streams[member];
     u32_t const step = data_epoch.ordinal;
     expected_t filled;

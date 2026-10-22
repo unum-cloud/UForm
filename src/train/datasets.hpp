@@ -18,11 +18,14 @@
  *  name hard negatives in @c negative , and text prefixes in @c anchor_prefix and
  *  @c positive_prefix . Each GPU draws one entry by weight per fill and packs its next
  *  @c batches_per_fill batches from it, refilling on its own phase of that period, so the mixer's
- *  world-wide shuffle sees datasets rotate a few GPUs at a time. Pairs route as bags, so one
- *  mixture never mixes them with plain text, whose segments route alone.
+ *  world-wide shuffle sees datasets rotate a few GPUs at a time. An entry over Parquet shards may
+ *  cap its draws at @c epochs passes over its rows, after which @ref mixture_sampler_t retires it.
+ *  Pairs route as bags, so one mixture never mixes them with plain text, whose segments route
+ *  alone.
  */
 #pragma once
 
+#include <span>    // `std::span` — the sampler's borrowed entries
 #include <variant> // `std::variant` — one loader per entry, of the entry's kind
 
 #include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
@@ -44,6 +47,10 @@ struct mixture_entry_t {
 
     /** The share of the draws this entry takes, relative to the other entries. */
     f64_t weight = 0.0;
+
+    /** The most passes over the entry's rows a run draws before the entry retires; zero, the key
+     *  absent, for no cap. */
+    std::size_t epochs = 0;
 
     /** A text entry's document column; empty for a pair. */
     sz::string_t text {};
@@ -89,6 +96,63 @@ struct mixture_t {
      *  geometry: RGBA images in 16-pixel patches, RGB video in 2-frame tubes of 16 pixels, and
      *  256-sample audio frames at 16 kHz. */
     [[nodiscard]] multimodal_batch_shape_t shape(multimodal_batch_shape_t shape) const noexcept;
+};
+
+/**
+ *  @brief The entry draw of a mixture, keyed by the run seed, the data epoch and the drawing GPU's
+ *      world coordinate, which retires an entry once the run has drawn its @c epochs passes.
+ *
+ *  A retired entry's weight spreads over its modality's live entries, so the modality shares hold;
+ *  a modality with none left spreads over every live entry, and with none at all the draw falls
+ *  back to the mixture's weights. Retirement follows from the keyed draws alone, counting the pairs
+ *  each fill draws rather than those it admits: before a draw, the sampler replays every world
+ *  GPU's fills from data epoch 0, a GPU refilling at epoch 0 and wherever its phase wraps the fill
+ *  period, so all GPUs and a resumed run agree on the live entries at every fill.
+ */
+struct mixture_sampler_t {
+
+    /**
+     *  @brief Size the counters for @p entries , borrowed, whose shards hold @p rows rows each, for
+     *      @p world_gpus GPUs packing @p batches_per_fill batches of @p segments segments per fill.
+     *  @retval status_t::invalid_input_k An entry caps its passes over shards that count no rows.
+     */
+    [[nodiscard]] static expected<mixture_sampler_t> make(std::span<mixture_entry_t const> entries,
+                                                          std::span<std::size_t const> rows, std::size_t world_gpus,
+                                                          std::size_t batches_per_fill, std::size_t segments) noexcept;
+
+    /** The entry world GPU @p gpu_index draws at @p data_epoch over the entries live after the
+     *  world's fills before it, printing each retirement through @p report unless null; the epochs
+     *  of successive calls never decrease. */
+    [[nodiscard]] std::size_t draw(u64_t seed, data_epoch_t data_epoch, u32_t gpu_index,
+                                   void (*report)(sz::string_view_t) noexcept) noexcept;
+
+  private:
+
+    /** Whether @p entry is uncapped or has passes left. */
+    [[nodiscard]] bool live_(std::size_t entry) const noexcept;
+
+    /** The entry world GPU @p gpu_index draws at @p epoch over @ref weight_prefix_ . */
+    [[nodiscard]] std::size_t search_(u64_t seed, u32_t epoch, u32_t gpu_index) const noexcept;
+
+    /** Rebuild @ref weight_prefix_ over the live entries after a retirement at @p epoch , or over
+     *  the mixture's weights once none is live, noting that through @p report unless null. */
+    void reweigh_(u32_t epoch, void (*report)(sz::string_view_t) noexcept) noexcept;
+
+    /** The entries the weights, modalities and caps come from. */
+    std::span<mixture_entry_t const> entries_ {};
+
+    /** @b [entries] each entry's rows, the pairs or documents one fill draws from it, and those the
+     *  replay counted. */
+    st::basic_vector<std::size_t> rows_ {}, fill_pairs_ {}, drawn_pairs_ {};
+
+    /** @b [entries+1] cumulative live weights, the draw's search table. */
+    st::basic_vector<f64_t> weight_prefix_ {};
+
+    /** The world's GPUs and the batches each fill packs, which set every GPU's refill phase. */
+    std::size_t world_gpus_ = 0, batches_per_fill_ = 0;
+
+    /** The data epochs whose fills the replay counted. */
+    u32_t replayed_epochs_ = 0;
 };
 
 /**
@@ -140,8 +204,8 @@ struct dataset_source_t final : batch_source_t {
     /** One loader per entry, in entry order. */
     st::basic_vector<loader_t> loaders_ {};
 
-    /** @b [entries+1] cumulative weights, the entry draw's search table. */
-    st::basic_vector<f64_t> weight_prefix_ {};
+    /** The entry draw over the entries live under their @c epochs caps. */
+    mixture_sampler_t sampler_ {};
 
     /** Every GPU's decoder sessions, present when an entry's media need them. */
     per_gpu_array<loaders::nvjpeg_session_t> jpeg_ {};

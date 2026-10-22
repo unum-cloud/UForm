@@ -21,7 +21,7 @@
  */
 #include "encode.hpp"
 #include "media/audio.hpp"    // `resample_mono`
-#include "media/planning.hpp" // `image_patch_budget`, `image_patch_grid`
+#include "media/planning.hpp" // `image_patch_grid`
 
 using namespace unum::uform;
 
@@ -38,7 +38,7 @@ struct text_packer_t {
 
     failure_t plan(std::size_t item, item_plan_t &plan, ui::geometry_t const &geometry, std::size_t) const noexcept {
         plan.spanned = tape.offsets[item + 1] - tape.offsets[item];
-        plan.tokens = static_cast<u32_t>(plan.spanned < geometry.context ? plan.spanned : geometry.context);
+        plan.tokens = static_cast<u32_t>(plan.spanned < geometry.columns ? plan.spanned : geometry.columns);
         return {};
     }
 
@@ -91,9 +91,8 @@ struct pixels_packer_t {
     failure_t plan(std::size_t item, item_plan_t &plan, ui::geometry_t const &geometry, std::size_t) const noexcept {
         um::image_extent_t const native {widths[item], heights[item]};
         if (!native.width || !native.height) return {};
-        u32_t const budget = um::image_patch_budget(native, geometry.image_patch_side, geometry.context,
-                                                    geometry.context);
-        um::patch_grid_t const grid = um::image_patch_grid(budget, native);
+        um::patch_grid_t const grid = um::image_patch_grid(
+            core::media_cells(core::modality_t::image_k, geometry.columns), native);
         plan.tokens = static_cast<u32_t>(grid.rows) * grid.columns;
         plan.spanned = native_patches(native, geometry.image_patch_side);
         plan.shape[0] = grid.rows, plan.shape[1] = grid.columns;
@@ -148,7 +147,8 @@ struct samples_packer_t {
 
     failure_t plan(std::size_t item, item_plan_t &plan, ui::geometry_t const &geometry, std::size_t) const noexcept {
         plan.spanned = core::divide_round_up(resampled(item, geometry), geometry.audio_chunk_samples);
-        plan.tokens = static_cast<u32_t>(plan.spanned < geometry.context ? plan.spanned : geometry.context);
+        u32_t const cells = core::media_cells(core::modality_t::audio_k, geometry.columns);
+        plan.tokens = static_cast<u32_t>(plan.spanned < cells ? plan.spanned : cells);
         return {};
     }
 

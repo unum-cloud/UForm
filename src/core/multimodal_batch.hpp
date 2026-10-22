@@ -250,7 +250,20 @@ struct multimodal_batch_shape_t {
         }
         return false;
     }
+
+    /** Whether any media modality participates, which sets a run's row width. */
+    [[nodiscard]] constexpr bool media_live() const noexcept {
+        return contains(modality_t::image_k) || contains(modality_t::video_k) || contains(modality_t::audio_k);
+    }
 };
+
+/** The cells one media item fills: half a row for an image or audio clip, so two share a row at
+ *  columns 0 and columns/2, and the whole row for a video clip; zero for freely packed text. */
+[[nodiscard]] constexpr u32_t media_cells(modality_t modality, u32_t columns) noexcept {
+    if (modality == modality_t::video_k) return columns;
+    if (modality == modality_t::image_k || modality == modality_t::audio_k) return columns / 2u;
+    return 0u;
+}
 
 /** @p content viewed as @b [rows,scalars] , one row per grid cell or per segment, so a run of
  *  cells is a range of whole rows; an absent modality's empty view stays empty. */
@@ -336,13 +349,14 @@ struct multimodal_batch {
      *  its coordinate places it. */
     nk::tensor<token_id_t, rebound<token_id_t>, 2> tokens {};
 
-    /** @b [rows,columns,patch_side,patch_side,channels] patch-arranged pixels — every image is
-     *  exactly @c max_columns_per_row square patches whatever its source aspect or resolution, so this
-     *  content tensor keeps one fixed shape the whole batch through. A data-loader only tiles pixels
-     *  into this grid and records @ref image_shapes ; it never learns the encoder's coordinate
-     *  convention or rotary geometry — loader and model share only the @c (content,shapes) contract, and
-     *  M-RoPE stays the tower's business. @c channels is the innermost rank, so the entry peels
-     *  @c (patch_side,patch_side,channels) into one projection fan-in with a @c reshape<2> . */
+    /** @b [rows,columns,patch_side,patch_side,channels] patch-arranged pixels — each image is a
+     *  sub-row segment of the patches its resolution earns, several sharing a row, so this content
+     *  tensor keeps one fixed shape the whole batch through. A data-loader only tiles pixels into
+     *  this grid and records @ref image_shapes ; it never learns the encoder's coordinate
+     *  convention or rotary geometry — loader and model share only the @c (content,shapes)
+     *  contract, and M-RoPE stays the tower's business. @c channels is the innermost rank, so the
+     *  entry peels @c (patch_side,patch_side,channels) into one projection fan-in with a
+     *  @c reshape<2> . */
     nk::tensor<pixel_t, rebound<pixel_t>, 5> images {};
 
     /** @b [max_segments_per_gpu,2] each image segment's @c (patch_rows,patch_cols) — the native aspect

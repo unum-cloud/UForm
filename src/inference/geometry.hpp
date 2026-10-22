@@ -37,8 +37,11 @@ struct geometry_t {
     u32_t rope_temporal = 0, rope_height = 0, rope_width = 0;
     f32_t rope_base = 0;
 
-    /** The longest item, and the extent of every rotary angle grid. */
+    /** The extent of every rotary angle grid. */
     u32_t context = 0;
+
+    /** The training row width: the longest text, and the row media items take their share of. */
+    u32_t columns = 0;
 
     /** Rows of the byte embedding table. */
     u32_t vocabulary = 0;

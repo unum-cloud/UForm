@@ -137,7 +137,7 @@ And because the pooled embedding is a small modality-agnostic latent — the des
 Dense vector embeddings are the workhorse of modern retrieval.
 Since __[Matryoshka](https://arxiv.org/abs/2205.13147)__ Representation Learning paper it has been standard practice to train _truncatable_ embeddings, where the leading dimensions already form a usable vector and each later block only sharpens it.
 That enables adaptive, high-throughput search: the coarse phases of an index traversal compare only the first 64 dimensions to separate unrelated content, then widen to 128, 256, 512, and the full 1024 dimensions as a query closes in on a relevant cluster — spending precision only where it changes the ranking.
-For a Tiny model UForm trains exactly these nested prefixes {64, 128, 256, 512, 1024}, but under a __[SigLIP](https://arxiv.org/abs/2303.15343) sigmoid loss__ rather than the Matryoshka InfoNCE of the original work.
+Every tier trains the nested prefixes of {64, 128, 256, 512, 1024} that fit its width plus the full width, so {64, 128, 256, 512} for Tiny and {64, …, 1024, 2048} for Large, but under a __[SigLIP](https://arxiv.org/abs/2303.15343) sigmoid loss__ rather than the Matryoshka InfoNCE of the original work.
 
 There is little architectural novelty here — the difficulty is entirely in the implementation.
 A contrastive objective lives at the scale of a single batch.
@@ -159,11 +159,11 @@ with no cross-column normalization, so an unlabeled positive sitting among the n
 The more rows that fit, the more negatives each pair is scored against and the sharper the geometry — batch size _is_ the objective's resolution.
 
 So UForm computes one SigLIP loss across every GPU in the NVLink domain — all-gathering the per-rank embedding towers into a single global similarity band and reduce-scattering the gradients back, with no NCCL, no host staging, and not even CPU-side scheduling, fully relying on `multimem` PTX instructions.
-Each rank contributes up to 1'024 anchor–positive pairs, so a 72-GPU NVL72 domain forms a global contrastive batch of up to 73'728 Tiny 1024-d BFloat16 embeddings spread across its ≈13.5 TB of pooled HBM3e — _roughly 2.25× the 32'768-sample batch OpenAI used to train the original CLIP_.
+Each rank contributes up to 1'024 anchor–positive pairs, so a 72-GPU NVL72 domain forms a global contrastive batch of up to 73'728 Small 1024-d BFloat16 embeddings spread across its ≈13.5 TB of pooled HBM3e — _roughly 2.25× the 32'768-sample batch OpenAI used to train the original CLIP_.
 As the batch grows into the tens of thousands, false negatives become statistically unavoidable, and SigLIP's per-cell independence is what keeps the signal sharp instead of corrupted at that scale.
 
 Two loader-side properties keep the step cheap.
-The text towers pack many short documents into a single 4096-token sequence and pool one embedding per packed segment, so a large contrastive batch of short inputs never balloons the step's sequence budget — the GPU stays saturated whether the corpus is sentences or full passages.
+The text towers pack many short documents into a single 4096-byte row and pool one embedding per packed segment, so a large contrastive batch of short inputs never balloons the step's sequence budget — the GPU stays saturated whether the corpus is sentences or full passages.
 And each entry can carry _several positives and explicit hard negatives_, which the sharded loss gathers as extra band columns, converging faster than a pipeline restricted to one positive and in-batch negatives alone.
 
 ### ColBERT-style Late-interaction Rerankers
@@ -246,12 +246,15 @@ Cross-node training would still need NCCL or NVSHMEM with IBGDA — UForm target
 
 __Training is BF16.__
 Weights and activations are BFloat16 throughout — the forward and backward GEMMs (FP32-accumulated on the tensor cores), RMSNorm, attention, SwiGLU, embedding lookups, and the loss kernels.
-The optimizer is Adafactor, which carries no first moment: a BF16 master weight plus a Float32 factored second moment — one per-row and one per-col vector per matrix rather than a full variance.
+The optimizer is Adafactor with a first moment: a BF16 master weight, a Float32 first moment of the clipped update with Adam's bias correction, and a Float32 factored second moment — one per-row and one per-col vector per matrix rather than a full variance.
 Most norm scales are the exception, keeping a Float32 master with a BF16 mirror: initialized at magnitude 1.0, their updates fall below the BF16 ULP of \~7.8e-3 and would round to zero in pure BF16.
 
 Float32 is not rare — it lives wherever values accumulate or reduce.
-Gradients accumulate in Float32 before being cast to BF16 for the optimizer step, and the Adafactor second moments, the attention outputs and log-sum-exps, the RMSNorm inverse-variances, the TCR and Lipschitz Gram matrices, and the sharded-loss partial-gradient slabs are all Float32.
+Gradients accumulate in Float32 before being cast to BF16 for the optimizer step, and the Adafactor moments, the attention outputs and log-sum-exps, the RMSNorm inverse-variances, the TCR and Lipschitz Gram matrices, and the sharded-loss partial-gradient slabs are all Float32.
 The rule is simple: store and compute in BF16, accumulate and normalize in Float32.
+
+Activation recomputation is always on: each block keeps only its Float32 input, and its backward replays the forward from that input to refill one set of stashes every block shares.
+Activation memory is one block's intermediates plus one residual stream per block, bought with one extra forward of every block but the top one.
 
 __Inference is BF16 or E4M3 (FP8), fixed per model at load time.__
 The compute mode is a single flag set at construction — `infer_bf16` or `infer_fp8`, not a per-layer toggle; an FP8 model keeps each weight's BF16 master alongside an E4M3 quantized copy used at runtime, while a BF16 model leaves the E4M3 copy empty.
@@ -270,13 +273,15 @@ Adafactor is the middle ground: it keeps a _factored_ second moment — per-row 
 In our optimizer × pooled-embedding-regularizer sweep it matched AdamW's validation loss and produced the lowest activation off-diagonal covariance of any variant — the decorrelation cosine retrieval depends on — trailing AdamW only slightly on bitext retrieval.
 
 The byte-level precedent is established: [ByT5](https://arxiv.org/abs/2105.13626) showed Adafactor trains stably at these sequence lengths and [PaLM](https://arxiv.org/abs/2204.02311) that it scales.
-The usual memory win is minor here — the 259-byte vocabulary makes the embedding table tiny — so the load-bearing reasons are the magnitude Lion throws away and the decorrelation AdamW only half-delivers.
+The usual memory win is minor here — the 258-entry byte vocabulary makes the embedding table tiny — so the load-bearing reasons are the magnitude Lion throws away and the decorrelation AdamW only half-delivers.
 
 ## Pretrained Models & Recipes
 
 All models share weights, not just structure, along a two-axis lineage:
 
-- __Growing scale__ — a larger tier is warm-started by tiling and replicating the weights of a smaller one, a function-preserving Net2Net initialization that doubles the encoder width per step, 512 → 1024 → 2048 → 4096 from Tiny to Large.
+- __Growing scale__ — a larger tier warm-starts from the one below it through a function-preserving Net2Net step that doubles exactly one of width or depth, from Tiny through Small, Medium and Large to XL.
+  Deepening inserts identity blocks with zeroed out and down projections; widening duplicates the residual stream as `[x, x]` with the input-side columns halved.
+  `uform_grow <in> <out> --deepen` or `--widen` runs either offline and refuses to write unless the grown model reproduces the source's embeddings to a cosine of 0.9999.
 - __Specializing capability__ — a reranker is initialized from the masked-pretraining base, and an embedder from the reranker.
 
 The same recipe is reused across every scale and task; only the head and the objective change.
@@ -284,25 +289,29 @@ Checkpoints are saved in the Hugging Face [SafeTensors](https://github.com/safet
 
 ### Uniform Byte Models
 
-| Tier        | width | blocks | pooled-embedding dim        | ColBERT dim | max-seq         | params  |
-| ----------- | ----- | ------ | --------------------------- | ----------- | --------------- | ------- |
-| text-tiny   | 512   | 12     | 64 / 128 / 256 / 512 / 1024 | 128         | 4096 bytes      | \~51 M  |
-| text-small  | 1024  | 12     | 64 / 128 / 256 / 512 / 1024 | 128         | 4096 bytes      | \~238 M |
-| text-medium | 2048  | 12     | 64 / 128 / 256 / 512 / 1024 | 128         | 4096 bytes      | \~1.0 B |
-| text-large  | 4096  | 12     | 64 / 128 / 256 / 512 / 1024 | 128         | 16384 bytes     | \~6.2 B |
-| omni-tiny   | 512   | 12     | 64 / 128 / 256 / 512 / 1024 | 128         | 4096 patches ¹  | \~51 M  |
-| omni-small  | 1024  | 12     | 64 / 128 / 256 / 512 / 1024 | 128         | 4096 patches ¹  | \~238 M |
-| omni-medium | 2048  | 12     | 64 / 128 / 256 / 512 / 1024 | 128         | 4096 patches ¹  | \~1.0 B |
-| omni-large  | 4096  | 12     | 64 / 128 / 256 / 512 / 1024 | 128         | 16384 patches ¹ | \~6.2 B |
+Five tiers form a ladder in which each step doubles exactly one of width or depth.
+A run names its tier with `--tier` and its data with `--mixture`, and the mixture picks the row width:
 
-¹ For omni tiers `--max-seq` is the number of encoder tokens (one per image patch), not bytes.
-The constraint is `--max-seq == (image_side / patch_size)²`; `set_omni_media_geometry` derives `image_side` from this budget at build time.
-With the default `patch_size=16` and `max_seq=4096` this resolves to `image_side=1024 px` (64² = 4096 patches).
-`omni-large` uses `max_seq=16384` → `image_side=2048 px` (128² = 16384 patches).
-Passing any other `--max-seq` value to an omni run aborts the forward pass with a `num_patches != max_seq` guard.
+```bash
+uform_base --tier small --mixture scripts/mixtures/text_contrastive.json --objective contrastive
+```
 
-The `text-*` configs use the byte-gather frontend only; the `omni-*` configs attach all frontends (vision patch projection, video tube projection, audio waveform-frame projection) into the same uniform encoder backbone.
-Every tier ships in three or more capability variants, warm-started in sequence — Net2Net width-doubles text-tiny → text-large, and each scale trains Base → Reranker → Embedder on top of its own Base:
+| Tier   | hidden | depth | params  | peak learning rate | pooled-embedding dim               | ColBERT dim |
+| ------ | ------ | ----- | ------- | ------------------ | ---------------------------------- | ----------- |
+| tiny   | 512    | 12    | \~51 M  | 5e-4               | 64 / 128 / 256 / 512               | 128         |
+| small  | 1024   | 12    | \~204 M | 2e-4               | 64 / 128 / 256 / 512 / 1024        | 128         |
+| medium | 1024   | 24    | \~405 M | 2e-4               | 64 / 128 / 256 / 512 / 1024        | 128         |
+| large  | 2048   | 24    | \~1.6 B | 1e-4               | 64 / 128 / 256 / 512 / 1024 / 2048 | 128         |
+| xl     | 2048   | 48    | \~3.2 B | 1e-4               | 64 / 128 / 256 / 512 / 1024 / 2048 | 128         |
+
+Every tier takes 4096-byte rows in text-only runs and 1024-token rows in any run with media, where an image or a 10.24 s audio clip fills half a row and a video clip a full one.
+At 16-pixel patches a square photo fills 506 of a half row's 512 cells as a 22×23 grid, 352 px tall and 368 px wide.
+
+Parameters count the blocks, the byte embedding and the pooled-embedding head, without the frontends and reconstruction heads a mixture attaches.
+`--learning-rate` overrides the tier's peak learning rate.
+
+A text-only mixture uses the byte-gather frontend only; a mixture with media attaches the frontend of each modality it names (vision patch projection, video tube projection, audio waveform-frame projection) to the same uniform encoder backbone.
+Every tier ships in three or more capability variants, warm-started in sequence — a Net2Net step grows each tier from the one below it, and each scale trains Base → Reranker → Embedder on top of its own Base:
 
 - __Base__ — span-masked byte modelling on the per-byte encoder output; the pretraining root.
 - __Reranker__ — ColBERT-style per-byte soft-MaxSim on the per-byte encoder output.
@@ -327,7 +336,7 @@ All modalities share one uniform encoder via per-modality input frontends:
 - __Audio__ — a waveform-frame frontend projects raw sample chunks into encoder-width vectors, learning the spectral transform end to end rather than baking a fixed mel filterbank.
 
 Each frontend is a thin adapter (patch / tube / waveform-frame projection or byte embedding lookup); the uniform encoder backbone is identical across all modalities — the same N blocks at the same width, the same M-RoPE, the same attention-pooled embedding.
-This is how the `omni-*` configs achieve cross-modal retrieval: image↔text, video↔text, and audio↔text pairs are scored using the same pooled-embedding space, so emergent cross-modal transfer (image↔video, audio↔text at zero-shot) follows from the shared encoder geometry.
+This is how a run with media achieves cross-modal retrieval: image↔text, video↔text, and audio↔text pairs are scored using the same pooled-embedding space, so emergent cross-modal transfer (image↔video, audio↔text at zero-shot) follows from the shared encoder geometry.
 
 Cross-modal retrieval and the structured-output tasks — de-identification, segmentation, log normalization, document extraction — all run over the same backbone and the same GPU-accelerated scaffolding, at encoder throughput.
 

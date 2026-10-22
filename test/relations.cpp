@@ -185,6 +185,32 @@ static void bag_roles(test_suite_t &suite) {
     suite.check(inert, "a PAD vertex and a singleton bag name no edge");
 }
 
+/** The mixer's two bands: two pairs' media lead, their captions trail, then PAD, from vertex 100.
+ *  Each caption still attracts its own pair's media across the bands, in ascending vertex order,
+ *  and bags that descend twice are refused. */
+static void bag_bands(test_suite_t &suite) {
+    constexpr u32_t segments = 5, base = 100;
+    using role_t = segment_role_t;
+    u32_t const bags[segments] = {0, 1, 0, 1, 2};
+    u32_t const lengths[segments] = {2048, 2048, 12, 9, 0};
+    role_t const roles[segments] = {role_t::positive_k, role_t::positive_k, role_t::anchor_k, role_t::anchor_k,
+                                    role_t::anchor_k};
+    expected<host_edges_t> made = host_edges_t::make(segments, 8);
+    if (!made) return suite.check(false, "edges: {}", made.description_);
+    host_edges_t &edges = made.value_;
+    expected_t related = relate_roles(u32r1_view_t {bags, segments}, {roles, segments},
+                                      u32r1_view_t {lengths, segments}, {}, base, edges);
+    if (!related) return suite.check(false, "relate: {}", related.description_);
+    contrastive_edges_view_t const attract = edges.attract();
+    suite.check(row_is_(attract, 0, {102}, {1}) && row_is_(attract, 1, {103}, {1}) && row_is_(attract, 2, {100}, {1}) &&
+                    row_is_(attract, 3, {101}, {1}) && row_is_(attract, 4, {}, {}),
+                "a bag split across the bands relates whole, and PAD names nothing");
+    u32_t const twice[segments] = {0, 1, 0, 1, 0};
+    suite.check(!relate_roles(u32r1_view_t {twice, segments}, {roles, segments}, u32r1_view_t {lengths, segments}, {},
+                              base, edges),
+                "bags descending twice are refused");
+}
+
 /** The derived capacity is exact: four bags of an anchor and two positives fill the attract set of
  *  @ref relation_edges_capacity to the last edge, and one edge less is refused loudly. */
 static void bag_capacity(test_suite_t &suite) {
@@ -215,6 +241,7 @@ int main(int, char **argv) {
     suite.run("world/2-8-16", slices_match_world, 2u, 8u, 16u);
     suite.run("world/4-8-16", slices_match_world, 4u, 8u, 16u);
     suite.run("roles/bag", bag_roles);
+    suite.run("roles/bands", bag_bands);
     suite.run("roles/capacity", bag_capacity);
     return suite.finish();
 }

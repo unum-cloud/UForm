@@ -26,10 +26,10 @@ namespace fu = ashvardanian::forkunion;
 /**
  *  @brief Write one batch's audio-segment geometry with the serial cursor model (the tokens loader's walk).
  *
- *  Thread 0 packs each clip's @p columns_per_row frames into rows (one clip fills a whole row), jumping the
- *  cursor past a row boundary a segment would cross, and records @c segment_offsets / @c segment_lengths and
- *  @c audio_k into @p segment_modality . Audio is 1-D, so there is no shape descriptor. A segment that
- *  overflows the rectangle is dropped loudly (zero length); PAD segments carry zero length, the repeated
+ *  Thread 0 packs each clip's @ref media_cells frames into half rows (two clips share a row, at its
+ *  start and its middle), and records @c segment_offsets / @c segment_lengths and @c audio_k into
+ *  @p segment_modality . Audio is 1-D, so there is no shape descriptor. A segment that overflows
+ *  the rectangle is dropped loudly (zero length); PAD segments carry zero length, the repeated
  *  cursor, and @c text_k .
  *
  *  __grid_size__ @c [1,1,1] , one thread live; no dynamic shared memory.
@@ -41,11 +41,10 @@ static __global__ void audio_segments_kernel_(u32r1_span_t segment_offsets, u32r
     u32_t const total_segments = static_cast<u32_t>(segment_lengths.extent(0));
     u32_t const capacity = columns_per_row * rows;
     u32_t const live = live_clips < total_segments ? live_clips : total_segments;
+    u32_t const clip_cells = media_cells(modality_t::audio_k, columns_per_row);
     u32_t cursor = 0;
     for (u32_t segment = 0; segment != total_segments; ++segment) {
-        u32_t cells = segment < live ? columns_per_row : 0u;
-        u32_t const room_in_row = columns_per_row - cursor % columns_per_row;
-        if (cells > room_in_row) cursor += room_in_row;
+        u32_t cells = segment < live ? clip_cells : 0u;
         if (cursor + cells > capacity) {
             printf("uform: loaded audio batch overflows at segment %u — segment dropped\n", segment);
             cells = 0u;
@@ -86,10 +85,11 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, u64r1_
                                     representation.chunk_samples, chunk_samples);
     std::size_t const reps_count = representations.size();
     std::size_t const job_count = clips * reps_count; // one segment per (clip, representation)
-    if (segment_lengths.extent(0) < job_count || job_count > rows)
+    u32_t const clip_cells = media_cells(modality_t::audio_k, columns);
+    if (segment_lengths.extent(0) < job_count || job_count * clip_cells > std::size_t {rows} * columns)
         return expected_t::fail(status_t::shape_unsupported_k, "audio geometry cannot hold {} segments", job_count);
-    // One clip fills a whole row: `columns` frames, each of `chunk_samples` raw samples.
-    u32_t const clip_samples = columns * chunk_samples;
+    // One clip fills half a row: `clip_cells` frames, each of `chunk_samples` raw samples.
+    u32_t const clip_samples = clip_cells * chunk_samples;
 
     // Hop each drawn clip's encoded bytes device → pinned back to back — the decoder's host-side source. A pinned
     // `column_view_t` (packed `encoded` buffer + `[clips+1]` offsets) tapes them, so a per-clip byte range is one
@@ -117,8 +117,9 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, u64r1_
         return expected_t::fail(status_t::cuda_error_k, "clip byte staging synchronization failed");
     column_view_t const staged_tape {std::span<b8_t const> {encoded}, std::span<u64_t const> {encoded_offsets}};
 
-    // Decode + resample to mono Float32 across the borrowed pool, into a pinned waveform landing already carrying
-    // the grid's `[clips,columns,chunk_samples]` layout: clip `c` fills row `c` (a clip is exactly `clip_samples`).
+    // Decode + resample to mono Float32 across the borrowed pool, into a pinned waveform landing
+    // already carrying the grid's cell layout: clip `c` fills the half row at cell `c·clip_cells`
+    // (a clip is exactly `clip_samples`).
     std::size_t const waveform_samples = job_count * static_cast<std::size_t>(clip_samples);
     st::basic_vector<f32_t, pinned_alloc<f32_t>> waveforms;
     st::basic_vector<i32_t> statuses;
@@ -150,12 +151,12 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, u64r1_
         return expected_t::fail(static_cast<status_t>(statuses[0]), "every one of {} segments failed to decode",
                                 job_count);
 
-    // Climb onto the GPU: one contiguous copy lands the decoded PCM into the grid's leading `clips` rows — the
-    // decode buffer already matches that `[clips,columns,chunk_samples]` sub-span, so there is no reshape or
-    // scatter — then the geometry kernel writes the segment table. Both retire at the closing synchronize.
-    audio_samples_span_t const landing = audio_samples[nk::range(0, job_count), nk::slice];
-    if (expected_t hopped = copy_host_to_device(std::span<f32_t const> {waveforms}, landing.flatten<1>(), stream);
-        !hopped)
+    // Climb onto the GPU: one contiguous copy lands the decoded PCM into the grid's leading
+    // `job_count` half rows — the decode buffer already matches those cells, so there is no reshape
+    // or scatter — then the geometry kernel writes the segment table. Both retire at the closing
+    // synchronize.
+    f32r1_span_t const landing {audio_samples.data(), waveform_samples};
+    if (expected_t hopped = copy_host_to_device(std::span<f32_t const> {waveforms}, landing, stream); !hopped)
         return hopped;
 
     expected_t staged = launch_kernel(&audio_segments_kernel_, dim3 {1u, 1u, 1u}, dim3 {1u, 1u, 1u}, stream,
@@ -213,13 +214,15 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
     std::size_t const columns = first_grid.extent(1);
     if (rows == 0 || columns == 0) return expected_t::fail(status_t::shape_unsupported_k, "the batch carries no audio");
 
-    // The loader's single flat `audio_batch_shape_t` is the one representation (the shape is the single source of
-    // geometry) — a size-1 span today, cross-product-ready for a future multi-rate config. Each clip emits one
-    // whole-row segment per representation, so a clip costs `representations.size()` rows; the clip count is one
-    // representation-set per row, capped by the segment capacity, so the serial cursor packs without overflowing.
+    // The loader's single flat `audio_batch_shape_t` is the one representation (the shape is the
+    // single source of geometry) — a size-1 span today, cross-product-ready for a future multi-rate
+    // config. Each clip emits one half-row segment per representation; the clip count is one
+    // representation-set per half row, capped by the segment capacity, so the serial cursor packs
+    // without overflowing.
     std::span<audio_batch_shape_t const> const representations {&audio_, 1};
     std::size_t const max_segments = batches[0].segment_lengths.extent(0);
-    std::size_t const clips_per_batch = std::min<std::size_t>(max_segments, rows) / representations.size();
+    std::size_t const per_row = columns / media_cells(modality_t::audio_k, static_cast<u32_t>(columns));
+    std::size_t const clips_per_batch = std::min<std::size_t>(max_segments, rows * per_row) / representations.size();
     if (clips_per_batch == 0) return expected_t::fail(status_t::shape_unsupported_k, "the batch holds no audio clips");
     std::size_t const total_clips = unroll * clips_per_batch;
 

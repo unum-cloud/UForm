@@ -124,9 +124,13 @@ struct batch_dest_t_ {
  *  source — a dropped bag's segments and the unclaimed tail both read as this. */
 static constexpr u32_t mixed_source_absent_k = ~u32_t {0};
 
-/** The cursor a run of @p columns starts at, jumped to the next row when it would otherwise cross
- *  a row boundary — a segment never spans two rows. */
-[[nodiscard]] static __device__ u32_t row_aligned_cursor_(u32_t cursor, u32_t columns, u32_t columns_per_row) noexcept {
+/** The cursor a run of @p columns of @p modality starts at: a media item at its next half or whole
+ *  row, as @ref media_cells places it, and text jumped to the next row when it would otherwise
+ *  cross a row boundary, so a segment never spans two rows. */
+[[nodiscard]] static __device__ u32_t row_aligned_cursor_(u32_t cursor, u32_t columns, modality_t modality,
+                                                          u32_t columns_per_row) noexcept {
+    u32_t const cells = media_cells(modality, columns_per_row);
+    if (cells != 0u) return (cursor + cells - 1u) / cells * cells;
     u32_t const room_in_row = columns_per_row - cursor % columns_per_row;
     return columns > room_in_row ? cursor + room_in_row : cursor;
 }
@@ -159,16 +163,17 @@ struct batch_sources_t_ {
  *  @brief Write the mixed batch's geometry: one warp walks the destinations serially, as the repack
  *      cursor is a strict scan, and searches each source bag's run 32 segments at a time.
  *
- *  It derives each destination's world source through the shared @ref epoch_permutation
- *  (read gather-wise: a destination looks up its source, equivalent to scattering by the inverse
+ *  It derives each destination's world source through the shared @ref epoch_permutation (read
+ *  gather-wise: a destination looks up its source, equivalent to scattering by the inverse
  *  permutation, and identical on every GPU so routing needs no exchange), records every mixed
  *  segment's world source into @p mixed_sources for the gather pass, and jumps the cursor past any
  *  row boundary a segment would cross. The routing granularity is the segment when
- *  @p max_bags_per_gpu is zero and the @b bag otherwise — the world axis becomes @c max_bags·world ,
- *  a source bag's live segments (the contiguous run tagged with its index) land together in order,
- *  and @p mixed_bags renumbers them to the destination-local bag. A bag that would overflow the
- *  destination rectangle or the segment table is dropped loudly and @b whole — never split — so a
- *  surviving bag is always intact; the packer's budgets make any drop a bug, not a case.
+ *  @p max_bags_per_gpu is zero and the @b bag otherwise, over a world axis of @c max_bags·world
+ *  bags: a source bag's live segments (the contiguous run tagged with its index) land together, its
+ *  anchors in a trailing band after every other role's segments, and @p mixed_bags renumbers them
+ *  to the destination-local bag. A bag that would overflow the destination rectangle or the segment
+ *  table is dropped loudly and @b whole — never split — so a surviving bag is always intact; the
+ *  packer's budgets make any drop a bug, not a case.
  *
  *  Empty @p mixed_offsets and @p mixed_bags route a destination for its lengths and sources
  *  alone, the way @ref batch_world_geometry_kernel_ derives every other GPU's mix, which lands
@@ -194,7 +199,8 @@ static __device__ void route_destination_(sources_type_ const &sources, u32r1_sp
             std::size_t const source = epoch_permutation(seed, data_epoch, destination, world_segments);
             batch_source_t_ const &peer = sources[static_cast<u32_t>(source / segments_per_gpu)];
             u32_t columns = peer.segment_lengths[source % segments_per_gpu];
-            cursor = row_aligned_cursor_(cursor, columns, columns_per_row);
+            cursor = row_aligned_cursor_(cursor, columns, peer.segment_modality[source % segments_per_gpu],
+                                         columns_per_row);
             if (!lands && cursor + columns > capacity) columns = 0; // the world pass drops silently
             if (cursor + columns > capacity) {
                 if (leader)
@@ -213,57 +219,77 @@ static __device__ void route_destination_(sources_type_ const &sources, u32r1_sp
         return;
     }
 
-    // Bag-cohesive routing: the destination walks its bag budget, each drawing one world bag; the source
-    // bag's live segments are the contiguous run tagged with its index in the peer's bag column, so the
-    // walk finds the run's start once and consumes it to its boundary — a tag that breaks contiguity
-    // simply ends the run instead of being gathered from afar.
+    // Bag-cohesive routing: the destination walks its bag budget, each drawing one world bag;
+    // the source bag's live segments are the contiguous run tagged with its index in the peer's bag
+    // column, so the walk finds the run's start once and consumes it to its boundary — a tag that
+    // breaks contiguity simply ends the run instead of being gathered from afar. The anchors land
+    // in a trailing band after every other role, the loader's own layout, so a caption never
+    // strands a row beside full-row media. The walk runs twice with the same decisions: the first
+    // sizes the leading band, the second writes both, each band ascending.
     std::size_t const world_bags = static_cast<std::size_t>(max_bags_per_gpu) * sources.count;
-    u32_t destination_segment = 0;
-    for (u32_t bag = 0; bag != max_bags_per_gpu; ++bag) {
-        std::size_t const destination_bag = static_cast<std::size_t>(member_index) * max_bags_per_gpu + bag;
-        std::size_t const source_bag_world = epoch_permutation(seed, data_epoch, destination_bag, world_bags);
-        batch_source_t_ const &peer = sources[static_cast<u32_t>(source_bag_world / max_bags_per_gpu)];
-        u32_t const source_bag = static_cast<u32_t>(source_bag_world % max_bags_per_gpu);
-        u32_t const source_gpu_base = static_cast<u32_t>(source_bag_world / max_bags_per_gpu) * segments_per_gpu;
+    u32_t lead_cursor = 0, trail_cursor = 0, lead_segments = 0, trail_segments = 0, trail_begin = 0;
+    for (u32_t pass = 0; pass != 2u; ++pass) {
+        bool const writes = pass == 1u;
+        trail_begin = writes ? static_cast<u32_t>(divide_round_up(lead_cursor, columns_per_row)) * columns_per_row : 0u;
+        u32_t const lead_total = lead_segments;
+        lead_cursor = trail_cursor = lead_segments = trail_segments = 0;
+        for (u32_t bag = 0; bag != max_bags_per_gpu; ++bag) {
+            std::size_t const destination_bag = static_cast<std::size_t>(member_index) * max_bags_per_gpu + bag;
+            std::size_t const source_bag_world = epoch_permutation(seed, data_epoch, destination_bag, world_bags);
+            batch_source_t_ const &peer = sources[static_cast<u32_t>(source_bag_world / max_bags_per_gpu)];
+            u32_t const source_bag = static_cast<u32_t>(source_bag_world % max_bags_per_gpu);
+            u32_t const source_gpu_base = static_cast<u32_t>(source_bag_world / max_bags_per_gpu) * segments_per_gpu;
 
-        u32_t const run_begin = find_run_edge_(peer, source_bag, 0u, segments_per_gpu, true);
-        u32_t const run_end = find_run_edge_(peer, source_bag, run_begin, segments_per_gpu, false);
+            u32_t const run_begin = find_run_edge_(peer, source_bag, 0u, segments_per_gpu, true);
+            u32_t const run_end = find_run_edge_(peer, source_bag, run_begin, segments_per_gpu, false);
+            auto const trails = [&](u32_t source_segment) {
+                return !peer.segment_role.empty() && peer.segment_role[source_segment] == segment_role_t::anchor_k;
+            };
 
-        // Trial placement first, then commit — a bag that cannot land whole lands not at all.
-        u32_t trial_cursor = cursor;
-        bool fits = destination_segment + (run_end - run_begin) <= segments_per_gpu;
-        for (u32_t source_segment = run_begin; source_segment != run_end && fits; ++source_segment) {
-            u32_t const columns = peer.segment_lengths[source_segment];
-            trial_cursor = row_aligned_cursor_(trial_cursor, columns, columns_per_row);
-            fits = trial_cursor + columns <= capacity;
-            trial_cursor += columns;
-        }
-        if (!fits && !lands) continue; // the world pass drops silently
-        if (!fits) {
-            if (leader)
-                printf("uform: bag %u cannot land whole on member %u (rows or segment budget) — whole bag dropped\n",
-                       bag, member_index);
-            continue;
-        }
-        for (u32_t source_segment = run_begin; source_segment != run_end; ++source_segment, ++destination_segment) {
-            u32_t const columns = peer.segment_lengths[source_segment];
-            cursor = row_aligned_cursor_(cursor, columns, columns_per_row);
-            if (leader) {
-                if (lands) mixed_offsets[destination_segment] = cursor, mixed_bags[destination_segment] = bag;
-                mixed_lengths[destination_segment] = columns;
-                mixed_sources[destination_segment] = source_gpu_base + source_segment;
+            // Trial placement first, then commit — a bag that cannot land whole lands not at all.
+            u32_t lead_trial = lead_cursor, trail_trial = trail_cursor;
+            bool fits = lead_segments + trail_segments + (run_end - run_begin) <= segments_per_gpu;
+            for (u32_t source_segment = run_begin; source_segment != run_end && fits; ++source_segment) {
+                u32_t const columns = peer.segment_lengths[source_segment];
+                u32_t &trial = trails(source_segment) ? trail_trial : lead_trial;
+                trial = row_aligned_cursor_(trial, columns, peer.segment_modality[source_segment], columns_per_row) +
+                        columns;
+                fits = divide_round_up(lead_trial, columns_per_row) + divide_round_up(trail_trial, columns_per_row) <=
+                       rows_per_gpu;
             }
-            cursor += columns;
+            if (!fits) {
+                if (writes && lands && leader)
+                    printf("uform: bag %u cannot land whole on member %u (rows or segment budget), dropped whole\n",
+                           bag, member_index);
+                continue;
+            }
+            for (u32_t source_segment = run_begin; source_segment != run_end; ++source_segment) {
+                bool const trailing = trails(source_segment);
+                u32_t const columns = peer.segment_lengths[source_segment];
+                u32_t &cursor = trailing ? trail_cursor : lead_cursor;
+                cursor = row_aligned_cursor_(cursor, columns, peer.segment_modality[source_segment], columns_per_row);
+                u32_t const destination_segment = trailing ? lead_total + trail_segments : lead_segments;
+                if (writes && leader) {
+                    if (lands)
+                        mixed_offsets[destination_segment] = (trailing ? trail_begin : 0u) + cursor,
+                        mixed_bags[destination_segment] = bag;
+                    mixed_lengths[destination_segment] = columns;
+                    mixed_sources[destination_segment] = source_gpu_base + source_segment;
+                }
+                cursor += columns;
+                ++(trailing ? trail_segments : lead_segments);
+            }
         }
     }
     if (!leader) return;
     // The unclaimed tail is PAD: zero length, no source, and the one-past-the-last-bag `end` sentinel.
-    for (u32_t segment = destination_segment; segment != segments_per_gpu; ++segment) {
-        if (lands) mixed_offsets[segment] = cursor, mixed_bags[segment] = max_bags_per_gpu;
+    u32_t const end = trail_segments != 0u ? trail_begin + trail_cursor : lead_cursor;
+    for (u32_t segment = lead_segments + trail_segments; segment != segments_per_gpu; ++segment) {
+        if (lands) mixed_offsets[segment] = end, mixed_bags[segment] = max_bags_per_gpu;
         mixed_lengths[segment] = 0u;
         mixed_sources[segment] = mixed_source_absent_k;
     }
-    if (lands) mixed_offsets[segments_per_gpu] = cursor;
+    if (lands) mixed_offsets[segments_per_gpu] = end;
 }
 
 /**

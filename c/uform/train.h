@@ -253,7 +253,8 @@ typedef struct uform_contrastive_t {
     /** The weight of every pair no edge names, under @c uform_negatives_ambient_k; 1. */
     float ambient_repulsion_weight;
 
-    /** Edges one device's step names per edge set at most; @c max_segments_per_device. */
+    /** Edges one device's step names per edge set at most; zero derives it from the segments and
+     *  the largest bag. */
     size_t max_edges_per_device;
 } uform_contrastive_t;
 

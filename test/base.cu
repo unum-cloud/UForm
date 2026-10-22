@@ -67,6 +67,8 @@ using namespace unum::uform::test;
     config.hidden = 256;
     config.steps = 16;
     config.warmup_steps = 2;
+    // Sixteen toy-width steps need the rate the descent checks were calibrated at, not a tier's.
+    config.learning_rate = 5.0e-3f;
     config.report_every = 1; // the cases read telemetry after every step, so the summands hold that step alone
     config.telemetry_channels = telemetry_losses_k | telemetry_signals_k | telemetry_rounds_k;
     return config;
@@ -554,6 +556,60 @@ static void mixture_sweep(test_suite_t &suite, world_health_t &health, tier_t wi
     }
 }
 
+/** @ref batch_capacity keeps a segment per row at least and one per cell at most, and otherwise
+ *  gives the rows times the density, rounded up. */
+static void segment_budget(test_suite_t &suite) {
+    multimodal_batch_shape_t const shape {0u, 0u, 64u};
+    suite.check(batch_capacity(shape, 64u, 3.05).max_segments_per_gpu == 196u,
+                "64 rows at 3.05 segments per row hold 196 segments");
+    suite.check(batch_capacity(shape, 64u, 0.5).max_segments_per_gpu == 64u, "a row holds one segment at least");
+    suite.check(batch_capacity(shape, 2u, 1000.0).max_segments_per_gpu == 128u, "a row holds one per cell at most");
+    suite.check(batch_capacity(shape, 7u, 1.0).max_rows_per_gpu == 7u, "the rows stay as given");
+}
+
+/** The synthetic corpus packs every token row with the segment budget's share of it, so the
+ *  envelope probe measures the real batch's density: at three segments per row, each row's
+ *  segments cover it exactly once and in order, and the step still trains finitely. */
+static void packed_rows(test_suite_t &suite, world_health_t &health, tier_t tier) {
+    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
+    trainer_config_t config = test_geometry_(false);
+    config.batch = batch_capacity(config.batch, 2u, 3.0);
+    config.capture = eager_k;
+    trainer_t trainer;
+    if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
+        return suite.check(false, "packed trainer bring-up: {}", built.description_);
+    switch_to_gpu_t gpu_scope {trainer.streams[0]};
+    if (!gpu_scope.ok()) return suite.check(false, "packed context entry");
+    base_replica_t &lead = trainer.replicas[0];
+    if (expected_t drawn = lead.draw(config, 0u, data_epoch_t {0u}, trainer.streams[0]); !drawn)
+        return suite.check(false, "packed draw: {}", drawn.description_);
+    std::size_t const rows = config.batch.max_rows_per_gpu, columns = config.batch.max_columns_per_row;
+    std::size_t const segments = config.batch.max_segments_per_gpu;
+    u32r1_tensor_pinned_t offsets = u32r1_tensor_pinned_t::uninitialized({segments + 1}, pinned_alloc<u32_t> {}).value;
+    u32r1_tensor_pinned_t lengths = u32r1_tensor_pinned_t::uninitialized({segments}, pinned_alloc<u32_t> {}).value;
+    if (!offsets || !lengths ||
+        !copy_device_to_host(lead.batch.segment_offsets.view(), offsets.span(), trainer.streams[0]) ||
+        !copy_device_to_host(lead.batch.segment_lengths.view(), lengths.span(), trainer.streams[0]) ||
+        cuStreamSynchronize(trainer.streams[0].get()) != CUDA_SUCCESS)
+        return suite.check(false, "packed readback");
+    bool covered = segments == 3u * rows && offsets[segments] == rows * columns;
+    for (std::size_t row = 0; covered && row != rows; ++row) {
+        std::size_t cursor = row * columns;
+        for (std::size_t index = 3u * row; covered && index != 3u * row + 3u; ++index) {
+            covered = offsets[index] == cursor && lengths[index] != 0u;
+            cursor += lengths[index];
+        }
+        covered = covered && cursor == (row + 1u) * columns;
+    }
+    suite.check(covered, "{} rows of {} columns cut into three segments each, in order", rows, columns);
+    if (expected_t ran = run_steps_(trainer, 0u, 2u); !ran)
+        return suite.check(false, "packed steps: {}", ran.description_);
+    f32_t const loss = trainer.telemetry(optimizer_step_t {1u}).composite();
+    suite.check(std::isfinite(loss), "packed rows train finitely: loss {}", loss);
+    if (expected_t drained = trainer.synchronize(); !drained)
+        suite.check(false, "packed end-of-case drain: {}", drained.description_);
+}
+
 /** The capture contract holds, one forward and one backward replay graph per replica build, and two forward replays
  *  over one fixed eager preamble produce the same shared @c d(normalized) up to reduction order. */
 static void graph_capture(test_suite_t &suite, world_health_t &health, tier_t tier) {
@@ -695,6 +751,8 @@ int main(int, char **argv) {
     tier_t const cheap {cheap_mesh, std::span<i32_t const> {devices}.first(1)};
 
     world_health_t health;
+    suite.run("segment_budget", segment_budget);
+    suite.run("packed_rows", packed_rows, health, cheap);
     suite.run("capture/replay", graph_capture, health, cheap);
     suite.run("resume/late_interaction", late_interaction_resume, health, cheap);
     suite.run("conformance/tokens", run_base_conformance, health, "tokens", test_geometry_(false), wide);

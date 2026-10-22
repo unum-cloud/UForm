@@ -141,12 +141,13 @@ using namespace unum::uform::train;
     envelope_t const &envelope = trainer.envelope;
     f64_t const mebibyte = 1024.0 * 1024.0;
     fmt::println(
-        "uform_base: {} rows of {} columns per GPU: {:.1f} MiB free, {:.1f} MiB fixed + {:.1f} MiB per row, " //
-        "{:.1f} MiB margin, {:.1f} MiB + {:.1f} MiB per row for the reservoir, the arena reserves {:.1f} MiB",
-        envelope.rows, config.batch.max_columns_per_row, envelope.free_bytes / mebibyte,
-        envelope.fixed_bytes / mebibyte, envelope.row_bytes / mebibyte, envelope.margin_bytes / mebibyte,
-        config.reservoir_fixed_bytes / mebibyte, config.reservoir_row_bytes / mebibyte,
-        envelope.reserve_bytes / mebibyte);
+        "uform_base: {} rows of {} columns and {} segments per GPU: {:.1f} MiB free, {:.1f} MiB fixed + "      //
+        "{:.1f} MiB per row, {:.1f} MiB margin, {:.1f} MiB + {:.1f} MiB per row for the reservoir, the arena " //
+        "reserves {:.1f} MiB",
+        envelope.rows, config.batch.max_columns_per_row, trainer.config.batch.max_segments_per_gpu,
+        envelope.free_bytes / mebibyte, envelope.fixed_bytes / mebibyte, envelope.row_bytes / mebibyte,
+        envelope.margin_bytes / mebibyte, config.reservoir_fixed_bytes / mebibyte,
+        config.reservoir_row_bytes / mebibyte, envelope.reserve_bytes / mebibyte);
     fmt::println("uform_base: multimem tier {}", trainer.domain.description());
     if (!config.resume.empty()) {
         if (expected_t resumed = trainer.resume(config.resume); !resumed) return fail_out_(resumed.description_.view());
@@ -199,6 +200,10 @@ int main(int argc, char **argv) {
         fmt::println("uform_base: mixture {} of {} datasets from {}", mixture.name, mixture.datasets.size(),
                      config.mixture);
     }
+    // Media runs take rows of two images or recordings; text-only runs take long documents.
+    config.batch.max_columns_per_row = config.batch.media_live() ? config.tier.media_columns : config.tier.text_columns;
+    fmt::println("uform_base: tier {}: hidden {}, depth {}, {} columns", config.tier.name, config.hidden, config.depth,
+                 config.batch.max_columns_per_row);
     // The library never reads the environment, so the launcher contract maps onto the config and the mesh here:
     // UFORM_DEBUG_ASSERTS arms the gradient-boundary signal probes, the rest place this process in the run.
     if (std::getenv("UFORM_DEBUG_ASSERTS") != nullptr) config.telemetry_channels |= telemetry_signals_k;

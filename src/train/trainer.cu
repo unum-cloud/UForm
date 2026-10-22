@@ -16,11 +16,14 @@
  */
 #include <cmath> // `std::sqrt` — the rows a curved footprint fits
 
+#include <unistd.h> // `getpid`
+
 #include <algorithm> // `std::max`, `std::min`, `std::sort`
 #include <charconv>  // `std::from_chars` — the rows peers measured
 #include <limits>    // `std::numeric_limits`
 
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
+#include <nvml.h> // `nvmlDeviceGetComputeRunningProcesses_v3` — the bytes this process holds
 
 #include "media/audio.hpp"    // `decode_audio`
 #include "media/image.hpp"    // `plan_image`, `decode_image`, `image_channels_k`
@@ -34,6 +37,14 @@ namespace um = unum::uform::media;
 
 /** A vertex, item or segment index that names nothing. */
 static constexpr u32_t absent_k = std::numeric_limits<u32_t>::max();
+
+/** Where an item of @p kept cells and @p modality starts from @p cursor : media on their own half
+ *  or whole row, text at the cursor unless it would cross a row. */
+[[nodiscard]] static u32_t placed_cursor_(u32_t cursor, u32_t kept, modality_t modality, u32_t columns) noexcept {
+    if (u32_t const cells = media_cells(modality, columns); cells != 0u) return (cursor + cells - 1u) / cells * cells;
+    u32_t const room = columns - cursor % columns;
+    return kept > room ? cursor + room : cursor;
+}
 
 /** One head's @c {λ·Σ, count} summand pair — the currency the ledger's loss rows accumulate. */
 struct summand_pair_t {
@@ -114,17 +125,66 @@ struct footprint_fit_t {
     }
 };
 
-/** One device's footprint after a probe step: the bytes the driver handed out since the run began,
- *  and the arena's share of them. */
+/** One device's footprint after a probe step: the bytes the driver gave this process since the
+ *  run began, and the arena's share of them. */
 struct footprint_t {
     std::size_t device_bytes = 0, arena_bytes = 0;
 };
 
+/** One device before the run allocated: what it had free, and what this process held. */
+struct device_budget_t {
+    std::size_t free_bytes = 0, held_bytes = 0;
+};
+
+/** The bytes the driver attributes to this process on @p device , as a plain or an MPS client, so a
+ *  probe's growth reads as its own whatever else grows on the device meanwhile. */
+[[nodiscard]] static expected<std::size_t> held_bytes_(i32_t device) noexcept {
+    using result_t = expected<std::size_t>;
+    CUdevice handle = 0;
+    char bus_id[NVML_DEVICE_PCI_BUS_ID_BUFFER_SIZE] = {};
+    if (CUresult result = cuDeviceGet(&handle, device); result != CUDA_SUCCESS)
+        return cuda_failure<std::size_t>(result, "device handle query failed (device={})", device);
+    if (CUresult result = cuDeviceGetPCIBusId(bus_id, sizeof(bus_id), handle); result != CUDA_SUCCESS)
+        return cuda_failure<std::size_t>(result, "PCI bus query failed (device={})", device);
+    if (nvmlReturn_t status = nvmlInit_v2(); status != NVML_SUCCESS)
+        return result_t::fail(status_t::cuda_error_k, "NVML initialization failed: {}", nvmlErrorString(status));
+    nvmlDevice_t nvml_device = nullptr;
+    nvmlReturn_t status = nvmlDeviceGetHandleByPciBusId_v2(bus_id, &nvml_device);
+    unsigned int const process = static_cast<unsigned int>(getpid());
+    std::size_t held = 0, entries = 0;
+    st::basic_vector<nvmlProcessInfo_t> processes;
+    // An MPS client appears in both lists with the same bytes, so the first list naming this
+    // process counts.
+    for (auto const query : {&nvmlDeviceGetComputeRunningProcesses_v3, &nvmlDeviceGetMPSComputeRunningProcesses_v3}) {
+        if (entries != 0) break;
+        unsigned int count = static_cast<unsigned int>(processes.size());
+        if (status == NVML_SUCCESS) status = query(nvml_device, &count, processes.data());
+        // The list can grow between the size query and the read, so the read retries until it fits.
+        while (status == NVML_ERROR_INSUFFICIENT_SIZE)
+            status = st::failed(processes.resize(st::assume_uninitialized, count))
+                         ? NVML_ERROR_MEMORY
+                         : query(nvml_device, &count, processes.data());
+        for (std::size_t index = 0; status == NVML_SUCCESS && index != count; ++index)
+            if (processes[index].pid == process && processes[index].usedGpuMemory != NVML_VALUE_NOT_AVAILABLE)
+                held += processes[index].usedGpuMemory, ++entries;
+    }
+    nvmlShutdown();
+    if (status != NVML_SUCCESS)
+        return result_t::fail(status_t::cuda_error_k, "NVML process query failed (device={}): {}", device,
+                              nvmlErrorString(status));
+    // A PID namespace or a driver withholding per-process bytes would read as zero growth and an
+    // unbounded fit.
+    if (entries == 0)
+        return result_t::fail(status_t::cuda_error_k, "NVML lists no bytes for process {} on device {}", process,
+                              device);
+    return result_t {held};
+}
+
 /** Bind @p placed to @p mesh , @p config and @p devices , make one stream per device, and record
- *  what each device has free into @p free_bytes — the part of @ref trainer_t::make before the
- *  envelope is known. */
+ *  what each device has free and this process holds into @p budgets — the part of
+ *  @ref trainer_t::make before the envelope is known. */
 [[nodiscard]] static expected_t prepare_(trainer_t &placed, mesh_t &mesh, trainer_config_t const &config,
-                                         std::span<i32_t const> devices, std::span<std::size_t> free_bytes) noexcept {
+                                         std::span<i32_t const> devices, std::span<device_budget_t> budgets) noexcept {
     mesh_topology_t const &topology = mesh.topology;
     std::size_t const gpus = devices.size();
     if (gpus == 0 || gpus != topology.shape.gpus_per_host_domain)
@@ -143,25 +203,37 @@ struct footprint_t {
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
         expected<gpu_memory_report_t> memory = gpu_memory_report(devices[member]);
         if (!memory) return expected_t::fail(std::move(memory));
-        free_bytes[member] = memory->free_bytes;
+        expected<std::size_t> held = held_bytes_(devices[member]);
+        if (!held) return expected_t::fail(std::move(held));
+        budgets[member] = {memory->free_bytes, *held};
     }
-    placed.envelope.free_bytes = *std::min_element(free_bytes.begin(), free_bytes.end());
+    placed.envelope.free_bytes = std::min_element(budgets.begin(), budgets.end(), [](auto const &a, auto const &b) {
+                                     return a.free_bytes < b.free_bytes;
+                                 })->free_bytes;
     return {};
 }
 
 [[nodiscard]] static expected_t assemble_(trainer_t &placed, mesh_t &mesh, std::size_t reserve_bytes) noexcept;
 
+/** How many segments a row of @p config holds: its own ratio when it sets both budgets, as the C
+ *  interface does, else the density its data source charged. */
+[[nodiscard]] static f64_t segments_per_row_(trainer_config_t const &config) noexcept {
+    multimodal_batch_shape_t const &batch = config.batch;
+    if (batch.max_rows_per_gpu && batch.max_segments_per_gpu)
+        return static_cast<f64_t>(batch.max_segments_per_gpu) / static_cast<f64_t>(batch.max_rows_per_gpu);
+    return config.segments_per_row;
+}
+
 /** Build a trainer over @p config at @p rows rows and segments per GPU, its arenas reserving all
  *  the free memory, take one synthetic step, and read every device's footprint against
- *  @p free_bytes , what it had free before the first probe. */
+ *  @p budgets , what it had free and held before the first probe. */
 [[nodiscard]] static expected_t probe_footprint_(mesh_t &mesh, trainer_config_t config, std::span<i32_t const> devices,
-                                                 u32_t rows, std::span<std::size_t const> free_bytes,
+                                                 u32_t rows, std::span<device_budget_t const> budgets,
                                                  std::span<footprint_t> footprints) noexcept {
-    config.batch.max_rows_per_gpu = rows;
-    config.batch.max_segments_per_gpu = rows;
+    config.batch = batch_capacity(config.batch, rows, segments_per_row_(config));
     trainer_t probe;
-    std::size_t probe_free_bytes[max_gpus_per_host_k] = {};
-    expected_t built = prepare_(probe, mesh, config, devices, {probe_free_bytes, devices.size()});
+    device_budget_t probe_budgets[max_gpus_per_host_k] = {};
+    expected_t built = prepare_(probe, mesh, config, devices, {probe_budgets, devices.size()});
     if (built) built = assemble_(probe, mesh, probe.envelope.free_bytes);
     if (!built) return built;
     synthetic_source_t source;
@@ -196,9 +268,9 @@ struct footprint_t {
     for (std::size_t member = 0; member != devices.size(); ++member) {
         switch_to_gpu_t gpu_scope {probe.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-        expected<gpu_memory_report_t> memory = gpu_memory_report(devices[member]);
-        if (!memory) return expected_t::fail(std::move(memory));
-        footprints[member].device_bytes = free_bytes[member] - std::min(memory->free_bytes, free_bytes[member]);
+        expected<std::size_t> held = held_bytes_(devices[member]);
+        if (!held) return expected_t::fail(std::move(held));
+        footprints[member].device_bytes = *held - std::min(*held, budgets[member].held_bytes);
         footprints[member].arena_bytes = probe.arenas[member].used(); // exact, where mapped() moves whole chunks
     }
     // A host destroys its queue pairs only once every host drained its last acknowledgement.
@@ -264,7 +336,7 @@ struct footprint_t {
  */
 [[nodiscard]] static expected<envelope_t> measure_envelope_(mesh_t &mesh, trainer_config_t const &config,
                                                             std::span<i32_t const> devices,
-                                                            std::span<std::size_t const> free_bytes) noexcept {
+                                                            std::span<device_budget_t const> budgets) noexcept {
     using result_t = expected<envelope_t>;
     if (config.late_interacts() && config.batch.max_rows_per_gpu == 0)
         return result_t::fail(status_t::invalid_input_k,
@@ -272,9 +344,9 @@ struct footprint_t {
                               "are set, never fitted to memory: pass --rows, or the batch's max_rows_per_device");
     std::size_t const gpus = devices.size();
     footprint_t smaller[max_gpus_per_host_k] = {}, middle[max_gpus_per_host_k] = {}, larger[max_gpus_per_host_k] = {};
-    expected_t probed = probe_footprint_(mesh, config, devices, smaller_probe_rows_k, free_bytes, {smaller, gpus});
-    if (probed) probed = probe_footprint_(mesh, config, devices, middle_probe_rows_k, free_bytes, {middle, gpus});
-    if (probed) probed = probe_footprint_(mesh, config, devices, larger_probe_rows_k, free_bytes, {larger, gpus});
+    expected_t probed = probe_footprint_(mesh, config, devices, smaller_probe_rows_k, budgets, {smaller, gpus});
+    if (probed) probed = probe_footprint_(mesh, config, devices, middle_probe_rows_k, budgets, {middle, gpus});
+    if (probed) probed = probe_footprint_(mesh, config, devices, larger_probe_rows_k, budgets, {larger, gpus});
     if (!probed) return result_t::fail(std::move(probed));
 
     f64_t const low_rows = smaller_probe_rows_k, middle_rows = middle_probe_rows_k, high_rows = larger_probe_rows_k;
@@ -304,7 +376,7 @@ struct footprint_t {
                      (high_rows - low_rows);
         device.fixed = static_cast<f64_t>(low.device_bytes) - device.row * low_rows - device.pair * low_rows * low_rows;
         envelope_t measured;
-        measured.free_bytes = free_bytes[member];
+        measured.free_bytes = budgets[member].free_bytes;
         measured.row_bytes = static_cast<std::size_t>(std::max(device.row, 0.0));
         measured.pair_bytes = static_cast<std::size_t>(device.pair);
         measured.fixed_bytes = static_cast<std::size_t>(std::max(device.fixed, 0.0));
@@ -535,16 +607,14 @@ struct footprint_t {
 
 expected_t trainer_t::make(trainer_t &placed, mesh_t &mesh, trainer_config_t const &requested,
                            std::span<i32_t const> devices) noexcept {
-    std::size_t free_bytes[max_gpus_per_host_k] = {};
-    if (expected_t prepared = prepare_(placed, mesh, requested, devices, {free_bytes, devices.size()}); !prepared)
+    device_budget_t budgets[max_gpus_per_host_k] = {};
+    if (expected_t prepared = prepare_(placed, mesh, requested, devices, {budgets, devices.size()}); !prepared)
         return prepared;
-    expected<envelope_t> measured = measure_envelope_(mesh, requested, devices, {free_bytes, devices.size()});
+    expected<envelope_t> measured = measure_envelope_(mesh, requested, devices, {budgets, devices.size()});
     if (!measured) return expected_t::fail(std::move(measured));
     placed.envelope = *measured;
-    if (!requested.batch.max_rows_per_gpu) {
-        placed.config.batch.max_rows_per_gpu = placed.envelope.rows;
-        placed.config.batch.max_segments_per_gpu = placed.envelope.rows;
-    }
+    if (!requested.batch.max_rows_per_gpu || !requested.batch.max_segments_per_gpu)
+        placed.config.batch = batch_capacity(placed.config.batch, placed.envelope.rows, segments_per_row_(requested));
 
     expected_t assembled = assemble_(placed, mesh, placed.envelope.reserve_bytes);
     if (assembled || assembled.status_ != status_t::bad_alloc_k) return assembled;
@@ -978,8 +1048,9 @@ expected_t items_source_t::make(items_source_t &placed, trainer_t &trainer) noex
     placed.packed_items_ = u32r2_tensor_pinned_t::uninitialized({gpus, segments}, pinned_alloc<u32_t> {}).value;
     allocated = allocated && placed.packed_items_;
     if (shape.contains(modality_t::audio_k))
-        allocated = allocated && !st::failed(placed.window_.resize(std::size_t {shape.max_columns_per_row} *
-                                                                   shape.audio.chunk_samples));
+        allocated = allocated && !st::failed(placed.window_.resize(
+                                     std::size_t {media_cells(modality_t::audio_k, shape.max_columns_per_row)} *
+                                     shape.audio.chunk_samples));
     if (config.contrasts()) {
         expected<contrastive_edges_pinned_t> edge_sets = contrastive_edges_pinned_t::make(static_cast<u32_t>(segments),
                                                                                           static_cast<u32_t>(edges));
@@ -1028,7 +1099,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
         std::size_t kept = 0, spanned = 0;
         if (modality == modality_t::text_k) spanned = bytes.size(), kept = std::min<std::size_t>(spanned, columns);
         else if (modality == modality_t::image_k) {
-            expected<um::image_plan_t> planned = um::plan_image(bytes, shape.image.patch_side, columns, 1u);
+            expected<um::image_plan_t> planned = um::plan_image(bytes, shape.image.patch_side, columns);
             if (!planned) return expected_t::fail(std::move(planned));
             kept = std::size_t {planned->grid.rows} * planned->grid.columns;
             spanned = divide_round_up(planned->native.width, shape.image.patch_side) *
@@ -1051,7 +1122,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
             while (heard && window_[heard - 1] == 0.0f) --heard;
             std::size_t const frames = divide_round_up(heard, shape.audio.chunk_samples);
             kept = frames ? frames : 1u;
-            spanned = frames == columns ? frames + 1u : kept;
+            spanned = frames == media_cells(modality_t::audio_k, columns) ? frames + 1u : kept;
         }
         tokens_[item] = static_cast<u32_t>(kept);
         report.truncated += spanned > kept;
@@ -1079,8 +1150,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
             for (std::size_t position = begin; position != end; ++position) {
                 u32_t const kept = tokens_[order_[position]];
                 if (!kept) continue;
-                u32_t const room = columns - cursor % columns;
-                cursor += (kept > room ? room : 0u) + kept;
+                cursor = placed_cursor_(cursor, kept, items.modalities[order_[position]], columns) + kept;
             }
             bool const fits = cursor <= capacity && used_segments[candidate] + live <= segments &&
                               (!bags_per_gpu || used_bags[candidate] < bags_per_gpu);
@@ -1093,8 +1163,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
         for (std::size_t position = begin; position != end; ++position) {
             u32_t const item = order_[position], kept = tokens_[item];
             if (!kept) continue;
-            u32_t const room = columns - cursors[device] % columns;
-            if (kept > room) cursors[device] += room;
+            cursors[device] = placed_cursor_(cursors[device], kept, items.modalities[item], columns);
             u32_t const segment = used_segments[device]++, offset = cursors[device];
             cursors[device] += kept;
             modality_t const modality = items.modalities[item];
@@ -1113,7 +1182,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
                     tokens[token] = static_cast<token_id_t>(bytes[token]);
             }
             else if (modality == modality_t::image_k) {
-                expected<um::image_plan_t> planned = um::plan_image(bytes, shape.image.patch_side, columns, 1u);
+                expected<um::image_plan_t> planned = um::plan_image(bytes, shape.image.patch_side, columns);
                 if (!planned) return expected_t::fail(std::move(planned));
                 std::size_t const side = shape.image.patch_side;
                 staged.image_shapes[segment, 0] = planned->grid.rows;

@@ -93,16 +93,15 @@ struct image_plan_t {
                                                   std::size_t window_offset = 0) noexcept;
 
 /**
- *  @brief Plan one image the way the NVIDIA loader plans it: probe, budget, factor, and the DCT scale toward the
- *      target a hardware JPEG decode would take.
+ *  @brief Plan one image the way the NVIDIA loader plans it: probe, the row-filling grid, and the
+ *      DCT scale toward the target a hardware JPEG decode would take.
  *
  *  @param[in] encoded The compressed blob, or at least its header prefix.
  *  @param[in] patch_side The square patch side in pixels.
- *  @param[in] columns The batch row width in patches.
- *  @param[in] segments The most images one batch carries.
+ *  @param[in] columns The batch row width in patches, which every image fills.
  */
-[[nodiscard]] expected<image_plan_t> plan_image(std::span<b8_t const> encoded, u32_t patch_side, u32_t columns,
-                                                u32_t segments) noexcept;
+[[nodiscard]] expected<image_plan_t> plan_image(std::span<b8_t const> encoded, u32_t patch_side,
+                                                u32_t columns) noexcept;
 
 /**
  *  @brief Decode one blob to interleaved RGBA at @p out 's extent.

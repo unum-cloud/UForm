@@ -28,7 +28,7 @@ struct images_packer_t {
 
     failure_t plan(std::size_t item, item_plan_t &plan, ui::geometry_t const &geometry, std::size_t) const noexcept {
         core::expected<um::image_plan_t> planned = um::plan_image(entry_of(tape, item, 1), geometry.image_patch_side,
-                                                                  geometry.context, geometry.context);
+                                                                  geometry.columns);
         if (!planned) return {media_status_of(planned.status_), "An image file could not be probed"};
         plan.image = *planned;
         plan.tokens = static_cast<u32_t>(planned->grid.rows) * planned->grid.columns;
@@ -77,7 +77,7 @@ struct videos_packer_t {
         core::expected<um::demuxed_t> clip = um::demux_video(entry_of(tape, item, 1));
         if (!clip) return {media_status_of(clip.status_), "A clip could not be demuxed"};
         core::video_batch_shape_t const shape = video_shape_of(geometry);
-        um::video_grid_t const grid = um::video_tube_grid(clip->frames, clip->extent, shape, geometry.context);
+        um::video_grid_t const grid = um::video_tube_grid(clip->frames, clip->extent, shape, geometry.columns);
         std::size_t const sampled = core::divide_round_up(clip->frames ? clip->frames : 1, shape.frame_stride);
         plan.tokens = static_cast<u32_t>(grid.temporal_groups) * grid.patch_rows * grid.patch_columns;
         plan.spanned = core::divide_round_up(sampled, shape.tube_frames) *
@@ -117,7 +117,8 @@ struct recordings_packer_t {
     failure_t validate(ui::geometry_t const &geometry) const noexcept { return validate_audio(geometry); }
 
     failure_t prepare(chunked_arena_t &staging, std::size_t threads, ui::geometry_t const &geometry) noexcept {
-        window_samples = std::size_t {geometry.context} * geometry.audio_chunk_samples;
+        window_samples = std::size_t {core::media_cells(core::modality_t::audio_k, geometry.columns)} *
+                         geometry.audio_chunk_samples;
         window = staging.allocate<f32_t>(window_samples * threads);
         if (!window) return {uform_status_out_of_memory_k, "Failed to allocate the recording staging"};
         return {};
@@ -135,7 +136,8 @@ struct recordings_packer_t {
         while (heard && samples[heard - 1] == 0.0f) --heard;
         std::size_t const frames = core::divide_round_up(heard, geometry.audio_chunk_samples);
         plan.tokens = static_cast<u32_t>(frames ? frames : 1);
-        plan.spanned = frames == geometry.context ? frames + 1 : plan.tokens;
+        plan.spanned = frames == core::media_cells(core::modality_t::audio_k, geometry.columns) ? frames + 1
+                                                                                                : plan.tokens;
         return {};
     }
 

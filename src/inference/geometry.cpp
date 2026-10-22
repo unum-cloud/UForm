@@ -62,6 +62,10 @@ expected<geometry_t> geometry_t::from(uc::checkpoint_to_load_t const &checkpoint
     if (read) read = read_(checkpoint, "rope_width", geometry.rope_width);
     if (read) read = read_(checkpoint, "rope_base", geometry.rope_base);
     if (read) read = read_(checkpoint, "context", geometry.context);
+    // Checkpoints from before the key trained one row as wide as their rotary grid.
+    if (read)
+        read = checkpoint.metadata("columns").empty() ? (geometry.columns = geometry.context, expected_t {})
+                                                      : read_(checkpoint, "columns", geometry.columns);
     if (read) read = read_(checkpoint, "image_patch_side", geometry.image_patch_side);
     if (read) read = read_(checkpoint, "image_channels", geometry.image_channels);
     if (read) read = read_(checkpoint, "video_patch_side", geometry.video_patch_side);

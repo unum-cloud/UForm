@@ -53,7 +53,8 @@
 
 #include <cstdint> // `std::uint32_t`
 
-#include <memory> // `std::allocator_traits`, the edge owner's per-type rebinding
+#include <algorithm> // `std::lower_bound`, a bag's run in the other band
+#include <memory>    // `std::allocator_traits`, the edge owner's per-type rebinding
 
 #include <cuda.h> // `cuMemcpyHtoDAsync`, `cuMemsetD8Async`
 #if defined(__CUDACC__)
@@ -383,7 +384,11 @@ using contrastive_edges_pinned_t = contrastive_edges<pinned_alloc_t>;
 
 /**
  *  @brief One GPU's relation graph from its bags, a pure host function over the mixed columns,
- *      which the mixer lands whole and contiguous per bag on one GPU.
+ *      which the mixer lands whole on one GPU, as at most one run per band.
+ *
+ *  The mixer lays every other role out first and the anchors after them, each band ascending by
+ *  bag, so the columns descend at most once, where the anchor band starts, and a bag's partners are
+ *  its run in each band, named in ascending position as each set keeps a row's IDs sorted.
  *
  *  Inside a bag, the anchor and its positives attract each other at unit weight, the anchor and a
  *  negative repel each other at the negative's weight, and a positive and a negative, or two
@@ -399,7 +404,8 @@ using contrastive_edges_pinned_t = contrastive_edges<pinned_alloc_t>;
  *  @param[in] vertex_base The global vertex of the GPU's segment 0, its world coordinate times the
  *      segments.
  *  @param[out] edges The three sets, refilled over the @b [segments] rows.
- *  @retval status_t::invalid_input_k Columns of other extents, or more edges than a set holds.
+ *  @retval status_t::invalid_input_k Columns of other extents, bags descending more than once, or
+ *      more edges than a set holds.
  */
 template <typename alloc_type_>
 [[nodiscard]] expected_t relate_roles(u32r1_view_t bags, nk::tensor_view<segment_role_t, 1> roles, u32r1_view_t lengths,
@@ -412,6 +418,14 @@ template <typename alloc_type_>
         return expected_t::fail(status_t::invalid_input_k,
                                 "{} bags, {} roles, {} lengths, {} weights and {} rows disagree", bags.extent(0),
                                 roles.extent(0), segments, weights.extent(0), edges.rows());
+    u32_t band = segments;
+    for (u32_t segment = 1; segment < segments; ++segment) {
+        if (bags[segment] >= bags[segment - 1u]) continue;
+        if (band != segments)
+            return expected_t::fail(status_t::invalid_input_k, "a GPU's bags descend at {} and again at {}", band,
+                                    segment);
+        band = segment;
+    }
     u32_t written[3] = {};
     for (set_t const set : {set_t::attract_k, set_t::repel_k, set_t::ignore_k}) {
         u32r1_span_t const offsets = edges.offsets(set);
@@ -419,40 +433,49 @@ template <typename alloc_type_>
     }
     for (u32_t segment = 0; segment != segments; ++segment) {
         bool const live = lengths[segment] != 0u;
-        u32_t begin = segment, end = segment + 1u;
+        u32_t begin = segment, end = segment + 1u, other_begin = 0, other_end = 0;
         if (live) {
             while (begin != 0u && bags[begin - 1u] == bags[segment] && lengths[begin - 1u] != 0u) --begin;
             while (end != segments && bags[end] == bags[segment] && lengths[end] != 0u) ++end;
         }
-        segment_role_t const role = roles[segment];
-        u32_t const bag_begin = vertex_base + begin, bag_end = vertex_base + end, self = vertex_base + segment;
-        for (u32_t partner = bag_begin; live && partner != bag_end; ++partner) {
-            if (partner == self) continue;
-            set_t set = set_t::attract_k;
-            f32_t weight = 1.0f;
-            u32_t const partner_segment = partner - vertex_base;
-            segment_role_t const partner_role = roles[partner_segment];
-            bool const negative = role == segment_role_t::negative_k;
-            bool const partner_negative = partner_role == segment_role_t::negative_k;
-            if (negative != partner_negative &&
-                (role == segment_role_t::anchor_k || partner_role == segment_role_t::anchor_k)) {
-                set = set_t::repel_k;
-                u32_t const negative_segment = negative ? segment : partner_segment;
-                weight = weights.empty() ? 1.0f : weights[negative_segment];
-            }
-            else if (negative || partner_negative) set = set_t::ignore_k;
-            u32_t &count = written[static_cast<u32_t>(set)];
-            if (count == edges.capacity())
-                return expected_t::fail(status_t::invalid_input_k, "a GPU's bags name over {} edges in one set",
-                                        edges.capacity());
-            u32r1_span_t const ids = edges.ids(set);
-            ids[count] = partner;
-            if (set != set_t::ignore_k) {
-                f32r1_span_t const weights_of_set = edges.weights(set);
-                weights_of_set[count] = weight;
-            }
-            ++count;
+        if (live && band != segments) {
+            u32_t const first = segment < band ? band : 0u, last = segment < band ? segments : band;
+            other_begin = static_cast<u32_t>(std::lower_bound(bags.data() + first, bags.data() + last, bags[segment]) -
+                                             bags.data());
+            for (other_end = other_begin; other_end != last && bags[other_end] == bags[segment];) ++other_end;
         }
+        bool const other_first = other_begin != other_end && other_begin < begin;
+        u32_t const runs[2][2] = {{other_first ? other_begin : begin, other_first ? other_end : end},
+                                  {other_first ? begin : other_begin, other_first ? end : other_end}};
+        segment_role_t const role = roles[segment];
+        for (auto const &run : runs)
+            for (u32_t partner_segment = run[0]; live && partner_segment < run[1]; ++partner_segment) {
+                if (partner_segment == segment || lengths[partner_segment] == 0u) continue;
+                set_t set = set_t::attract_k;
+                f32_t weight = 1.0f;
+                u32_t const partner = vertex_base + partner_segment;
+                segment_role_t const partner_role = roles[partner_segment];
+                bool const negative = role == segment_role_t::negative_k;
+                bool const partner_negative = partner_role == segment_role_t::negative_k;
+                if (negative != partner_negative &&
+                    (role == segment_role_t::anchor_k || partner_role == segment_role_t::anchor_k)) {
+                    set = set_t::repel_k;
+                    u32_t const negative_segment = negative ? segment : partner_segment;
+                    weight = weights.empty() ? 1.0f : weights[negative_segment];
+                }
+                else if (negative || partner_negative) set = set_t::ignore_k;
+                u32_t &count = written[static_cast<u32_t>(set)];
+                if (count == edges.capacity())
+                    return expected_t::fail(status_t::invalid_input_k, "a GPU's bags name over {} edges in one set",
+                                            edges.capacity());
+                u32r1_span_t const ids = edges.ids(set);
+                ids[count] = partner;
+                if (set != set_t::ignore_k) {
+                    f32r1_span_t const weights_of_set = edges.weights(set);
+                    weights_of_set[count] = weight;
+                }
+                ++count;
+            }
         for (set_t const set : {set_t::attract_k, set_t::repel_k, set_t::ignore_k}) {
             u32r1_span_t const offsets = edges.offsets(set);
             offsets[segment + 1u] = written[static_cast<u32_t>(set)];

@@ -106,8 +106,7 @@ expected<image_probe_t> um::probe_image(std::span<b8_t const> encoded, std::size
     return image_probe_t {format, extent.value_, 0};
 }
 
-expected<image_plan_t> um::plan_image(std::span<b8_t const> encoded, u32_t patch_side, u32_t columns,
-                                      u32_t segments) noexcept {
+expected<image_plan_t> um::plan_image(std::span<b8_t const> encoded, u32_t patch_side, u32_t columns) noexcept {
     expected<image_probe_t> probed = probe_image(encoded);
     if (!probed) return expected<image_plan_t>::fail(std::move(probed));
     if (probed->extent.width == 0)
@@ -115,7 +114,7 @@ expected<image_plan_t> um::plan_image(std::span<b8_t const> encoded, u32_t patch
     image_plan_t plan;
     plan.format = probed->format;
     plan.native = probed->extent;
-    plan.grid = image_patch_grid(image_patch_budget(plan.native, patch_side, columns, segments), plan.native);
+    plan.grid = image_patch_grid(uc::media_cells(uc::modality_t::image_k, columns), plan.native);
     image_extent_t const target {u32_t(plan.grid.columns) * patch_side, u32_t(plan.grid.rows) * patch_side};
     plan.scale = plan.format == format_jpeg_k ? image_decode_scale(plan.native, target) : 0u;
     plan.decoded = image_decoded_extent(plan.native, plan.scale);

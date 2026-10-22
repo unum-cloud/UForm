@@ -43,12 +43,15 @@
 #include "loaders/audio_loader.cuh"   // `decode_audios`, `cpu_decode_pool_t`
 #include "loaders/image_loader.cuh"   // `nvjpeg_session_t`, `decode_images`
 #include "loaders/video_loader.cuh"   // `nvdec_session_t`, `decode_videos`
+#include "media/planning.hpp"         // `image_patch_grid`, `video_tube_grid`
 #include "harness.hpp"                // `test_suite_t`
+#include "train/datasets.hpp"         // `mixture_sampler_t`, `mixture_entry_t`
 
 using namespace unum::uform::core;
 using namespace unum::uform::loaders;
 using namespace unum::uform::test;
 namespace um = unum::uform::media;
+namespace ut = unum::uform::train;
 
 /** The loaders' file-local keyed-draw salts, pinned here as a frozen copy (like Tier A's finalize
  *  golden): a changed loader salt diverges these host oracles, catching a silent reshuffle of the draw. */
@@ -115,7 +118,8 @@ struct fabricated_tape_t {
         // Device memory: `uninitialized` + explicit memset — `zeros` writes through the host pointer.
         tape.device_bytes = b8r1_tensor_arena_t::uninitialized({total}, gpu_arena_alloc<b8_t> {arena}).value;
         if (!tape.device_bytes) return result_t::fail(status_t::bad_alloc_k, "tape device buffer alloc failed");
-        if (CUresult reset = cuMemsetD8(device_address(tape.device_bytes.data()), 0, total); reset != CUDA_SUCCESS)
+        if (CUresult reset = cuMemsetD8Async(device_address(tape.device_bytes.data()), 0, total, stream.get());
+            reset != CUDA_SUCCESS)
             return cuda_failure<fabricated_tape_t>(reset, "tape device buffer reset failed");
         if (expected_t staged = copy_host_to_device(std::span<b8_t const> {host}, tape.device_bytes.span(), stream);
             !staged)
@@ -273,6 +277,72 @@ static void glob_spans_depths_and_symlinks(test_suite_t &suite) {
     for (char const *directory : {"/a/b", "/a", "/real", ""}) ::rmdir(path(directory).c_str());
 }
 
+/** An entry capped at one pass retires once the world's fills drew exactly its rows, its weight
+ *  moves to its modality's live entry rather than across modalities, and a run resumed at a later
+ *  epoch replays the keyed draws to the same live entries. */
+static void mixture_sampler_retires_capped_entries(test_suite_t &suite) {
+    auto const entry_of = [](char const *name, f64_t weight, std::size_t epochs, modality_t modality) {
+        ut::mixture_entry_t entry;
+        (void)entry.name.assign(sz::string_view_t {name});
+        (void)entry.anchor.assign(sz::string_view_t {"caption"});
+        entry.weight = weight, entry.epochs = epochs, entry.modality = modality;
+        return entry;
+    };
+    st::basic_vector<ut::mixture_entry_t> entries;
+    if (st::failed(entries.push_back(entry_of("capped", 1.0, 1, modality_t::image_k))) ||
+        st::failed(entries.push_back(entry_of("image", 1.0, 0, modality_t::image_k))) ||
+        st::failed(entries.push_back(entry_of("text", 2.0, 0, modality_t::text_k))))
+        return suite.check(false, "entry table alloc failed");
+    // Two GPUs refilling on alternate epochs, each fill drawing two batches of two pairs.
+    constexpr std::size_t world_gpus = 2, batches_per_fill = 2, segments = 4, epochs = 2000;
+    constexpr std::size_t fill_pairs = batches_per_fill * (segments / 2);
+    constexpr u64_t seed = 0xE90C5ull;
+    std::size_t const rows[3] = {12, 1000, 1000};
+    auto const make = [&]() noexcept -> expected<ut::mixture_sampler_t> {
+        return ut::mixture_sampler_t::make(entries, rows, world_gpus, batches_per_fill, segments);
+    };
+    auto const refills = [](std::size_t epoch, std::size_t gpu) {
+        return epoch == 0 || (epoch + gpu * batches_per_fill / world_gpus) % batches_per_fill == 0;
+    };
+
+    expected<ut::mixture_sampler_t> fresh = make();
+    if (!fresh) return suite.check(false, "the sampler should make: {}", fresh.description_);
+    st::basic_vector<std::size_t> drawn; // per world fill, left zero where a GPU does not refill
+    if (st::failed(drawn.resize(epochs * world_gpus))) return suite.check(false, "draw table alloc failed");
+    nk::tensor_span<std::size_t, 2> const draws {drawn.data(), epochs, world_gpus};
+    std::size_t capped_fills = 0, retired_epoch = 0;
+    for (std::size_t epoch = 0; epoch != epochs; ++epoch)
+        for (std::size_t gpu = 0; gpu != world_gpus; ++gpu)
+            if (refills(epoch, gpu)) {
+                std::size_t const entry = fresh.value_.draw(seed, data_epoch_t {static_cast<u32_t>(epoch)},
+                                                            static_cast<u32_t>(gpu), nullptr);
+                draws[epoch, gpu] = entry;
+                if (entry == 0) ++capped_fills, retired_epoch = epoch;
+            }
+    suite.check(capped_fills * fill_pairs == rows[0], "the capped entry retires after exactly its {} rows, drew {}",
+                rows[0], capped_fills * fill_pairs);
+
+    std::size_t image_fills = 0, later_fills = 0;
+    for (std::size_t epoch = retired_epoch + 1; epoch != epochs; ++epoch)
+        for (std::size_t gpu = 0; gpu != world_gpus; ++gpu)
+            if (refills(epoch, gpu)) ++later_fills, image_fills += draws[epoch, gpu] == 1;
+    suite.check(image_fills * 10 >= later_fills * 4 && image_fills * 10 <= later_fills * 6,
+                "the image entry takes the image modality's half of the draws, not a third, got {} of {}", image_fills,
+                later_fills);
+
+    for (std::size_t const resumed_at : {retired_epoch, retired_epoch + 1, epochs / 2}) {
+        expected<ut::mixture_sampler_t> resumed = make();
+        if (!resumed) return suite.check(false, "the sampler should make: {}", resumed.description_);
+        bool agrees = true;
+        for (std::size_t epoch = resumed_at; epoch != epochs; ++epoch)
+            for (std::size_t gpu = 0; gpu != world_gpus; ++gpu)
+                if (refills(epoch, gpu))
+                    agrees &= resumed.value_.draw(seed, data_epoch_t {static_cast<u32_t>(epoch)},
+                                                  static_cast<u32_t>(gpu), nullptr) == draws[epoch, gpu];
+        suite.check(agrees, "a run resumed at epoch {} draws as the fresh one did", resumed_at);
+    }
+}
+
 /** The weighted file pick is row-proportional, distinct, and floored at two shards. */
 static void file_pick_is_weighted_and_distinct(test_suite_t &suite) {
     constexpr splitmix64_hash_t hash {};
@@ -312,11 +382,13 @@ static void file_pick_is_weighted_and_distinct(test_suite_t &suite) {
     suite.check(hits[2] > hits[1] * 5, "the pick must be weighted by row count (file2={} file1={})", hits[2], hits[1]);
 }
 
-// Tier B — the multi-segment-per-row packing cursor, host oracle of the shared token-cursor scan every media
-// loader now obeys: each `[offset,offset+len)` stays in one row, pre-jump gaps appear, PAD repeats the cursor.
+// Tier B — the multi-segment-per-row packing cursor, host oracle of the token loader's scan: each
+// `[offset,offset+len)` stays in one row, pre-jump gaps appear, PAD repeats the cursor. Media never
+// share a row.
 
-/** The packing cursor keeps every segment in one row, packs several per row, jumps before a crossing,
- *  and repeats the cursor with zero length on PAD — the host oracle every media loader's scan mirrors. */
+/** The packing cursor keeps every segment in one row, packs several per row, jumps before a
+ *  crossing, and repeats the cursor with zero length on PAD — the host oracle the token loader's
+ *  scan mirrors. */
 static void segment_geometry_packs_multiple_per_row(test_suite_t &suite) {
     u32_t const columns = 8u, rows = 3u, capacity = rows * columns, total_segments = 8u;
     stack_array<u64_t, 5> item_bytes; // truncated to the row width, packed back to back
@@ -360,6 +432,32 @@ static void segment_geometry_packs_multiple_per_row(test_suite_t &suite) {
     suite.check(offsets[total_segments] <= capacity, "the pack cursor must never exceed the {}-cell grid", capacity);
     suite.check(pad_ok, "PAD segments must repeat the live cursor with zero length");
     suite.check(offsets[total_segments] == cursor, "the terminal offset must close the last live segment");
+}
+
+/** Every image fills half a row and every clip a whole one, whatever their resolution: a 224² photo
+ *  upscales to the near-square half-row grid, a 4:3 one keeps its aspect, and a short
+ *  low-resolution clip grows its frame. */
+static void media_fill_their_rows(test_suite_t &suite) {
+    u32_t const columns = 1024u, half_row = media_cells(modality_t::image_k, columns);
+    suite.check(half_row == 512u && media_cells(modality_t::audio_k, columns) == 512u &&
+                    media_cells(modality_t::video_k, columns) == columns &&
+                    media_cells(modality_t::text_k, columns) == 0u,
+                "images and audio take half a row, video a whole one, text packs freely");
+    um::patch_grid_t const square = um::image_patch_grid(half_row, um::image_extent_t {224u, 224u});
+    suite.check(square.rows == 22u && square.columns == 23u, "a 224² image fills a 22×23 grid, got {}×{}", square.rows,
+                square.columns);
+    um::patch_grid_t const landscape = um::image_patch_grid(half_row, um::image_extent_t {640u, 480u});
+    u32_t const landscape_cells = u32_t {landscape.rows} * landscape.columns;
+    suite.check(
+        landscape.columns > landscape.rows && landscape_cells <= half_row && landscape_cells * 50u >= half_row * 47u,
+        "a 4:3 image keeps its aspect and fills ≥94% of its half row, got {}×{}", landscape.rows, landscape.columns);
+    video_batch_shape_t video_shape {};
+    video_shape.patch_side = 16u, video_shape.tube_frames = 2u, video_shape.frame_stride = 1u;
+    um::video_grid_t const clip = um::video_tube_grid(32u, um::image_extent_t {128u, 128u}, video_shape, columns);
+    u32_t const clip_cells = u32_t {clip.temporal_groups} * clip.patch_rows * clip.patch_columns;
+    suite.check(clip.temporal_groups == 16u && clip_cells <= columns && clip_cells * 50u >= columns * 45u,
+                "a 32-frame 128² clip keeps its 16 tubes and fills ≥90% of the row, got {}×{}×{}", clip.temporal_groups,
+                clip.patch_rows, clip.patch_columns);
 }
 
 // Tier C / D — on-device decode into a real batch. Every helper allocates the actual
@@ -569,8 +667,9 @@ static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, st::b
 
     suite.check(modality[0] == modality_t::audio_k, "[{}] first segment must be audio_k (got {})", label,
                 static_cast<int>(modality[0]));
-    suite.check(lengths[0] == columns, "[{}] one clip fills the row: length {} must equal columns {}", label,
-                lengths[0], columns);
+    u32_t const half_row = media_cells(modality_t::audio_k, columns);
+    suite.check(lengths[0] == half_row, "[{}] one clip fills half the row: length {} must equal {}", label, lengths[0],
+                half_row);
     suite.check(offsets[0] == 0u, "[{}] first segment must start at the row origin (got {})", label, offsets[0]);
     bool finite = true;
     std::size_t const live = std::size_t {lengths[0]} * chunk;
@@ -1097,8 +1196,10 @@ int main(int, char **argv) {
     suite.run("draw_primitives_are_stable", draw_primitives_are_stable);
     suite.run("jpeg_probe_resumes_past_metadata", jpeg_probe_resumes_past_metadata);
     suite.run("glob_spans_depths_and_symlinks", glob_spans_depths_and_symlinks);
+    suite.run("mixture_sampler_retires_capped_entries", mixture_sampler_retires_capped_entries);
     suite.run("file_pick_is_weighted_and_distinct", file_pick_is_weighted_and_distinct);
     suite.run("segment_geometry_packs_multiple_per_row", segment_geometry_packs_multiple_per_row);
+    suite.run("media_fill_their_rows", media_fill_their_rows);
 
     int device_count = 0;
     if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count == 0) {

@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
 #
-# base-4-8-16.sbatch — launch distributed span-masked Base pretraining (tools/base.cu) at 4, 8, or
-# 16 GPUs, unchanged binary from a single NVLink node to a two-node InfiniBand world.
+# base-4-8-16.sbatch — launch distributed Base training (tools/base.cu) at 4, 8, or 16 GPUs, unchanged
+# binary from a single NVLink node to a two-node InfiniBand world.
 #
 # The model is data-parallel: ONE process per host_domain (node), and that process drives every GPU on
 # its node over NVLink (the multimem_domain). Nodes reduce over InfiniBand (the colocated_domain), which
-# only wakes up when host_domain_count > 1. So the three tiers are just allocation shapes:
+# only wakes up when host_domain_count > 1. So the three GPU counts are just allocation shapes:
 #
 #   4 GPUs : sbatch --nodes=1 --gpus-per-node=4  scripts/slurm/base-4-8-16.sbatch
 #   8 GPUs : sbatch --nodes=1 --gpus-per-node=8  scripts/slurm/base-4-8-16.sbatch
 #   16 GPUs: sbatch --nodes=2 --gpus-per-node=8  scripts/slurm/base-4-8-16.sbatch
+#
+# The run's model and data ride the environment, and the rows per GPU are left to the measuring pass:
+#
+#   UFORM_TIER      — tiny, small, medium, large or xl; required
+#   UFORM_MIXTURE   — a scripts/mixtures/*.json mixture; required
+#   UFORM_OBJECTIVE — masked, contrastive or joint; contrastive by default
+#
+#   sbatch --export=ALL,UFORM_TIER=tiny,UFORM_MIXTURE=scripts/mixtures/text_contrastive.json \
+#          --nodes=1 --gpus-per-node=8 scripts/slurm/base-4-8-16.sbatch
 #
 # The body reads the allocation Slurm actually granted (SLURM_JOB_NUM_NODES, SLURM_GPUS_ON_NODE) and
 # wires the mesh env contract base.cu / mesh_topology_t::bootstrap read:
@@ -51,9 +60,8 @@ echo "uform-base: ${total_gpus} GPU(s) = ${host_domain_count} node(s) x ${gpus_p
 # mask). Slurm sets SLURM_NODEID per task, which base.cu reads as its host_domain_index.
 srun --ntasks="${host_domain_count}" --ntasks-per-node=1 --gpu-bind=none \
     "${UFORM_BASE_BIN:-build_release/uform_base}" \
-    --hidden "${UFORM_HIDDEN:-512}" \
-    --depth "${UFORM_DEPTH:-12}" \
-    --rows "${UFORM_ROWS:-8}" \
-    --columns "${UFORM_COLUMNS:-2048}" \
+    --tier "${UFORM_TIER:?set UFORM_TIER to tiny|small|medium|large|xl}" \
+    --mixture "${UFORM_MIXTURE:?set UFORM_MIXTURE to a scripts/mixtures/*.json}" \
+    --objective "${UFORM_OBJECTIVE:-contrastive}" \
     --steps "${UFORM_STEPS:-1000}" \
     --checkpoint "${UFORM_CHECKPOINT:-base-${host_domain_count}x${gpus_per_multimem_domain}.safetensors}"

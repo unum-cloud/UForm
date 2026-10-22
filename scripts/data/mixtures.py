@@ -34,8 +34,10 @@ mixtures_dir = project_root / "scripts" / "mixtures"
 #: contract. `text` is the MLM document column; the other four are the contrastive relation columns.
 column_fields = ("text", "anchor", "positive", "negative", "media")
 
-#: Per-mixture (not per-dataset) key, excluded from the cross-mixture agreement check in `dataset_spec`.
-_per_mixture_dataset_keys = ("weight",)
+#: Per-mixture (not per-dataset) keys, excluded from the cross-mixture agreement check in `dataset_spec`: the
+#: draw share, and the optional `epochs` cap, the most passes over the dataset's rows a run draws before the
+#: trainer retires it and spreads its weight over the live datasets of its modality.
+_per_mixture_dataset_keys = ("weight", "epochs")
 
 
 def _resolve_glob(glob: str) -> str:

@@ -75,24 +75,10 @@ struct video_grid_t {
     u16_t patch_columns = 1;
 };
 
-/**
- *  @brief One image's column budget — how many patches it earns from its native resolution, so a bigger image
- *      packs more patches and several small images share a row.
- *
- *  The native patch count, the @c patch_side² tiles covering the source ceiled per axis, is rounded @b up to a
- *  multiple of the floor budget @c columns/segments for a divisor-friendly @ref image_patch_grid , then clamped to
- *  @c [columns/segments,columns] . Monotonic in resolution, and bounded so at most @p segments images fill a row.
- *
- *  @param[in] native The image's full encoded resolution.
- *  @param[in] patch_side The square patch side in pixels.
- *  @param[in] columns The batch row width in patches.
- *  @param[in] segments The most images one batch carries.
- */
-[[nodiscard]] u32_t image_patch_budget(image_extent_t native, u32_t patch_side, u32_t columns, u32_t segments) noexcept;
-
-/** The factor pair of @p budget whose @c columns/rows aspect is nearest @p native 's, so every image is exactly
- *  @p budget patches and its rectangle rides the coordinates without a crop toward a square. */
-[[nodiscard]] patch_grid_t image_patch_grid(u32_t budget, image_extent_t native) noexcept;
+/** The largest patch grid within one @p columns row that keeps @p native 's aspect, so every image
+ *  fills its row whatever its resolution: a small image is upscaled and a large one shrunk to the
+ *  same patch count. */
+[[nodiscard]] patch_grid_t image_patch_grid(u32_t columns, image_extent_t native) noexcept;
 
 /** The centered crop of @p source matching @p target 's aspect — the largest rectangle of that aspect that fits,
  *  so the resize that follows never stretches. */
@@ -109,12 +95,12 @@ struct video_grid_t {
 
 /**
  *  @brief A video segment's @c (temporal_groups,patch_rows,patch_columns) from the clip's native
- *      @c (frames,width,height) — the image budget's analogue with a temporal axis folded ahead of the patch.
+ *      @c (frames,width,height) — the image grid with a temporal axis folded ahead of the patch.
  *
- *  The rows and columns tile the native frame at the shape's @c patch_side ; the temporal groups pack the
- *  @c frame_stride -sampled frames into @c tube_frames -deep tubes. A footprint over @p columns is scaled toward
- *  its own shape by a cube root, then trimmed on its largest axis until it fits one row, so an arbitrarily large
- *  clip downscales instead of overflowing.
+ *  The rows and columns tile the native frame at the shape's @c patch_side ; the temporal groups
+ *  pack the @c frame_stride -sampled frames into @c tube_frames -deep tubes. A footprint under
+ *  @p columns grows its frame until the clip fills the row; one over it is scaled toward its own
+ *  shape by a cube root, then trimmed on its largest axis until it fits one row.
  *
  *  @param[in] frames The clip's native frame count, 0 when unknown.
  *  @param[in] native The clip's native frame extent.

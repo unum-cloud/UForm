@@ -1,0 +1,1600 @@
+{
+  "mixture": "omni_multilingual",
+  "datasets": [
+    {
+      "name": "cc12m-original",
+      "weight": 0.041484,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/cc12m/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "redcaps-original",
+      "weight": 0.035146,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/redcaps/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "redcaps-qwen3vl8b",
+      "weight": 0.031972,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/redcaps/*.parquet",
+      "anchor": "qwen3vl8b_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "marqo-gs-qwen35",
+      "weight": 0.027199,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/marqo-gs/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "marqo-gs-qwen35-zh",
+      "weight": 0.027199,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/marqo-gs/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "cc12m-qwen3vl8b",
+      "weight": 0.026669,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/cc12m/*.parquet",
+      "anchor": "qwen3vl8b_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "wit-original",
+      "weight": 0.018429,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/wit/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "open-images-qwen35",
+      "weight": 0.01217,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/open-images/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "open-images-qwen35-zh",
+      "weight": 0.01217,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/open-images/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "datacomp-small-original",
+      "weight": 0.011767,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/datacomp-small/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "laion-cc3m-original",
+      "weight": 0.01036,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/laion-cc3m/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "laion-cc3m-qwen3vl8b",
+      "weight": 0.01036,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/laion-cc3m/*.parquet",
+      "anchor": "qwen3vl8b_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "wit-qwen3vl8b",
+      "weight": 0.009951,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/wit/*.parquet",
+      "anchor": "qwen3vl8b_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "pop_memoire-qwen35",
+      "weight": 0.009945,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/pop_memoire/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "pop_memoire-qwen35-zh",
+      "weight": 0.009945,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/pop_memoire/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "wit-qwen35",
+      "weight": 0.0085,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/wit/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "wit-qwen35-zh",
+      "weight": 0.0085,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/wit/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "abo-qwen35",
+      "weight": 0.007051,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/abo/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "abo-qwen35-zh",
+      "weight": 0.007051,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/abo/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "foodi_ml-qwen35",
+      "weight": 0.006699,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/foodi_ml/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "foodi_ml-qwen35-zh",
+      "weight": 0.006699,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/foodi_ml/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "inat21-qwen35",
+      "weight": 0.006636,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/inat21/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "inat21-qwen35-zh",
+      "weight": 0.006636,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/inat21/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "openfoodfacts-qwen35",
+      "weight": 0.006291,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/openfoodfacts/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "openfoodfacts-qwen35-zh",
+      "weight": 0.006291,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/openfoodfacts/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "paris_musees-qwen35",
+      "weight": 0.004696,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/paris_musees/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "paris_musees-qwen35-zh",
+      "weight": 0.004696,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/paris_musees/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "deepfashion-qwen35",
+      "weight": 0.00469,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/deepfashion/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "deepfashion-qwen35-zh",
+      "weight": 0.00469,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/deepfashion/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "marqo-gs-qwen3vl8b",
+      "weight": 0.004181,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/marqo-gs/*.parquet",
+      "anchor": "qwen3vl8b_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "laion-cc3m-qwen35",
+      "weight": 0.003717,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/laion-cc3m/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "laion-cc3m-qwen35-zh",
+      "weight": 0.003717,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/laion-cc3m/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "flickr30k-original",
+      "weight": 0.003305,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/flickr30k/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "stair_captions-qwen35",
+      "weight": 0.003295,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/stair_captions/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "stair_captions-qwen35-zh",
+      "weight": 0.003295,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/stair_captions/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "datacomp-small-qwen3vl8b",
+      "weight": 0.003285,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/datacomp-small/*.parquet",
+      "anchor": "qwen3vl8b_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "inaturalist-qwen35",
+      "weight": 0.003251,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/inaturalist/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "inaturalist-qwen35-zh",
+      "weight": 0.003251,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/inaturalist/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "facesynthetics-qwen35",
+      "weight": 0.002968,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/facesynthetics/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "facesynthetics-qwen35-zh",
+      "weight": 0.002968,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/facesynthetics/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "pa100k-qwen35",
+      "weight": 0.002968,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/pa100k/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "pa100k-qwen35-zh",
+      "weight": 0.002968,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/pa100k/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "fairface-qwen35",
+      "weight": 0.002934,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/fairface/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "fairface-qwen35-zh",
+      "weight": 0.002934,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/fairface/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "minc-qwen35",
+      "weight": 0.002737,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/minc/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "minc-qwen35-zh",
+      "weight": 0.002737,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/minc/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "dota-qwen35",
+      "weight": 0.002355,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/dota/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "dota-qwen35-zh",
+      "weight": 0.002355,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/dota/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "foodi_ml-original",
+      "weight": 0.002141,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/foodi_ml/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "sardet-qwen35",
+      "weight": 0.002087,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/sardet/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "sardet-qwen35-zh",
+      "weight": 0.002087,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/sardet/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "fashionpedia-qwen35",
+      "weight": 0.00203,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/fashionpedia/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "fashionpedia-qwen35-zh",
+      "weight": 0.00203,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/fashionpedia/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "museum_furniture-qwen35",
+      "weight": 0.002028,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/museum_furniture/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "museum_furniture-qwen35-zh",
+      "weight": 0.002028,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/museum_furniture/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "bundesarchiv-qwen35",
+      "weight": 0.001923,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/bundesarchiv/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "bundesarchiv-qwen35-zh",
+      "weight": 0.001923,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/bundesarchiv/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "detectiumfire-qwen35",
+      "weight": 0.001734,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/detectiumfire/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "detectiumfire-qwen35-zh",
+      "weight": 0.001734,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/detectiumfire/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "resisc45-qwen35",
+      "weight": 0.001666,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/resisc45/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "resisc45-qwen35-zh",
+      "weight": 0.001666,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/resisc45/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "opensurfaces-qwen35",
+      "weight": 0.001631,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/opensurfaces/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "opensurfaces-qwen35-zh",
+      "weight": 0.001631,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/opensurfaces/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "celebamask-qwen35",
+      "weight": 0.001625,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/celebamask/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "celebamask-qwen35-zh",
+      "weight": 0.001625,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/celebamask/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "firearm_cctv-qwen35",
+      "weight": 0.001614,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/firearm_cctv/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "firearm_cctv-qwen35-zh",
+      "weight": 0.001614,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/firearm_cctv/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "fitrs-original",
+      "weight": 0.001598,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/fitrs/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "fitrs-qwen35",
+      "weight": 0.001598,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/fitrs/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "fitrs-qwen35-zh",
+      "weight": 0.001598,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/fitrs/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "visual_genome-original",
+      "weight": 0.001567,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/visual_genome/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "visual_genome-qwen3vl8b",
+      "weight": 0.001567,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/visual_genome/*.parquet",
+      "anchor": "qwen3vl8b_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "visual_genome-qwen35",
+      "weight": 0.001567,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/visual_genome/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "visual_genome-qwen35-zh",
+      "weight": 0.001567,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/visual_genome/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "ade20k-qwen35",
+      "weight": 0.001398,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/ade20k/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "ade20k-qwen35-zh",
+      "weight": 0.001398,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/ade20k/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "semart-qwen35",
+      "weight": 0.001372,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/semart/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "semart-qwen35-zh",
+      "weight": 0.001372,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/semart/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "deepfashion_multimodal-qwen35",
+      "weight": 0.001329,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/deepfashion_multimodal/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "deepfashion_multimodal-qwen35-zh",
+      "weight": 0.001329,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/deepfashion_multimodal/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "peta-qwen35",
+      "weight": 0.001293,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/peta/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "peta-qwen35-zh",
+      "weight": 0.001293,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/peta/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "deepfashion_multimodal-original",
+      "weight": 0.001283,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/deepfashion_multimodal/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "magicbrush-qwen35",
+      "weight": 0.001115,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/magicbrush/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "magicbrush-qwen35-zh",
+      "weight": 0.001115,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/magicbrush/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "spot_the_diff-qwen35",
+      "weight": 0.001083,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/spot_the_diff/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "spot_the_diff-qwen35-zh",
+      "weight": 0.001083,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/spot_the_diff/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "vrsbench-original",
+      "weight": 0.001076,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/vrsbench/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "vrsbench-qwen35",
+      "weight": 0.001076,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/vrsbench/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "vrsbench-qwen35-zh",
+      "weight": 0.001076,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/vrsbench/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "abo_native-qwen35",
+      "weight": 0.001048,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/abo_native/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "abo_native-qwen35-zh",
+      "weight": 0.001048,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/abo_native/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "hod-qwen35",
+      "weight": 0.000962,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/hod/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "hod-qwen35-zh",
+      "weight": 0.000962,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/hod/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "easyportrait-qwen35",
+      "weight": 0.000938,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/easyportrait/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "easyportrait-qwen35-zh",
+      "weight": 0.000938,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/easyportrait/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "codrone-qwen35",
+      "weight": 0.000938,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/codrone/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "codrone-qwen35-zh",
+      "weight": 0.000938,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/codrone/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "pidray-qwen35",
+      "weight": 0.000914,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/pidray/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "pidray-qwen35-zh",
+      "weight": 0.000914,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/pidray/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "cuhk_avenue-qwen35",
+      "weight": 0.000896,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/cuhk_avenue/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "cuhk_avenue-qwen35-zh",
+      "weight": 0.000896,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/cuhk_avenue/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "cmingre-qwen35",
+      "weight": 0.000839,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/cmingre/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "cmingre-qwen35-zh",
+      "weight": 0.000839,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/cmingre/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "military_objects-qwen35",
+      "weight": 0.000838,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/military_objects/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "military_objects-qwen35-zh",
+      "weight": 0.000838,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/military_objects/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "vulca-qwen35",
+      "weight": 0.000797,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/vulca/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "vulca-qwen35-zh",
+      "weight": 0.000797,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/vulca/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "cctv_accident-qwen35",
+      "weight": 0.000751,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/cctv_accident/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "cctv_accident-qwen35-zh",
+      "weight": 0.000751,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/cctv_accident/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "doclaynet-original",
+      "weight": 0.000727,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/doclaynet/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "doclaynet-qwen3vl8b",
+      "weight": 0.000727,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/doclaynet/*.parquet",
+      "anchor": "qwen3vl8b_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "doclaynet-qwen35",
+      "weight": 0.000727,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/doclaynet/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "doclaynet-qwen35-zh",
+      "weight": 0.000727,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/doclaynet/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "dtd-qwen35",
+      "weight": 0.000704,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/dtd/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "dtd-qwen35-zh",
+      "weight": 0.000704,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/dtd/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "sohas-qwen35",
+      "weight": 0.000664,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/sohas/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "sohas-qwen35-zh",
+      "weight": 0.000664,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/sohas/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "aro-original",
+      "weight": 0.000615,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/aro/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "aro-qwen35",
+      "weight": 0.000615,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/aro/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "aro-qwen35-zh",
+      "weight": 0.000615,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/aro/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "docci-original",
+      "weight": 0.000585,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/docci/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "docci-qwen3vl8b",
+      "weight": 0.000585,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/docci/*.parquet",
+      "anchor": "qwen3vl8b_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "docci-qwen35",
+      "weight": 0.000585,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/docci/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "docci-qwen35-zh",
+      "weight": 0.000585,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/docci/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "nutrition5k-qwen35",
+      "weight": 0.000554,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/nutrition5k/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "nutrition5k-qwen35-zh",
+      "weight": 0.000554,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/nutrition5k/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "rsicd-original",
+      "weight": 0.000514,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/rsicd/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "rsicd-qwen3vl8b",
+      "weight": 0.000514,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/rsicd/*.parquet",
+      "anchor": "qwen3vl8b_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "rsicd-qwen35",
+      "weight": 0.000514,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/rsicd/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "rsicd-qwen35-zh",
+      "weight": 0.000514,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/rsicd/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "dashcam_collision-qwen35",
+      "weight": 0.000514,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/dashcam_collision/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "dashcam_collision-qwen35-zh",
+      "weight": 0.000514,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/dashcam_collision/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "fashion_iq-original",
+      "weight": 0.000513,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/fashion_iq/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "fashion_iq-qwen3vl8b",
+      "weight": 0.000513,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/fashion_iq/*.parquet",
+      "anchor": "qwen3vl8b_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "fashion_iq-qwen35",
+      "weight": 0.000513,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/fashion_iq/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "fashion_iq-qwen35-zh",
+      "weight": 0.000513,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/fashion_iq/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "open-images-qwen3vl8b",
+      "weight": 0.000443,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/open-images/*.parquet",
+      "anchor": "qwen3vl8b_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "ambientcg-qwen35",
+      "weight": 0.000416,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/ambientcg/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "ambientcg-qwen35-zh",
+      "weight": 0.000416,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/ambientcg/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "tattoos-qwen35",
+      "weight": 0.000413,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/tattoos/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "tattoos-qwen35-zh",
+      "weight": 0.000413,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/tattoos/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "chvg-qwen35",
+      "weight": 0.000387,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/chvg/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "chvg-qwen35-zh",
+      "weight": 0.000387,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/chvg/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "sugarcrepe-original",
+      "weight": 0.000381,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/sugarcrepe/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "sugarcrepe-qwen35",
+      "weight": 0.000381,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/sugarcrepe/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "sugarcrepe-qwen35-zh",
+      "weight": 0.000381,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/sugarcrepe/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "figaro-qwen35",
+      "weight": 0.000304,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/figaro/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "figaro-qwen35-zh",
+      "weight": 0.000304,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/figaro/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "sardet_rec-qwen35",
+      "weight": 0.000273,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/sardet_rec/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "sardet_rec-qwen35-zh",
+      "weight": 0.000273,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/sardet_rec/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "wildfire_smoke-qwen35",
+      "weight": 0.000255,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/wildfire_smoke/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "wildfire_smoke-qwen35-zh",
+      "weight": 0.000255,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/wildfire_smoke/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "cov_ctr-qwen35",
+      "weight": 0.000252,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/cov_ctr/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "cov_ctr-qwen35-zh",
+      "weight": 0.000252,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/cov_ctr/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "slake-qwen35",
+      "weight": 0.000212,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/slake/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "slake-qwen35-zh",
+      "weight": 0.000212,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/slake/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "construction_safety-qwen35",
+      "weight": 0.000186,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/construction_safety/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "construction_safety-qwen35-zh",
+      "weight": 0.000186,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/construction_safety/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "whoops-original",
+      "weight": 0.00014,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/whoops/*.parquet",
+      "anchor": "original_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "whoops-qwen35",
+      "weight": 0.00014,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/whoops/*.parquet",
+      "anchor": "qwen35_caption_english",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "whoops-qwen35-zh",
+      "weight": 0.00014,
+      "epochs": 4,
+      "glob": "data/uform-data/standard/whoops/*.parquet",
+      "anchor": "qwen35_caption_chinese",
+      "positive": "jpg",
+      "media": "jpg"
+    },
+    {
+      "name": "parallel_sent_wikimatrix",
+      "weight": 0.066667,
+      "epochs": 4,
+      "glob": "data/parallel-sent-wikimatrix/en-*/train-*.parquet",
+      "anchor": "english",
+      "positive": "non_english"
+    },
+    {
+      "name": "parallel_sent_tatoeba",
+      "weight": 0.042424,
+      "epochs": 4,
+      "glob": "data/parallel-sent-tatoeba/en-*/train-*.parquet",
+      "anchor": "english",
+      "positive": "non_english"
+    },
+    {
+      "name": "paws_x",
+      "weight": 0.030303,
+      "epochs": 4,
+      "glob": "data/paws-x/*/train-*.parquet",
+      "anchor": "sentence1",
+      "positive": "sentence2"
+    },
+    {
+      "name": "mr_tydi_multipos",
+      "weight": 0.030303,
+      "epochs": 4,
+      "glob": "data/mr-tydi/mrtydi-v1.1-*/train.parquet",
+      "anchor": "query",
+      "positive": "positive",
+      "negative": "negative",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "mmarco",
+      "weight": 0.030303,
+      "epochs": 4,
+      "glob": "data/mmarco/pairs/*/train.parquet",
+      "anchor": "query",
+      "positive": "positive",
+      "negative": "negative",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "allnli_multipos",
+      "weight": 0.035871,
+      "epochs": 4,
+      "glob": "data/all-nli/pair/train-*.parquet",
+      "anchor": "anchor",
+      "positive": "positive"
+    },
+    {
+      "name": "quora_multipos",
+      "weight": 0.016304,
+      "epochs": 4,
+      "glob": "data/quora-duplicates/pair/train-*.parquet",
+      "anchor": "anchor",
+      "positive": "positive"
+    },
+    {
+      "name": "natural_questions",
+      "weight": 0.019565,
+      "epochs": 4,
+      "glob": "data/natural-questions/**/*.parquet",
+      "anchor": "query",
+      "positive": "answer",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "gooaq",
+      "weight": 0.013043,
+      "epochs": 4,
+      "glob": "data/gooaq/pair/train-*.parquet",
+      "anchor": "question",
+      "positive": "answer",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "hotpotqa",
+      "weight": 0.009783,
+      "epochs": 4,
+      "glob": "data/hotpotqa/distractor/train-*.parquet",
+      "anchor": "question",
+      "positive": "answer",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "pubmedqa",
+      "weight": 0.019565,
+      "epochs": 4,
+      "glob": "data/pubmedqa/pqa_artificial/train-*.parquet",
+      "anchor": "question",
+      "positive": "long_answer",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "paq",
+      "weight": 0.013043,
+      "epochs": 4,
+      "glob": "data/paq/pair/train-*.parquet",
+      "anchor": "query",
+      "positive": "answer",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
+      "name": "wikianswers",
+      "weight": 0.013043,
+      "epochs": 4,
+      "glob": "data/wikianswers-duplicates/pair/train-*.parquet",
+      "anchor": "anchor",
+      "positive": "positive"
+    },
+    {
+      "name": "reddit_title_body",
+      "weight": 0.009783,
+      "epochs": 4,
+      "glob": "data/reddit-title-body/parquet/reddit_*.parquet",
+      "anchor": "title",
+      "positive": "body"
+    },
+    {
+      "name": "audiocaps",
+      "weight": 0.1,
+      "epochs": 4,
+      "glob": "data/audiocaps/data/train-*.parquet",
+      "anchor": "caption",
+      "positive": "audio",
+      "media": "audio"
+    }
+  ]
+}

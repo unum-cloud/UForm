@@ -24,12 +24,13 @@
  *  a linear ramp from zero to the peak over @c warmup_steps , then a cosine decay to @c min_learning_rate over
  *  the run's remainder — the validated draft envelope's shape.
  */
-#include <cmath>   // `std::cos` — the cosine decay, `std::sqrt` — the initialization's fan-in scale, `std::isfinite`
+#include <cmath>   // `std::cos`, `std::sqrt`, `std::ceil`, `std::isfinite`
 #include <cstring> // `std::strlen`
 
 #include <unistd.h> // `::write`, `STDOUT_FILENO` — the host diagnostic channel
 
-#include <algorithm> // `std::max`, `std::min`
+#include <algorithm> // `std::max`, `std::min`, `std::clamp`, `std::find_if`
+#include <iterator>  // `std::begin`, `std::end`
 #include <charconv>  // `std::from_chars` — the command line's numbers
 #include <limits>    // `std::numeric_limits` — the i16 coordinate ceiling
 #include <numbers>   // `std::numbers::pi_v` — the decay's half-period
@@ -64,8 +65,9 @@ static __global__ void synthetic_tokens_kernel_(nk::tensor_span<token_id_t, 2> t
  *      tokens, then the image / video / audio runs in @ref modality_t order (an empty run leaves consecutive
  *      begins equal).
  *
- *  One full-width segment per row; image / video rows also carry the near-square
- *  @c (patch_rows,patch_cols) aspect the coordinate adapter reads.
+ *  A token row splits into equal slices, as many as the segment budget gives each row, so the
+ *  envelope probe runs at the real batch's density. A media row is one full-width segment with
+ *  the near-square @c (patch_rows,patch_cols) aspect the coordinate adapter reads, then PAD.
  *
  *  @b grid_size @c [rows,1,1] , one CTA per row; only thread 0 writes; no dynamic shared memory.
  */
@@ -74,26 +76,39 @@ static __global__ void synthetic_segments_kernel_(u32r1_span_t segment_offsets, 
                                                   video_shape_span_t video_shapes, u32_t columns, u32_t image_begin,
                                                   u32_t video_begin, u32_t audio_begin, u16_t patch_rows,
                                                   u16_t patch_cols) {
-    u32_t const rows = static_cast<u32_t>(segment_lengths.extent(0));
-    u32_t const row = blockIdx.x;
+    u32_t const segments = static_cast<u32_t>(segment_lengths.extent(0)), rows = gridDim.x;
+    u32_t const row = blockIdx.x, per_row = segments / rows, first = row * per_row;
     if (threadIdx.x != 0u) return;
     modality_t modality = modality_t::text_k;
     if (row >= audio_begin) modality = modality_t::audio_k;
     else if (row >= video_begin) modality = modality_t::video_k;
     else if (row >= image_begin) modality = modality_t::image_k;
-    segment_offsets[row] = row * columns;
-    segment_lengths[row] = columns;
-    segment_modality[row] = modality;
+    u32_t const live = modality == modality_t::text_k ? per_row : 1u, slice = columns / live;
+    for (u32_t index = 0; index != per_row; ++index) {
+        // The last live slice takes the row's remainder; PAD repeats the row's end with no length.
+        u32_t const begin = index < live ? index * slice : columns;
+        u32_t const end = index + 1u == live ? columns : std::min(begin + slice, columns);
+        segment_offsets[first + index] = row * columns + begin;
+        segment_lengths[first + index] = index < live ? end - begin : 0u;
+        segment_modality[first + index] = index < live ? modality : modality_t::text_k;
+    }
     if (modality == modality_t::image_k) {
-        image_shapes[row, 0] = patch_rows;
-        image_shapes[row, 1] = patch_cols;
+        image_shapes[first, 0] = patch_rows;
+        image_shapes[first, 1] = patch_cols;
     }
     if (modality == modality_t::video_k) {
-        video_shapes[row, 0] = 1u;
-        video_shapes[row, 1] = patch_rows;
-        video_shapes[row, 2] = patch_cols;
+        video_shapes[first, 0] = 1u;
+        video_shapes[first, 1] = patch_rows;
+        video_shapes[first, 2] = patch_cols;
     }
-    if (row == 0u) segment_offsets[rows] = rows * columns;
+    if (row != 0u) return;
+    // The segments past the rows' shares PAD at the grid's end.
+    for (u32_t index = rows * per_row; index != segments; ++index) {
+        segment_offsets[index] = rows * columns;
+        segment_lengths[index] = 0u;
+        segment_modality[index] = modality_t::text_k;
+    }
+    segment_offsets[segments] = rows * columns;
 }
 
 /**
@@ -171,6 +186,14 @@ struct grid_factor_t {
  *  output. */
 [[nodiscard]] static bool writes_residual_(differentiable_weights_t const &matrix) noexcept {
     return matrix.name.view().ends_with(".out") || matrix.name.view().ends_with(".down");
+}
+
+multimodal_batch_shape_t ut::batch_capacity(multimodal_batch_shape_t shape, std::size_t rows,
+                                            f64_t segments_per_row) noexcept {
+    f64_t const per_row = std::clamp(segments_per_row, 1.0, static_cast<f64_t>(shape.max_columns_per_row));
+    shape.max_rows_per_gpu = static_cast<u32_t>(rows);
+    shape.max_segments_per_gpu = static_cast<u32_t>(std::ceil(static_cast<f64_t>(rows) * per_row));
+    return shape;
 }
 
 expected_t ut::seed_weights(st::basic_vector<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept {
@@ -271,7 +294,6 @@ struct row_partition_t {
     tower.vocabulary = byte_vocabulary_k;
     tower.depth = config.depth;
     tower.block.hidden = config.hidden;
-    tower.block.ffn_expansion = 2;
     tower.block.max_tokens = max_tokens;
     tower.block.max_segments = batch.max_segments_per_gpu;
     tower.block.max_segment_tokens = batch.max_columns_per_row;
@@ -368,7 +390,8 @@ expected_t ut::save_weights(checkpoint_to_save_t &checkpoint, trainer_config_t c
         record("rms_epsilon", tower.block.rms_eps) && record("rope_temporal", tower.rope.temporal) &&
         record("rope_height", tower.rope.height) && record("rope_width", tower.rope.width) &&
         record("rope_base", tower.rope_base) && record("context", tower.rope_max_positions) &&
-        record("image_patch_side", tower.image_patch_height) && record("image_channels", tower.image_channels) &&
+        record("columns", config.batch.max_columns_per_row) && record("image_patch_side", tower.image_patch_height) &&
+        record("image_channels", tower.image_channels) &&
         record_list("image_pixel_mean", tower.image_pixel_mean, tower.image_channels) &&
         record_list("image_pixel_std", tower.image_pixel_std, tower.image_channels) &&
         record("video_patch_side", tower.video_patch_height) && record("video_tube_frames", tower.video_tube_frames) &&
@@ -384,6 +407,8 @@ expected_t ut::save_weights(checkpoint_to_save_t &checkpoint, trainer_config_t c
 expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexcept {
     using result_t = expected<trainer_config_t>;
     trainer_config_t config;
+    trainer_tier_t &tier = config.tier;
+    f32_t learning_rate = 0.0f;
     for (int arg = 1; arg < argc; ++arg) {
         sz::string_view_t const flag {argv[arg], std::strlen(argv[arg])};
         if (flag == "--eager") {
@@ -399,15 +424,15 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
         };
         bool taken = true;
         if (flag == "--steps") taken = number(config.steps);
-        else if (flag == "--hidden") taken = number(config.hidden);
-        else if (flag == "--depth") taken = number(config.depth);
-        else if (flag == "--rows") {
-            // One segment per row, so the segment budget tracks the row budget.
-            taken = number(config.batch.max_rows_per_gpu);
-            config.batch.max_segments_per_gpu = config.batch.max_rows_per_gpu;
+        else if (flag == "--tier") {
+            trainer_tier_t const *found = std::find_if(
+                std::begin(trainer_tiers_k), std::end(trainer_tiers_k),
+                [&](trainer_tier_t const &known) { return value == known.name; });
+            taken = found != std::end(trainer_tiers_k);
+            if (taken) tier = *found;
         }
-        else if (flag == "--columns") taken = number(config.batch.max_columns_per_row);
-        else if (flag == "--learning-rate") taken = number(config.learning_rate) && config.learning_rate > 0.0f;
+        else if (flag == "--rows") taken = number(config.batch.max_rows_per_gpu);
+        else if (flag == "--learning-rate") taken = number(learning_rate) && learning_rate > 0.0f;
         else if (flag == "--warmup-steps") taken = number(config.warmup_steps);
         else if (flag == "--seed") taken = number(config.seed);
         else if (flag == "--nvdec-engines") taken = number(config.nvdec_engines);
@@ -434,11 +459,11 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
         else if (flag == "--mixture") {
             if (value.ends_with(".json")) config.mixture = value;
             else if (value == "omni") {
-                // The omni preset: 8-pixel RGB image patches, 2-frame RGB video tubes, 256-sample
+                // The omni preset: 8-pixel RGB image patches, 2-frame RGB video tubes, 320-sample
                 // audio frames.
                 config.batch.image = image_batch_shape_t {8u, 3u};
                 config.batch.video = video_batch_shape_t {8u, 3u, 2u, 1u};
-                config.batch.audio = audio_batch_shape_t {256u, 16000u};
+                config.batch.audio = audio_batch_shape_t {320u, 16000u};
             }
             else taken = value == "tokens";
         }
@@ -456,6 +481,13 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
         else return result_t::fail(status_t::invalid_input_k, "unknown flag {}", flag);
         if (!taken) return result_t::fail(status_t::invalid_input_k, "{} does not take {}", flag, value);
     }
+    if (!tier.hidden) return result_t::fail(status_t::invalid_input_k, "pass --tier tiny, small, medium, large or xl");
+    config.hidden = tier.hidden, config.depth = tier.depth;
+    config.learning_rate = learning_rate != 0.0f ? learning_rate : tier.learning_rate;
+    // Every tier trains the nested prefixes 64…1024 that fit its width, then the full width.
+    for (u32_t width = 64u; width <= std::min(1024u, tier.hidden) && width != tier.hidden; width *= 2u)
+        config.contrastive.matryoshka_dimensions[config.contrastive.matryoshka_count++] = width;
+    config.contrastive.matryoshka_dimensions[config.contrastive.matryoshka_count++] = tier.hidden;
     return result_t {std::move(config)};
 }
 
@@ -613,6 +645,9 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
             if (CUresult result = cuMemsetD8(device_address(pair->data()), 0, pair->numel() * sizeof(f32_t));
                 result != CUDA_SUCCESS)
                 return cuda_failure<base_replica_t>(result, "loss summands reset failed");
+    // The resets ran on the legacy stream, which the replica's non-blocking streams never wait on.
+    if (CUresult result = cuStreamSynchronize(CU_STREAM_LEGACY); result != CUDA_SUCCESS)
+        return cuda_failure<base_replica_t>(result, "loss summands reset drain failed");
     return result_t {std::move(replica)};
 }
 

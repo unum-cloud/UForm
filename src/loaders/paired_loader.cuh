@@ -14,15 +14,15 @@
  *  element of a row recurs across steps. A row's negatives are a list too: strings for a text
  *  positive, and shard-local row indices into the positive column for media.
  *
- *  @section paired_layout One bag per pair, a negative alone
+ *  @section paired_layout One bag per pair or triplet
  *
- *  A batch of @c rows rows and @c segments segments takes @c min(rows,segments)/2 pairs, or a third
- *  of that with negatives. Pair @c i 's segments are its positive, then its anchor, both tagged bag
- *  @c i , the contiguous run the mixer routes whole, then its negative tagged a bag of its own past
- *  the pairs. A negative attracts nothing and repels through the ambient weight. Every segment
- *  spans at most one row, so any order of those bags packs into the rows a destination has. Inside
- *  the loaded batch the positives take the leading rows, the negatives the next, and the anchors
- *  the trailing rows they need, each through the decode its modality already has:
+ *  A batch of @c segments segments draws @c segments/2 pairs, or a third of that with negatives,
+ *  and admits them whole in keyed order while their rows fit: captions pack back to back, and a
+ *  media positive or negative takes at most one row. Pair @c i 's segments are its positive, its
+ *  anchor and any negative, all tagged bag @c i , the contiguous run the mixer routes whole; the
+ *  segments past the admitted pairs PAD. Every segment spans at most one row. Inside the loaded
+ *  batch the positives take the leading rows, the negatives the next, and the anchors the trailing
+ *  rows they need, each through the decode its modality already has:
  *  @ref decode_images , @ref decode_audios or @ref decode_videos , and @ref pack_tokens for text.
  */
 #pragma once
@@ -135,6 +135,19 @@ struct paired_loader_parquet_t {
 
     /** The device bytes a fill's reservoir can take outside the arena. */
     [[nodiscard]] reservoir_bound_t reservoir() const noexcept { return reservoir_; }
+
+    /** The pairs one batch row of @p columns holds, which bounds a fill's draws and the reservoir
+     *  charged for them: as many media items as @ref media_cells places, a media negative taking
+     *  rows of its own, or texts at the widest row group's mean length. */
+    [[nodiscard]] f64_t pairs_per_row(std::size_t columns) const noexcept {
+        if (u32_t const cells = media_cells(modality_, static_cast<u32_t>(columns)); cells != 0u)
+            return static_cast<f64_t>(columns / cells) / (negative_.empty() ? 1.0 : 2.0);
+        std::size_t const pair_cells = reservoir_.row_bytes / reservoir_bound_t::copies_k;
+        return pair_cells != 0 ? static_cast<f64_t>(columns) / static_cast<f64_t>(pair_cells) : 1.0;
+    }
+
+    /** The rows holding every role column across the shards, the ones a fill draws. */
+    [[nodiscard]] std::size_t rows() const noexcept { return group_prefix_[group_prefix_.size() - 1]; }
 
   private:
 

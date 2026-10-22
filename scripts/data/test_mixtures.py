@@ -2,9 +2,9 @@
 # requires-python = ">=3.12"
 # dependencies = []
 # ///
-"""Catalog validator for the five per-mixture training JSONs — stdlib only, no cuDF / pyarrow.
+"""Catalog validator for the six per-mixture training JSONs — stdlib only, no cuDF / pyarrow.
 
-The mixture JSONs (`scripts/mixtures/{text_masked,text_contrastive,image_contrastive,video_contrastive,audio_contrastive}.json`)
+The mixture JSONs (`scripts/mixtures/{text_masked,text_contrastive,image_contrastive,video_contrastive,audio_contrastive,omni_multilingual}.json`)
 are the language-neutral column contract both the Python acquisition and the C++ trainer read. This module
 checks that contract holds without touching any GPU or parquet dependency: it asserts the files parse, that
 every dataset entry carries the fields the loaders need, that a dataset's columns agree across the mixtures
@@ -33,13 +33,14 @@ import mixtures
 #: `scripts/data/` holds the `download_*.py` scripts; the mixture JSONs sit beside it in `scripts/mixtures/`.
 pkg_dir = Path(__file__).resolve().parent
 
-#: The five mixtures whose JSONs form the column contract; the file basename is `<name>.json`.
+#: The six mixtures whose JSONs form the column contract; the file basename is `<name>.json`.
 expected_mixtures = (
     "text_masked",
     "text_contrastive",
     "image_contrastive",
     "video_contrastive",
     "audio_contrastive",
+    "omni_multilingual",
 )
 
 #: The dataset-entry keys whose values are actual parquet column names (mirrors `mixtures.column_fields`).
@@ -119,7 +120,7 @@ def _acquired_via_text_pairs(glob: str) -> bool:
 
 
 def test_mixture_files_load() -> None:
-    """All five mixture JSONs parse and carry a `mixture` name and a non-empty `datasets` list."""
+    """All six mixture JSONs parse and carry a `mixture` name and a non-empty `datasets` list."""
     for name in expected_mixtures:
         path = _mixture_path(name)
         assert path.exists(), f"missing mixture JSON: {path}"
@@ -131,7 +132,7 @@ def test_mixture_files_load() -> None:
 
 
 def test_dataset_entry_fields() -> None:
-    """Every dataset entry has `name`, `weight` in (0, 1], a non-empty `glob`, and >=1 column field."""
+    """Every entry has `name`, `weight` in (0, 1], a non-empty `glob`, >=1 column field, and any `epochs` positive."""
     for name in expected_mixtures:
         for entry in _load_mixture(name)["datasets"]:
             label = f"{name}:{entry.get('name')!r}"
@@ -142,6 +143,10 @@ def test_dataset_entry_fields() -> None:
             assert isinstance(entry.get("glob"), str) and entry["glob"], f"{label}: missing non-empty 'glob'"
             has_column = "text" in entry or "anchor" in entry or "positive" in entry
             assert has_column, f"{label}: no column field (need 'text' or 'anchor'/'positive')"
+            epochs = entry.get("epochs", 1)
+            assert isinstance(epochs, int) and not isinstance(epochs, bool) and epochs > 0, (
+                f"{label}: 'epochs' {epochs!r} not a positive integer"
+            )
 
 
 def test_column_consistency() -> None:

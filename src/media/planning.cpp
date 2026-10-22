@@ -4,9 +4,9 @@
  *  @author Ash Vardanian
  *  @date July 4, 2026
  */
-#include <cmath> // `std::cbrt`
+#include <cmath> // `std::cbrt`, `std::sqrt`
 
-#include <algorithm> // `std::min`, `std::max`
+#include <algorithm> // `std::min`, `std::max`, `std::clamp`
 
 #include "media/planning.hpp"
 
@@ -14,27 +14,12 @@ namespace um = unum::uform::media;
 using namespace um;
 using uc::divide_round_up;
 
-u32_t um::image_patch_budget(image_extent_t native, u32_t patch_side, u32_t columns, u32_t segments) noexcept {
-    u32_t const floor_budget = std::max<u32_t>(1u, columns / std::max<u32_t>(segments, 1u));
-    u32_t const patch_rows = static_cast<u32_t>(divide_round_up(native.height, patch_side));
-    u32_t const patch_columns = static_cast<u32_t>(divide_round_up(native.width, patch_side));
-    u32_t const native_patches = std::max<u32_t>(1u, patch_rows * patch_columns);
-    u32_t const rounded = static_cast<u32_t>(divide_round_up(native_patches, floor_budget)) * floor_budget;
-    return std::min<u32_t>(std::max<u32_t>(rounded, floor_budget), columns);
-}
-
-patch_grid_t um::image_patch_grid(u32_t budget, image_extent_t native) noexcept {
-    f64_t const target = static_cast<f64_t>(native.width) / static_cast<f64_t>(std::max<u32_t>(native.height, 1u));
-    u32_t best_rows = 1, best_columns = budget;
-    f64_t best_error = 1.0e300;
-    for (u32_t rows = 1; rows <= budget; ++rows) {
-        if (budget % rows != 0) continue;
-        u32_t const columns = budget / rows;
-        f64_t const aspect = static_cast<f64_t>(columns) / static_cast<f64_t>(rows);
-        f64_t const error = aspect > target ? aspect / target : target / aspect;
-        if (error < best_error) best_error = error, best_rows = rows, best_columns = columns;
-    }
-    return patch_grid_t {static_cast<u16_t>(best_rows), static_cast<u16_t>(best_columns)};
+patch_grid_t um::image_patch_grid(u32_t columns, image_extent_t native) noexcept {
+    f64_t const aspect = static_cast<f64_t>(std::max<u32_t>(native.width, 1u)) /
+                         static_cast<f64_t>(std::max<u32_t>(native.height, 1u));
+    u32_t const rows = std::clamp<u32_t>(static_cast<u32_t>(std::sqrt(static_cast<f64_t>(columns) / aspect)), 1u,
+                                         std::max<u32_t>(columns, 1u));
+    return patch_grid_t {static_cast<u16_t>(rows), static_cast<u16_t>(std::max<u32_t>(columns / rows, 1u))};
 }
 
 crop_t um::image_center_crop(image_extent_t source, image_extent_t target) noexcept {
@@ -76,9 +61,16 @@ video_grid_t um::video_tube_grid(u32_t frames, image_extent_t native, video_batc
     u32_t patch_rows = static_cast<u32_t>(divide_round_up(std::max<u32_t>(native.height, 1u), side));
     u32_t patch_columns = static_cast<u32_t>(divide_round_up(std::max<u32_t>(native.width, 1u), side));
     u32_t const budget = std::max<u32_t>(columns, 1u);
+    f64_t const product = static_cast<f64_t>(temporal_groups) * patch_rows * patch_columns;
+    if (product < budget) {
+        // A clip fills its row: the frames it has stay, and the frame grows to take the rest.
+        f64_t const scale = std::sqrt(static_cast<f64_t>(budget) / product);
+        patch_rows = std::max<u32_t>(1u, static_cast<u32_t>(patch_rows * scale));
+        patch_columns = std::max<u32_t>(1u, static_cast<u32_t>(patch_columns * scale));
+    }
     if (static_cast<u64_t>(temporal_groups) * patch_rows * patch_columns > budget) {
-        f64_t const product = static_cast<f64_t>(temporal_groups) * patch_rows * patch_columns;
-        f64_t const scale = std::cbrt(static_cast<f64_t>(budget) / product);
+        f64_t const scale = std::cbrt(static_cast<f64_t>(budget) /
+                                      (static_cast<f64_t>(temporal_groups) * patch_rows * patch_columns));
         temporal_groups = std::max<u32_t>(1u, static_cast<u32_t>(temporal_groups * scale));
         patch_rows = std::max<u32_t>(1u, static_cast<u32_t>(patch_rows * scale));
         patch_columns = std::max<u32_t>(1u, static_cast<u32_t>(patch_columns * scale));

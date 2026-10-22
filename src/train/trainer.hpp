@@ -78,7 +78,7 @@ struct mesh_t {
  *  from or, for configured rows, checked against. */
 struct envelope_t {
 
-    /** Rows per GPU, with as many segments. */
+    /** Rows per GPU; @ref batch_capacity derives the segments from them. */
     u32_t rows = 0;
 
     /** The fewest bytes any of this process's devices had free before the run allocated. */
@@ -343,8 +343,9 @@ struct trainer_t {
      *  the domain, the world all-reduce, the optimizer and the contrastive loss, then the replay
      *  graphs unless the config runs eagerly.
      *
-     *  The envelope is measured first: a trainer at one and at two rows per GPU takes one step
-     *  each, and every device's footprint and arena high-water mark are fitted linearly in rows.
+     *  The envelope is measured first: trainers at three row counts take one step each, at the
+     *  segments @ref batch_capacity gives those rows, and every device's footprint and arena
+     *  high-water mark are fitted quadratically in rows.
      *  Zero rows in @p requested take the most rows that leave the margin free on every device of
      *  every process; configured rows are honoured or refused, never shrunk. The arenas reserve the
      *  fitted high-water mark, see @ref envelope_t .

@@ -31,7 +31,7 @@ if (UFORM_BUILD_CUDA)
     add_executable(uform_test_contrastive contrastive.cu)
     target_link_libraries(uform_test_contrastive PRIVATE uform::train)
     add_executable(uform_test_loaders loaders.cu)
-    target_link_libraries(uform_test_loaders PRIVATE uform::loaders)
+    target_link_libraries(uform_test_loaders PRIVATE uform::datasets)
     add_executable(uform_test_base base.cu)
     target_link_libraries(uform_test_base PRIVATE uform::train)
     # The preflight probe every multi-node sbatch runs first: links the full training stack so merely starting on a

@@ -78,6 +78,16 @@
       "positive_prefix": "passage: "
     },
     {
+      "name": "mmarco",
+      "weight": 0.05,
+      "glob": "data/mmarco/pairs/*/train.parquet",
+      "anchor": "query",
+      "positive": "positive",
+      "negative": "negative",
+      "anchor_prefix": "query: ",
+      "positive_prefix": "passage: "
+    },
+    {
       "name": "pubmedqa",
       "weight": 0.06,
       "glob": "data/pubmedqa/pqa_artificial/train-*.parquet",

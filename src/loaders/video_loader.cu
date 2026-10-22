@@ -711,11 +711,9 @@ struct cursor_plan_t {
             video_grid_t const grid = um::video_tube_grid(decoded.frames, decoded.extent, rep, columns);
             length = static_cast<u32_t>(grid.temporal_groups) * grid.patch_rows * grid.patch_columns;
             modality = modality_t::video_k;
-            // A segment never crosses its row: jump the cursor to the next row when it would. `video_tube_grid`
-            // already clamped `length` to one row, so a drop here means the grid ran out of rows, not that one
-            // clip was too big.
-            u32_t const room_in_row = columns - cursor % columns;
-            if (length > room_in_row) cursor += room_in_row;
+            // Every clip owns one row from its start. `video_tube_grid` already clamped `length` to
+            // one row, so a drop here means the grid ran out of rows, not an oversized clip.
+            cursor = static_cast<u32_t>(divide_round_up(cursor, columns) * columns);
             if (cursor + length > capacity) {
                 sz::string_t line;
                 if (format_into(line, "uform: loaded video batch full at segment {} — dropped\n", segment)) {

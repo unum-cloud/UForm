@@ -445,6 +445,9 @@ expected<infiniband_queue_mapping_t> infiniband_queue_mapping_t::make(ibv_qp *qu
     if (CUresult result = cuMemsetD8(device_address(mapping.handles_.producer_index), 0, sizeof(u32_t));
         result != CUDA_SUCCESS)
         return cuda_failure<infiniband_queue_mapping_t>(result, "producer-index counter reset failed");
+    // The reset ran on the legacy stream, which the collectives' non-blocking streams never await.
+    if (CUresult result = cuStreamSynchronize(CU_STREAM_LEGACY); result != CUDA_SUCCESS)
+        return cuda_failure<infiniband_queue_mapping_t>(result, "producer-index counter reset drain failed");
     return expected<infiniband_queue_mapping_t> {std::move(mapping)};
 }
 
@@ -506,6 +509,9 @@ expected<infiniband_completion_mapping_t> infiniband_completion_mapping_t::make(
     if (CUresult result = cuMemsetD8(device_address(mapping.handles_.consumer_index), 0, sizeof(u32_t));
         result != CUDA_SUCCESS)
         return cuda_failure<infiniband_completion_mapping_t>(result, "consumer-index counter reset failed");
+    // The reset ran on the legacy stream, which the collectives' non-blocking streams never await.
+    if (CUresult result = cuStreamSynchronize(CU_STREAM_LEGACY); result != CUDA_SUCCESS)
+        return cuda_failure<infiniband_completion_mapping_t>(result, "consumer-index counter reset drain failed");
     return expected<infiniband_completion_mapping_t> {std::move(mapping)};
 }
 
