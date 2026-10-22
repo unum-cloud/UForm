@@ -112,13 +112,15 @@ static __global__ void contrastive_scaled_cosine_kernel_(f32r4_view_t raw_dot, f
 
 /**
  *  @brief The raw-dot gradient of one subgraph block: @c raw_dot_grad[p,v,n] = β_v·logit_grad/max(‖v‖·‖n‖,floor)
- *      — the operand the gradient matmuls and the self-coefficient folds both consume.
+ *      — the operand the gradient matmuls and the self-coefficient folds both consume. A vertex's
+ *      cell against its own copy on the self-edge default is zero.
  *
  *  __grid_size__ @c [ceil(K·R·Rc/block),1,1] ; grid-stride over cells; no dynamic shared memory.
  */
 static __global__ void contrastive_raw_dot_grad_kernel_(f32r3_view_t logit_grad, f32r2_view_t from_vertex_norms,
                                                         f32r2_view_t to_vertex_norms, contrastive_recipe_t recipe,
-                                                        f32r3_span_t raw_dot_grad) {
+                                                        contrastive_relations_view_t relations,
+                                                        std::size_t global_offset, f32r3_span_t raw_dot_grad) {
     std::size_t const num_vertices = logit_grad.extent(1);
     std::size_t const num_neighbors = logit_grad.extent(2);
     std::size_t const total = logit_grad.extent(0) * num_vertices * num_neighbors;
@@ -130,9 +132,14 @@ static __global__ void contrastive_raw_dot_grad_kernel_(f32r3_view_t logit_grad,
         std::size_t const neighbor_index = cell % num_neighbors;
         f32_t const denominator = from_vertex_norms[prefix_index, vertex_index] *
                                   to_vertex_norms[prefix_index, neighbor_index];
+        // Cosine 1 against its own copy has a zero gradient; skip the cancelling BF16 product.
+        bool const own_copy = !relations.has_explicit_attract_edges() &&
+                              global_offset + neighbor_index == relations.self_edge_base + vertex_index;
         raw_dot_grad[prefix_index, vertex_index, neighbor_index] =
-            contrastive_from_vertex_beta_(recipe, static_cast<u32_t>(vertex_index)) *
-            logit_grad[prefix_index, vertex_index, neighbor_index] / fmaxf(denominator, cosine_denominator_floor_k);
+            own_copy ? 0.0f
+                     : contrastive_from_vertex_beta_(recipe, static_cast<u32_t>(vertex_index)) *
+                           logit_grad[prefix_index, vertex_index, neighbor_index] /
+                           std::fmax(denominator, cosine_denominator_floor_k);
     }
 }
 
@@ -1046,8 +1053,8 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
         launched = transpose_bf16(subgraph.to_vertices, to_vertices_transposed, stream);
         if (launched)
             launched = launch_kernel(&contrastive_raw_dot_grad_kernel_, block_grid, block_shape, stream,
-                                     logit_grad_view, from_vertex_norms_view, to_vertex_norms_view, recipe,
-                                     raw_dot_grad_.span());
+                                     logit_grad_view, from_vertex_norms_view, to_vertex_norms_view, recipe, relations,
+                                     subgraph.global_offset, raw_dot_grad_.span());
         if (launched)
             launched = launch_kernel(&contrastive_from_vertex_self_coefficients_kernel_,
                                      dim3 {config_.from_vertices_per_gpu, prefix_count, 1u}, block_shape, stream,

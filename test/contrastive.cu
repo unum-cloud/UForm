@@ -243,7 +243,8 @@ enum class oracle_graph_t : u32_t {
  *  sampled channels, and check captured replays land where the eager run did. */
 static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::size_t hidden,
                             std::vector<u32_t> const &prefixes, oracle_graph_t graph, bool with_pad,
-                            f32_t ambient_weight, contrastive_pair_loss_form_t form) {
+                            f32_t ambient_weight, contrastive_pair_loss_form_t form, f32_t inverse_temperature,
+                            f32_t bias) {
     if (!cuda_devices_visible_(1)) return suite.skip(no_cuda_device_k);
     auto stream_made = gpu_stream_t::make(0);
     if (!stream_made) return suite.check(false, "stream: {}", stream_made.description_);
@@ -263,11 +264,13 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
     if (!loss_made) return suite.check(false, "loss make: {}", loss_made.description_);
     contrastive_segments_t loss = std::move(loss_made.value_);
 
-    // The tower on the BFloat16 grid in Float64 for the oracle, its bit patterns for the device.
+    // The tower on the BFloat16 grid in Float64 for the oracle, its bit patterns for the device;
+    // the squared index keeps rows wider than the filler's period from repeating each other.
     std::size_t const scalars = num_vertices * hidden;
     std::vector<f64_t> host_tower(scalars);
     std::vector<nk_bf16_t> staging(scalars);
-    for (std::size_t index = 0; index != scalars; ++index) host_tower[index] = hash_fill(index, num_vertices + hidden);
+    for (std::size_t index = 0; index != scalars; ++index)
+        host_tower[index] = hash_fill(index * index, num_vertices + hidden);
     if (!narrow_to_bf16(host_tower, staging)) return suite.check(false, "tower rounding failed");
     bf16_t *tower = arena.allocate_object<bf16_t>(scalars);
     bf16_t *grad = arena.allocate_object<bf16_t>(scalars);
@@ -344,6 +347,8 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
     subgraph.global_offset = 0;
     subgraph.to_vertices_grad = f32r2_span_t {grad_f32, num_vertices, hidden};
     contrastive_recipe_t recipe;
+    recipe.inverse_temperature = inverse_temperature;
+    recipe.bias = bias;
     recipe.ambient_repulsion_weight = ambient_weight;
 
     auto run_once = [&]() noexcept -> expected_t {
@@ -359,7 +364,7 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
     for (u32_t const length : host_effective) live_vertices += !padded || length != 0u;
     auto const oracle_of = [&](std::vector<f64_t> const &towers) noexcept {
         f64r2_view_t const rows {towers.data(), num_vertices, hidden};
-        return host_pair_loss(form, rows, rows, prefixes, host_relations, 1.0, 0.0, live_vertices);
+        return host_pair_loss(form, rows, rows, prefixes, host_relations, inverse_temperature, bias, live_vertices);
     };
     f64_t const oracle = oracle_of(host_tower);
     f64_t const relative = std::fabs(f64_t(device_loss) - oracle) / std::max(std::fabs(oracle), 1.0e-9);
@@ -368,13 +373,15 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
     // Each cell's softplus stays under 2 at unit β and zero bias, so repel-only rows stay bounded.
     suite.check(device_loss < 2.0f * 1.5f * f32_t(num_vertices), "loss {:.6f} stays bounded by its cells", device_loss);
 
-    // Finite-difference force check on a few sampled channels: the analytic BF16 gradient must sit
-    // within BF16 resolution of (L(x+h) - L(x-h)) / 2h.
+    // Finite-difference force check on a few sampled channels, as one vector against its own
+    // norm, so a small true force cannot hide under an absolute floor: (L(x+h) - L(x-h)) / 2h
+    // within 1%.
     std::vector<f64_t> host_grad(scalars);
     cuMemcpyDtoH(staging.data(), device_address(grad), scalars * sizeof(nk_bf16_t));
     if (!widen_from_bf16(staging, host_grad)) return suite.check(false, "gradient widening failed");
     std::vector<f32_t> host_column(scalars);
     cuMemcpyDtoH(host_column.data(), device_address(grad_f32), scalars * sizeof(f32_t));
+    f64_t error_squares = 0.0, numeric_squares = 0.0;
     for (std::size_t sample = 0; sample != 6; ++sample) {
         std::size_t const index = (sample * 977ull + 13ull) % scalars;
         f64_t const step_size = 1.0e-2;
@@ -385,13 +392,12 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
         f64_t const numeric = (oracle_of(plus) - oracle_of(minus)) / (plus[index] - minus[index]);
         // The full derivative sums the row-side (bf16 output) and column-side (f32 subgraph) forces.
         f64_t const analytic = host_grad[index] + host_column[index];
-        f64_t const difference = std::fabs(numeric - analytic);
-        if (difference > 5.0e-2 * std::max(std::fabs(numeric), 0.05)) {
-            suite.check(false, "force[{}] matches central finite differences: numeric {:.5f} analytic {:.5f}", index,
-                        numeric, analytic);
-            break;
-        }
+        error_squares += (numeric - analytic) * (numeric - analytic), numeric_squares += numeric * numeric;
     }
+    f64_t const force_error = std::sqrt(error_squares), force_norm = std::sqrt(numeric_squares);
+    suite.check(force_error <= 1.0e-2 * force_norm + 1.0e-12,
+                "the sampled force matches central finite differences: error {:.3e} over norm {:.3e}", force_error,
+                force_norm);
 
     // The retrieval table against the Float64 rows, over the oracle's tower and then over one whose
     // vertices all lie within a few degrees of one direction, where uncentred cosine sums cancel.
@@ -1844,18 +1850,29 @@ int main(int, char **argv) {
     constexpr contrastive_pair_loss_form_t balanced_k = contrastive_pair_loss_form_t::balanced_k;
     constexpr contrastive_pair_loss_form_t ranked_k = contrastive_pair_loss_form_t::ranked_k;
     constexpr contrastive_pair_loss_form_t sigmoid_k = contrastive_pair_loss_form_t::sigmoid_k;
-    suite.run("oracle/self-edges", run_oracle_case, 8, 64, {64}, graph_t::self_edges_k, false, 1.0f, balanced_k);
-    suite.run("oracle/matryoshka", run_oracle_case, 8, 64, {32, 64}, graph_t::self_edges_k, false, 1.0f, balanced_k);
-    suite.run("oracle/explicit-edges", run_oracle_case, 8, 64, {64}, graph_t::explicit_edges_k, false, 0.5f,
-              balanced_k);
-    suite.run("oracle/roles", run_oracle_case, 10, 64, {32, 64}, graph_t::roles_k, false, 1.0f, balanced_k);
-    suite.run("oracle/ranked-roles", run_oracle_case, 10, 64, {32, 64}, graph_t::roles_k, false, 1.0f, ranked_k);
-    suite.run("oracle/sigmoid-roles", run_oracle_case, 10, 64, {32, 64}, graph_t::roles_k, false, 1.0f, sigmoid_k);
-    suite.run("oracle/ranked-self-edges", run_oracle_case, 8, 64, {64}, graph_t::self_edges_k, false, 1.0f, ranked_k);
-    suite.run("oracle/pad-rows", run_oracle_case, 8, 64, {64}, graph_t::self_edges_k, true, 1.0f, balanced_k);
-    suite.run("oracle/no-ambient", run_oracle_case, 8, 64, {64}, graph_t::self_edges_k, false, 0.0f, balanced_k);
+    suite.run("oracle/self-edges", run_oracle_case, 8, 64, {64}, graph_t::self_edges_k, false, 1.0f, balanced_k, 1.0f,
+              0.0f);
+    suite.run("oracle/matryoshka", run_oracle_case, 8, 64, {32, 64}, graph_t::self_edges_k, false, 1.0f, balanced_k,
+              1.0f, 0.0f);
+    suite.run("oracle/explicit-edges", run_oracle_case, 8, 64, {64}, graph_t::explicit_edges_k, false, 0.5f, balanced_k,
+              1.0f, 0.0f);
+    suite.run("oracle/roles", run_oracle_case, 10, 64, {32, 64}, graph_t::roles_k, false, 1.0f, balanced_k, 1.0f, 0.0f);
+    suite.run("oracle/ranked-roles", run_oracle_case, 10, 64, {32, 64}, graph_t::roles_k, false, 1.0f, ranked_k, 1.0f,
+              0.0f);
+    suite.run("oracle/sigmoid-roles", run_oracle_case, 10, 64, {32, 64}, graph_t::roles_k, false, 1.0f, sigmoid_k, 1.0f,
+              0.0f);
+    suite.run("oracle/ranked-self-edges", run_oracle_case, 8, 64, {64}, graph_t::self_edges_k, false, 1.0f, ranked_k,
+              1.0f, 0.0f);
+    suite.run("oracle/pad-rows", run_oracle_case, 8, 64, {64}, graph_t::self_edges_k, true, 1.0f, balanced_k, 1.0f,
+              0.0f);
+    suite.run("oracle/no-ambient", run_oracle_case, 8, 64, {64}, graph_t::self_edges_k, false, 0.0f, balanced_k, 1.0f,
+              0.0f);
     suite.run("oracle/odd-rows-wide", run_oracle_case, 33, 256, {32, 256}, graph_t::self_edges_k, false, 1.0f,
-              balanced_k);
+              balanced_k, 1.0f, 0.0f);
+    suite.run("oracle/sigmoid-sharp-wide", run_oracle_case, 64, 1024, {1024}, graph_t::self_edges_k, false, 1.0f,
+              sigmoid_k, 10.0f, -10.0f);
+    suite.run("oracle/ranked-sharp-wide", run_oracle_case, 64, 1024, {1024}, graph_t::self_edges_k, false, 1.0f,
+              ranked_k, 10.0f, -10.0f);
     suite.run("negatives", run_negative_cases);
     suite.run("sharded_oracle/self-edges", run_sharded_oracle_case, graph_t::self_edges_k, balanced_k);
     suite.run("sharded_oracle/roles", run_sharded_oracle_case, graph_t::roles_k, balanced_k);
