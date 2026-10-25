@@ -12,7 +12,7 @@
 #include <turbojpeg.h>   // vendor-boundary: JPEG decode with DCT scaling, reporting corrupt streams
 #include <webp/decode.h> // vendor-boundary: WebP decode
 
-#include "core/types.hpp" // `st::basic_vector` — the decode scratch
+#include "uform/core/types.hpp" // `st::basic_vector` — the decode scratch
 #include "media/image.hpp"
 
 namespace um = unum::uform::media;

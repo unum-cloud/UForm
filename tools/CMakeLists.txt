@@ -6,7 +6,14 @@ add_executable(uform_base base.cu)
 target_link_libraries(uform_base PRIVATE uform::datasets fmt::fmt)
 add_executable(uform_eval eval.cpp)
 target_link_libraries(
-    uform_eval PRIVATE uform::static numkong::static forkunion::header smashtable::header yyjson fmt::fmt
+    uform_eval
+    PRIVATE uform::static
+            uform::core
+            numkong::static
+            forkunion::header
+            smashtable::header
+            yyjson
+            fmt::fmt
 )
 add_executable(uform_grow grow.cpp)
 target_link_libraries(uform_grow PRIVATE uform::static uform::core fmt::fmt)

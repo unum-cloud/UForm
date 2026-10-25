@@ -1,5 +1,5 @@
 /**
- *  @file src/core/checkpoint.hpp
+ *  @file include/uform/core/checkpoint.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
  *  @brief Safetensors checkpoints: one file, a yyjson-built JSON header of names / dtypes / shapes
@@ -42,7 +42,7 @@
 #include <numkong/types.h>                 // `nk_bf16_t`
 #include <smashtable/basic_hash_table.hpp> // `hash_map` — every entry's position by its name's hash
 
-#include "core/types.hpp" // `expected`, `expected_t`, `status_t`, `sz::string_t`, `st::basic_vector`
+#include "uform/core/types.hpp" // `expected`, `expected_t`, `status_t`, `sz::string_t`, `st::basic_vector`
 
 namespace unum::uform::core {
 
@@ -201,6 +201,12 @@ struct checkpoint_to_load_t {
 
     /** The metadata value of @p key , or an empty view when the file carries none. */
     [[nodiscard]] sz::string_view_t metadata(sz::string_view_t key) const noexcept;
+
+    /** Every metadata pair, in file order, for a tool copying the checkpoint whole. */
+    [[nodiscard]] std::span<checkpoint_metadata_t const> metadata() const noexcept { return metadata_; }
+
+    /** Every indexed tensor's record, in file order, for a tool copying the checkpoint whole. */
+    [[nodiscard]] std::span<checkpoint_entry_t const> entries() const noexcept { return entries_; }
 
     /** The @c step metadata the file was saved at; @c 0 when absent. */
     [[nodiscard]] u64_t step() const noexcept;

@@ -1,15 +1,15 @@
 /**
- *  @brief Parsing the tower geometry out of checkpoint metadata — see the header for the contract.
- *  @file src/inference/geometry.cpp
+ *  @file src/encoder/geometry.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
+ *  @brief Parsing the tower geometry out of checkpoint metadata — see the header for the contract.
  */
 #include <charconv>     // `std::from_chars`
 #include <system_error> // `std::errc`
 
-#include "inference/geometry.hpp"
+#include "uform/encoder/geometry.hpp"
 
-using namespace unum::uform::inference;
+using namespace unum::uform::encoder;
 using uc::expected_t;
 using uc::status_t;
 
@@ -85,7 +85,7 @@ expected<geometry_t> geometry_t::from(uc::checkpoint_to_load_t const &checkpoint
     if (!read) return result_t::fail(std::move(read));
 
     if (geometry.depth == 0 || geometry.head_width == 0 || geometry.hidden % geometry.head_width != 0 ||
-        geometry.context == 0)
+        geometry.context == 0 || geometry.columns == 0)
         return result_t::fail(status_t::invalid_input_k, "depth {} hidden {} head_width {} context {} build no tower",
                               geometry.depth, geometry.hidden, geometry.head_width, geometry.context);
     if (geometry.rope_temporal + geometry.rope_height + geometry.rope_width != geometry.head_width ||
@@ -100,5 +100,18 @@ expected<geometry_t> geometry_t::from(uc::checkpoint_to_load_t const &checkpoint
     if (gate_up.empty() || gate_up.extent(0) != 2u * geometry.ffn())
         return result_t::fail(status_t::invalid_input_k, "the first gate_up must have {} rows", 2u * geometry.ffn());
     geometry.vocabulary = static_cast<u32_t>(embedding.extent(0));
+
+    nk::tensor_view<nk_bf16_t, 2> const projection = checkpoint["model.token_head.projection"];
+    if (!projection.empty() && projection.extent(1) != geometry.hidden)
+        return result_t::fail(status_t::invalid_input_k, "the token head must project [width,{}]", geometry.hidden);
+    geometry.token_width = static_cast<u32_t>(projection.empty() ? 0 : projection.extent(0));
+    nk::tensor_view<nk_bf16_t, 2> const decoder = checkpoint["model.masked_tokens"];
+    if (!decoder.empty() && decoder.extent(1) != geometry.hidden)
+        return result_t::fail(status_t::invalid_input_k, "the byte decoder must be [vocabulary,{}]", geometry.hidden);
+    geometry.masked_vocabulary = static_cast<u32_t>(decoder.empty() ? 0 : decoder.extent(0));
+    nk::tensor_view<f32_t, 2> const temperatures = checkpoint.float32("choices.inverse_temperatures");
+    geometry.choice_temperature_groups = static_cast<u32_t>(decoder.empty()        ? 0
+                                                            : temperatures.empty() ? 1
+                                                                                   : temperatures.numel());
     return result_t {geometry};
 }

@@ -44,8 +44,8 @@
 #include <numkong/cast.h>              // `nk_bf16_to_f32_serial`, `nk_f32_to_bf16_serial`
 #include <smashtable/basic_vector.hpp> // `basic_vector` — every growable table here
 
-#include "core/checkpoint.hpp"
-#include "inference/geometry.hpp"
+#include "uform/core/checkpoint.hpp"
+#include "uform/encoder/geometry.hpp"
 #include "uform/encode.h"
 #include "uform/model.h"
 #include "uform/types.h"
@@ -54,7 +54,7 @@ namespace nk = ashvardanian::numkong;
 namespace st = ashvardanian::smashtable;
 namespace sz = ashvardanian::stringzilla;
 namespace uc = unum::uform::core;
-namespace ui = unum::uform::inference;
+namespace ue = unum::uform::encoder;
 
 /** The cosine every grown embedding's prefix must reach against the source's. */
 static constexpr float cosine_floor_k = 0.9999f;
@@ -157,7 +157,7 @@ static constexpr char const *kept_metadata_k[] = {
 
 /** Fill @p grown with the weights and geometry of @p source taken one @p step up, refusing a source
  *  tensor this neither grows, carries nor leaves behind. */
-[[nodiscard]] static uc::expected_t grow_(uc::checkpoint_to_load_t const &source, ui::geometry_t const &geometry,
+[[nodiscard]] static uc::expected_t grow_(uc::checkpoint_to_load_t const &source, ue::geometry_t const &geometry,
                                           step_t step, uc::checkpoint_to_save_t &grown) noexcept {
     using uc::expected_t, uc::status_t;
     std::size_t accounted = 0;
@@ -452,8 +452,8 @@ int main(int argc, char **argv) {
     std::size_t hidden = 0, depth = 0;
     {
         uc::expected<uc::checkpoint_to_load_t> source = uc::checkpoint_to_load_t::make(source_path);
-        uc::expected<ui::geometry_t> geometry = source ? ui::geometry_t::from(*source)
-                                                       : uc::expected<ui::geometry_t>::fail(std::move(source));
+        uc::expected<ue::geometry_t> geometry = source ? ue::geometry_t::from(*source)
+                                                       : uc::expected<ue::geometry_t>::fail(std::move(source));
         uc::checkpoint_to_save_t grown;
         uc::expected_t written = geometry ? grow_(*source, *geometry, step, grown)
                                           : uc::expected_t::fail(std::move(geometry));

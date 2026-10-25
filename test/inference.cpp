@@ -1,17 +1,23 @@
 /**
- *  @brief Parity of the host tower against the Rust crate on the seeded tiny checkpoint.
  *  @file test/inference.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
+ *  @brief Parity of the encoder's class variants with each other, with a device, and with the Rust
+ *      crate, on the seeded tiny checkpoint.
  *
- *  Loads the checkpoint `test/tiny_checkpoint.cpp` writes, encodes three texts on the CPU in BFloat16 and E4M3, and
- *  compares the BFloat16 states and embeddings against raw Float32 dumps of the Rust crate's outputs for the same
- *  texts. The Rust crate deviates from the training recipe in three known places, so agreement is expected at the
- *  BFloat16 floor, not bitwise: its QK-norm reads BFloat16 rather than the Float32 product, its pooled rows stay
- *  Float32, and its head's SiLU runs in Float32. It also keeps its states in Float32 where the tower rounds them.
+ *  Loads the checkpoint `test/tiny_checkpoint.cpp` writes and encodes three texts in BFloat16 and
+ *  E4M3 through the serial floor's variant, the reference every other run compares with:
  *
- *  With a CUDA device present, both precisions also encode on it and compare against the CPU, expecting the
- *  BFloat16 floor again: the products accumulate in another order and the rotary angles take the fast sine.
+ *  - Every CPU class this build compiled and this machine runs encodes through its own variant and
+ *    matches the floor at the BFloat16 floor, its kernels summing in another order. A class whose
+ *    kits match its parent's has no variant and skips.
+ *  - Every device @c UFORM_DEVICES selects encodes through the newest class its vendor's ladder
+ *    admits and matches the floor again: the products accumulate in another order and the rotary
+ *    angles take the fast sine.
+ *  - With the Rust crate's dumps, the floor's BFloat16 states and embeddings match them. The crate
+ *    deviates from the training recipe in three known places, so agreement is expected at the
+ *    BFloat16 floor, not bitwise: its QK-norm reads BFloat16 rather than the Float32 product, its
+ *    pooled rows stay Float32, and its head's SiLU runs in Float32.
  *
  *  Usage: `uform_test_inference <tiny.safetensors> [<rust_states.f32> <rust_embeddings.f32>]`.
  */
@@ -23,19 +29,17 @@
 
 #include <forkunion.hpp>
 #include <numkong/capabilities.h>
-#include <numkong/dots.h> // `nk_dots_pack_size_*_best` — which precisions a device runs
 #include <numkong/memory.hpp>
 
-#include "core/checkpoint.hpp"
-#include "core/multimodal_batch.hpp"
-#include "inference/geometry.hpp"
-#include "inference/tower.hpp"
-#include "harness.hpp" // `test_suite_t`
+#include "uform/core/checkpoint.hpp"
+#include "uform/core/multimodal_batch.hpp"
+#include "uform/encoder/geometry.hpp"
+#include "encoder_punned.hpp" // `encoder_verbs`, `encoder_class_tables`, `pick_gpu_variant`
+#include "harness.hpp"        // `test_suite_t`
 
-using namespace unum::uform::inference;
+using namespace unum::uform;
+using namespace unum::uform::encoder;
 using namespace unum::uform::test;
-namespace fu = ashvardanian::forkunion;
-namespace nk = ashvardanian::numkong;
 
 static char const *const texts_k[] = {"Hello, world!", "UForm encodes bytes.", "a"};
 static constexpr std::size_t items_k = 3;
@@ -43,6 +47,12 @@ static constexpr std::size_t items_k = 3;
 /** The largest absolute difference relative to the reference's largest magnitude, and the worst row cosine. */
 struct agreement_t {
     double relative = 0, cosine = 1;
+};
+
+/** What one variant encoded from the texts, every surface in Float32; a surface a run skips is
+ *  empty. */
+struct encoded_t {
+    std::vector<float> states, embeddings, token_vectors, masked_logits;
 };
 
 static agreement_t compare(f32r2_view_t tower, f32r2_view_t reference) {
@@ -72,14 +82,16 @@ static std::vector<float> read_floats(char const *path) {
     return values;
 }
 
-/** Encodes the texts in @p precision into @p states and @p embeddings , both Float32: on @p pool 's threads for a
- *  CPU mask, or on @p stream for a GPU one, with the batch and the outputs in memory both sides address. */
-static bool encode(test_suite_t &suite, uc::checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
-                   precision_t precision, nk_capability_t capabilities, nk_stream_t stream, fu::flat_pool_t &pool,
-                   std::vector<float> &states, std::vector<float> &embeddings) {
-    placement_t placement {capabilities, stream, {}};
-    uc::expected<tower_t> tower = tower_t::make(checkpoint, geometry, precision, placement);
-    if (!tower) return suite.check(false, "tower: {}", tower.description_), false;
+/** Encodes the texts through @p verbs in @p precision into @p encoded : on @p executor , a pool
+ *  for a host variant or a stream for a device one, with the batch and the outputs in memory both
+ *  sides address, placed under @p capabilities . */
+template <encoder_home_t home_>
+static bool encode(test_suite_t &suite, encoder_verbs<home_> const &verbs, uc::checkpoint_to_load_t const &checkpoint,
+                   geometry_t const &geometry, precision_t precision, nk_capability_t capabilities,
+                   typename encoder_home_executor<home_>::type executor, nk_stream_t stream, encoded_t &encoded) {
+    uc::expected<void *> made = verbs.create(checkpoint, geometry, precision, stream);
+    if (!made) return suite.check(false, "tower: {}", made.description_), false;
+    void *const tower = *made;
 
     bool const on_device = (capabilities & nk_cap_gpus_k) != 0;
     nk_allocator_t shared {}, scratch_policy {};
@@ -87,7 +99,7 @@ static bool encode(test_suite_t &suite, uc::checkpoint_to_load_t const &checkpoi
                                               : nk_allocator_init_heap(&shared, 64);
     if (initialized != nk_success_k || (on_device ? nk_allocator_init_device_best(&scratch_policy, capabilities)
                                                   : nk_allocator_init_heap(&scratch_policy, 64)) != nk_success_k)
-        return suite.check(false, "allocators: {}", nk_status_name(initialized)), false;
+        return verbs.destroy(tower), suite.check(false, "allocators: {}", nk_status_name(initialized)), false;
     nk::allocator<uc::b8_t> const allocator {shared, stream};
 
     using batch_t = uc::multimodal_batch<nk::allocator<uc::b8_t>>;
@@ -95,7 +107,7 @@ static bool encode(test_suite_t &suite, uc::checkpoint_to_load_t const &checkpoi
     shape.max_rows_per_gpu = items_k, shape.max_segments_per_gpu = items_k,
     shape.max_columns_per_row = geometry.context;
     uc::expected<batch_t> batch = batch_t::make(allocator, shape);
-    if (!batch) return suite.check(false, "batch: {}", batch.description_), false;
+    if (!batch) return verbs.destroy(tower), suite.check(false, "batch: {}", batch.description_), false;
     auto offsets = batch->segment_offsets.span();
     auto lengths = batch->segment_lengths.span();
     auto modalities = batch->segment_modality.span();
@@ -112,80 +124,152 @@ static bool encode(test_suite_t &suite, uc::checkpoint_to_load_t const &checkpoi
     }
     offsets[items_k] = static_cast<uc::u32_t>(items_k * geometry.context);
 
-    uc::expected<std::size_t> bytes = tower->scratch_bytes(tokens, items_k, capabilities);
-    if (!bytes) return suite.check(false, "scratch: {}", bytes.description_), false;
+    uc::expected<std::size_t> bytes = verbs.scratch_bytes(tower, tokens, items_k);
+    if (!bytes) return verbs.destroy(tower), suite.check(false, "scratch: {}", bytes.description_), false;
     st::basic_vector<uc::b8_t, nk::allocator<uc::b8_t>> scratch {nk::allocator<uc::b8_t> {scratch_policy, stream}};
-    st::basic_vector<float, nk::allocator<float>> shared_states {nk::allocator<float> {allocator}},
-        shared_embeddings {nk::allocator<float> {allocator}};
+    using shared_floats_t = st::basic_vector<float, nk::allocator<float>>;
+    shared_floats_t states {nk::allocator<float> {allocator}}, embeddings {nk::allocator<float> {allocator}},
+        token_vectors {nk::allocator<float> {allocator}}, masked_logits {nk::allocator<float> {allocator}};
     if (st::failed(scratch.resize(st::assume_uninitialized, *bytes)) ||
-        st::failed(shared_states.resize(st::assume_uninitialized, tokens * geometry.hidden)) ||
-        st::failed(shared_embeddings.resize(st::assume_uninitialized, items_k * geometry.hidden)))
-        return suite.check(false, "scratch and outputs allocation failed"), false;
-    placement.scratch = scratch;
-    outputs_t const outputs {shared_embeddings.data(), shared_states.data(), nk_f32_k};
-    uc::expected_t encoded = on_device ? tower->encode(batch->view(), outputs, placement)
-                                       : tower->encode(batch->view(), outputs, placement, pool);
-    if (!encoded) return suite.check(false, "encode: {}", encoded.description_), false;
-    nk_status_t const finished = nk_stream_synchronize_best(capabilities, stream);
+        st::failed(states.resize(st::assume_uninitialized, tokens * geometry.hidden)) ||
+        st::failed(embeddings.resize(st::assume_uninitialized, items_k * geometry.hidden)) ||
+        st::failed(token_vectors.resize(st::assume_uninitialized, tokens * geometry.token_width)) ||
+        st::failed(masked_logits.resize(st::assume_uninitialized, items_k * geometry.masked_vocabulary)))
+        return verbs.destroy(tower), suite.check(false, "scratch and outputs allocation failed"), false;
+    outputs_t const outputs {embeddings.data(), states.data(), token_vectors.empty() ? nullptr : token_vectors.data(),
+                             masked_logits.empty() ? nullptr : masked_logits.data(), nk_f32_k};
+    uc::expected_t ran = verbs.encode(tower, batch->view(), outputs, scratch, executor);
+    nk_status_t const finished = on_device ? nk_stream_synchronize_best(capabilities, stream) : nk_success_k;
+    verbs.destroy(tower);
+    if (!ran) return suite.check(false, "encode: {}", ran.description_), false;
     if (finished != nk_success_k) return suite.check(false, "encode: {}", nk_status_name(finished)), false;
-    states.assign(shared_states.data(), shared_states.data() + shared_states.size());
-    embeddings.assign(shared_embeddings.data(), shared_embeddings.data() + shared_embeddings.size());
+    encoded.states.assign(states.begin(), states.end());
+    encoded.embeddings.assign(embeddings.begin(), embeddings.end());
+    encoded.token_vectors.assign(token_vectors.begin(), token_vectors.end());
+    encoded.masked_logits.assign(masked_logits.begin(), masked_logits.end());
     return true;
 }
 
-/** Encodes in @p precision on the first CUDA device, when there is one, and compares with the
- *  CPU's @p states and @p embeddings within @p tolerance ; a precision NumKong has no device
- *  kernels for skips. */
-static void device_parity(test_suite_t &suite, uc::checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
-                          fu::flat_pool_t &pool, precision_t precision, std::vector<float> const &states,
-                          std::vector<float> const &embeddings, double tolerance) {
-    nk_size_t devices = 0;
-    nk_capability_t capabilities = 0;
-    if (nk_cuda_count_devices(&devices) != nk_success_k || devices == 0 ||
-        nk_cuda_capabilities_enabled(0, &capabilities) != nk_success_k || capabilities == 0)
-        return suite.skip(no_cuda_device_k);
-    std::size_t const hidden = geometry.hidden, tokens = states.size() / hidden;
-    nk_size_t bytes = 0;
-    nk_status_t const supported = precision == precision_t::bf16_k
-                                      ? nk_dots_pack_size_bf16_best(hidden, hidden, capabilities, &bytes)
-                                      : nk_dots_pack_size_e4m3_best(hidden, hidden, capabilities, &bytes);
-    if (supported != nk_success_k) return suite.skip(nk_status_name(supported));
-    nk_stream_t stream = nullptr;
-    if (nk_stream_init_cuda(0, &stream) != nk_success_k) return suite.check(false, "device stream init");
-    std::vector<float> device_states, device_embeddings;
-    if (encode(suite, checkpoint, geometry, precision, capabilities, stream, pool, device_states, device_embeddings)) {
-        agreement_t const states_agreement = compare({device_states.data(), tokens, hidden},
-                                                     {states.data(), tokens, hidden});
-        agreement_t const embeddings_agreement = compare({device_embeddings.data(), items_k, hidden},
-                                                         {embeddings.data(), items_k, hidden});
-        suite.check(states_agreement.relative < tolerance && embeddings_agreement.relative < tolerance,
-                    "device matches the CPU: states max relative {:.4e} worst cosine {:.6f}, embeddings max " //
-                    "relative {:.4e} worst cosine {:.6f}",
-                    states_agreement.relative, states_agreement.cosine, embeddings_agreement.relative,
-                    embeddings_agreement.cosine);
-    }
-    suite.check(nk_stream_free_cuda(stream) == nk_success_k, "device stream free");
+/** Checks @p encoded against @p reference within @p tolerance , naming @p who in the message. */
+static void check_agreement(test_suite_t &suite, char const *who, encoded_t const &encoded, encoded_t const &reference,
+                            std::size_t hidden, double tolerance) {
+    std::size_t const rows = reference.states.size() / hidden;
+    auto const check = [&](char const *surface, std::vector<float> const &tower, std::vector<float> const &floor,
+                           std::size_t surface_rows) {
+        if (tower.empty() || floor.empty()) return;
+        std::size_t const width = floor.size() / surface_rows;
+        agreement_t const agreement = compare({tower.data(), surface_rows, width}, {floor.data(), surface_rows, width});
+        suite.check(agreement.relative < tolerance,
+                    "{} {} match the serial floor: max relative {:.4e} worst cosine {:.6f}", who, surface,
+                    agreement.relative, agreement.cosine);
+    };
+    check("states", encoded.states, reference.states, rows);
+    check("embeddings", encoded.embeddings, reference.embeddings, items_k);
+    check("token vectors", encoded.token_vectors, reference.token_vectors, rows);
+    check("masked logits", encoded.masked_logits, reference.masked_logits, items_k);
 }
 
-/** Compares the CPU's BFloat16 @p states and @p embeddings with the Rust crate's dumps at
- *  @p states_path and @p embeddings_path , which skips without them. */
+/** Encodes in @p precision through the variant of @p class_ , when this machine runs it and it
+ *  advances past its parent, and compares with the serial floor's @p reference . */
+template <cpu_class_t class_>
+static void class_parity(test_suite_t &suite, uc::checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
+                         fu::flat_pool_t &pool, nk_capability_t available, precision_t precision,
+                         encoded_t const &reference, double tolerance) {
+    if (!numkong_admits(available, class_)) return suite.skip("this machine does not run the class");
+    encoder_verbs<encoder_home_t::ram_k> const *const verbs =
+        encoder_class_tables<encoder_home_t::ram_k, class_>::find();
+    if (!verbs) return suite.skip("the class picks the kits its parent does");
+    encoded_t encoded;
+    if (!encode(suite, *verbs, checkpoint, geometry, precision, numkong_capabilities_of(class_), pool, nullptr,
+                encoded))
+        return;
+    check_agreement(suite, uform_cpu_class_name(static_cast<uform_cpu_class_t>(class_)), encoded, reference,
+                    geometry.hidden, tolerance);
+}
+
+/** Encodes in @p precision on @p stream through @p verbs , the variant a device's vendor ladder
+ *  picked, and compares with the serial floor's @p reference . */
+template <encoder_home_t home_>
+static void check_device_variant(test_suite_t &suite, encoder_verbs<home_> const *verbs,
+                                 uc::checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
+                                 precision_t precision, nk_capability_t capabilities, nk_stream_t stream,
+                                 encoded_t const &reference, double tolerance) {
+    if (!verbs) return suite.skip("this build compiles no variant for the device's vendor");
+    encoded_t encoded;
+    if (encode(suite, *verbs, checkpoint, geometry, precision, capabilities, stream, stream, encoded))
+        check_agreement(suite, uform_gpu_class_name(static_cast<uform_gpu_class_t>(verbs->gpu_class)), encoded,
+                        reference, geometry.hidden, tolerance);
+}
+
+/** Encodes in @p precision on @p device through the newest class its vendor's ladder admits, and
+ *  compares with the serial floor's @p reference . */
+static void device_parity(test_suite_t &suite, uc::checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
+                          uform_gpu_device_t device, precision_t precision, encoded_t const &reference,
+                          double tolerance) {
+    bool const amd = device.vendor == uform_gpu_vendor_amd_k;
+    nk::expected<nk::device_t> const opened = nk::device_t::make(
+        amd ? nk::device_kind_t::rocm_k : nk::device_kind_t::cuda_k, device.vendor_ordinal);
+    if (!opened) return suite.check(false, "device: {}", nk::status_name(opened.status));
+    nk::expected<nk_capability_t> const capabilities = opened.value.capabilities_enabled();
+    if (!capabilities || !capabilities.value) return suite.skip("this build holds no kernels for the device");
+    nk::expected<nk::stream_t> const stream = nk::stream_t::make(opened.value);
+    if (!stream) return suite.check(false, "device stream: {}", nk::status_name(stream.status));
+    if (amd)
+        check_device_variant(suite,
+                             pick_gpu_variant<encoder_home_t::vram_amd_k>(amd_ladder_t {}, uform_gpu_class_unknown_k,
+                                                                          capabilities.value),
+                             checkpoint, geometry, precision, capabilities.value, stream.value.get(), reference,
+                             tolerance);
+    else
+        check_device_variant(suite,
+                             pick_gpu_variant<encoder_home_t::vram_nvidia_k>(
+                                 nvidia_ladder_t {}, uform_gpu_class_unknown_k, capabilities.value),
+                             checkpoint, geometry, precision, capabilities.value, stream.value.get(), reference,
+                             tolerance);
+}
+
+/** Compares the serial floor's BFloat16 @p reference with the Rust crate's dumps at @p states_path
+ *  and @p embeddings_path , which skips without them. */
 static void rust_parity(test_suite_t &suite, char const *states_path, char const *embeddings_path,
-                        std::vector<float> const &states, std::vector<float> const &embeddings, std::size_t hidden) {
+                        encoded_t const &reference, std::size_t hidden) {
     if (states_path == nullptr || embeddings_path == nullptr) return suite.skip("needs the Rust crate's dumps");
-    std::vector<float> const rust_states = read_floats(states_path), rust_embeddings = read_floats(embeddings_path);
-    if (rust_states.size() != states.size() || rust_embeddings.size() != embeddings.size())
-        return suite.check(false, "rust dumps hold {} and {} floats, expected {} and {}", rust_states.size(),
-                           rust_embeddings.size(), states.size(), embeddings.size());
-    std::size_t const state_rows = states.size() / hidden;
-    agreement_t const states_agreement = compare({states.data(), state_rows, hidden},
-                                                 {rust_states.data(), state_rows, hidden});
-    agreement_t const embeddings_agreement = compare({embeddings.data(), items_k, hidden},
-                                                     {rust_embeddings.data(), items_k, hidden});
-    suite.check(states_agreement.relative < 5e-2 && embeddings_agreement.relative < 5e-2,
-                "bf16 matches the Rust crate: states max relative {:.4e} worst cosine {:.6f}, embeddings max " //
-                "relative {:.4e} worst cosine {:.6f}",
-                states_agreement.relative, states_agreement.cosine, embeddings_agreement.relative,
-                embeddings_agreement.cosine);
+    encoded_t rust {read_floats(states_path), read_floats(embeddings_path)};
+    if (rust.states.size() != reference.states.size() || rust.embeddings.size() != reference.embeddings.size())
+        return suite.check(false, "rust dumps hold {} and {} floats, expected {} and {}", rust.states.size(),
+                           rust.embeddings.size(), reference.states.size(), reference.embeddings.size());
+    check_agreement(suite, "the Rust crate", rust, reference, hidden, 5e-2);
+}
+
+/** Checks every token vector of the serial floor's @p reference has unit length at the BFloat16
+ *  floor. */
+static void token_vectors_unit_length(test_suite_t &suite, encoded_t const &reference, std::size_t width) {
+    if (reference.token_vectors.empty()) return suite.skip("the checkpoint carries no token head");
+    f32r2_view_t const vectors {reference.token_vectors.data(), reference.token_vectors.size() / width, width};
+    double worst = 0;
+    for (std::size_t row = 0; row != vectors.extent(0); ++row) {
+        double squares = 0;
+        for (std::size_t column = 0; column != width; ++column)
+            squares += double(vectors[row, column]) * vectors[row, column];
+        worst = std::fmax(worst, std::fabs(std::sqrt(squares) - 1));
+    }
+    suite.check(worst < 1e-2, "token vectors have unit length: worst deviation {:.4e}", worst);
+}
+
+/** Runs @ref class_parity for every class of the ladder this build compiled, in both precisions. */
+template <cpu_class_t... classes_>
+static void run_class_parity(test_suite_t &suite, cpu_ladder<classes_...>, uc::checkpoint_to_load_t const &checkpoint,
+                             geometry_t const &geometry, fu::flat_pool_t &pool, nk_capability_t available,
+                             encoded_t const &bf16_reference, encoded_t const &e4m3_reference) {
+    auto rung = [&]<cpu_class_t class_>() {
+        if constexpr (cpu_class_compiled(class_) && class_ != cpu_class_t::serial_k) {
+            char const *const name = uform_cpu_class_name(static_cast<uform_cpu_class_t>(class_));
+            suite.run(fmt::format("class_parity/{}/bf16", name), class_parity<class_>, checkpoint, geometry, pool,
+                      available, precision_t::bf16_k, bf16_reference, 5e-2);
+            suite.run(fmt::format("class_parity/{}/e4m3", name), class_parity<class_>, checkpoint, geometry, pool,
+                      available, precision_t::e4m3_k, e4m3_reference, 1e-1);
+        }
+    };
+    (rung.template operator()<classes_>(), ...);
 }
 
 int main(int argc, char **argv) {
@@ -197,22 +281,31 @@ int main(int argc, char **argv) {
     uc::expected<geometry_t> geometry = geometry_t::from(*checkpoint);
     if (!geometry) return suite.check(false, "geometry: {}", geometry.description_), suite.finish();
 
-    nk_capability_t capabilities = 0;
-    if (nk_cpu_capabilities_enabled(&capabilities) != nk_success_k)
+    nk_capability_t available = 0;
+    if (nk_cpu_capabilities_enabled(&available) != nk_success_k)
         return suite.check(false, "no CPU capabilities"), suite.finish();
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(4))) return suite.check(false, "pool spawn failed"), suite.finish();
 
-    std::vector<float> states, embeddings, quantized_states, quantized_embeddings;
-    if (!encode(suite, *checkpoint, *geometry, precision_t::bf16_k, capabilities, nullptr, pool, states, embeddings) ||
-        !encode(suite, *checkpoint, *geometry, precision_t::e4m3_k, capabilities, nullptr, pool, quantized_states,
-                quantized_embeddings))
+    encoder_verbs<encoder_home_t::ram_k> const &serial =
+        *encoder_class_tables<encoder_home_t::ram_k, cpu_class_t::serial_k>::find();
+    encoded_t bf16_reference, e4m3_reference;
+    if (!encode(suite, serial, *checkpoint, *geometry, precision_t::bf16_k, nk_cap_serial_k, pool, nullptr,
+                bf16_reference) ||
+        !encode(suite, serial, *checkpoint, *geometry, precision_t::e4m3_k, nk_cap_serial_k, pool, nullptr,
+                e4m3_reference))
         return suite.finish();
-    suite.run("device_parity/bf16", device_parity, *checkpoint, *geometry, pool, precision_t::bf16_k, states,
-              embeddings, 5e-2);
-    suite.run("device_parity/e4m3", device_parity, *checkpoint, *geometry, pool, precision_t::e4m3_k, quantized_states,
-              quantized_embeddings, 1e-1);
-    suite.run("rust_parity", rust_parity, argc == 4 ? argv[2] : nullptr, argc == 4 ? argv[3] : nullptr, states,
-              embeddings, geometry->hidden);
+    suite.run("token_vectors/unit_length", token_vectors_unit_length, bf16_reference, geometry->token_width);
+    run_class_parity(suite, cpu_ladder_t {}, *checkpoint, *geometry, pool, available, bf16_reference, e4m3_reference);
+    per_gpu_array<uform_gpu_device_t> const listed = listed_gpu_devices();
+    for (i32_t const device : suite.settings.devices) {
+        suite.run(fmt::format("device_parity/{}/bf16", device), device_parity, *checkpoint, *geometry, listed[device],
+                  precision_t::bf16_k, bf16_reference, 5e-2);
+        suite.run(fmt::format("device_parity/{}/e4m3", device), device_parity, *checkpoint, *geometry, listed[device],
+                  precision_t::e4m3_k, e4m3_reference, 1e-1);
+    }
+    if (suite.settings.devices.size() == 0) suite.skip("device_parity", "no GPU device listed");
+    suite.run("rust_parity", rust_parity, argc == 4 ? argv[2] : nullptr, argc == 4 ? argv[3] : nullptr, bf16_reference,
+              geometry->hidden);
     return suite.finish();
 }

@@ -267,4 +267,71 @@ uform_mood_t uform_mood_from_name(uform_bytes_view_t name) {
     return named(name, "spinning") ? uform_mood_spinning_k : uform_mood_parked_k;
 }
 
+char const *uform_cpu_class_name(uform_cpu_class_t cpu_class) {
+    switch (cpu_class) {
+    case uform_cpu_class_unknown_k: return "unknown";
+    case uform_cpu_class_serial_k: return "serial";
+    case uform_cpu_class_intel_haswell_k: return "intel-haswell";
+    case uform_cpu_class_intel_sierra_k: return "intel-sierra";
+    case uform_cpu_class_intel_skylake_k: return "intel-skylake";
+    case uform_cpu_class_intel_icelake_k: return "intel-icelake";
+    case uform_cpu_class_amd_genoa_k: return "amd-genoa";
+    case uform_cpu_class_intel_sapphire_k: return "intel-sapphire";
+    case uform_cpu_class_intel_granite_k: return "intel-granite";
+    case uform_cpu_class_intel_diamond_k: return "intel-diamond";
+    case uform_cpu_class_aws_g2_k: return "aws-g2";
+    case uform_cpu_class_apple_m2_k: return "apple-m2";
+    case uform_cpu_class_apple_m4_k: return "apple-m4";
+    case uform_cpu_class_aws_g5_k: return "aws-g5";
+    case uform_cpu_class_nvidia_vera_k: return "nvidia-vera";
+    case uform_cpu_class_alibaba_c930_k: return "alibaba-c930";
+    case uform_cpu_class_wasm32_v128_k: return "wasm32-v128";
+    case uform_cpu_class_wasm64_extended_k: return "wasm64-extended";
+    default: return "unrecognized";
+    }
+}
+
+uform_cpu_class_t uform_cpu_class_from_name(uform_bytes_view_t name) {
+    for (int code = uform_cpu_class_serial_k; code <= uform_cpu_class_wasm64_extended_k; ++code) {
+        uform_cpu_class_t const cpu_class = static_cast<uform_cpu_class_t>(code);
+        if (named(name, uform_cpu_class_name(cpu_class))) return cpu_class;
+    }
+    return uform_cpu_class_unknown_k;
+}
+
+char const *uform_gpu_class_name(uform_gpu_class_t gpu_class) {
+    switch (gpu_class) {
+    case uform_gpu_class_unknown_k: return "unknown";
+    case uform_gpu_class_nvidia_ampere_k: return "nvidia-ampere";
+    case uform_gpu_class_nvidia_ada_k: return "nvidia-ada";
+    case uform_gpu_class_nvidia_hopper_k: return "nvidia-hopper";
+    case uform_gpu_class_nvidia_blackwell_k: return "nvidia-blackwell";
+    case uform_gpu_class_nvidia_blackwellrtx_k: return "nvidia-blackwellrtx";
+    case uform_gpu_class_nvidia_rubin_k: return "nvidia-rubin";
+    case uform_gpu_class_amd_cdna3_k: return "amd-cdna3";
+    case uform_gpu_class_amd_cdna4_k: return "amd-cdna4";
+    case uform_gpu_class_amd_cdna5_k: return "amd-cdna5";
+    case uform_gpu_class_apple_metal7_k: return "apple-metal7";
+    case uform_gpu_class_apple_metal9_k: return "apple-metal9";
+    case uform_gpu_class_apple_metal10_k: return "apple-metal10";
+    default: return "unrecognized";
+    }
+}
+
+uform_gpu_class_t uform_gpu_class_from_name(uform_bytes_view_t name) {
+    for (int code = uform_gpu_class_nvidia_ampere_k; code <= uform_gpu_class_apple_metal10_k; ++code) {
+        uform_gpu_class_t const gpu_class = static_cast<uform_gpu_class_t>(code);
+        if (named(name, uform_gpu_class_name(gpu_class))) return gpu_class;
+    }
+    return uform_gpu_class_unknown_k;
+}
+
+void uform_gpu_devices(uform_gpu_devices_t *arguments) {
+    deferred_outcome_t outcome(arguments->outcome);
+    if (reject_if(!arguments->devices_count, uform_status_invalid_argument_k, "The count output must not be null",
+                  outcome))
+        return;
+    *arguments->devices_count = 0;
+}
+
 } // extern "C"

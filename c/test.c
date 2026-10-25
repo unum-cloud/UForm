@@ -177,6 +177,30 @@ static void test_library_probes(void) {
                "Every modality reads back from its name");
     expect(strcmp(uform_multimem_tier_name(uform_multimem_tier_peer_read_k), "peer-read") == 0,
            "A multimem tier spells its name");
+
+    for (int code = uform_cpu_class_serial_k; code <= uform_cpu_class_wasm64_extended_k; ++code)
+        expect(uform_cpu_class_from_name(view_of(uform_cpu_class_name((uform_cpu_class_t)code))) == code,
+               "Every CPU class reads back from its name");
+    for (int code = uform_gpu_class_nvidia_ampere_k; code <= uform_gpu_class_apple_metal10_k; ++code)
+        expect(uform_gpu_class_from_name(view_of(uform_gpu_class_name((uform_gpu_class_t)code))) == code,
+               "Every GPU class reads back from its name");
+    expect(strcmp(uform_cpu_class_name(uform_cpu_class_intel_haswell_k), "intel-haswell") == 0,
+           "A CPU class spells its name as USearch does");
+    expect(uform_gpu_class_from_name(view_of("nvidia-volta")) == uform_gpu_class_unknown_k,
+           "An unrecognized GPU class is unknown");
+
+    uform_outcome_t outcome = {0};
+    uform_gpu_device_t devices[8];
+    size_t devices_count = 0;
+    uform_gpu_devices(&(uform_gpu_devices_t) {
+        .outcome = &outcome, .devices = devices, .devices_capacity = 8, .devices_count = &devices_count});
+    expect(!outcome.message, outcome.message);
+    for (size_t position = 0; position != devices_count && position != 8; ++position) {
+        printf("- GPU #%zu: %s %s, %u units, %llu MiB\n", position, devices[position].name,
+               uform_gpu_class_name(devices[position].gpu_class), devices[position].compute_units,
+               (unsigned long long)(devices[position].memory_bytes >> 20));
+        expect(devices[position].vendor != uform_gpu_vendor_unknown_k, "A listed GPU names its vendor");
+    }
     printf("Test: Library Probes - PASSED\n");
 }
 
@@ -219,6 +243,35 @@ static void test_model_load(void) {
     uform_model_t const model = load_model(executor, &description);
     expect(description.quantization == uform_scalar_bf16_k, "A model runs in the quantization asked for");
     expect(description.capabilities != NULL, "A model names the kernels it dispatched to");
+    expect(description.cpu_class != uform_cpu_class_unknown_k, "A RAM model names the class it was packed for");
+    expect(description.gpu_class == uform_gpu_class_unknown_k, "A RAM model names no GPU class");
+
+    uform_outcome_t pin_outcome = {0};
+    uform_model_t serial = NULL;
+    uform_model_load_ram(&(uform_model_load_ram_t) {.model = &serial,
+                                                    .executor = executor,
+                                                    .outcome = &pin_outcome,
+                                                    .path = view_of(checkpoint_path),
+                                                    .ram = {.cpu_class = uform_cpu_class_serial_k},
+                                                    .quantization = uform_scalar_bf16_k});
+    expect(!pin_outcome.message, pin_outcome.message);
+    uform_model_description_t serial_description = {0};
+    uform_model_describe(&(uform_model_describe_t) {
+        .model = serial, .executor = executor, .outcome = &pin_outcome, .description = &serial_description});
+    expect(serial_description.cpu_class == uform_cpu_class_serial_k, "A pinned load packs for the pinned class");
+    uform_model_free(serial);
+    uform_model_t foreign = NULL;
+    uform_cpu_class_t const foreign_class = description.cpu_class == uform_cpu_class_wasm64_extended_k
+                                                ? uform_cpu_class_intel_diamond_k
+                                                : uform_cpu_class_wasm64_extended_k;
+    uform_model_load_ram(&(uform_model_load_ram_t) {.model = &foreign,
+                                                    .executor = executor,
+                                                    .outcome = &pin_outcome,
+                                                    .path = view_of(checkpoint_path),
+                                                    .ram = {.cpu_class = foreign_class},
+                                                    .quantization = uform_scalar_bf16_k});
+    expect(pin_outcome.status == uform_status_unsupported_k, "A class this CPU does not run is refused");
+    expect(foreign == NULL, "A refused pin leaves no model");
 
     FILE* const file = fopen(checkpoint_path, "rb");
     expect(file != NULL, "The checkpoint must be readable");
@@ -322,6 +375,89 @@ static void test_text_shapes(void) {
     uform_arena_free(arena);
     uform_executor_free(executor);
     printf("Test: Text Shapes - PASSED\n");
+}
+
+/** Token vectors and choices: with the heads, unit-length vectors on the states' offsets and
+ *  probabilities summing to one over each item's choices, a group past the model's refused; without
+ *  them, @c unsupported_k. */
+static void test_heads(void) {
+    printf("Test: Heads\n");
+    uform_executor_t const executor = create_executor(0);
+    uform_arena_t const arena = create_arena(executor);
+    uform_model_description_t description = {0};
+    uform_model_t const model = load_model(executor, &description);
+    size_t const lengths[] = {3, 9, description.context + 4};
+    texts_t texts;
+    fill_texts(&texts, 3, lengths);
+
+    uform_outcome_t outcome = {0};
+    uform_rows_tape_view_t states = {0}, token_vectors = {0};
+    uform_text_encode(&(uform_text_encode_t) {.model = model,
+                                              .executor = executor,
+                                              .outcome = &outcome,
+                                              .count = texts.count,
+                                              .texts = tape_of(&texts),
+                                              .states = &states,
+                                              .token_vectors = &token_vectors,
+                                              .arena = arena,
+                                              .outputs_scalar = uform_scalar_f32_k});
+    if (!description.token_width) expect(outcome.status == uform_status_unsupported_k, "No token head, no vectors");
+    else {
+        expect(!outcome.message, outcome.message);
+        expect(token_vectors.rows.columns == description.token_width, "Token vectors are token_width wide");
+        for (size_t item = 0; item <= texts.count; ++item)
+            expect(token_vectors.offsets[item] == states.offsets[item], "Token vectors share the states' offsets");
+        for (size_t row = 0; row != token_vectors.offsets[texts.count]; ++row) {
+            float const* const vector =
+                (float const*)((char const*)token_vectors.rows.data + row * token_vectors.rows.stride);
+            float squares = 0;
+            for (size_t column = 0; column != description.token_width; ++column)
+                squares += vector[column] * vector[column];
+            expect(squares > 0.98f && squares < 1.02f, "Every token vector has unit length");
+        }
+    }
+
+    uint8_t const choice_bytes[] = {'y', 'n', 'A', 'B', 'C', 's'};
+    size_t const choice_offsets[] = {0, 2, 5, 6};
+    uint32_t const groups[] = {0, 0, 0};
+    uform_tape_view_t probabilities = {0};
+    uform_text_choose_t choose = {.model = model,
+                                  .executor = executor,
+                                  .outcome = &outcome,
+                                  .count = texts.count,
+                                  .texts = tape_of(&texts),
+                                  .choices = {choice_bytes, choice_offsets, uform_scalar_u8_k},
+                                  .temperature_groups = groups,
+                                  .probabilities = &probabilities,
+                                  .arena = arena};
+    uform_text_choose(&choose);
+    if (!description.choice_temperature_groups) {
+        expect(outcome.status == uform_status_unsupported_k, "No byte decoder, no choices");
+        expect(probabilities.data == NULL, "A refused choice leaves its probabilities NULL");
+    }
+    else {
+        expect(!outcome.message, outcome.message);
+        float const* const values = (float const*)probabilities.data;
+        for (size_t item = 0; item != texts.count; ++item) {
+            expect(probabilities.offsets[item + 1] - probabilities.offsets[item] ==
+                       choice_offsets[item + 1] - choice_offsets[item],
+                   "One probability per choice");
+            float sum = 0;
+            for (size_t choice = probabilities.offsets[item]; choice != probabilities.offsets[item + 1]; ++choice)
+                expect(values[choice] >= 0 && values[choice] <= 1, "Probabilities lie in [0,1]"),
+                    sum += values[choice];
+            expect(sum > 0.999f && sum < 1.001f, "Each item's probabilities sum to one");
+        }
+        uint32_t const past[] = {0, (uint32_t)description.choice_temperature_groups, 0};
+        choose.temperature_groups = past;
+        uform_text_choose(&choose);
+        expect(outcome.status == uform_status_invalid_argument_k, "A group past the model's is refused");
+    }
+
+    uform_model_free(model);
+    uform_arena_free(arena);
+    uform_executor_free(executor);
+    printf("Test: Heads - PASSED\n");
 }
 
 /** CRC-32 of @p length bytes, as PNG chunks carry it. */
@@ -911,6 +1047,7 @@ int main(int argc, char* argv[]) {
     if (selected("executors")) test_executors();
     if (selected("model_load")) test_model_load();
     if (selected("text_shapes")) test_text_shapes();
+    if (selected("heads")) test_heads();
     if (selected("media_shapes")) test_media_shapes();
     if (selected("blocking_and_deferred")) test_blocking_and_deferred();
     if (selected("deferred_limit")) test_deferred_limit();

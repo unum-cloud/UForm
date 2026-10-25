@@ -199,6 +199,21 @@ typedef struct uform_model_description_t {
 
     /** Static codename of the kernels the model dispatched to on this machine. */
     char const* capabilities;
+
+    /** The class a RAM model's tower was packed for; @c uform_cpu_class_unknown_k for a VRAM
+     *  model. */
+    uform_cpu_class_t cpu_class;
+
+    /** The class every replica of a VRAM model runs as; @c uform_gpu_class_unknown_k for a RAM
+     *  model. */
+    uform_gpu_class_t gpu_class;
+
+    /** Scalars per token vector; zero when the checkpoint carries no token head. */
+    size_t token_width;
+
+    /** Question types the choice temperatures were calibrated over: zero without the byte
+     *  decoder, one when uncalibrated. */
+    size_t choice_temperature_groups;
 } uform_model_description_t;
 
 /** The arguments of @c uform_model_describe. */

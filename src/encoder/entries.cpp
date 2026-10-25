@@ -1,17 +1,18 @@
 /**
- *  @brief Host implementations of the tower steps NumKong has no kernel for — see the header for the contract.
- *  @file src/inference/entries.cpp
+ *  @file src/encoder/entries.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
+ *  @brief Host implementations of the tower steps NumKong has no kernel for — see the header for
+ *      the contract.
  */
 #include <cmath> // `std::pow`, `std::sin`, `std::cos`, `std::fabs`
 
 #include <numkong/cast.h> // `nk_bf16_to_f32_serial`, `nk_f32_to_bf16_serial`, `nk_f32_to_e4m3_serial`
 
-#include "inference/entries.hpp"
+#include "uform/encoder/entries.hpp"
 
-namespace ui = unum::uform::inference;
-using namespace ui;
+namespace ue = unum::uform::encoder;
+using namespace ue;
 using uc::f64_t;
 using uc::status_t;
 
@@ -57,7 +58,7 @@ expected<rope_angles_t> rope_angles_t::make(u32_t positions, u32_t temporal, u32
     return grids[axis][position, pair];
 }
 
-void ui::gather_bytes(segment_layout_t const &layout, nk::tensor_view<token_id_t, 1> grid_tokens, bf16r2_view_t table,
+void ue::gather_bytes(segment_layout_t const &layout, nk::tensor_view<token_id_t, 1> grid_tokens, bf16r2_view_t table,
                       bf16r2_span_t rows, fu::flat_pool_t &pool) noexcept {
     std::size_t const hidden = rows.extent(1);
     pool.for_n(layout.lengths.extent(0), [&](std::size_t segment, auto) noexcept {
@@ -70,7 +71,7 @@ void ui::gather_bytes(segment_layout_t const &layout, nk::tensor_view<token_id_t
     });
 }
 
-void ui::stage_patches(segment_layout_t const &layout, modality_t target, nk::tensor_view<pixel_t, 3> grid_pixels,
+void ue::stage_patches(segment_layout_t const &layout, modality_t target, nk::tensor_view<pixel_t, 3> grid_pixels,
                        f32r1_view_t mean, f32r1_view_t inverse_std, bf16r2_span_t patches,
                        fu::flat_pool_t &pool) noexcept {
     std::size_t const spatial = grid_pixels.extent(1), channels = grid_pixels.extent(2);
@@ -91,7 +92,7 @@ void ui::stage_patches(segment_layout_t const &layout, modality_t target, nk::te
     });
 }
 
-void ui::stage_frames(segment_layout_t const &layout, nk::tensor_view<f32_t, 2> grid_samples, bf16r2_span_t frames,
+void ue::stage_frames(segment_layout_t const &layout, nk::tensor_view<f32_t, 2> grid_samples, bf16r2_span_t frames,
                       fu::flat_pool_t &pool) noexcept {
     std::size_t const samples = grid_samples.extent(1);
     pool.for_n(layout.lengths.extent(0), [&](std::size_t segment, auto) noexcept {
@@ -105,7 +106,7 @@ void ui::stage_frames(segment_layout_t const &layout, nk::tensor_view<f32_t, 2> 
     });
 }
 
-void ui::fill_coords(segment_layout_t const &layout, nk::tensor_view<u16_t, 2> image_shapes,
+void ue::fill_coords(segment_layout_t const &layout, nk::tensor_view<u16_t, 2> image_shapes,
                      nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames, u32_t frame_stride, i16r2_span_t coords,
                      fu::flat_pool_t &pool) noexcept {
     pool.for_n(layout.lengths.extent(0), [&](std::size_t segment, auto) noexcept {
@@ -139,7 +140,7 @@ void ui::fill_coords(segment_layout_t const &layout, nk::tensor_view<u16_t, 2> i
     });
 }
 
-void ui::mrope(bf16r2_span_t values, u32_t role_offset, u32_t heads, u32_t head_width, i16r2_view_t coords,
+void ue::mrope(bf16r2_span_t values, u32_t role_offset, u32_t heads, u32_t head_width, i16r2_view_t coords,
                rope_grids_t angles, fu::flat_pool_t &pool) noexcept {
     u32_t const pairs = head_width / 2u;
     pool.for_slices(values.extent(0), [&](auto rows, auto) noexcept {
@@ -181,17 +182,17 @@ static void quantize_rows_(view_type_ values, e4m3r2_span_t shadow, f32r1_span_t
     });
 }
 
-void ui::quantize_tokens_e4m3(bf16r2_view_t values, e4m3r2_span_t shadow, f32r1_span_t token_scales,
+void ue::quantize_tokens_e4m3(bf16r2_view_t values, e4m3r2_span_t shadow, f32r1_span_t token_scales,
                               fu::flat_pool_t &pool) noexcept {
     quantize_rows_(values, shadow, token_scales, widen_, pool);
 }
 
-void ui::quantize_tokens_e4m3(f32r2_view_t values, e4m3r2_span_t shadow, f32r1_span_t token_scales,
+void ue::quantize_tokens_e4m3(f32r2_view_t values, e4m3r2_span_t shadow, f32r1_span_t token_scales,
                               fu::flat_pool_t &pool) noexcept {
     quantize_rows_(values, shadow, token_scales, [](f32_t value) noexcept { return value; }, pool);
 }
 
-void ui::rescale_tokens(f32r2_view_t products, f32r1_view_t token_scales, f32_t weight_descale, bf16r2_view_t residual,
+void ue::rescale_tokens(f32r2_view_t products, f32r1_view_t token_scales, f32_t weight_descale, bf16r2_view_t residual,
                         bf16r2_span_t values, fu::flat_pool_t &pool) noexcept {
     std::size_t const width = values.extent(1);
     pool.for_slices(values.extent(0), [&](auto rows, auto) noexcept {

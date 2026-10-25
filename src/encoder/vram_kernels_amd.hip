@@ -1,10 +1,10 @@
 /**
  *  @brief The AMD kernels of the tower steps NumKong has no kernel for, published as @ref vram_amd_kernels_k .
- *  @file src/inference/vram_amd_kernels.hip
+ *  @file src/encoder/vram_kernels_amd.hip
  *  @author Ash Vardanian
  *  @date October 17, 2026
  *
- *  The HIP twin of @c vram_nvidia_kernels.cu , kernel for kernel: every kernel runs a body of @ref tower_kernels.cuh
+ *  The HIP twin of @c vram_kernels_nvidia.cu , kernel for kernel: every kernel runs a body of @ref tower_kernels.cuh
  *  with NumKong's SIMT conversions, which match its host casts bit for bit. Each launcher enters the device of its
  *  stream and leaves the caller's current device as it was.
  */
@@ -17,10 +17,10 @@
 #include <numkong/cast/simt.cuh> // `nk_bf16_to_f32_simt_`, `nk_f32_to_bf16_simt_`, `nk_f32_to_e4m3_simt_`
 
 #include "core/tower_kernels.cuh" // the bodies every vendor's kernels share with training
-#include "inference/entries.hpp"  // `device_kernels_t`, `segment_layout_t`
+#include "uform/encoder/entries.hpp"  // `device_kernels_t`, `segment_layout_t`
 
-namespace ui = unum::uform::inference;
-using namespace ui;
+namespace ue = unum::uform::encoder;
+using namespace ue;
 
 /** Threads per block of every kernel here, a power of two the quantize reduction halves. */
 static constexpr unsigned block_threads_k = 256;
@@ -176,6 +176,19 @@ static __global__ void rescale_tokens_kernel_(f32r2_view_t products, f32r1_view_
                              stride_step_(), vram_scalars_t {});
 }
 
+static nk_status_t describe_(std::size_t ordinal, device_description_t &description) noexcept {
+    int const device = static_cast<int>(ordinal);
+    int compute_units = 0;
+    std::size_t memory_bytes = 0;
+    if (hipDeviceGetName(description.name, sizeof(description.name), device) != hipSuccess ||
+        hipDeviceGetAttribute(&compute_units, hipDeviceAttributeMultiprocessorCount, device) != hipSuccess ||
+        hipDeviceTotalMem(&memory_bytes, device) != hipSuccess)
+        return nk_device_code_mismatch_k;
+    description.compute_units = static_cast<u32_t>(compute_units);
+    description.memory_bytes = memory_bytes;
+    return nk_success_k;
+}
+
 static nk_status_t copy_(void *target, void const *source, std::size_t bytes, nk_stream_t stream) noexcept {
     return on_device_(stream, [&](hipStream_t native) {
         return hipMemcpyAsync(target, source, bytes, hipMemcpyDefault, native);
@@ -242,6 +255,7 @@ static nk_status_t rescale_tokens_(f32r2_view_t products, f32r1_view_t token_sca
 [[nodiscard]] static device_kernels_t tabulate_() noexcept {
     return {
         .vendor = nk_cap_rocm_k,
+        .describe = &describe_,
         .copy = &copy_,
         .zero = &zero_,
         .fill_layout = &fill_layout_,
@@ -256,4 +270,4 @@ static nk_status_t rescale_tokens_(f32r2_view_t products, f32r1_view_t token_sca
     };
 }
 
-device_kernels_t const ui::vram_amd_kernels_k = tabulate_();
+device_kernels_t const ue::vram_amd_kernels_k = tabulate_();

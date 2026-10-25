@@ -17,8 +17,8 @@
 
 #include <span> // `std::span`
 
-#include "core/types.hpp"     // `expected`, `status_t`, the scalar aliases
-#include "media/planning.hpp" // `image_extent_t`, `patch_grid_t`, `crop_t`
+#include "uform/core/types.hpp" // `expected`, `status_t`, the scalar aliases
+#include "media/planning.hpp"   // `image_extent_t`, `patch_grid_t`, `crop_t`
 
 namespace unum::uform::media {
 

@@ -9,11 +9,14 @@
  *  a blocking call on the same executor, or a free of a handle it names. Whichever thread asks runs it, and every
  *  call held before it on that executor, in submission order.
  */
+#include <cstring> // `std::memcpy` - a listed device's name
+
 #include <memory> // `std::unique_ptr` - a handle under construction
 #include <new>    // `std::nothrow`
 
 #include "lib.hpp"
 
+namespace ue = unum::uform::encoder;
 using namespace unum::uform;
 
 deferred_registry_t uf::deferred_registry;
@@ -150,8 +153,7 @@ uform_arena_t uf::claim_arena(uform_arena_t arena, uform_executor_t executor,
         return propagate_error(uform_status_device_k, outcome, "Host pages serve no call computing on a GPU"), nullptr;
     if (!hold_arena(arena, outcome.published()))
         return propagate_error(uform_status_contended_k, outcome, "The arena serves another call"), nullptr;
-    chunked_arena_t &memory = std::visit([](chunked_arena_t &held) noexcept -> chunked_arena_t & { return held; },
-                                         arena->memory);
+    chunked_arena_t &memory = chunks_of(arena->memory);
     for (void const *input : inputs)
         if (input && memory.contains(input))
             return propagate_error(uform_status_invalid_argument_k, outcome,
@@ -205,7 +207,7 @@ static bool adopt_memory_domains(st::basic_vector<i32_t> &domains, uform_ram_opt
 /** Cores the NUMA nodes in @p domains carry, every one of them a node of @p topology. */
 static std::size_t cores_of(fu::machine_topology_t const &topology, st::basic_vector<i32_t> const &domains) noexcept {
     std::size_t cores = 0;
-    for (i32_t const domain : domains) cores += node_of(topology, domain)->logical_cores_count;
+    for (i32_t const domain : domains) cores += node_of(topology, domain)->core_ids.size();
     return cores;
 }
 
@@ -234,10 +236,21 @@ static void delist_executor(uform_executor_handle_t &executor) noexcept {
         }
 }
 
-/** Opens a stream and a scratch arena on the GPU the process-wide @p listed ordinal names, CUDA's devices first,
- *  then ROCm's, and appends it to @p devices. False once @p outcome records why not. */
+/** The capabilities a device of @p detected capabilities runs under @p pinned : its class's, a
+ *  pinned class's it holds, or, for a device no class covers and nothing pins, its own; zero when
+ *  the pin refuses it. */
+static nk_capability_t device_class_capabilities(nk_capability_t detected, uform_gpu_class_t pinned) noexcept {
+    gpu_class_t const device_class = gpu_class_of(detected);
+    if (device_class == gpu_class_t::unknown_k && pinned == uform_gpu_class_unknown_k) return detected;
+    return gpu_pin_capabilities(device_class, pinned);
+}
+
+/** Opens a stream and a scratch arena on the GPU the process-wide @p listed ordinal names, CUDA's
+ *  devices first, then ROCm's, dispatching as @p pinned , and appends it to @p devices. False once
+ *  @p outcome records why not. */
 static bool open_device(per_gpu_array<vram_device_t> &devices, i32_t listed, nk_size_t cuda_devices,
-                        nk_size_t rocm_devices, std::size_t scratch_limit, uform_outcome_t *outcome) noexcept {
+                        nk_size_t rocm_devices, uform_gpu_class_t pinned, std::size_t scratch_limit,
+                        uform_outcome_t *outcome) noexcept {
     if (listed < 0 || static_cast<nk_size_t>(listed) >= cuda_devices + rocm_devices)
         return propagate_error(uform_status_device_k, outcome, "A device ordinal names no GPU this build drives");
     nk_size_t const cuda_ordinal = static_cast<nk_size_t>(listed);
@@ -245,20 +258,23 @@ static bool open_device(per_gpu_array<vram_device_t> &devices, i32_t listed, nk_
     nk_size_t const ordinal = kind == nk::device_kind_t::cuda_k ? cuda_ordinal : cuda_ordinal - cuda_devices;
     nk::expected<nk::device_t> const device = nk::device_t::make(kind, ordinal);
     if (!device) return propagate_error(status_of(static_cast<nk_status_t>(device.status)), outcome, "No such GPU");
-    nk::expected<nk_capability_t> const capabilities = device.value.capabilities_enabled();
-    if (!capabilities || !capabilities.value)
+    nk::expected<nk_capability_t> const detected = device.value.capabilities_enabled();
+    if (!detected || !detected.value)
         return propagate_error(uform_status_device_k, outcome, "This build holds no kernels for the GPU");
+    nk_capability_t const capabilities = device_class_capabilities(detected.value, pinned);
+    if (!capabilities) return propagate_error(uform_status_unsupported_k, outcome, "The GPU does not admit the pin");
     nk::expected<owned_stream_t> stream = owned_stream_t::make(device.value);
     if (!stream)
         return propagate_error(status_of(static_cast<nk_status_t>(stream.status)), outcome, "Failed to open a stream");
-    nk_allocator_t policy {}, pinned {};
-    if (nk_status_t const status = nk_allocator_init_device_best(&policy, capabilities.value); status != nk_success_k)
+    nk_allocator_t policy {}, pages {};
+    if (nk_status_t const status = nk_allocator_init_device_best(&policy, capabilities); status != nk_success_k)
         return propagate_error(status_of(status), outcome, "The GPU has no device allocator");
-    if (nk_status_t const status = nk_allocator_init_pinned_best(&pinned, capabilities.value); status != nk_success_k)
+    if (nk_status_t const status = nk_allocator_init_pinned_best(&pages, capabilities); status != nk_success_k)
         return propagate_error(status_of(status), outcome, "The GPU has no pinned host allocator");
     nk_stream_t const handle = stream.value.get();
-    vram_device_t opened {static_cast<i32_t>(ordinal), capabilities.value, std::move(stream.value),
-                          device_arena_t(policy, handle, scratch_limit), chunked_arena_t(pinned, handle, 0)};
+    vram_device_t opened {static_cast<i32_t>(ordinal), capabilities, std::move(stream.value),
+                          device_arena_t {chunked_arena_t(policy, handle, scratch_limit)},
+                          chunked_arena_t(pages, handle, 0)};
     if (devices.push_back(std::move(opened)) != core::status_t::success_k)
         return propagate_error(uform_status_invalid_argument_k, outcome, "More devices than one process drives");
     return true;
@@ -287,6 +303,39 @@ UFORM_EXPORT uform_status_t uform_outcome_status(uform_outcome_t *outcome) {
 
 #pragma region Executors
 
+UFORM_EXPORT void uform_gpu_devices(uform_gpu_devices_t *arguments) {
+    call_outcome_t outcome(arguments->outcome);
+    if (!arguments->devices_count)
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The count output must not be null"), void();
+    if (arguments->devices_capacity && !arguments->devices)
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The devices must not be null"), void();
+    std::size_t listed = 0;
+    for (nk::device_kind_t const kind : {nk::device_kind_t::cuda_k, nk::device_kind_t::rocm_k}) {
+        nk::expected<std::size_t> const count = nk::device_t::count(kind);
+        if (!count) continue; // a vendor this build or machine lacks lists nothing
+        for (std::size_t ordinal = 0; ordinal != count.value; ++ordinal, ++listed) {
+            if (listed >= arguments->devices_capacity) continue;
+            nk::expected<nk::device_t> const device = nk::device_t::make(kind, ordinal);
+            nk::expected<nk_capability_t> const detected = device ? device.value.capabilities_enabled()
+                                                                  : nk::expected<nk_capability_t> {};
+            nk_capability_t const capabilities = detected ? detected.value : 0;
+            uform_gpu_device_t &entry = arguments->devices[listed];
+            entry = {};
+            entry.vendor = kind == nk::device_kind_t::cuda_k ? uform_gpu_vendor_nvidia_k : uform_gpu_vendor_amd_k;
+            entry.vendor_ordinal = static_cast<u32_t>(ordinal);
+            entry.gpu_class = static_cast<uform_gpu_class_t>(gpu_class_of(capabilities));
+            ue::device_kernels_t const *const kernels = ue::device_kernels_of(capabilities);
+            ue::device_description_t description;
+            if (!kernels || kernels->describe(ordinal, description) != nk_success_k) continue;
+            std::memcpy(entry.name, description.name, sizeof(entry.name));
+            entry.compute_units = description.compute_units;
+            entry.memory_bytes = description.memory_bytes;
+        }
+    }
+    *arguments->devices_count = listed;
+    propagate_error(uform_status_success_k, outcome, nullptr);
+}
+
 UFORM_EXPORT void uform_executor_for_ram(uform_executor_for_ram_t *arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
@@ -302,8 +351,12 @@ UFORM_EXPORT void uform_executor_for_ram(uform_executor_for_ram_t *arguments) {
                                                    : derived_threads(cores_of(topology, ram.memory_domains));
     if (fu::failed(ram.pool.spawn(threads)))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to spawn the threads"), void();
-    if (nk_cpu_capabilities_enabled(&ram.capabilities) != nk_success_k)
+    nk_capability_t available = 0;
+    if (nk_cpu_capabilities_enabled(&available) != nk_success_k)
         return propagate_error(uform_status_device_k, outcome, "The CPU capabilities could not be read"), void();
+    if (!cpu_pin_admitted(arguments->ram.cpu_class, available))
+        return propagate_error(uform_status_unsupported_k, outcome, "The CPU does not admit the pinned class"), void();
+    ram.capabilities = numkong_capabilities_of(pick_cpu_class(cpu_ladder_t {}, arguments->ram.cpu_class, available));
     hand_out_executor(std::move(executor), arguments->deferred_limit, arguments->executor, outcome);
 }
 
@@ -336,9 +389,13 @@ UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t *arguments) 
     std::size_t const count = vram.devices_count ? vram.devices_count : 1;
     for (std::size_t index = 0; index != count; ++index) {
         i32_t const listed = vram.devices_count ? vram.devices[index] : 0;
-        if (!open_device(devices.devices, listed, cuda_devices, rocm_devices, arguments->scratch_limit, outcome))
+        if (!open_device(devices.devices, listed, cuda_devices, rocm_devices, vram.gpu_class, arguments->scratch_limit,
+                         outcome))
             return;
     }
+    for (vram_device_t const &device : devices.devices)
+        if (gpu_class_of(device.capabilities) != gpu_class_of(devices.devices[0].capabilities))
+            return propagate_error(uform_status_config_mismatch_k, outcome, "The devices differ in class"), void();
     if (fu::failed(devices.decoders.spawn(derived_threads(topology.logical_cores_count()))))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to spawn the decoders"), void();
     hand_out_executor(std::move(executor), arguments->deferred_limit, arguments->executor, outcome);
@@ -387,7 +444,7 @@ UFORM_EXPORT void uform_arena_init(uform_arena_init_t *arguments) {
             if (nk_status_t const status = nk_allocator_init_device_best(&policy, first.capabilities);
                 status != nk_success_k)
                 return propagate_error(status_of(status), outcome, "The GPU has no device allocator"), void();
-            arena->memory.emplace<device_arena_t>(policy, first.stream.get(), 0);
+            arena->memory.emplace<device_arena_t>(chunked_arena_t(policy, first.stream.get(), 0));
             arena->executor = arguments->executor;
         }
     *arguments->arena = arena.release();
@@ -477,6 +534,71 @@ UFORM_EXPORT char const *uform_mood_name(uform_mood_t mood) {
 
 UFORM_EXPORT uform_mood_t uform_mood_from_name(uform_bytes_view_t name) {
     return named(name, "spinning") ? uform_mood_spinning_k : uform_mood_parked_k;
+}
+
+UFORM_EXPORT char const *uform_cpu_class_name(uform_cpu_class_t cpu_class) {
+    switch (cpu_class) {
+    case uform_cpu_class_unknown_k: return "unknown";
+    case uform_cpu_class_serial_k: return "serial";
+    case uform_cpu_class_intel_haswell_k: return "intel-haswell";
+    case uform_cpu_class_intel_sierra_k: return "intel-sierra";
+    case uform_cpu_class_intel_skylake_k: return "intel-skylake";
+    case uform_cpu_class_intel_icelake_k: return "intel-icelake";
+    case uform_cpu_class_amd_genoa_k: return "amd-genoa";
+    case uform_cpu_class_intel_sapphire_k: return "intel-sapphire";
+    case uform_cpu_class_intel_granite_k: return "intel-granite";
+    case uform_cpu_class_intel_diamond_k: return "intel-diamond";
+    case uform_cpu_class_aws_g2_k: return "aws-g2";
+    case uform_cpu_class_apple_m2_k: return "apple-m2";
+    case uform_cpu_class_apple_m4_k: return "apple-m4";
+    case uform_cpu_class_aws_g5_k: return "aws-g5";
+    case uform_cpu_class_nvidia_vera_k: return "nvidia-vera";
+    case uform_cpu_class_alibaba_c930_k: return "alibaba-c930";
+    case uform_cpu_class_wasm32_v128_k: return "wasm32-v128";
+    case uform_cpu_class_wasm64_extended_k: return "wasm64-extended";
+    }
+    return "unrecognized";
+}
+
+UFORM_EXPORT uform_cpu_class_t uform_cpu_class_from_name(uform_bytes_view_t name) {
+    for (uform_cpu_class_t const cpu_class :
+         {uform_cpu_class_serial_k, uform_cpu_class_intel_haswell_k, uform_cpu_class_intel_sierra_k,
+          uform_cpu_class_intel_skylake_k, uform_cpu_class_intel_icelake_k, uform_cpu_class_amd_genoa_k,
+          uform_cpu_class_intel_sapphire_k, uform_cpu_class_intel_granite_k, uform_cpu_class_intel_diamond_k,
+          uform_cpu_class_aws_g2_k, uform_cpu_class_apple_m2_k, uform_cpu_class_apple_m4_k, uform_cpu_class_aws_g5_k,
+          uform_cpu_class_nvidia_vera_k, uform_cpu_class_alibaba_c930_k, uform_cpu_class_wasm32_v128_k,
+          uform_cpu_class_wasm64_extended_k})
+        if (named(name, uform_cpu_class_name(cpu_class))) return cpu_class;
+    return uform_cpu_class_unknown_k;
+}
+
+UFORM_EXPORT char const *uform_gpu_class_name(uform_gpu_class_t gpu_class) {
+    switch (gpu_class) {
+    case uform_gpu_class_unknown_k: return "unknown";
+    case uform_gpu_class_nvidia_ampere_k: return "nvidia-ampere";
+    case uform_gpu_class_nvidia_ada_k: return "nvidia-ada";
+    case uform_gpu_class_nvidia_hopper_k: return "nvidia-hopper";
+    case uform_gpu_class_nvidia_blackwell_k: return "nvidia-blackwell";
+    case uform_gpu_class_nvidia_blackwellrtx_k: return "nvidia-blackwellrtx";
+    case uform_gpu_class_nvidia_rubin_k: return "nvidia-rubin";
+    case uform_gpu_class_amd_cdna3_k: return "amd-cdna3";
+    case uform_gpu_class_amd_cdna4_k: return "amd-cdna4";
+    case uform_gpu_class_amd_cdna5_k: return "amd-cdna5";
+    case uform_gpu_class_apple_metal7_k: return "apple-metal7";
+    case uform_gpu_class_apple_metal9_k: return "apple-metal9";
+    case uform_gpu_class_apple_metal10_k: return "apple-metal10";
+    }
+    return "unrecognized";
+}
+
+UFORM_EXPORT uform_gpu_class_t uform_gpu_class_from_name(uform_bytes_view_t name) {
+    for (uform_gpu_class_t const gpu_class :
+         {uform_gpu_class_nvidia_ampere_k, uform_gpu_class_nvidia_ada_k, uform_gpu_class_nvidia_hopper_k,
+          uform_gpu_class_nvidia_blackwell_k, uform_gpu_class_nvidia_blackwellrtx_k, uform_gpu_class_nvidia_rubin_k,
+          uform_gpu_class_amd_cdna3_k, uform_gpu_class_amd_cdna4_k, uform_gpu_class_amd_cdna5_k,
+          uform_gpu_class_apple_metal7_k, uform_gpu_class_apple_metal9_k, uform_gpu_class_apple_metal10_k})
+        if (named(name, uform_gpu_class_name(gpu_class))) return gpu_class;
+    return uform_gpu_class_unknown_k;
 }
 
 UFORM_EXPORT char const *uform_modality_name(uform_modality_t modality) {

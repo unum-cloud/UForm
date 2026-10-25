@@ -10,8 +10,8 @@
  */
 #pragma once
 
-#include "core/types.hpp"            // the scalar aliases
-#include "core/multimodal_batch.hpp" // `video_batch_shape_t`
+#include "uform/core/types.hpp"            // the scalar aliases
+#include "uform/core/multimodal_batch.hpp" // `video_batch_shape_t`
 
 namespace unum::uform::media {
 

@@ -1,8 +1,8 @@
 /**
- *  @brief Memory-owning multimodal training batches, one per GPU.
- *  @file src/core/multimodal_batch.hpp
+ *  @file include/uform/core/multimodal_batch.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
+ *  @brief Memory-owning multimodal training batches, one per GPU.
  *
  *  The allocator template argument decides residency: a @c pinned_alloc_t instance is what a host packer
  *  writes, a @c gpu_arena_alloc_t instance is what the towers read, and one @c copy_from between the two is
@@ -86,9 +86,19 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor` — the owning storage
 
-#include "core/types.hpp" // the scalar aliases, `token_id_t`, `pixel_t`
+#include "uform/core/types.hpp" // the scalar aliases, `token_id_t`, `pixel_t`
 
 namespace unum::uform::core {
+
+/** The byte vocabulary: 256 UTF-8 byte values plus the PAD and MASK specials. */
+inline constexpr u32_t byte_vocabulary_k = 258u;
+
+/** The PAD byte ID — token 256; ineligible for masking, its loss weight is always zero. */
+inline constexpr token_id_t byte_pad_k = 256u;
+
+/** The MASK byte ID — token 257, what the replace fraction of masked positions shows the tower, and
+ *  the position a choice is read at. */
+inline constexpr token_id_t byte_mask_k = 257u;
 
 /** One segment's input kind — which raw tensor feeds it, which RoPE pattern it walks, and, under
  *  masking, which reconstruction head scores it. Carried per segment (any row may mix modalities), so
@@ -230,6 +240,10 @@ struct multimodal_batch_shape_t {
      *  roles allow. Zero means no loader groups segments into role bags. */
     u32_t max_bag_segments = 0;
 
+    /** Most legal bytes one choice segment offers, the width of
+     *  @ref multimodal_batch::segment_choices ; zero allocates no choice columns. */
+    u32_t max_choices_per_segment = 0;
+
     /** The image modality's geometry (patch side, channels) — handed to the image loader alone. */
     image_batch_shape_t image {};
 
@@ -286,6 +300,8 @@ struct multimodal_batch_view_t {
     nk::tensor_view<pixel_t, 6> videos {};
     nk::tensor_view<u16_t, 2> video_shapes {};
     nk::tensor_view<f32_t, 3> audio_samples {};
+    nk::tensor_view<token_id_t, 2> segment_choices {};
+    nk::tensor_view<f32_t, 2> segment_choice_targets {};
 };
 
 /**
@@ -385,6 +401,15 @@ struct multimodal_batch {
      *  from the segment geometry alone. */
     nk::tensor<f32_t, rebound<f32_t>, 3> audio_samples {};
 
+    /** @b [max_segments_per_gpu,max_choices_per_segment] each choice segment's legal bytes, padded
+     *  with @c byte_pad_k ; a segment whose first entry is the pad makes no choice. Its last token
+     *  carries @c byte_mask_k . */
+    nk::tensor<token_id_t, rebound<token_id_t>, 2> segment_choices {};
+
+    /** @b [max_segments_per_gpu,max_choices_per_segment] each choice's target probability,
+     *  summing to one per segment; zero under the pads. */
+    nk::tensor<f32_t, rebound<f32_t>, 2> segment_choice_targets {};
+
     /** The segment capacity of this batch — @c max_segments_per_gpu , PAD-inclusive, the pooling and
      *  routing axis every modality shares. Modalities do not own disjoint row bands, so a segment count
      *  (not a per-modality row count) is the only axis with a batch-wide meaning. */
@@ -392,9 +417,20 @@ struct multimodal_batch {
 
     /** Every tensor, borrowed read-only. */
     [[nodiscard]] multimodal_batch_view_t view() const noexcept {
-        return {segment_offsets.view(),       segment_lengths.view(), segment_modality.view(), segment_role.view(),
-                segment_prefix_length.view(), segment_side.view(),    tokens.view(),           images.view(),
-                image_shapes.view(),          videos.view(),          video_shapes.view(),     audio_samples.view()};
+        return {segment_offsets.view(),
+                segment_lengths.view(),
+                segment_modality.view(),
+                segment_role.view(),
+                segment_prefix_length.view(),
+                segment_side.view(),
+                tokens.view(),
+                images.view(),
+                image_shapes.view(),
+                videos.view(),
+                video_shapes.view(),
+                audio_samples.view(),
+                segment_choices.view(),
+                segment_choice_targets.view()};
     }
 
     /**
@@ -483,6 +519,19 @@ struct multimodal_batch {
             if (!batch.audio_samples)
                 return result_t::fail(status_t::bad_alloc_k, "audio allocation failed ({} rows of {} frames)",
                                       shape.max_rows_per_gpu, shape.max_columns_per_row);
+        }
+        if (shape.max_choices_per_segment != 0) {
+            batch.segment_choices = nk::tensor<token_id_t, rebound<token_id_t>, 2>::uninitialized(
+                                        {shape.max_segments_per_gpu, shape.max_choices_per_segment},
+                                        rebound<token_id_t> {allocator})
+                                        .value;
+            batch.segment_choice_targets = nk::tensor<f32_t, rebound<f32_t>, 2>::uninitialized(
+                                               {shape.max_segments_per_gpu, shape.max_choices_per_segment},
+                                               rebound<f32_t> {allocator})
+                                               .value;
+            if (!batch.segment_choices || !batch.segment_choice_targets)
+                return result_t::fail(status_t::bad_alloc_k, "choice allocation failed ({} segments of {} choices)",
+                                      shape.max_segments_per_gpu, shape.max_choices_per_segment);
         }
         return result_t {std::move(batch)};
     }

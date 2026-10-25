@@ -21,31 +21,33 @@ Configuring CMake also arms the hooks in `.githooks/`; to arm them without a bui
 
 ## Layout and Namespaces
 
-| Path             | Contents                                                               | Namespace                |
-| :--------------- | :--------------------------------------------------------------------- | :----------------------- |
-| `c/uform/*.h`    | the C ABI, with `uform.h` over the model, encode and train headers     | none                     |
-| `src/*.cpp`      | the verbs of each header, over the cells below                         | `unum::uform`            |
-| `src/inference/` | the tower on the host, and its NVIDIA and AMD kernels                  | `unum::uform::inference` |
-| `src/media/`     | image, video and audio decoding on the host                            | `unum::uform::media`     |
-| `src/core/`      | device memory, batches, graphs, mesh, transports, cells, checkpoints   | `unum::uform::core`      |
-| `src/loaders/`   | storage sessions, shard readers, and GPU image, video and audio decode | `unum::uform::loaders`   |
-| `src/train/`     | the composition of a training run, `mesh_t` and `trainer_t`            | `unum::uform::train`     |
-| `src_stub/`      | the stand-in, answering every verb over the C++ standard library alone | `unum::uform`            |
-| `tools/`         | the `uform_base` trainer binary and its command line                   | `unum::uform::tools`     |
-| `test/`          | one conformance suite per cell, their harness, and the Python suites   | `unum::uform::test`      |
-| `scripts/data/`  | acquisition, repack and mining scripts, the mixture JSONs, the tests   | none                     |
-| `scripts/slurm/` | the `.sbatch` runners and the cluster notes                            | none                     |
-| `python/`        | the CPython extension over the C ABI                                   | none                     |
-| `rust/`          | the Rust crate over the C ABI                                          | none                     |
-| `javascript/`    | the Node-API addon and the WebAssembly module over the C ABI           | none                     |
-| `swift/`         | the Swift package over the C ABI                                       | none                     |
-| `docs/`          | the Sphinx site                                                        | none                     |
+| Path                     | Contents                                                      | Namespace              |
+| :----------------------- | :------------------------------------------------------------ | :--------------------- |
+| `c/uform/*.h`            | the C ABI, `uform.h` over the model, encode and train headers | none                   |
+| `include/uform/core/`    | host-only types, arrays, batches and checkpoints              | `unum::uform::core`    |
+| `include/uform/encoder/` | the encoder tower on the host, its geometry and entries       | `unum::uform::encoder` |
+| `src/*.cpp`              | the verbs of each header, over the cells below                | `unum::uform`          |
+| `src/encoder/`           | the encoder's compiled bodies and NVIDIA and AMD kernels      | `unum::uform::encoder` |
+| `src/media/`             | image, video and audio decoding on the host                   | `unum::uform::media`   |
+| `src/core/`              | device memory, graphs, mesh, transports, cells, checkpoint IO | `unum::uform::core`    |
+| `src/loaders/`           | storage sessions, shard readers, GPU media decode             | `unum::uform::loaders` |
+| `src/train/`             | the composition of a training run, `mesh_t` and `trainer_t`   | `unum::uform::train`   |
+| `src_stub/`              | the stand-in, every verb over the C++ standard library alone  | `unum::uform`          |
+| `tools/`                 | the `uform_base` trainer binary and its command line          | `unum::uform::tools`   |
+| `test/`                  | one conformance suite per cell, the harness, Python suites    | `unum::uform::test`    |
+| `scripts/data/`          | acquisition, repack and mining scripts, mixture JSONs, tests  | none                   |
+| `scripts/slurm/`         | the `.sbatch` runners and the cluster notes                   | none                   |
+| `python/`                | the CPython extension over the C ABI                          | none                   |
+| `rust/`                  | the Rust crate over the C ABI                                 | none                   |
+| `javascript/`            | the Node-API addon and the WebAssembly module over the C ABI  | none                   |
+| `swift/`                 | the Swift package over the C ABI                              | none                   |
+| `docs/`                  | the Sphinx site                                               | none                   |
 
 Namespaces mirror directories and nothing else: a directory adds a namespace component, and no namespace groups symbols by theme.
-`c/` and `src/` are include roots that add no component, so `src/core/` opens `unum::uform::core` and headers include each other as `"core/types.hpp"`.
+`c/`, `include/` and `src/` are include roots that add no component, so `src/core/` and `include/uform/core/` both open `unum::uform::core`, and headers include each other as `"core/schedule.cuh"` and `"uform/core/types.hpp"`.
 Dependencies run one way:
 
-- `inference` and `media` build on the host libraries alone and never include an NVIDIA header; each vendor's kernels sit in their own `vram_<vendor>_kernels` unit.
+- `encoder` and `media` build on the host libraries alone and never include an NVIDIA header; each vendor's kernels sit in their own `vram_kernels_<vendor>` unit.
 - Only `src/train/` and `src/train.cpp` touch the mesh, the multimem collectives and InfiniBand.
 - `loaders` and `train` build on `core`, `tools` builds on `train`, and `test` may include any of them.
 - `c/uform/` includes only itself and C headers, and every binding includes only `c/uform/`.

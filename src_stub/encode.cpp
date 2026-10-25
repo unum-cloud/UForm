@@ -45,18 +45,22 @@ template <typename arguments_>
 static void clear_outputs(arguments_ &arguments) {
     if (arguments.embeddings) *arguments.embeddings = {};
     if (arguments.states) *arguments.states = {};
+    if (arguments.token_vectors) *arguments.token_vectors = {};
     if (arguments.stats) *arguments.stats = {};
 }
 
-/** The refusals every encode verb shares: no model, no output named, an output scalar the stand-in does not
- *  write, and a tape without storage, of another element, or with decreasing offsets. */
+/** The refusals every encode verb shares: no model, no output named, token vectors the stand-in's
+ *  model has no head for, an output scalar it does not write, and a tape without storage, of
+ *  another element, or with decreasing offsets. */
 template <typename arguments_>
 static bool reject_call(arguments_ const &arguments, uform_tape_view_t tape, uform_scalar_t element,
                         uform_outcome_t *outcome) {
     if (reject_if(!arguments.model, uform_status_invalid_argument_k, "The model must not be null", outcome))
         return true;
-    if (reject_if(!arguments.embeddings && !arguments.states, uform_status_invalid_argument_k,
-                  "Name the embeddings, the states, or both", outcome))
+    if (reject_if(!arguments.embeddings && !arguments.states && !arguments.token_vectors,
+                  uform_status_invalid_argument_k, "Name the embeddings, the states or the token vectors", outcome))
+        return true;
+    if (reject_if(arguments.token_vectors, uform_status_unsupported_k, "The model carries no token head", outcome))
         return true;
     if (reject_if(!output_scalar_bytes(arguments.outputs_scalar), uform_status_unsupported_k,
                   "Outputs land as f32, f16 or bf16 only", outcome))
@@ -158,6 +162,15 @@ void uform_text_encode(uform_text_encode_t *arguments) {
     if (reject_call(*arguments, texts, uform_scalar_u8_k, outcome)) return;
     encode(
         *arguments, {texts.data, texts.offsets}, [&](std::size_t item) { return entry_of(texts, item, 1); }, outcome);
+}
+
+void uform_text_choose(uform_text_choose_t *arguments) {
+    if (through_executor<uform_text_choose>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
+    if (arguments->probabilities) *arguments->probabilities = {};
+    if (arguments->stats) *arguments->stats = {};
+    if (reject_if(!arguments->model, uform_status_invalid_argument_k, "The model must not be null", outcome)) return;
+    reject_if(true, uform_status_unsupported_k, "The model carries no byte decoder", outcome);
 }
 
 void uform_image_encode(uform_image_encode_t *arguments) {

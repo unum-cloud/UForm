@@ -1,18 +1,18 @@
 /**
- *  @brief The shape and numerics of one encoder tower, read back from a checkpoint alone.
- *  @file src/inference/geometry.hpp
+ *  @file include/uform/encoder/geometry.hpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
+ *  @brief The shape and numerics of one encoder tower, read back from a checkpoint alone.
  *
  *  Every extent comes from two places that must agree: the tensor shapes and the metadata keys training
  *  writes at save. A media modality whose patch side or chunk is zero is absent, and so is its projection.
  */
 #pragma once
 
-#include "core/types.hpp"      // `expected`, the scalar aliases
-#include "core/checkpoint.hpp" // `checkpoint_to_load_t`
+#include "uform/core/types.hpp"      // `expected`, the scalar aliases
+#include "uform/core/checkpoint.hpp" // `checkpoint_to_load_t`
 
-namespace unum::uform::inference {
+namespace unum::uform::encoder {
 
 namespace uc = unum::uform::core;
 namespace nk = ashvardanian::numkong;
@@ -54,6 +54,18 @@ struct geometry_t {
 
     u32_t audio_chunk_samples = 0, audio_sample_rate = 0;
 
+    /** Scalars per token vector of the late-interaction head, from its projection's rows; zero
+     *  without one. */
+    u32_t token_width = 0;
+
+    /** Rows of the byte decoder @c masked_tokens , the choices a masked position scores; zero
+     *  without one. */
+    u32_t masked_vocabulary = 0;
+
+    /** Question types the choice temperatures were calibrated over: zero without a decoder, one
+     *  when uncalibrated. */
+    u32_t choice_temperature_groups = 0;
+
     [[nodiscard]] u32_t heads() const noexcept { return hidden / head_width; }
     [[nodiscard]] u32_t ffn() const noexcept { return ffn_expansion * hidden; }
     [[nodiscard]] u32_t image_scalars() const noexcept { return image_patch_side * image_patch_side * image_channels; }
@@ -69,4 +81,4 @@ struct geometry_t {
     [[nodiscard]] static expected<geometry_t> from(uc::checkpoint_to_load_t const &checkpoint) noexcept;
 };
 
-} // namespace unum::uform::inference
+} // namespace unum::uform::encoder

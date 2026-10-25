@@ -143,7 +143,7 @@ using call_arguments_t = std::variant<                                          
     uform_model_load_ram_t, uform_model_load_ram_buffer_t, uform_model_load_vram_t,               //
     uform_model_load_vram_buffer_t, uform_model_describe_t,                                       //
     uform_text_encode_t, uform_image_encode_t, uform_image_encode_pixels_t, uform_video_encode_t, //
-    uform_audio_encode_t, uform_audio_encode_samples_t,                                           //
+    uform_audio_encode_t, uform_audio_encode_samples_t, uform_text_choose_t,                      //
     uform_mesh_bootstrap_t, uform_trainer_init_vram_t, uform_trainer_step_t, uform_trainer_save_t>;
 
 /** A call given to an executor, waiting in the queue or running on some caller's thread. */

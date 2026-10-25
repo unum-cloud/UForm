@@ -18,6 +18,8 @@
  *  UFORM_SEED         42       Seed the suite's draws derive from, an unsigned integer or random
  *  UFORM_FILTER       none     Cases to run, by name, as an ECMAScript regex or else as a substring
  *  UFORM_TEST_FILTER  none     The same filter, read when UFORM_FILTER is unset
+ *  UFORM_DEVICES      derived  Comma-separated UForm device ordinals the GPU cases run on; unset takes
+ *                              the first listed device of every vendor
  *  @endverbatim
  */
 #pragma once
@@ -26,6 +28,7 @@
 #include <cstdio>  // `std::setvbuf`, `stdout`
 #include <cstdlib> // `std::getenv`, `std::exit`
 
+#include <algorithm>   // `std::min`
 #include <charconv>    // `std::from_chars`
 #include <format>      // `std::vformat_to`, `std::make_format_args`
 #include <random>      // `std::random_device`
@@ -35,13 +38,15 @@
 #include <type_traits> // `std::type_identity_t`
 
 #include <fmt/format.h> // `fmt::println`
+#include <fmt/ranges.h> // `fmt::join` — the devices
 
 #include <numkong/cast.hpp> // `nk::cast` — the oracles' BFloat16 rounding and widening
 #include <numkong/dot.hpp>  // `nk::dot` — the oracles' products
 
-#include "uform/types.h" // `uform_version_name`, `uform_capabilities_compiled`, `uform_capabilities_available`
+#include "uform/types.h" // `uform_version_name`, `uform_capabilities_available`, `uform_gpu_devices`
 
-#include "core/types.hpp" // `format_at_t`, `format_into_t`, `sz`, the scalar aliases
+#include "uform/core/types.hpp" // `format_at_t`, `format_into_t`, `sz`, the scalar aliases
+#include "uform/core/array.hpp" // `per_gpu_array` — the devices
 
 /** Prints a StringZilla view as the text it spans. */
 template <>
@@ -115,9 +120,57 @@ struct settings_t {
 
     /** Seed every draw of the suite descends from. */
     u64_t seed = 42;
+
+    /** UForm device ordinals the GPU cases run on, positions in @c uform_gpu_devices . */
+    per_gpu_array<i32_t> devices {};
 };
 
-/** Reads every @ref settings_t variable, exiting with status 1 on a malformed @c UFORM_SEED . */
+/** Every GPU @c uform_gpu_devices lists, each at its UForm device ordinal. */
+[[nodiscard]] inline per_gpu_array<uform_gpu_device_t> listed_gpu_devices() noexcept {
+    per_gpu_array<uform_gpu_device_t> listed;
+    std::size_t count = 0;
+    uform_outcome_t outcome {};
+    [[maybe_unused]] status_t const sized = listed.resize(listed.capacity());
+    uform_gpu_devices_t listing {&outcome, listed.begin(), listed.size(), &count};
+    uform_gpu_devices(&listing);
+    [[maybe_unused]] status_t const trimmed = listed.resize(std::min<std::size_t>(count, listed.capacity()));
+    return listed;
+}
+
+/** The ordinals @c UFORM_DEVICES lists, comma-separated, or the first listed device of every vendor
+ *  when it is unset; exits with status 1 on text that does not parse or names a device past the
+ *  listing. */
+[[nodiscard]] inline per_gpu_array<i32_t> read_devices() noexcept {
+    per_gpu_array<uform_gpu_device_t> const listed = listed_gpu_devices();
+    std::size_t const listed_count = listed.size();
+    per_gpu_array<i32_t> devices;
+    std::string_view const text = environment_text("UFORM_DEVICES");
+    if (text.empty()) {
+        for (std::size_t ordinal = 0; ordinal != listed_count; ++ordinal) {
+            if (ordinal != 0 && listed[ordinal - 1].vendor == listed[ordinal].vendor) continue;
+            [[maybe_unused]] status_t const pushed = devices.push_back(static_cast<i32_t>(ordinal));
+        }
+        return devices;
+    }
+    for (std::size_t begin = 0; begin <= text.size();) {
+        std::size_t const end = std::min(text.find(',', begin), text.size());
+        u32_t ordinal = 0;
+        auto const [parsed_end, parse_status] = std::from_chars(text.data() + begin, text.data() + end, ordinal);
+        if (parse_status != std::errc {} || parsed_end != text.data() + end) {
+            fmt::println(stderr, "UFORM_DEVICES=\"{}\" does not parse, expected unsigned integers like 0,1", text);
+            std::exit(1);
+        }
+        if (ordinal >= listed_count || devices.push_back(static_cast<i32_t>(ordinal)) != status_t::success_k) {
+            fmt::println(stderr, "UFORM_DEVICES names device {}, past the {} listed", ordinal, listed_count);
+            std::exit(1);
+        }
+        begin = end + 1;
+    }
+    return devices;
+}
+
+/** Reads every @ref settings_t variable, exiting with status 1 on a malformed @c UFORM_SEED or
+ *  @c UFORM_DEVICES . */
 [[nodiscard]] inline settings_t read_settings() noexcept {
     settings_t settings;
     std::string_view filter_text = environment_text("UFORM_FILTER");
@@ -133,6 +186,7 @@ struct settings_t {
             std::exit(1);
         }
     }
+    settings.devices = read_devices();
     return settings;
 }
 
@@ -177,6 +231,8 @@ struct test_suite_t {
         fmt::println("- Seed: {}", suite.settings.seed);
         std::string_view const filter = suite.settings.filter.text;
         fmt::println("- Filter: {}", filter.empty() ? std::string_view {"none"} : filter);
+        if (suite.settings.devices.size() == 0) fmt::println("- Devices: none");
+        else fmt::println("- Devices: {}", fmt::join(suite.settings.devices, ","));
         return suite;
     }
 

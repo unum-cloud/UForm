@@ -383,6 +383,171 @@ typedef enum uform_completion_t {
     uform_completion_deferred_k = 1,
 } uform_completion_t;
 
+/** The CPU families UForm ships tuned variants for - dispatch reports its pick in this vocabulary,
+ *  and callers may pin one. The enumerators and their ordinals are USearch's. */
+typedef enum uform_cpu_class_t {
+    uform_cpu_class_unknown_k = 0,
+
+    /** The portable floor: no SIMD assumptions. */
+    uform_cpu_class_serial_k,
+
+    /** Haswell-class x86: AVX2 & FMA, the 256-bit floor. */
+    uform_cpu_class_intel_haswell_k,
+
+    /** Sierra Forest-class x86 - the E-core Xeons: AVX-VNNI and its successors without AVX-512. */
+    uform_cpu_class_intel_sierra_k,
+
+    /** Skylake-class x86: the AVX-512 foundation tier. */
+    uform_cpu_class_intel_skylake_k,
+
+    /** Icelake-class x86: AVX-512 VNNI & VPOPCNT. */
+    uform_cpu_class_intel_icelake_k,
+
+    /** Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512. */
+    uform_cpu_class_amd_genoa_k,
+
+    /** Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16 & AMX-INT8
+     *  tiles. */
+    uform_cpu_class_intel_sapphire_k,
+
+    /** Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles. */
+    uform_cpu_class_intel_granite_k,
+
+    /** Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions. */
+    uform_cpu_class_intel_diamond_k,
+
+    /** Graviton2-class Arm - Neoverse N1, the bare NEON floor; phones predating Armv8.6 land here
+     *  too. */
+    uform_cpu_class_aws_g2_k,
+
+    /** Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2, Cortex-A710 & X2
+     *  class silicon. */
+    uform_cpu_class_apple_m2_k,
+
+    /** Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles. */
+    uform_cpu_class_apple_m4_k,
+
+    /** Graviton5-class Arm - Neoverse V3, Armv9.2. */
+    uform_cpu_class_aws_g5_k,
+
+    /** Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products. */
+    uform_cpu_class_nvidia_vera_k,
+
+    /** Alibaba C930-class RISC-V - T-Head's XuanTie core, RVA23 vectors. */
+    uform_cpu_class_alibaba_c930_k,
+
+    /** WebAssembly every engine loads: 32-bit, single-threaded, the fixed-width simd128 tier. */
+    uform_cpu_class_wasm32_v128_k,
+
+    /** WebAssembly with relaxed SIMD, shared memory for real thread pools, and 64-bit
+     *  addressing. */
+    uform_cpu_class_wasm64_extended_k,
+} uform_cpu_class_t;
+
+/** The GPU families UForm ships tuned variants for, the device twin of @c uform_cpu_class_t:
+ *  one class per generation of kernel kits. The enumerators and their ordinals are USearch's. */
+typedef enum uform_gpu_class_t {
+    uform_gpu_class_unknown_k = 0,
+
+    /** Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30. */
+    uform_gpu_class_nvidia_ampere_k,
+
+    /** Ada-class NVIDIA - L4, L40S & RTX 40: the fp8 conversions. */
+    uform_gpu_class_nvidia_ada_k,
+
+    /** Hopper-class NVIDIA - H100 & H200. */
+    uform_gpu_class_nvidia_hopper_k,
+
+    /** Blackwell-class NVIDIA - B200, B300 & GB300. */
+    uform_gpu_class_nvidia_blackwell_k,
+
+    /** Consumer Blackwell NVIDIA - RTX 50, RTX PRO 6000 & DGX Spark. */
+    uform_gpu_class_nvidia_blackwellrtx_k,
+
+    /** Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
+    uform_gpu_class_nvidia_rubin_k,
+
+    /** CDNA3 AMD - MI300X & MI325X: gfx942, FNUZ fp8. */
+    uform_gpu_class_amd_cdna3_k,
+
+    /** CDNA4 AMD - MI350X & MI355X: gfx950, OCP fp8. */
+    uform_gpu_class_amd_cdna4_k,
+
+    /** CDNA5 AMD - MI400: gfx1250. */
+    uform_gpu_class_amd_cdna5_k,
+
+    /** Apple7-family GPUs and every Apple GPU without a class of its own - M1 & M2. */
+    uform_gpu_class_apple_metal7_k,
+
+    /** Apple9-family GPUs - M3 & M4. */
+    uform_gpu_class_apple_metal9_k,
+
+    /** Apple10-family GPUs - M5. */
+    uform_gpu_class_apple_metal10_k,
+} uform_gpu_class_t;
+
+/** The GPU vendors one binary drives at once. */
+typedef enum uform_gpu_vendor_t {
+    uform_gpu_vendor_unknown_k = 0,
+
+    /** NVIDIA, through the CUDA driver. */
+    uform_gpu_vendor_nvidia_k,
+
+    /** AMD, through the HIP runtime. */
+    uform_gpu_vendor_amd_k,
+
+    /** Apple, through Metal. */
+    uform_gpu_vendor_apple_k,
+} uform_gpu_vendor_t;
+
+/** One GPU as UForm numbers it: its position in @c uform_gpu_devices is the UForm device ordinal
+ *  every VRAM call names. */
+typedef struct uform_gpu_device_t {
+
+    /** The vendor whose runtime drives the device. */
+    uform_gpu_vendor_t vendor;
+
+    /** The device's ordinal in its vendor's runtime, as @c nvidia-smi or @c rocm-smi list it. */
+    uint32_t vendor_ordinal;
+
+    /** The class whose kernels run on it. */
+    uform_gpu_class_t gpu_class;
+
+    /** Streaming multiprocessors or compute units. */
+    uint32_t compute_units;
+
+    /** Device memory in bytes. */
+    uint64_t memory_bytes;
+
+    /** The vendor's own name for the device, NUL-terminated and truncated to fit. */
+    char name[64];
+} uform_gpu_device_t;
+
+/** The arguments of @c uform_gpu_devices. */
+typedef struct uform_gpu_devices_t {
+
+    /** Output for the outcome, final when the call returns. */
+    uform_outcome_t* outcome;
+
+    /** Output for up to @c devices_capacity devices, in UForm ordinal order; may be @c NULL. */
+    uform_gpu_device_t* devices;
+
+    /** Entries @c devices holds. */
+    size_t devices_capacity;
+
+    /** Output for every device this process can drive, which may exceed @c devices_capacity. */
+    size_t* devices_count;
+} uform_gpu_devices_t;
+
+/**
+ *  @brief Lists every GPU this process can drive, NVIDIA devices first, then AMD, so the position
+ *      of a device is the UForm ordinal @c uform_vram_options_t names it by.
+ *
+ *  A vendor this build does not compile, or whose runtime is absent, lists no devices, so the call
+ *  succeeds with a zero count on a machine without GPUs.
+ */
+UFORM_EXPORT void uform_gpu_devices(uform_gpu_devices_t* arguments);
+
 /** The host memory domains a RAM-resident model and executor place their bytes in - one NUMA node each. */
 typedef struct uform_ram_options_t {
 
@@ -392,16 +557,25 @@ typedef struct uform_ram_options_t {
 
     /** Number of entries in @c memory_domains; zero derives. */
     size_t memory_domains_count;
+
+    /** The class to dispatch as if the CPU were of it, admitting every rung whose features it
+     *  holds; @c uform_cpu_class_unknown_k derives the CPU's own. */
+    uform_cpu_class_t cpu_class;
 } uform_ram_options_t;
 
 /** The devices a VRAM-resident model, trainer and executor place their bytes in. */
 typedef struct uform_vram_options_t {
 
-    /** CUDA device ordinals, borrowed for the duration of the call; @c NULL derives one free device. */
+    /** UForm device ordinals, positions in the listing @c uform_gpu_devices reports, borrowed
+     *  for the duration of the call; @c NULL derives one free device. */
     int32_t const* devices;
 
     /** Number of entries in @c devices; zero derives. */
     size_t devices_count;
+
+    /** The class every named device dispatches as; @c uform_gpu_class_unknown_k derives the
+     *  devices' own, which must agree, or the call reports @c uform_status_config_mismatch_k. */
+    uform_gpu_class_t gpu_class;
 } uform_vram_options_t;
 
 /**
@@ -614,6 +788,20 @@ UFORM_EXPORT char const* uform_mood_name(uform_mood_t mood);
 
 /** Reads a mood back; @c uform_mood_parked_k when unrecognized. */
 UFORM_EXPORT uform_mood_t uform_mood_from_name(uform_bytes_view_t name);
+
+/** The canonical spelling of a CPU class, as @c uform_cpu_class_intel_haswell_k spells
+ *  "intel-haswell". */
+UFORM_EXPORT char const* uform_cpu_class_name(uform_cpu_class_t cpu_class);
+
+/** Reads a CPU class back; @c uform_cpu_class_unknown_k when unrecognized. */
+UFORM_EXPORT uform_cpu_class_t uform_cpu_class_from_name(uform_bytes_view_t name);
+
+/** The canonical spelling of a GPU class, as @c uform_gpu_class_nvidia_hopper_k spells
+ *  "nvidia-hopper". */
+UFORM_EXPORT char const* uform_gpu_class_name(uform_gpu_class_t gpu_class);
+
+/** Reads a GPU class back; @c uform_gpu_class_unknown_k when unrecognized. */
+UFORM_EXPORT uform_gpu_class_t uform_gpu_class_from_name(uform_bytes_view_t name);
 
 /**
  *  @brief Reports the version of the library this process linked, which may differ from the

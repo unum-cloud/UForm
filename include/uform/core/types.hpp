@@ -1,8 +1,9 @@
 /**
- *  @brief Foundational vocabulary of the UForm v4 primitives cell: statuses, error channel, launch constants.
- *  @file src/core/types.hpp
+ *  @file include/uform/core/types.hpp
  *  @author Ash Vardanian
  *  @date July 2, 2026
+ *  @brief Foundational vocabulary of the UForm v4 primitives cell: statuses, error channel, launch
+ *      constants.
  *
  *  The primitives cell holds the self-contained CUDA building blocks the rest of the v4 stack assembles —
  *  losses, collectives, packers — each a header-only @c .cuh with its own kernels and @c launch_* wrappers,

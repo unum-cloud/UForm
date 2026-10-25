@@ -5,10 +5,12 @@
  *  @brief Writes a seeded, tiny but structurally complete UForm checkpoint, so the C suite and the bindings
  *      load a real tower on any machine without a training run.
  *
- *  The checkpoint is safetensors in BFloat16: every tensor the tower reads, under the names training saves,
- *  and the full geometry in the safetensors metadata with every value a string. The tower is 2 blocks of hidden width
- *  256, SwiGLU width 512, 8-pixel patches, 2-frame tubes and 256-sample audio frames. Weights are xorshift
- *  draws scaled to about 0.02 and every norm scale is one, so encodings are finite and reproducible.
+ *  The checkpoint is safetensors in BFloat16: every tensor the tower reads, under the names
+ *  training saves, and the full geometry in the safetensors metadata with every value a string. The
+ *  tower is 2 blocks of hidden width 256, SwiGLU width 512, 8-pixel patches, 2-frame tubes and
+ *  256-sample audio frames, with a 32-wide token head and the byte decoder, so token vectors and
+ *  choices run too. Weights are xorshift draws scaled to about 0.02 and every norm scale is one, so
+ *  encodings are finite and reproducible.
  *
  *  Usage: `tiny_checkpoint <output.safetensors>`.
  */
@@ -21,7 +23,7 @@
 
 /** The tower's geometry, every value spelled as the metadata spells it. */
 static constexpr std::size_t hidden_k = 256, depth_k = 2, ffn_expansion_k = 2, patch_side_k = 8, tube_frames_k = 2;
-static constexpr std::size_t image_channels_k = 4, video_channels_k = 3, chunk_samples_k = 256;
+static constexpr std::size_t image_channels_k = 4, video_channels_k = 3, chunk_samples_k = 256, token_width_k = 32;
 
 /** The byte vocabulary of the text entry: 256 byte values, then the mask and padding tokens. */
 static constexpr std::size_t vocabulary_k = 258;
@@ -60,6 +62,9 @@ static std::vector<tensor_plan_t> plan_tensors() {
     plans.push_back({"model.head.norm", 1, hidden_k, fill_t::ones_k});
     plans.push_back({"model.head.fc1", hidden_k, hidden_k, fill_t::random_k});
     plans.push_back({"model.head.fc2", hidden_k, hidden_k, fill_t::random_k});
+    plans.push_back({"model.token_head.norm", 1, hidden_k, fill_t::ones_k});
+    plans.push_back({"model.token_head.projection", token_width_k, hidden_k, fill_t::random_k});
+    plans.push_back({"model.masked_tokens", vocabulary_k, hidden_k, fill_t::random_k});
     std::size_t const patch_pixels = patch_side_k * patch_side_k;
     plans.push_back({"model.image_projection", hidden_k, patch_pixels * image_channels_k, fill_t::random_k});
     plans.push_back(

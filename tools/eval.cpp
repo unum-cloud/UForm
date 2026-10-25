@@ -26,6 +26,11 @@
  *  kernels widen into Float64, scored block by block on host threads. A split whose modality the
  *  checkpoint was not trained on prints a skip line. With @c --gpu the model loads into that
  *  device's VRAM and encodes there instead of on host threads.
+ *
+ *  With @c --calibrate it fits each question type's inverse temperature of the choice head on the
+ *  held-out choices that JSON-lines file lists, prints each group's negative log-likelihood and the
+ *  top-choice calibration error before and after, and writes the checkpoint again at @c --output
+ *  with them as @c choices.inverse_temperatures .
  */
 #include <cmath>   // `std::sqrt`
 #include <cstdint> // `std::uint32_t`
@@ -36,6 +41,7 @@
 #include <algorithm>        // `std::min`, `std::max`
 #include <atomic>           // `std::atomic`, `std::atomic_ref`
 #include <initializer_list> // `std::initializer_list`
+#include <limits>           // `std::numeric_limits` — the peak a softmax starts below
 #include <span>             // `std::span` — the fixed-size hit and recall tables
 #include <string_view>      // `std::string_view`
 
@@ -49,7 +55,8 @@
 #include <smashtable/basic_hash_table.hpp> // `hash_map` — COCO image IDs to their files
 #include <smashtable/basic_vector.hpp>     // `basic_vector` — every growable table here
 
-#include "core/types.hpp" // `divide_round_up`
+#include "uform/core/checkpoint.hpp" // `checkpoint_to_load_t`, `checkpoint_to_save_t` — the calibrated copy
+#include "uform/core/types.hpp"      // `divide_round_up`
 #include "uform/encode.h"
 #include "uform/model.h"
 #include "uform/types.h"
@@ -495,16 +502,200 @@ static constexpr std::size_t score_block_rows_k = 64;
     return true;
 }
 
+/** Held-out choices, one per line of the @c --calibrate file: each state, its choice bytes, their
+ *  target probabilities end to end, and its question type. */
+struct choices_t {
+    strings_t states {}, choices {};
+    st::basic_vector<float> targets {};
+    st::basic_vector<std::uint32_t> groups {};
+};
+
+/** Read the JSON lines at @p path , each `{"state": text, "choices": bytes, "targets": [p...],
+ *  "group": n}` with one target per choice byte and @c group optional, into @p loaded . */
+[[nodiscard]] static bool load_choices_(std::string_view path, choices_t &loaded) noexcept {
+    st::basic_vector<std::uint8_t> bytes;
+    if (!read_file_(path, bytes)) return false;
+    std::string_view text {reinterpret_cast<char const *>(bytes.data()), bytes.size()};
+    for (std::size_t line_number = 1; !text.empty(); ++line_number) {
+        std::size_t const end = std::min(text.find('\n'), text.size());
+        std::string_view const line = text.substr(0, end);
+        text.remove_prefix(std::min(end + 1, text.size()));
+        if (line.find_first_not_of(" \t\r") == std::string_view::npos) continue;
+        yyjson_doc *document = yyjson_read(line.data(), line.size(), 0);
+        yyjson_val *root = yyjson_doc_get_root(document);
+        yyjson_val *state = yyjson_obj_get(root, "state"), *offered = yyjson_obj_get(root, "choices");
+        yyjson_val *targets = yyjson_obj_get(root, "targets"), *group = yyjson_obj_get(root, "group");
+        bool parsed = yyjson_is_str(state) && yyjson_is_str(offered) && yyjson_is_arr(targets) &&
+                      yyjson_arr_size(targets) == yyjson_get_len(offered) && (!group || yyjson_is_uint(group)) &&
+                      loaded.states.append({{yyjson_get_str(state), yyjson_get_len(state)}}) &&
+                      loaded.choices.append({{yyjson_get_str(offered), yyjson_get_len(offered)}}) &&
+                      !st::failed(loaded.groups.push_back(group ? std::uint32_t(yyjson_get_uint(group)) : 0u));
+        for (std::size_t index = 0; parsed && index != yyjson_arr_size(targets); ++index)
+            parsed = !st::failed(loaded.targets.push_back(float(yyjson_get_num(yyjson_arr_get(targets, index)))));
+        yyjson_doc_free(document);
+        if (!parsed) return fmt::println(stderr, "uform_eval: {} line {} is no choice", path, line_number), false;
+    }
+    return true;
+}
+
+/** The mean negative log-likelihood of @p targets under the softmax of @p logits at inverse
+ *  temperature @p beta , over the items @p group holds, or every item for a group past them. */
+[[nodiscard]] static double choice_loss_(choices_t const &held_out, std::span<double const> logits, double beta,
+                                         std::uint32_t group) noexcept {
+    double total = 0;
+    std::size_t items = 0;
+    for (std::size_t item = 0; item != held_out.states.count(); ++item) {
+        if (held_out.groups[item] != group) continue;
+        std::size_t const begin = held_out.choices.offsets[item], end = held_out.choices.offsets[item + 1];
+        double peak = -std::numeric_limits<double>::infinity(), sum = 0, expected = 0;
+        for (std::size_t choice = begin; choice != end; ++choice) peak = std::max(peak, beta * logits[choice]);
+        for (std::size_t choice = begin; choice != end; ++choice) sum += std::exp(beta * logits[choice] - peak);
+        for (std::size_t choice = begin; choice != end; ++choice)
+            expected += held_out.targets[choice] * (beta * logits[choice] - peak - std::log(sum));
+        total -= expected, ++items;
+    }
+    return items ? total / double(items) : 0;
+}
+
+/** The top-choice expected calibration error over 15 equal confidence bins, a choice correct when
+ *  it is the target's most likely, under @p beta per group. */
+[[nodiscard]] static double calibration_error_(choices_t const &held_out, std::span<double const> logits,
+                                               std::span<double const> betas) noexcept {
+    double confidence_sums[15] = {}, correct_sums[15] = {};
+    std::size_t const items = held_out.states.count();
+    for (std::size_t item = 0; item != items; ++item) {
+        std::size_t const begin = held_out.choices.offsets[item], end = held_out.choices.offsets[item + 1];
+        if (begin == end) continue;
+        double const beta = betas[held_out.groups[item]];
+        std::size_t top = begin, wanted = begin;
+        double sum = 0;
+        for (std::size_t choice = begin; choice != end; ++choice) {
+            if (logits[choice] > logits[top]) top = choice;
+            if (held_out.targets[choice] > held_out.targets[wanted]) wanted = choice;
+        }
+        for (std::size_t choice = begin; choice != end; ++choice)
+            sum += std::exp(beta * (logits[choice] - logits[top]));
+        double const confidence = 1 / sum;
+        std::size_t const bin = std::min<std::size_t>(std::size_t(confidence * 15), 14);
+        confidence_sums[bin] += confidence, correct_sums[bin] += top == wanted;
+    }
+    double error = 0;
+    for (std::size_t bin = 0; bin != 15; ++bin) error += std::fabs(confidence_sums[bin] - correct_sums[bin]);
+    return items ? error / double(items) : 0;
+}
+
+/**
+ *  @brief Fit each question type's inverse temperature on the held-out choices at @p choices_path
+ *      and write @p checkpoint_path again at @p output_path with them.
+ *
+ *  The choices score once through @c uform_text_choose in group zero, whose stored temperature
+ *  turns the probabilities back into logits up to each item's constant. Each group's temperature
+ *  then minimizes its mean negative log-likelihood, convex in it, by a golden-section search over
+ *  its logarithm in Float64.
+ */
+[[nodiscard]] static bool calibrate_(encoder_t &encoder, std::string_view checkpoint_path,
+                                     std::string_view choices_path, char const *output_path) noexcept {
+    choices_t held_out;
+    if (!load_choices_(choices_path, held_out)) return false;
+    std::size_t const items = held_out.states.count(), offered = held_out.targets.size();
+    std::uint32_t groups = 1;
+    for (std::uint32_t const group : held_out.groups) groups = std::max(groups, group + 1);
+    uc::expected<uc::checkpoint_to_load_t> source = uc::checkpoint_to_load_t::make(checkpoint_path);
+    if (!source) return fmt::println(stderr, "uform_eval: {}", std::string_view {source.description_}), false;
+    uc::f32r2_view_t const stored = source->float32("choices.inverse_temperatures");
+    double const scoring_beta = stored.empty() ? 1.0 : double(stored[0, 0]);
+
+    st::basic_vector<double> logits, betas;
+    st::basic_vector<float> probabilities;
+    if (st::failed(logits.resize(st::assume_uninitialized, offered)) ||
+        st::failed(probabilities.resize(st::assume_uninitialized, offered)) ||
+        st::failed(betas.resize(st::assume_uninitialized, groups)))
+        return fmt::println(stderr, "uform_eval: calibration staging failed"), false;
+    for (std::size_t first = 0; first < items; first += encoder.batch) {
+        std::size_t const count = std::min(encoder.batch, items - first);
+        uform_outcome_t outcome {};
+        uform_tape_view_t chosen {};
+        uform_text_choose_t arguments {
+            .model = encoder.model,
+            .executor = encoder.executor,
+            .outcome = &outcome,
+            .count = count,
+            .texts = {held_out.states.bytes.data(), held_out.states.offsets.data() + first, uform_scalar_u8_k},
+            .choices = {held_out.choices.bytes.data(), held_out.choices.offsets.data() + first, uform_scalar_u8_k},
+            .probabilities = &chosen,
+            .arena = encoder.arena};
+        uform_text_choose(&arguments);
+        if (outcome.status != uform_status_success_k)
+            return fmt::println(stderr, "uform_eval: choosing failed: {}", outcome.message), false;
+        std::size_t const begin = held_out.choices.offsets[first],
+                          scored = held_out.choices.offsets[first + count] - begin;
+        float *const landed = probabilities.data() + begin;
+        if (!encoder.context) std::memcpy(landed, chosen.data, scored * sizeof(float));
+        else if (cuMemcpyDtoH(landed, reinterpret_cast<CUdeviceptr>(chosen.data), scored * sizeof(float)) !=
+                 CUDA_SUCCESS)
+            return fmt::println(stderr, "uform_eval: copying the probabilities failed"), false;
+    }
+    for (std::size_t choice = 0; choice != offered; ++choice)
+        logits[choice] = std::log(std::max(double(probabilities[choice]), 1e-30)) / scoring_beta;
+
+    for (std::uint32_t group = 0; group != groups; ++group) {
+        double low = std::log(1e-2), high = std::log(1e2);
+        double const golden = (std::sqrt(5.0) - 1) / 2;
+        for (std::size_t step = 0; step != 100; ++step) {
+            double const left = high - golden * (high - low), right = low + golden * (high - low);
+            if (choice_loss_(held_out, logits, std::exp(left), group) <
+                choice_loss_(held_out, logits, std::exp(right), group))
+                high = right;
+            else low = left;
+        }
+        betas[group] = std::exp((low + high) / 2);
+    }
+    st::basic_vector<double> before;
+    if (st::failed(before.resize(st::assume_uninitialized, groups)))
+        return fmt::println(stderr, "uform_eval: calibration staging failed"), false;
+    for (std::uint32_t group = 0; group != groups; ++group) {
+        before[group] = group < stored.extent(1) ? double(stored[0, group]) : scoring_beta;
+        fmt::println("calibrate group {}: inverse temperature {:.4f} -> {:.4f}, NLL {:.4f} -> {:.4f}", group,
+                     before[group], betas[group], choice_loss_(held_out, logits, before[group], group),
+                     choice_loss_(held_out, logits, betas[group], group));
+    }
+    fmt::println("calibrate: {} choices over {} groups, top-choice ECE {:.4f} -> {:.4f}", items, groups,
+                 calibration_error_(held_out, logits, before), calibration_error_(held_out, logits, betas));
+
+    st::basic_vector<float> fitted;
+    if (st::failed(fitted.resize(st::assume_uninitialized, groups)))
+        return fmt::println(stderr, "uform_eval: calibration staging failed"), false;
+    for (std::uint32_t group = 0; group != groups; ++group) fitted[group] = float(betas[group]);
+    uc::checkpoint_to_save_t calibrated; // Float32 entries go first, packed ahead of the BFloat16 weights
+    uc::expected_t written = calibrated.insert("choices.inverse_temperatures",
+                                               uc::f32r2_view_t {fitted.data(), 1, groups});
+    for (uc::checkpoint_entry_t const &entry : source->entries())
+        if (written && entry.dtype == uc::checkpoint_dtype_t::f32_k &&
+            entry.name.view() != "choices.inverse_temperatures")
+            written = calibrated.insert(entry.name.view(), source->float32(entry.name.view()));
+    uc::checkpoint_to_load_t const &weights = *source;
+    for (uc::checkpoint_entry_t const &entry : weights.entries())
+        if (written && entry.dtype == uc::checkpoint_dtype_t::bf16_k)
+            written = calibrated.insert(entry.name.view(), weights[entry.name.view()]);
+    for (uc::checkpoint_metadata_t const &pair : weights.metadata())
+        if (written) written = calibrated.metadata(pair.key.view(), pair.value.view());
+    if (written) written = calibrated.save(output_path);
+    if (!written) return fmt::println(stderr, "uform_eval: {}", std::string_view {written.description_}), false;
+    fmt::println("calibrate: wrote {}", output_path);
+    return true;
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
         fmt::println(stderr, "Usage: uform_eval <checkpoint> [--coco <dir>] [--msrvtt <dir>] [--clotho <dir>] " //
                              "[--coco-sm <dir> --coco-sm-images <dir>] [--gpu <ordinal>] "                      //
-                             "[--batch <items>] [--threads <count>] [--query-prefix <text>]");
+                             "[--batch <items>] [--threads <count>] [--query-prefix <text>] "                   //
+                             "[--calibrate <choices.jsonl> --output <calibrated.safetensors>]");
         return 1;
     }
     encoder_t encoder;
     char const *coco = nullptr, *msrvtt = nullptr, *clotho = nullptr, *coco_sm = nullptr, *coco_sm_images = nullptr,
-               *gpu = nullptr;
+               *gpu = nullptr, *calibrate = nullptr, *output = nullptr;
     for (int index = 2; index + 1 < argc; index += 2) {
         char const *flag = argv[index], *value = argv[index + 1];
         if (!std::strcmp(flag, "--coco")) coco = value;
@@ -516,11 +707,14 @@ int main(int argc, char **argv) {
         else if (!std::strcmp(flag, "--batch")) encoder.batch = std::strtoull(value, nullptr, 10);
         else if (!std::strcmp(flag, "--threads")) encoder.threads = std::strtoull(value, nullptr, 10);
         else if (!std::strcmp(flag, "--query-prefix")) encoder.query_prefix = value;
+        else if (!std::strcmp(flag, "--calibrate")) calibrate = value;
+        else if (!std::strcmp(flag, "--output")) output = value;
         else return fmt::println(stderr, "uform_eval: unknown flag {}", flag), 1;
     }
     if (!encoder.batch) return fmt::println(stderr, "uform_eval: --batch takes a positive count"), 1;
     if (!coco_sm != !coco_sm_images)
         return fmt::println(stderr, "uform_eval: --coco-sm and --coco-sm-images come together"), 1;
+    if (!calibrate != !output) return fmt::println(stderr, "uform_eval: --calibrate and --output come together"), 1;
 
     uform_outcome_t outcome {};
     std::int32_t const device = gpu ? std::int32_t(std::strtol(gpu, nullptr, 10)) : 0;
@@ -593,6 +787,7 @@ int main(int argc, char **argv) {
         evaluated = evaluate_(encoder, split) && evaluated;
     }
     if (coco_sm) evaluated = evaluate_coco_sm_(encoder, coco_sm, coco_sm_images) && evaluated;
+    if (calibrate) evaluated = calibrate_(encoder, checkpoint, calibrate, output) && evaluated;
     uform_model_free(encoder.model);
     uform_arena_free(encoder.arena);
     uform_executor_free(encoder.executor);

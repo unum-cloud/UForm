@@ -10,7 +10,7 @@
 #include <algorithm> // `std::clamp`
 #include <numbers>   // `std::numbers::pi`
 
-#include "core/types.hpp" // `st::basic_vector` — the resize scratch
+#include "uform/core/types.hpp" // `st::basic_vector` — the resize scratch
 #include "media/image.hpp"
 
 namespace um = unum::uform::media;

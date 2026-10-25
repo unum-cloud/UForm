@@ -1,5 +1,5 @@
 /**
- *  @file src/core/array.hpp
+ *  @file include/uform/core/array.hpp
  *  @author Ash Vardanian
  *  @date July 2, 2026
  *  @brief Exception-free fixed-capacity arrays with inline storage, for the per-GPU object tables.
@@ -17,7 +17,7 @@
 #include <new>         // placement `new`, `std::launder`
 #include <span>        // `std::span`
 
-#include "core/types.hpp" // `status_t`
+#include "uform/core/types.hpp" // `status_t`
 
 namespace unum::uform::core {
 

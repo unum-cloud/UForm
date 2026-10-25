@@ -42,7 +42,7 @@
 # loudly if absent — each is available on every target, including consumer / workstation GPUs. InfiniBand is the sole
 # optional path (absent on those cards): `-DUFORM_WITH_INFINIBAND=AUTO|ON|OFF` (default `AUTO` — probe and enable when
 # present). `-DUFORM_BUILD_TEST=OFF` and `-DUFORM_BUILD_TOOLS=OFF` skip `test/` and `tools/`, which only a top-level
-# build compiles by default, and `-DUFORM_BUILD_BENCH=ON` adds the GPU benchmarks in `bench/`.
+# build compiles by default, and `-DUFORM_BUILD_BENCH=ON` adds the benchmarks in `bench/`.
 cmake_minimum_required(VERSION 3.27)
 
 # Every CUDA unit compiles one cubin per generation, as USearch's do: sm_86 runs Ampere's and B300 runs "100f", and PTX
@@ -158,15 +158,15 @@ set(NUMKONG_BUILD_ROCM ${UFORM_BUILD_ROCM})
 set(NUMKONG_CUDA_ARCHITECTURES "${UFORM_CUDA_ARCHITECTURES}")
 set(NUMKONG_BUILD_TEST OFF)
 set(NUMKONG_BUILD_BENCH OFF)
-uform_sibling(numkong https://github.com/ashvardanian/NumKong 2dea1586c8c26d1ce9de230b0165078480c63a9a)
-uform_sibling(stringzilla https://github.com/ashvardanian/StringZilla c560b106da8f91e9d10351e9a102ec97e279c5e9)
-uform_sibling(forkunion https://github.com/ashvardanian/ForkUnion 4d4bda36f65511a5281984b58df2c87795b98076)
+uform_sibling(numkong https://github.com/ashvardanian/NumKong 065f5bcabcff5b0cee8055f9fe7df935e5bbd170)
+uform_sibling(stringzilla https://github.com/ashvardanian/StringZilla 7df2583a53f09b2bfcda096e9ffa24c0a6f855b8)
+uform_sibling(forkunion https://github.com/ashvardanian/ForkUnion 10d306f27d908e440a269ed74277bd767f08ec6a)
 
 # SmashTable's containers, header-only
 set(SMASHTABLE_BUILD_TEST OFF)
 set(SMASHTABLE_BUILD_CUDA OFF)
 set(SMASHTABLE_INSTALL OFF)
-uform_sibling(smashtable https://github.com/ashvardanian/SmashTable 811203963268ce10bb480b5059c7f0803b970aa0)
+uform_sibling(smashtable https://github.com/ashvardanian/SmashTable f67526deab5b708cf50baa64d40240875af40f3f)
 
 FetchContent_Declare(
     yyjson
@@ -296,7 +296,7 @@ endif ()
 if (UFORM_BUILD_TOOLS AND UFORM_BUILD_CUDA)
     add_subdirectory(tools)
 endif ()
-if (UFORM_BUILD_BENCH AND UFORM_BUILD_CUDA)
+if (UFORM_BUILD_BENCH)
     add_subdirectory(bench)
 endif ()
 # `uform_bundle` → a self-contained runtime tree (executables + their shared-library closure, glibc excepted) under

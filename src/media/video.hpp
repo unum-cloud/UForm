@@ -18,9 +18,9 @@
 
 #include <span> // `std::span`
 
-#include "core/types.hpp"            // `expected`, `status_t`, the scalar aliases, `st::basic_vector`
-#include "core/multimodal_batch.hpp" // `video_batch_shape_t`
-#include "media/planning.hpp"        // `image_extent_t`, `video_grid_t`
+#include "uform/core/types.hpp"            // `expected`, `status_t`, the scalar aliases, `st::basic_vector`
+#include "uform/core/multimodal_batch.hpp" // `video_batch_shape_t`
+#include "media/planning.hpp"              // `image_extent_t`, `video_grid_t`
 
 namespace unum::uform::media {
 

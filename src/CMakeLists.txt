@@ -1,19 +1,155 @@
 # `uform_host` → the verbs and handles every build carries, compiled once into objects that `c/` assembles into
-# `uform_static` and `uform_shared`. `src/` and `c/` are its include roots, so sources include `"core/types.hpp"` and
-# `"uform/types.h"`. Only `UFORM_EXPORT` symbols leave the shared library.
+# `uform_static` and `uform_shared`. `src/`, `include/` and `c/` are its include roots, so sources include
+# `"core/schedule.cuh"`, `"uform/core/types.hpp"` and `"uform/types.h"`. Only `UFORM_EXPORT` symbols leave the shared
+# library.
 add_library(
     uform_host OBJECT
     types.cpp
     model.cpp
     encode.cpp
     core/checkpoint.cpp
-    inference/geometry.cpp
-    inference/entries.cpp
-    inference/tower.cpp
+    encoder/geometry.cpp
+    encoder/entries.cpp
+    encoder/ram_variants_serial.cpp
     media/planning.cpp
     media/resize.cpp
 )
-target_include_directories(uform_host PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/c")
+target_include_directories(
+    uform_host PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/c"
+)
+
+# The encoder's CPU class units, one explicit instantiation each, compiled into `uform_host` at its baseline, as every
+# kit calls NumKong's per-capability kernels rather than inlining them. A unit sees `NUMKONG_TARGET_<CAPABILITY>` for
+# each capability of its lineage NumKong compiled, which declares those kernels, and nothing compiles for the class's
+# instruction set, so no body of one unit merges into another's. Capabilities follow `OVER` as `name MACRO` pairs. A
+# class whose kits match its parent's answers no table, and `UFORM_TARGET_<CLASS>` tells the ladder which units exist.
+function (uform_cpu_class class_ target_macro_)
+    cmake_parse_arguments(PARSE_ARGV 2 arg "" "OVER" "")
+    set(definitions_ ${uform_class_${arg_OVER}_definitions_})
+    list(LENGTH arg_UNPARSED_ARGUMENTS entries_)
+    if (entries_)
+        math(EXPR last_ "${entries_} - 1")
+        foreach (index_ RANGE 0 ${last_} 2)
+            math(EXPR macro_index_ "${index_} + 1")
+            list(GET arg_UNPARSED_ARGUMENTS ${index_} capability_)
+            list(GET arg_UNPARSED_ARGUMENTS ${macro_index_} capability_macro_)
+            if (nk_target_${capability_}_compiles)
+                list(APPEND definitions_ NUMKONG_TARGET_${capability_macro_}=1)
+            endif ()
+        endforeach ()
+    endif ()
+    set(uform_class_${class_}_definitions_
+        ${definitions_}
+        PARENT_SCOPE
+    )
+    target_sources(uform_host PRIVATE encoder/ram_variants_${class_}.cpp)
+    set_source_files_properties(encoder/ram_variants_${class_}.cpp PROPERTIES COMPILE_DEFINITIONS "${definitions_}")
+    target_compile_definitions(uform_host PUBLIC UFORM_TARGET_${target_macro_}=1)
+endfunction ()
+set(uform_class_serial_definitions_)
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    uform_cpu_class(intel_haswell INTEL_HASWELL OVER serial haswell HASWELL)
+    uform_cpu_class(
+        intel_sierra
+        INTEL_SIERRA
+        OVER
+        intel_haswell
+        alder
+        ALDER
+        sierra
+        SIERRA
+    )
+    uform_cpu_class(intel_skylake INTEL_SKYLAKE OVER intel_haswell skylake SKYLAKE)
+    uform_cpu_class(intel_icelake INTEL_ICELAKE OVER intel_skylake icelake ICELAKE)
+    uform_cpu_class(amd_genoa AMD_GENOA OVER intel_icelake genoa GENOA)
+    uform_cpu_class(
+        intel_sapphire
+        INTEL_SAPPHIRE
+        OVER
+        amd_genoa
+        sapphire
+        SAPPHIRE
+        sapphireamx
+        SAPPHIREAMX
+    )
+    uform_cpu_class(intel_granite INTEL_GRANITE OVER intel_sapphire graniteamx GRANITEAMX)
+    uform_cpu_class(
+        intel_diamond
+        INTEL_DIAMOND
+        OVER
+        intel_granite
+        alder
+        ALDER
+        sierra
+        SIERRA
+        diamond
+        DIAMOND
+    )
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    uform_cpu_class(aws_g2 AWS_G2 OVER serial neon NEON)
+    uform_cpu_class(
+        apple_m2
+        APPLE_M2
+        OVER
+        aws_g2
+        neonsdot
+        NEONSDOT
+        neonbfdot
+        NEONBFDOT
+        neonfhm
+        NEONFHM
+    )
+    uform_cpu_class(
+        apple_m4
+        APPLE_M4
+        OVER
+        apple_m2
+        sme
+        SME
+        smebi32
+        SMEBI32
+    )
+    uform_cpu_class(aws_g5 AWS_G5 OVER apple_m2)
+    uform_cpu_class(nvidia_vera NVIDIA_VERA OVER aws_g5 neonfp8 NEONFP8)
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^riscv64$")
+    uform_cpu_class(
+        alibaba_c930
+        ALIBABA_C930
+        OVER
+        serial
+        rvv
+        RVV
+        rvvbb
+        RVVBB
+    )
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "^wasm")
+    uform_cpu_class(wasm32_v128 WASM32_V128 OVER serial v128 V128)
+    uform_cpu_class(wasm64_extended WASM64_EXTENDED OVER wasm32_v128 v128relaxed V128RELAXED)
+endif ()
+
+# The encoder's GPU class units: each vendor's floor, which runs NumKong's generic kits, and one unit per generation.
+# NumKong's `numkong_<vendor>_capabilities_compiled_` tells every unit which generations its library compiled, and
+# `NUMKONG_ARCH_<VENDOR>_` declares their kernels in a host unit, as it does in NumKong's own dispatch units.
+if (UFORM_BUILD_CUDA)
+    set(uform_nvidia_units_
+        encoder/vram_variants_nvidia.cpp encoder/vram_variants_nvidia_ampere.cpp encoder/vram_variants_nvidia_ada.cpp
+        encoder/vram_variants_nvidia_hopper.cpp encoder/vram_variants_nvidia_blackwell.cpp
+        encoder/vram_variants_nvidia_blackwellrtx.cpp
+    )
+    target_sources(uform_host PRIVATE ${uform_nvidia_units_})
+    set_source_files_properties(${uform_nvidia_units_} PROPERTIES COMPILE_DEFINITIONS NUMKONG_ARCH_CUDA_=1)
+    target_link_libraries(uform_host PRIVATE $<BUILD_INTERFACE:numkong_cuda_capabilities_compiled_>)
+    target_compile_definitions(uform_host PUBLIC UFORM_TARGET_CUDA=1)
+endif ()
+if (UFORM_BUILD_ROCM)
+    set(uform_amd_units_ encoder/vram_variants_amd.cpp encoder/vram_variants_amd_cdna3.cpp
+                         encoder/vram_variants_amd_cdna4.cpp encoder/vram_variants_amd_cdna5.cpp
+    )
+    target_sources(uform_host PRIVATE ${uform_amd_units_})
+    set_source_files_properties(${uform_amd_units_} PROPERTIES COMPILE_DEFINITIONS NUMKONG_ARCH_ROCM_=1)
+    target_link_libraries(uform_host PRIVATE $<BUILD_INTERFACE:numkong_rocm_capabilities_compiled_>)
+    target_compile_definitions(uform_host PUBLIC UFORM_TARGET_ROCM=1)
+endif ()
 # Training runs on NVIDIA alone: without CUDA its verbs refuse, and with it `uform_nvidia_train` below serves them.
 if (NOT UFORM_BUILD_CUDA)
     target_sources(uform_host PRIVATE train_absent.cpp)
@@ -118,8 +254,8 @@ if (UFORM_BUILD_CUDA)
 
     # `src/core` → `uform::core`: one static library for the whole core cell, compiled once, never per consumer.
     # Dependencies stay lean: NumKong, StringZilla, yyjson and the CUDA Driver API, with no NCCL or NVSHMEM; the runtime
-    # arrives only through NumKong's kernel units. `src/` is the one include root of all three libraries, so sources
-    # include `"core/types.hpp"`.
+    # arrives only through NumKong's kernel units. `src/` and `include/` are the include roots of all three libraries,
+    # so sources include `"core/schedule.cuh"` and `"uform/core/types.hpp"`.
     add_library(
         uform_core STATIC
         core/schedule.cu
@@ -136,7 +272,7 @@ if (UFORM_BUILD_CUDA)
         core/encoder_tower.cu
     )
     add_library(uform::core ALIAS uform_core)
-    target_include_directories(uform_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_include_directories(uform_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include")
     target_link_libraries(
         uform_core PUBLIC numkong::static stringzilla::static smashtable::header yyjson CUDA::cuda_driver
     )
@@ -158,8 +294,9 @@ if (UFORM_BUILD_CUDA)
     target_link_libraries(uform_train PUBLIC uform::core)
     # The envelope probe reads this process's device bytes from NVML, which ships with the driver like libcuda.
     target_link_libraries(uform_train PRIVATE CUDA::nvml)
-    # The items source plans and decodes caller media through the host decoders `uform_host` compiled.
-    target_link_libraries(uform_train PRIVATE uform_host)
+    # The items source plans and decodes caller media through the host decoders `uform_host` compiled, and the GPU
+    # listing among those objects names the NVIDIA kernel table, so the archive carries that unit too.
+    target_link_libraries(uform_train PRIVATE uform_host uform_nvidia_inference)
 
     # `train.cpp` → the training verbs, which `c/` links into both library flavors. They hold the composition by
     # value, so they compile as CUDA like the composition itself.
@@ -180,11 +317,13 @@ if (UFORM_BUILD_CUDA)
         loaders/video_loader.cu
         loaders/audio_loader.cu
         loaders/paired_loader.cu
+        loaders/choices_loader.cu
     )
     add_library(uform::loaders ALIAS uform_loaders)
     target_link_libraries(uform_loaders PUBLIC uform::core)
-    # The loaders call the host decoders, so the archive takes the objects `uform_host` compiled rather than its own.
-    target_link_libraries(uform_loaders PRIVATE uform_host)
+    # The loaders call the host decoders, so the archive takes the objects `uform_host` compiled rather than its own,
+    # with the NVIDIA kernel table the GPU listing among them names.
+    target_link_libraries(uform_loaders PRIVATE uform_host uform_nvidia_inference)
 
     # libcudf: `BEFORE`, and on the consumer directly — the wheels bundle their own CCCL 3.3 under `include/rapids`,
     # which must precede the CUDA toolkit's older copy (propagated via the `CUDA::` imported targets) or every RMM
@@ -233,19 +372,27 @@ endif ()
 set(uform_nvidia_inference_kernels_ nullptr)
 set(uform_amd_inference_kernels_ nullptr)
 if (UFORM_BUILD_CUDA)
-    add_library(uform_nvidia_inference OBJECT inference/vram_nvidia_kernels.cu)
-    target_include_directories(uform_nvidia_inference PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
-    target_link_libraries(
-        uform_nvidia_inference PRIVATE numkong::static forkunion::header stringzilla::static smashtable::header
+    # The host unit launches by name the kernels NVCC compiles device-only into the embedded bundle, for every
+    # configured architecture, so no host pass registers a fatbin with the CUDA runtime.
+    set(uform_encoder_nvidia_libraries_ numkong::static forkunion::header stringzilla::static smashtable::header)
+    add_library(uform_nvidia_inference OBJECT encoder/vram_entries_nvidia.cpp)
+    target_include_directories(
+        uform_nvidia_inference PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include"
     )
+    target_link_libraries(uform_nvidia_inference PRIVATE ${uform_encoder_nvidia_libraries_})
     target_link_libraries(uform_nvidia_inference PUBLIC CUDA::cuda_driver)
-    target_compile_options(uform_nvidia_inference PRIVATE --expt-relaxed-constexpr)
-    set_target_properties(uform_nvidia_inference PROPERTIES CUDA_VISIBILITY_PRESET hidden)
+    target_compile_options(uform_nvidia_inference PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+    uform_gpu_bundle(
+        uform_nvidia_inference uform_encoder_nvidia encoder/vram_kernels_nvidia.cu CODES ${UFORM_CUDA_ARCHITECTURES}
+    )
+    target_link_libraries(uform_encoder_nvidia_device PRIVATE ${uform_encoder_nvidia_libraries_})
     set(uform_nvidia_inference_kernels_ &vram_nvidia_kernels_k)
 endif ()
 if (UFORM_BUILD_ROCM)
-    add_library(uform_amd_inference OBJECT inference/vram_amd_kernels.hip)
-    target_include_directories(uform_amd_inference PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_library(uform_amd_inference OBJECT encoder/vram_kernels_amd.hip)
+    target_include_directories(
+        uform_amd_inference PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include"
+    )
     target_link_libraries(
         uform_amd_inference PRIVATE numkong::static forkunion::header stringzilla::static smashtable::header
     )
@@ -255,13 +402,13 @@ endif ()
 file(
     CONFIGURE
     OUTPUT
-    "${CMAKE_CURRENT_BINARY_DIR}/inference/vram_vendors.cpp"
+    "${CMAKE_CURRENT_BINARY_DIR}/encoder/vram_vendors.cpp"
     CONTENT
-    [=[#include "inference/entries.hpp"
+    [=[#include "uform/encoder/entries.hpp"
 
-namespace ui = unum::uform::inference;
-ui::device_kernels_t const *const ui::device_kernels_k[2] = {@uform_nvidia_inference_kernels_@, @uform_amd_inference_kernels_@};
+namespace ue = unum::uform::encoder;
+ue::device_kernels_t const *const ue::device_kernels_k[2] = {@uform_nvidia_inference_kernels_@, @uform_amd_inference_kernels_@};
 ]=]
     @ONLY
 )
-target_sources(uform_host PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/inference/vram_vendors.cpp")
+target_sources(uform_host PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/encoder/vram_vendors.cpp")

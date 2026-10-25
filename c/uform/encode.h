@@ -80,6 +80,11 @@ typedef struct uform_text_encode_t {
      *  after truncation, inside @c arena; @c NULL skips them. */
     uform_rows_tape_view_t* states;
 
+    /** The @b optional output for the token head's unit vectors, one row of the model's
+     *  @c token_width per token left after truncation, the prefix included, inside @c arena; a
+     *  model without a token head reports @c uform_status_unsupported_k. */
+    uform_rows_tape_view_t* token_vectors;
+
     /** Memory for every output, rewound by the call. */
     uform_arena_t arena;
 
@@ -95,6 +100,56 @@ typedef struct uform_text_encode_t {
 
 /** Encodes @c count texts through one forward, keeping the surfaces the caller names. */
 UFORM_EXPORT void uform_text_encode(uform_text_encode_t* arguments);
+
+/** The arguments of @c uform_text_choose. */
+typedef struct uform_text_choose_t {
+
+    /** The model to choose with; it must carry the byte decoder, its @c choice_temperature_groups
+     *  nonzero. */
+    uform_model_t model;
+
+    /** The executor the call runs on; it must share the model's residency. */
+    uform_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c uform_status_deferred_k. */
+    uform_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    uform_completion_t completion;
+
+    /** Items in @c texts, and the batch axis of every input and output. */
+    size_t count;
+
+    /** UTF-8 states, one per item, each ending where the choice goes; the call appends the mask
+     *  byte, and a state longer than the model's context loses its head, never its end. */
+    uform_tape_view_t texts;
+
+    /** Each item's legal choices, one byte each, @c uform_scalar_u8_k; an item with none chooses
+     *  nothing. */
+    uform_tape_view_t choices;
+
+    /** The @b optional question type of each item, @c count of them, below the model's
+     *  @c choice_temperature_groups; @c NULL puts every item in group zero. */
+    uint32_t const* temperature_groups;
+
+    /** Output for one probability per choice in @c choices order, @c uform_scalar_f32_k, inside
+     *  @c arena. */
+    uform_tape_view_t* probabilities;
+
+    /** Memory for every output, rewound by the call. */
+    uform_arena_t arena;
+
+    /** The @b optional handler, called with items scored. */
+    uform_progress_t progress;
+
+    /** The @b optional report; @c NULL skips it. */
+    uform_text_encode_stats_t* stats;
+} uform_text_choose_t;
+
+/** Scores each item's legal choices through one forward, a softmax over them alone at the item's
+ *  group's calibrated inverse temperature; a model without the byte decoder reports
+ *  @c uform_status_unsupported_k. */
+UFORM_EXPORT void uform_text_choose(uform_text_choose_t* arguments);
 
 /** What an image call reports beside its outputs. */
 typedef struct uform_image_encode_stats_t {
@@ -132,6 +187,10 @@ typedef struct uform_image_encode_t {
 
     /** The @b optional output for the final-norm states, one row per patch, inside @c arena. */
     uform_rows_tape_view_t* states;
+
+    /** The @b optional output for the token head's unit vectors, one row per patch, inside
+     *  @c arena. */
+    uform_rows_tape_view_t* token_vectors;
 
     /** Memory for every output, rewound by the call. */
     uform_arena_t arena;
@@ -183,6 +242,10 @@ typedef struct uform_image_encode_pixels_t {
 
     /** The @b optional output for the final-norm states, one row per patch, inside @c arena. */
     uform_rows_tape_view_t* states;
+
+    /** The @b optional output for the token head's unit vectors, one row per patch, inside
+     *  @c arena. */
+    uform_rows_tape_view_t* token_vectors;
 
     /** Memory for every output, rewound by the call. */
     uform_arena_t arena;
@@ -238,6 +301,10 @@ typedef struct uform_video_encode_t {
     /** The @b optional output for the final-norm states, one row per tube, inside @c arena. */
     uform_rows_tape_view_t* states;
 
+    /** The @b optional output for the token head's unit vectors, one row per tube, inside
+     *  @c arena. */
+    uform_rows_tape_view_t* token_vectors;
+
     /** Memory for every output, rewound by the call. */
     uform_arena_t arena;
 
@@ -291,6 +358,10 @@ typedef struct uform_audio_encode_t {
     /** The @b optional output for the final-norm states, one row per frame, inside @c arena. */
     uform_rows_tape_view_t* states;
 
+    /** The @b optional output for the token head's unit vectors, one row per frame, inside
+     *  @c arena. */
+    uform_rows_tape_view_t* token_vectors;
+
     /** Memory for every output, rewound by the call. */
     uform_arena_t arena;
 
@@ -336,6 +407,10 @@ typedef struct uform_audio_encode_samples_t {
 
     /** The @b optional output for the final-norm states, one row per frame, inside @c arena. */
     uform_rows_tape_view_t* states;
+
+    /** The @b optional output for the token head's unit vectors, one row per frame, inside
+     *  @c arena. */
+    uform_rows_tape_view_t* token_vectors;
 
     /** Memory for every output, rewound by the call. */
     uform_arena_t arena;

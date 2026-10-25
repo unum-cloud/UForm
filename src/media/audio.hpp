@@ -12,7 +12,7 @@
 
 #include <span> // `std::span`
 
-#include "core/types.hpp" // `expected_t`, `status_t`, the scalar aliases
+#include "uform/core/types.hpp" // `expected_t`, `status_t`, the scalar aliases
 
 namespace unum::uform::media {
 

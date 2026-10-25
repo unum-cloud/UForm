@@ -51,6 +51,12 @@ static void publish_model(uform_model_t *output, uform_scalar_t quantization, st
     *output = model;
 }
 
+/** Refuses a pin to any class but serial, the only one the stand-in runs as. */
+static bool reject_pin(uform_cpu_class_t cpu_class, uform_outcome_t *outcome) {
+    return reject_if(cpu_class != uform_cpu_class_unknown_k && cpu_class != uform_cpu_class_serial_k,
+                     uform_status_unsupported_k, "The stand-in runs as the serial class alone", outcome);
+}
+
 extern "C" {
 
 void uform_model_load_ram(uform_model_load_ram_t *arguments) {
@@ -59,7 +65,7 @@ void uform_model_load_ram(uform_model_load_ram_t *arguments) {
     if (reject_if(!arguments->model, uform_status_invalid_argument_k, "The model output must not be null", outcome))
         return;
     *arguments->model = nullptr;
-    if (reject_quantization(arguments->quantization, outcome)) return;
+    if (reject_quantization(arguments->quantization, outcome) || reject_pin(arguments->ram.cpu_class, outcome)) return;
     if (reject_if(!arguments->path.data || !arguments->path.length, uform_status_invalid_argument_k,
                   "The path must not be empty", outcome))
         return;
@@ -74,7 +80,7 @@ void uform_model_load_ram_buffer(uform_model_load_ram_buffer_t *arguments) {
     if (reject_if(!arguments->model, uform_status_invalid_argument_k, "The model output must not be null", outcome))
         return;
     *arguments->model = nullptr;
-    if (reject_quantization(arguments->quantization, outcome)) return;
+    if (reject_quantization(arguments->quantization, outcome) || reject_pin(arguments->ram.cpu_class, outcome)) return;
     if (reject_if(!arguments->buffer.data || !arguments->buffer.length, uform_status_invalid_argument_k,
                   "The checkpoint must not be empty", outcome))
         return;
@@ -102,7 +108,13 @@ void uform_model_describe(uform_model_describe_t *arguments) {
                   "The model and the description must not be null", outcome))
         return;
     uform_model_handle_t const &model = *arguments->model;
-    *arguments->description = {dimensions_k, context_k, model.quantization, model.memory_usage, "serial"};
+    *arguments->description = {dimensions_k,
+                               context_k,
+                               model.quantization,
+                               model.memory_usage,
+                               "serial",
+                               uform_cpu_class_serial_k,
+                               uform_gpu_class_unknown_k};
 }
 
 void uform_model_free(uform_model_t model) {

@@ -1,9 +1,10 @@
 /**
- *  @brief The tower steps NumKong has no kernel for, as host loops split across a thread pool: the per-modality
- *      entries, the coordinate fill, M-RoPE, and the per-token E4M3 scaling around each quantized product.
- *  @file src/inference/entries.hpp
+ *  @file include/uform/encoder/entries.hpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
+ *  @brief The tower steps NumKong has no kernel for, as host loops split across a thread pool:
+ *      the per-modality entries, the coordinate fill, M-RoPE, and the per-token E4M3 scaling
+ *      around each quantized product.
  *
  *  Each step mirrors one NVIDIA kernel of the training tower element for element, so a checkpoint encodes the same
  *  on every residency:
@@ -29,10 +30,10 @@
 #include <numkong/capabilities.h> // `nk_capability_t`, `nk_stream_t`
 #include <numkong/types.h>        // `nk_bf16_t`, `nk_e4m3_t`
 
-#include "core/types.hpp"            // the scalar aliases and the rank-tagged views, `st::basic_vector`
-#include "core/multimodal_batch.hpp" // `modality_t`, the shape views
+#include "uform/core/types.hpp"            // the scalar aliases and the rank-tagged views, `st::basic_vector`
+#include "uform/core/multimodal_batch.hpp" // `modality_t`, the shape views
 
-namespace unum::uform::inference {
+namespace unum::uform::encoder {
 
 namespace uc = unum::uform::core;
 namespace fu = ashvardanian::forkunion;
@@ -47,6 +48,7 @@ using uc::pixel_t;
 using uc::token_id_t;
 using uc::u16_t;
 using uc::u32_t;
+using uc::u64_t;
 
 using uc::f32r1_span_t;
 using uc::f32r1_view_t;
@@ -154,6 +156,19 @@ void quantize_tokens_e4m3(f32r2_view_t values, e4m3r2_span_t shadow, f32r1_span_
 void rescale_tokens(f32r2_view_t products, f32r1_view_t token_scales, f32_t weight_descale, bf16r2_view_t residual,
                     bf16r2_span_t values, fu::flat_pool_t &pool) noexcept;
 
+/** What a vendor's runtime reports about one of its devices beside its capabilities. */
+struct device_description_t {
+
+    /** The vendor's own name for the device, NUL-terminated and truncated to fit. */
+    char name[64] = {};
+
+    /** Streaming multiprocessors or compute units. */
+    u32_t compute_units = 0;
+
+    /** Device memory in bytes. */
+    u64_t memory_bytes = 0;
+};
+
 /**
  *  @brief The same steps for one GPU vendor, queued on a stream over device-addressable views, plus the copies the
  *      tower moves weights with. Each vendor's unit defines one table with the same signatures, so the tower picks
@@ -165,6 +180,10 @@ struct device_kernels_t {
 
     /** The vendor's capability group, @c nk_cap_cuda_k or @c nk_cap_rocm_k . */
     nk_capability_t vendor = 0;
+
+    /** Reads the name, compute units and memory of the vendor's device @p ordinal into
+     *  @p description . */
+    nk_status_t (*describe)(std::size_t ordinal, device_description_t &description) noexcept = nullptr;
 
     /** @p bytes from @p source to @p target , either side in host or device memory. */
     nk_status_t (*copy)(void *target, void const *source, std::size_t bytes, nk_stream_t stream) noexcept = nullptr;
@@ -212,6 +231,9 @@ struct device_kernels_t {
                                   bf16r2_view_t residual, bf16r2_span_t values, nk_stream_t stream) noexcept = nullptr;
 };
 
+/** Threads per block of every vendor kernel, a power of two the quantize reduction halves. */
+inline constexpr unsigned entries_block_threads_k = 256;
+
 /** The NVIDIA and AMD tables, each defined only by its vendor's unit, which a build without that vendor omits. */
 extern device_kernels_t const vram_nvidia_kernels_k, vram_amd_kernels_k;
 
@@ -227,4 +249,4 @@ extern device_kernels_t const *const device_kernels_k[2];
     return nullptr;
 }
 
-} // namespace unum::uform::inference
+} // namespace unum::uform::encoder
