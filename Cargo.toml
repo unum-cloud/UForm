@@ -24,6 +24,13 @@ version = "4.0.0-rc.1"
 name = "uform"
 path = "rust/lib.rs"
 
+[dependencies]
+# CMake builds each crate's tree in place of downloading the revision the submodule pins.
+forkunion = { version = "4.0.0-rc.1", default-features = false }
+numkong = "8.0.0-rc.1"
+smashtable = "1.0.0-rc.1"
+stringzilla = { version = "6.0.0-rc.1", default-features = false }
+
 # Which implementation of the C interface gets linked. Naming none links the engine for the host
 # alone; the GPU features add residencies to it, and `build.rs` refuses the stub beside either.
 #

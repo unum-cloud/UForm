@@ -98,12 +98,11 @@ const STUB: Implementation = Implementation {
     sources: &["src_stub"],
 };
 
-/// The sibling checkouts `UFORM_SIBLINGS=1` builds instead of the pinned revisions CMake fetches.
-const SIBLINGS: &[(&str, &str)] = &[
-    ("FETCHCONTENT_SOURCE_DIR_NUMKONG", "NumKong-v8"),
-    ("FETCHCONTENT_SOURCE_DIR_STRINGZILLA", "StringZilla-v6"),
-    ("FETCHCONTENT_SOURCE_DIR_FORKUNION", "ForkUnion-v4"),
-];
+/// The tree a sibling crate reports through its `links` metadata.
+fn sibling_source(links: &str) -> Result<String, String> {
+    let variable = format!("DEP_{}_SOURCE", links.to_uppercase());
+    env::var(&variable).map_err(|_| format!("{variable} is unset: this `{links}` crate predates reporting its tree"))
+}
 
 /// Answers the one implementation the features select, refusing the stub beside a GPU backend
 /// rather than choosing.
@@ -157,15 +156,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         library.define(option, if wanted { "ON" } else { "OFF" });
     }
 
-    // Local development builds the sibling checkouts beside this one; everyone else fetches the pins.
-    println!("cargo:rerun-if-env-changed=UFORM_SIBLINGS");
-    if env::var("UFORM_SIBLINGS").is_ok_and(|value| value == "1") {
-        let parent = manifest
-            .parent()
-            .ok_or("the crate has no parent directory to find siblings in")?;
-        for (variable, sibling) in SIBLINGS {
-            library.define(variable, parent.join(sibling));
-        }
+    // `FetchContent` builds each sibling crate's tree rather than downloading the pinned revision again.
+    for (variable, links) in [
+        ("FETCHCONTENT_SOURCE_DIR_FORKUNION", "forkunion"),
+        ("FETCHCONTENT_SOURCE_DIR_NUMKONG", "numkong"),
+        ("FETCHCONTENT_SOURCE_DIR_SMASHTABLE", "smashtable"),
+        ("FETCHCONTENT_SOURCE_DIR_STRINGZILLA", "stringzilla"),
+    ] {
+        library.define(variable, sibling_source(links)?);
     }
 
     // Every preset compiles with Clang, so an unset `CXX` takes `clang++` rather than the platform default.

@@ -60,6 +60,7 @@ Package.resolved
 .cache/
 .claude/
 CMakeUserPresets.json
+/.cargo/config.toml
 /compile_commands.json
 target/
 Cargo.lock

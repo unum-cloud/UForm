@@ -21,12 +21,12 @@ Three features swap what is linked, and `build.rs` refuses the stub beside eithe
 - `rocm` adds the AMD residency, and needs ROCm at build time.
 - `stub` links a stand-in that answers the same verbs over the C++ standard library alone, with deterministic rows, seconds to build and no codecs, for testing a caller and never for shipping.
 
-CMake fetches the pinned NumKong, StringZilla and ForkUnion revisions, while `UFORM_SIBLINGS=1` builds the `NumKong-v8`, `StringZilla-v6` and `ForkUnion-v4` checkouts beside this one instead.
+CMake builds the NumKong, StringZilla, ForkUnion and SmashTable trees of the crates Cargo resolved, rather than fetching their pinned revisions again.
 A WASI build reads the SDK from `WASI_SDK_PATH` and needs `-C target-feature=+simd128`.
 The suites run against the stub:
 
 ```sh
-UFORM_SIBLINGS=1 CC=clang-22 CXX=clang++-22 cargo test --features stub
+CC=clang-22 CXX=clang++-22 cargo test --features stub
 ```
 
 ## Quickstart
