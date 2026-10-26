@@ -66,7 +66,6 @@
 
 #include <cstdint> // `std::uint8_t`, `std::uint16_t`, `std::uint64_t`
 #include <cstring> // `std::memcpy`, `std::strcmp`
-#include <ctime>   // `nanosleep` — the completion-poll backoff
 
 #include <utility>  // `std::exchange`
 #include <span>     // `std::span` — the DMA ring ranges inside the wire PODs
@@ -74,6 +73,7 @@
 #include <chrono>   // `std::chrono::steady_clock` — the completion-poll deadline
 
 #include <cuda.h>      // `cuMemGetHandleForAddressRange`, `cuMemHostRegister`, `cuMemHostGetDevicePointer`
+#include <cuda/atomic> // `cuda::atomic_ref` — the device producer index a post claims
 #include <cuda/memory> // `cuda::align_down`, `cuda::align_up` — the pages covering a host range
 
 #if defined(UFORM_WITH_INFINIBAND)
@@ -362,19 +362,17 @@ struct host_page_registration_t {
 struct host_page_registry_t {
 
     /**
-     *  @brief Register every page covering @c [host_pointer,host_pointer+span) for GPU access — counting
-     *      pages other mappings already hold — and resolve @p device_pointer for @p host_pointer .
-     *  @param[in] host_pointer The NIC structure's host address; any alignment.
-     *  @param[in] span The structure's byte extent.
+     *  @brief Register every page covering @p host for GPU access — counting pages other mappings
+     *      already hold — and resolve @p device_address for its first byte.
+     *  @param[in] host The NIC structure's host bytes; any alignment.
      *  @param[in] memory NIC BAR space (the BlueFlame register) versus ordinary DMA memory.
-     *  @param[out] device_pointer The GPU-dereferenceable address for @p host_pointer .
+     *  @param[out] device_address The GPU-dereferenceable address of @p host 's first byte.
      */
-    [[nodiscard]] expected_t acquire(void *host_pointer, std::size_t span, host_memory_t memory,
-                                     CUdeviceptr &device_address) noexcept {
+    [[nodiscard]] expected_t acquire(bytes_span_t host, host_memory_t memory, CUdeviceptr &device_address) noexcept {
         device_address = 0;
         std::size_t const page_bytes = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
-        b8_t *const first = cuda::align_down(static_cast<b8_t *>(host_pointer), page_bytes);
-        b8_t *const last = cuda::align_up(static_cast<b8_t *>(host_pointer) + span, page_bytes);
+        b8_t *const first = cuda::align_down(host.data(), page_bytes);
+        b8_t *const last = cuda::align_up(host.data() + host.size(), page_bytes);
         unsigned const flags = CU_MEMHOSTREGISTER_DEVICEMAP |
                                (memory == host_memory_t::mmio_k ? CU_MEMHOSTREGISTER_IOMEMORY : 0u);
         for (b8_t *page = first; page != last; page += page_bytes) {
@@ -386,31 +384,31 @@ struct host_page_registry_t {
             CUresult const registered = cuMemHostRegister(entry.page, page_bytes, flags);
             if (registered == CUDA_SUCCESS) entry.owned = true;
             else if (registered != CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED) {
-                release(first, static_cast<std::size_t>(page - first)); // exactly the pages acquired so far
+                release({first, page}); // exactly the pages acquired so far
                 return cuda_failure(registered, "host page registration failed ({} memory, page={})",
                                     memory == host_memory_t::mmio_k ? "NIC MMIO" : "DMA", entry.page);
             }
             if (status_t inserted = insert_(entry); inserted != status_t::success_k) {
                 if (entry.owned) cuMemHostUnregister(entry.page);
-                release(first, static_cast<std::size_t>(page - first));
+                release({first, page});
                 return expected_t::fail(inserted, "page-registration table allocation failed");
             }
         }
-        if (CUresult result = cuMemHostGetDevicePointer(&device_address, host_pointer, 0); result != CUDA_SUCCESS) {
-            release(host_pointer, span);
+        if (CUresult result = cuMemHostGetDevicePointer(&device_address, host.data(), 0); result != CUDA_SUCCESS) {
+            release(host);
             return cuda_failure(result, "device-pointer resolution failed");
         }
         return {};
     }
 
-    /** Drop one reference from every page covering @c [host_pointer,host_pointer+span) — the exact
-     *  range of a prior @ref acquire ; the last reference unregisters an owned page. A zero @p span
-     *  covers no page and is the no-op an unwound partial acquire relies on. */
-    void release(void *host_pointer, std::size_t span) noexcept {
-        if (host_pointer == nullptr) return;
+    /** Drop one reference from every page covering @p host — the exact bytes of a prior
+     *  @ref acquire ; the last reference unregisters an owned page. Empty bytes cover no page and
+     *  are the no-op an unwound partial acquire relies on. */
+    void release(bytes_span_t host) noexcept {
+        if (host.empty()) return;
         std::size_t const page_bytes = static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
-        b8_t *const first = cuda::align_down(static_cast<b8_t *>(host_pointer), page_bytes);
-        b8_t *const last = cuda::align_up(static_cast<b8_t *>(host_pointer) + span, page_bytes);
+        b8_t *const first = cuda::align_down(host.data(), page_bytes);
+        b8_t *const last = cuda::align_up(host.data() + host.size(), page_bytes);
         for (b8_t *page = first; page != last; page += page_bytes) {
             host_page_registration_t *held = find_(page);
             if (held == nullptr || held->references == 0) continue; // release without acquire — nothing to drop
@@ -442,17 +440,6 @@ struct host_page_registry_t {
 
     /** The page table — a handful of entries, walked linearly. */
     st::basic_vector<host_page_registration_t> pages_ {};
-};
-
-/** One acquired page range a mapping must release — the exact @c (host,span) it passed to
- *  @ref host_page_registry_t::acquire ; a null host is the empty range. */
-struct host_page_range_t {
-
-    /** The NIC structure's host address, as acquired. */
-    void *host = nullptr;
-
-    /** The structure's byte extent, as acquired. */
-    std::size_t span = 0;
 };
 
 /**
@@ -687,9 +674,12 @@ struct infiniband_endpoint_t {
         return {};
     }
 
-    /** Spin-poll (50 µs backoff) until one completion is reaped or @p timeout_seconds elapses. */
-    [[nodiscard]] expected_t poll_completion(f64_t timeout_seconds) noexcept {
+    /** Poll until a completion is reaped or @p timeout_seconds elapse, calling the ForkUnion
+     *  @p waiter after each empty poll, which finds no queue word to watch and waits its cap. */
+    template <typename waiter_type_>
+    [[nodiscard]] expected_t poll_completion(f64_t timeout_seconds, waiter_type_ waiter) noexcept {
         auto const deadline = std::chrono::steady_clock::now() + std::chrono::duration<f64_t>(timeout_seconds);
+        u32_t const unwatched = 0;
         while (true) {
             ibv_wc completion {};
             int const reaped = ibv_poll_cq(completion_queue_, 1, &completion);
@@ -702,8 +692,7 @@ struct infiniband_endpoint_t {
             }
             if (std::chrono::steady_clock::now() >= deadline)
                 return expected_t::fail(status_t::io_error_k, "no completion within {}s", timeout_seconds);
-            timespec const backoff {0, 50'000};
-            nanosleep(&backoff, nullptr);
+            waiter(&unwatched, u32_t {0}, std::size_t {0});
         }
     }
 
@@ -769,17 +758,17 @@ struct infiniband_queue_mapping_t {
     infiniband_queue_mapping_t(infiniband_queue_mapping_t &&other) noexcept
         : handles_(std::exchange(other.handles_, infiniband_queue_handles_t {})),
           registry_(std::exchange(other.registry_, nullptr)),
-          send_queue_range_(std::exchange(other.send_queue_range_, host_page_range_t {})),
-          doorbell_range_(std::exchange(other.doorbell_range_, host_page_range_t {})),
-          blueflame_range_(std::exchange(other.blueflame_range_, host_page_range_t {})) {}
+          send_queue_range_(std::exchange(other.send_queue_range_, bytes_span_t {})),
+          doorbell_range_(std::exchange(other.doorbell_range_, bytes_span_t {})),
+          blueflame_range_(std::exchange(other.blueflame_range_, bytes_span_t {})) {}
     infiniband_queue_mapping_t &operator=(infiniband_queue_mapping_t &&other) noexcept {
         if (this != &other) {
             destroy_();
             handles_ = std::exchange(other.handles_, infiniband_queue_handles_t {});
             registry_ = std::exchange(other.registry_, nullptr);
-            send_queue_range_ = std::exchange(other.send_queue_range_, host_page_range_t {});
-            doorbell_range_ = std::exchange(other.doorbell_range_, host_page_range_t {});
-            blueflame_range_ = std::exchange(other.blueflame_range_, host_page_range_t {});
+            send_queue_range_ = std::exchange(other.send_queue_range_, bytes_span_t {});
+            doorbell_range_ = std::exchange(other.doorbell_range_, bytes_span_t {});
+            blueflame_range_ = std::exchange(other.blueflame_range_, bytes_span_t {});
         }
         return *this;
     }
@@ -797,9 +786,9 @@ struct infiniband_queue_mapping_t {
   private:
     void destroy_() noexcept {
         if (registry_ != nullptr) {
-            for (host_page_range_t *range : {&blueflame_range_, &doorbell_range_, &send_queue_range_}) {
-                registry_->release(range->host, range->span);
-                *range = host_page_range_t {};
+            for (bytes_span_t *range : {&blueflame_range_, &doorbell_range_, &send_queue_range_}) {
+                registry_->release(*range);
+                *range = bytes_span_t {};
             }
             registry_ = nullptr;
         }
@@ -812,13 +801,13 @@ struct infiniband_queue_mapping_t {
     host_page_registry_t *registry_ = nullptr;
 
     /** The send queue's acquired range, released through @ref registry_ at teardown. */
-    host_page_range_t send_queue_range_ {};
+    bytes_span_t send_queue_range_ {};
 
     /** The doorbell record's acquired range — routinely a page shared with other queue pairs. */
-    host_page_range_t doorbell_range_ {};
+    bytes_span_t doorbell_range_ {};
 
     /** The BlueFlame register's acquired range — NIC BAR space. */
-    host_page_range_t blueflame_range_ {};
+    bytes_span_t blueflame_range_ {};
 };
 
 /** The GPU-reachable completion path of one queue pair: the completion ring and its doorbell
@@ -832,15 +821,15 @@ struct infiniband_completion_mapping_t {
     infiniband_completion_mapping_t(infiniband_completion_mapping_t &&other) noexcept
         : handles_(std::exchange(other.handles_, infiniband_completion_handles_t {})),
           registry_(std::exchange(other.registry_, nullptr)),
-          ring_range_(std::exchange(other.ring_range_, host_page_range_t {})),
-          doorbell_range_(std::exchange(other.doorbell_range_, host_page_range_t {})) {}
+          ring_range_(std::exchange(other.ring_range_, bytes_span_t {})),
+          doorbell_range_(std::exchange(other.doorbell_range_, bytes_span_t {})) {}
     infiniband_completion_mapping_t &operator=(infiniband_completion_mapping_t &&other) noexcept {
         if (this != &other) {
             destroy_();
             handles_ = std::exchange(other.handles_, infiniband_completion_handles_t {});
             registry_ = std::exchange(other.registry_, nullptr);
-            ring_range_ = std::exchange(other.ring_range_, host_page_range_t {});
-            doorbell_range_ = std::exchange(other.doorbell_range_, host_page_range_t {});
+            ring_range_ = std::exchange(other.ring_range_, bytes_span_t {});
+            doorbell_range_ = std::exchange(other.doorbell_range_, bytes_span_t {});
         }
         return *this;
     }
@@ -859,9 +848,9 @@ struct infiniband_completion_mapping_t {
   private:
     void destroy_() noexcept {
         if (registry_ != nullptr) {
-            for (host_page_range_t *range : {&doorbell_range_, &ring_range_}) {
-                registry_->release(range->host, range->span);
-                *range = host_page_range_t {};
+            for (bytes_span_t *range : {&doorbell_range_, &ring_range_}) {
+                registry_->release(*range);
+                *range = bytes_span_t {};
             }
             registry_ = nullptr;
         }
@@ -874,10 +863,10 @@ struct infiniband_completion_mapping_t {
     host_page_registry_t *registry_ = nullptr;
 
     /** The completion ring's acquired range, released through @ref registry_ at teardown. */
-    host_page_range_t ring_range_ {};
+    bytes_span_t ring_range_ {};
 
     /** The completion doorbell's acquired range — routinely a page shared with other queues. */
-    host_page_range_t doorbell_range_ {};
+    bytes_span_t doorbell_range_ {};
 };
 
 #if defined(__CUDACC__)
@@ -930,7 +919,8 @@ __device__ inline void infiniband_post_write(infiniband_queue_handles_t handles,
                                              u32_t local_access_key, u64_t remote_address, u32_t remote_access_key,
                                              u32_t byte_count, infiniband_signaling_t signaling,
                                              void const *inline_four_bytes) noexcept {
-    u32_t const producer_index = atomicAdd(handles.producer_index, 1u);
+    u32_t const producer_index = cuda::atomic_ref<u32_t, cuda::thread_scope_device> {*handles.producer_index}.fetch_add(
+        1u, cuda::std::memory_order_relaxed);
     u32_t const cell_offset = (producer_index % handles.send_queue_entry_count) * handles.send_queue_stride;
     std::byte *entry_bytes = handles.send_queue.data() + cell_offset;
 

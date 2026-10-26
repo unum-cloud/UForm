@@ -1119,10 +1119,20 @@ pub(crate) fn vram_options(devices: &[i32], gpu_class: Option<GPUClass>) -> ufor
     }
 }
 
-/// Borrows a path as the bytes the C interface exchanges, which must be UTF-8.
+/// Borrows a path as the bytes the C interface exchanges: the OS's own bytes on Unix, not necessarily
+/// UTF-8, and UTF-8 where the OS keeps paths in another encoding.
 pub(crate) fn path_view(path: &Path) -> Result<uform_bytes_view_t> {
-    let path = path.to_str().ok_or(fail(Status::Io, "the path is not valid UTF-8"))?;
-    Ok(path.as_bytes().into())
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+
+        Ok(path.as_os_str().as_bytes().into())
+    }
+    #[cfg(not(unix))]
+    {
+        let path = path.to_str().ok_or(fail(Status::InvalidArgument, "the path is not valid UTF-8"))?;
+        Ok(path.as_bytes().into())
+    }
 }
 
 // endregion: Placements

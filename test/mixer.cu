@@ -480,7 +480,8 @@ static void mixer_routes_segments(test_suite_t &suite) {
 
     u32_t const host_domain_index = host_domain_index_from_environment();
     u32_t const host_domain_count = host_domain_count_from_environment();
-    auto bootstrapped = mesh_topology_t::bootstrap(host_domain_index, host_domain_count, member_count);
+    auto bootstrapped = mesh_topology_t::bootstrap(host_domain_index, host_domain_count, &pause_between_polls,
+                                                   member_count);
     if (!bootstrapped) return suite.check(false, "mesh bootstrap: {}", bootstrapped.description_);
     mesh_topology_t topology = std::move(bootstrapped.value_);
     // The routing world spans every multimem_domain's members; this domain's GPUs carry the world
@@ -548,7 +549,8 @@ static void mixer_routes_bags(test_suite_t &suite, u32_t rows, u32_t columns_per
 
     u32_t const host_domain_index = host_domain_index_from_environment();
     u32_t const host_domain_count = host_domain_count_from_environment();
-    auto bootstrapped = mesh_topology_t::bootstrap(host_domain_index, host_domain_count, member_count);
+    auto bootstrapped = mesh_topology_t::bootstrap(host_domain_index, host_domain_count, &pause_between_polls,
+                                                   member_count);
     if (!bootstrapped) return suite.check(false, "mesh bootstrap: {}", bootstrapped.description_);
     mesh_topology_t topology = std::move(bootstrapped.value_);
     u32_t const world_member_count = member_count * host_domain_count;

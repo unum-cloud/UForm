@@ -6,6 +6,8 @@
  *  @author Ash Vardanian
  *  @date July 7, 2026
  */
+#include <cmath> // `std::sqrt` — a sample window's L2
+
 #include <unistd.h> // `::write`, `STDERR_FILENO` — the host diagnostic channel
 
 #include <cuda.h> // `cuMemsetD8`, `cuMemcpyDtoH`, `cuStreamSynchronize`
@@ -50,7 +52,7 @@ static __global__ void telemetry_signal_probe_kernel_(f32r1_view_t values, nk::t
     if (threadIdx.x != 0u) return;
     telemetry_row_t &state = row[0];
     state.updates += 1u;
-    state.last_scalar = sqrtf(energy);
+    state.last_scalar = std::sqrt(energy);
     state.last_checksum = checksum;
     if (nonzero_mask == 0u) {
         state.zero_observations += 1u;

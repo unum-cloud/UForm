@@ -43,13 +43,13 @@ A few convictions shape the whole stack:
 - __Communication buys batch size buys quality__ — custom lower-level cross-GPU collectives unlock far larger global batches, and with contrastive objectives more in-batch negatives directly sharpen the learned space.
 - __The data path is half the model__ — for IO-heavy modalities like images and video, the parallel CPU/GPU decode-and-load scaffolding is as worth optimizing as the forward and backward passes.
 - __Lower precision wins twice__ — narrow number formats drove most of the last decade's FLOP/s while moving fewer bytes: more tensor-core throughput _and_ less traffic across the memory wall, from GPU SRAM/HBM to CPU L1/L2.
-  UForm trains in mixed BFloat16/Float32 and serves scale-free E4M3 Float8 from one `mode` flag — quantization built in, not bolted on — for pocket-sized weights and 2.5× faster Float8 matmuls on Blackwell.
+  UForm trains in mixed BFloat16/Float32 and serves scale-free E4M3 Float8 from one `quantization` argument at load — quantization built in, not bolted on — for pocket-sized weights and 2.5× faster Float8 matmuls on Blackwell.
 - __A shared uniform encoder across modalities__ — attention-pooling the output of a single same-width encoder into one pooled embedding is the most direct route to emergent cross-modal transfer.
-- __Non-autoregressive generation__ — emitting the entire output in one forward pass instead of token-by-token pushes single-GPU throughput up by one or two orders of magnitude for tasks that can be ahndled with such models — from ≈100 tokens/s to up to ≈10'000.
+- __Non-autoregressive generation__ — emitting the entire output in one forward pass instead of token-by-token pushes single-GPU throughput up by one or two orders of magnitude for tasks that can be handled with such models — from ≈100 tokens/s to up to ≈10'000.
 
-This repository is the full training and inference stack, tuned for NVIDIA Hopper and Blackwell GPUs: custom CUDA kernels, Python trainers, and GPU-accelerated loaders & decoders for IO-heavy modalities.
-The trained model carries __no PyTorch or JAX dependency__ — those appear only as offline parity oracles that validate the CUDA kernels.
-There is not even NCCL or NVSHMEM, no dynamic memory allcoations on the hot paths, locks, mutexes, or even need for multiple threads.
+This repository is the full training and inference stack, tuned for NVIDIA Hopper and Blackwell GPUs: custom CUDA kernels, a C++ trainer, and GPU-accelerated loaders & decoders for IO-heavy modalities.
+Neither training nor inference carries a __PyTorch or JAX dependency__.
+There is not even NCCL or NVSHMEM, no dynamic memory allocations on the hot paths, locks, mutexes, or even need for multiple threads.
 
 ## Architecture & Goals
 
@@ -70,7 +70,8 @@ The subsections below trace it end to end.
 The uniform encoder processes all bytes at full width, then an attention-pool distills the per-byte output into the pooled embedding where retrieval and cross-modal matching happen.
 The pooled embedding is the deployment surface — every retrieval query, image-text match, and reranker score runs through one fixed-length vector — so its _information density_ and _dimensional decorrelation_ together set retrieval quality.
 Neither follows from masked-modelling cross-entropy alone: under pure reconstruction pressure the pool collapses rank, concentrating its energy in a handful of directions.
-Two opt-in auxiliary regularizers (off by default; enable via `--tcr-lambda` and `--lipschitz-lambda`, both default `0.0`) shape that pooled code's spectrum from both ends.
+Two opt-in auxiliary regularizers shape that pooled code's spectrum from both ends.
+The trainer's configuration declares both as `tcr_lambda` and `lipschitz_lambda`, zero by default, and their kernels are not yet wired into the step.
 
 __Total Coding Rate__ (TCR), from the [MCR²](https://arxiv.org/abs/2006.08558) work, raises the floor — the coding rate of an L2-normalized batch of pooled rows $Z$:
 
@@ -107,7 +108,7 @@ The same property pays off anywhere the output is bounded and mostly determined 
 
 - __Data Anonymization__ — redacting secrets and PII from in-flight messages before they are indexed, logged, shared, or used for training; the output is the input with sensitive spans rewritten.
 - __Logs Streams Normalization__ — folding unstructured packets into a shared `{time}{source}{priority}{message}` schema, supporting template induction, alert deduplication, and correlation; a schema-fill, not free generation.
-- __Code Documentation Extraction__ – bringing complex multi-language docstrings to one clean Web-firndly documentation form.
+- __Code Documentation Extraction__ – bringing complex multi-language docstrings to one clean Web-friendly documentation form.
 
 Similar story with media modalities:
 
@@ -193,41 +194,39 @@ UForm not only publicly lists all of the data mixtures and code used for trainin
 The pipeline follows the convictions up top:
 
 - [Mixed Precision by Design](#) — BF16 training, E4M3 inference, one master copy per weight.
-- [GPU-Accelerated Data-loaders & IO](#) — bytes to batch on the GPU, no CPU decode.
+- [GPU-Accelerated Data-loaders & IO](#) — bytes to batch on the GPU, decoding there wherever the codec allows.
 - [NVLink-based Cross-GPU Collaboration](#) — cross-rank collectives inside the captured graph, no NCCL.
 - [Optimizing via Adafactor](#) — magnitude-aware updates at byte-level scale.
 
 ### GPU-Accelerated Data-loaders & IO
 
 The defining property of the UForm training stack is that __nothing should leave the GPU between fetch and forward__.
-Corpora are read into device memory as Apache Arrow-compatible columns, byte-tokenized and gathered on-device, and handed to the C++ step as raw device pointers through the [`__cuda_array_interface__`](https://numba.readthedocs.io/en/stable/cuda/cuda_array_interface.html) protocol — DLPack's GPU sibling — so there is no host-device copy in the loop.
+Parquet corpora are read into device memory by cuDF over GPUDirect Storage as Apache Arrow-compatible columns, then byte-tokenized, gathered and packed on-device by the C++ loaders, so text takes no host-device copy in the loop.
 The binary-column path sustains 2–3 GB/s of media bytes at \~5 ms/batch, comfortably ahead of what a training step consumes, so the prefetcher rarely stalls.
 This easily supersedes single-process PyTorch `DataLoader`s by \~25× even for text processing, \~25× even for images, even without augmentations, and by a criminal number for videos.
 
 Each modality goes from raw bytes to a masked batch on-device, and every item — a caption, an image, a clip — becomes a variable-width __segment__ packed onto one shared `[rows, columns]` grid and tagged by modality, so a single uniform encoder ingests them all:
 
 - __Tokens__ — byte-tokenized, bucket-stratified, packed, and span-masked in CUDA; paired sentences average a few hundred bytes, so packing many into one 4 KB row keeps the batch dense without wasting context on padding.
-- __Images__ — decoded from JPEG, PNG, or WebP by nvImageCodec into __4-channel RGBA__ (alpha is 255 where the codec carries none), then __2D patchified__ and MAE-masked.
+- __Images__ — JPEG decoded on the GPU by nvJPEG, PNG and WebP on host threads, into __4-channel RGBA__ (alpha is 255 where the codec carries none), then cropped and resized by one NPP batch, __2D patchified__ and MAE-masked.
 - __Video__ — decoded by NVDEC, NV12 → planar RGB, then __3D tube-extracted__ and tube-masked into a `[3, T, H, W]` tensor.
-- __Audio__ — decoded from WAV, FLAC, or OGG-Opus by a pool of libavcodec workers, then chunked into __raw waveform frames__ on the GPU — the mel / STFT frontend is a learnable layer of the encoder, not a fixed loader transform — and masked like the rest.
+- __Audio__ — decoded from WAV, FLAC, MP3 or Opus by a pool of libavcodec workers, then chunked into __raw waveform frames__ on the GPU — the mel / STFT frontend is a learnable layer of the encoder, not a fixed loader transform — and masked like the rest.
 - __Code__ – ...
 
 First-party NVIDIA libraries do the decode and IO:
 
-- __[nvImageCodec](https://github.com/NVIDIA/nvImageCodec)__ — batched on-GPU decode of JPEG, PNG, and WebP into device RGB tensors.
-- __[nvJPEG](https://developer.nvidia.com/nvjpeg)__ — the hardware-JPEG fast path on Blackwell's decode engine, device-direct.
+- __[nvJPEG](https://developer.nvidia.com/nvjpeg)__ — batched on-GPU JPEG decode, on the hardware decode engine where the GPU has one.
+- __[NPP](https://developer.nvidia.com/npp)__ — batched crop and resize of decoded images into the batch's patch grid.
 - __[NVDEC](https://developer.nvidia.com/video-codec-sdk)__ — on-GPU video decode, NV12 → planar RGB.
 - __[cuFile](https://developer.nvidia.com/gpudirect-storage)__ — streams compressed bytes from disk straight to device memory on GDS-capable mounts, with a buffered fallback.
-- __[cuRAND](https://developer.nvidia.com/curand)__ — device-side RNG for span-, patch-, and tube-mask sampling and augmentation.
-- __[cuDF](https://github.com/rapidsai/cudf)__ — GPU dataframes that read and filter Parquet and JSONL corpora as Arrow-format columns and gather mined negatives with `series.take`, no CPU round-trip.
-- __[CuPy](https://github.com/cupy/cupy)__ — GPU arrays for on-device caption byte-token scatter and GPU-native sampling.
+- __[cuDF](https://github.com/rapidsai/cudf)__ — GPU-side Parquet reads through its KvikIO layer, on explicit per-loader streams.
 
 And the host-side C++ libraries that carry bytes up to the device line:
 
 - __[NumKong](https://github.com/ashvardanian/NumKong)__ — the `nk::` tensor and span types every host- and device-side buffer is shaped against.
 - __[ForkUnion](https://github.com/ashvardanian/ForkUnion)__ — a lock-free CPU thread pool that fans out host-side decode and file IO without `std::thread`.
 - __[StringZilla](https://github.com/ashvardanian/StringZilla)__ — SIMD byte-string ops and the Arrow strings tape that holds raw records.
-- __[PyArrow](https://github.com/apache/arrow)__ — the columnar on-disk format the corpora are stored and read in.
+- __[SmashTable](https://github.com/ashvardanian/SmashTable)__ — the vectors and hash tables every host-side table grows in.
 - __[yyjson](https://github.com/ibireme/yyjson)__ — the exception-free JSON parser behind JSONL dataset records and SafeTensors headers.
 
 ### NVLink-based Cross-GPU Collaboration
@@ -241,7 +240,9 @@ Ranks synchronize with an in-kernel arrive-and-wait barrier — a `multimem.red.
 
 The whole forward, backward, gradient all-reduce, and optimizer step is therefore one graph the host launches once and replays — no phase decomposition, no host barrier, no CPU-side scheduling between collectives.
 We call this path the __Multicast World__; it needs Compute Capability 9.0+ with NVLink multicast (Hopper or Blackwell) and is validated against single-rank references across world sizes 2 and 4.
-Cross-node training would still need NCCL or NVSHMEM with IBGDA — UForm targets a single NVLink domain — and the [FAQ](#why-hand-roll-ptx-instead-of-nccl-and-nvshmem) covers why this is hand-rolled rather than delegated to either.
+Where multicast is absent, every member reads its peers in a fixed order instead, with bit-identical results.
+Across NVLink domains, device-initiated InfiniBand writes on a recursive-doubling schedule all-gather the contrastive embeddings and all-reduce the gradients from inside the same captured graph.
+The [FAQ](#why-hand-roll-ptx-instead-of-nccl-and-nvshmem) covers why this is hand-rolled rather than delegated to NCCL or NVSHMEM.
 
 ### Mixed Precision by Design
 
@@ -258,7 +259,8 @@ Activation recomputation is always on: each block keeps only its Float32 input, 
 Activation memory is one block's intermediates plus one residual stream per block, bought with one extra forward of every block but the top one.
 
 __Inference is BF16 or E4M3 (FP8), fixed per model at load time.__
-The compute mode is a single flag set at construction — `infer_bf16` or `infer_fp8`, not a per-layer toggle; an FP8 model keeps each weight's BF16 master alongside an E4M3 quantized copy used at runtime, while a BF16 model leaves the E4M3 copy empty.
+The compute mode is the one `quantization` scalar a load names — `bf16` as the checkpoint stores it, or `e4m3` quantized at load — not a per-layer toggle; an E4M3 model runs its transformer blocks in Float8, while the entries, the attention pool and the projection head stay BFloat16.
+Each load packs its weights for one CPU or GPU class, the hardware's own or one the caller pins, so a single binary carries tuned variants from Haswell to Diamond Rapids on x86, from Graviton2 to Vera on Arm, and from Ampere to Blackwell and CDNA3 to CDNA5 on GPUs.
 [NumKong](https://github.com/ashvardanian/NumKong) runs every matrix product and every attention, forward and backward — BF16 and E4M3 alike, against weights packed once per step — and [CUB](https://github.com/NVIDIA/cccl) supplies the device-wide scans and reductions inside the custom kernels.
 
 ### Optimizing via Adafactor (the Sole Optimizer)
@@ -341,23 +343,39 @@ This is how a run with media achieves cross-modal retrieval: image↔text, video
 
 Cross-modal retrieval and the structured-output tasks — de-identification, segmentation, log normalization, document extraction — all run over the same backbone and the same GPU-accelerated scaffolding, at encoder throughput.
 
+### Evaluation and Calibration
+
+`uform_eval <checkpoint>` scores a checkpoint through the C interface as Recall@1, @5 and @10 in both directions between captions and media.
+`--coco` takes COCO 2017 val, `--msrvtt` the MSR-VTT 1K-A test, `--clotho` the Clotho evaluation set, and `--coco-sm` the COCO-SM captions in 21 languages.
+It encodes on host threads, or in the VRAM of the GPU `--gpu` names.
+
+A run with `--choices-weight` also trains calibrated choices through the byte decoder: a softmax over each item's legal bytes alone, scored by a soft cross-entropy and a Brier term `--brier-weight` weighs.
+`uform_eval <checkpoint> --calibrate <choices.jsonl> --output <calibrated.safetensors>` fits one inverse temperature per question type on held-out choices.
+It prints each group's negative log-likelihood and the top-choice calibration error before and after, and writes the checkpoint again with them as `choices.inverse_temperatures`, which `uform_text_choose` reads.
+
 ## Repository Layout
 
 ```bash
 uform/
 ├── c/                the C ABI in uform/*.h, shared by every binding, and its test
-├── src/              the engine behind the C ABI, one namespace per folder
-│   ├── *.cpp         the verbs of each header: types, model, encode and train
-│   ├── encoder/      the tower on the host, and the NVIDIA and AMD kernels beside it
-│   ├── media/        image, video and audio decoding on the host
+├── include/uform/    the templates and models of every component, one folder per namespace
 │   ├── core/         device memory, batches, streams, mesh, transports, model cells, checkpoints
+│   ├── encoder/      the encoder towers and kits, their geometry and entries
+│   ├── media/        image, video and audio decoding on the host
 │   ├── loaders/      storage sessions, shard readers, and GPU image, video and audio decode
-│   └── train/        the composition root of a training run
-├── src_stub/         a stand-in answering the same verbs over the C++ standard library alone
-├── tools/            the trainer binary
+│   └── train/        the composition of a training run
+├── src/              the instantiations, the dispatch and the per-class units behind the C ABI
+│   ├── *.cpp         the verbs of each header: types, model, encode and train
+│   ├── encoder/      one unit per CPU and GPU class, and each vendor's kernels
+│   └── ...           the compiled bodies of the other include/uform/ folders
+├── src_stub/         a stand-in answering the same verbs over the C++ standard library and ForkUnion
+├── tools/            the trainer, evaluation and growth binaries
+├── bench/            the encoder and training-kernel benchmarks
 ├── test/             conformance suites, one file per cell, and the binding suites in python/
+├── verification/     Promela models of the mesh protocols, checked with Spin
 ├── scripts/
-│   ├── data/         dataset acquisition, repacking and mining, with the mixture JSONs
+│   ├── data/         dataset acquisition, repacking and mining
+│   ├── mixtures/     the dataset mixtures a run trains on
 │   └── slurm/        cluster runners for training, tests and acquisition
 ├── python/           the CPython extension over the C ABI
 ├── rust/             the Rust crate over the C ABI
@@ -390,7 +408,7 @@ NumKong's ragged attention makes the expressive route as cheap as the mean, so t
 
 [NumKong](https://github.com/ashvardanian/NumKong) already runs a [FlashAttention](https://arxiv.org/abs/2205.14135)-style ragged attention, forward and backward, on every GPU generation and on the CPU, with each segment and head summed in a fixed order.
 One kernel library behind the products and the attention keeps the external surface small across driver and architecture bumps.
-The banned-backends list in STYLE.md — ThunderKittens, FA3, CUTLASS, TransformerEngine — exists for this reason.
+ThunderKittens, FA3, CUTLASS and TransformerEngine stay out of the stack for the same reason.
 
 ### Why hand-roll PTX instead of NCCL and NVSHMEM?
 

@@ -135,14 +135,6 @@ pub struct uform_relations_view_t {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
-pub struct uform_choices_view_t {
-    pub offsets: *const usize,
-    pub bytes: *const u8,
-    pub targets: *const f32,
-}
-
-#[repr(C)]
 pub struct uform_trainer_step_t {
     pub trainer: uform_trainer_t,
     pub executor: uform_executor_t,
@@ -154,7 +146,8 @@ pub struct uform_trainer_step_t {
     pub bags: *const u32,
     pub temperature_groups: *const u32,
     pub sides: *const uform_late_interaction_side_t,
-    pub choices: uform_choices_view_t,
+    pub choices: uform_tape_view_t,
+    pub choice_targets: uform_tape_view_t,
     pub relations: uform_relations_view_t,
     pub embeddings: *mut uform_rows_view_t,
     pub arena: uform_arena_t,
@@ -180,6 +173,7 @@ extern "C" {
     pub fn uform_negatives_name(negatives: uform_negatives_t) -> *const c_char;
     pub fn uform_negatives_from_name(name: uform_bytes_view_t) -> uform_negatives_t;
     pub fn uform_multimem_tier_name(tier: uform_multimem_tier_t) -> *const c_char;
+    pub fn uform_multimem_tier_from_name(name: uform_bytes_view_t) -> uform_multimem_tier_t;
 
     pub fn uform_mesh_bootstrap(arguments: *mut uform_mesh_bootstrap_t);
     pub fn uform_mesh_describe(arguments: *mut uform_mesh_describe_t);
@@ -330,7 +324,7 @@ impl FromStr for Negatives {
     }
 }
 
-/// How a mesh's NVLink domains reduce; the C interface spells it but reads none back.
+/// How a mesh's NVLink domains reduce.
 ///
 /// Mirrors `uform_multimem_tier_t`.
 #[repr(i32)]
@@ -356,6 +350,20 @@ impl fmt::Display for MultimemTier {
     /// Calls `uform_multimem_tier_name`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(spelling(uform_multimem_tier_name, *self as c_int))
+    }
+}
+
+impl FromStr for MultimemTier {
+    type Err = Error;
+
+    /// Calls `uform_multimem_tier_from_name`.
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(
+            text,
+            uform_multimem_tier_from_name,
+            uform_multimem_tier_name,
+            MultimemTier::from_raw,
+        )
     }
 }
 
@@ -790,52 +798,32 @@ pub struct TrainerStepStats {
     pub dropped: usize,
 }
 
-/// Each item's legal choices and their targets, as compressed sparse rows; empty offsets make no
-/// choices.
-///
-/// Mirrors `uform_choices_view_t`.
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
-pub struct ChoicesView<'config> {
-    /// The step's count plus one non-decreasing offsets into `bytes` and `targets`; an item
-    /// offering no bytes makes no choice.
-    pub offsets: &'config [usize],
-    /// Item `i` offers the distinct bytes `bytes[offsets[i]..offsets[i + 1]]`.
-    pub bytes: &'config [u8],
-    /// The target probability of each byte, paired with `bytes`, summing to one per item.
-    pub targets: &'config [f32],
-}
-
-impl ChoicesView<'_> {
-    /// Lends the choices to a step over `count` items, refusing ones the library would read past.
-    fn lower(&self, count: usize) -> Result<uform_choices_view_t> {
-        if self.offsets.is_empty() {
-            return match self.bytes.is_empty() && self.targets.is_empty() {
-                true => Ok(uform_choices_view_t {
-                    offsets: ptr::null(),
-                    bytes: ptr::null(),
-                    targets: ptr::null(),
-                }),
-                false => Err(fail(Status::InvalidArgument, "choices without offsets name no items")),
-            };
-        }
-        if self.offsets.len() != count + 1 {
-            return Err(fail(
-                Status::ShapeMismatch,
-                "choices hold one more offset than the step's items",
-            ));
-        }
-        if self.offsets.windows(2).any(|pair| pair[1] < pair[0]) || self.offsets[count] > self.bytes.len() {
-            return Err(fail(Status::Malformed, "the choice offsets decrease or run past the bytes"));
-        }
-        if self.targets.len() != self.bytes.len() {
-            return Err(fail(Status::ShapeMismatch, "every choice needs one target"));
-        }
-        Ok(uform_choices_view_t {
-            offsets: self.offsets.as_ptr(),
-            bytes: self.bytes.as_ptr(),
-            targets: self.targets.as_ptr(),
-        })
+/// Lends a step over `count` items its choices and their targets, both `(data, offsets)` tapes or
+/// neither, refusing ones the library would read past or pair unevenly.
+fn lower_choices(
+    choices: (&[u8], &[usize]),
+    targets: (&[f32], &[usize]),
+    count: usize,
+) -> Result<(uform_tape_view_t, uform_tape_view_t)> {
+    if choices.1.is_empty() && targets.1.is_empty() {
+        return match choices.0.is_empty() && targets.0.is_empty() {
+            true => Ok((uform_tape_view_t::default(), uform_tape_view_t::default())),
+            false => Err(fail(Status::InvalidArgument, "choices without offsets name no items")),
+        };
     }
+    let lent = choices.tape(&mut Gathered::default())?;
+    let aimed = targets.tape(&mut Gathered::default())?;
+    if lent.count != count || aimed.count != count {
+        return Err(fail(
+            Status::ShapeMismatch,
+            "choices and their targets hold one more offset than the step's items",
+        ));
+    }
+    let mut entries = choices.1.windows(2).zip(targets.1.windows(2));
+    if entries.any(|(offered, aimed)| offered[1] - offered[0] != aimed[1] - aimed[0]) {
+        return Err(fail(Status::ShapeMismatch, "every choice needs one target"));
+    }
+    Ok((lent.tape, aimed.tape))
 }
 
 /// The routing, targets and reports of [`TrainVerbs::step`].
@@ -851,9 +839,14 @@ pub struct TrainerStepConfig<'config, 'arena> {
     /// The late-interaction side of each item; empty makes every item
     /// [`LateInteractionSide::None`].
     pub sides: &'config [LateInteractionSide],
-    /// The choices, read when the run trains them: a text item offering any is the state its answer
-    /// follows, and the call appends the mask byte, cutting a state longer than a row at its head.
-    pub choices: ChoicesView<'config>,
+    /// Each item's legal choices, one byte each, as a `(data, offsets)` tape like the one
+    /// [`text_choose`](crate::EncodeVerbs::text_choose) takes; empty offsets make no choices. Read when
+    /// the run trains them: a text item offering any is the state its answer follows, and the call
+    /// appends the mask byte, cutting a state longer than a row at its head.
+    pub choices: (&'config [u8], &'config [usize]),
+    /// The target probability of each choice, a `(data, offsets)` tape whose entries are as long as
+    /// those of `choices` and sum to one, as `text_choose` answers its probabilities.
+    pub choice_targets: (&'config [f32], &'config [usize]),
     /// The contrastive targets, read unless the objective is masked alone.
     pub relations: Relations<'config>,
     /// The arena the pooled embeddings land in, as the contrastive loss scored them before the
@@ -871,7 +864,8 @@ impl Default for TrainerStepConfig<'_, '_> {
             bags: &[],
             temperature_groups: &[],
             sides: &[],
-            choices: ChoicesView::default(),
+            choices: (&[], &[]),
+            choice_targets: (&[], &[]),
             relations: Relations::default(),
             arena: None,
             outputs_scalar: Scalar::F32,
@@ -1216,7 +1210,7 @@ impl<'arena, Modalities: AsRef<[Modality]>, Contents: TapeView<u8>> Calling
         {
             return Err(fail(Status::ShapeMismatch, "pass no bags, groups or sides, or one per item"));
         }
-        let choices = config.choices.lower(count)?;
+        let (choices, choice_targets) = lower_choices(config.choices, config.choice_targets, count)?;
         let relations = uform_relations_view_t {
             attract: config.relations.attract.lower(count)?,
             repel: config.relations.repel.lower(count)?,
@@ -1244,6 +1238,7 @@ impl<'arena, Modalities: AsRef<[Modality]>, Contents: TapeView<u8>> Calling
                 false => config.sides.as_ptr().cast(),
             },
             choices,
+            choice_targets,
             relations,
             embeddings: match config.arena {
                 Some(_) => ptr::from_mut(&mut self.embeddings.0),
@@ -1332,8 +1327,11 @@ mod tests {
             assert_eq!(negatives.to_string().parse(), Ok(negatives));
         }
         assert_eq!(Objective::Joint.to_string(), "joint");
+        for tier in [MultimemTier::SwitchReduced, MultimemTier::PeerRead] {
+            assert_eq!(tier.to_string().parse(), Ok(tier));
+        }
         assert_eq!(MultimemTier::PeerRead.to_string(), "peer-read");
-        assert_eq!(MultimemTier::SwitchReduced.to_string(), "switch-reduced");
+        assert!("ring".parse::<MultimemTier>().is_err());
         assert!(
             "speech".parse::<Modality>().is_err(),
             "the default a stranger reads as is refused"
@@ -1353,8 +1351,12 @@ mod tests {
         assert_eq!(size_of::<Choices>(), 8);
         assert_eq!(offset_of!(uform_trainer_step_t, choices), offset_of!(uform_trainer_step_t, sides) + word);
         assert_eq!(
-            offset_of!(uform_trainer_step_t, relations),
+            offset_of!(uform_trainer_step_t, choice_targets),
             offset_of!(uform_trainer_step_t, choices) + 3 * word
+        );
+        assert_eq!(
+            offset_of!(uform_trainer_step_t, relations),
+            offset_of!(uform_trainer_step_t, choice_targets) + 3 * word
         );
         let late_interaction_loss = offset_of!(TrainerStepStats, late_interaction_loss);
         assert_eq!(late_interaction_loss, offset_of!(TrainerStepStats, masked_audio_loss) + 4);
@@ -1373,6 +1375,17 @@ mod tests {
             ..MeshOptions::default()
         };
         assert_eq!(status_of(Mesh::bootstrap(&executor, &options)), Some(Status::Device));
+        #[cfg(unix)]
+        {
+            use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+            let options = MeshOptions {
+                directory: Path::new(OsStr::from_bytes(b"/tmp/\xff")),
+                ..options
+            };
+            let refused = status_of(Mesh::bootstrap(&executor, &options));
+            assert_eq!(refused, Some(Status::Device), "a path crosses as the OS's bytes");
+        }
         let config = TrainerInitVramConfig {
             depth: 2,
             hidden: 128,
@@ -1419,16 +1432,21 @@ mod tests {
             Some(Status::ShapeMismatch)
         );
         let untargeted = TrainerStepConfig {
-            choices: ChoicesView {
-                offsets: &[0, 2, 2],
-                bytes: b"yn",
-                targets: &[1.0],
-            },
+            choices: (b"yn", &[0, 2, 2]),
+            choice_targets: (&[1.0], &[0, 1, 1]),
             ..TrainerStepConfig::default()
         };
         assert_eq!(
             status_of(receiver.step(modalities, contents, untargeted)),
             Some(Status::ShapeMismatch)
+        );
+        let unpaired_targets = TrainerStepConfig {
+            choices: (b"yn", &[0, 2, 2]),
+            ..TrainerStepConfig::default()
+        };
+        assert_eq!(
+            status_of(receiver.step(modalities, contents, unpaired_targets)),
+            Some(Status::InvalidArgument)
         );
 
         fn edges(offsets: &'static [usize], ids: &'static [u32]) -> Relations<'static> {

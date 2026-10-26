@@ -60,9 +60,7 @@
 
 #include <cuda.h> // `cuMemsetD8Async`, `cuMemcpyDtoDAsync`
 
-#include <numkong/attention.h> // `nk_attention_pack_bf16_best`, `nk_attention_packed_bf16_best`
-#include <numkong/cast.h>      // `nk_cast_best` — the pooled Float32 rows into BFloat16
-#include <numkong/tensor.hpp>  // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
+#include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
 #include "uform/core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`, `modality_t`
 #include "uform/core/transformer_block.cuh" // the block stack, `rope_angles_t`, shared `rmsnorm_*`
@@ -140,7 +138,7 @@ struct tower_pool_t {
      *  @c max_segment_tokens , the Float32 pooled rows with their log-sum-exps, and the Float32 gradient
      *  rows the backward reads and writes. Uploads the offsets — outside any capture. */
     [[nodiscard]] static expected<tower_pool_t> make(gpu_arena_t &arena, transformer_block_config_t const &block,
-                                                     nk_capability_t capabilities) noexcept;
+                                                     gpu_numerics_t const &numerics) noexcept;
 
     /**
      *  @brief Pool every segment of @p states — pure enqueue: pack K=V, attend, cast to BFloat16.
@@ -170,8 +168,8 @@ struct tower_pool_t {
 
   private:
 
-    /** The NumKong capabilities of the arena's device, picking every launch. */
-    nk_capability_t capabilities_ = 0;
+    /** The NumKong kernels of the arena's device class, every launch's. */
+    gpu_numerics_t numerics_ {};
 
     /** @b [segments+1] the query offsets @c {0,1,…,segments} . */
     u32r1_tensor_arena_t query_offsets_ {};
@@ -202,9 +200,9 @@ struct tower_pool_t {
 struct tower_token_head_t {
 
     /** Allocate the weights, their gradients, the packs and every stash off @p arena for @p block
-     *  's capacities, dispatching with @p capabilities . */
+     *  's capacities, calling the kernels of @p numerics . */
     [[nodiscard]] static expected<tower_token_head_t> make(gpu_arena_t &arena, transformer_block_config_t const &block,
-                                                           u32_t width, nk_capability_t capabilities) noexcept;
+                                                           u32_t width, gpu_numerics_t const &numerics) noexcept;
 
     /**
      *  @brief Project the late-interaction tokens of @p states — pure enqueue: lay out the compact
@@ -256,8 +254,8 @@ struct tower_token_head_t {
 
   private:
 
-    /** The NumKong capabilities of the arena's device, picking every product. */
-    nk_capability_t capabilities_ = 0;
+    /** The NumKong kernels of the arena's device class, every product's. */
+    gpu_numerics_t numerics_ {};
 
     /** The RMSNorm floor the tower's norms share, also flooring the squared L2 norm. */
     f32_t epsilon_ = 0.0f;
@@ -294,10 +292,10 @@ struct encoder_tower_bf16_t {
 
     /** Allocate and plan the whole tower off @p arena — token / media entries, @c depth blocks,
      *  the attention pool, and the head — validating each present modality's patch count against
-     *  @p shape 's @c max_columns_per_row . Every part dispatches with @p capabilities . */
+     *  @p shape 's @c max_columns_per_row . Every part calls the kernels of @p numerics . */
     [[nodiscard]] static expected<encoder_tower_bf16_t> make(gpu_arena_t &arena, encoder_tower_config_t config,
                                                              multimodal_batch_shape_t shape,
-                                                             nk_capability_t capabilities) noexcept;
+                                                             gpu_numerics_t const &numerics) noexcept;
 
     /** One tower forward over @p batch — pure enqueue; every stash the backward reads is written
      *  along the way, including the per-token rotary @b (t,h,w) coordinates @ref coords_ derives fresh
@@ -375,8 +373,8 @@ struct encoder_tower_bf16_t {
     /** The baked geometry. */
     encoder_tower_config_t config_ {};
 
-    /** The NumKong capabilities of the arena's device, picking the products, casts and norm. */
-    nk_capability_t capabilities_ = 0;
+    /** The NumKong kernels of the arena's device class: the products, casts and norm. */
+    gpu_numerics_t numerics_ {};
 
     /** The transients every block shares; heap-held so the blocks' borrows survive the tower's moves. */
     std::unique_ptr<transformer_scratch_t> scratch_ {};
@@ -497,9 +495,9 @@ struct encoder_tower_e4m3_t {
   private:
     friend struct encoder_tower_bf16_t;
 
-    /** The baked geometry and the NumKong capabilities of the arena's device. */
+    /** The baked geometry and the NumKong kernels of the arena's device class. */
     encoder_tower_config_t config_ {};
-    nk_capability_t capabilities_ = 0;
+    gpu_numerics_t numerics_ {};
 
     /** The @c depth E4M3 transformer blocks, owned in order — the quantized-precision tier. */
     st::basic_vector<transformer_block_e4m3_t> blocks_ {};

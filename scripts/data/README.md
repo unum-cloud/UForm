@@ -1,16 +1,16 @@
 # Datasets
 
 UForm trains from public corpora across text, images, video, audio, 3D, and robotics.
-Every corpus is referenced by name through the mixture JSONs — five per-mixture recipes (`scripts/mixtures/{text_masked,text_contrastive,image_contrastive,video_contrastive,audio_contrastive}.json`) that are the language-neutral column contract read by both the Python acquisition and the C++ trainer, parsed by `scripts/data/mixtures.py`; run `uv run scripts/data/list_registry.py` for the live name-to-glob-to-mixture mapping.
+Every corpus is referenced by name through the mixture JSONs under `scripts/mixtures/`, the language-neutral column contract read by both the Python acquisition and the C++ trainer, parsed on this side by `scripts/data/mixtures.py`; run `uv run scripts/data/list_registry.py` for the live name-to-glob-to-mixture mapping.
 This page is the modality-organized catalog of what those names point to, including the corpora staged for upcoming tiers.
 
 A checkbox marks whether the repository already has parsing code for the dataset: ✅ a mixture entry with a working downloader and a modality loader, 🔜 planned but not parseable yet — a wishlist row awaiting a downloader or loader, or a corpus not yet added.
 The format reads `downloaded → stored`; every corpus is converted on download into the same GPU-friendly parquet that cuDF reads zero-copy, so the stored form is always `parquet`.
 Where a section is a list rather than a table, each entry reads `corpus: role; format; coverage`.
 
-## Staging the Balanced Corpus
+## Corpus Staging
 
-The tables above list what _exists_; this section is how a balanced slice of it lands on disk.
+The tables below list what _exists_; this section is how a balanced slice of it lands on disk.
 The host data root comes from the `UFORM_DATA_ROOT` env var, falling back to the repository's own `data/` tree.
 The declarative plan lives in `scripts/data/acquire_manifest.py` — one `StagingRow` per dataset, grouped into four modalities (text / image / video / audio).
 Sizing is disk-aware: `resolve_budget_gigabytes` derives one total budget (`--budget-gb` > `$UFORM_DATA_BUDGET_GB` > free disk × `SAFETY_MARGIN`), `MODALITY_WEIGHTS` splits it across modalities (cross-modal video / image lead, text stays substantial, audio is thinnest), and `allocate_targets` water-fills each modality's share across its growable rows.
@@ -78,7 +78,7 @@ The text stack spans masked-language pretraining (`MLM`), contrastive retrieval 
 [fineweb-edu]: https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu
 [redpajama]: https://huggingface.co/datasets/togethercomputer/RedPajama-Data-V2
 
-### Retrieval & QA Pairs
+### Retrieval Pairs
 
 - ✅ [MS MARCO][msmarco]: pairs, triplets; parquet; query → passage; 1 or 50 BM25 hard negatives ¹
 - 🔜 [mMARCO][mmarco]: pairs; parquet; multilingual MS MARCO ²
@@ -120,7 +120,7 @@ The text stack spans masked-language pretraining (`MLM`), contrastive retrieval 
 [openhermes]: https://huggingface.co/datasets/teknium/OpenHermes-2.5
 [infinity]: https://huggingface.co/datasets/BAAI/Infinity-Instruct
 
-### Personal Search (Email / Messages / Notes)
+### Personal Search
 
 The on-device local fuzzy-search use case — a short, typo-laden query against a user's own email / messages / notes — has no single public corpus, so the mixture pairs the few public email + chat sets with synthetic surface robustness from the augmentation family (date / number / casing / spelling variants; see `### Denoising & Normalization`).
 Each entry slots into the mixture JSONs' `(anchor / positive / negative)` field contract; hard negatives are BM25- or ANN-mined at pack time where the source ships none.
@@ -163,7 +163,7 @@ The augmentation family supplies the _multi-positive_ side by construction: each
 > ¹ Acquired via `uv run scripts/data/download_codecontests.py` (the `hf_snapshot` source kind), with a competition-skewed language mix (C++ / Python / Java) that buys NL ↔ code alignment and equivalence supervision rather than language breadth.
 > ² Production LLVM IR from Rust / Julia / Swift / C-C++ (\~1.3T tokens), staged as a capped shard count via `uv run scripts/data/download_compile_ir.py --max-shards N` (the `hf_snapshot` source kind) so the mixture weight, not the byte count, controls representation.
 > ³ Named `starcoderdata` (single-text code-MLM, full files beyond CommitPackFT's diffs) and acquired via `uv run scripts/data/download_starcoderdata.py` (the `hf_snapshot` source kind, 86 languages); the same corpus also feeds the deterministic lint/format before → after pairs, which are still 🔜.
-> ⁴ A sibling view of `commitpackft` — `old_contents` + the commit `subject` → `new_contents` — for non-AR copy/edit fast-apply, expressed as the separate `commitpackft_apply` mixture entry reusing `TextPairLoader`.
+> ⁴ A sibling view of `commitpackft` — `old_contents` + the commit `subject` → `new_contents` — for non-AR copy/edit fast-apply, expressed as the separate `commitpackft_apply` mixture entry reusing `paired_loader_parquet_t`.
 > ⁵ Wishlist competitive submissions carrying accept/reject, CPU-time, and memory labels with the broadest language coverage of the code sets, though the HF mirrors leave their parquet schema undocumented.
 > ⁶ Wishlist whose source ↔ IR pairs need a clang `-emit-llvm` pass, with ExeBench also shipping I/O examples for execution-grounded objectives.
 
@@ -181,7 +181,7 @@ The augmentation family supplies the _multi-positive_ side by construction: each
 ### Denoising & Normalization
 
 Paired `(corrupted → canonical)` transductions that pressure the uniform byte encoder toward surface-invariant semantics (the denoising-autoencoder regularizer in `NORMALIZATION_TASKS.md`).
-These now parse through the mixture JSONs' `(anchor, positive)` contract on the standard `TextPairLoader` path, supplying the multi-positive surface-robustness side of the personal-search mixture; in-place corruption-MLM over the web corpora above remains a complementary cheap vehicle.
+These now parse through the mixture JSONs' `(anchor, positive)` contract on the standard `paired_loader_parquet_t` path, supplying the multi-positive surface-robustness side of the personal-search mixture; in-place corruption-MLM over the web corpora above remains a complementary cheap vehicle.
 
 - ✅ [C4\_200M][c4200m]: denoise pair; zip → parquet; 185M synthetic GEC pairs; permissive training bulk ¹
 - ✅ [Google Text Normalization][googletn]: denoise pair; CSV → parquet; written ↔ spoken hard classes; best non-AR fit ²
@@ -244,7 +244,7 @@ CSAM is entirely out of scope.
 - ✅ [DocLayNet][doclaynet]: image-text; parquet; document pages; weak captions = layout class names ⁴
 
 > ¹ Hard negatives are mined offline by `mine_hard_negatives.py` (eight per row) and the first non-empty caption is the positive.
-> ² Repacked from WebDataset tars to parquet by the `webdataset` source kind and read zero-copy through `ImageTextParquetLoader`.
+> ² Repacked from WebDataset tars to parquet by the `webdataset` source kind and read zero-copy through `paired_loader_parquet_t`.
 > ³ URL-only metadata (CLIP scores but no decoded bytes), so each needs an `img2dataset`-style fetch into parquet before a loader can read it.
 > ⁴ Single-file pull + repack (image struct + a `captions` list<string>), all ship decoded bytes (no URL fetch): DOCCI's dense human description, XM3600's 36-language human captions (cross-lingual multi-positive), RSICD's 5 captions, and DocLayNet's layout class names (a WEAK signal — its bbox/mask head is out of scope).
 
@@ -288,7 +288,7 @@ CSAM is entirely out of scope.
 | 🔜 [ShareGPT4V][sharegpt4v]  | image-text | JSON → parquet | dense GPT-4V captions, CC BY 4.0         |
 | 🔜 [M4-Instruct][m4]         | image-text | ZIP → parquet  | multi-image instruction tuning ¹         |
 
-> ¹ Per-task ZIP archives with varied schemas; needs a repack to parquet plus the `ImageInstructLoader` (image decode + `TextPacker` masking) before the VLM trainer can consume real data instead of its synthetic smoke batch.
+> ¹ Per-task ZIP archives with varied schemas; needs a repack to parquet plus an instruction loader before training can read it.
 
 [llava]: https://huggingface.co/datasets/liuhaotian/LLaVA-Instruct-150K
 [sharegpt4v]: https://huggingface.co/datasets/Lin-Chen/ShareGPT4V
@@ -322,7 +322,7 @@ CSAM is entirely out of scope.
 [ccpd]: https://github.com/detectRecog/CCPD
 [rodosol]: https://github.com/raysonlaroca/rodosol-alpr-dataset
 
-### Dense Labeling & Segmentation
+### Dense Labeling
 
 - 🔜 [ADE20K][ade20k]: seg; imgs+masks → parquet; scene parsing, 150 classes; the semantic-segmentation standard
 - 🔜 [COCO-Stuff][cocostuff]: seg; imgs+masks → parquet; things + stuff, 171 classes, \~120K images
@@ -359,7 +359,7 @@ CSAM is entirely out of scope.
 > ¹ Fetched and repacked on demand via `uv run scripts/data/download_msrvtt.py` (its media-fetch downloader) because the license blocks redistribution, with an in-batch shuffle synthesizing rerank negatives.
 > ² Repacked to parquet by the `webdataset` source kind (Panda-70M's tars), the `hf_snapshot` source kind (WebVid's snapshot parquet), or its media-fetch downloader (Kinetics-400's CSV-joined action label); WebVid is Shutterstock-licensed stock video.
 > ³ Acquired via `uv run scripts/data/download_howto100m.py`: streams a bounded per-clip ASR-caption parquet index (`bpiyush/howto100m_captions_with_verb_nouns`, capped by `--index-cap` / `$UFORM_INDEX_CAP` windows), then fetches an H.264 mp4 per window via `acquire_clips` (rank/world split); bulk YouTube fetch needs `yt-dlp` cookies.
-> HMDB-51 (`uv run scripts/data/download_hmdb51.py`) is kept only as a small VideoMAE smoke, not a training corpus.
+> HMDB-51 (`uv run scripts/data/download_hmdb51.py`) is kept only as a small video smoke test, not a training corpus.
 > ⁴ The per-moment descriptions are packed into a `captions` list<string> by the `webdataset` source kind, which muxes the MP4 tars to parquet inline; no external fetch.
 > ⁵ The `webdataset` source kind re-encodes each clip's JPEG frames to MP4 (ffmpeg) and packs the referring motion expressions into a `captions` list<string>; the dense masks are dropped (mask-head loader out of scope), and expressions refer to sub-clip object motion, so treat MeViS as supplementary video-text rather than a precision benchmark.
 > ⁶ Fetched on demand from YouTube by its media-fetch downloader — `uv run scripts/data/download_vatex.py` / `uv run scripts/data/download_activitynet_captions.py` — because the media is not redistributable.
@@ -384,8 +384,8 @@ CSAM is entirely out of scope.
 ## Audio
 
 UForm carries no custom audio kernels, and no GPU audio codec exists across the NVIDIA, AMD, and Intel SDKs.
-Audio is decoded host-side to PCM via libavformat, then an on-GPU `cuFFT` short-time Fourier transform (Hann window) and a mel-filterbank `cuBLAS` GEMM produce log-mel frames in the same token-stream shape as the byte encoder.
-AudioCaps and AudioSet are read through `AudioParquetLoader`; VGGSound is on the roadmap.
+Audio is decoded host-side to mono Float32 PCM via libav, resampled, and cut into raw frames of `chunk_samples` samples, one frame per token, since the spectral frontend is a learned first layer of the encoder.
+AudioCaps and AudioSet are read through `audio_loader_parquet_t`; VGGSound is on the roadmap.
 Each entry reads `corpus: modalities; format; scale; license`.
 
 - ✅ [AudioCaps][audiocaps]: audio + text; parquet; 50K captioned clips ¹; research
@@ -424,8 +424,8 @@ The two text-richest options, each reading `corpus: format; text per object; lic
 
 ## Robotics / VLA
 
-Vision-language-action trajectories for the VLA trainer (`image_text_act.py`, today a synthetic smoke).
-Neither is staged; both need an RLDS → parquet repacker plus a `VLAParquetLoader`.
+Vision-language-action trajectories, for which UForm has no trainer yet.
+Neither is staged; both need an RLDS → parquet repacker plus a trajectory loader.
 
 | Dataset                       | Role              | Format           | Coverage                                  |
 | ----------------------------- | ----------------- | ---------------- | ----------------------------------------- |

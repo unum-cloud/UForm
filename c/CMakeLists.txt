@@ -8,14 +8,19 @@
 # no consumer hunts yyjson, NumKong or StringZilla archives out of the dependency tree to link one of ours.
 add_library(uform_shared SHARED)
 add_library(uform::shared ALIAS uform_shared)
-target_link_libraries(uform_shared PRIVATE uform_host)
+# The encoder's variants follow `uform_host`, so the baseline's copy of an inline function they share comes first.
+target_link_libraries(uform_shared PRIVATE uform_host ${uform_encoder_variants_})
 # The archives it links were compiled with default visibility, so only the linker can keep their symbols in.
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(uform_shared PRIVATE "LINKER:--exclude-libs,ALL")
 endif ()
+set(uform_variant_objects_)
+foreach (library_ IN LISTS uform_encoder_variants_)
+    list(APPEND uform_variant_objects_ $<TARGET_OBJECTS:${library_}>)
+endforeach ()
 add_library(
-    uform_static STATIC $<TARGET_OBJECTS:uform_host> $<TARGET_OBJECTS:yyjson> $<TARGET_OBJECTS:numkong_static>
-                        $<TARGET_OBJECTS:stringzilla_static>
+    uform_static STATIC $<TARGET_OBJECTS:uform_host> ${uform_variant_objects_} $<TARGET_OBJECTS:yyjson>
+                        $<TARGET_OBJECTS:numkong_static> $<TARGET_OBJECTS:stringzilla_static>
 )
 add_library(uform::static ALIAS uform_static)
 target_include_directories(uform_shared PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
@@ -54,10 +59,8 @@ foreach (
         target_sources(uform_static PRIVATE $<TARGET_OBJECTS:numkong_${numkong_unit_}_>)
     endif ()
 endforeach ()
-# Each GPU vendor's inference kernels join both flavors, and the archive names that vendor's runtime to its consumers.
-if (TARGET uform_nvidia_inference)
-    target_link_libraries(uform_shared PRIVATE uform_nvidia_inference)
-    target_sources(uform_static PRIVATE $<TARGET_OBJECTS:uform_nvidia_inference>)
+# Each GPU vendor's variants join both flavors above, and the archive names that vendor's runtime to its consumers.
+if (TARGET uform_encoder_vram_nvidia_variants)
     target_link_libraries(uform_static INTERFACE CUDA::cudart CUDA::cuda_driver)
 endif ()
 # The training verbs join both flavors with the NVIDIA build, and the archive names the training stack to its consumers.
@@ -66,9 +69,7 @@ if (TARGET uform_nvidia_train)
     target_sources(uform_static PRIVATE $<TARGET_OBJECTS:uform_nvidia_train>)
     target_link_libraries(uform_static INTERFACE uform::train)
 endif ()
-if (TARGET uform_amd_inference)
-    target_link_libraries(uform_shared PRIVATE uform_amd_inference)
-    target_sources(uform_static PRIVATE $<TARGET_OBJECTS:uform_amd_inference>)
+if (TARGET uform_encoder_vram_amd_variants)
     target_link_libraries(uform_static INTERFACE hip::host)
 endif ()
 set_target_properties(
@@ -93,7 +94,7 @@ if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test.c")
 endif ()
 
 # The same checkpoint on an NVIDIA GPU against the host, which only a build with the NVIDIA kernels and the suites runs.
-if (TARGET uform_nvidia_inference AND TARGET uform_tiny_checkpoint)
+if (TARGET uform_encoder_vram_nvidia_variants AND TARGET uform_tiny_checkpoint)
     add_executable(uform_test_vram "${PROJECT_SOURCE_DIR}/test/vram.c")
     target_link_libraries(uform_test_vram PRIVATE uform_static CUDA::cuda_driver)
     set_target_properties(uform_test_vram PROPERTIES LINKER_LANGUAGE CXX)

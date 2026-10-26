@@ -13,26 +13,27 @@
 #pragma once
 
 #include <new>         // `std::nothrow`
-#include <type_traits> // `std::conditional_t`, `std::is_same_v`
+#include <type_traits> // `std::is_same_v`
 
 #include "uform/encoder/ram_kits.hpp"   // `products_ladder`, `attention_ladder`, `elementwise_ladder`
 #include "uform/encoder/ram_tower.hpp"  // `ram_tower`
-#include "uform/encoder/vram_kits.hpp"  // `vram_*_ladder`, `vram_nvidia_entries_kit_t`, `vram_amd_entries_kit_t`
+#include "uform/encoder/vram_kits.hpp"  // `vram_*_ladder`
 #include "uform/encoder/vram_tower.hpp" // `vram_tower`
 
-#include "encoder_punned.hpp" // `encoder_verbs`, `encoder_class_tables`
+#include "encoder_punned.hpp" // `encoder_verbs`, `encoder_class_tables`, `entries_kit_of`
 
 namespace unum::uform {
 
 #pragma region Residencies
 
-/** The host tower one CPU class runs, each kit the pick of its own ladder under the class's
- *  mask. */
-template <cpu_class_t cpu_class_>
+/** The host tower one CPU class runs: each kit the pick of its own ladder under the mask of
+ *  @p kits_class_ , and the atomic reference of @p atomics_class_ . */
+template <cpu_class_t kits_class_, cpu_class_t atomics_class_ = kits_class_>
 using ram_tower_of =
-    encoder::ram_tower<typename encoder::products_ladder<numkong_capabilities_of(cpu_class_)>::kit_t,
-                       typename encoder::attention_ladder<numkong_capabilities_of(cpu_class_)>::kit_t,
-                       typename encoder::elementwise_ladder<numkong_capabilities_of(cpu_class_)>::kit_t>;
+    encoder::ram_tower<typename encoder::products_ladder<numkong_capabilities_of(kits_class_)>::kit_t,
+                       typename encoder::attention_ladder<numkong_capabilities_of(kits_class_)>::kit_t,
+                       typename encoder::elementwise_ladder<numkong_capabilities_of(kits_class_)>::kit_t,
+                       atomic_ref_for_cpu_class<atomics_class_>::template type>;
 
 /** The mask a device class picks its kits under: its generation's, or its vendor's generic
  *  floor. */
@@ -41,24 +42,23 @@ inline constexpr nk_capability_t device_capabilities_of = gpu_class_ == gpu_clas
                                                               ? vendor_of(home_)
                                                               : numkong_capabilities_of(gpu_class_);
 
-/** The entries kit of a device home's vendor. */
-template <encoder_home_t home_>
-using entries_kit_of = std::conditional_t<home_ == encoder_home_t::vram_amd_k, encoder::vram_amd_entries_kit_t,
-                                          encoder::vram_nvidia_entries_kit_t>;
-
-/** The device tower one GPU class runs. */
+/** The device tower one GPU class runs. Its unit compiles for the serial CPU class, so its load
+ *  stages through that class's element-wise kit. */
 template <encoder_home_t home_, gpu_class_t gpu_class_>
 using vram_tower_of =
     encoder::vram_tower<typename encoder::vram_products_ladder<device_capabilities_of<home_, gpu_class_>>::kit_t,
                         typename encoder::vram_attention_ladder<device_capabilities_of<home_, gpu_class_>>::kit_t,
                         typename encoder::vram_elementwise_ladder<device_capabilities_of<home_, gpu_class_>>::kit_t,
-                        entries_kit_of<home_>>;
+                        entries_kit_of<home_>,
+                        typename encoder::elementwise_ladder<numkong_capabilities_of(cpu_class_t::serial_k)>::kit_t>;
 
-/** Whether a host class picks a tower its parent does not; the serial floor always does. */
+/** Whether a host class picks kits its parent does not; the serial floor always does. Both sides
+ *  take the class's own atomic reference, as each class names it through an alias template of its
+ *  own. */
 template <cpu_class_t cpu_class_>
 constexpr bool ram_variant_advances() noexcept {
     if constexpr (cpu_class_ == cpu_class_t::serial_k) return true;
-    else return !std::is_same_v<ram_tower_of<cpu_class_>, ram_tower_of<parent_class_of(cpu_class_)>>;
+    else return !std::is_same_v<ram_tower_of<cpu_class_>, ram_tower_of<parent_class_of(cpu_class_), cpu_class_>>;
 }
 
 /** Whether a device class picks a tower its parent does not; the vendor floor always does. */
@@ -88,9 +88,9 @@ struct ram_bodies {
 
     static void destroy(void *tower) noexcept { delete static_cast<tower_type_ *>(tower); }
 
-    static core::expected<std::size_t> scratch_bytes(void const *tower, std::size_t tokens,
-                                                     std::size_t segments) noexcept {
-        return static_cast<tower_type_ const *>(tower)->scratch_bytes(tokens, segments);
+    static core::expected<std::size_t> scratch_bytes(void const *tower, std::size_t tokens, std::size_t segments,
+                                                     fu::flat_pool_t &pool) noexcept {
+        return static_cast<tower_type_ const *>(tower)->scratch_bytes(tokens, segments, pool.threads_count());
     }
 
     static core::expected_t encode(void const *tower, core::multimodal_batch_view_t batch, encoder::outputs_t outputs,
@@ -108,13 +108,14 @@ struct vram_bodies {
                                          nk_stream_t stream) noexcept {
         nk_allocator_t policy {};
         if (nk_status_t const status = nk_allocator_init_device_best(&policy, capabilities_); status != nk_success_k)
-            return core::expected<void *>::fail(core::status_t::other_k, "tower memory setup failed: {}",
+            return core::expected<void *>::fail(encoder::tower_status_of(status), "tower memory setup failed: {}",
                                                 nk_status_name(status));
         core::expected<tower_type_> made = tower_type_::make(checkpoint, geometry, precision, policy, stream);
         if (!made) return core::expected<void *>::fail(std::move(made));
         nk_status_t const landed = nk_stream_synchronize_best(capabilities_, stream); // the packs and staged operands
         if (landed != nk_success_k)
-            return core::expected<void *>::fail(core::status_t::other_k, "load failed: {}", nk_status_name(landed));
+            return core::expected<void *>::fail(encoder::tower_status_of(landed), "load failed: {}",
+                                                nk_status_name(landed));
         tower_type_ *const tower = new (std::nothrow) tower_type_(std::move(*made));
         if (!tower) return core::expected<void *>::fail(core::status_t::bad_alloc_k, "tower allocation failed");
         return core::expected<void *> {tower};
@@ -122,8 +123,8 @@ struct vram_bodies {
 
     static void destroy(void *tower) noexcept { delete static_cast<tower_type_ *>(tower); }
 
-    static core::expected<std::size_t> scratch_bytes(void const *tower, std::size_t tokens,
-                                                     std::size_t segments) noexcept {
+    static core::expected<std::size_t> scratch_bytes(void const *tower, std::size_t tokens, std::size_t segments,
+                                                     nk_stream_t) noexcept {
         return static_cast<tower_type_ const *>(tower)->scratch_bytes(tokens, segments);
     }
 
@@ -158,6 +159,20 @@ encoder_verbs<home_> const *encoder_class_tables<home_, class_>::find() noexcept
             return &verbs_k;
         }
     }
+}
+
+template <cpu_class_t cpu_class_>
+void host_class_tables<cpu_class_>::wait(u64_t &word, u64_t seen) noexcept {
+    using atomic_ref_t = typename atomic_ref_for_cpu_class<cpu_class_>::template type<u64_t>;
+    u64_t const *const watched = &word;
+    while (atomic_ref_t {word}.load(std::memory_order_acquire) == seen)
+        waiter_of<cpu_class_> {}(watched, seen, std::size_t {0}, fu::wait_capped_k);
+}
+
+template <cpu_class_t cpu_class_>
+host_verbs_t const *host_class_tables<cpu_class_>::find() noexcept {
+    static constexpr host_verbs_t verbs_k {&host_class_tables::wait};
+    return &verbs_k;
 }
 
 #pragma endregion Bodies

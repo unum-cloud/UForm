@@ -62,7 +62,9 @@ blank_c_comments_preserving_columns() { # blank_c_comments_preserving_columns < 
 # the top-level `uform/<name>` ones, the public `uform/<dir>/...` ones, and last the private ones spelled from
 # their root. Only headers in this repository are quoted, found beside the including file or anywhere in the
 # index, and public ones under `c/` always with the `project_include_prefix`. Includes under an `#if` keep
-# their quoting but sit outside the grouping; an include guard is not such an `#if`.
+# their quoting but sit outside the grouping; an include guard is not such an `#if`. So does one a `#define`
+# right above configures, as `PY_SSIZE_T_CLEAN` does CPython's, which must precede every standard header. A C
+# source counts the `<name.h>` headers of its own standard library as the C library.
 check_include_groups() {
     local misgrouped
     misgrouped=$(awk -v project="$project_include_prefix" -v file="$file" '
@@ -73,13 +75,18 @@ check_include_groups() {
             split("dirent.h dlfcn.h errno.h fcntl.h ftw.h poll.h pthread.h sched.h signal.h stdio.h stdlib.h " \
                   "string.h time.h unistd.h io.h windows.h bcrypt.h malloc.h", names, " ")
             for (n in names) platform[names[n]] = 1
+            split("assert.h ctype.h errno.h fenv.h float.h inttypes.h iso646.h limits.h locale.h math.h setjmp.h " \
+                  "signal.h stdalign.h stdarg.h stdatomic.h stdbool.h stddef.h stdint.h stdio.h stdlib.h " \
+                  "stdnoreturn.h string.h tgmath.h threads.h time.h uchar.h wchar.h wctype.h", names, " ")
+            if (file ~ /\.[ch]$/) for (n in names) clibrary[names[n]] = 1
             split("forkunion numkong smashtable stringzilla uform usearch ustore", names, " ")
             for (n in names) sibling[names[n]] = 1
             split("C-library platform C++-standard external sibling top-level-own public-own private", labels, " ")
         }
         NR == FNR { added[$1 + 0]; next }
+        { configuring = configured; configured = ($1 == "#define") }
         guard != "" && NF {
-            if ($1 == "#define" && $2 == guard) { --depth; counted[level] = 0 }
+            if ($1 == "#define" && $2 == guard) { --depth; counted[level] = 0; configured = 0 }
             guard = ""
         }
         /^[[:space:]]*#[[:space:]]*if/ { ++depth; counted[++level] = 1; guard = ($1 == "#ifndef") ? $2 : "" }
@@ -112,7 +119,7 @@ check_include_groups() {
                     printf "line %d: \"%s\" is a %s header - write <%s>\n", FNR, header, labels[rank], header
                 if (touched && !quoted && rank >= 6)
                     printf "line %d: <%s> is an own header - write \"%s\"\n", FNR, header, header
-                if (depth) next
+                if (depth || configuring) next
                 if (touched && block && rank != block)
                     printf "line %d: a %s header shares its group with %s ones\n", FNR, labels[rank], labels[block]
                 if (touched && !block && rank < previous)
@@ -945,6 +952,73 @@ check_template_type_suffixes() {
         "            \`template <typename index_type_> constexpr bool device_resident\`:"
 }
 
+# A template takes a bare name - `struct humanized`, never `struct humanized_gt` or `using reader_at`: template
+# parameters end in a single underscore, and `_t` marks only a materialized type. Only the name a `template` head
+# introduces is judged, so a local named for what it reads at an index, like `byte_at`, passes.
+check_suffixed_template_names() {
+    local suffixed
+    suffixed=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+        sed -e 's/R"\([A-Za-z_]*\)(.*)\1"/""/g' -e 's/"[^"]*"/""/g' |
+        awk '
+            function suffixed(line) {
+                return line ~ /(^|[^A-Za-z0-9_])(class|struct|union|using)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*_(gt|at)([^A-Za-z0-9_]|$)/ ||
+                    line ~ /[A-Za-z0-9_>*&][[:space:]]+[A-Za-z_][A-Za-z0-9_]*_(gt|at)[[:space:]]*[(=]/
+            }
+            /^\+[[:space:]]*template[[:space:]]*</ { if (suffixed($0)) print; else pending = 1; next }
+            pending && /^\+[[:space:]]*requires/ { next }
+            pending && suffixed($0) { print }
+            { pending = 0 }' || true)
+    [ -z "$suffixed" ] || fail "$suffixed" \
+        "$file names a template with a _gt or _at suffix - write \`template <typename value_type_> struct humanized\`:"
+}
+
+# Private and protected data members end in an underscore, so a reader tells state from locals at a glance. The
+# staged file is read whole, since access is context: a class starts private, a struct public, and every access
+# specifier changes the section; only the added declarations are reported.
+check_private_member_underscores() {
+    local members
+    members=$(awk '
+        NR == FNR { added[$1 + 0]; next }
+        {
+            line = $0
+            if (in_comment) { if (match(line, /\*\//)) { line = substr(line, RSTART + 2); in_comment = 0 } else next }
+            gsub(/\/\*([^*]|\*[^\/])*\*\//, " ", line)
+            if (match(line, /\/\*/)) { line = substr(line, 1, RSTART - 1); in_comment = 1 }
+            sub(/\/\/.*/, "", line)
+            if (kind[depth] ~ /^record/ && line ~ /^[[:space:]]*(public|protected|private)[[:space:]]*:/) {
+                match(line, /(public|protected|private)/); access[depth] = substr(line, RSTART, RLENGTH)
+            }
+            else if (kind[depth] ~ /^record/ && access[depth] != "public" && (FNR in added) &&
+                     line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_:<>,*& ]*[[:space:]*&]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(\[[^]]*\])?[[:space:]]*(=[^;]*|\{[^}]*\})?;[[:space:]]*$/ &&
+                     line !~ /^[[:space:]]*(using|typedef|friend|return|static[[:space:]]+constexpr|enum|class|struct)[[:space:]]/ &&
+                     line !~ /\(/) {
+                name = line; sub(/[[:space:]]*(\[[^]]*\])?[[:space:]]*(=[^;]*|\{[^}]*\})?;[[:space:]]*$/, "", name); sub(/.*[[:space:]*&]/, "", name)
+                if (name !~ /_$/ && name !~ /_k$/) printf "line %d: %s\n", FNR, $0
+            }
+            statement = statement " " line
+            for (position = 1; position <= length(line); ++position) {
+                character = substr(line, position, 1)
+                if (character == "{") {
+                    ++depth
+                    head = statement
+                    if (match(head, /template[[:space:]]*<.*>[[:space:]]*(struct|class|union)[[:space:]]/)) {
+                        keyword = substr(head, RSTART, RLENGTH); sub(/.*>[[:space:]]*/, "", keyword)
+                        head = substr(head, 1, RSTART - 1) keyword substr(head, RSTART + RLENGTH)
+                    }
+                    if (kind[depth - 1] == "code") kind[depth] = "code"
+                    else if (head ~ /(^|[^A-Za-z0-9_])class([^A-Za-z0-9_]|$)/) { kind[depth] = "record"; access[depth] = "private" }
+                    else if (head ~ /(^|[^A-Za-z0-9_])(struct|union)([^A-Za-z0-9_]|$)/) { kind[depth] = "record"; access[depth] = "public" }
+                    else if (statement ~ /(^|[^A-Za-z0-9_])(namespace|extern)([^A-Za-z0-9_]|$)/) kind[depth] = "namespace"
+                    else kind[depth] = "code"
+                    statement = ""
+                } else if (character == "}") { if (depth > 0) { delete kind[depth]; delete access[depth]; --depth }; statement = "" }
+                else if (character == ";") statement = ""
+            }
+        }' "$staged_lines_path" "$staged_blob" || true)
+    [ -z "$members" ] || fail "$members" \
+        "$file declares a private or protected data member without a trailing underscore - write \`size_\`:"
+}
+
 # Template type parameters carry a trailing underscore - `typename variant_type_`, never
 # `typename multi_t` - a special case of the underscore marking internal symbols: a
 # parameter is internal to its template, exists only to be materialized, and must never
@@ -986,7 +1060,7 @@ check_budget_writers() {
 
 check_boolean_parameters() {
     local flags
-    flags=$(printf '%s\n' "$added" | grep -E '[(,] ?bool [a-z_]+' || true)
+    flags=$(printf '%s\n' "$added" | grep -E '[(,] ?bool [a-z_]+' | grep -vE '\bfor \(bool [a-z_]+ :' || true)
     [ -z "$flags" ] || fail "$flags" \
         "$file takes a bare bool parameter - name both states, as in" \
         "            \`enum class ordering_t : bool { ascending_k, descending_k };\`:"
@@ -1076,6 +1150,17 @@ check_deque() {
         grep -E 'std::deque\b|#[[:space:]]*include[[:space:]]*<deque>' || true)
     [ -z "$deques" ] || fail "$deques" \
         "$file uses std::deque - reach for reserved unique_ptr vectors, arenas, or ForkUnion containers:"
+}
+
+# `std::filesystem` throws, allocates paths behind the caller's back, and is missing or partial on several targets the
+# bindings ship to. The library and its bindings reach files through the C library and mmap views; only the test,
+# benchmark and tool harnesses may include `<filesystem>`.
+check_filesystem_in_library() {
+    local hits
+    hits=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+        grep -E '\bstd::filesystem\b|#[[:space:]]*include[[:space:]]*<filesystem>' || true)
+    [ -z "$hits" ] || fail "$hits" \
+        "$file uses std::filesystem in library code - it is allowed only in test/, bench/ and tools/ harnesses:"
 }
 
 # Reinterpreting copies in C++ sources - a `memcpy` between two objects whose byte count is one
@@ -1192,15 +1277,64 @@ check_iterator_laundering() {
         "$file launders an iterator through &* - write \`values.data() + offset\`, or address the element:"
 }
 
-# GCC atomic builtins fork the memory-model dialect. In-place words go through
-# `std::atomic_ref` with explicit `std::memory_order` - the same currency the ForkUnion
+# The library is noexcept end to end: a C verb reports failure through its status, and an exception escaping into the
+# C ABI terminates the caller's process. A `throw` or a `noexcept(false)` here would break that.
+check_in_house_never_throws() {
+    local throwing
+    throwing=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns | sed -E 's/"([^"\\]|\\.)*"//g' |
+        grep -E '\bthrow\b|noexcept[[:space:]]*\([[:space:]]*false[[:space:]]*\)' || true)
+    [ -z "$throwing" ] || fail "$throwing" \
+        "$file throws in library code - answer a status_t or an expected, since every C verb above it is noexcept:"
+}
+
+# Every library function promises not to throw, so the compiler drops the unwinding paths and a reader never wonders.
+# Signatures are joined across lines, and control statements, `_foreach` loop macros, lambdas, types, `__global__`
+# kernels and the `uform_*` C exports, which a C header declares, are skipped. A helper that lets a vendor's exceptions
+# reach its caller's `try`, as cuDF's do, carries the `vendor-boundary` marker on a line of its signature.
+check_in_house_noexcept() {
+    local missing
+    missing=$(< "$staged_blob" awk -v lines=" $(printf '%s ' $added_lines)" '
+        function reset() { head = ""; first = 0; touched = 0; marked = 0 }
+        function open_parentheses(text) { return gsub(/\(/, "(", text) - gsub(/\)/, ")", text) }
+        {
+            if ($0 ~ /vendor-boundary/) marked = 1
+            line = $0
+            sub(/[[:space:]]*\/\/.*$/, "", line)
+            if (line ~ /^[[:space:]]*(\/\*|\*|#|$)/ || line ~ /^[[:space:]]*((public|private|protected|default)[[:space:]]*:|case )/) {
+                reset()
+                next
+            }
+            if (!first) first = NR
+            if (index(lines, " " NR " ")) touched = 1
+            opened = line
+            if (opened ~ /\) ?(const )?\{.*\}[[:space:]]*;?[[:space:]]*$/) sub(/\{.*$/, "{", opened)
+            head = head " " opened
+            if (opened !~ /\{[[:space:]]*$/) {
+                if (line ~ /[;}][[:space:]]*$/ && open_parentheses(head) <= 0) reset()
+                next
+            }
+            text = head
+            gsub(/[[:space:]]+/, " ", text)
+            sub(/^ /, "", text)
+            defines = text ~ /\)( const)?( ->[^{]*)? \{$/ || text ~ /\) : [^{]*\{$/
+            control = text ~ /^(if|else|for|while|switch|catch|do|return|\}|[a-z_]+_foreach ?\()/ || text ~ /(^| )(if|for|while|switch) \(/
+            skipped = text ~ /\[[^]]*\] ?\(|= ?\[|(^| )(struct|class|union|enum|namespace|extern|concept|requires|__global__) |(^|[ *&])uform_[a-z_]+\(/
+            if (touched && defines && !control && !skipped && !marked && text !~ /noexcept/) print first ": " text
+            reset()
+        }' || true)
+    [ -z "$missing" ] || fail "$missing" \
+        "$file defines a library function without noexcept - the library never throws:"
+}
+
+# GCC atomic builtins fork the memory-model dialect. In-place words go through the class's
+# ForkUnion atomic reference with explicit `std::memory_order` - the same words the ForkUnion
 # waiters monitor, so loads, stores & waits compose.
 check_gcc_atomics() {
     local builtins
     builtins=$(printf '%s\n' "$added" | grep -E '__atomic_[a-z_]+|__builtin_[a-z_]+|__ATOMIC_[A-Z_]+' || true)
     [ -z "$builtins" ] || fail "$builtins" \
-        "$file uses a GCC atomic builtin - write std::atomic_ref{word}.load(std::memory_order_acquire)," \
-        "            naming the memory order at every access:"
+        "$file uses a GCC atomic builtin - write atomic_ref_type_ {word}.load(std::memory_order_acquire)" \
+        "            through the class's fu atomic reference, naming the memory order at every access:"
 }
 
 # Host threads managing GPUs in CUDA sources - fleets of NVLink-resident devices are
@@ -1214,6 +1348,134 @@ check_host_threads() {
     [ -z "$threads" ] || fail "$threads" \
         "$file spawns host threads in a GPU backend - orchestrate devices with per-device" \
         "            non-blocking CUstream + CUevent from one host thread:"
+}
+
+# A library type derives from none: a base couples one type's layout and lifetime to another's, so shared behavior is a
+# member the type holds. Nor does library code lock through the standard mutexes and condition variables: it serializes
+# through the ForkUnion locks and waiters its caller passes. A `std::formatter` specialization keeps its parent, since
+# its qualified name never matches.
+check_inheritance_and_locks() {
+    local derived locks
+    derived=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns | sed -E 's/"([^"\\]|\\.)*"//g' |
+        grep -E '(^|[^A-Za-z0-9_])(struct|class)[[:space:]]+((alignas\([^)]*\)|\[\[[^]]*\]\])[[:space:]]+)*[A-Za-z_][A-Za-z0-9_]*(<[^;{]*>)?([[:space:]]+final)?[[:space:]]*:([^:]|$)|^\+[[:space:]]*:[[:space:]]*(public|protected|private|virtual)[[:space:]]' |
+        grep -vE '(^|[^A-Za-z0-9_])enum[[:space:]]+(class|struct)[[:space:]]' || true)
+    [ -z "$derived" ] || fail "$derived" \
+        "$file derives one type from another in library code - hold the shared part as a member:"
+    locks=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+        grep -E '\bstd::([a-z_]*mutex|lock_guard|unique_lock|shared_lock|scoped_lock|condition_variable[a-z_]*)\b|#[[:space:]]*include[[:space:]]*<(thread|mutex|shared_mutex|condition_variable)>' || true)
+    [ -z "$locks" ] || fail "$locks" \
+        "$file locks through the standard library in library code - take the ForkUnion lock or waiter the caller passes:"
+}
+
+# Shared words go through the class's ForkUnion atomic reference and waiter, which src/ picks per CPU class.
+check_standard_atomics() {
+    local atomics
+    atomics=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+        grep -nE '\bstd::atomic(_ref|_flag)?\b|#[[:space:]]*include[[:space:]]*<atomic>|\.notify_(all|one)[[:space:]]*\(' || true)
+    [ -z "$atomics" ] || fail "$atomics" \
+        "$file uses a standard atomic - take the class's fu atomic reference and wait through its waiter:"
+}
+
+# Scalar NumKong in a hardware path and runtime dispatch in an engine both bypass the class's kit. A `_serial` kernel
+# is named only by the serial kit's `static constexpr auto` rows and the test oracles, and a `_best` one is called
+# outside the harnesses only as NumKong's runtime verbs: allocator init, stream sync and device listing.
+check_numkong_dispatch() {
+    local serial= dispatching= calls
+    case "$file" in
+    test/*) ;;
+    *)
+        serial=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+            grep -nE '\bnk_[a-z0-9_]+_serial[[:space:]]*\(|\bnk_[a-z0-9]+_to_[a-z0-9]+_serial\b' |
+            grep -vE 'static constexpr auto [a-z0-9_]+ = nk_[a-z0-9_]+_serial;' || true)
+        ;;
+    esac
+    case "$file" in
+    include/* | src/*)
+        dispatching=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+            grep -nE '\bnk_[a-z0-9_]+_best[[:space:]]*\(' |
+            grep -vE 'nk_(allocator_init|stream_synchronize|device)[a-z_]*_best' || true)
+        ;;
+    esac
+    calls=$(printf '%s\n%s\n' "$serial" "$dispatching" | grep -v '^$' || true)
+    [ -z "$calls" ] || fail "$calls" \
+        "$file calls a serial or dispatching NumKong kernel - name the class kit's kernel instead:"
+}
+
+# An engine takes kits, never the mask they were picked under: no `nk_capability_t` member, local or function
+# parameter appears under include/, except a kit's own `capability_k`.
+check_capability_masks_in_engines() {
+    local masks
+    masks=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+        grep -E '^\+[[:space:]]*((static|inline|constexpr)[[:space:]]+)*nk_capability_t([[:space:]]+const)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(;|=|\{)|[(,][[:space:]]*nk_capability_t([[:space:]]+const)?[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*([,)=]|$)' |
+        grep -vE '[[:space:]]capability_k[[:space:]]*=' || true)
+    [ -z "$masks" ] || fail "$masks" \
+        "$file holds or takes a NumKong capability mask under include/ - take the kits src/ picks under it:"
+}
+
+# A raw pointer member beside a count describes one range: a span, a NumKong view or a tape says so. A C++ record
+# holds no `T *name` or `T const *name` member, and a function takes no `(T const *, std::size_t)` pair. The C ABI's
+# `uform_*_handle_t` records, the type-erased `void *` towers and states the verb tables pass, C-string members,
+# function-pointer types, and lines marked `vendor-boundary` or `device-boundary`, where a view would cost a kernel
+# registers, keep theirs. A pointer member counts only in a record that also holds a count, size, length, bytes or
+# stride. The staged file is read whole, since whether a line is a member is context.
+check_pointer_count_members() {
+    local pointers
+    pointers=$(awk '
+        NR == FNR { added[$1 + 0]; next }
+        {
+            line = $0
+            if (in_comment) { if (match(line, /\*\//)) { line = substr(line, RSTART + 2); in_comment = 0 } else next }
+            gsub(/\/\*([^*]|\*[^\/])*\*\//, " ", line)
+            if (match(line, /\/\*/)) { line = substr(line, 1, RSTART - 1); in_comment = 1 }
+            sub(/\/\/.*/, "", line)
+            if (kind[depth] == "record" &&
+                line ~ /^[[:space:]]*[A-Za-z_][A-Za-z0-9_:<>, ]*[[:space:]]+[a-z_]*(count|size|length|bytes|stride)[a-z_]*[[:space:]]*(=[^;]*|\{[^}]*\})?;/)
+                counted[depth] = 1
+            if ((FNR in added) && $0 !~ /(vendor|device)-boundary/) {
+                if (kind[depth] == "record" &&
+                    line ~ /^[[:space:]]*((static|inline|constexpr)[[:space:]]+)*(const[[:space:]]+)?[A-Za-z_][A-Za-z0-9_:]*(<[^;()]*>)?([[:space:]]+const)?[[:space:]]*\*[[:space:]]*(const[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*[[:space:]]*(=[^;]*|\{[^}]*\})?;[[:space:]]*$/ &&
+                    line !~ /^[[:space:]]*(const[[:space:]]+)?(void|char)([[:space:]]+const)?[[:space:]]*\*/ &&
+                    line !~ /^[[:space:]]*(return|delete|using|typedef|friend|case|goto)[[:space:]]/)
+                    pending[depth] = pending[depth] sprintf("line %d: %s\n", FNR, $0)
+                else if (line ~ /[(,][[:space:]]*[A-Za-z_][A-Za-z0-9_:<>]*([[:space:]]+const)?[[:space:]]*\*[[:space:]]*[A-Za-z_][A-Za-z0-9_]*[[:space:]]*,[[:space:]]*(std::)?(size_t|nk_size_t)[[:space:]]+[A-Za-z_]/ &&
+                         line !~ /void([[:space:]]+const)?[[:space:]]*\*[[:space:]]*(tower|state)[[:space:]]*,/ &&
+                         (statement " " line) !~ /(using[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=|typedef)[^;]*\(\*/)
+                    printf "line %d: %s\n", FNR, $0
+            }
+            statement = statement " " line
+            for (position = 1; position <= length(line); ++position) {
+                character = substr(line, position, 1)
+                if (character == "{") {
+                    ++depth
+                    if (kind[depth - 1] == "code") kind[depth] = "code"
+                    else if (statement ~ /(^|[^A-Za-z0-9_])(struct|class|union)[[:space:]]+(alignas\([^)]*\)[[:space:]]+)?uform_[a-z0-9_]+_handle_t([^A-Za-z0-9_]|$)/) kind[depth] = "handle"
+                    else if (statement ~ /(^|[^A-Za-z0-9_])(struct|class|union)([^A-Za-z0-9_]|$)/ && statement !~ /(^|[^A-Za-z0-9_])enum([^A-Za-z0-9_]|$)/) kind[depth] = "record"
+                    else if (statement ~ /(^|[^A-Za-z0-9_])(namespace|extern)([^A-Za-z0-9_]|$)/) kind[depth] = "namespace"
+                    else kind[depth] = "code"
+                    statement = ""
+                } else if (character == "}") {
+                    if (depth > 0) {
+                        if (counted[depth]) printf "%s", pending[depth]
+                        delete kind[depth]; delete pending[depth]; delete counted[depth]; --depth
+                    }
+                    statement = ""
+                }
+                else if (character == ";") statement = ""
+            }
+        }' "$staged_lines_path" "$staged_blob" || true)
+    [ -z "$pointers" ] || fail "$pointers" \
+        "$file passes a range as a raw pointer - hold or take a std::span, a NumKong view or a tape_view:"
+}
+
+# An engine never sleeps or yields on its own schedule: how a thread waits, spinning, yielding or parking, is the
+# caller's choice, so it waits through the waiter or pause src/ passes, and src/ alone spells the sleep.
+check_library_sleeps() {
+    local sleeps
+    sleeps=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns | sed -E 's/"([^"\\]|\\.)*"//g' |
+        grep -E '(^|[^A-Za-z0-9_])(nanosleep|usleep|sleep|sched_yield)[[:space:]]*\(|\bsleep_(for|until)\b|\bstd::this_thread\b' ||
+        true)
+    [ -z "$sleeps" ] || fail "$sleeps" \
+        "$file sleeps or yields in an engine - wait through the waiter or pause src/ passes:"
 }
 
 # CUDA's `atomicAdd`-family intrinsics never name their memory order - they are relaxed at device scope, and a
@@ -1700,7 +1962,7 @@ check_rust_use_groups() { # check_rust_use_groups <own-crate> <path> < source
 
 # endregion Build CI and Packaging
 
-# Judges a source under src/, test/ or tools/.
+# Judges a file of the library under include/ or src/, or of a harness under test/, bench/ or tools/.
 judge_cuda_path() {
     # Translation units (.cu / .cpp) never OPEN a namespace block — named or anonymous. They define
     # entities already declared in the headers, so they reach the namespace with `using namespace ...;`
@@ -1718,9 +1980,6 @@ judge_cuda_path() {
             rejection_count=$((rejection_count + 1))
         fi
         ;;
-    esac
-    case "$file" in
-    *.cu | *.cuh | *.cpp | *.hpp) check_include_groups ;;
     esac
     chevrons=$(printf '%s\n' "$added" | grep -nE '<<<.*>>>' || true)
     runtime_includes=$(printf '%s\n' "$added" | grep -nE '#include\s*<cuda_runtime(_api)?\.h>' || true)
@@ -1818,7 +2077,7 @@ judge_cuda_path() {
     # built noexcept end-to-end — a bad_alloc anywhere would terminate. Outside tests, strings are
     # sz::string_t (try_append / try_push_back) and dynamic arrays are st::basic_vector<T>.
     case "$file" in
-    test/* | bench/*) ;;
+    test/* | bench/* | tools/*) ;;
     *)
         # Lines marked `vendor-boundary` are exempt: some vendor APIs, like cuDF's source paths, force
         # std containers in their signatures; the marker keeps those exemptions explicit and greppable.
@@ -1919,14 +2178,14 @@ judge_path() {
     [ -s "$staged_lines_path" ] || echo > "$staged_lines_path"
     added_lines=$(< "$staged_lines_path")
     case "$file" in
-    src/* | test/* | tools/* | bench/*) judge_cuda_path ;;
+    include/* | src/* | test/* | tools/* | bench/*) judge_cuda_path ;;
     esac
     case "$file" in
     *.py) judge_python_path ;;
     esac
     case "$file" in
     # Every C and C++ source: prose, Doxygen and the shared vocabulary.
-    *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh)
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh | *.hip)
         check_ascii_arrows
         check_glued_arrows
         check_ids_capitalized
@@ -1956,15 +2215,23 @@ judge_path() {
         ;;&
     # Declarations in headers are already judged by the bare-comment check of the CUDA cells.
     *.hpp | *.cuh) ;;
-    *.c | *.h | *.cpp | *.cc | *.cxx | *.cu) check_bare_member_docs ;;
+    *.c | *.h | *.cpp | *.cc | *.cxx | *.cu | *.hip) check_bare_member_docs ;;
     esac
     case "$file" in
+    # Every C source: its includes group the C library first, and its macros stay object-like.
+    *.c | *.h)
+        check_include_groups
+        check_function_like_macros
+        ;;&
     # Every C++ source: the C ABI header keeps its C idioms.
-    *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh)
+    *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh | *.hip)
+        check_include_groups
         check_qualified_namespace
         check_c_limit_macros
         check_template_parameter_underscores
         check_template_type_suffixes
+        check_suffixed_template_names
+        check_private_member_underscores
         check_requires_clauses
         check_function_like_macros
         check_stl_streams
@@ -1979,24 +2246,36 @@ judge_path() {
         check_data_null_probe
         check_call_chained_call
         check_gcc_atomics
+        check_standard_atomics
+        check_numkong_dispatch
         check_mutable_and_const_cast
         check_clang_format_on_changed_lines
         ;;&
-    *.hip)
-        check_printf
-        check_partial_prints
-        ;;&
-    *.cu | *.cuh)
+    *.cu | *.cuh | *.hip)
         check_host_threads
+        ;;&
+    # HIP has no `cuda::atomic_ref` to suggest, so only the CUDA sources answer for their atomics.
+    *.cu | *.cuh)
         check_cuda_raw_atomics
         ;;&
-    # The shipped library: the C ABI under c/uform/ and the headers under src/, never the tests.
-    c/*.h | src/*.cuh | src/*.hpp)
+    # The shipped library: the C ABI under c/uform/, the engines under include/uform/ and the sources under src/. The
+    # stand-in under src_stub/ is built on the C++ standard library alone, so only the C++ rules above judge it.
+    c/*.h | include/uform/*.hpp | include/uform/*.cuh | src/*.cuh | src/*.hpp | src/*.cu | src/*.cpp | src/*.hip)
         check_boolean_parameters
         ;;&
-    src/*.cuh | src/*.hpp | src/*.cu | src/*.cpp)
+    include/uform/*.hpp | include/uform/*.cuh | src/*.cuh | src/*.hpp | src/*.cu | src/*.cpp | src/*.hip)
         check_stl_dynamic_containers
         check_budget_writers
+        check_in_house_never_throws
+        check_in_house_noexcept
+        check_inheritance_and_locks
+        check_pointer_count_members
+        ;;&
+    # The engines wait through the waiters src/ picks and run through the kits it picks, so only they never sleep or
+    # yield on their own, nor hold a capability mask.
+    include/uform/*.hpp | include/uform/*.cuh)
+        check_library_sleeps
+        check_capability_masks_in_engines
         ;;&
     # The code every GPU vendor shares, and the C verbs above every residency.
     include/uform/encoder/tower.hpp | include/uform/encoder/vram_tower.hpp | include/uform/encoder/entries.hpp | \
@@ -2062,7 +2341,12 @@ judge_path() {
         ;;
     esac
     case "$file" in
-    python/*.c | python/*.h) check_cpython_format_shortcuts ;;
+    python/*.c | python/*.h) check_cpython_format_shortcuts ;;&
+    include/* | src/* | src_stub/* | c/* | python/* | javascript/* | swift/*)
+        case "$file" in
+        *.c | *.h | *.cpp | *.hpp | *.cu | *.cuh | *.hip | *.cc | *.cxx) check_filesystem_in_library ;;
+        esac
+        ;;
     esac
     check_banners "$file" <<< "$added" || rejection_count=$((rejection_count + 1))
     # Turning a formatter off in-band is banned: the checked-in .clang-format and .cmake-format.py profiles are

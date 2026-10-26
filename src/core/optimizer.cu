@@ -114,9 +114,10 @@ static __global__ void adafactor_scale_kernel_(adafactor_state_t state, f32r1_vi
 
 /**
  *  @brief Apply the clipped update @c W -= @c lr·scale·G/√v , or its running mean under @p beta1
- *      divided by @p first_moment_correction when @p first_moments are kept, through the Float32
- *      master for vector weights (the norm scales) and straight into BFloat16 otherwise, rounded
- *      stochastically under @p rounding_key .
+ *      divided by @p first_moment_correction when @p first_moments are kept.
+ *
+ *  The update lands through the Float32 master for vector weights (the norm scales) and straight
+ *  into BFloat16 otherwise, rounded stochastically under @p rounding_key .
  *
  *  Every CTA folds the row-moment mean and the @p row_energies into the clip scale in the same
  *  order, so all of them agree bitwise.
@@ -164,16 +165,6 @@ static __global__ void adafactor_apply_kernel_(adafactor_state_t state, f32r1_vi
     }
 }
 
-/** Cast one BFloat16 gradient buffer into its window of the Float32 world-gradient surface.
- *  __grid_size__ grid-stride; no dynamic shared memory. */
-static __global__ void adafactor_stage_gradient_kernel_(bf16r1_view_t gradient, f32r1_span_t destination) {
-    std::size_t const total = gradient.extent(0);
-    std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < total;
-         index += stride)
-        destination[index] = __bfloat162float(gradient[index]);
-}
-
 /**
  *  @brief Materialise the deterministic domain-reduced gradient into this rank's own buffer — the
  *      peer tier's fixed-order serial fold over this consumer's window at @p shard_begin ; the
@@ -218,33 +209,25 @@ static __global__ void adafactor_reduce_gradient_peer_kernel_(multimem_member_t 
     return expected_t::fail(status_t::invalid_input_k, "unknown multimem tier {}", static_cast<u32_t>(domain.tier()));
 }
 
-/** Seed the Float32 masters of the vector weights from their live BFloat16 values.
- *  __grid_size__ grid-stride; no dynamic shared memory. */
-static __global__ void adafactor_seed_master_kernel_(bf16r1_span_t weights, f32r1_span_t master) {
-    std::size_t const total = weights.extent(0);
-    std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < total;
-         index += stride)
-        master[index] = __bfloat162float(weights[index]);
-}
-
 /** Enqueue the seeding of @p state 's Float32 master inside @p masters from its live BFloat16
  *  weights. */
 [[nodiscard]] static expected_t seed_master_(adafactor_state_t const &state, f32r1_tensor_arena_t &masters,
-                                             gpu_stream_t &stream) noexcept {
+                                             gpu_numerics_t const &numerics, gpu_stream_t &stream) noexcept {
     std::size_t const cols = state.weights.extent(1);
-    f32r1_span_t const master {masters.data() + state.master_offset, cols};
-    return launch_kernel(&adafactor_seed_master_kernel_, dim3 {grid_size_for(cols), 1u, 1u},
-                         dim3 {kernel_block_size_default_k, 1u, 1u}, stream, state.weights.flatten<1>(), master);
+    return numkong_result(numerics.cast(state.weights.data(), nk_bf16_k, masters.data() + state.master_offset, nk_f32_k,
+                                        cols, stream.numkong()),
+                          "master seeding");
 }
 
 expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differentiable_weights_t const> weights,
-                                        adafactor_config_t config, gpu_stream_t &stream) noexcept {
+                                        adafactor_config_t config, gpu_numerics_t const &numerics,
+                                        gpu_stream_t &stream) noexcept {
     using result_t = expected<adafactor_t>;
     std::size_t const count = weights.size();
     if (count == 0) return result_t::fail(status_t::invalid_input_k, "an optimizer needs weights");
     adafactor_t optimizer;
     optimizer.config_ = config;
+    optimizer.numerics_ = numerics;
     if (st::failed(optimizer.states_.resize(count)) || st::failed(optimizer.names_.resize(count)))
         return result_t::fail(status_t::bad_alloc_k, "state table allocation failed ({})", count);
     std::size_t moment_scalars = 0, master_scalars = 0, gradient_scalars = 0;
@@ -289,7 +272,7 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
         return result_t::fail(std::move(zeroed));
     for (adafactor_state_t const &state : optimizer.states_)
         if (state.weights.extent(0) == 1u)
-            if (expected_t seeded = seed_master_(state, optimizer.masters_, stream); !seeded)
+            if (expected_t seeded = seed_master_(state, optimizer.masters_, numerics, stream); !seeded)
                 return result_t::fail(std::move(seeded));
     return result_t {std::move(optimizer)};
 }
@@ -351,7 +334,8 @@ expected_t adafactor_t::load(checkpoint_to_load_t const &checkpoint, gpu_stream_
             restored = restore("column_moments", column_moments,
                                [&]() noexcept { return zero_async(column_moments, stream); });
         if (restored && rows == 1u)
-            restored = restore("master", master, [&]() noexcept { return seed_master_(state, masters_, stream); });
+            restored = restore("master", master,
+                               [&]() noexcept { return seed_master_(state, masters_, numerics_, stream); });
         if (restored && !first_moments_.empty()) {
             f32r1_span_t const first_moment {first_moments_.data() + state.gradient_offset, rows * cols};
             restored = restore("first_moment", first_moment,
@@ -393,7 +377,7 @@ expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_vi
 expected<distributed_adafactor_t> distributed_adafactor_t::make(
     multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce, std::span<gpu_arena_t> arenas,
     std::span<differentiable_weights_t const> weights, std::size_t weights_per_rank, adafactor_config_t config,
-    std::span<gpu_stream_t> streams, telemetry_ledger_t &ledger) noexcept {
+    gpu_numerics_t const &numerics, std::span<gpu_stream_t> streams, telemetry_ledger_t &ledger) noexcept {
     using result_t = expected<distributed_adafactor_t>;
     std::size_t const gpus = arenas.size();
     bool const single_domain = world_reduce.identity();
@@ -416,7 +400,7 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
         switch_to_gpu_t gpu_scope {streams[rank]};
         if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (rank={})", rank);
         expected<adafactor_t> state = adafactor_t::make(
-            arenas[rank], weights.subspan(rank * weights_per_rank, weights_per_rank), config, streams[rank]);
+            arenas[rank], weights.subspan(rank * weights_per_rank, weights_per_rank), config, numerics, streams[rank]);
         if (!state) return result_t::fail(std::move(state));
         optimizer.ranks_[rank].state = std::move(state.value_);
         if (single_domain) {
@@ -463,20 +447,20 @@ expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, 
     if (rank >= gpus) return expected_t::fail(status_t::invalid_input_k, "rank {} of {}", rank, gpus);
     switch_to_gpu_t gpu_scope {stream};
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed ({})", rank);
-    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     std::size_t const member = domain_->member_offset() + rank;
     gpu_fault_t *const fault = domain_->member(member).fault;
     f32_t *const window_base = domain_->payload(member).data() + window_.offset;
+    gpu_numerics_t const &numerics = ranks_[rank].state.numerics_;
     auto stage = [&]() noexcept -> expected_t {
         expected_t staged {};
         nk::tensor_view<adafactor_state_t, 1> const states = ranks_[rank].state.states();
         for (std::size_t index = 0; index != states.extent(0) && staged; ++index) {
             adafactor_state_t const &state = states[index];
             std::size_t const scalars = state.weights.extent(0) * state.weights.extent(1);
-            bf16r1_view_t const gradient = state.weights_grad.flatten<1>();
-            f32r1_span_t const window_block {window_base + state.gradient_offset, scalars};
-            staged = launch_kernel(&adafactor_stage_gradient_kernel_, dim3 {grid_size_for(scalars), 1u, 1u},
-                                   block_shape, stream, gradient, window_block);
+            staged = numkong_result(
+                numerics.cast(state.weights_grad.data(), nk_bf16_k, window_base + state.gradient_offset, nk_f32_k,
+                              scalars, stream.numkong()),
+                "gradient staging");
         }
         return staged;
     };

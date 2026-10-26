@@ -13,17 +13,39 @@
  *  only on a mask holding them all. A kit this build's NumKong did not compile keeps its name
  *  with @c compiled_k false, so every ladder stays one list.
  *
- *  Every kit carries both block precisions, as precision is a runtime value of the tower, never a
- *  type.
+ *  Every kit carries BFloat16 products, and E4M3 ones where its capability has them: precision is a
+ *  runtime value of the tower, never a type, so a class whose products kit has no E4M3 kernel
+ *  refuses an E4M3 load, as @ref e4m3_products tells. Where a whole ISA family lacks a kernel, its
+ *  kits compose the operation from the family's own kernels, as @ref mrope rotates without
+ *  @c rope_bf16 , or, with nothing to compose from, borrow the serial kit's row, the only place a
+ *  @c _serial kernel is named.
+ *
+ *  The host entries close the file as @c inline @c static function templates over the element-wise
+ *  kit: each works one row or one segment in Float32 through the kit's casts, reductions and
+ *  rotations, and every class unit compiles its own copy under its own flags, so the linker never
+ *  hands one class the copy another compiled.
  */
 #pragma once
 
-#include <numkong/attention.h> // `nk_attention_pack_*`, `nk_attention_packed_*`
-#include <numkong/cast.h>      // `nk_cast_*`
-#include <numkong/dots.h>      // `nk_dots_pack_*`, `nk_dots_packed_*`
-#include <numkong/each.h> // `nk_each_sum_f32_*`, `nk_each_rmscast_bf16_*`, `nk_each_rmsnorm_bf16_*`, `nk_each_swiglu_*`
+#include <cmath>   // `std::fmax` — the E4M3 scale floor
+#include <cstring> // `std::memcpy` — byte rows and angle rows
+
+#include <type_traits> // `std::conditional_t`, `std::is_same_v`
+
+#include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t`, the threads the integer entries split across
+
+#include <numkong/attention.h>    // `nk_attention_pack_*`, `nk_attention_packed_*`, `nk_attention_rope_bf16_*`
+#include <numkong/cast.h>         // `nk_cast_*`
+#include <numkong/dots.h>         // `nk_dots_pack_*`, `nk_dots_packed_*`
+#include <numkong/each.h>         // `nk_each_sum_f32_*`, `nk_each_scale_f32_*`, `nk_each_rmsnorm_bf16_*`, ...
+#include <numkong/reduce.h>       // `nk_reduce_minmax_f32_*`
+#include <numkong/trigonometry.h> // `nk_trig_sin_f32_*`, `nk_trig_cos_f32_*`
+
+#include "uform/encoder/entries.hpp" // `segment_layout_t`, `rope_grids_t`, `e4m3_range_k`
 
 namespace unum::uform::encoder {
+
+namespace fu = ashvardanian::forkunion;
 
 /** The first of @p kits_ whose every capability bit @p caps_ holds and whose kernels this build
  *  compiled, else @p floor_ . Reading order is the priority order. */
@@ -37,6 +59,15 @@ struct highest_kit<caps_, floor_, head_, tail_...> {
     using type = std::conditional_t<head_::compiled_k && (caps_ & head_::capability_k) == head_::capability_k, head_,
                                     typename highest_kit<caps_, floor_, tail_...>::type>;
 };
+
+/** Whether a products kit carries E4M3 products; a class whose kit has none refuses E4M3 loads
+ *  rather than fall to serial code. */
+template <typename products_kit_type_>
+concept e4m3_products = requires { products_kit_type_::multiply_e4m3; };
+
+/** Whether an element-wise kit carries NumKong's rotation; @ref mrope composes one without it. */
+template <typename elementwise_kit_type_>
+concept rope_rotations = requires { elementwise_kit_type_::rope_bf16; };
 
 #pragma region Products
 
@@ -146,16 +177,13 @@ struct diamond_products_kit_t {
 
 #if NUMKONG_TARGET_NEON
 
-/** The NEON floor: BFloat16 products in NEON, FP8 ones in serial code. */
+/** The NEON floor: BFloat16 products only, as NumKong's FP8 products start at FHM. */
 struct neon_products_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_neon_k;
     static constexpr bool compiled_k = true;
     static constexpr auto pack_size_bf16 = nk_dots_pack_size_bf16_neon;
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_neon;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_neon;
-    static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_serial;
-    static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_serial;
-    static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_serial;
 };
 #else
 struct neon_products_kit_t {
@@ -243,16 +271,14 @@ struct rvv_products_kit_t {
 
 #if NUMKONG_TARGET_V128
 
-/** WebAssembly's fixed-width SIMD: BFloat16 products in it, FP8 ones in serial code. */
+/** WebAssembly's fixed-width SIMD: BFloat16 products only, as NumKong's FP8 products need relaxed
+ *  SIMD. */
 struct v128_products_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
     static constexpr bool compiled_k = true;
     static constexpr auto pack_size_bf16 = nk_dots_pack_size_bf16_v128;
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_v128;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_v128;
-    static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_serial;
-    static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_serial;
-    static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_serial;
 };
 #else
 struct v128_products_kit_t {
@@ -287,7 +313,6 @@ struct products_ladder {
                              genoa_products_kit_t, skylake_products_kit_t, haswell_products_kit_t, sme_products_kit_t,
                              neonfp8_products_kit_t, neonbfdot_products_kit_t, neon_products_kit_t, rvv_products_kit_t,
                              v128relaxed_products_kit_t, v128_products_kit_t>::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 #pragma endregion Products
@@ -478,19 +503,25 @@ struct attention_ladder {
                                        genoa_attention_kit_t, skylake_attention_kit_t, haswell_attention_kit_t,
                                        sme_attention_kit_t, neonbfdot_attention_kit_t, neon_attention_kit_t,
                                        rvv_attention_kit_t, v128relaxed_attention_kit_t>::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 #pragma endregion Attention
 
 #pragma region Elementwise
 
-/** The casts, sums, norms and gates every CPU runs. */
+/** The casts, element-wise arithmetic, reductions, rotations, norms and gates every CPU runs. */
 struct serial_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_serial;
     static constexpr auto sum_f32 = nk_each_sum_f32_serial;
+    static constexpr auto scale_f32 = nk_each_scale_f32_serial;
+    static constexpr auto blend_f32 = nk_each_blend_f32_serial;
+    static constexpr auto fma_f32 = nk_each_fma_f32_serial;
+    static constexpr auto reduce_f32 = nk_reduce_minmax_f32_serial;
+    static constexpr auto sine_f32 = nk_trig_sin_f32_serial;
+    static constexpr auto cosine_f32 = nk_trig_cos_f32_serial;
+    static constexpr auto rope_bf16 = nk_attention_rope_bf16_serial;
     static constexpr auto rmscast_bf16 = nk_each_rmscast_bf16_serial;
     static constexpr auto rmsnorm_bf16 = nk_each_rmsnorm_bf16_serial;
     static constexpr auto swiglu_f32 = nk_each_swiglu_f32_serial;
@@ -503,6 +534,13 @@ struct haswell_elementwise_kit_t {
     static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_haswell;
     static constexpr auto sum_f32 = nk_each_sum_f32_haswell;
+    static constexpr auto scale_f32 = nk_each_scale_f32_haswell;
+    static constexpr auto blend_f32 = nk_each_blend_f32_haswell;
+    static constexpr auto fma_f32 = nk_each_fma_f32_haswell;
+    static constexpr auto reduce_f32 = nk_reduce_minmax_f32_haswell;
+    static constexpr auto sine_f32 = nk_trig_sin_f32_haswell;
+    static constexpr auto cosine_f32 = nk_trig_cos_f32_haswell;
+    static constexpr auto rope_bf16 = nk_attention_rope_bf16_haswell;
     static constexpr auto rmscast_bf16 = nk_each_rmscast_bf16_haswell;
     static constexpr auto rmsnorm_bf16 = nk_each_rmsnorm_bf16_haswell;
     static constexpr auto swiglu_f32 = nk_each_swiglu_f32_haswell;
@@ -521,6 +559,13 @@ struct skylake_elementwise_kit_t {
     static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_skylake;
     static constexpr auto sum_f32 = nk_each_sum_f32_skylake;
+    static constexpr auto scale_f32 = nk_each_scale_f32_skylake;
+    static constexpr auto blend_f32 = nk_each_blend_f32_skylake;
+    static constexpr auto fma_f32 = nk_each_fma_f32_skylake;
+    static constexpr auto reduce_f32 = nk_reduce_minmax_f32_skylake;
+    static constexpr auto sine_f32 = nk_trig_sin_f32_skylake;
+    static constexpr auto cosine_f32 = nk_trig_cos_f32_skylake;
+    static constexpr auto rope_bf16 = nk_attention_rope_bf16_skylake;
     static constexpr auto rmscast_bf16 = nk_each_rmscast_bf16_skylake;
     static constexpr auto rmsnorm_bf16 = nk_each_rmsnorm_bf16_skylake;
     static constexpr auto swiglu_f32 = nk_each_swiglu_f32_skylake;
@@ -541,6 +586,13 @@ struct icelake_elementwise_kit_t {
     static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_icelake;
     static constexpr auto sum_f32 = nk_each_sum_f32_skylake;
+    static constexpr auto scale_f32 = nk_each_scale_f32_skylake;
+    static constexpr auto blend_f32 = nk_each_blend_f32_skylake;
+    static constexpr auto fma_f32 = nk_each_fma_f32_skylake;
+    static constexpr auto reduce_f32 = nk_reduce_minmax_f32_skylake;
+    static constexpr auto sine_f32 = nk_trig_sin_f32_skylake;
+    static constexpr auto cosine_f32 = nk_trig_cos_f32_skylake;
+    static constexpr auto rope_bf16 = nk_attention_rope_bf16_skylake;
     static constexpr auto rmscast_bf16 = nk_each_rmscast_bf16_skylake;
     static constexpr auto rmsnorm_bf16 = nk_each_rmsnorm_bf16_skylake;
     static constexpr auto swiglu_f32 = nk_each_swiglu_f32_skylake;
@@ -561,6 +613,13 @@ struct genoa_elementwise_kit_t {
     static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_icelake;
     static constexpr auto sum_f32 = nk_each_sum_f32_skylake;
+    static constexpr auto scale_f32 = nk_each_scale_f32_skylake;
+    static constexpr auto blend_f32 = nk_each_blend_f32_skylake;
+    static constexpr auto fma_f32 = nk_each_fma_f32_skylake;
+    static constexpr auto reduce_f32 = nk_reduce_minmax_f32_skylake;
+    static constexpr auto sine_f32 = nk_trig_sin_f32_skylake;
+    static constexpr auto cosine_f32 = nk_trig_cos_f32_skylake;
+    static constexpr auto rope_bf16 = nk_attention_rope_bf16_skylake;
     static constexpr auto rmscast_bf16 = nk_each_rmscast_bf16_skylake;
     static constexpr auto rmsnorm_bf16 = nk_each_rmsnorm_bf16_genoa;
     static constexpr auto swiglu_f32 = nk_each_swiglu_f32_skylake;
@@ -581,6 +640,13 @@ struct sapphire_elementwise_kit_t {
     static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_sapphire;
     static constexpr auto sum_f32 = nk_each_sum_f32_skylake;
+    static constexpr auto scale_f32 = nk_each_scale_f32_skylake;
+    static constexpr auto blend_f32 = nk_each_blend_f32_skylake;
+    static constexpr auto fma_f32 = nk_each_fma_f32_skylake;
+    static constexpr auto reduce_f32 = nk_reduce_minmax_f32_skylake;
+    static constexpr auto sine_f32 = nk_trig_sin_f32_skylake;
+    static constexpr auto cosine_f32 = nk_trig_cos_f32_skylake;
+    static constexpr auto rope_bf16 = nk_attention_rope_bf16_skylake;
     static constexpr auto rmscast_bf16 = nk_each_rmscast_bf16_skylake;
     static constexpr auto rmsnorm_bf16 = nk_each_rmsnorm_bf16_genoa;
     static constexpr auto swiglu_f32 = nk_each_swiglu_f32_skylake;
@@ -599,6 +665,13 @@ struct neon_elementwise_kit_t {
     static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_neon;
     static constexpr auto sum_f32 = nk_each_sum_f32_neon;
+    static constexpr auto scale_f32 = nk_each_scale_f32_neon;
+    static constexpr auto blend_f32 = nk_each_blend_f32_neon;
+    static constexpr auto fma_f32 = nk_each_fma_f32_neon;
+    static constexpr auto reduce_f32 = nk_reduce_minmax_f32_neon;
+    static constexpr auto sine_f32 = nk_trig_sin_f32_neon;
+    static constexpr auto cosine_f32 = nk_trig_cos_f32_neon;
+    static constexpr auto rope_bf16 = nk_attention_rope_bf16_neon;
     static constexpr auto rmscast_bf16 = nk_each_rmscast_bf16_neon;
     static constexpr auto rmsnorm_bf16 = nk_each_rmsnorm_bf16_neon;
     static constexpr auto swiglu_f32 = nk_each_swiglu_f32_neon;
@@ -613,16 +686,23 @@ struct neon_elementwise_kit_t {
 
 #if NUMKONG_TARGET_RVV
 
-/** RISC-V vectors' casts and sums over serial norms and gates. */
+/** RISC-V vectors' casts, arithmetic, reductions and trigonometry, which also rotate as @ref mrope
+ *  composes them, over the serial norms and gates, which NumKong has no RISC-V kernel for. */
 struct rvv_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
     static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_rvv;
     static constexpr auto sum_f32 = nk_each_sum_f32_rvv;
-    static constexpr auto rmscast_bf16 = nk_each_rmscast_bf16_serial;
-    static constexpr auto rmsnorm_bf16 = nk_each_rmsnorm_bf16_serial;
-    static constexpr auto swiglu_f32 = nk_each_swiglu_f32_serial;
-    static constexpr auto swiglu_bf16 = nk_each_swiglu_bf16_serial;
+    static constexpr auto scale_f32 = nk_each_scale_f32_rvv;
+    static constexpr auto blend_f32 = nk_each_blend_f32_rvv;
+    static constexpr auto fma_f32 = nk_each_fma_f32_rvv;
+    static constexpr auto reduce_f32 = nk_reduce_minmax_f32_rvv;
+    static constexpr auto sine_f32 = nk_trig_sin_f32_rvv;
+    static constexpr auto cosine_f32 = nk_trig_cos_f32_rvv;
+    static constexpr auto rmscast_bf16 = serial_elementwise_kit_t::rmscast_bf16;
+    static constexpr auto rmsnorm_bf16 = serial_elementwise_kit_t::rmsnorm_bf16;
+    static constexpr auto swiglu_f32 = serial_elementwise_kit_t::swiglu_f32;
+    static constexpr auto swiglu_bf16 = serial_elementwise_kit_t::swiglu_bf16;
 };
 #else
 struct rvv_elementwise_kit_t {
@@ -633,16 +713,25 @@ struct rvv_elementwise_kit_t {
 
 #if NUMKONG_TARGET_V128
 
-/** WebAssembly's fixed-width sums over serial casts, norms and gates. */
+/** WebAssembly's fixed-width sums over the serial rest: NumKong runs the casts, arithmetic,
+ *  reductions and trigonometry only under relaxed SIMD, so fixed-width SIMD has nothing to compose
+ *  them from. */
 struct v128_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k;
     static constexpr bool compiled_k = true;
-    static constexpr auto cast = nk_cast_serial;
+    static constexpr auto cast = serial_elementwise_kit_t::cast;
     static constexpr auto sum_f32 = nk_each_sum_f32_v128;
-    static constexpr auto rmscast_bf16 = nk_each_rmscast_bf16_serial;
-    static constexpr auto rmsnorm_bf16 = nk_each_rmsnorm_bf16_serial;
-    static constexpr auto swiglu_f32 = nk_each_swiglu_f32_serial;
-    static constexpr auto swiglu_bf16 = nk_each_swiglu_bf16_serial;
+    static constexpr auto scale_f32 = serial_elementwise_kit_t::scale_f32;
+    static constexpr auto blend_f32 = serial_elementwise_kit_t::blend_f32;
+    static constexpr auto fma_f32 = serial_elementwise_kit_t::fma_f32;
+    static constexpr auto reduce_f32 = serial_elementwise_kit_t::reduce_f32;
+    static constexpr auto sine_f32 = serial_elementwise_kit_t::sine_f32;
+    static constexpr auto cosine_f32 = serial_elementwise_kit_t::cosine_f32;
+    static constexpr auto rope_bf16 = serial_elementwise_kit_t::rope_bf16;
+    static constexpr auto rmscast_bf16 = serial_elementwise_kit_t::rmscast_bf16;
+    static constexpr auto rmsnorm_bf16 = serial_elementwise_kit_t::rmsnorm_bf16;
+    static constexpr auto swiglu_f32 = serial_elementwise_kit_t::swiglu_f32;
+    static constexpr auto swiglu_bf16 = serial_elementwise_kit_t::swiglu_bf16;
 };
 #else
 struct v128_elementwise_kit_t {
@@ -653,16 +742,24 @@ struct v128_elementwise_kit_t {
 
 #if NUMKONG_TARGET_V128 && NUMKONG_TARGET_V128RELAXED
 
-/** Relaxed SIMD's casts over the fixed-width sums. */
+/** Relaxed SIMD's casts, arithmetic, reductions and trigonometry, which also rotate as @ref mrope
+ *  composes them, over the fixed-width sums and the serial norms and gates, which NumKong has no
+ *  WebAssembly kernel for. */
 struct v128relaxed_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k | nk_cap_v128relaxed_k;
     static constexpr bool compiled_k = true;
     static constexpr auto cast = nk_cast_v128relaxed;
     static constexpr auto sum_f32 = nk_each_sum_f32_v128;
-    static constexpr auto rmscast_bf16 = nk_each_rmscast_bf16_serial;
-    static constexpr auto rmsnorm_bf16 = nk_each_rmsnorm_bf16_serial;
-    static constexpr auto swiglu_f32 = nk_each_swiglu_f32_serial;
-    static constexpr auto swiglu_bf16 = nk_each_swiglu_bf16_serial;
+    static constexpr auto scale_f32 = nk_each_scale_f32_v128relaxed;
+    static constexpr auto blend_f32 = nk_each_blend_f32_v128relaxed;
+    static constexpr auto fma_f32 = nk_each_fma_f32_v128relaxed;
+    static constexpr auto reduce_f32 = nk_reduce_minmax_f32_v128relaxed;
+    static constexpr auto sine_f32 = nk_trig_sin_f32_v128relaxed;
+    static constexpr auto cosine_f32 = nk_trig_cos_f32_v128relaxed;
+    static constexpr auto rmscast_bf16 = serial_elementwise_kit_t::rmscast_bf16;
+    static constexpr auto rmsnorm_bf16 = serial_elementwise_kit_t::rmsnorm_bf16;
+    static constexpr auto swiglu_f32 = serial_elementwise_kit_t::swiglu_f32;
+    static constexpr auto swiglu_bf16 = serial_elementwise_kit_t::swiglu_bf16;
 };
 #else
 struct v128relaxed_elementwise_kit_t {
@@ -678,9 +775,217 @@ struct elementwise_ladder {
                                        genoa_elementwise_kit_t, icelake_elementwise_kit_t, skylake_elementwise_kit_t,
                                        haswell_elementwise_kit_t, neon_elementwise_kit_t, rvv_elementwise_kit_t,
                                        v128relaxed_elementwise_kit_t, v128_elementwise_kit_t>::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 #pragma endregion Elementwise
+
+#pragma region Entries
+
+/** Rows @c [t,:] of @p rows for each text segment's cells, copied from @c table[token] ; other rows
+ *  stay as they are. Token IDs are trusted: packers write bytes only. */
+inline static void gather_bytes(segment_layout_t const &layout, nk::tensor_view<token_id_t, 1> grid_tokens,
+                                bf16r2_view_t table, bf16r2_span_t rows, fu::flat_pool_t &pool) noexcept {
+    std::size_t const row_bytes = rows.extent(1) * sizeof(nk_bf16_t);
+    pool.for_n(layout.lengths.extent(0), [&](std::size_t segment, auto) noexcept {
+        if (layout.modality[segment] != modality_t::text_k) return;
+        for (u32_t cell = 0; cell != layout.lengths[segment]; ++cell) {
+            std::size_t const token = grid_tokens[layout.grid_offsets[segment] + cell];
+            std::memcpy(rows.row(layout.packed_offsets[segment] + cell).data(), table.row(token).data(), row_bytes);
+        }
+    });
+}
+
+/** The gain and bias rows of @p affine @b [2,spatial·channels] , channels innermost, that turn a
+ *  widened pixel row into @c (byte/255−mean)·inverse_std in one fused multiply-add. */
+inline static void fill_patch_affine(f32r1_view_t mean, f32r1_view_t inverse_std, f32r2_span_t affine) noexcept {
+    std::size_t const channels = mean.extent(0), width = affine.extent(1);
+    f32_t *const gain = affine.row(0).data(), *const bias = affine.row(1).data();
+    for (std::size_t scalar = 0; scalar != width; ++scalar) {
+        std::size_t const channel = scalar % channels;
+        gain[scalar] = inverse_std[channel] / 255.0f;
+        bias[scalar] = -mean[channel] * inverse_std[channel];
+    }
+}
+
+/** Segment @p segment 's pixel cells @b [cells,spatial,channels] , when it is @p target , into
+ *  patch rows @b [rows,spatial·channels] : each cell widens into @p wide , takes the gain and bias
+ *  of @ref fill_patch_affine , and narrows into its row. */
+template <typename elementwise_kit_type_>
+[[nodiscard]] inline static nk_status_t stage_patches(segment_layout_t const &layout, std::size_t segment,
+                                                      modality_t target, nk::tensor_view<pixel_t, 3> grid_pixels,
+                                                      f32r2_view_t affine, f32r1_span_t wide,
+                                                      bf16r2_span_t patches) noexcept {
+    if (layout.modality[segment] != target) return nk_success_k;
+    std::size_t const width = affine.extent(1);
+    f32_t const one = 1.0f;
+    nk_status_t status = nk_success_k;
+    for (u32_t cell = 0; status == nk_success_k && cell != layout.lengths[segment]; ++cell) {
+        pixel_t const *const pixels = grid_pixels.row(layout.grid_offsets[segment] + cell).data();
+        status = elementwise_kit_type_::cast(pixels, nk_u8_k, wide.data(), nk_f32_k, width, nullptr);
+        if (status == nk_success_k)
+            status = elementwise_kit_type_::fma_f32(wide.data(), affine.row(0).data(), affine.row(1).data(), width,
+                                                    &one, &one, wide.data(), nullptr);
+        if (status == nk_success_k)
+            status = elementwise_kit_type_::cast(wide.data(), nk_f32_k,
+                                                 patches.row(layout.packed_offsets[segment] + cell).data(), nk_bf16_k,
+                                                 width, nullptr);
+    }
+    return status;
+}
+
+/** Segment @p segment 's raw frames @b [cells,chunk_samples] , when it is audio, narrowed into its
+ *  rows in one cast, as both sides keep its cells back to back. */
+template <typename elementwise_kit_type_>
+[[nodiscard]] inline static nk_status_t stage_frames(segment_layout_t const &layout, std::size_t segment,
+                                                     nk::tensor_view<f32_t, 2> grid_samples,
+                                                     bf16r2_span_t frames) noexcept {
+    std::size_t const cells = layout.lengths[segment];
+    if (layout.modality[segment] != modality_t::audio_k || cells == 0) return nk_success_k;
+    return elementwise_kit_type_::cast(grid_samples.row(layout.grid_offsets[segment]).data(), nk_f32_k,
+                                       frames.row(layout.packed_offsets[segment]).data(), nk_bf16_k,
+                                       cells * grid_samples.extent(1), nullptr);
+}
+
+/** Every packed row's @c (t,h,w) into @p coords @b [rows,3] : text and audio @c (k,0,0) , image
+ *  @c (0,k/cols,k%cols) , video @c (group·tube_frames·frame_stride,r,c) , PAD rows untouched. */
+inline static void fill_coords(segment_layout_t const &layout, nk::tensor_view<u16_t, 2> image_shapes,
+                               nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames, u32_t frame_stride,
+                               i16r2_span_t coords, fu::flat_pool_t &pool) noexcept {
+    pool.for_n(layout.lengths.extent(0), [&](std::size_t segment, auto) noexcept {
+        modality_t const modality = layout.modality[segment];
+        for (u32_t cell = 0; cell != layout.lengths[segment]; ++cell) {
+            u32_t temporal = 0, height = 0, width = 0;
+            switch (modality) {
+            case modality_t::text_k:
+            case modality_t::audio_k: temporal = cell; break;
+            case modality_t::image_k: {
+                u32_t const columns = image_shapes[segment, 1];
+                if (columns == 0u) continue;
+                height = cell / columns, width = cell % columns;
+                break;
+            }
+            case modality_t::video_k: {
+                u32_t const columns = video_shapes[segment, 2];
+                u32_t const groups_per_frame = static_cast<u32_t>(video_shapes[segment, 1]) * columns;
+                if (groups_per_frame == 0u) continue;
+                u32_t const planar = cell % groups_per_frame;
+                temporal = cell / groups_per_frame * tube_frames * frame_stride;
+                height = planar / columns, width = planar % columns;
+                break;
+            }
+            }
+            std::size_t const row = layout.packed_offsets[segment] + cell;
+            coords[row, 0] = static_cast<i16_t>(temporal);
+            coords[row, 1] = static_cast<i16_t>(height);
+            coords[row, 2] = static_cast<i16_t>(width);
+        }
+    });
+}
+
+/** Rotate row @p row 's @p heads head vectors from column @p role_offset in place: the NeoX
+ *  split-half pair @c (k,k+head_width/2) turns by its angle at the row's @c (t,h,w) , each
+ *  coordinate clamped into its grid. The row's angles gather into @p wide , temporal pairs first,
+ *  their cosines and sines follow them, and every head turns by both. A kit without NumKong's
+ *  rotation widens each head behind them and turns its halves with two fused multiplies each. */
+template <typename elementwise_kit_type_>
+[[nodiscard]] inline static nk_status_t mrope(bf16r2_span_t values, std::size_t row, u32_t role_offset, u32_t heads,
+                                              u32_t head_width, i16r2_view_t coords, rope_grids_t angles,
+                                              f32r1_span_t wide) noexcept {
+    std::size_t const pairs = head_width / 2u;
+    f32_t *const angle = wide.data(), *const cosine = angle + pairs, *const sine = cosine + pairs;
+    f32r2_view_t const grids[3] = {angles.temporal, angles.height, angles.width};
+    std::size_t gathered = 0;
+    for (std::size_t axis = 0; axis != 3; ++axis) {
+        i16_t const coordinate = coords[row, axis];
+        std::size_t position = coordinate > 0 ? static_cast<std::size_t>(coordinate) : 0;
+        if (position >= grids[axis].extent(0)) position = grids[axis].extent(0) - 1u;
+        std::memcpy(angle + gathered, grids[axis].row(position).data(), grids[axis].extent(1) * sizeof(f32_t));
+        gathered += grids[axis].extent(1);
+    }
+    nk_status_t status = elementwise_kit_type_::cosine_f32(angle, pairs, cosine, nullptr);
+    if (status == nk_success_k) status = elementwise_kit_type_::sine_f32(angle, pairs, sine, nullptr);
+    nk_bf16_t *const rotated = values.row(row).data() + role_offset;
+    if constexpr (rope_rotations<elementwise_kit_type_>) {
+        std::size_t const stride = values.extent(1) * sizeof(nk_bf16_t);
+        if (status == nk_success_k)
+            status = elementwise_kit_type_::rope_bf16(rotated, cosine, sine, rotated, 1, heads, head_width, stride,
+                                                      stride, nullptr);
+    }
+    else {
+        f32_t *const low = sine + pairs, *const high = low + pairs, *const turned = high + pairs;
+        f32_t const one = 1.0f, zero = 0.0f, minus_one = -1.0f;
+        for (u32_t head = 0; status == nk_success_k && head != heads; ++head) {
+            nk_bf16_t *const vector = rotated + static_cast<std::size_t>(head) * head_width;
+            status = elementwise_kit_type_::cast(vector, nk_bf16_k, low, nk_f32_k, head_width, nullptr);
+            if (status == nk_success_k) // turned = low·sine + high·cosine
+                status = elementwise_kit_type_::fma_f32(low, sine, low, pairs, &one, &zero, turned, nullptr);
+            if (status == nk_success_k)
+                status = elementwise_kit_type_::fma_f32(high, cosine, turned, pairs, &one, &one, turned, nullptr);
+            if (status == nk_success_k) // low = low·cosine − high·sine
+                status = elementwise_kit_type_::fma_f32(high, sine, high, pairs, &one, &zero, high, nullptr);
+            if (status == nk_success_k)
+                status = elementwise_kit_type_::fma_f32(low, cosine, high, pairs, &one, &minus_one, low, nullptr);
+            if (status == nk_success_k)
+                status = elementwise_kit_type_::cast(low, nk_f32_k, vector, nk_bf16_k, pairs, nullptr);
+            if (status == nk_success_k)
+                status = elementwise_kit_type_::cast(turned, nk_f32_k, vector + pairs, nk_bf16_k, pairs, nullptr);
+        }
+    }
+    return status;
+}
+
+/** Quantize row @p row of @p values by its own @c max_abs/240 into @p shadow , keeping the scale in
+ *  @p token_scales : a BFloat16 row widens into @p wide first, a Float32 one is read in place, and
+ *  the scaled row lands in @p wide before it narrows. */
+template <typename elementwise_kit_type_, typename value_type_>
+[[nodiscard]] inline static nk_status_t quantize_tokens_e4m3(nk::tensor_view<value_type_, 2> values, std::size_t row,
+                                                             e4m3r2_span_t shadow, f32r1_span_t token_scales,
+                                                             f32r1_span_t wide) noexcept {
+    std::size_t const width = values.extent(1);
+    f32_t const *source = wide.data();
+    nk_status_t status = nk_success_k;
+    if constexpr (std::is_same_v<value_type_, f32_t>) source = values.row(row).data();
+    else status = elementwise_kit_type_::cast(values.row(row).data(), nk_bf16_k, wide.data(), nk_f32_k, width, nullptr);
+    f32_t lowest = 0.0f, highest = 0.0f;
+    nk_size_t lowest_index = 0, highest_index = 0;
+    if (status == nk_success_k)
+        status = elementwise_kit_type_::reduce_f32(source, width, sizeof(f32_t), &lowest, &lowest_index, &highest,
+                                                   &highest_index, nullptr);
+    f32_t const scale = std::fmax(std::fmax(-lowest, highest) / e4m3_range_k, e4m3_descale_floor_k);
+    f32_t const inverse = 1.0f / scale, shift = 0.0f;
+    token_scales[row] = scale;
+    if (status == nk_success_k)
+        status = elementwise_kit_type_::scale_f32(source, width, &inverse, &shift, wide.data(), nullptr);
+    if (status == nk_success_k)
+        status = elementwise_kit_type_::cast(wide.data(), nk_f32_k, shadow.row(row).data(), nk_e4m3_k, width, nullptr);
+    return status;
+}
+
+/** Row @p row of @c values=products·weight_descale·token_scales+residual , narrowed: the
+ *  residual widens into @p wide and the products blend into it there; an empty @p residual drops
+ *  its term. */
+template <typename elementwise_kit_type_>
+[[nodiscard]] inline static nk_status_t rescale_tokens(f32r2_view_t products, std::size_t row,
+                                                       f32r1_view_t token_scales, f32_t weight_descale,
+                                                       bf16r2_view_t residual, bf16r2_span_t values,
+                                                       f32r1_span_t wide) noexcept {
+    std::size_t const width = values.extent(1);
+    f32_t const weight = weight_descale * token_scales[row], one = 1.0f, zero = 0.0f;
+    f32_t const *const product = products.row(row).data();
+    nk_status_t status = nk_success_k;
+    if (residual.empty())
+        status = elementwise_kit_type_::scale_f32(product, width, &weight, &zero, wide.data(), nullptr);
+    else {
+        status = elementwise_kit_type_::cast(residual.row(row).data(), nk_bf16_k, wide.data(), nk_f32_k, width,
+                                             nullptr);
+        if (status == nk_success_k)
+            status = elementwise_kit_type_::blend_f32(product, wide.data(), width, &weight, &one, wide.data(), nullptr);
+    }
+    if (status == nk_success_k)
+        status = elementwise_kit_type_::cast(wide.data(), nk_f32_k, values.row(row).data(), nk_bf16_k, width, nullptr);
+    return status;
+}
+
+#pragma endregion Entries
 
 } // namespace unum::uform::encoder

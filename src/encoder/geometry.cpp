@@ -2,11 +2,15 @@
  *  @file src/encoder/geometry.cpp
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief Parsing the tower geometry out of checkpoint metadata — see the header for the contract.
+ *  @brief Parsing the tower geometry out of checkpoint metadata, and the rotary angle grids it
+ *      implies — see the headers for the contracts. Load-time work, compiled once at the baseline.
  */
+#include <cmath> // `std::pow`
+
 #include <charconv>     // `std::from_chars`
 #include <system_error> // `std::errc`
 
+#include "uform/encoder/entries.hpp" // `rope_angles_t`
 #include "uform/encoder/geometry.hpp"
 
 using namespace unum::uform::encoder;
@@ -32,12 +36,14 @@ template <typename value_type_>
     return {};
 }
 
-/** Read the required comma-separated metadata @p key into exactly @p count floats. */
+/** Read the required comma-separated metadata @p key into exactly as many floats as @p values
+ *  holds. */
 [[nodiscard]] static expected_t read_list_(uc::checkpoint_to_load_t const &checkpoint, sz::string_view_t key,
-                                           f32_t *values, u32_t count) noexcept {
+                                           std::span<f32_t> values) noexcept {
     sz::string_view_t remaining = checkpoint.metadata(key);
     if (remaining.empty()) return expected_t::fail(status_t::invalid_input_k, "the checkpoint misses the {} key", key);
-    u32_t parsed = 0;
+    std::size_t const count = values.size();
+    std::size_t parsed = 0;
     for (sz::string_view_t separator = ","; parsed != count && !separator.empty(); ++parsed) {
         auto [item, match, after] = remaining.partition(',');
         if (!parse_(item, values[parsed]))
@@ -78,10 +84,14 @@ expected<geometry_t> geometry_t::from(uc::checkpoint_to_load_t const &checkpoint
     if (geometry.image_channels > pixel_channels_max_k || geometry.video_channels > pixel_channels_max_k)
         return result_t::fail(status_t::invalid_input_k, "pixels carry at most {} channels (image {}, video {})",
                               pixel_channels_max_k, geometry.image_channels, geometry.video_channels);
-    read = read_list_(checkpoint, "image_pixel_mean", geometry.image_pixel_mean, geometry.image_channels);
-    if (read) read = read_list_(checkpoint, "image_pixel_std", geometry.image_pixel_std, geometry.image_channels);
-    if (read) read = read_list_(checkpoint, "video_pixel_mean", geometry.video_pixel_mean, geometry.video_channels);
-    if (read) read = read_list_(checkpoint, "video_pixel_std", geometry.video_pixel_std, geometry.video_channels);
+    std::span<f32_t> const image_mean = std::span {geometry.image_pixel_mean}.first(geometry.image_channels);
+    std::span<f32_t> const image_std = std::span {geometry.image_pixel_std}.first(geometry.image_channels);
+    std::span<f32_t> const video_mean = std::span {geometry.video_pixel_mean}.first(geometry.video_channels);
+    std::span<f32_t> const video_std = std::span {geometry.video_pixel_std}.first(geometry.video_channels);
+    read = read_list_(checkpoint, "image_pixel_mean", image_mean);
+    if (read) read = read_list_(checkpoint, "image_pixel_std", image_std);
+    if (read) read = read_list_(checkpoint, "video_pixel_mean", video_mean);
+    if (read) read = read_list_(checkpoint, "video_pixel_std", video_std);
     if (!read) return result_t::fail(std::move(read));
 
     if (geometry.depth == 0 || geometry.head_width == 0 || geometry.hidden % geometry.head_width != 0 ||
@@ -114,4 +124,24 @@ expected<geometry_t> geometry_t::from(uc::checkpoint_to_load_t const &checkpoint
                                                             : temperatures.empty() ? 1
                                                                                    : temperatures.numel());
     return result_t {geometry};
+}
+
+expected<rope_angles_t> rope_angles_t::make(u32_t positions, u32_t temporal, u32_t height, u32_t width,
+                                            f32_t base) noexcept {
+    using result_t = expected<rope_angles_t>;
+    rope_angles_t angles;
+    angles.positions_ = positions;
+    angles.pairs_[0] = temporal / 2u, angles.pairs_[1] = height / 2u, angles.pairs_[2] = width / 2u;
+    u32_t const denominators[3] = {temporal + height + width, height, width};
+    std::size_t const pairs = angles.pairs_[0] + angles.pairs_[1] + angles.pairs_[2];
+    if (st::failed(angles.angles_.resize(static_cast<std::size_t>(positions) * pairs)))
+        return result_t::fail(status_t::bad_alloc_k, "angle grid allocation failed ({} positions)", positions);
+    std::size_t offset = 0;
+    for (u32_t axis = 0; axis != 3; ++axis)
+        for (u32_t position = 0; position != positions; ++position)
+            for (u32_t pair = 0; pair != angles.pairs_[axis]; ++pair)
+                angles.angles_[offset++] = static_cast<f32_t>(position) *
+                                           static_cast<f32_t>(std::pow(static_cast<uc::f64_t>(base),
+                                                                       -2.0 * pair / denominators[axis]));
+    return result_t {std::move(angles)};
 }

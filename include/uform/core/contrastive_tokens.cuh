@@ -118,9 +118,9 @@ struct gpu_query_subgraph_t {
 struct contrastive_tokens_t {
 
     /** Validate @p config and allocate every tile, pack and scratch tensor off @p arena ,
-     *  dispatching with @p capabilities . */
+     *  calling the kernels of @p numerics . */
     [[nodiscard]] static expected<contrastive_tokens_t> make(gpu_arena_t &arena, contrastive_tokens_config_t config,
-                                                             nk_capability_t capabilities) noexcept;
+                                                             gpu_numerics_t const &numerics) noexcept;
 
     /**
      *  @brief Single-GPU forward and backward for one step.
@@ -196,8 +196,8 @@ struct contrastive_tokens_t {
     /** The baked geometry. */
     contrastive_tokens_config_t config_ {};
 
-    /** The NumKong capabilities of the arena's device, picking every product. */
-    nk_capability_t capabilities_ = 0;
+    /** The NumKong kernels of the arena's device class, every product's. */
+    gpu_numerics_t numerics_ {};
 
     /** The whole-row pair loss over this GPU's query rows. */
     contrastive_pair_loss_t pair_loss_ {};
@@ -329,11 +329,11 @@ struct distributed_contrastive_tokens_t {
      *  @param[in] streams @b [gpus] per-GPU streams scoping each per-device setup.
      *  @param[in] config The per-GPU geometry; @c gpu_subgraphs_per_step must equal the world's
      *      GPUs.
-     *  @param[in] capabilities The NumKong capabilities every GPU's products dispatch with.
+     *  @param[in] numerics The NumKong kernels every GPU's products call.
      */
     [[nodiscard]] static expected<distributed_contrastive_tokens_t> make(
         multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
-        std::span<gpu_stream_t> streams, contrastive_tokens_config_t config, nk_capability_t capabilities,
+        std::span<gpu_stream_t> streams, contrastive_tokens_config_t config, gpu_numerics_t const &numerics,
         f64_t timeout_seconds = 120.0) noexcept;
 
     /** One step over every local GPU, enqueued phase by phase across @p inputs and @p streams . */

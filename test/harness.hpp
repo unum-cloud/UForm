@@ -30,11 +30,13 @@
 
 #include <algorithm>   // `std::min`
 #include <charconv>    // `std::from_chars`
+#include <chrono>      // `std::chrono::milliseconds` — the pause between two polls of a mesh exchange
 #include <format>      // `std::vformat_to`, `std::make_format_args`
 #include <random>      // `std::random_device`
 #include <regex>       // `std::regex`, `std::regex_search`
 #include <span>        // `std::span` — the oracles' host staging
 #include <string_view> // `std::string_view`
+#include <thread>      // `std::this_thread::sleep_for`
 #include <type_traits> // `std::type_identity_t`
 
 #include <fmt/format.h> // `fmt::println`
@@ -70,6 +72,9 @@ using namespace unum::uform::core;
 
 /** The reason every case needing a GPU skips with on a machine that shows none. */
 inline constexpr char const *no_cuda_device_k = "no CUDA device detected";
+
+/** Pauses 50 ms between two polls of a mesh exchange directory, as the trainer does. */
+inline void pause_between_polls() noexcept { std::this_thread::sleep_for(std::chrono::milliseconds {50}); }
 
 /** The file name of a `__FILE__`-style path, the trailing component after the last `/`. */
 [[nodiscard]] constexpr std::string_view path_basename(std::string_view path) noexcept {

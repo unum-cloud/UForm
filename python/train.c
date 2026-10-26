@@ -298,8 +298,9 @@ static uform_py_field_t const MeshOptions_fields[] = {
     {"gpus_per_multimem_domain", uform_py_field_size_k, offsetof(uform_mesh_options_t, gpus_per_multimem_domain), NULL,
      "GPUs one NVLink multicast domain spans; 0 derives the host."},
     {"directory", uform_py_field_object_k, 0, NULL,
-     "The directory every host sees, a str, bytes or os.PathLike; required with peers."},
-    {"job", uform_py_field_object_k, 0, NULL, "The run's unique name inside `directory`; required with peers."},
+     "The directory every host sees, a str, bytes or os.PathLike passed as the OS's bytes; required with peers."},
+    {"job", uform_py_field_object_k, 0, NULL,
+     "The run's unique name, a str naming one directory inside `directory`; required with peers."},
     {"timeout_seconds", uform_py_field_double_k, offsetof(uform_mesh_options_t, timeout_seconds), NULL,
      "Seconds any wait for a peer lasts before the call fails; 0 derives 120."},
 };
@@ -354,27 +355,6 @@ uform_py_fields_t RelationsType = {
     sizeof(Relations_fields) / sizeof(*Relations_fields),
 };
 
-/** The indices of the three buffers among the fields of `ChoicesView`. */
-enum { choices_offsets_k = 0, choices_bytes_k = 1, choices_targets_k = 2 };
-
-static uform_py_field_t const ChoicesView_fields[] = {
-    {"offsets", uform_py_field_object_k, 0, NULL,
-     "The step's count + 1 non-decreasing size_t offsets into `bytes`; None makes no choices."},
-    {"bytes", uform_py_field_object_k, 0, NULL,
-     "A uint8 buffer: item `i` offers the distinct bytes `bytes[offsets[i]:offsets[i + 1]]`."},
-    {"targets", uform_py_field_object_k, 0, NULL,
-     "The float32 target probability of each byte, summing to one per item that offers any."},
-};
-
-uform_py_fields_t ChoicesViewType = {
-    {PyVarObject_HEAD_INIT(NULL, 0).tp_name = "uform.ChoicesView",
-     .tp_doc = "ChoicesView(*, offsets=None, bytes=None, targets=None)\n\n"                                    //
-               "Each item's legal choices and their targets, as compressed sparse rows of buffers, borrowed\n" //
-               "until the step is final; a text item offering any is the state its answer follows."},
-    ChoicesView_fields,
-    sizeof(ChoicesView_fields) / sizeof(*ChoicesView_fields),
-};
-
 #pragma endregion Keyword Structures
 
 #pragma region Mesh
@@ -411,6 +391,21 @@ static int optional_path(PyObject *object, char const *field, uform_bytes_view_t
     return uform_py_path_from_object(object, field, view, decoded);
 }
 
+/** Lends an optional name field, a @c str, as its UTF-8 bytes into @p view, which live as long
+ *  as the string; returns 0 or -1. */
+static int optional_name(PyObject *object, char const *field, uform_bytes_view_t *view) {
+    if (!object || object == Py_None) return 0;
+    if (!PyUnicode_Check(object)) {
+        PyErr_Format(PyExc_TypeError, "the '%s' option takes a str, got %S", field, Py_TYPE(object));
+        return -1;
+    }
+    Py_ssize_t length = 0;
+    char const *const text = PyUnicode_AsUTF8AndSize(object, &length);
+    if (!text) return -1;
+    *view = (uform_bytes_view_t) {(uint8_t const *)text, (size_t)length};
+    return 0;
+}
+
 static char const doc_Mesh_bootstrap[] =                                                         //
     "bootstrap(executor, options, /) -> Mesh\n"                                                  //
     "\n"                                                                                         //
@@ -428,7 +423,7 @@ static char const doc_Mesh_bootstrap[] =                                        
 
 static PyObject *Mesh_bootstrap(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
                                 PyObject *args_names_tuple) {
-    PyObject *executor_object, *options_object, *directory = NULL, *job = NULL, *result = NULL;
+    PyObject *executor_object, *options_object, *directory = NULL, *result = NULL;
     uform_py_argument_t const arguments[] = {{"executor", &executor_object}, {"options", &options_object}};
     uform_executor_t executor = NULL;
     uform_mesh_bootstrap_t bootstrap = {0};
@@ -437,10 +432,10 @@ static PyObject *Mesh_bootstrap(PyTypeObject *type, PyObject *const *args, Py_ss
         uform_py_executor_from_object(executor_object, &executor) != 0 ||
         uform_py_fields_write(options_object, "options", &MeshOptionsType, &bootstrap.options) != 0)
         return NULL;
-    if (options_object != Py_None && (optional_path(uform_py_fields_value(options_object, mesh_options_directory_k),
-                                                    "directory", &bootstrap.options.directory, &directory) != 0 ||
-                                      optional_path(uform_py_fields_value(options_object, mesh_options_job_k), "job",
-                                                    &bootstrap.options.job, &job) != 0))
+    if (options_object != Py_None &&
+        (optional_path(uform_py_fields_value(options_object, mesh_options_directory_k), "directory",
+                       &bootstrap.options.directory, &directory) != 0 ||
+         optional_name(uform_py_fields_value(options_object, mesh_options_job_k), "job", &bootstrap.options.job) != 0))
         goto release;
 
     uform_mesh_t handle = NULL;
@@ -464,7 +459,6 @@ static PyObject *Mesh_bootstrap(PyTypeObject *type, PyObject *const *args, Py_ss
     result = (PyObject *)mesh;
 
 release:
-    Py_XDECREF(job);
     Py_XDECREF(directory);
     return result;
 }
@@ -864,42 +858,24 @@ static int edges_from_object(PyObject *object, char const *field, size_t count, 
     return 0;
 }
 
-/** A step's choice buffers, lent until the step is final. */
-typedef struct choices_t {
-    Py_buffer offsets, bytes, targets;
-} choices_t;
-
-static void choices_release(choices_t *choices) {
-    if (choices->offsets.obj) PyBuffer_Release(&choices->offsets);
-    if (choices->bytes.obj) PyBuffer_Release(&choices->bytes);
-    if (choices->targets.obj) PyBuffer_Release(&choices->targets);
-}
-
 /**
- *  @brief Lends the choices @p object, a @c ChoicesView or None, over @p count items into
- *      @p view, checking every offset stays inside its bytes and every target pairs with one.
+ *  @brief Lends the @b optional choices and their targets over @p count items: both tapes or
+ *      neither, one entry per item each, the library checking each target entry is as long as
+ *      its choice entry.
  *  @return 0 on success, -1 with an exception set otherwise.
  */
-static int choices_from_object(PyObject *object, size_t count, choices_t *choices, uform_choices_view_t *view) {
-    if (!object || object == Py_None || uform_py_fields_value(object, choices_offsets_k) == Py_None) return 0;
-    if (!Py_IS_TYPE(object, &ChoicesViewType.type)) {
-        PyErr_Format(PyExc_TypeError, "the 'choices' option must be a ChoicesView or None, got %S", Py_TYPE(object));
+static int choices_from_objects(PyObject *choices_object, PyObject *targets_object, size_t count,
+                                uform_py_tape_t *choices, uform_py_tape_t *targets) {
+    int const with_choices = choices_object && choices_object != Py_None;
+    if (with_choices != (targets_object && targets_object != Py_None))
+        return uform_py_raise(uform_status_invalid_argument_k, "pass both 'choices' and 'choice_targets', or neither");
+    if (!with_choices) return 0;
+    if (uform_py_tape_from_object(choices_object, "choices", uform_py_element_text_k, choices) != 0 ||
+        uform_py_tape_from_object(targets_object, "choice_targets", uform_py_element_samples_k, targets) != 0)
         return -1;
-    }
-    if (edges_buffer(uform_py_fields_value(object, choices_offsets_k), "choices", sizeof(size_t), "NQL",
-                     &choices->offsets) != 0 ||
-        edges_buffer(uform_py_fields_value(object, choices_bytes_k), "choices", 1, "B", &choices->bytes) != 0 ||
-        edges_buffer(uform_py_fields_value(object, choices_targets_k), "choices", sizeof(float), "f",
-                     &choices->targets) != 0)
-        return -1;
-    size_t const *const offsets = (size_t const *)choices->offsets.buf;
-    size_t const bytes_count = (size_t)choices->bytes.len;
-    if ((size_t)choices->offsets.len != (count + 1) * sizeof(size_t) || offsets[count] > bytes_count ||
-        (size_t)choices->targets.len != bytes_count * sizeof(float))
+    if (choices->count != count || targets->count != count)
         return uform_py_raise(uform_status_shape_mismatch_k,
-                              "the 'choices' need %zu offsets ending inside their bytes, and one target per byte",
-                              count + 1);
-    *view = (uform_choices_view_t) {offsets, (uint8_t const *)choices->bytes.buf, (float const *)choices->targets.buf};
+                              "the 'choices' and 'choice_targets' need one entry per item, %zu", count);
     return 0;
 }
 
@@ -907,12 +883,11 @@ static int choices_from_object(PyObject *object, size_t count, choices_t *choice
 typedef struct step_call_t {
     uform_py_call_t call;
     uform_trainer_step_t arguments;
-    uform_py_tape_t contents;
+    uform_py_tape_t contents, choices, choice_targets;
     uform_modality_t *modalities;
     uform_late_interaction_side_t *sides;
     uform_py_words_t bags, temperature_groups;
     edges_t attract, repel, ignore;
-    choices_t choices;
     uform_rows_view_t embeddings;
     uform_trainer_step_stats_t stats;
 
@@ -949,7 +924,8 @@ static void step_release(void *erased) {
     edges_release(&call->attract);
     edges_release(&call->repel);
     edges_release(&call->ignore);
-    choices_release(&call->choices);
+    uform_py_tape_release(&call->choices);
+    uform_py_tape_release(&call->choice_targets);
     Py_CLEAR(call->stats_object);
     uform_py_call_release(&call->call);
 }
@@ -1007,7 +983,8 @@ static int sides_from_object(PyObject *object, size_t count, uform_late_interact
 
 static char const doc_Trainer_step[] =                                                            //
     "step(modalities, contents, /, *, bags=None, temperature_groups=None, sides=None,\n"          //
-    "    choices=None, relations=None, arena=None, outputs_scalar=Scalar.F32, stats=None)\n"      //
+    "    choices=None, choice_targets=None, relations=None, arena=None,\n"                        //
+    "    outputs_scalar=Scalar.F32, stats=None)\n"                                                //
     "    -> ArenaBuffer | None\n"                                                                 //
     "\n"                                                                                          //
     "Applies one optimizer step over this process's items and every peer's: forward, losses,\n"   //
@@ -1025,8 +1002,12 @@ static char const doc_Trainer_step[] =                                          
     "    item; None puts every item in group zero.\n"                                             //
     "  sides (Sequence[LateInteractionSide], optional): The late-interaction side of each\n"      //
     "    item; None leaves every item out of late interaction.\n"                                 //
-    "  choices (ChoicesView, optional): Each item's legal choices and their targets, read when\n" //
-    "    the run trains choices; the call appends the mask byte to each choosing text.\n"         //
+    "  choices (Sequence[str | bytes] | tuple[buffer, buffer], optional): Each item's legal\n"    //
+    "    choices, one byte each, as `Model.text_choose` takes them, read when the run trains\n"   //
+    "    choices; the call appends the mask byte to each choosing text.\n"                        //
+    "  choice_targets (Sequence[buffer] | tuple[buffer, buffer], optional): The float32 target\n" //
+    "    of each choice, an entry as long as its item's choices and summing to one, as\n"         //
+    "    `Model.text_choose` answers its probabilities; required with `choices`.\n"               //
     "  relations (Relations, optional): The contrastive targets over the step's items.\n"         //
     "  arena (Arena, optional): Where the pooled embeddings the loss scored land; None skips\n"   //
     "    the copy.\n"                                                                             //
@@ -1039,7 +1020,8 @@ static char const doc_Trainer_step[] =                                          
 static PyObject *Trainer_step(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
                               PyObject *args_names_tuple) {
     PyObject *modalities_object, *contents_object, *bags_object, *temperature_groups_object, *sides_object,
-        *choices_object, *relations_object, *arena_object, *outputs_scalar_object, *stats_object;
+        *choices_object, *choice_targets_object, *relations_object, *arena_object, *outputs_scalar_object,
+        *stats_object;
     uform_py_argument_t const arguments[] = {
         {"modalities", &modalities_object},
         {"contents", &contents_object},
@@ -1047,6 +1029,7 @@ static PyObject *Trainer_step(PyObject *self, PyObject *const *args, Py_ssize_t 
         {"temperature_groups", &temperature_groups_object},
         {"sides", &sides_object},
         {"choices", &choices_object},
+        {"choice_targets", &choice_targets_object},
         {"relations", &relations_object},
         {"arena", &arena_object},
         {"outputs_scalar", &outputs_scalar_object},
@@ -1074,14 +1057,14 @@ static PyObject *Trainer_step(PyObject *self, PyObject *const *args, Py_ssize_t 
     step_call_t *const call = uform_py_call_open(&receiver, &step_verb, &stack);
     if (!call) return NULL;
     uform_relations_view_t relations = {{0}};
-    uform_choices_view_t choices = {0};
     int const has_relations = relations_object && relations_object != Py_None;
     if (uform_py_tape_from_object(contents_object, "contents", uform_py_element_text_k, &call->contents) != 0)
         return uform_py_call_discard(&receiver, &step_verb, call);
     size_t const count = call->contents.count;
     if (modalities_from_object(modalities_object, count, &call->modalities) != 0 ||
         sides_from_object(sides_object, count, &call->sides) != 0 ||
-        choices_from_object(choices_object, count, &call->choices, &choices) != 0 ||
+        choices_from_objects(choices_object, choice_targets_object, count, &call->choices, &call->choice_targets) !=
+            0 ||
         uform_py_words_from_object(bags_object, "bags", count, &call->bags) != 0 ||
         uform_py_words_from_object(temperature_groups_object, "temperature_groups", count, &call->temperature_groups) !=
             0 ||
@@ -1105,7 +1088,8 @@ static PyObject *Trainer_step(PyObject *self, PyObject *const *args, Py_ssize_t 
         .bags = call->bags.data,
         .temperature_groups = call->temperature_groups.data,
         .sides = call->sides,
-        .choices = choices,
+        .choices = call->choices.view,
+        .choice_targets = call->choice_targets.view,
         .relations = relations,
         .embeddings = call->call.arena ? &call->embeddings : NULL,
         .arena = call->call.arena ? ((Arena *)call->call.arena)->handle : NULL,
@@ -1188,8 +1172,6 @@ static PyObject *Trainer_save(PyObject *self, PyObject *const *args, Py_ssize_t 
 
 #pragma endregion Steps
 
-#pragma region Registration
-
 PyMethodDef uform_py_trainer_verbs[] = {
     {"step", (PyCFunction)Trainer_step, uform_py_method_flags_k, doc_Trainer_step},
     {"save", (PyCFunction)Trainer_save, uform_py_method_flags_k, doc_Trainer_save},
@@ -1214,5 +1196,3 @@ PyTypeObject TrainerType = {
     .tp_new = Trainer_tp_new,
     .tp_dealloc = (destructor)Trainer_dealloc,
 };
-
-#pragma endregion Registration

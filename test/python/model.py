@@ -139,10 +139,9 @@ def test_load_ram_and_describe(checkpoint: Path):
     """A load from a path answers a model whose description carries its geometry."""
     model = uform.Model.load_ram(checkpoint, quantization=uform.Scalar.BF16)
     description = model.describe()
-    dimensions, context, quantization, memory_usage, capabilities, cpu_class, gpu_class, _, _ = description
+    dimensions, context, quantization, memory_usage, cpu_class, gpu_class, _, _ = description
     assert dimensions > 0 and context > 0 and memory_usage > 0
     assert quantization is uform.Scalar.BF16
-    assert isinstance(capabilities, str)
     assert isinstance(cpu_class, uform.CPUClass) and gpu_class is None
 
 

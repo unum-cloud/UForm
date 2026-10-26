@@ -18,7 +18,7 @@ Models are tokenizer-free: text arrives as UTF-8 and every byte is a token.
 An executor owns the threads, a model owns the weights, and an arena owns the outputs, so one executor serves many models and one arena serves a steady loop without allocating.
 
 ```js
-import { Executor, Arena, Model, Outputs, Scalar } from "@unum-cloud/uform";
+import { Executor, Arena, Model, Outputs, Scalar, gpuDevices } from "@unum-cloud/uform";
 
 const executor = Executor.forRam();
 const arena = new Arena(executor);
@@ -64,6 +64,8 @@ const [keep, drop] = probabilities.item(0);
 Images, clips and recordings arrive encoded, as JPEG, PNG, WebP, MP4, WebM, WAV, FLAC, MP3 or Opus files:
 
 ```js
+import fs from "node:fs/promises";
+
 const images = model.imageEncode([await fs.readFile("panda.jpg")], arena);
 const clips = model.videoEncode([await fs.readFile("panda.mp4")], arena);
 const recordings = model.audioEncode([await fs.readFile("panda.wav")], arena);
@@ -132,7 +134,7 @@ Training runs on GPUs through the Node addon.
 A run's processes join a mesh once, and a trainer borrows it until freed.
 
 ```js
-import { Executor, Mesh, Trainer, Objective, Modality } from "@unum-cloud/uform";
+import { Executor, Mesh, Trainer, Objective, Modality, PairLossForm, LateInteractionSide } from "@unum-cloud/uform";
 
 const gpus = Executor.forVram();
 const mesh = Mesh.bootstrap(gpus, { hostDomainIndex: 0, hostDomainCount: 2, directory: "/shared", job: "run-1" });
@@ -165,16 +167,22 @@ reranker.step({
   modalities: [Modality.Text, Modality.Text],
   contents: ["red panda diet", "Red pandas eat bamboo."],
   sides: [LateInteractionSide.Query, LateInteractionSide.Document],
-  choices: { offsets: [0, 2, 2], bytes: [0x79, 0x6e], targets: [0.9, 0.1] },
+  choices: ["yn", ""],
+  choiceTargets: [Float32Array.of(0.9, 0.1), new Float32Array()],
   relations: { attract: { offsets: [0, 1, 2], ids: [1, 0] } },
 });
 ```
+
+The choices take the shape `textChoose` takes, and their targets the shape of the `Probabilities` it answers, so one model's probabilities can train another as they land.
+Every batch, `contents` and `choices` alike, also takes a packed `{ data, offsets }` tape, which the Node addon lends to the library without a copy when its offsets are a `BigUint64Array`; an array of entries is first gathered into one tape, the one copy that path makes.
 
 ## Errors
 
 Every error carries a `code` from the `Status` enum, spelled as the C library names it, so a caller branches on the identity of the fault:
 
 ```js
+import { Model, Status } from "@unum-cloud/uform";
+
 try {
   Model.loadRam("missing.safetensors");
 } catch (error) {
@@ -190,7 +198,7 @@ The SDK is a thin layer over the C interface, one module per header: `types`, `m
 - The receiver chooses and the verb stays: `model.textEncode` runs on the calling thread, `model.on(executor).textEncode` blocks on an executor, and `model.deferred(executor).textEncode` answers a `Deferred`.
 - A `Deferred` is `PromiseLike` and `Disposable`: `await` waits on the libuv pool, `wait` blocks the calling thread, `status` polls, and disposing one waits until it is final.
 - Every output verb takes an arena and answers views borrowing it, detached when the arena rewinds or is freed.
-- Statuses, scalars, moods, modalities and multimem tiers are enums read from the C name tables; objectives and negatives carry the C numbers.
+- Statuses, scalars, moods, modalities, objectives, negatives and multimem tiers are string enums spelled as the C name tables spell them.
 - CPU and GPU classes cross as the strings the C name tables spell, and pair-loss forms, late-interaction sides and GPU vendors as numeric enums of the C numbers.
 - The SDK starts no threads and keeps no queues or caches; the only thread it borrows is the libuv worker an `await` runs its wait on.
 - A progress handler runs only on the calling thread, so only a model's own verbs take one.

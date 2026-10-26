@@ -9,12 +9,11 @@
  *  Only the RAM executor constructor succeeds: VRAM needs a GPU backend this library never carries, and a
  *  borrowed pool is not wired yet, as in the engine.
  */
-#include <algorithm>          // `std::find`, `std::count_if`, `std::any_of`, `std::find_if`, `std::stable_partition`
-#include <condition_variable> // `std::condition_variable`
-#include <iterator>           // `std::make_move_iterator`
-#include <mutex>              // `std::mutex`, `std::lock_guard`, `std::unique_lock`
-#include <variant>            // `std::visit`
-#include <vector>             // `std::vector`
+#include <algorithm> // `std::find`, `std::count_if`, `std::any_of`, `std::find_if`, `std::stable_partition`
+#include <iterator>  // `std::make_move_iterator`
+#include <mutex>     // `std::mutex`, `std::lock_guard`, `std::unique_lock`
+#include <variant>   // `std::visit`
+#include <vector>    // `std::vector`
 
 #include "lib.hpp"
 
@@ -26,8 +25,8 @@ using namespace unum::uform;
 struct calls_t {
     std::mutex guard;
 
-    /** Signalled whenever a running call becomes final. */
-    std::condition_variable finished;
+    /** Bumped under @ref guard whenever a running call becomes final, and waited on outside it. */
+    std::uint64_t finished = 0;
 
     /** Deferred calls no drain has started yet, oldest first. */
     std::vector<call_t> queued;
@@ -71,7 +70,7 @@ static void run_listed(call_t &call) {
     std::visit([&](auto &arguments) { call.verb(&arguments); }, call.arguments);
     std::lock_guard<std::mutex> lock(calls.guard);
     calls.running.erase(std::find(calls.running.begin(), calls.running.end(), &call));
-    calls.finished.notify_all();
+    fu::standard_atomic_ref<std::uint64_t> {calls.finished}.fetch_add(1, std::memory_order_release);
 }
 
 void uf::run_blocking(call_t call) {
@@ -111,8 +110,14 @@ void uf::wait_for_calls_using(void const *handle) {
             lock.lock();
         }
         else if (std::any_of(calls.running.begin(), calls.running.end(),
-                             [&](call_t const *running) { return names_handle(*running); }))
-            calls.finished.wait(lock);
+                             [&](call_t const *running) { return names_handle(*running); })) {
+            fu::standard_atomic_ref<std::uint64_t> const finished {calls.finished};
+            std::uint64_t const seen = finished.load(std::memory_order_relaxed);
+            lock.unlock(); // the running call delists itself under this lock
+            while (finished.load(std::memory_order_acquire) == seen)
+                fu::standard_yield_t {}(&calls.finished, seen, std::size_t {0}, fu::wait_capped_k);
+            lock.lock();
+        }
         else return;
     }
 }
@@ -132,16 +137,16 @@ char const *uform_capabilities_available(void) { return "serial"; }
 uform_status_t uform_outcome_wait(uform_outcome_t *outcome) {
     if (!outcome) return uform_status_invalid_argument_k;
     wait_for_calls_using(outcome);
-    std::atomic_ref status(outcome->status);
+    fu::standard_atomic_ref<uform_status_t> status {outcome->status};
     uform_status_t current = status.load(std::memory_order_acquire);
     for (; current == uform_status_deferred_k; current = status.load(std::memory_order_acquire))
-        status.wait(uform_status_deferred_k, std::memory_order_acquire);
+        fu::standard_yield_t {}(&outcome->status, current, std::size_t {0}, fu::wait_capped_k);
     return current;
 }
 
 uform_status_t uform_outcome_status(uform_outcome_t *outcome) {
     if (!outcome) return uform_status_invalid_argument_k;
-    return std::atomic_ref(outcome->status).load(std::memory_order_acquire);
+    return fu::standard_atomic_ref<uform_status_t> {outcome->status}.load(std::memory_order_acquire);
 }
 
 void uform_executor_for_ram(uform_executor_for_ram_t *arguments) {

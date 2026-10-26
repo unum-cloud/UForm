@@ -271,8 +271,8 @@ expected<CUmemFabricHandle> gpu_symmetric_arena_t::export_fabric_handle(std::siz
 
 expected_t gpu_symmetric_arena_t::adopt_peer(std::size_t member, CUmemFabricHandle const &handle) noexcept {
     CUmemGenericAllocationHandle imported = 0;
-    if (CUresult result = cuMemImportFromShareableHandle(
-            &imported, const_cast<void *>(static_cast<void const *>(&handle)), CU_MEM_HANDLE_TYPE_FABRIC);
+    CUmemFabricHandle shared = handle; // the driver takes a writable pointer it only reads through
+    if (CUresult result = cuMemImportFromShareableHandle(&imported, &shared, CU_MEM_HANDLE_TYPE_FABRIC);
         result != CUDA_SUCCESS)
         return cuda_failure(result, "peer slice import failed (member={})", member);
     CUdeviceptr const slice = base_ + member * member_stride_;

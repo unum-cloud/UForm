@@ -6,21 +6,45 @@
  *      step of @ref encode_steps split across a thread pool.
  *
  *  Products run in 64-row tiles, attention in equal task windows, element-wise steps in row
- *  slices. The steps NumKong has no kernel for are the host loops of @ref entries.hpp . The tower
- *  names no class and no capability: the class unit instantiating it hands it its kits.
+ *  slices, and the host entries of @ref ram_kits.hpp one row or one segment per task, each in its
+ *  thread's Float32 row of the call's scratch. The tower names no class and no capability: the
+ *  class unit instantiating it hands it its kits and its atomic reference.
  */
 #pragma once
 
 #include <cstring> // `std::memcpy`, `std::memset`
 
-#include <atomic> // `std::atomic` — the first failure of a parallel step
-#include <span>   // `std::span` — the scratch a call borrows
+#include <algorithm> // `std::max`, `std::min`
+#include <span>      // `std::span` — the scratch a call borrows
 
 #include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t`, the threads every step splits across
 
-#include "uform/encoder/tower.hpp" // `tower_weights_t`, `pack_weights`, `encode_steps`
+#include "uform/encoder/ram_kits.hpp" // the host entries
+#include "uform/encoder/tower.hpp"    // `tower_weights_t`, `pack_weights`, `encode_steps`
 
 namespace unum::uform::encoder {
+
+/** The Float32 rows the host entries work in, reserved in a call's scratch before its
+ *  activations. */
+struct entries_rows_t {
+
+    /** @b [threads,width] each thread's row, as wide as the widest row an entry widens. */
+    f32r2_span_t workers {};
+
+    /** @b [2·patch_scalars] the gain and bias rows of @ref fill_patch_affine , refilled per staged
+     *  modality. */
+    f32r1_span_t affine {};
+};
+
+/** Reserve the entries rows of @p threads threads for a tower of @p geometry behind @p cursor :
+ *  each as wide as the widest block product, which also holds M-RoPE's angle, cosine and sine rows
+ *  and a widened head behind them, or the widest patch. */
+[[nodiscard]] inline static entries_rows_t reserve_entries(scratch_cursor_t &cursor, geometry_t const &geometry,
+                                                           std::size_t threads) noexcept {
+    std::size_t const patch = patch_scalars(geometry);
+    std::size_t const width = std::max<std::size_t>({3 * geometry.hidden, 2 * geometry.ffn(), patch});
+    return {cursor.take<f32_t>(threads, width), cursor.take<f32_t>(2 * patch)};
+}
 
 /** Places a tower's arrays in NumKong's aligned heap, copying with @c memcpy . */
 struct ram_placer_t {
@@ -42,14 +66,18 @@ struct ram_placer_t {
 };
 
 /** The steps of @ref encode_steps over host memory, split across a pool's threads, through the
- *  kits a CPU class picked. */
-template <typename products_kit_type_, typename attention_kit_type_, typename elementwise_kit_type_>
+ *  kits a CPU class picked; a step's first failure latches through @p atomic_ref_template_ . The
+ *  host entries are @c inline @c static templates over the element-wise kit, so no two class units
+ *  share a copy. */
+template <typename products_kit_type_, typename attention_kit_type_, typename elementwise_kit_type_,
+          template <typename> class atomic_ref_template_>
 struct ram_steps {
     using products_kit_t = products_kit_type_;
     using attention_kit_t = attention_kit_type_;
     using elementwise_kit_t = elementwise_kit_type_;
 
     fu::flat_pool_t &pool;
+    entries_rows_t rows;
 
     [[nodiscard]] nk_stream_t stream() const noexcept { return nullptr; }
 
@@ -58,31 +86,43 @@ struct ram_steps {
         return std::max<std::size_t>(uc::divide_round_up(tasks, std::max<std::size_t>(pool.threads_count(), 1)), 1);
     }
 
+    /** Run @p body once per task of @p tasks , each with its thread's row of
+     *  @ref entries_rows_t::workers , reporting the first NumKong failure. */
+    template <typename body_type_>
+    [[nodiscard]] expected_t each(std::size_t tasks, sz::string_view_t what, body_type_ const &body) noexcept {
+        std::size_t const width = rows.workers.extent(1);
+        nk_status_t failure = nk_success_k;
+        pool.for_n(tasks, [&](std::size_t task, fu::flat_pool_t::thread_in_domain_t at) noexcept {
+            nk_status_t const status = body(task, f32r1_span_t {rows.workers.row(at.thread).data(), width});
+            if (status != nk_success_k)
+                atomic_ref_template_<nk_status_t> {failure}.store(status, std::memory_order_relaxed);
+        });
+        return checked(failure, what); // `for_n` joined every worker
+    }
+
     /** Run @p body over @p tasks in tiles of @p tile on every thread, reporting the first NumKong
      *  failure. */
     template <typename body_type_>
     [[nodiscard]] expected_t split(std::size_t tasks, std::size_t tile, sz::string_view_t what,
                                    body_type_ const &body) noexcept {
-        std::atomic<nk_status_t> failure {nk_success_k};
-        pool.for_n(uc::divide_round_up(tasks, tile), [&](std::size_t index, auto) noexcept {
+        return each(uc::divide_round_up(tasks, tile), what, [&](std::size_t index, f32r1_span_t) noexcept {
             std::size_t const first = index * tile;
-            nk_status_t const status = body(first, std::min(tile, tasks - first));
-            if (status != nk_success_k) failure.store(status, std::memory_order_relaxed);
+            return body(first, std::min(tile, tasks - first));
         });
-        return checked(failure.load(std::memory_order_relaxed), what);
     }
 
-    [[nodiscard]] expected_t zero(void *target, std::size_t bytes) noexcept {
-        std::memset(target, 0, bytes);
+    [[nodiscard]] expected_t zero(uc::bytes_span_t target) noexcept {
+        std::memset(target.data(), 0, target.size());
         return {};
     }
 
-    [[nodiscard]] expected_t copy(void *target, void const *source, std::size_t bytes) noexcept {
-        std::memcpy(target, source, bytes);
+    [[nodiscard]] expected_t copy(uc::bytes_span_t target, uc::bytes_view_t source) noexcept {
+        std::memcpy(target.data(), source.data(), source.size());
         return {};
     }
 
-    [[nodiscard]] expected_t fill_layout(u32r1_view_t lengths, u32_t *packed_offsets, u32_t *pool_offsets) noexcept {
+    [[nodiscard]] expected_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets,
+                                         u32r1_span_t pool_offsets) noexcept {
         std::size_t const segments = lengths.extent(0);
         packed_offsets[0] = 0;
         for (std::size_t segment = 0; segment != segments; ++segment) {
@@ -110,40 +150,49 @@ struct ram_steps {
     [[nodiscard]] expected_t stage_patches(segment_layout_t const &layout, modality_t target,
                                            nk::tensor_view<pixel_t, 3> pixels, f32r1_view_t mean,
                                            f32r1_view_t inverse_std, bf16r2_span_t patches) noexcept {
-        encoder::stage_patches(layout, target, pixels, mean, inverse_std, patches, pool);
-        return {};
+        f32r2_span_t const affine {rows.affine.data(), 2, pixels.extent(1) * pixels.extent(2)};
+        fill_patch_affine(mean, inverse_std, affine);
+        return each(layout.lengths.extent(0), "patch staging", [&](std::size_t segment, f32r1_span_t wide) noexcept {
+            return encoder::stage_patches<elementwise_kit_t>(layout, segment, target, pixels, affine, wide, patches);
+        });
     }
 
     [[nodiscard]] expected_t stage_frames(segment_layout_t const &layout, nk::tensor_view<f32_t, 2> samples,
                                           bf16r2_span_t frames) noexcept {
-        encoder::stage_frames(layout, samples, frames, pool);
-        return {};
+        return each(layout.lengths.extent(0), "frame staging", [&](std::size_t segment, f32r1_span_t) noexcept {
+            return encoder::stage_frames<elementwise_kit_t>(layout, segment, samples, frames);
+        });
     }
 
     [[nodiscard]] expected_t mrope(bf16r2_span_t values, u32_t role_offset, u32_t heads, u32_t head_width,
                                    i16r2_view_t coords, rope_grids_t angles) noexcept {
-        encoder::mrope(values, role_offset, heads, head_width, coords, angles, pool);
-        return {};
+        return each(values.extent(0), "M-RoPE", [&](std::size_t row, f32r1_span_t wide) noexcept {
+            return encoder::mrope<elementwise_kit_t>(values, row, role_offset, heads, head_width, coords, angles, wide);
+        });
     }
 
     template <typename values_type_>
     [[nodiscard]] expected_t quantize(values_type_ values, e4m3r2_span_t shadow, f32r1_span_t token_scales) noexcept {
-        encoder::quantize_tokens_e4m3(values, shadow, token_scales, pool);
-        return {};
+        return each(values.extent(0), "quantization", [&](std::size_t row, f32r1_span_t wide) noexcept {
+            return encoder::quantize_tokens_e4m3<elementwise_kit_t>(values, row, shadow, token_scales, wide);
+        });
     }
 
     [[nodiscard]] expected_t rescale(f32r2_view_t products, f32r1_view_t token_scales, f32_t weight_descale,
                                      bf16r2_view_t residual, bf16r2_span_t values) noexcept {
-        encoder::rescale_tokens(products, token_scales, weight_descale, residual, values, pool);
-        return {};
+        return each(values.extent(0), "rescale", [&](std::size_t row, f32r1_span_t wide) noexcept {
+            return encoder::rescale_tokens<elementwise_kit_t>(products, row, token_scales, weight_descale, residual,
+                                                              values, wide);
+        });
     }
 };
 
 /** The forward-only encoder on host memory, its products, attention and element-wise steps from
- *  the kits it is handed. */
-template <typename products_kit_type_, typename attention_kit_type_, typename elementwise_kit_type_>
+ *  the kits it is handed, and its shared words through @p atomic_ref_template_ . */
+template <typename products_kit_type_, typename attention_kit_type_, typename elementwise_kit_type_,
+          template <typename> class atomic_ref_template_>
 struct ram_tower {
-    using steps_t = ram_steps<products_kit_type_, attention_kit_type_, elementwise_kit_type_>;
+    using steps_t = ram_steps<products_kit_type_, attention_kit_type_, elementwise_kit_type_, atomic_ref_template_>;
 
     /**
      *  @brief Pack every weight of @p checkpoint into NumKong's aligned heap, in @p precision for
@@ -154,26 +203,37 @@ struct ram_tower {
                                                   geometry_t const &geometry, precision_t precision) noexcept {
         nk_allocator_t policy {};
         if (nk_status_t const status = nk_allocator_init_heap(&policy, nk_default_alignment_k); status != nk_success_k)
-            return expected<ram_tower>::fail(uc::status_t::other_k, "tower memory setup failed: {}",
+            return expected<ram_tower>::fail(tower_status_of(status), "tower memory setup failed: {}",
                                              nk_status_name(status));
         ram_placer_t const placer {nk::allocator<b8_t> {policy, nullptr}, nullptr};
-        expected<tower_weights_t> weights = pack_weights<products_kit_type_>(checkpoint, geometry, precision, placer);
+        expected<tower_weights_t> weights = pack_weights<products_kit_type_, elementwise_kit_type_>(
+            checkpoint, geometry, precision, placer);
         if (!weights) return expected<ram_tower>::fail(std::move(weights));
         ram_tower tower;
         tower.weights_ = std::move(*weights);
         return expected<ram_tower> {std::move(tower)};
     }
 
-    /** The scratch bytes one call over @p tokens live tokens in @p segments items needs. */
-    [[nodiscard]] expected<std::size_t> scratch_bytes(std::size_t tokens, std::size_t segments) const noexcept {
-        return scratch_bytes_of<attention_kit_type_>(weights_, tokens, segments);
+    /** The scratch bytes one call over @p tokens live tokens in @p segments items needs on
+     *  @p threads threads: their entries rows, then the activations. */
+    [[nodiscard]] expected<std::size_t> scratch_bytes(std::size_t tokens, std::size_t segments,
+                                                      std::size_t threads) const noexcept {
+        scratch_cursor_t measure;
+        [[maybe_unused]] entries_rows_t const unplaced = reserve_entries(measure, weights_.geometry, threads);
+        expected<std::size_t> activations = scratch_bytes_of<attention_kit_type_>(weights_, tokens, segments);
+        if (!activations) return activations;
+        return expected<std::size_t> {measure.used + *activations};
     }
 
     /** Encode @p batch in host memory on @p pool 's threads. */
     [[nodiscard]] expected_t encode(uc::multimodal_batch_view_t batch, outputs_t outputs, std::span<b8_t> scratch,
                                     fu::flat_pool_t &pool) const noexcept {
-        steps_t steps {pool};
-        return encode_steps(steps, weights_, batch, outputs, scratch);
+        scratch_cursor_t cursor {scratch};
+        steps_t steps {pool, reserve_entries(cursor, weights_.geometry, pool.threads_count())};
+        if (scratch.size() < cursor.used)
+            return expected_t::fail(uc::status_t::bad_alloc_k, "the scratch holds {} bytes, the entries need {}",
+                                    scratch.size(), cursor.used);
+        return encode_steps(steps, weights_, batch, outputs, scratch.subspan(cursor.used));
     }
 
     [[nodiscard]] tower_weights_t const &weights() const noexcept { return weights_; }

@@ -213,19 +213,18 @@ struct synthetic_source_t {
     [[nodiscard]] expected_t fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept;
 };
 
-/** One edge set over a step's items as compressed sparse rows; null offsets name no edges. */
+/** One edge set over a step's items as compressed sparse rows, each item's neighbours an entry of
+ *  @c ids ; an empty tape names no edges, and empty weights weigh every edge one. */
 struct item_edges_t {
-    std::size_t const *offsets = nullptr;
-    u32_t const *ids = nullptr;
-    f32_t const *weights = nullptr;
+    tape_view<u32_t const> ids {};
+    std::span<f32_t const> weights {};
 };
 
-/** Each item's legal choice bytes and their targets, @c count+1 offsets into both; null offsets
- *  make no choice. */
+/** Each item's legal choice bytes and their targets, entries matching in length; empty tapes make
+ *  no choice. */
 struct item_choices_t {
-    std::size_t const *offsets = nullptr;
-    u8_t const *bytes = nullptr;
-    f32_t const *targets = nullptr;
+    tape_view<u8_t const> bytes {};
+    tape_view<f32_t const> targets {};
 };
 
 /** This process's share of one step: every item's modality and bytes, and its optional bag,
@@ -234,20 +233,19 @@ struct item_choices_t {
 struct training_items_t {
     std::span<modality_t const> modalities {};
 
-    /** The items' bytes end to end, and @c count+1 offsets into them. */
-    b8_t const *contents = nullptr;
-    std::size_t const *offsets = nullptr;
+    /** The items' bytes, one entry each. */
+    tape_view<b8_t const> contents {};
 
-    /** Null keeps every item its own bag. */
-    u32_t const *bags = nullptr;
+    /** Empty keeps every item its own bag. */
+    std::span<u32_t const> bags {};
 
-    /** Null puts every item in group zero. */
-    u32_t const *temperature_groups = nullptr;
+    /** Empty puts every item in group zero. */
+    std::span<u32_t const> temperature_groups {};
 
     item_edges_t attract {}, repel {}, ignore {};
 
-    /** Null makes every item @c none_k . */
-    late_interaction_side_t const *sides = nullptr;
+    /** Empty makes every item @c none_k . */
+    std::span<late_interaction_side_t const> sides {};
 
     /** A text item with choices ends where its answer goes, and the mask byte follows it. */
     item_choices_t choices {};
@@ -318,8 +316,8 @@ struct trainer_t {
     /** The device ordinals this process drives. */
     st::basic_vector<i32_t> devices {};
 
-    /** The NumKong capabilities every component dispatches with, after the executor's pin. */
-    nk_capability_t capabilities = 0;
+    /** The NumKong kernels every component calls, the class the mesh agreed on. */
+    gpu_numerics_t numerics {};
 
     /** The measured envelope @ref config 's batch was sized from. */
     envelope_t envelope {};
@@ -388,11 +386,11 @@ struct trainer_t {
      *  Zero rows in @p requested take the most rows that leave the margin free on every device of
      *  every process; configured rows are honoured or refused, never shrunk. The arenas reserve the
      *  fitted high-water mark, see @ref envelope_t .
-     *  Every component dispatches with @p capabilities .
+     *  Every component calls the kernels of @p numerics .
      *  @retval status_t::bad_alloc_k The envelope does not fit, with the measured numbers.
      */
     [[nodiscard]] static expected_t make(trainer_t &placed, mesh_t &mesh, trainer_config_t const &requested,
-                                         std::span<i32_t const> devices, nk_capability_t capabilities) noexcept;
+                                         std::span<i32_t const> devices, gpu_numerics_t const &numerics) noexcept;
 
     /**
      *  @brief Load every replica from the checkpoint at @p path and continue from its saved step,

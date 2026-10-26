@@ -14,6 +14,8 @@
  *  master, the pool a slave that only demuxes. The engines own @b no streams: the whole GPU tail (the
  *  NV12 → interleaved-RGB conversion and the tube tiling) rides the caller's one stream.
  */
+#include <cmath> // `std::fmin`, `std::fmax` — the RGB channels clamped to a byte
+
 #include <unistd.h> // `::write`, `STDERR_FILENO`
 
 #include <algorithm> // `std::min`, `std::max`, `std::find`, `std::upper_bound`
@@ -164,7 +166,7 @@ static __global__ void nv12_to_interleaved_rgb_kernel_(pixel_t const *nv12_luma,
         float const chroma_blue = static_cast<float>(nv12_chroma[chroma_offset + 0u]) - 128.0f;
         float const chroma_red = static_cast<float>(nv12_chroma[chroma_offset + 1u]) - 128.0f;
         auto clamp_to_uint8 = [](float value) -> pixel_t {
-            return static_cast<pixel_t>(__float2int_rn(fminf(fmaxf(value, 0.0f), 255.0f)));
+            return static_cast<pixel_t>(__float2int_rn(std::fmin(std::fmax(value, 0.0f), 255.0f)));
         };
         pixel_t *destination = rgb_out + pixel_index * 3u;
         destination[0] = clamp_to_uint8(luma + 1.792741f * chroma_red);
@@ -446,12 +448,12 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
  *  clip at once faults inside libnvcuvid after the first frame. */
 [[nodiscard]] static CUresult feed_av1_temporal_units(CuvidFunctions *cuvid, CUvideoparser parser,
                                                       std::span<b8_t const> stream) noexcept {
-    auto feed_unit = [&](std::size_t begin, std::size_t end, bool last) -> CUresult {
+    auto feed_unit = [&](std::size_t begin, std::size_t end, unsigned long flags) -> CUresult {
         if (end <= begin) return CUDA_SUCCESS;
         CUVIDSOURCEDATAPACKET packet {};
         packet.payload = cuvid_payload_(stream.data() + begin);
         packet.payload_size = static_cast<unsigned long>(end - begin);
-        packet.flags = last ? CUVID_PKT_ENDOFSTREAM : 0u;
+        packet.flags = flags;
         return cuvid->cuvidParseVideoData(parser, &packet);
     };
     std::size_t temporal_unit_start = 0;
@@ -478,12 +480,12 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
         std::size_t const obu_end = cursor + obu_size;
         if (!size_complete || obu_end > stream.size()) return CUDA_ERROR_INVALID_VALUE;
         if (obu_type == 2u && offset != temporal_unit_start) {
-            if (CUresult status = feed_unit(temporal_unit_start, offset, false); status != CUDA_SUCCESS) return status;
+            if (CUresult status = feed_unit(temporal_unit_start, offset, 0u); status != CUDA_SUCCESS) return status;
             temporal_unit_start = offset;
         }
         offset = obu_end;
     }
-    return feed_unit(temporal_unit_start, stream.size(), true);
+    return feed_unit(temporal_unit_start, stream.size(), CUVID_PKT_ENDOFSTREAM);
 }
 
 #pragma region Host Container Demux

@@ -128,7 +128,7 @@ struct checkpoint_to_save_t {
   private:
 
     /** The shared body of both @ref insert overloads. */
-    [[nodiscard]] expected_t insert_(sz::string_view_t name, checkpoint_dtype_t dtype, void const *data,
+    [[nodiscard]] expected_t insert_(sz::string_view_t name, checkpoint_dtype_t dtype, bytes_view_t data,
                                      std::size_t rows, std::size_t cols) noexcept;
 
     /** Every inserted tensor's bytes back-to-back in insertion order — `save` streams them to disk
@@ -219,8 +219,8 @@ struct checkpoint_to_load_t {
     /** The file mapping when @ref make opened one; empty for @ref view . */
     checkpoint_mapping_t mapping_ {};
 
-    /** The first payload byte, inside the mapping or the caller's image. */
-    b8_t const *payload_ = nullptr;
+    /** The payload bytes, inside the mapping or the caller's image. */
+    bytes_view_t payload_ {};
 
     /** The name / dtype / shape / offset record per indexed tensor. */
     st::basic_vector<checkpoint_entry_t> entries_ {};

@@ -124,8 +124,10 @@ expected<image_plan_t> um::plan_image(std::span<b8_t const> encoded, u32_t patch
 /** Decode a JPEG through @p decoder into @p out with the @c 1/2ᵏ DCT scale landing exactly on its extent. TurboJPEG
  *  reports a corrupt or truncated stream where libjpeg's default error handler exits the process; @c TJPF_RGBA
  *  emits a constant 255 alpha, so a JPEG matches the RGBA grid. */
-[[nodiscard]] static expected_t decode_jpeg_(tjhandle decoder, unsigned char const *bytes, std::size_t size,
+[[nodiscard]] static expected_t decode_jpeg_(tjhandle decoder, std::span<b8_t const> encoded,
                                              pixel_image_span_t out) noexcept {
+    unsigned char const *const bytes = codec_bytes_(encoded.data());
+    std::size_t const size = encoded.size();
     if (tj3DecompressHeader(decoder, bytes, size) != 0)
         return expected_t::fail(status_t::invalid_input_k, "malformed JPEG header: {}", tj3GetErrorStr(decoder));
     int const width = static_cast<int>(out.extent(1)), height = static_cast<int>(out.extent(0));
@@ -172,7 +174,7 @@ expected_t um::decode_image_rgba(std::span<b8_t const> encoded, image_format_t f
     if (format != format_jpeg_k) return expected_t::fail(status_t::invalid_input_k, "unrecognized image format");
     tjhandle const decoder = tj3Init(TJINIT_DECOMPRESS);
     if (!decoder) return expected_t::fail(status_t::bad_alloc_k, "JPEG decoder allocation failed");
-    expected_t decoded = decode_jpeg_(decoder, bytes, size, out);
+    expected_t decoded = decode_jpeg_(decoder, encoded, out);
     tj3Destroy(decoder);
     return decoded;
 }

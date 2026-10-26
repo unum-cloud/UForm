@@ -22,10 +22,13 @@
 #include "uform/core/encoder_tower.hpp"        // `encoder_tower_bf16_t`
 #include "uform/core/types.hpp"                // `st::basic_vector`
 
+#include "train/numerics.hpp" // `gpu_numerics_of`
+
 #include "harness.hpp" // `loop_t`, `run`
 
 using namespace unum::uform::core;
 using namespace unum::uform::bench;
+namespace ut = unum::uform::train;
 
 /** Transformer blocks of the benchmarked tower. */
 inline constexpr u32_t depth_k = 6;
@@ -111,7 +114,8 @@ static void tower_forward_backward(loop_t &loop, u64_t seed) {
     multimodal_batch_shape_t const shape {rows_k, segments_k, columns_k};
     nk_capability_t capabilities = 0;
     if (nk_cuda_capabilities_enabled(0, &capabilities) != nk_success_k) return loop.fail("capability query failed");
-    expected<encoder_tower_bf16_t> tower = encoder_tower_bf16_t::make(*arena, config, shape, capabilities);
+    expected<encoder_tower_bf16_t> tower = encoder_tower_bf16_t::make(*arena, config, shape,
+                                                                      ut::gpu_numerics_of(capabilities));
     if (!tower) return loop.fail(tower.description_.view());
     st::basic_vector<differentiable_weights_t> weights;
     if (expected_t filled = tower->fill(weights); !filled) return loop.fail(filled.description_.view());
@@ -176,7 +180,7 @@ static void contrastive_loss(loop_t &loop, u64_t seed) {
     nk_capability_t capabilities = 0;
     if (nk_cuda_capabilities_enabled(0, &capabilities) != nk_success_k) return loop.fail("capability query failed");
     expected<contrastive_segments_t> loss = contrastive_segments_t::make(*arena, config, {prefix_dims, 1},
-                                                                         capabilities);
+                                                                         ut::gpu_numerics_of(capabilities));
     if (!loss) return loop.fail(loss.description_.view());
     expected<contrastive_relations_t> relations = contrastive_relations_t::make(*arena, segments_k, 16);
     if (!relations) return loop.fail(relations.description_.view());
@@ -225,7 +229,7 @@ static void contrastive_tokens(loop_t &loop, u64_t seed) {
     config.width = width_k;
     nk_capability_t capabilities = 0;
     if (nk_cuda_capabilities_enabled(0, &capabilities) != nk_success_k) return loop.fail("capability query failed");
-    expected<contrastive_tokens_t> loss = contrastive_tokens_t::make(*arena, config, capabilities);
+    expected<contrastive_tokens_t> loss = contrastive_tokens_t::make(*arena, config, ut::gpu_numerics_of(capabilities));
     if (!loss) return loop.fail(loss.description_.view());
 
     // Query i attracts document i; every other document repels it at the ambient weight.

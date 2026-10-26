@@ -18,6 +18,12 @@ export type Completion = 0 | 1;
 /** Hears a long call's advance; answering `false` stops it with `cancelled`. */
 export type ProgressCallback = (completed: number, total: number) => boolean | void;
 
+/**
+ * The `count + 1` offsets of a tape: a `BigUint64Array`, which the Node addon lends as `size_t` without a copy, or a
+ * `Uint32Array`, which it widens and the WebAssembly module, whose `size_t` is 32 bits wide, lends as it is.
+ */
+export type Offsets = BigUint64Array | Uint32Array;
+
 /** The threads or streams a verb runs on. */
 export interface CompiledExecutor {
   drain(mood?: string): void;
@@ -79,7 +85,6 @@ export interface CompiledDescription {
   context: number;
   quantization: string;
   memoryUsage: number;
-  capabilities: string;
   cpuClass: string | null;
   gpuClass: string | null;
   tokenWidth: number;
@@ -139,23 +144,23 @@ type Encoding = CompiledEncoded | CompiledDeferred;
 export interface CompiledModel {
   free(): void;
   describe(...on: On): CompiledDescription | CompiledDeferred;
-  textEncode(...arguments_: [...On, bytes: Uint8Array, offsets: Uint32Array, ...Landing]): Encoding;
-  imageEncode(...arguments_: [...On, bytes: Uint8Array, offsets: Uint32Array, ...Landing]): Encoding;
+  textEncode(...arguments_: [...On, bytes: Uint8Array, offsets: Offsets, ...Landing]): Encoding;
+  imageEncode(...arguments_: [...On, bytes: Uint8Array, offsets: Offsets, ...Landing]): Encoding;
   imageEncodePixels(
-    ...arguments_: [...On, rgb: Uint8Array, offsets: Uint32Array, heights: Uint32Array, widths: Uint32Array, ...Landing]
+    ...arguments_: [...On, rgb: Uint8Array, offsets: Offsets, heights: Uint32Array, widths: Uint32Array, ...Landing]
   ): Encoding;
-  videoEncode(...arguments_: [...On, bytes: Uint8Array, offsets: Uint32Array, ...Landing]): Encoding;
-  audioEncode(...arguments_: [...On, bytes: Uint8Array, offsets: Uint32Array, ...Landing]): Encoding;
+  videoEncode(...arguments_: [...On, bytes: Uint8Array, offsets: Offsets, ...Landing]): Encoding;
+  audioEncode(...arguments_: [...On, bytes: Uint8Array, offsets: Offsets, ...Landing]): Encoding;
   audioEncodeSamples(
-    ...arguments_: [...On, samples: Float32Array, offsets: Uint32Array, sampleRate: number, ...Landing]
+    ...arguments_: [...On, samples: Float32Array, offsets: Offsets, sampleRate: number, ...Landing]
   ): Encoding;
   textChoose(
     ...arguments_: [
       ...On,
       bytes: Uint8Array,
-      offsets: Uint32Array,
+      offsets: Offsets,
       choices: Uint8Array,
-      choiceOffsets: Uint32Array,
+      choiceOffsets: Offsets,
       temperatureGroups: Uint32Array | undefined,
       arena: CompiledArena,
       progress: ProgressCallback | undefined,
@@ -214,13 +219,14 @@ export interface CompiledTrainer {
       ...On,
       modalities: Int32Array,
       contents: Uint8Array,
-      offsets: Uint32Array,
+      offsets: Offsets,
       bags: Uint32Array | undefined,
       temperatureGroups: Uint32Array | undefined,
       sides: Int32Array | undefined,
-      choiceOffsets: Uint32Array | undefined,
-      choiceBytes: Uint8Array | undefined,
+      choices: Uint8Array | undefined,
+      choiceOffsets: Offsets | undefined,
       choiceTargets: Float32Array | undefined,
+      choiceTargetOffsets: Offsets | undefined,
       attractOffsets: Uint32Array | undefined,
       attractIds: Uint32Array | undefined,
       attractWeights: Float32Array | undefined,

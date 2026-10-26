@@ -43,13 +43,9 @@
 #include <cuda_bf16.h> // `__nv_bfloat16`
 #include <cuda_fp8.h>  // `__nv_fp8_e4m3`
 
-#include <numkong/attention.h> // `nk_attention_pack_*_best`, `nk_attention_packed_*_best`, the BFloat16 gradients
-#include <numkong/cast.h>      // `nk_cast_best` — Float32 norm scales and the narrowed products
-#include <numkong/dots.h>      // `nk_dots_pack_bf16_best`, `nk_dots_packed_bf16_best` — every product
-#include <numkong/each.h>      // `nk_each_rmscast_bf16_best`, `nk_each_swiglu_f32_best`, `nk_each_sum_f32_best`
-#include <numkong/tensor.hpp>  // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
+#include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "uform/core/schedule.cuh"      // `gpu_stream_t`, `launch_kernel`, the NumKong products
+#include "uform/core/schedule.cuh"      // `gpu_stream_t`, `launch_kernel`, `gpu_numerics_t`, the NumKong products
 #include "uform/core/tower_kernels.cuh" // the rotary and E4M3 scaling bodies, `e4m3_range_k`
 #include "uform/core/types.hpp"         // `expected`, `expected_t`, `status_t`, the integer aliases
 
@@ -182,8 +178,10 @@ __global__ void rmsnorm_forward_kernel(bf16r2_view_t input, bf16r1_view_t scale,
 /**
  *  @brief Learnable RMSNorm backward for the row gradient:
  *      @c dx = (dy·γ − x̂·mean(dy·γ·x̂))·(1/rms) with @c x̂ = x·(1/rms) , written to
- *      @p input_grad , and the band's scale-gradient partial @c Σ_band dy·x̂ into row
- *      @c blockIdx.x of @p scale_grad_partials .
+ *      @p input_grad .
+ *
+ *  The band's scale-gradient partial @c Σ_band dy·x̂ lands in row @c blockIdx.x of
+ *  @p scale_grad_partials .
  *
  *  __grid_size__ @c [⌈rows/block⌉,1,1] ; each CTA owns a band of @c block rows, one warp per row,
  *  then one thread per channel folds the band's rows in order; no dynamic shared memory.
@@ -203,9 +201,10 @@ __global__ void rmsnorm_scale_grad_kernel(f32r2_view_t scale_grad_partials, bf16
 
 /**
  *  @brief The row-gradient backward of NumKong's rmscast over the Float32 residual stream:
- *      @c dx = residual + (dy·γ − x̂·mean(dy·γ·x̂))·(1/rms) , recomputing @c 1/rms from @p input ,
- *      and the band's scale-gradient partial into row @c blockIdx.x of @p scale_grad_partials for
- *      @ref rmsnorm_scale_grad_kernel ; an empty @p residual_grad adds nothing.
+ *      @c dx = residual + (dy·γ − x̂·mean(dy·γ·x̂))·(1/rms) , recomputing @c 1/rms from @p input .
+ *
+ *  The band's scale-gradient partial lands in row @c blockIdx.x of @p scale_grad_partials for
+ *  @ref rmsnorm_scale_grad_kernel ; an empty @p residual_grad adds nothing.
  *
  *  __grid_size__ @c [⌈rows/block⌉,1,1] ; each CTA owns a band of @c block rows, one warp per row,
  *  then one thread per channel folds the band's rows in order; no dynamic shared memory.
@@ -236,11 +235,11 @@ struct transformer_scratch_t {
     /** Allocate every transient off @p arena for @p config 's capacities, wide enough for the
      *  weight gradients of every entry projecting one of @p entry_inputs scalars per token, of the
      *  tower head over the segments, and of a token head of @p token_width outputs when nonzero;
-     *  the NumKong pack and workspace sizes come from @p capabilities . */
+     *  the NumKong pack and workspace sizes come from @p numerics . */
     [[nodiscard]] static expected<transformer_scratch_t> make(gpu_arena_t &arena,
                                                               transformer_block_config_t const &config,
                                                               std::span<u32_t const> entry_inputs, u32_t token_width,
-                                                              nk_capability_t capabilities) noexcept;
+                                                              gpu_numerics_t const &numerics) noexcept;
 
     /** Float32 @b [tokens·ffn] the SwiGLU output before its cast, then each data gradient before the
      *  house kernel or cast consuming it. */
@@ -305,10 +304,10 @@ struct transformer_block_bf16_t {
 
     /** Allocate the weights and their gradients, every stash the backward reads, and the weight
      *  packs; construction validates the config, and every call after it is a pure enqueue,
-     *  dispatching with @p capabilities . */
+     *  calling the kernels of @p numerics . */
     [[nodiscard]] static expected<transformer_block_bf16_t> make(gpu_arena_t &arena, transformer_scratch_t &scratch,
                                                                  transformer_block_config_t config,
-                                                                 nk_capability_t capabilities) noexcept;
+                                                                 gpu_numerics_t const &numerics) noexcept;
 
     /** Pack the four weights as the forward's B operands and their transposes as the data gradients' —
      *  pure enqueue, capture-safe. Call once per optimizer step, after the weights change and before the
@@ -379,8 +378,8 @@ struct transformer_block_bf16_t {
     /** The baked geometry. */
     transformer_block_config_t config_ {};
 
-    /** The NumKong capabilities of the arena's device, picking every product and element-wise verb. */
-    nk_capability_t capabilities_ = 0;
+    /** The NumKong kernels of the arena's device class: every product and element-wise verb. */
+    gpu_numerics_t numerics_ {};
 
     /** The shared transients — borrowed, owned by the stack. */
     transformer_scratch_t *scratch_ = nullptr;
@@ -452,8 +451,8 @@ struct transformer_block_e4m3_t {
     /** The baked geometry. */
     transformer_block_config_t config_ {};
 
-    /** The NumKong capabilities of the device the twin was quantized on, picking every product. */
-    nk_capability_t capabilities_ = 0;
+    /** The NumKong kernels of the device class the twin was quantized on: every product. */
+    gpu_numerics_t numerics_ {};
 
     /** The four E4M3 shadow weights: fused QKV, out-projection, fused gate/up, down —
      *  @b [out,in] row-major each, the source of @ref packed_weights_ . */

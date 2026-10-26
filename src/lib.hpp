@@ -25,14 +25,12 @@
 
 #include <cstddef> // `std::size_t`
 
-#include <atomic>           // `std::atomic`, `std::atomic_ref` - the arena's holder and the outcome's status word
 #include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
 #include <limits>           // `std::numeric_limits` - the overflow guard of a typed allocation
-#include <mutex>            // `std::lock_guard` over the ticks' lock
 #include <type_traits>      // `std::is_trivially_copyable_v`
 #include <variant>          // `std::variant` - the executor's kind, the arena's residency, a deferred call
 
-#include <forkunion.hpp>          // vendor-boundary: `fu::flat_pool_t`, `fu::spin_mutex_t`, `fu::machine_topology_t`
+#include <forkunion.hpp>          // vendor-boundary: `fu::flat_pool_t`, `fu::spin_mutex_t`, waiters & atomic refs
 #include <numkong/capabilities.h> // `nk_capability_t`, `nk_stream_t`
 #include <numkong/memory.h>       // `nk_allocator_t`, `nk_allocator_init_heap`
 #include <numkong/memory.hpp>     // `nk::stream_t` - the stream an executor owns
@@ -51,6 +49,8 @@ namespace sz = ashvardanian::stringzilla;
 namespace st = ashvardanian::smashtable;
 
 using core::b8_t;
+using core::bytes_span_t;
+using core::bytes_view_t;
 using core::i32_t;
 using core::per_gpu_array;
 using core::u32_t;
@@ -72,6 +72,14 @@ inline constexpr u64_t every_ticket_k = std::numeric_limits<u64_t>::max();
 /** A borrowed byte run of the C interface, a path or a spelling, as the engine's string view. */
 [[nodiscard]] inline sz::string_view_t text_of(uform_bytes_view_t bytes) noexcept {
     return {static_cast<char const *>(static_cast<void const *>(bytes.data)), bytes.length};
+}
+
+/** The @p count entries of a C tape as the engine's typed tape, whose elements reach the last
+ *  offset; null offsets make an empty tape, and null data no elements. */
+template <typename element_type_>
+[[nodiscard]] core::tape_view<element_type_> tape_of(uform_tape_view_t tape, std::size_t count) noexcept {
+    if (!tape.offsets) return {};
+    return {{static_cast<element_type_ *>(tape.data), tape.data ? tape.offsets[count] : 0}, {tape.offsets, count + 1}};
 }
 
 #pragma region Classes
@@ -208,19 +216,237 @@ constexpr gpu_class_t gpu_class_of(nk_capability_t device_capabilities) noexcept
     return gpu_class_t::unknown_k;
 }
 
+/** The wait instruction one CPU class pairs: x86 spins PAUSE, the WAITPKG Xeons and the monitored
+ *  Arm & RISC-V classes arm TPAUSE, WFET & WRS, WebAssembly threads sleep in @c memory.atomic.wait,
+ *  everything else yields - as does any class whose @c FORKUNION_TARGET_<BIT> is off in the probe
+ *  list. */
+template <cpu_class_t cpu_class_>
+struct waiter_for_cpu_class {
+    using type = fu::standard_yield_t;
+};
+#if FORKUNION_TARGET_X86_PAUSE
+template <>
+struct waiter_for_cpu_class<cpu_class_t::intel_haswell_k> {
+    using type = fu::x86_pause_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::intel_skylake_k> {
+    using type = fu::x86_pause_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::intel_icelake_k> {
+    using type = fu::x86_pause_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::amd_genoa_k> {
+    using type = fu::x86_pause_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::intel_sapphire_k> {
+    using type = fu::x86_pause_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::intel_granite_k> {
+    using type = fu::x86_pause_t;
+};
+#endif
+#if FORKUNION_TARGET_X86_TPAUSE
+template <>
+struct waiter_for_cpu_class<cpu_class_t::intel_sierra_k> {
+    using type = fu::x86_tpause_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::intel_diamond_k> {
+    using type = fu::x86_tpause_t;
+};
+#endif
+#if FORKUNION_TARGET_ARM64_YIELD
+template <>
+struct waiter_for_cpu_class<cpu_class_t::aws_g2_k> {
+    using type = fu::arm64_yield_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::apple_m2_k> {
+    using type = fu::arm64_yield_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::apple_m4_k> {
+    using type = fu::arm64_yield_t;
+};
+#endif
+#if FORKUNION_TARGET_ARM64_WFET
+template <>
+struct waiter_for_cpu_class<cpu_class_t::aws_g5_k> {
+    using type = fu::arm64_wfet_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::nvidia_vera_k> {
+    using type = fu::arm64_wfet_t;
+};
+#endif
+#if FORKUNION_TARGET_RISC5_WRS
+template <>
+struct waiter_for_cpu_class<cpu_class_t::alibaba_c930_k> {
+    using type = fu::risc5_wrs_t;
+};
+#endif
+#if FORKUNION_TARGET_WASM_WAIT
+template <>
+struct waiter_for_cpu_class<cpu_class_t::wasm32_v128_k> {
+    using type = fu::wasm_wait_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::wasm64_extended_k> {
+    using type = fu::wasm_wait_t;
+};
+#endif
+
+/** The waiter a CPU class pairs, spelled short for the class units. */
+template <cpu_class_t cpu_class_>
+using waiter_of = typename waiter_for_cpu_class<cpu_class_>::type;
+
+/** The atomic reference one CPU class pairs: single-instruction LSE read-modify-writes under RCpc
+ *  acquiring loads on the Armv8.3+ classes, conditional adds on the CMPCCXADD Xeons, @c amocas on
+ *  Zacas RISC-V, and on WebAssembly threads a @c memory.atomic.notify after every releasing write,
+ *  so the sleeping waiter wakes on it - the floors, the older classes, and any class whose
+ *  @c FORKUNION_TARGET_<BIT> is off in the probe list take the standard one. */
+template <cpu_class_t cpu_class_>
+struct atomic_ref_for_cpu_class {
+    template <typename value_type_>
+    using type = fu::standard_atomic_ref<value_type_>;
+};
+#if FORKUNION_TARGET_X86_CMPCCXADD
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::intel_sierra_k> {
+    template <typename value_type_>
+    using type = fu::x86_cmpccxadd_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::intel_diamond_k> {
+    template <typename value_type_>
+    using type = fu::x86_cmpccxadd_atomic_ref<value_type_>;
+};
+#endif
+#if FORKUNION_TARGET_ARM64_RCPC
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::apple_m2_k> {
+    template <typename value_type_>
+    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::apple_m4_k> {
+    template <typename value_type_>
+    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::aws_g5_k> {
+    template <typename value_type_>
+    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::nvidia_vera_k> {
+    template <typename value_type_>
+    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
+};
+#elif FORKUNION_TARGET_ARM64_LSE
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::apple_m2_k> {
+    template <typename value_type_>
+    using type = fu::arm64_lse_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::apple_m4_k> {
+    template <typename value_type_>
+    using type = fu::arm64_lse_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::aws_g5_k> {
+    template <typename value_type_>
+    using type = fu::arm64_lse_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::nvidia_vera_k> {
+    template <typename value_type_>
+    using type = fu::arm64_lse_atomic_ref<value_type_>;
+};
+#endif
+#if FORKUNION_TARGET_RISC5_ZACAS
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::alibaba_c930_k> {
+    template <typename value_type_>
+    using type = fu::risc5_zacas_atomic_ref<value_type_>;
+};
+#endif
+#if FORKUNION_TARGET_WASM_WAIT
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::wasm32_v128_k> {
+    template <typename value_type_>
+    using type = fu::wasm_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::wasm64_extended_k> {
+    template <typename value_type_>
+    using type = fu::wasm_atomic_ref<value_type_>;
+};
+#endif
+
+/** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause: the runtime
+ *  confirms nothing about them, and a class differing by one alone earns no rung. */
+inline constexpr fu::capabilities_t baseline_hints_k = fu::capability_x86_pause_k | fu::capability_arm64_yield_k |
+                                                       fu::capability_risc5_pause_k;
+
+/** Lowers one CPU class onto ForkUnion's mask - the bits the runtime must confirm before the
+ *  class's waiter and atomic reference are trusted, read off the two types themselves. */
+template <cpu_class_t cpu_class_>
+constexpr fu::capabilities_t forkunion_capabilities_of() noexcept {
+    constexpr fu::capabilities_t waits_k = waiter_of<cpu_class_>::capability_k;
+    constexpr fu::capabilities_t atomics_k = atomic_ref_for_cpu_class<cpu_class_>::template type<u32_t>::capabilities_k;
+    return static_cast<fu::capabilities_t>((waits_k | atomics_k) & ~baseline_hints_k);
+}
+
+/** ForkUnion's mask for a class named at run time, read off the template per class. */
+constexpr fu::capabilities_t forkunion_capabilities_of(cpu_class_t cpu_class) noexcept {
+    switch (cpu_class) {
+    case cpu_class_t::intel_haswell_k: return forkunion_capabilities_of<cpu_class_t::intel_haswell_k>();
+    case cpu_class_t::intel_sierra_k: return forkunion_capabilities_of<cpu_class_t::intel_sierra_k>();
+    case cpu_class_t::intel_skylake_k: return forkunion_capabilities_of<cpu_class_t::intel_skylake_k>();
+    case cpu_class_t::intel_icelake_k: return forkunion_capabilities_of<cpu_class_t::intel_icelake_k>();
+    case cpu_class_t::amd_genoa_k: return forkunion_capabilities_of<cpu_class_t::amd_genoa_k>();
+    case cpu_class_t::intel_sapphire_k: return forkunion_capabilities_of<cpu_class_t::intel_sapphire_k>();
+    case cpu_class_t::intel_granite_k: return forkunion_capabilities_of<cpu_class_t::intel_granite_k>();
+    case cpu_class_t::intel_diamond_k: return forkunion_capabilities_of<cpu_class_t::intel_diamond_k>();
+    case cpu_class_t::aws_g2_k: return forkunion_capabilities_of<cpu_class_t::aws_g2_k>();
+    case cpu_class_t::apple_m2_k: return forkunion_capabilities_of<cpu_class_t::apple_m2_k>();
+    case cpu_class_t::apple_m4_k: return forkunion_capabilities_of<cpu_class_t::apple_m4_k>();
+    case cpu_class_t::aws_g5_k: return forkunion_capabilities_of<cpu_class_t::aws_g5_k>();
+    case cpu_class_t::nvidia_vera_k: return forkunion_capabilities_of<cpu_class_t::nvidia_vera_k>();
+    case cpu_class_t::alibaba_c930_k: return forkunion_capabilities_of<cpu_class_t::alibaba_c930_k>();
+    case cpu_class_t::wasm32_v128_k: return forkunion_capabilities_of<cpu_class_t::wasm32_v128_k>();
+    case cpu_class_t::wasm64_extended_k: return forkunion_capabilities_of<cpu_class_t::wasm64_extended_k>();
+    default: return forkunion_capabilities_of<cpu_class_t::serial_k>();
+    }
+}
+
 /** Whether every compute bit one CPU class lowers onto is present in @p available. */
 constexpr bool numkong_admits(nk_capability_t available, cpu_class_t cpu_class) noexcept {
     nk_capability_t const wanted = numkong_capabilities_of(cpu_class);
     return (available & wanted) == wanted;
 }
 
-/** Whether @p rung runs wherever @p pinned does: its NumKong mask is a subset of the pinned
- *  class's, so a pin admits exactly the rungs a machine of that class would. The towers take no
- *  waiter or atomic reference, so the compute mask is the whole class. */
+/** Whether the runtime confirms every ForkUnion bit one CPU class needs. */
+inline bool forkunion_admits(cpu_class_t cpu_class) noexcept {
+    fu::capabilities_t const wanted = forkunion_capabilities_of(cpu_class);
+    return (fu::runtime_capabilities() & wanted) == wanted;
+}
+
+/** Whether @p rung runs wherever @p pinned does: its NumKong and ForkUnion masks are subsets of
+ *  the pinned class's, so a pin admits exactly the rungs a machine of that class would. */
 constexpr bool cpu_class_within(cpu_class_t rung, cpu_class_t pinned) noexcept {
     nk_capability_t const rung_compute = numkong_capabilities_of(rung),
                           pinned_compute = numkong_capabilities_of(pinned);
-    return (rung_compute & pinned_compute) == rung_compute;
+    fu::capabilities_t const rung_sync = forkunion_capabilities_of(rung),
+                             pinned_sync = forkunion_capabilities_of(pinned);
+    return (rung_compute & pinned_compute) == rung_compute && (rung_sync & pinned_sync) == rung_sync;
 }
 
 /** The C enum's class as the engine names it; @c uform_cpu_class_unknown_k derives nothing, so it
@@ -231,12 +457,12 @@ constexpr cpu_class_t cpu_class_of(uform_cpu_class_t cpu_class) noexcept {
     return static_cast<cpu_class_t>(cpu_class);
 }
 
-/** Whether this machine runs @p pinned, the class a caller told a load to dispatch as; no pin
- *  always runs. */
-constexpr bool cpu_pin_admitted(uform_cpu_class_t pinned, nk_capability_t available) noexcept {
+/** Whether this machine runs @p pinned, the class a caller told a load to dispatch as: every
+ *  NumKong bit in @p available and every ForkUnion bit the runtime confirms; no pin always runs. */
+inline bool cpu_pin_admitted(uform_cpu_class_t pinned, nk_capability_t available) noexcept {
     if (pinned == uform_cpu_class_unknown_k) return true;
     if (pinned > uform_cpu_class_wasm64_extended_k) return false;
-    return numkong_admits(available, cpu_class_of(pinned));
+    return numkong_admits(available, cpu_class_of(pinned)) && forkunion_admits(cpu_class_of(pinned));
 }
 
 /** Whether a ladder may take @p rung under @p pinned: every rung when nothing is pinned. */
@@ -375,14 +601,44 @@ constexpr bool gpu_vendor_compiled([[maybe_unused]] nk_capability_t vendor) noex
     return false;
 }
 
-/** The newest class on @p ladder that @p available runs and @p pinned takes, whose NumKong mask
- *  every call dispatches under. */
+/** The newest class on @p ladder that @p available and the ForkUnion runtime run and @p pinned
+ *  takes, whose NumKong mask every call dispatches under. */
 template <cpu_class_t... classes_>
-constexpr cpu_class_t pick_cpu_class(cpu_ladder<classes_...>, uform_cpu_class_t pinned,
-                                     nk_capability_t available) noexcept {
+inline cpu_class_t pick_cpu_class(cpu_ladder<classes_...>, uform_cpu_class_t pinned,
+                                  nk_capability_t available) noexcept {
     for (cpu_class_t const rung : {classes_...})
-        if (cpu_pin_takes(pinned, rung) && numkong_admits(available, rung)) return rung;
+        if (cpu_pin_takes(pinned, rung) && numkong_admits(available, rung) && forkunion_admits(rung)) return rung;
     return cpu_class_t::serial_k;
+}
+
+/** The verbs one CPU class compiles in its class unit for the C layer, which is compiled once at
+ *  the baseline: how its threads wait on a word another thread writes. */
+struct host_verbs_t {
+
+    /** Returns once @p word no longer holds @p seen, reading it through the class's atomic
+     *  reference and waiting between reads through the class's waiter. */
+    void (*wait)(u64_t &word, u64_t seen) noexcept;
+};
+
+/** The host verbs one class unit compiles, defined in @c encoder_specializations.hpp , which the
+ *  class units alone include, so no body compiled for a class reaches a caller of another. */
+template <cpu_class_t cpu_class_>
+struct host_class_tables {
+    static host_verbs_t const *find() noexcept;
+    static void wait(u64_t &word, u64_t seen) noexcept;
+};
+
+/** The host verbs of the newest compiled class on @p ladder that runs wherever @p cpu_class does;
+ *  the serial floor always answers. */
+template <cpu_class_t... classes_>
+host_verbs_t const *pick_host_verbs(cpu_ladder<classes_...>, cpu_class_t cpu_class) noexcept {
+    host_verbs_t const *picked = nullptr;
+    auto rung = [&]<cpu_class_t class_>() noexcept {
+        if constexpr (cpu_class_compiled(class_))
+            if (!picked && cpu_class_within(class_, cpu_class)) picked = host_class_tables<class_>::find();
+    };
+    (rung.template operator()<classes_>(), ...);
+    return picked;
 }
 
 #pragma endregion Classes
@@ -415,21 +671,21 @@ constexpr cpu_class_t pick_cpu_class(cpu_ladder<classes_...>, uform_cpu_class_t 
     }
 }
 
-/** Marks @p outcome as running; no waiter watches for this store, so it is relaxed. */
+/** Marks @p outcome as running; no waiter watches for this store, so it is relaxed. The C layer is
+ *  compiled once at the baseline, so its shared words go through the standard reference, which
+ *  every class's waiter reads. */
 inline void propagate_pending(uform_outcome_t *outcome) noexcept {
     outcome->message = nullptr;
-    std::atomic_ref<uform_status_t> {outcome->status}.store(uform_status_deferred_k, std::memory_order_relaxed);
+    fu::standard_atomic_ref<uform_status_t> {outcome->status}.store(uform_status_deferred_k, std::memory_order_relaxed);
 }
 
-/** The one final write to @p outcome: the message, then the status every waiter acquires, and a wake. The call
+/** The one final write to @p outcome: the message, then the status every waiter acquires. The call
  *  touches nothing it was passed after this, and the message is null exactly on success. */
 inline bool propagate_error(uform_status_t status, uform_outcome_t *outcome,
                             char const *message) noexcept { // vendor-boundary: the C outcome's static message
     bool const succeeded = status == uform_status_success_k;
     outcome->message = succeeded ? nullptr : message;
-    std::atomic_ref<uform_status_t> final_status {outcome->status};
-    final_status.store(status, std::memory_order_release);
-    final_status.notify_all();
+    fu::standard_atomic_ref<uform_status_t> {outcome->status}.store(status, std::memory_order_release);
     return succeeded;
 }
 
@@ -499,7 +755,7 @@ class progress_ticks_t {
      *  @c ⌈i·population/steps⌉ closes exactly step @c i . */
     continuation_t operator()(std::size_t completed, std::size_t population) noexcept {
         if (!progress_.callback) return continuation_t::continue_k;
-        std::lock_guard<fu::spin_mutex_t> lock(mutex_);
+        st::unique_lock<fu::spin_mutex_t> lock(mutex_);
         std::size_t const steps = steps_(population);
         std::size_t const step = completed >= population ? steps : completed * steps / population;
         if (step <= closed_) return continuation_t::continue_k;
@@ -529,12 +785,6 @@ class progress_ticks_t {
 
 #pragma region Memory
 
-/** A run of bytes one arena owns. */
-struct arena_chunk_t {
-    b8_t *data = nullptr;
-    std::size_t capacity = 0;
-};
-
 /**
  *  @brief Memory that one call at a time rewinds and refills through one NumKong allocation policy: chunks that
  *      double and never move, so a steady loop allocates once and every view a call hands out stays put.
@@ -549,7 +799,7 @@ class chunked_arena_t {
     chunked_arena_t(chunked_arena_t &&) noexcept = default;
     chunked_arena_t &operator=(chunked_arena_t &&) = delete;
     ~chunked_arena_t() noexcept {
-        for (arena_chunk_t const &chunk : chunks_) policy_.free(chunk.data, chunk.capacity, policy_.handle, stream_);
+        for (bytes_span_t const chunk : chunks_) policy_.free(chunk.data(), chunk.size(), policy_.handle, stream_);
     }
 
     /** The stream its chunks are allocated and freed on; null for host pages. */
@@ -560,8 +810,8 @@ class chunked_arena_t {
 
     /** Whether @p address lies in memory this arena handed out, which its next rewind reuses. */
     [[nodiscard]] bool contains(void const *address) const noexcept {
-        for (arena_chunk_t const &chunk : chunks_)
-            if (address >= chunk.data && address < chunk.data + chunk.capacity) return true;
+        for (bytes_span_t const chunk : chunks_)
+            if (address >= chunk.data() && address < chunk.data() + chunk.size()) return true;
         return false;
     }
 
@@ -570,22 +820,22 @@ class chunked_arena_t {
     [[nodiscard]] void *allocate(std::size_t bytes) noexcept {
         std::size_t const aligned = core::divide_round_up(bytes, nk_default_alignment_k) * nk_default_alignment_k;
         for (; current_ != chunks_.size(); ++current_, used_ = 0)
-            if (chunks_[current_].capacity - used_ >= aligned) {
-                b8_t *const landed = chunks_[current_].data + used_;
+            if (chunks_[current_].size() - used_ >= aligned) {
+                b8_t *const landed = chunks_[current_].data() + used_;
                 used_ += aligned;
                 return landed;
             }
         std::size_t held = 0;
-        for (arena_chunk_t const &chunk : chunks_) held += chunk.capacity;
+        for (bytes_span_t const chunk : chunks_) held += chunk.size();
         std::size_t const capacity = held > aligned ? held : aligned;
         if (limit_ && held + capacity > limit_) return nullptr;
         if (!policy_.allocate) return nullptr;
-        arena_chunk_t const chunk {static_cast<b8_t *>(policy_.allocate(capacity, policy_.handle, stream_)), capacity};
-        if (!chunk.data) return nullptr;
-        if (st::failed(chunks_.push_back(arena_chunk_t {chunk})))
-            return policy_.free(chunk.data, chunk.capacity, policy_.handle, stream_), nullptr;
+        b8_t *const allocated = static_cast<b8_t *>(policy_.allocate(capacity, policy_.handle, stream_));
+        if (!allocated) return nullptr;
+        if (st::failed(chunks_.push_back(bytes_span_t {allocated, capacity})))
+            return policy_.free(allocated, capacity, policy_.handle, stream_), nullptr;
         current_ = chunks_.size() - 1, used_ = aligned;
-        return chunk.data;
+        return allocated;
     }
 
     /** Hands out @p count values of @p value_type_, or null when they cannot be allocated. */
@@ -602,7 +852,7 @@ class chunked_arena_t {
 
     /** Bytes the chunks may span together, or zero for no ceiling. */
     std::size_t limit_;
-    st::basic_vector<arena_chunk_t> chunks_;
+    st::basic_vector<bytes_span_t> chunks_;
 
     /** The chunk being filled, and the bytes of it already handed out since the last rewind. */
     std::size_t current_ = 0;
@@ -654,8 +904,12 @@ struct ram_executor_t {
 /** One GPU of a VRAM executor: its stream, and the scratch its calls rewind. */
 struct vram_device_t {
 
-    /** The vendor's own ordinal, as @c cudaSetDevice or @c hipSetDevice takes it. */
+    /** The UForm ordinal, the device's position in the @c uform_gpu_devices listing, NVIDIA
+     *  devices first, which @c uform_vram_options_t names and a model's replicas match by. */
     i32_t ordinal = 0;
+
+    /** The vendor's own ordinal, as @c cuDeviceGet or @c hipSetDevice takes it. */
+    i32_t vendor_ordinal = 0;
 
     /** What the device runs, whose group names the vendor every NumKong call dispatches on. */
     nk_capability_t capabilities = 0;
@@ -710,21 +964,10 @@ using encoder_home_tables_t =
     std::variant<encoder_verbs<encoder_home_t::ram_k> const *, encoder_verbs<encoder_home_t::vram_nvidia_k> const *,
                  encoder_verbs<encoder_home_t::vram_amd_k> const *>;
 
-/** A model's one tower in host memory, packed for the class its load picked, serving any RAM
- *  executor. */
-struct ram_model_t {
-    void *tower = nullptr;
-};
-
-/** One copy of a model's tower on one GPU, matched to an executor's device by ordinal. */
+/** One copy of a model's tower on one GPU, matched to an executor's device by its UForm ordinal. */
 struct vram_replica_t {
     i32_t ordinal = 0;
     void *tower = nullptr;
-};
-
-/** A model replicated on every GPU its load named, every replica of the class its load picked. */
-struct vram_model_t {
-    per_gpu_array<vram_replica_t> replicas;
 };
 
 #pragma endregion Models
@@ -769,8 +1012,9 @@ struct deferred_call_t {
 struct deferred_registry_t {
     fu::spin_mutex_t guard;
 
-    /** Bumped under @ref guard whenever a taken call becomes final, and waited on outside it. */
-    std::atomic<u64_t> finished {0};
+    /** Bumped under @ref guard whenever a taken call becomes final, and waited on outside it
+     *  through the waiting executor's @ref host_verbs_t. */
+    u64_t finished = 0;
 
     /** The last ticket handed out. */
     u64_t tickets = 0;
@@ -880,6 +1124,10 @@ struct uform_executor_handle_t {
     /** The next listed executor, so a wait or a free finds the calls naming its handle. */
     uform_executor_handle_t *next_listed = nullptr;
 
+    /** How its callers wait on the calls it runs: the verbs of the CPU class its host threads run,
+     *  a static table that outlives the executor. */
+    uf::host_verbs_t const *host_verbs = nullptr;
+
     std::variant<uf::ram_executor_t, uf::vram_executor_t> executor;
 };
 
@@ -894,9 +1142,10 @@ struct uform_arena_handle_t {
      *  pages, which serve any call computing on the host. */
     uform_executor_t executor = nullptr;
 
-    /** The published outcome of the call holding the arena, from its claim or deferred submission until just before
-     *  its final store; atomic, since a held call finishes on whichever thread runs it. */
-    std::atomic<uform_outcome_t const *> holder {nullptr};
+    /** The published outcome of the call holding the arena, from its claim or deferred submission
+     *  until just before its final store; touched through the standard reference, since a held call
+     *  finishes on whichever thread runs it. */
+    uform_outcome_t const *holder = nullptr;
 };
 
 /** What @c uform_model_t owns: the geometry its checkpoint carried, the precision its blocks run in, and its packed
@@ -916,7 +1165,9 @@ struct uform_model_handle_t {
      *  back. */
     uf::encoder_home_tables_t tables;
 
-    std::variant<uf::ram_model_t, uf::vram_model_t> residency;
+    /** The one host tower, serving any RAM executor, or one replica per GPU the load named, every
+     *  one of the picked class. */
+    std::variant<void *, uf::per_gpu_array<uf::vram_replica_t>> towers;
 
     uform_model_handle_t() noexcept = default;
     uform_model_handle_t(uform_model_handle_t const &) = delete;

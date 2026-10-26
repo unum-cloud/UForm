@@ -432,10 +432,14 @@ final class Landing {
         return UnsafePointer(copy)
     }
 
-    /// Lends the UTF-8 bytes of a path or a name, never terminated, by contract.
+    /// Lends the UTF-8 bytes of a path or a name, never terminated, by contract, copied once into the landing so a
+    /// deferred call may read them.
     func lend(_ text: String) -> uform_bytes_view_t {
-        let bytes = Array(text.utf8)
-        return uform_bytes_view_t(data: lend(bytes), length: bytes.count)
+        let utf8 = text.utf8
+        guard !utf8.isEmpty else { return uform_bytes_view_t(data: nil, length: 0) }
+        let bytes = slots(UInt8(0), count: utf8.count)
+        _ = UnsafeMutableBufferPointer(start: bytes, count: utf8.count).update(fromContentsOf: utf8)
+        return uform_bytes_view_t(data: bytes, length: utf8.count)
     }
 
     /// Lends the host placement every RAM load and executor takes; nil `cpuClass` derives the CPU's own.
@@ -456,7 +460,8 @@ final class Landing {
         )
     }
 
-    /// Lays `items` end to end with Apache Arrow offsets around them, as every ragged input crosses.
+    /// Lays `items` end to end with Apache Arrow offsets around them, as every ragged input crosses: the one copy a
+    /// verb makes, into the landing, so a deferred call may read the tape after the verb returns.
     func tape<Item: Collection>(_ items: [Item], _ scalar: Scalar) -> uform_tape_view_t
     where Item.Element: BitwiseCopyable {
         let offsets = slots(0, count: items.count + 1)

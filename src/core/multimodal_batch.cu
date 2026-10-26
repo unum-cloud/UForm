@@ -66,7 +66,7 @@ static __global__ void fill_coords_kernel_(u32r1_view_t segment_offsets, u32r1_v
     }
 }
 
-expected_t uc::fill_coords(u32r1_span_t segment_offsets, u32r1_span_t segment_lengths, modality_span_t segment_modality,
+expected_t uc::fill_coords(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths, modality_view_t segment_modality,
                            image_shape_view_t image_shapes, video_shape_view_t video_shapes, u32_t tube_frames,
                            u32_t frame_stride, i16r2_span_t coords, gpu_stream_t &stream) noexcept {
     if (coords.extent(1) != 3)
@@ -198,7 +198,7 @@ static __device__ u32_t route_destination_(sources_type_ const &sources, u32r1_s
                                            u32r1_span_t mixed_lengths, u32r1_span_t mixed_sources,
                                            u32r1_span_t mixed_bags, u32_t member_index, data_epoch_t data_epoch,
                                            u64_t seed, u32_t segments_per_gpu, u32_t rows_per_gpu,
-                                           u32_t columns_per_row, u32_t max_bags_per_gpu) {
+                                           u32_t columns_per_row, u32_t max_bags_per_gpu) noexcept {
     bool const lands = !mixed_offsets.empty();
     bool const leader = threadIdx.x % warp_size_k == 0u; // every lane walks the same cursor, one stores it
     u32_t const capacity = rows_per_gpu * columns_per_row;

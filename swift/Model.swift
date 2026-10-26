@@ -18,8 +18,6 @@ public struct ModelDescription: Sendable {
     public var quantization: Scalar
     /// Bytes the model holds; activations are the executor's.
     public var memoryUsage: Int
-    /// The codename of the kernels the model dispatched to on this machine.
-    public var capabilities: String
     /// The class a RAM model's tower was packed for, or nil for a VRAM model.
     public var cpuClass: CPUClass?
     /// The class every replica of a VRAM model runs as, or nil for a RAM model.
@@ -35,7 +33,6 @@ public struct ModelDescription: Sendable {
         context = raw.context
         quantization = Scalar(raw: raw.quantization)
         memoryUsage = raw.memory_usage
-        capabilities = raw.capabilities.map { String(cString: $0) } ?? ""
         cpuClass = CPUClass(reported: raw.cpu_class)
         gpuClass = GPUClass(reported: raw.gpu_class)
         tokenWidth = raw.token_width

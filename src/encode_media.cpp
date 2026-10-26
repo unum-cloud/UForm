@@ -19,7 +19,7 @@ using namespace unum::uform;
 /** JPEG, PNG and WebP files, planned from their headers and decoded on the host. */
 struct images_packer_t {
     static constexpr modality_t modality_k = modality_t::image_k;
-    uform_tape_view_t tape;
+    core::tape_view<b8_t const> tape;
 
     std::size_t cell_bytes(ue::geometry_t const &geometry) const noexcept {
         return std::size_t {geometry.image_patch_side} * geometry.image_patch_side * geometry.image_channels;
@@ -28,7 +28,7 @@ struct images_packer_t {
     failure_t prepare(chunked_arena_t &, std::size_t, ue::geometry_t const &) noexcept { return {}; }
 
     failure_t plan(std::size_t item, item_plan_t &plan, ue::geometry_t const &geometry, std::size_t) const noexcept {
-        core::expected<um::image_plan_t> planned = um::plan_image(entry_of(tape, item, 1), geometry.image_patch_side,
+        core::expected<um::image_plan_t> planned = um::plan_image(tape[item], geometry.image_patch_side,
                                                                   geometry.columns);
         if (!planned) return {media_status_of(planned.status_), "An image file could not be probed"};
         plan.image = *planned;
@@ -38,12 +38,12 @@ struct images_packer_t {
         return {};
     }
 
-    failure_t stage(std::size_t item, item_plan_t const &plan, b8_t *cells, ue::geometry_t const &geometry,
+    failure_t stage(std::size_t item, item_plan_t const &plan, bytes_span_t cells, ue::geometry_t const &geometry,
                     std::size_t) const noexcept {
         std::size_t const side = geometry.image_patch_side;
         core::expected_t const decoded = um::decode_image(
-            entry_of(tape, item, 1), plan.image,
-            {static_cast<pixel_t *>(static_cast<void *>(cells)), {plan.shape[0], plan.shape[1], side, side, 4}});
+            tape[item], plan.image,
+            {static_cast<pixel_t *>(static_cast<void *>(cells.data())), {plan.shape[0], plan.shape[1], side, side, 4}});
         if (!decoded) return {media_status_of(decoded.status_), "An image file could not be decoded"};
         return {};
     }
@@ -58,7 +58,7 @@ static core::video_batch_shape_t video_shape_of(ue::geometry_t const &geometry) 
 /** MP4 or WebM clips, demuxed to plan their tubes and decoded in software. */
 struct videos_packer_t {
     static constexpr modality_t modality_k = modality_t::video_k;
-    uform_tape_view_t tape;
+    core::tape_view<b8_t const> tape;
 
     std::size_t cell_bytes(ue::geometry_t const &geometry) const noexcept {
         return std::size_t {geometry.video_scalars()};
@@ -75,7 +75,7 @@ struct videos_packer_t {
     failure_t prepare(chunked_arena_t &, std::size_t, ue::geometry_t const &) noexcept { return {}; }
 
     failure_t plan(std::size_t item, item_plan_t &plan, ue::geometry_t const &geometry, std::size_t) const noexcept {
-        core::expected<um::demuxed_t> clip = um::demux_video(entry_of(tape, item, 1));
+        core::expected<um::demuxed_t> clip = um::demux_video(tape[item]);
         if (!clip) return {media_status_of(clip.status_), "A clip could not be demuxed"};
         core::video_batch_shape_t const shape = video_shape_of(geometry);
         um::video_grid_t const grid = um::video_tube_grid(clip->frames, clip->extent, shape, geometry.columns);
@@ -87,13 +87,13 @@ struct videos_packer_t {
         return {};
     }
 
-    failure_t stage(std::size_t item, item_plan_t const &plan, b8_t *cells, ue::geometry_t const &geometry,
+    failure_t stage(std::size_t item, item_plan_t const &plan, bytes_span_t cells, ue::geometry_t const &geometry,
                     std::size_t) const noexcept {
-        core::expected<um::demuxed_t> clip = um::demux_video(entry_of(tape, item, 1));
+        core::expected<um::demuxed_t> clip = um::demux_video(tape[item]);
         if (!clip) return {media_status_of(clip.status_), "A clip could not be demuxed"};
         core::video_batch_shape_t const shape = video_shape_of(geometry);
         std::size_t const side = geometry.video_patch_side;
-        um::pixel_tubes_span_t const tubes {static_cast<pixel_t *>(static_cast<void *>(cells)),
+        um::pixel_tubes_span_t const tubes {static_cast<pixel_t *>(static_cast<void *>(cells.data())),
                                             {plan.shape[0], std::size_t {plan.shape[1]} * plan.shape[2],
                                              shape.tube_frames, side, side, um::video_channels_k}};
         core::expected_t const decoded = um::decode_video_frames(*clip, {plan.shape[0], plan.shape[1], plan.shape[2]},
@@ -106,11 +106,10 @@ struct videos_packer_t {
 /** WAV, FLAC, MP3 or Opus files, decoded into the whole context once to find their length, then into their frames. */
 struct recordings_packer_t {
     static constexpr modality_t modality_k = modality_t::audio_k;
-    uform_tape_view_t tape;
+    core::tape_view<b8_t const> tape;
 
-    /** One context of samples per thread, which a plan decodes into. */
-    f32_t *window = nullptr;
-    std::size_t window_samples = 0;
+    /** @b [threads,samples] one context of samples per thread, which a plan decodes into. */
+    core::f32r2_span_t windows {};
 
     std::size_t cell_bytes(ue::geometry_t const &geometry) const noexcept {
         return std::size_t {geometry.audio_chunk_samples} * sizeof(f32_t);
@@ -118,10 +117,11 @@ struct recordings_packer_t {
     failure_t validate(ue::geometry_t const &geometry) const noexcept { return validate_audio(geometry); }
 
     failure_t prepare(chunked_arena_t &staging, std::size_t threads, ue::geometry_t const &geometry) noexcept {
-        window_samples = std::size_t {core::media_cells(core::modality_t::audio_k, geometry.columns)} *
-                         geometry.audio_chunk_samples;
-        window = staging.allocate<f32_t>(window_samples * threads);
-        if (!window) return {uform_status_out_of_memory_k, "Failed to allocate the recording staging"};
+        std::size_t const samples = std::size_t {core::media_cells(core::modality_t::audio_k, geometry.columns)} *
+                                    geometry.audio_chunk_samples;
+        f32_t *const rows = staging.allocate<f32_t>(samples * threads);
+        if (!rows) return {uform_status_out_of_memory_k, "Failed to allocate the recording staging"};
+        windows = {rows, threads, samples};
         return {};
     }
 
@@ -129,8 +129,9 @@ struct recordings_packer_t {
      *  reaching the window's last frame counts as cut there. */
     failure_t plan(std::size_t item, item_plan_t &plan, ue::geometry_t const &geometry,
                    std::size_t thread) const noexcept {
-        f32_t *const samples = window + thread * window_samples;
-        core::expected_t const decoded = um::decode_audio(entry_of(tape, item, 1), geometry.audio_sample_rate,
+        std::size_t const window_samples = windows.extent(1);
+        f32_t *const samples = windows.row(thread).data();
+        core::expected_t const decoded = um::decode_audio(tape[item], geometry.audio_sample_rate,
                                                           {samples, window_samples});
         if (!decoded) return {media_status_of(decoded.status_), "A recording could not be decoded"};
         std::size_t heard = window_samples;
@@ -142,10 +143,10 @@ struct recordings_packer_t {
         return {};
     }
 
-    failure_t stage(std::size_t item, item_plan_t const &plan, b8_t *cells, ue::geometry_t const &geometry,
+    failure_t stage(std::size_t item, item_plan_t const &plan, bytes_span_t cells, ue::geometry_t const &geometry,
                     std::size_t) const noexcept {
-        core::expected_t const decoded = um::decode_audio(entry_of(tape, item, 1), geometry.audio_sample_rate,
-                                                          {static_cast<f32_t *>(static_cast<void *>(cells)),
+        core::expected_t const decoded = um::decode_audio(tape[item], geometry.audio_sample_rate,
+                                                          {static_cast<f32_t *>(static_cast<void *>(cells.data())),
                                                            std::size_t {plan.tokens} * geometry.audio_chunk_samples});
         if (!decoded) return {media_status_of(decoded.status_), "A recording could not be decoded"};
         return {};
@@ -160,7 +161,7 @@ UFORM_EXPORT void uform_image_encode(uform_image_encode_t *arguments) {
     if (submitted<uform_image_encode>(arguments)) return;
     call_outcome_t outcome(arguments->outcome, arguments->arena);
     uform_tape_view_t const tape = arguments->images;
-    images_packer_t packer {tape};
+    images_packer_t packer {tape_of<b8_t const>(tape, arguments->count)};
     encode_call(*arguments, packer, tape, uform_scalar_u8_k, {tape.data, tape.offsets}, outcome);
 }
 
@@ -168,7 +169,7 @@ UFORM_EXPORT void uform_video_encode(uform_video_encode_t *arguments) {
     if (submitted<uform_video_encode>(arguments)) return;
     call_outcome_t outcome(arguments->outcome, arguments->arena);
     uform_tape_view_t const tape = arguments->videos;
-    videos_packer_t packer {tape};
+    videos_packer_t packer {tape_of<b8_t const>(tape, arguments->count)};
     encode_call(*arguments, packer, tape, uform_scalar_u8_k, {tape.data, tape.offsets}, outcome);
 }
 
@@ -176,7 +177,7 @@ UFORM_EXPORT void uform_audio_encode(uform_audio_encode_t *arguments) {
     if (submitted<uform_audio_encode>(arguments)) return;
     call_outcome_t outcome(arguments->outcome, arguments->arena);
     uform_tape_view_t const tape = arguments->recordings;
-    recordings_packer_t packer {tape};
+    recordings_packer_t packer {tape_of<b8_t const>(tape, arguments->count)};
     encode_call(*arguments, packer, tape, uform_scalar_u8_k, {tape.data, tape.offsets}, outcome);
 }
 

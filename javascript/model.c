@@ -161,14 +161,12 @@ static napi_value uform_js_model_release(napi_env env, napi_callback_info info) 
 
 static napi_value uform_js_finish_describe(napi_env env, uform_js_call_t *call, napi_value const *slots) {
     uform_model_description_t const *const description = &((uform_js_describe_call_t *)call)->description;
-    static char const *const names[] = {"dimensions",  "context",      "quantization",
-                                        "memoryUsage", "capabilities", "cpuClass",
-                                        "gpuClass",    "tokenWidth",   "choiceTemperatureGroups"};
+    static char const *const names[] = {"dimensions", "context",  "quantization", "memoryUsage",
+                                        "cpuClass",   "gpuClass", "tokenWidth",   "choiceTemperatureGroups"};
     napi_value const values[] = {uform_js_number(env, description->dimensions),
                                  uform_js_number(env, description->context),
                                  uform_js_static_string(env, uform_scalar_name(description->quantization)),
                                  uform_js_number(env, description->memory_usage),
-                                 uform_js_static_string(env, description->capabilities),
                                  uform_js_class_name(env, uform_cpu_class_name(description->cpu_class)),
                                  uform_js_class_name(env, uform_gpu_class_name(description->gpu_class)),
                                  uform_js_number(env, description->token_width),
@@ -199,8 +197,6 @@ static napi_value uform_js_model_describe(napi_env env, napi_callback_info info)
 
 #pragma endregion Lifecycle
 
-#pragma region Registration
-
 napi_value uform_js_model_define(napi_env env) {
     static napi_property_descriptor const lifecycle[] = {
         {"free", NULL, uform_js_model_release, NULL, NULL, NULL, napi_default_method, NULL},
@@ -222,5 +218,3 @@ napi_value uform_js_model_define(napi_env env) {
     memcpy(properties + lifecycle_count, encode, encode_count * sizeof(napi_property_descriptor));
     return uform_js_class_define(env, "CompiledModel", lifecycle_count + encode_count, properties);
 }
-
-#pragma endregion Registration

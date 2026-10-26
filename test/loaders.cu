@@ -1163,7 +1163,7 @@ static void cross_rank_sampling(test_suite_t &suite) {
         }
     if (count == 0) return suite.check(false, "world size should be set ($UFORM_HOST_DOMAIN_COUNT / $SLURM_NTASKS)");
 
-    auto bootstrapped = mesh_topology_t::bootstrap(index, count);
+    auto bootstrapped = mesh_topology_t::bootstrap(index, count, &pause_between_polls);
     if (!bootstrapped) return suite.check(false, "the cluster should bootstrap: {}", bootstrapped.description_);
     mesh_topology_t topology = std::move(bootstrapped.value_);
 

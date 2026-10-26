@@ -346,8 +346,21 @@ bool uform_js_offsets_from_value(napi_env env, napi_value value, char const *fie
     if (uform_js_value_absent(env, value)) return true;
     void *data = NULL;
     size_t elements = 0;
-    if (!uform_js_array_from_value(env, value, field, napi_uint32_array, &data, &elements)) return false;
+    napi_typedarray_type type = napi_int8_array;
+    napi_value arraybuffer = NULL;
+    size_t offset = 0;
+    bool is_typedarray = false;
+    if (napi_is_typedarray(env, value, &is_typedarray) != napi_ok || !is_typedarray ||
+        napi_get_typedarray_info(env, value, &type, &elements, &data, &arraybuffer, &offset) != napi_ok ||
+        (type != napi_biguint64_array && type != napi_uint32_array))
+        return uform_js_throw_field(env, field, "must be a BigUint64Array or a Uint32Array");
     if (!elements) return uform_js_throw_field(env, field, "must hold one more offset than entries");
+    if (uform_js_typedarray_unit_bytes(type) == sizeof(size_t)) { // as wide as `size_t`, so lent as it is
+        *offsets = (size_t const *)data;
+        *count = elements - 1;
+        return true;
+    }
+    if (type != napi_uint32_array) return uform_js_throw_field(env, field, "is wider than this platform's size_t");
     size_t *const widened = (size_t *)uform_js_call_own(env, call, elements * sizeof(size_t));
     if (!widened) return false;
     for (size_t position = 0; position != elements; ++position) widened[position] = ((uint32_t const *)data)[position];
@@ -364,7 +377,7 @@ bool uform_js_tape_from_value(napi_env env, napi_value data_value, napi_value of
     if (!uform_js_array_from_value(env, data_value, field, element_type, &data, &elements) ||
         !uform_js_offsets_from_value(env, offsets_value, "offsets", call, &tape->offsets, count))
         return false;
-    if (!tape->offsets) return uform_js_throw_field(env, "offsets", "must be a Uint32Array");
+    if (!tape->offsets) return uform_js_throw_field(env, "offsets", "must be a BigUint64Array or a Uint32Array");
     if (tape->offsets[*count] > elements) // the library reads as far as the last offset says
         return uform_js_throw(env, uform_status_shape_mismatch_k, "The offsets reach past the end of the tape");
     tape->data = data;

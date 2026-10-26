@@ -112,6 +112,7 @@ static void exchange_round_trips(test_suite_t &suite, fs::path const &base) {
     mesh_topology_t topology;
     if (st::failed(topology.host_domains.resize(2))) return suite.check(false, "topology table alloc");
     topology.host_domain_index = 0;
+    topology.poll_pause = &pause_between_polls;
     (void)format_into(topology.exchange_directory, "{}", directory.c_str());
 
     sz::string_view_t const payload = "qpn 42\npsn 7\nrkey 3735928559\n";
@@ -135,6 +136,7 @@ static bool two_host_topology(mesh_topology_t &topology, fs::path const &directo
     if (st::failed(topology.host_domains.resize(2))) return false;
     topology.shape = mesh_shape_t {1u, 1u, 2u};
     topology.host_domain_index = index;
+    topology.poll_pause = &pause_between_polls;
     return format_into(topology.exchange_directory, "{}", directory.c_str());
 }
 
@@ -189,7 +191,8 @@ static void rendezvous_generations(test_suite_t &suite, fs::path const &base) {
  *  and never opens the exchange directory — the common one-box case. */
 static void single_box_world(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
     if (local_devices == 0) return suite.skip(no_cuda_device_k);
-    auto result = mesh_topology_t::bootstrap(0, 1, local_devices, base.c_str(), "single_box", 10.0);
+    auto result = mesh_topology_t::bootstrap(0, 1, &pause_between_polls, local_devices, base.c_str(), "single_box",
+                                             10.0);
     if (!result) return suite.check(false, "single-box bootstrap should succeed: {}", result.description_);
     mesh_topology_t topology = std::move(*result);
     suite.check(topology.host_domain_count() == 1, "world should hold one host_domain: got {}",
@@ -218,7 +221,8 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
         plant(directory / "host_domain1.mesh",
               facts_payload(job, 1, 2, local_devices, local_devices, "faux-peer", device_name, 0x3));
         plant(directory / "host_domain1.mesh.arrive", "1\n"); // the peer's arrival at the closing barrier
-        auto result = mesh_topology_t::bootstrap(0, 2, local_devices, base.c_str(), job, 10.0, 0x3);
+        auto result = mesh_topology_t::bootstrap(0, 2, &pause_between_polls, local_devices, base.c_str(), job, 10.0,
+                                                 0x3);
         if (!result) suite.check(false, "lead should assemble the world: {}", result.description_);
         else {
             mesh_topology_t lead = std::move(*result);
@@ -240,7 +244,8 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
         fs::create_directories(directory, error);
         plant(directory / "host_domain1.mesh",
               facts_payload(job, 1, 2, local_devices, local_devices, "faux-peer", device_name, 0x1));
-        auto result = mesh_topology_t::bootstrap(0, 2, local_devices, base.c_str(), job, 10.0, 0x3);
+        auto result = mesh_topology_t::bootstrap(0, 2, &pause_between_polls, local_devices, base.c_str(), job, 10.0,
+                                                 0x3);
         suite.check(!result && result.status_ == status_t::shape_unsupported_k,
                     "lead should refuse a peer of other capabilities: {}", result.description_);
     }
@@ -252,7 +257,7 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
         fs::create_directories(directory, error);
         plant(directory / "host_domain0.manifest", manifest_payload(job, local_devices, 2, local_devices, device_name));
         plant(directory / "host_domain0.mesh.release", "1\n"); // the lead's release at the closing barrier
-        auto result = mesh_topology_t::bootstrap(1, 2, local_devices, base.c_str(), job, 10.0);
+        auto result = mesh_topology_t::bootstrap(1, 2, &pause_between_polls, local_devices, base.c_str(), job, 10.0);
         if (!result) suite.check(false, "follower should adopt the world: {}", result.description_);
         else {
             mesh_topology_t follower = std::move(*result);
@@ -272,7 +277,8 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
  *  make. The trap poisons the context, so this case runs last. */
 static void barrier_traps_past_deadline(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
     if (local_devices == 0) return suite.skip(no_cuda_device_k);
-    auto bootstrapped = mesh_topology_t::bootstrap(0, 1, local_devices, base.c_str(), "barrier_deadline", 10.0);
+    auto bootstrapped = mesh_topology_t::bootstrap(0, 1, &pause_between_polls, local_devices, base.c_str(),
+                                                   "barrier_deadline", 10.0);
     if (!bootstrapped) return suite.check(false, "single-box bootstrap: {}", bootstrapped.description_);
     mesh_topology_t topology = std::move(bootstrapped.value_);
     per_gpu_array<i32_t> devices;
@@ -324,7 +330,7 @@ static void run_cluster_exchange(test_suite_t &suite, u32_t local_devices) {
         }
     if (count == 0) return suite.check(false, "world size should be set ($UFORM_HOST_DOMAIN_COUNT / $SLURM_NTASKS)");
 
-    auto result = mesh_topology_t::bootstrap(index, count);
+    auto result = mesh_topology_t::bootstrap(index, count, &pause_between_polls);
     if (!result) return suite.check(false, "the cluster should bootstrap: {}", result.description_);
     mesh_topology_t topology = std::move(*result);
     suite.check(topology.host_domain_count() == count, "world size should match the launch: got {}",

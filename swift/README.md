@@ -83,7 +83,7 @@ try hostThreads.drain(mood: .parked)
 
 Each factory takes every argument its C constructor has, and only those.
 A thread count of zero takes 7/8 of the cores the memory domains carry, and `forVram` takes no thread count at all, since the submitting thread drives one stream per device.
-`Executor.onPool(memoryDomains:pool:deferredLimit:)` mirrors the C verb that borrows a ForkUnion pool, and reports `unsupported` until the library wires borrowed pools.
+`Executor.onPool(memoryDomains:cpuClass:pool:deferredLimit:)` mirrors the C verb that borrows a ForkUnion pool, and reports `unsupported` until the library wires borrowed pools.
 `drain(mood:)` waits for the executor's earlier calls and picks whether its threads park or spin once idle.
 
 ## Arenas
@@ -207,8 +207,10 @@ try trainer.save(path: "checkpoint.safetensors")
 
 `Modality`, `Objective`, `Negatives` and `MultimemTier` spell themselves through the library's own name tables.
 `Contrastive` and `LateInteraction` each take a `PairLossForm`, and a positive `LateInteraction.weight` trains the token head over the items whose `sides` name them a query, a document or both.
-A positive `Choices.weight` trains calibrated choices, which needs `BatchShape.maxChoicesPerItem`, over the legal bytes and targets each step's `ChoicesView` names.
+A positive `Choices.weight` trains calibrated choices, which needs `BatchShape.maxChoicesPerItem`, over the legal bytes each step's `choices` names, as `textChoose` takes them, and their `choiceTargets`.
 The step reports both terms as `lateInteractionLoss` and `choicesLoss`.
+A step over arrays of items gathers each into one tape, its one copy, while a step over `(data, offsets)` tapes lends their storage to the library in place.
+`Modality`, `Objective`, `Negatives` and `MultimemTier` read a spelling back with `init?(name:)`, answering nil for a name the library's table would quietly read as its default.
 
 ## Errors
 
@@ -227,7 +229,7 @@ do {
 
 ## What This Binding Does Not Expose
 
-- The constructors address no model or trainer yet, so no receiver offers them; each takes an optional `executor` and blocks.
+- The constructors address no model or trainer yet, so no receiver offers them; each blocks, the model loads on an optional `executor` and the trainer and mesh on a required one.
 - A trainer is bound to the executor it was made on, so its verbs block there and take no receiver.
 
 ## Design

@@ -61,7 +61,8 @@ struct vram_scalars_t {
 }
 
 /** __grid_size__ @c [1,1,1] , one thread. */
-extern "C" __global__ void uform_fill_layout_kernel(u32r1_view_t lengths, u32_t *packed_offsets, u32_t *pool_offsets) {
+extern "C" __global__ void uform_fill_layout_kernel(u32r1_view_t lengths, u32r1_span_t packed_offsets,
+                                                    u32r1_span_t pool_offsets) {
     if (threadIdx.x == 0u) uc::fill_packed_layout(lengths, packed_offsets, pool_offsets);
 }
 
@@ -114,7 +115,7 @@ extern "C" __global__ void uform_mrope_kernel(bf16r2_span_t values, rope_grids_t
 /** The body of both quantize kernels: one block of @ref entries_block_threads_k per token. */
 template <typename value_type_>
 static __device__ void quantize_tokens_(nk::tensor_view<value_type_, 2> values, e4m3r2_span_t shadow,
-                                        f32r1_span_t token_scales) {
+                                        f32r1_span_t token_scales) noexcept {
     __shared__ f32_t partials[entries_block_threads_k];
     std::size_t const token = blockIdx.x;
     vram_scalars_t const scalars;

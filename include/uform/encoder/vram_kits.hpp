@@ -10,6 +10,10 @@
  *  of a family's kernels, its kit borrows the rest from its vendor's earlier generations, and
  *  @c capability_k is the union of every bit the kit calls, as in @ref ram_kits.hpp . NVIDIA and
  *  AMD masks never overlap, so one ladder per family serves both vendors.
+ *
+ *  UForm's own steps come from one entries kit per vendor, declared here and defined by the
+ *  vendor's unit beside the bundle of kernels it launches by name, so every class of a vendor
+ *  shares one copy.
  */
 #pragma once
 
@@ -20,24 +24,104 @@
 #include <numkong/dots.h>      // `nk_dots_pack_*`, `nk_dots_packed_*`
 #include <numkong/each.h>      // `nk_each_*`
 
-#include "uform/encoder/entries.hpp"  // `device_kernels_t`, `vram_nvidia_kernels_k`, `vram_amd_kernels_k`
+#include "uform/encoder/entries.hpp"  // `segment_layout_t`, `rope_grids_t`
 #include "uform/encoder/ram_kits.hpp" // `highest_kit`
 
 namespace unum::uform::encoder {
 
-#pragma region Products
+#pragma region Entries
 
-/** NVIDIA's own encoder steps, the table its kernel unit defines. */
+/** What a vendor's runtime reports about one of its devices beside its capabilities. */
+struct device_description_t {
+
+    /** The vendor's own name for the device, NUL-terminated and truncated to fit. */
+    char name[64] = {};
+
+    /** Streaming multiprocessors or compute units. */
+    u32_t compute_units = 0;
+
+    /** Device memory in bytes. */
+    u64_t memory_bytes = 0;
+};
+
+/**
+ *  @brief NVIDIA's own encoder steps, the copies weights move with, and the device listing, which
+ *      @c vram_entries_nvidia.cpp defines over the kernels it launches by name.
+ *
+ *  Every step queues on @p stream over device-addressable views and returns without waiting,
+ *  @c nk_device_code_mismatch_k when the launch fails. Each mirrors the host entry of
+ *  @ref ram_kits.hpp of the same name.
+ */
 struct vram_nvidia_entries_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_cuda_k;
-    [[nodiscard]] static device_kernels_t const &kernels() noexcept { return vram_nvidia_kernels_k; }
+
+    /** Reads the name, compute units and memory of the vendor's device @p vendor_ordinal . */
+    static nk_status_t describe(std::size_t vendor_ordinal, device_description_t &description) noexcept;
+
+    /** @p source into @p target , as long, either side in host or device memory. */
+    static nk_status_t copy(uc::bytes_span_t target, uc::bytes_view_t source, nk_stream_t stream) noexcept;
+
+    /** Zeros into device memory at @p target . */
+    static nk_status_t zero(uc::bytes_span_t target, nk_stream_t stream) noexcept;
+
+    /** Prefix sums of @p lengths into @p packed_offsets @b [segments+1] , and
+     *  @c pool_offsets[s]=s over @b [segments+1] , the one query row per item the pool attends
+     *  with. */
+    static nk_status_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets, u32r1_span_t pool_offsets,
+                                   nk_stream_t stream) noexcept;
+
+    /** Coordinates clamp below @p positions , so @ref mrope reads no grid out of range. */
+    static nk_status_t fill_coords(segment_layout_t layout, nk::tensor_view<u16_t, 2> image_shapes,
+                                   nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames, u32_t frame_stride,
+                                   u32_t positions, i16r2_span_t coords, nk_stream_t stream) noexcept;
+    static nk_status_t gather_bytes(segment_layout_t layout, nk::tensor_view<token_id_t, 1> grid_tokens,
+                                    bf16r2_view_t table, bf16r2_span_t rows, nk_stream_t stream) noexcept;
+    static nk_status_t stage_patches(segment_layout_t layout, modality_t target,
+                                     nk::tensor_view<pixel_t, 3> grid_pixels, f32r1_view_t mean,
+                                     f32r1_view_t inverse_std, bf16r2_span_t patches, nk_stream_t stream) noexcept;
+    static nk_status_t stage_frames(segment_layout_t layout, nk::tensor_view<f32_t, 2> grid_samples,
+                                    bf16r2_span_t frames, nk_stream_t stream) noexcept;
+    static nk_status_t mrope(bf16r2_span_t values, u32_t role_offset, u32_t heads, u32_t head_width,
+                             i16r2_view_t coords, rope_grids_t angles, nk_stream_t stream) noexcept;
+    static nk_status_t quantize_tokens_e4m3(bf16r2_view_t values, e4m3r2_span_t shadow, f32r1_span_t token_scales,
+                                            nk_stream_t stream) noexcept;
+    static nk_status_t quantize_tokens_e4m3(f32r2_view_t values, e4m3r2_span_t shadow, f32r1_span_t token_scales,
+                                            nk_stream_t stream) noexcept;
+    static nk_status_t rescale_tokens(f32r2_view_t products, f32r1_view_t token_scales, f32_t weight_descale,
+                                      bf16r2_view_t residual, bf16r2_span_t values, nk_stream_t stream) noexcept;
 };
 
-/** AMD's own encoder steps, the table its kernel unit defines. */
+/** AMD's twin of @ref vram_nvidia_entries_kit_t , which @c vram_entries_amd.cpp defines. */
 struct vram_amd_entries_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
-    [[nodiscard]] static device_kernels_t const &kernels() noexcept { return vram_amd_kernels_k; }
+    static nk_status_t describe(std::size_t vendor_ordinal, device_description_t &description) noexcept;
+    static nk_status_t copy(uc::bytes_span_t target, uc::bytes_view_t source, nk_stream_t stream) noexcept;
+    static nk_status_t zero(uc::bytes_span_t target, nk_stream_t stream) noexcept;
+    static nk_status_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets, u32r1_span_t pool_offsets,
+                                   nk_stream_t stream) noexcept;
+    static nk_status_t fill_coords(segment_layout_t layout, nk::tensor_view<u16_t, 2> image_shapes,
+                                   nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames, u32_t frame_stride,
+                                   u32_t positions, i16r2_span_t coords, nk_stream_t stream) noexcept;
+    static nk_status_t gather_bytes(segment_layout_t layout, nk::tensor_view<token_id_t, 1> grid_tokens,
+                                    bf16r2_view_t table, bf16r2_span_t rows, nk_stream_t stream) noexcept;
+    static nk_status_t stage_patches(segment_layout_t layout, modality_t target,
+                                     nk::tensor_view<pixel_t, 3> grid_pixels, f32r1_view_t mean,
+                                     f32r1_view_t inverse_std, bf16r2_span_t patches, nk_stream_t stream) noexcept;
+    static nk_status_t stage_frames(segment_layout_t layout, nk::tensor_view<f32_t, 2> grid_samples,
+                                    bf16r2_span_t frames, nk_stream_t stream) noexcept;
+    static nk_status_t mrope(bf16r2_span_t values, u32_t role_offset, u32_t heads, u32_t head_width,
+                             i16r2_view_t coords, rope_grids_t angles, nk_stream_t stream) noexcept;
+    static nk_status_t quantize_tokens_e4m3(bf16r2_view_t values, e4m3r2_span_t shadow, f32r1_span_t token_scales,
+                                            nk_stream_t stream) noexcept;
+    static nk_status_t quantize_tokens_e4m3(f32r2_view_t values, e4m3r2_span_t shadow, f32r1_span_t token_scales,
+                                            nk_stream_t stream) noexcept;
+    static nk_status_t rescale_tokens(f32r2_view_t products, f32r1_view_t token_scales, f32_t weight_descale,
+                                      bf16r2_view_t residual, bf16r2_span_t values, nk_stream_t stream) noexcept;
 };
+
+#pragma endregion Entries
+
+#pragma region Products
 
 #if NUMKONG_TARGET_CUDA
 struct cuda_products_kit_t {
@@ -46,6 +130,7 @@ struct cuda_products_kit_t {
     static constexpr auto pack_size_bf16 = nk_dots_pack_size_bf16_cuda;
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_cuda;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_cuda;
+    static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_cuda;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_cuda;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_cuda;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_cuda;
@@ -64,6 +149,7 @@ struct ampere_products_kit_t {
     static constexpr auto pack_size_bf16 = nk_dots_pack_size_bf16_ampere;
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_ampere;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_ampere;
+    static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_ampere;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_ampere;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_ampere;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_ampere;
@@ -84,6 +170,7 @@ struct hopper_products_kit_t {
     static constexpr auto pack_size_bf16 = nk_dots_pack_size_bf16_hopper;
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_hopper;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_hopper;
+    static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_hopper;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_ampere;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_ampere;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_ampere;
@@ -102,6 +189,7 @@ struct blackwell_products_kit_t {
     static constexpr auto pack_size_bf16 = nk_dots_pack_size_bf16_blackwell;
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_blackwell;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_blackwell;
+    static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_blackwell;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_blackwell;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_blackwell;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_blackwell;
@@ -122,6 +210,7 @@ struct blackwellrtx_products_kit_t {
     static constexpr auto pack_size_bf16 = nk_dots_pack_size_bf16_ampere;
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_ampere;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_ampere;
+    static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_ampere;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_blackwellrtx;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_blackwellrtx;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_blackwellrtx;
@@ -140,6 +229,7 @@ struct rocm_products_kit_t {
     static constexpr auto pack_size_bf16 = nk_dots_pack_size_bf16_rocm;
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_rocm;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_rocm;
+    static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_rocm;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_rocm;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_rocm;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_rocm;
@@ -158,6 +248,7 @@ struct cdna3_products_kit_t {
     static constexpr auto pack_size_bf16 = nk_dots_pack_size_bf16_cdna3;
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_cdna3;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_cdna3;
+    static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_cdna3;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_cdna3;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_cdna3;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_cdna3;
@@ -176,6 +267,7 @@ struct cdna4_products_kit_t {
     static constexpr auto pack_size_bf16 = nk_dots_pack_size_bf16_cdna4;
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_cdna4;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_cdna4;
+    static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_cdna4;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_cdna4;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_cdna4;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_cdna4;
@@ -194,6 +286,7 @@ struct cdna5_products_kit_t {
     static constexpr auto pack_size_bf16 = nk_dots_pack_size_bf16_cdna5;
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_cdna5;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_cdna5;
+    static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_cdna5;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_cdna5;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_cdna5;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_cdna5;
@@ -212,7 +305,6 @@ struct vram_products_ladder {
     using kit_t = typename highest_kit<caps_, floor_t, blackwell_products_kit_t, blackwellrtx_products_kit_t,
                                        hopper_products_kit_t, ampere_products_kit_t, cdna5_products_kit_t,
                                        cdna4_products_kit_t, cdna3_products_kit_t>::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 #pragma endregion Products
@@ -226,6 +318,7 @@ struct cuda_attention_kit_t {
     static constexpr auto pack_size_bf16 = nk_attention_pack_size_bf16_cuda;
     static constexpr auto pack_bf16 = nk_attention_pack_bf16_cuda;
     static constexpr auto attend_bf16 = nk_attention_packed_bf16_cuda;
+    static constexpr auto attend_gradients_bf16 = nk_attention_packed_gradients_bf16_cuda;
     static constexpr auto pack_size_e4m3 = nk_attention_pack_size_e4m3_cuda;
     static constexpr auto pack_e4m3 = nk_attention_pack_e4m3_cuda;
     static constexpr auto attend_e4m3 = nk_attention_packed_e4m3_cuda;
@@ -244,6 +337,7 @@ struct ampere_attention_kit_t {
     static constexpr auto pack_size_bf16 = nk_attention_pack_size_bf16_ampere;
     static constexpr auto pack_bf16 = nk_attention_pack_bf16_ampere;
     static constexpr auto attend_bf16 = nk_attention_packed_bf16_ampere;
+    static constexpr auto attend_gradients_bf16 = nk_attention_packed_gradients_bf16_ampere;
     static constexpr auto pack_size_e4m3 = nk_attention_pack_size_e4m3_ampere;
     static constexpr auto pack_e4m3 = nk_attention_pack_e4m3_ampere;
     static constexpr auto attend_e4m3 = nk_attention_packed_e4m3_ampere;
@@ -262,6 +356,7 @@ struct hopper_attention_kit_t {
     static constexpr auto pack_size_bf16 = nk_attention_pack_size_bf16_hopper;
     static constexpr auto pack_bf16 = nk_attention_pack_bf16_hopper;
     static constexpr auto attend_bf16 = nk_attention_packed_bf16_hopper;
+    static constexpr auto attend_gradients_bf16 = nk_attention_packed_gradients_bf16_hopper;
     static constexpr auto pack_size_e4m3 = nk_attention_pack_size_e4m3_hopper;
     static constexpr auto pack_e4m3 = nk_attention_pack_e4m3_hopper;
     static constexpr auto attend_e4m3 = nk_attention_packed_e4m3_hopper;
@@ -280,6 +375,7 @@ struct blackwell_attention_kit_t {
     static constexpr auto pack_size_bf16 = nk_attention_pack_size_bf16_blackwell;
     static constexpr auto pack_bf16 = nk_attention_pack_bf16_blackwell;
     static constexpr auto attend_bf16 = nk_attention_packed_bf16_blackwell;
+    static constexpr auto attend_gradients_bf16 = nk_attention_packed_gradients_bf16_blackwell;
     static constexpr auto pack_size_e4m3 = nk_attention_pack_size_e4m3_blackwell;
     static constexpr auto pack_e4m3 = nk_attention_pack_e4m3_blackwell;
     static constexpr auto attend_e4m3 = nk_attention_packed_e4m3_blackwell;
@@ -300,6 +396,7 @@ struct blackwellrtx_attention_kit_t {
     static constexpr auto pack_size_bf16 = nk_attention_pack_size_bf16_ampere;
     static constexpr auto pack_bf16 = nk_attention_pack_bf16_ampere;
     static constexpr auto attend_bf16 = nk_attention_packed_bf16_ampere;
+    static constexpr auto attend_gradients_bf16 = nk_attention_packed_gradients_bf16_ampere;
     static constexpr auto pack_size_e4m3 = nk_attention_pack_size_e4m3_blackwellrtx;
     static constexpr auto pack_e4m3 = nk_attention_pack_e4m3_blackwellrtx;
     static constexpr auto attend_e4m3 = nk_attention_packed_e4m3_blackwellrtx;
@@ -318,6 +415,7 @@ struct rocm_attention_kit_t {
     static constexpr auto pack_size_bf16 = nk_attention_pack_size_bf16_rocm;
     static constexpr auto pack_bf16 = nk_attention_pack_bf16_rocm;
     static constexpr auto attend_bf16 = nk_attention_packed_bf16_rocm;
+    static constexpr auto attend_gradients_bf16 = nk_attention_packed_gradients_bf16_rocm;
     static constexpr auto pack_size_e4m3 = nk_attention_pack_size_e4m3_rocm;
     static constexpr auto pack_e4m3 = nk_attention_pack_e4m3_rocm;
     static constexpr auto attend_e4m3 = nk_attention_packed_e4m3_rocm;
@@ -338,6 +436,7 @@ struct cdna3_attention_kit_t {
     static constexpr auto pack_size_bf16 = nk_attention_pack_size_bf16_cdna3;
     static constexpr auto pack_bf16 = nk_attention_pack_bf16_cdna3;
     static constexpr auto attend_bf16 = nk_attention_packed_bf16_cdna3;
+    static constexpr auto attend_gradients_bf16 = nk_attention_packed_gradients_bf16_cdna3;
     static constexpr auto pack_size_e4m3 = nk_attention_pack_size_e4m3_rocm;
     static constexpr auto pack_e4m3 = nk_attention_pack_e4m3_rocm;
     static constexpr auto attend_e4m3 = nk_attention_packed_e4m3_rocm;
@@ -356,6 +455,7 @@ struct cdna4_attention_kit_t {
     static constexpr auto pack_size_bf16 = nk_attention_pack_size_bf16_cdna4;
     static constexpr auto pack_bf16 = nk_attention_pack_bf16_cdna4;
     static constexpr auto attend_bf16 = nk_attention_packed_bf16_cdna4;
+    static constexpr auto attend_gradients_bf16 = nk_attention_packed_gradients_bf16_cdna4;
     static constexpr auto pack_size_e4m3 = nk_attention_pack_size_e4m3_cdna4;
     static constexpr auto pack_e4m3 = nk_attention_pack_e4m3_cdna4;
     static constexpr auto attend_e4m3 = nk_attention_packed_e4m3_cdna4;
@@ -374,6 +474,7 @@ struct cdna5_attention_kit_t {
     static constexpr auto pack_size_bf16 = nk_attention_pack_size_bf16_cdna5;
     static constexpr auto pack_bf16 = nk_attention_pack_bf16_cdna5;
     static constexpr auto attend_bf16 = nk_attention_packed_bf16_cdna5;
+    static constexpr auto attend_gradients_bf16 = nk_attention_packed_gradients_bf16_cdna5;
     static constexpr auto pack_size_e4m3 = nk_attention_pack_size_e4m3_cdna5;
     static constexpr auto pack_e4m3 = nk_attention_pack_e4m3_cdna5;
     static constexpr auto attend_e4m3 = nk_attention_packed_e4m3_cdna5;
@@ -392,7 +493,6 @@ struct vram_attention_ladder {
     using kit_t = typename highest_kit<caps_, floor_t, blackwell_attention_kit_t, blackwellrtx_attention_kit_t,
                                        hopper_attention_kit_t, ampere_attention_kit_t, cdna5_attention_kit_t,
                                        cdna4_attention_kit_t, cdna3_attention_kit_t>::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 #pragma endregion Attention
@@ -409,6 +509,7 @@ struct cuda_elementwise_kit_t {
     static constexpr auto rmsnorm_bf16 = nk_each_rmsnorm_bf16_cuda;
     static constexpr auto swiglu_f32 = nk_each_swiglu_f32_cuda;
     static constexpr auto swiglu_bf16 = nk_each_swiglu_bf16_cuda;
+    static constexpr auto rope_bf16 = nk_attention_rope_bf16_cuda;
 };
 #else
 struct cuda_elementwise_kit_t {
@@ -419,7 +520,8 @@ struct cuda_elementwise_kit_t {
 
 #if NUMKONG_TARGET_CUDA && NUMKONG_TARGET_AMPERE
 
-/** Ampere's casts, norms and BFloat16 gates over the generic CUDA sums and Float32 gates. */
+/** Ampere's casts, norms and BFloat16 gates over the generic CUDA sums, Float32 gates and
+ *  rotation. */
 struct ampere_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_cuda_k | nk_cap_ampere_k;
     static constexpr bool compiled_k = true;
@@ -429,6 +531,7 @@ struct ampere_elementwise_kit_t {
     static constexpr auto rmsnorm_bf16 = nk_each_rmsnorm_bf16_ampere;
     static constexpr auto swiglu_f32 = nk_each_swiglu_f32_cuda;
     static constexpr auto swiglu_bf16 = nk_each_swiglu_bf16_ampere;
+    static constexpr auto rope_bf16 = nk_attention_rope_bf16_cuda;
 };
 #else
 struct ampere_elementwise_kit_t {
@@ -449,6 +552,7 @@ struct ada_elementwise_kit_t {
     static constexpr auto rmsnorm_bf16 = nk_each_rmsnorm_bf16_ampere;
     static constexpr auto swiglu_f32 = nk_each_swiglu_f32_cuda;
     static constexpr auto swiglu_bf16 = nk_each_swiglu_bf16_ampere;
+    static constexpr auto rope_bf16 = nk_attention_rope_bf16_cuda;
 };
 #else
 struct ada_elementwise_kit_t {
@@ -458,6 +562,8 @@ struct ada_elementwise_kit_t {
 #endif // NUMKONG_TARGET_CUDA && NUMKONG_TARGET_AMPERE && NUMKONG_TARGET_ADA
 
 #if NUMKONG_TARGET_ROCM
+
+/** The generic ROCm kernels, without a rotation, as NumKong ships no RoPE for ROCm. */
 struct rocm_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
     static constexpr bool compiled_k = true;
@@ -480,7 +586,6 @@ template <nk_capability_t caps_>
 struct vram_elementwise_ladder {
     using floor_t = std::conditional_t<(caps_ & nk_cap_rocm_k) != 0, rocm_elementwise_kit_t, cuda_elementwise_kit_t>;
     using kit_t = typename highest_kit<caps_, floor_t, ada_elementwise_kit_t, ampere_elementwise_kit_t>::type;
-    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 #pragma endregion Elementwise

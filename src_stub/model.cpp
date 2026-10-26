@@ -69,6 +69,9 @@ void uform_model_load_ram(uform_model_load_ram_t *arguments) {
     if (reject_if(!arguments->path.data || !arguments->path.length, uform_status_invalid_argument_k,
                   "The path must not be empty", outcome))
         return;
+    if (reject_if(as_text(arguments->path).contains('\0'), uform_status_invalid_argument_k,
+                  "The path holds no NUL byte", outcome))
+        return;
     std::size_t const length = read_whole_file(arguments->path, outcome);
     if (!length) return;
     publish_model(arguments->model, arguments->quantization, length, arguments->progress, outcome);
@@ -112,7 +115,6 @@ void uform_model_describe(uform_model_describe_t *arguments) {
                                context_k,
                                model.quantization,
                                model.memory_usage,
-                               "serial",
                                uform_cpu_class_serial_k,
                                uform_gpu_class_unknown_k};
 }

@@ -4,7 +4,7 @@ Model checking for the mesh protocols: the shared-filesystem rendezvous, the mul
 [Spin](https://spinroot.com) checks each protocol as a Promela model.
 These protocols are GPU flags, RDMA writes and files rather than C++ atomics, so no GenMC client reads the code itself.
 
-- `weak_memory.pml` is the C++ memory model as views, for Promela, under the models chosen by `-Dmemory=`: `sc`, one copy of every word, and `rc11`, the default, RC11's release-acquire-relaxed fragment.
+- `weak_memory.pml` is the C++ memory model as views, for Promela, under the models chosen by `-Dmemory=`: `sc`, one copy of every word; `rc11`, the default, RC11's release-acquire-relaxed fragment; and `far`, which posts a relaxed no-return add the way RAO-INT does.
 - `check.sh` is the runner.
 
 ## Writing a Model
@@ -22,7 +22,7 @@ Every expected verdict is a `@verify` line in the docblock of the file it checks
 Every model has a `pass` line, every knob appears on some line, and adding a model, a knob or a finding never edits `check.sh`.
 Run every line with `verification/check.sh`, or one model with `verification/check.sh window_reuse.pml`.
 
-## What the Models Found
+## Model Findings
 
 Each finding is the `@verify` line that replays it, where the full counterexample is written out.
 

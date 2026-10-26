@@ -14,7 +14,7 @@
 #include <memory> // `std::unique_ptr` - a handle under construction
 #include <new>    // `std::nothrow`
 
-#include "lib.hpp"
+#include "encoder_punned.hpp" // `entries_kit_of`, `vendor_of` - a listed device's description
 
 namespace ue = unum::uform::encoder;
 using namespace unum::uform;
@@ -49,18 +49,22 @@ static bool deferred_uses(deferred_call_t const &call, void const *handle) noexc
 static bool hold_arena(uform_arena_t arena, uform_outcome_t const *call) noexcept {
     if (!arena) return true;
     uform_outcome_t const *holder = nullptr;
-    return arena->holder.compare_exchange_strong(holder, call, std::memory_order_acquire) || holder == call;
+    return fu::standard_atomic_ref<uform_outcome_t const *> {arena->holder}.compare_exchange_strong(
+               holder, call, std::memory_order_acquire) ||
+           holder == call;
 }
 
 void uf::release_arena(uform_arena_t arena, uform_outcome_t const *call) noexcept {
-    if (arena) arena->holder.compare_exchange_strong(call, nullptr, std::memory_order_release);
+    if (arena)
+        fu::standard_atomic_ref<uform_outcome_t const *> {arena->holder}.compare_exchange_strong(
+            call, nullptr, std::memory_order_release);
 }
 
 void uf::run_held(uform_executor_t executor, u64_t last) noexcept {
     for (;;) {
         deferred_call_t *oldest = nullptr;
         {
-            std::lock_guard<fu::spin_mutex_t> lock(deferred_registry.guard);
+            st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
             for (deferred_call_t &call : executor->deferred)
                 if (call.stage == deferred_stage_t::held_k && call.ticket <= last &&
                     (!oldest || call.ticket < oldest->ticket))
@@ -75,11 +79,10 @@ void uf::run_held(uform_executor_t executor, u64_t last) noexcept {
             },
             oldest->arguments);
         {
-            std::lock_guard<fu::spin_mutex_t> lock(deferred_registry.guard);
+            st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
             oldest->stage = deferred_stage_t::free_k;
-            deferred_registry.finished.fetch_add(1, std::memory_order_release);
+            fu::standard_atomic_ref<u64_t> {deferred_registry.finished}.fetch_add(1, std::memory_order_release);
         }
-        deferred_registry.finished.notify_all();
     }
 }
 
@@ -88,14 +91,14 @@ static void wait_running(uform_executor_handle_t &executor, u64_t last) noexcept
     for (;;) {
         u64_t seen = 0;
         {
-            std::lock_guard<fu::spin_mutex_t> lock(deferred_registry.guard);
+            st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
             std::size_t running = 0;
             for (deferred_call_t const &call : executor.deferred)
                 running += call.stage == deferred_stage_t::running_k && call.ticket <= last;
             if (!running) return;
-            seen = deferred_registry.finished.load(std::memory_order_relaxed);
+            seen = fu::standard_atomic_ref<u64_t> {deferred_registry.finished}.load(std::memory_order_relaxed);
         }
-        deferred_registry.finished.wait(seen, std::memory_order_acquire);
+        executor.host_verbs->wait(deferred_registry.finished, seen);
     }
 }
 
@@ -103,20 +106,21 @@ void uf::finish_calls_using(void const *handle) noexcept {
     if (!handle) return;
     for (;;) {
         uform_executor_handle_t *holding = nullptr;
+        host_verbs_t const *running = nullptr; // a static table, still valid once the lock lets the executor go
         u64_t last = 0, seen = 0;
-        std::size_t running = 0;
         {
-            std::lock_guard<fu::spin_mutex_t> lock(deferred_registry.guard);
+            st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
             for (uform_executor_handle_t *executor = deferred_registry.executors; executor && !holding;
                  executor = executor->next_listed)
                 for (deferred_call_t const &call : executor->deferred)
                     if (call.stage == deferred_stage_t::held_k && deferred_uses(call, handle))
                         holding = executor, last = last > call.ticket ? last : call.ticket;
-                    else if (call.stage == deferred_stage_t::running_k && deferred_uses(call, handle)) ++running;
-            seen = deferred_registry.finished.load(std::memory_order_relaxed);
+                    else if (call.stage == deferred_stage_t::running_k && deferred_uses(call, handle))
+                        running = executor->host_verbs;
+            seen = fu::standard_atomic_ref<u64_t> {deferred_registry.finished}.load(std::memory_order_relaxed);
         }
         if (holding) run_held(holding, last); // takes the lock itself, so it runs outside it
-        else if (running) deferred_registry.finished.wait(seen, std::memory_order_acquire);
+        else if (running) running->wait(deferred_registry.finished, seen);
         else return;
     }
 }
@@ -127,7 +131,7 @@ void uf::hold_deferred(uform_executor_t executor, deferred_arguments_t const &ar
     if (!hold_arena(arena, outcome))
         return propagate_error(uform_status_contended_k, outcome, "The arena serves another call"), void();
     {
-        std::lock_guard<fu::spin_mutex_t> lock(deferred_registry.guard);
+        st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
         for (deferred_call_t &call : executor->deferred)
             if (call.stage == deferred_stage_t::free_k) {
                 call.arguments = arguments;
@@ -211,14 +215,16 @@ static std::size_t cores_of(fu::machine_topology_t const &topology, st::basic_ve
     return cores;
 }
 
-/** Sizes @p executor 's deferred table at @p limit entries, zero taking the default, lists it, and hands it out
- *  through @p output; frees it once @p outcome records why not. */
-static void hand_out_executor(std::unique_ptr<uform_executor_handle_t> executor, std::size_t limit,
-                              uform_executor_t *output, uform_outcome_t *outcome) noexcept {
+/** Sizes @p executor 's deferred table at @p limit entries, zero taking the default, gives it the
+ *  host verbs of @p cpu_class , lists it, and hands it out through @p output; frees it once
+ *  @p outcome records why not. */
+static void hand_out_executor(std::unique_ptr<uform_executor_handle_t> executor, cpu_class_t cpu_class,
+                              std::size_t limit, uform_executor_t *output, uform_outcome_t *outcome) noexcept {
     if (st::failed(executor->deferred.resize(limit ? limit : deferred_limit_default_k)))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the deferred table"), void();
+    executor->host_verbs = pick_host_verbs(cpu_ladder_t {}, cpu_class);
     {
-        std::lock_guard<fu::spin_mutex_t> lock(deferred_registry.guard);
+        st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
         executor->next_listed = deferred_registry.executors;
         deferred_registry.executors = executor.get();
     }
@@ -228,7 +234,7 @@ static void hand_out_executor(std::unique_ptr<uform_executor_handle_t> executor,
 
 /** Takes @p executor off the list; the caller already finished every call it held. */
 static void delist_executor(uform_executor_handle_t &executor) noexcept {
-    std::lock_guard<fu::spin_mutex_t> lock(deferred_registry.guard);
+    st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
     for (uform_executor_handle_t **link = &deferred_registry.executors; *link; link = &(*link)->next_listed)
         if (*link == &executor) {
             *link = executor.next_listed;
@@ -245,6 +251,14 @@ static nk_capability_t device_class_capabilities(nk_capability_t detected, uform
     return gpu_pin_capabilities(device_class, pinned);
 }
 
+/** Reads the name, compute units and memory of @p home_ 's device @p vendor_ordinal through its
+ *  vendor's entries kit; false for a vendor this build lacks or a runtime that refuses. */
+template <encoder_home_t home_>
+static bool describe_device(std::size_t vendor_ordinal, ue::device_description_t &description) noexcept {
+    if constexpr (!gpu_vendor_compiled(vendor_of(home_))) return false;
+    else return entries_kit_of<home_>::describe(vendor_ordinal, description) == nk_success_k;
+}
+
 /** Opens a stream and a scratch arena on the GPU the process-wide @p listed ordinal names, CUDA's
  *  devices first, then ROCm's, dispatching as @p pinned , and appends it to @p devices. False once
  *  @p outcome records why not. */
@@ -253,10 +267,10 @@ static bool open_device(per_gpu_array<vram_device_t> &devices, i32_t listed, nk_
                         uform_outcome_t *outcome) noexcept {
     if (listed < 0 || static_cast<nk_size_t>(listed) >= cuda_devices + rocm_devices)
         return propagate_error(uform_status_device_k, outcome, "A device ordinal names no GPU this build drives");
-    nk_size_t const cuda_ordinal = static_cast<nk_size_t>(listed);
-    nk::device_kind_t const kind = cuda_ordinal < cuda_devices ? nk::device_kind_t::cuda_k : nk::device_kind_t::rocm_k;
-    nk_size_t const ordinal = kind == nk::device_kind_t::cuda_k ? cuda_ordinal : cuda_ordinal - cuda_devices;
-    nk::expected<nk::device_t> const device = nk::device_t::make(kind, ordinal);
+    nk_size_t const flat_ordinal = static_cast<nk_size_t>(listed);
+    nk::device_kind_t const kind = flat_ordinal < cuda_devices ? nk::device_kind_t::cuda_k : nk::device_kind_t::rocm_k;
+    nk_size_t const vendor_ordinal = kind == nk::device_kind_t::cuda_k ? flat_ordinal : flat_ordinal - cuda_devices;
+    nk::expected<nk::device_t> const device = nk::device_t::make(kind, vendor_ordinal);
     if (!device) return propagate_error(status_of(static_cast<nk_status_t>(device.status)), outcome, "No such GPU");
     nk::expected<nk_capability_t> const detected = device.value.capabilities_enabled();
     if (!detected || !detected.value)
@@ -272,7 +286,10 @@ static bool open_device(per_gpu_array<vram_device_t> &devices, i32_t listed, nk_
     if (nk_status_t const status = nk_allocator_init_pinned_best(&pages, capabilities); status != nk_success_k)
         return propagate_error(status_of(status), outcome, "The GPU has no pinned host allocator");
     nk_stream_t const handle = stream.value.get();
-    vram_device_t opened {static_cast<i32_t>(ordinal), capabilities, std::move(stream.value),
+    vram_device_t opened {listed,
+                          static_cast<i32_t>(vendor_ordinal),
+                          capabilities,
+                          std::move(stream.value),
                           device_arena_t {chunked_arena_t(policy, handle, scratch_limit)},
                           chunked_arena_t(pages, handle, 0)};
     if (devices.push_back(std::move(opened)) != core::status_t::success_k)
@@ -284,24 +301,20 @@ static bool open_device(per_gpu_array<vram_device_t> &devices, i32_t listed, nk_
 
 extern "C" {
 
-#pragma region Outcomes
+#pragma region Outcomes Executors and Arenas
 
 UFORM_EXPORT uform_status_t uform_outcome_wait(uform_outcome_t *outcome) {
-    finish_calls_using(outcome);
-    std::atomic_ref<uform_status_t> status {outcome->status};
+    finish_calls_using(outcome); // waits on a deferred call through its executor's class waiter
+    fu::standard_atomic_ref<uform_status_t> status {outcome->status};
     uform_status_t seen = status.load(std::memory_order_acquire);
     for (; seen == uform_status_deferred_k; seen = status.load(std::memory_order_acquire))
-        status.wait(uform_status_deferred_k, std::memory_order_acquire);
+        fu::standard_yield_t {}(&outcome->status, seen, std::size_t {0}, fu::wait_capped_k); // no executor owns it
     return seen;
 }
 
 UFORM_EXPORT uform_status_t uform_outcome_status(uform_outcome_t *outcome) {
-    return std::atomic_ref<uform_status_t> {outcome->status}.load(std::memory_order_acquire);
+    return fu::standard_atomic_ref<uform_status_t> {outcome->status}.load(std::memory_order_acquire);
 }
-
-#pragma endregion Outcomes
-
-#pragma region Executors
 
 UFORM_EXPORT void uform_gpu_devices(uform_gpu_devices_t *arguments) {
     call_outcome_t outcome(arguments->outcome);
@@ -324,9 +337,11 @@ UFORM_EXPORT void uform_gpu_devices(uform_gpu_devices_t *arguments) {
             entry.vendor = kind == nk::device_kind_t::cuda_k ? uform_gpu_vendor_nvidia_k : uform_gpu_vendor_amd_k;
             entry.vendor_ordinal = static_cast<u32_t>(ordinal);
             entry.gpu_class = static_cast<uform_gpu_class_t>(gpu_class_of(capabilities));
-            ue::device_kernels_t const *const kernels = ue::device_kernels_of(capabilities);
             ue::device_description_t description;
-            if (!kernels || kernels->describe(ordinal, description) != nk_success_k) continue;
+            bool const described = kind == nk::device_kind_t::cuda_k
+                                       ? describe_device<encoder_home_t::vram_nvidia_k>(ordinal, description)
+                                       : describe_device<encoder_home_t::vram_amd_k>(ordinal, description);
+            if (!described) continue;
             std::memcpy(entry.name, description.name, sizeof(entry.name));
             entry.compute_units = description.compute_units;
             entry.memory_bytes = description.memory_bytes;
@@ -356,8 +371,9 @@ UFORM_EXPORT void uform_executor_for_ram(uform_executor_for_ram_t *arguments) {
         return propagate_error(uform_status_device_k, outcome, "The CPU capabilities could not be read"), void();
     if (!cpu_pin_admitted(arguments->ram.cpu_class, available))
         return propagate_error(uform_status_unsupported_k, outcome, "The CPU does not admit the pinned class"), void();
-    ram.capabilities = numkong_capabilities_of(pick_cpu_class(cpu_ladder_t {}, arguments->ram.cpu_class, available));
-    hand_out_executor(std::move(executor), arguments->deferred_limit, arguments->executor, outcome);
+    cpu_class_t const cpu_class = pick_cpu_class(cpu_ladder_t {}, arguments->ram.cpu_class, available);
+    ram.capabilities = numkong_capabilities_of(cpu_class);
+    hand_out_executor(std::move(executor), cpu_class, arguments->deferred_limit, arguments->executor, outcome);
 }
 
 UFORM_EXPORT void uform_executor_on_pool(uform_executor_on_pool_t *arguments) {
@@ -398,7 +414,11 @@ UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t *arguments) 
             return propagate_error(uform_status_config_mismatch_k, outcome, "The devices differ in class"), void();
     if (fu::failed(devices.decoders.spawn(derived_threads(topology.logical_cores_count()))))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to spawn the decoders"), void();
-    hand_out_executor(std::move(executor), arguments->deferred_limit, arguments->executor, outcome);
+    nk_capability_t available = 0;
+    if (nk_cpu_capabilities_enabled(&available) != nk_success_k)
+        return propagate_error(uform_status_device_k, outcome, "The CPU capabilities could not be read"), void();
+    cpu_class_t const cpu_class = pick_cpu_class(cpu_ladder_t {}, uform_cpu_class_unknown_k, available);
+    hand_out_executor(std::move(executor), cpu_class, arguments->deferred_limit, arguments->executor, outcome);
 }
 
 UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t *arguments) {
@@ -408,7 +428,7 @@ UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t *arguments) {
     uform_executor_handle_t &executor = *arguments->executor;
     u64_t last = 0;
     {
-        std::lock_guard<fu::spin_mutex_t> lock(deferred_registry.guard);
+        st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
         last = deferred_registry.tickets;
     }
     run_held(&executor, last);
@@ -427,10 +447,6 @@ UFORM_EXPORT void uform_executor_free(uform_executor_t executor) {
     delist_executor(*executor);
     delete executor;
 }
-
-#pragma endregion Executors
-
-#pragma region Arenas
 
 UFORM_EXPORT void uform_arena_init(uform_arena_init_t *arguments) {
     call_outcome_t outcome(arguments->outcome);
@@ -456,7 +472,7 @@ UFORM_EXPORT void uform_arena_free(uform_arena_t arena) {
     delete arena;
 }
 
-#pragma endregion Arenas
+#pragma endregion Outcomes Executors and Arenas
 
 #pragma region Names
 
@@ -650,6 +666,10 @@ UFORM_EXPORT char const *uform_multimem_tier_name(uform_multimem_tier_t tier) {
     case uform_multimem_tier_peer_read_k: return "peer-read";
     }
     return "unrecognized";
+}
+
+UFORM_EXPORT uform_multimem_tier_t uform_multimem_tier_from_name(uform_bytes_view_t name) {
+    return named(name, "peer-read") ? uform_multimem_tier_peer_read_k : uform_multimem_tier_switch_reduced_k;
 }
 
 #pragma endregion Names

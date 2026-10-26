@@ -125,7 +125,7 @@ static bool encode(test_suite_t &suite, encoder_verbs<home_> const &verbs, uc::c
     }
     offsets[items_k] = static_cast<uc::u32_t>(items_k * geometry.context);
 
-    uc::expected<std::size_t> bytes = verbs.scratch_bytes(tower, tokens, items_k);
+    uc::expected<std::size_t> bytes = verbs.scratch_bytes(tower, tokens, items_k, executor);
     if (!bytes) return verbs.destroy(tower), suite.check(false, "scratch: {}", bytes.description_), false;
     st::basic_vector<uc::b8_t, nk::allocator<uc::b8_t>> scratch {nk::allocator<uc::b8_t> {scratch_policy, stream}};
     using shared_floats_t = st::basic_vector<float, nk::allocator<float>>;
@@ -137,8 +137,10 @@ static bool encode(test_suite_t &suite, encoder_verbs<home_> const &verbs, uc::c
         st::failed(token_vectors.resize(st::assume_uninitialized, tokens * geometry.token_width)) ||
         st::failed(masked_logits.resize(st::assume_uninitialized, items_k * geometry.masked_vocabulary)))
         return verbs.destroy(tower), suite.check(false, "scratch and outputs allocation failed"), false;
-    outputs_t const outputs {embeddings.data(), states.data(), token_vectors.empty() ? nullptr : token_vectors.data(),
-                             masked_logits.empty() ? nullptr : masked_logits.data(), nk_f32_k};
+    outputs_t const outputs {{uc::f32r2_span_t {embeddings.data(), items_k, geometry.hidden}, nk_f32_k},
+                             {uc::f32r2_span_t {states.data(), tokens, geometry.hidden}, nk_f32_k},
+                             {uc::f32r2_span_t {token_vectors.data(), tokens, geometry.token_width}, nk_f32_k},
+                             {masked_logits.data(), items_k, geometry.masked_vocabulary}};
     uc::expected_t ran = verbs.encode(tower, batch->view(), outputs, scratch, executor);
     nk_status_t const finished = on_device ? nk_stream_synchronize_best(capabilities, stream) : nk_success_k;
     verbs.destroy(tower);

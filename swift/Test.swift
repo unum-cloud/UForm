@@ -123,6 +123,8 @@ struct VocabularyTests {
         #expect(Negatives.named.description == "named")
         #expect(Negatives(name: "ambient") == .ambient)
         #expect(MultimemTier.peerRead.description == "peer-read")
+        #expect(MultimemTier(name: "switch-reduced") == .switchReduced)
+        #expect(MultimemTier(name: "ring") == nil)
         #expect(CPUClass.intelHaswell.description == "intel-haswell")
         #expect(CPUClass(name: "wasm64-extended") == .wasm64Extended)
         #expect(CPUClass(name: "unknown") == nil)

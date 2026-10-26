@@ -29,6 +29,8 @@
 
 #include "uform/train/datasets.hpp" // `mixture_t`, `dataset_source_t`, and the trainer
 
+#include "train/numerics.hpp" // `gpu_numerics_of`
+
 /** Prints a StringZilla view as the text it spans. */
 template <>
 struct fmt::formatter<ashvardanian::stringzilla::string_view_t> : fmt::formatter<std::string_view> {
@@ -142,7 +144,8 @@ using namespace unum::uform::train;
     }
 
     trainer_t trainer;
-    if (expected_t built = trainer_t::make(trainer, mesh, config, devices, options.capabilities); !built)
+    if (expected_t built = trainer_t::make(trainer, mesh, config, devices, gpu_numerics_of(options.capabilities));
+        !built)
         return fail_out_(built.description_.view());
     envelope_t const &envelope = trainer.envelope;
     f64_t const mebibyte = 1024.0 * 1024.0;

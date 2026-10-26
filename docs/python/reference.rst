@@ -96,6 +96,12 @@ Training
 .. autoclass:: uform.Contrastive
     :members:
 
+.. autoclass:: uform.LateInteraction
+    :members:
+
+.. autoclass:: uform.Choices
+    :members:
+
 .. autoclass:: uform.Schedule
     :members:
 
@@ -115,6 +121,11 @@ Vocabulary
 
 .. autofunction:: uform.capabilities_available
 
+.. autofunction:: uform.gpu_devices
+
+.. autoclass:: uform.GPUDevice
+    :members:
+
 .. autoclass:: uform.Status
     :members:
     :undoc-members:
@@ -124,6 +135,18 @@ Vocabulary
     :undoc-members:
 
 .. autoclass:: uform.Mood
+    :members:
+    :undoc-members:
+
+.. autoclass:: uform.CPUClass
+    :members:
+    :undoc-members:
+
+.. autoclass:: uform.GPUClass
+    :members:
+    :undoc-members:
+
+.. autoclass:: uform.GPUVendor
     :members:
     :undoc-members:
 
@@ -140,6 +163,14 @@ Vocabulary
     :undoc-members:
 
 .. autoclass:: uform.Negatives
+    :members:
+    :undoc-members:
+
+.. autoclass:: uform.PairLossForm
+    :members:
+    :undoc-members:
+
+.. autoclass:: uform.LateInteractionSide
     :members:
     :undoc-members:
 

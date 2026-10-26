@@ -154,7 +154,7 @@ static napi_value uform_js_encode_files(napi_env env, napi_callback_info info, u
     uform_js_encode_call_t *const call = uform_js_encode_open(env, info, 8, arguments, &self, &local, napi_uint8_array,
                                                               4, &model, &parsed);
     if (!call) return NULL;
-    napi_value const slots[uform_js_slots_k] = {self, arguments[0], arguments[4], arguments[2]};
+    napi_value const slots[uform_js_slots_k] = {self, arguments[0], arguments[4], arguments[2], arguments[3]};
     if (!uform_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
     uform_outcome_t *const outcome = &call->call.outcome;
     switch (verb) {
@@ -264,8 +264,8 @@ static napi_value uform_js_image_encode_pixels(napi_env env, napi_callback_info 
         uform_js_throw(env, uform_status_shape_mismatch_k, "Every image needs one height and one width");
         return NULL;
     }
-    napi_value const slots[uform_js_slots_k] = {self,         arguments[0], arguments[6],
-                                                arguments[2], arguments[4], arguments[5]};
+    napi_value const slots[uform_js_slots_k] = {self,         arguments[0], arguments[6], arguments[2],
+                                                arguments[3], arguments[4], arguments[5]};
     if (!uform_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
     uform_image_encode_pixels_t encode = {.model = model,
                                           .executor = parsed.executor,
@@ -303,7 +303,7 @@ static napi_value uform_js_audio_encode_samples(napi_env env, napi_callback_info
         uform_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    napi_value const slots[uform_js_slots_k] = {self, arguments[0], arguments[5], arguments[2]};
+    napi_value const slots[uform_js_slots_k] = {self, arguments[0], arguments[5], arguments[2], arguments[3]};
     if (!uform_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
     uform_audio_encode_samples_t encode = {.model = model,
                                            .executor = parsed.executor,
@@ -384,8 +384,8 @@ static napi_value uform_js_text_choose(napi_env env, napi_callback_info info) {
         uform_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    napi_value const slots[uform_js_slots_k] = {self,         arguments[0], arguments[7],
-                                                arguments[2], arguments[4], arguments[6]};
+    napi_value const slots[uform_js_slots_k] = {self,         arguments[0], arguments[7], arguments[2],
+                                                arguments[3], arguments[4], arguments[5], arguments[6]};
     call->call.finish = uform_js_finish_choose;
     call->choices = choose.choices.offsets[choices_count];
     choose.count = call->count;
@@ -398,8 +398,6 @@ static napi_value uform_js_text_choose(napi_env env, napi_callback_info info) {
 }
 
 #pragma endregion Verbs
-
-#pragma region Registration
 
 napi_property_descriptor const *uform_js_encode_properties(size_t *count) {
     static napi_property_descriptor const properties[] = {
@@ -414,5 +412,3 @@ napi_property_descriptor const *uform_js_encode_properties(size_t *count) {
     *count = sizeof(properties) / sizeof(properties[0]);
     return properties;
 }
-
-#pragma endregion Registration

@@ -363,7 +363,7 @@ class Deferred[AnswerT]:
 # region: Models
 
 @final
-class ModelDescription(structseq[Any], tuple[int, int, Scalar, int, str, CPUClass | None, GPUClass | None, int, int]):
+class ModelDescription(structseq[Any], tuple[int, int, Scalar, int, CPUClass | None, GPUClass | None, int, int]):
     """What a loaded model reports about itself, as `uform_model_description_t` holds it."""
 
     __match_args__: Final = (
@@ -371,7 +371,6 @@ class ModelDescription(structseq[Any], tuple[int, int, Scalar, int, str, CPUClas
         "context",
         "quantization",
         "memory_usage",
-        "capabilities",
         "cpu_class",
         "gpu_class",
         "token_width",
@@ -399,11 +398,6 @@ class ModelDescription(structseq[Any], tuple[int, int, Scalar, int, str, CPUClas
         ...
 
     @property
-    def capabilities(self) -> str:
-        """The codename of the kernels the model dispatched to on this machine."""
-        ...
-
-    @property
     def cpu_class(self) -> CPUClass | None:
         """The class a RAM model was packed for, or None for a VRAM model."""
         ...
@@ -420,7 +414,7 @@ class ModelDescription(structseq[Any], tuple[int, int, Scalar, int, str, CPUClas
 
     @property
     def choice_temperature_groups(self) -> int:
-        """Question types `text_choose` was calibrated over: 0 without the byte decoder."""
+        """Question types `text_choose` was calibrated over: 0 without the byte decoder, 1 when uncalibrated."""
         ...
 
 @final
@@ -834,7 +828,7 @@ class MeshOptions(_Fields):
     host_domain_count: Final[int]
     gpus_per_multimem_domain: Final[int]
     directory: Final[_PathLike | None]
-    job: Final[_PathLike | None]
+    job: Final[str | None]
     timeout_seconds: Final[float]
     def __new__(
         cls,
@@ -843,7 +837,7 @@ class MeshOptions(_Fields):
         host_domain_count: int = 0,
         gpus_per_multimem_domain: int = 0,
         directory: _PathLike | None = None,
-        job: _PathLike | None = None,
+        job: str | None = None,
         timeout_seconds: float = 0.0,
     ) -> Self: ...
 
@@ -868,17 +862,6 @@ class Relations(_Fields):
     repel: Final[Edges | None]
     ignore: Final[Edges | None]
     def __new__(cls, *, attract: _EdgesLike = None, repel: _EdgesLike = None, ignore: _EdgesLike = None) -> Self: ...
-
-@final
-class ChoicesView(_Fields):
-    """Each item's legal bytes and their targets, as compressed sparse rows of buffers borrowed until the step is final."""
-
-    offsets: Final[Buffer | None]
-    bytes: Final[Buffer | None]
-    targets: Final[Buffer | None]
-    def __new__(
-        cls, *, offsets: Buffer | None = None, bytes: Buffer | None = None, targets: Buffer | None = None
-    ) -> Self: ...
 
 @final
 class MeshDescription(structseq[Any], tuple[int, int, int, int, int, MultimemTier, GPUClass | None]):
@@ -999,7 +982,8 @@ class Trainer:
         bags: _Words | None = None,
         temperature_groups: _Words | None = None,
         sides: Sequence[LateInteractionSide] | None = None,
-        choices: ChoicesView | None = None,
+        choices: _Texts | None = None,
+        choice_targets: Sequence[Buffer] | _Tape | None = None,
         relations: Relations | None = None,
         arena: Arena | None = None,
         outputs_scalar: Scalar = ...,
@@ -1120,7 +1104,8 @@ class On[TargetT]:
         bags: _Words | None = None,
         temperature_groups: _Words | None = None,
         sides: Sequence[LateInteractionSide] | None = None,
-        choices: ChoicesView | None = None,
+        choices: _Texts | None = None,
+        choice_targets: Sequence[Buffer] | _Tape | None = None,
         relations: Relations | None = None,
         arena: Arena | None = None,
         outputs_scalar: Scalar = ...,
@@ -1234,7 +1219,8 @@ class DeferredOn[TargetT]:
         bags: _Words | None = None,
         temperature_groups: _Words | None = None,
         sides: Sequence[LateInteractionSide] | None = None,
-        choices: ChoicesView | None = None,
+        choices: _Texts | None = None,
+        choice_targets: Sequence[Buffer] | _Tape | None = None,
         relations: Relations | None = None,
         arena: Arena | None = None,
         outputs_scalar: Scalar = ...,

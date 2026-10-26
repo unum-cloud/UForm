@@ -28,11 +28,8 @@ inline constexpr std::size_t video_avio_buffer_bytes_k = 32u * 1024u;
 /** Backing state for the in-memory @c AVIOContext read and seek callbacks. */
 struct video_memory_reader_t {
 
-    /** The clip's container bytes — borrowed, not owned. */
-    b8_t const *data = nullptr;
-
-    /** Total size of @c data in bytes — the seek's end bound. */
-    std::size_t size = 0;
+    /** The clip's container bytes — borrowed, not owned; their end is the seek's bound. */
+    uc::bytes_view_t bytes {};
 
     /** The read cursor, advanced by every read and moved by every seek. */
     std::size_t position = 0;
@@ -44,11 +41,11 @@ struct video_memory_reader_t {
 /** @c AVIOContext read callback: copy up to @p buffer_size bytes, @c AVERROR_EOF at the end. */
 static int video_memory_read_(void *opaque, u8_t *buffer, int buffer_size) noexcept {
     auto *reader = static_cast<video_memory_reader_t *>(opaque);
-    std::size_t const remaining = reader->size - reader->position;
+    std::size_t const remaining = reader->bytes.size() - reader->position;
     std::size_t const to_read = std::min<std::size_t>(static_cast<std::size_t>(buffer_size), remaining);
     if (to_read == 0) return AVERROR_EOF;
     for (std::size_t index = 0; index != to_read; ++index)
-        buffer[index] = std::to_integer<u8_t>(reader->data[reader->position + index]);
+        buffer[index] = std::to_integer<u8_t>(reader->bytes[reader->position + index]);
     reader->position += to_read;
     return static_cast<int>(to_read);
 }
@@ -56,13 +53,14 @@ static int video_memory_read_(void *opaque, u8_t *buffer, int buffer_size) noexc
 /** @c AVIOContext seek callback: honors @c SEEK_SET/CUR/END and the @c AVSEEK_SIZE query, @c -1 out of range. */
 static i64_t video_memory_seek_(void *opaque, i64_t offset, int whence) noexcept {
     auto *reader = static_cast<video_memory_reader_t *>(opaque);
-    if (whence == AVSEEK_SIZE) return static_cast<i64_t>(reader->size);
+    i64_t const size = static_cast<i64_t>(reader->bytes.size());
+    if (whence == AVSEEK_SIZE) return size;
     i64_t position = 0;
     if (whence == SEEK_SET) position = offset;
     else if (whence == SEEK_CUR) position = static_cast<i64_t>(reader->position) + offset;
-    else if (whence == SEEK_END) position = static_cast<i64_t>(reader->size) + offset;
+    else if (whence == SEEK_END) position = size + offset;
     else return -1;
-    if (position < 0 || position > static_cast<i64_t>(reader->size)) return -1;
+    if (position < 0 || position > size) return -1;
     reader->position = static_cast<std::size_t>(position);
     return position;
 }
@@ -161,7 +159,7 @@ expected<demuxed_t> um::demux_video(std::span<b8_t const> container) noexcept {
         return clip;
     }
 
-    video_memory_reader_t reader {container.data(), container.size(), 0u};
+    video_memory_reader_t reader {container, 0u};
     // Every libav handle is declared up front and freed exactly once by `release_libav`. `avformat_open_input` frees
     // and nulls `format` itself on failure while leaving our custom-IO `avio` ours to free (AVFMT_FLAG_CUSTOM_IO).
     u8_t *avio_buffer = static_cast<u8_t *>(av_malloc(video_avio_buffer_bytes_k));
@@ -261,19 +259,19 @@ expected<demuxed_t> um::demux_video(std::span<b8_t const> container) noexcept {
 struct video_decoder_ {
 
     /** The decoder context, single-threaded since executors decode clips in parallel. */
-    AVCodecContext *context = nullptr;
+    AVCodecContext *context = nullptr; // vendor-boundary
 
     /** The parser that splits the elementary stream into the decoder's packets. */
-    AVCodecParserContext *parser = nullptr;
+    AVCodecParserContext *parser = nullptr; // vendor-boundary
 
     /** The reusable packet the parser fills. */
-    AVPacket *packet = nullptr;
+    AVPacket *packet = nullptr; // vendor-boundary
 
     /** The reusable frame the decoder emits into. */
-    AVFrame *frame = nullptr;
+    AVFrame *frame = nullptr; // vendor-boundary
 
     /** The scaler to RGB24 at the planned grid size, rebuilt only when the decoded format changes. */
-    SwsContext *scaler = nullptr;
+    SwsContext *scaler = nullptr; // vendor-boundary
 
     ~video_decoder_() noexcept {
         if (scaler != nullptr) sws_freeContext(scaler);

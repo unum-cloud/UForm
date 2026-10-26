@@ -409,31 +409,29 @@ expected<infiniband_queue_mapping_t> infiniband_queue_mapping_t::make(ibv_qp *qu
     std::size_t const send_queue_bytes = static_cast<std::size_t>(raw_queue.sq.wqe_cnt) *
                                          static_cast<std::size_t>(raw_queue.sq.stride);
     CUdeviceptr send_queue_device = 0;
-    if (expected_t mapped = registry.acquire(raw_queue.sq.buf, send_queue_bytes, host_memory_t::dma_k,
-                                             send_queue_device);
-        !mapped)
+    bytes_span_t const send_queue_host {static_cast<b8_t *>(raw_queue.sq.buf), send_queue_bytes};
+    if (expected_t mapped = registry.acquire(send_queue_host, host_memory_t::dma_k, send_queue_device); !mapped)
         return expected<infiniband_queue_mapping_t>::fail(std::move(mapped));
-    mapping.send_queue_range_ = {raw_queue.sq.buf, send_queue_bytes};
+    mapping.send_queue_range_ = send_queue_host;
     mapping.handles_.send_queue = {device_pointer<std::byte>(send_queue_device), send_queue_bytes};
 
     CUdeviceptr doorbell_device = 0;
-    if (expected_t mapped = registry.acquire(raw_queue.dbrec, sizeof(u32_t) * 2, host_memory_t::dma_k, doorbell_device);
-        !mapped)
+    bytes_span_t const doorbell_host {static_cast<b8_t *>(static_cast<void *>(raw_queue.dbrec)), sizeof(u32_t) * 2};
+    if (expected_t mapped = registry.acquire(doorbell_host, host_memory_t::dma_k, doorbell_device); !mapped)
         return expected<infiniband_queue_mapping_t>::fail(std::move(mapped));
-    mapping.doorbell_range_ = {raw_queue.dbrec, sizeof(u32_t) * 2};
+    mapping.doorbell_range_ = doorbell_host;
     mapping.handles_.doorbell_record = device_pointer<u32_t>(doorbell_device);
 
     std::size_t const blueflame_bytes = raw_queue.bf.size != 0 ? raw_queue.bf.size : sizeof(u64_t);
     CUdeviceptr blueflame_device = 0;
-    if (expected_t mapped = registry.acquire(raw_queue.bf.reg, blueflame_bytes, host_memory_t::mmio_k,
-                                             blueflame_device);
-        !mapped)
+    bytes_span_t const blueflame_host {static_cast<b8_t *>(raw_queue.bf.reg), blueflame_bytes};
+    if (expected_t mapped = registry.acquire(blueflame_host, host_memory_t::mmio_k, blueflame_device); !mapped)
         return expected<infiniband_queue_mapping_t>::fail( //
             status_t::io_error_k,
             "the BlueFlame MMIO page would not map into GPU address space (CU_MEMHOSTREGISTER_IOMEMORY) — " //
             "device-initiated GDAKI is blocked on this platform: {}",
             mapped.description_);
-    mapping.blueflame_range_ = {raw_queue.bf.reg, blueflame_bytes};
+    mapping.blueflame_range_ = blueflame_host;
     mapping.handles_.blueflame_register = device_pointer<void>(blueflame_device);
 
     mapping.handles_.producer_index = arena.allocate_object<u32_t>(1);
@@ -486,18 +484,18 @@ expected<infiniband_completion_mapping_t> infiniband_completion_mapping_t::make(
     std::size_t const ring_bytes = static_cast<std::size_t>(raw_completion.cqe_cnt) *
                                    static_cast<std::size_t>(raw_completion.cqe_size);
     CUdeviceptr ring_device = 0;
-    if (expected_t mapped = registry.acquire(raw_completion.buf, ring_bytes, host_memory_t::dma_k, ring_device);
-        !mapped)
+    bytes_span_t const ring_host {static_cast<b8_t *>(raw_completion.buf), ring_bytes};
+    if (expected_t mapped = registry.acquire(ring_host, host_memory_t::dma_k, ring_device); !mapped)
         return expected<infiniband_completion_mapping_t>::fail(std::move(mapped));
-    mapping.ring_range_ = {raw_completion.buf, ring_bytes};
+    mapping.ring_range_ = ring_host;
     mapping.handles_.ring = {device_pointer<std::byte>(ring_device), ring_bytes};
 
     CUdeviceptr doorbell_device = 0;
-    if (expected_t mapped = registry.acquire(raw_completion.dbrec, sizeof(u32_t) * 2, host_memory_t::dma_k,
-                                             doorbell_device);
-        !mapped)
+    bytes_span_t const doorbell_host {static_cast<b8_t *>(static_cast<void *>(raw_completion.dbrec)),
+                                      sizeof(u32_t) * 2};
+    if (expected_t mapped = registry.acquire(doorbell_host, host_memory_t::dma_k, doorbell_device); !mapped)
         return expected<infiniband_completion_mapping_t>::fail(std::move(mapped));
-    mapping.doorbell_range_ = {raw_completion.dbrec, sizeof(u32_t) * 2};
+    mapping.doorbell_range_ = doorbell_host;
     mapping.handles_.doorbell_record = device_pointer<u32_t>(doorbell_device);
 
     mapping.handles_.consumer_index = arena.allocate_object<u32_t>(1);

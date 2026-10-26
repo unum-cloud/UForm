@@ -375,32 +375,32 @@ static bool uform_js_edges_from_value(napi_env env, napi_value const *arguments,
     return true;
 }
 
-/** Reads the @b optional choices: widened offsets, borrowed bytes, and one target per byte. */
+/** Reads the @b optional choices and their targets, two tapes of one entry per item each, or
+ *  neither; the library checks each target entry is as long as its choice entry. */
 static bool uform_js_choices_from_value(napi_env env, napi_value const *arguments, size_t count, uform_js_call_t *call,
-                                        uform_choices_view_t *choices) {
-    size_t offsets_count = 0, bytes_count = 0, targets_count = 0;
-    void *bytes = NULL, *targets = NULL;
-    if (!uform_js_offsets_from_value(env, arguments[0], "choices", call, &choices->offsets, &offsets_count))
+                                        uform_tape_view_t *choices, uform_tape_view_t *targets) {
+    bool const with_choices = !uform_js_value_absent(env, arguments[1]);
+    if (with_choices == uform_js_value_absent(env, arguments[3]))
+        return uform_js_throw(env, uform_status_invalid_argument_k, "Pass both the choices and their targets");
+    if (!with_choices) return true;
+    size_t choices_count = 0, targets_count = 0;
+    if (!uform_js_tape_from_value(env, arguments[0], arguments[1], "choices", napi_uint8_array, call, &choices_count,
+                                  choices) ||
+        !uform_js_tape_from_value(env, arguments[2], arguments[3], "choiceTargets", napi_float32_array, call,
+                                  &targets_count, targets))
         return false;
-    if (!choices->offsets) return true;
-    if (offsets_count != count) return uform_js_throw_field(env, "choices", "must hold one more offset than items");
-    if (!uform_js_array_from_value(env, arguments[1], "bytes", napi_uint8_array, &bytes, &bytes_count) ||
-        !uform_js_array_from_value(env, arguments[2], "targets", napi_float32_array, &targets, &targets_count))
-        return false;
-    if (choices->offsets[count] > bytes_count || targets_count != bytes_count)
-        return uform_js_throw(env, uform_status_shape_mismatch_k, "The choices reach past their bytes or targets");
-    choices->bytes = (uint8_t const *)bytes;
-    choices->targets = (float const *)targets;
+    if (choices_count != count || targets_count != count)
+        return uform_js_throw(env, uform_status_shape_mismatch_k, "The choices and targets need one entry per item");
     return true;
 }
 
 /** @c step(executor, completion, modalities, contents, offsets, bags, temperatureGroups, sides,
- *  choiceOffsets, choiceBytes, choiceTargets, attractOffsets, attractIds, attractWeights,
- *  repelOffsets, repelIds, repelWeights, ignoreOffsets, ignoreIds, arena, outputsScalar) →
- *  @c {stats, embeddings}, the embeddings present when an arena was given. */
+ *  choices, choiceOffsets, choiceTargets, choiceTargetOffsets, attractOffsets, attractIds,
+ *  attractWeights, repelOffsets, repelIds, repelWeights, ignoreOffsets, ignoreIds, arena,
+ *  outputsScalar) → @c {stats, embeddings}, the embeddings present when an arena was given. */
 static napi_value uform_js_trainer_step(napi_env env, napi_callback_info info) {
-    napi_value arguments[21], self = NULL, deferred = NULL;
-    uform_js_trainer_t *const trainer = uform_js_trainer_live(env, info, 21, arguments, &self);
+    napi_value arguments[22], self = NULL, deferred = NULL;
+    uform_js_trainer_t *const trainer = uform_js_trainer_live(env, info, 22, arguments, &self);
     if (!trainer) return NULL;
     uform_js_trainer_call_t local;
     uform_trainer_step_t step = {.trainer = trainer->handle};
@@ -409,8 +409,8 @@ static napi_value uform_js_trainer_step(napi_env env, napi_callback_info info) {
     if (!call) return NULL;
     void *modalities = NULL, *sides = NULL;
     size_t modalities_count = 0, sides_count = 0;
-    napi_value const ignore[3] = {arguments[17], arguments[18], NULL};
-    bool const with_arena = !uform_js_value_absent(env, arguments[19]);
+    napi_value const ignore[3] = {arguments[18], arguments[19], NULL};
+    bool const with_arena = !uform_js_value_absent(env, arguments[20]);
     bool const with_sides = !uform_js_value_absent(env, arguments[7]);
     bool parsed =
         uform_js_tape_from_value(env, arguments[3], arguments[4], "contents", napi_uint8_array, &call->call,
@@ -422,21 +422,21 @@ static napi_value uform_js_trainer_step(napi_env env, napi_callback_info info) {
         (!with_sides ||
          (uform_js_array_from_value(env, arguments[7], "sides", napi_int32_array, &sides, &sides_count) &&
           (sides_count == step.count || uform_js_throw_field(env, "sides", "must hold one entry per item")))) &&
-        uform_js_choices_from_value(env, arguments + 8, step.count, &call->call, &step.choices) &&
-        uform_js_edges_from_value(env, arguments + 11, &call->call, &step.relations.attract) &&
-        uform_js_edges_from_value(env, arguments + 14, &call->call, &step.relations.repel) &&
+        uform_js_choices_from_value(env, arguments + 8, step.count, &call->call, &step.choices, &step.choice_targets) &&
+        uform_js_edges_from_value(env, arguments + 12, &call->call, &step.relations.attract) &&
+        uform_js_edges_from_value(env, arguments + 15, &call->call, &step.relations.repel) &&
         uform_js_edges_from_value(env, ignore, &call->call, &step.relations.ignore);
     if (parsed && with_arena)
-        parsed = uform_js_scalar_from_value(env, arguments[20], "outputsScalar", &step.outputs_scalar) &&
-                 uform_js_arena_from_value(env, arguments[19], &call->call, &step.arena);
+        parsed = uform_js_scalar_from_value(env, arguments[21], "outputsScalar", &step.outputs_scalar) &&
+                 uform_js_arena_from_value(env, arguments[20], &call->call, &step.arena);
     if (!parsed) {
         uform_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    napi_value const slots[uform_js_slots_k] = {self,          arguments[0],  arguments[19], arguments[3],
-                                                arguments[2],  arguments[5],  arguments[6],  arguments[7],
-                                                arguments[9],  arguments[10], arguments[12], arguments[13],
-                                                arguments[15], arguments[16], arguments[18]};
+    napi_value const slots[uform_js_slots_k] = {
+        self,          arguments[0],  arguments[20], arguments[3],  arguments[4],  arguments[2],  arguments[5],
+        arguments[6],  arguments[7],  arguments[8],  arguments[9],  arguments[10], arguments[11], arguments[12],
+        arguments[13], arguments[14], arguments[15], arguments[16], arguments[17], arguments[18], arguments[19]};
     call->call.finish = uform_js_finish_step;
     call->count = step.count;
     step.modalities = (uform_modality_t const *)modalities;

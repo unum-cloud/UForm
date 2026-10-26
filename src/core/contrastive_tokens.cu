@@ -13,8 +13,6 @@
 #include <cub/block/block_scan.cuh>     // `cub::BlockScan` — the tile layouts
 #include <cub/thread/thread_search.cuh> // `cub::UpperBound` — a tile row's segment
 
-#include <numkong/each.h> // `nk_each_sum_f32_best` — the band forces onto their accumulators
-
 #include "uform/core/contrastive_tokens.cuh"
 
 using namespace unum::uform::core;
@@ -462,7 +460,7 @@ static __global__ void contrastive_tokens_weigh_kernel_(f32r1_span_t loss_out,
 }
 
 expected<contrastive_tokens_t> contrastive_tokens_t::make(gpu_arena_t &arena, contrastive_tokens_config_t config,
-                                                          nk_capability_t capabilities) noexcept {
+                                                          gpu_numerics_t const &numerics) noexcept {
     using result_t = expected<contrastive_tokens_t>;
     if (config.segments_per_gpu == 0 || config.head_tokens_per_gpu == 0 || config.query_tokens_per_gpu == 0 ||
         config.documents_per_gpu == 0 || config.band_tokens == 0 || config.gpu_subgraphs_per_step == 0)
@@ -479,7 +477,7 @@ expected<contrastive_tokens_t> contrastive_tokens_t::make(gpu_arena_t &arena, co
 
     contrastive_tokens_t loss;
     loss.config_ = config;
-    loss.capabilities_ = capabilities;
+    loss.numerics_ = numerics;
     expected<contrastive_pair_loss_t> pair_loss = contrastive_pair_loss_t::make(
         arena, config.segments_per_gpu, config.segments_per_gpu * config.gpu_subgraphs_per_step, config.pair_loss);
     if (!pair_loss) return result_t::fail(std::move(pair_loss));
@@ -525,11 +523,11 @@ expected<contrastive_tokens_t> contrastive_tokens_t::make(gpu_arena_t &arena, co
         !loss.document_grad_products_ || !loss.document_grad_ || !loss.query_grad_ || !loss.scores_)
         return result_t::fail(status_t::bad_alloc_k, "tokens loss allocation failed (arena_used={})", arena.used());
 
-    expected<std::size_t> band_bytes = pack_bytes_bf16(band, width, loss.capabilities_);
+    expected<std::size_t> band_bytes = pack_bytes_bf16(band, width, loss.numerics_);
     if (!band_bytes) return result_t::fail(std::move(band_bytes));
-    expected<std::size_t> band_transposed_bytes = pack_bytes_bf16(width, band, loss.capabilities_);
+    expected<std::size_t> band_transposed_bytes = pack_bytes_bf16(width, band, loss.numerics_);
     if (!band_transposed_bytes) return result_t::fail(std::move(band_transposed_bytes));
-    expected<std::size_t> queries_transposed_bytes = pack_bytes_bf16(width, queries, loss.capabilities_);
+    expected<std::size_t> queries_transposed_bytes = pack_bytes_bf16(width, queries, loss.numerics_);
     if (!queries_transposed_bytes) return result_t::fail(std::move(queries_transposed_bytes));
     loss.band_pack_bytes_ = band_bytes.value_;
     loss.band_pack_transposed_bytes_ = band_transposed_bytes.value_;
@@ -571,11 +569,11 @@ expected_t contrastive_tokens_t::stage(bf16r2_view_t token_vectors, u32r1_view_t
     for (std::size_t band_index = 0; staged && band_index != bands_(); ++band_index) {
         auto const rows = nk::range(band_index * band, (band_index + 1u) * band);
         staged = pack_bf16(document_tile_[rows, nk::slice],
-                           packed_band_(packed_documents_, band_pack_bytes_, band_index), capabilities_, stream);
+                           packed_band_(packed_documents_, band_pack_bytes_, band_index), numerics_, stream);
         if (staged)
             staged = pack_bf16(document_tile_transposed_[nk::all, rows, nk::slice],
                                packed_band_(packed_documents_transposed_, band_pack_transposed_bytes_, band_index),
-                               capabilities_, stream);
+                               numerics_, stream);
     }
     if (staged) staged = zero_async(document_grad_.span(), stream);
     return staged;
@@ -597,7 +595,7 @@ expected_t contrastive_tokens_t::score(std::size_t subgraph_index, gpu_query_sub
     expected_t staged = zero_async(raw_scores, stream);
     for (std::size_t band_index = 0; staged && band_index != bands_(); ++band_index) {
         staged = multiply_bf16(subgraph.query_vectors, packed_band_(packed_documents_, band_pack_bytes_, band_index),
-                               band_products_.span(), capabilities_, stream);
+                               band_products_.span(), numerics_, stream);
         if (staged)
             staged = launch_kernel(&contrastive_tokens_band_max_kernel_, row_warps_grid, block_shape, stream,
                                    band_products_.view(), subgraph.query_segments, document_of_row_.view(),
@@ -619,12 +617,11 @@ expected_t contrastive_tokens_t::force(std::size_t subgraph_index, gpu_query_sub
     dim3 const row_warps_grid {
         static_cast<u32_t>(divide_round_up(queries, std::size_t {kernel_block_size_default_k / warp_size_k})), 1u, 1u};
     expected_t staged = transpose_bf16(subgraph.query_vectors, query_tile_transposed_.span(), stream);
-    if (staged)
-        staged = pack_bf16(query_tile_transposed_.view(), packed_queries_transposed_.span(), capabilities_, stream);
+    if (staged) staged = pack_bf16(query_tile_transposed_.view(), packed_queries_transposed_.span(), numerics_, stream);
     if (staged) staged = zero_async(query_grad, stream);
     for (std::size_t band_index = 0; staged && band_index != bands_(); ++band_index) {
         staged = multiply_bf16(subgraph.query_vectors, packed_band_(packed_documents_, band_pack_bytes_, band_index),
-                               band_products_.span(), capabilities_, stream);
+                               band_products_.span(), numerics_, stream);
         if (staged)
             staged = launch_kernel(&contrastive_tokens_band_grad_kernel_, row_warps_grid, block_shape, stream,
                                    band_products_.view(), subgraph.query_segments, subgraph.query_offsets,
@@ -633,20 +630,19 @@ expected_t contrastive_tokens_t::force(std::size_t subgraph_index, gpu_query_sub
         if (staged)
             staged = multiply_bf16(band_grad_.view(),
                                    packed_band_(packed_documents_transposed_, band_pack_transposed_bytes_, band_index),
-                                   query_grad_products_.span(), capabilities_, stream);
+                                   query_grad_products_.span(), numerics_, stream);
         if (staged)
-            staged = numkong_result(
-                nk_each_sum_f32_best(query_grad.data(), query_grad_products_.data(), queries * width, query_grad.data(),
-                                     capabilities_, stream.numkong()),
-                "query force addition");
+            staged = numkong_result(numerics_.sum_f32(query_grad.data(), query_grad_products_.data(), queries * width,
+                                                      query_grad.data(), stream.numkong()),
+                                    "query force addition");
         if (staged) staged = transpose_bf16(band_grad_.view(), band_grad_transposed_.span(), stream);
         if (staged)
             staged = multiply_bf16(band_grad_transposed_.view(), packed_queries_transposed_.view(),
-                                   document_grad_products_.span(), capabilities_, stream);
+                                   document_grad_products_.span(), numerics_, stream);
         if (staged) {
             f32_t *const band_force = document_grad_.data() + band_index * band * width;
-            staged = numkong_result(nk_each_sum_f32_best(band_force, document_grad_products_.data(), band * width,
-                                                         band_force, capabilities_, stream.numkong()),
+            staged = numkong_result(numerics_.sum_f32(band_force, document_grad_products_.data(), band * width,
+                                                      band_force, stream.numkong()),
                                     "document force addition");
         }
     }
@@ -712,7 +708,7 @@ expected_t contrastive_tokens_t::operator()(bf16r2_view_t token_vectors, u32r1_v
 
 expected<distributed_contrastive_tokens_t> distributed_contrastive_tokens_t::make(
     multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
-    std::span<gpu_stream_t> streams, contrastive_tokens_config_t config, nk_capability_t capabilities,
+    std::span<gpu_stream_t> streams, contrastive_tokens_config_t config, gpu_numerics_t const &numerics,
     f64_t timeout_seconds) noexcept {
     using result_t = expected<distributed_contrastive_tokens_t>;
     std::size_t const gpus = arenas.size();
@@ -758,7 +754,7 @@ expected<distributed_contrastive_tokens_t> distributed_contrastive_tokens_t::mak
     for (std::size_t rank = 0; rank != gpus; ++rank) {
         switch_to_gpu_t gpu_scope {streams[rank]};
         if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (rank={})", rank);
-        expected<contrastive_tokens_t> loss = contrastive_tokens_t::make(arenas[rank], config, capabilities);
+        expected<contrastive_tokens_t> loss = contrastive_tokens_t::make(arenas[rank], config, numerics);
         if (!loss) return result_t::fail(std::move(loss));
         distributed.losses_[rank] = std::move(loss.value_);
         gpu_arena_alloc<f32_t> f32_alloc {arenas[rank]};

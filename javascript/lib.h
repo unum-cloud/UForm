@@ -45,8 +45,9 @@ enum {
     /** Bytes a formatted diagnostic may occupy, terminator included. */
     uform_js_message_capacity_k = 256,
 
-    /** Heap blocks one call may own, freed together once it is final: the offsets it widened to @c size_t. */
-    uform_js_owned_k = 5,
+    /** Heap blocks one call may own, freed together once it is final: the offsets it widened
+     *  to @c size_t, at most a training step's six tapes and edge sets. */
+    uform_js_owned_k = 6,
 };
 
 /** The surfaces an encode call keeps, as the @c outputs flags of the TypeScript side spell them. */
@@ -182,8 +183,8 @@ typedef enum uform_js_slot_t {
     /** The first borrowed input, every later slot holding one more. */
     uform_js_slot_inputs_k,
 
-    /** Slots in every call: the three above and up to thirteen borrowed inputs. */
-    uform_js_slots_k = 16,
+    /** Slots in every call: the three above and up to eighteen borrowed inputs. */
+    uform_js_slots_k = 21,
 } uform_js_slot_t;
 
 /** Builds a verb's answer from a successful call's outputs; @c NULL with an exception pending. */
@@ -307,11 +308,12 @@ bool uform_js_array_from_value(napi_env env, napi_value value, char const *field
                                void **data, size_t *elements);
 
 /**
- *  @brief Reads a ragged batch: its elements in @p data_value and @c count + 1 offsets in a @c Uint32Array,
- *      widened into a @c size_t block the call owns.
+ *  @brief Borrows a ragged batch: its elements in @p data_value and @c count + 1 offsets read as
+ *      @c uform_js_offsets_from_value reads them.
  *  @param[in] element_type The @c TypedArray the elements arrive in.
  *  @param[out] count The entries the tape holds, which every batch verb takes as its @c count.
- *  @param[out] tape The view the library reads; its offsets live in the block @c call owns.
+ *  @param[out] tape The view the library reads, over the caller's elements and offsets, or
+ *      their widened copy.
  *  @return @c true on success, @c false with an exception pending otherwise.
  */
 bool uform_js_tape_from_value(napi_env env, napi_value data_value, napi_value offsets_value, char const *field,
@@ -319,8 +321,10 @@ bool uform_js_tape_from_value(napi_env env, napi_value data_value, napi_value of
                               uform_tape_view_t *tape);
 
 /**
- *  @brief Widens a @c Uint32Array of offsets into a @c size_t block @p call owns.
- *  @param[out] offsets The widened run, @c NULL when the value is absent.
+ *  @brief Reads offsets: a @c BigUint64Array or a @c Uint32Array as wide as @c size_t is lent
+ *      as it is, so a deferred call holds its value, and a narrower @c Uint32Array is widened
+ *      into a block @p call owns.
+ *  @param[out] offsets The lent or widened run, @c NULL when the value is absent.
  *  @param[out] count One less than the offsets read, the entries they bound.
  */
 bool uform_js_offsets_from_value(napi_env env, napi_value value, char const *field, uform_js_call_t *call,

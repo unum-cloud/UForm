@@ -43,8 +43,8 @@ using multimodal_batch_on_cpu_t = multimodal_batch<pinned_alloc_t>;
  *  @param[in] tube_frames The video tube depth — the batch's fixed value.
  *  @param[in] frame_stride The source frames between two sampled ones — the batch's fixed value, 0 read as 1.
  */
-[[nodiscard]] expected_t fill_coords(u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
-                                     modality_span_t segment_modality, image_shape_view_t image_shapes,
+[[nodiscard]] expected_t fill_coords(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
+                                     modality_view_t segment_modality, image_shape_view_t image_shapes,
                                      video_shape_view_t video_shapes, u32_t tube_frames, u32_t frame_stride,
                                      i16r2_span_t coords, gpu_stream_t &stream) noexcept;
 

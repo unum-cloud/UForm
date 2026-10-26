@@ -107,10 +107,12 @@ struct adafactor_state_t {
 struct adafactor_t {
 
     /** Resolve the weights table into combined-state offsets, allocate the state, zero the
-     *  moments, and seed the vector masters — once, on @p stream , outside any capture. */
+     *  moments, and seed the vector masters through the casts of @p numerics — once, on
+     *  @p stream , outside any capture. */
     [[nodiscard]] static expected<adafactor_t> make(gpu_arena_t &arena,
                                                     std::span<differentiable_weights_t const> weights,
-                                                    adafactor_config_t config, gpu_stream_t &stream) noexcept;
+                                                    adafactor_config_t config, gpu_numerics_t const &numerics,
+                                                    gpu_stream_t &stream) noexcept;
 
     /** The resolved states, for the distributed sibling's staging pass. */
     [[nodiscard]] nk::tensor_view<adafactor_state_t, 1> states() const noexcept {
@@ -152,6 +154,10 @@ struct adafactor_t {
     }
 
     adafactor_config_t config_ {};
+
+    /** The NumKong kernels of the arena's device class: the master seeding and gradient staging
+     *  casts. */
+    gpu_numerics_t numerics_ {};
 
     /** Steps taken, which the decay schedule and the rounding keys read. */
     u64_t steps_ = 0;
@@ -217,11 +223,12 @@ struct distributed_adafactor_t {
      *      identity in single-domain worlds, unwired in processes not holding member 0. On the gateway its payload
      *      must span at least this optimizer's gradient scalars; the unread tail beyond them is harmless.
      *  @param[in] weights Rank-major @b [ranks·weights_per_rank] weights table.
+     *  @param[in] numerics The NumKong kernels every rank's casts call.
      */
     [[nodiscard]] static expected<distributed_adafactor_t> make(
         multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce, std::span<gpu_arena_t> arenas,
         std::span<differentiable_weights_t const> weights, std::size_t weights_per_rank, adafactor_config_t config,
-        std::span<gpu_stream_t> streams, telemetry_ledger_t &ledger) noexcept;
+        gpu_numerics_t const &numerics, std::span<gpu_stream_t> streams, telemetry_ledger_t &ledger) noexcept;
 
     /**
      *  @brief Local rank @p rank 's slice of one world step — pure enqueue onto @p stream , the shape a

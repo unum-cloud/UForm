@@ -67,6 +67,10 @@ char const *uform_multimem_tier_name(uform_multimem_tier_t tier) {
     }
 }
 
+uform_multimem_tier_t uform_multimem_tier_from_name(uform_bytes_view_t name) {
+    return named(name, "peer-read") ? uform_multimem_tier_peer_read_k : uform_multimem_tier_switch_reduced_k;
+}
+
 void uform_mesh_bootstrap(uform_mesh_bootstrap_t *arguments) {
     if (through_executor<uform_mesh_bootstrap>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);

@@ -5,10 +5,10 @@
  *  @author Ash Vardanian
  *  @date July 3, 2026
  */
+#include <cmath> // `std::fmax` — the row maxima and the floored counts
+
 #include <algorithm> // `std::max` — the head product scratch sizing
 #include <limits>    // `std::numeric_limits` — the softmax's row-maximum identity
-
-#include <numkong/each.h> // `nk_each_sum_f32_best` — the media heads adding onto the shared gradient
 
 #include "uform/core/multimodal_masking.hpp"
 
@@ -26,13 +26,13 @@ template <unsigned block_size_>
     unsigned const lane_index = threadIdx.x % warp_size_k;
     unsigned const warp_index = threadIdx.x / warp_size_k;
     for (unsigned delta = warp_size_k / 2u; delta != 0u; delta /= 2u)
-        value = fmaxf(value, __shfl_xor_sync(0xffffffffu, value, delta));
+        value = std::fmax(value, __shfl_xor_sync(0xffffffffu, value, delta));
     if (lane_index == 0u) warp_partials[warp_index] = value;
     __syncthreads();
     if (warp_index == 0u) {
         f32_t staged = lane_index < warps_k ? warp_partials[lane_index] : -std::numeric_limits<f32_t>::infinity();
         for (unsigned delta = warp_size_k / 2u; delta != 0u; delta /= 2u)
-            staged = fmaxf(staged, __shfl_xor_sync(0xffffffffu, staged, delta));
+            staged = std::fmax(staged, __shfl_xor_sync(0xffffffffu, staged, delta));
         if (lane_index == 0u) block_total = staged;
     }
     __syncthreads();
@@ -43,7 +43,7 @@ template <unsigned block_size_>
  *  clean) and a loss weight of one. */
 static __device__ void mask_token_(tokens_span_t distorted, u32r1_span_t loss_weights, u32_t position, u64_t seed,
                                    data_epoch_t data_epoch, u32_t segment, u32_t column, f32_t replace_fraction,
-                                   f32_t random_fraction) {
+                                   f32_t random_fraction) noexcept {
     f32_t const action = masking_draw(seed, data_epoch, segment, column,
                                       static_cast<u32_t>(masking_draw_purpose_t::token_action_k));
     if (action < replace_fraction) { distorted[position] = byte_mask_k; }
@@ -128,7 +128,7 @@ static __global__ void masked_count_kernel_(u32r1_view_t loss_weights, f32r1_spa
         live += static_cast<f32_t>(loss_weights[index]);
     f32_t const total = block_reduce_broadcast<kernel_block_size_default_k>(live);
     if (threadIdx.x != 0u) return;
-    scale_and_count[0] = weight / fmaxf(total, 1.0f);
+    scale_and_count[0] = weight / std::fmax(total, 1.0f);
     scale_and_count[1] = total;
 }
 
@@ -149,7 +149,7 @@ static __global__ void masked_cross_entropy_kernel_(f32r2_view_t logits, tokens_
 
     f32_t thread_max = -std::numeric_limits<f32_t>::infinity();
     for (u32_t byte = threadIdx.x; byte < vocabulary; byte += blockDim.x)
-        thread_max = fmaxf(thread_max, logits[row, byte]);
+        thread_max = std::fmax(thread_max, logits[row, byte]);
     f32_t const row_max = block_reduce_max_broadcast_<kernel_block_size_default_k>(thread_max);
 
     f32_t thread_sum = 0.0f;
@@ -293,17 +293,17 @@ static __global__ void choices_scatter_kernel_(f32r2_view_t gathered_grad, multi
 /** Allocate off @p arena one linear head's NumKong packs and transients: its @b [outputs,hidden] weight packed
  *  both ways, the weight gradient's transposes over @p rows states (the input one wide enough to stage the
  *  weight's padded transpose too), the @c normalizedᵀ pack, and the Float32 products of all three products. */
-static expected_t allocate_head_products_(gpu_arena_t &arena, nk_capability_t capabilities, std::size_t outputs,
+static expected_t allocate_head_products_(gpu_arena_t &arena, gpu_numerics_t const &numerics, std::size_t outputs,
                                           std::size_t hidden, std::size_t rows, b8r1_tensor_arena_t &packed_weight,
                                           b8r1_tensor_arena_t &packed_weight_transposed,
                                           bf16r1_tensor_arena_t &transposed_grad,
                                           bf16r1_tensor_arena_t &transposed_input, b8r1_tensor_arena_t &packed_input,
                                           f32r1_tensor_arena_t &products) noexcept {
-    expected<b8r1_tensor_arena_t> forward = allocate_pack_bf16(outputs, hidden, capabilities, arena);
+    expected<b8r1_tensor_arena_t> forward = allocate_pack_bf16(outputs, hidden, numerics, arena);
     if (!forward) return expected_t::fail(std::move(forward));
-    expected<b8r1_tensor_arena_t> backward = allocate_pack_bf16(hidden, outputs, capabilities, arena);
+    expected<b8r1_tensor_arena_t> backward = allocate_pack_bf16(hidden, outputs, numerics, arena);
     if (!backward) return expected_t::fail(std::move(backward));
-    expected<b8r1_tensor_arena_t> input = allocate_pack_bf16(hidden, rows, capabilities, arena);
+    expected<b8r1_tensor_arena_t> input = allocate_pack_bf16(hidden, rows, numerics, arena);
     if (!input) return expected_t::fail(std::move(input));
     packed_weight = std::move(forward.value_);
     packed_weight_transposed = std::move(backward.value_);
@@ -324,7 +324,7 @@ static expected_t allocate_head_products_(gpu_arena_t &arena, nk_capability_t ca
 }
 
 expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, masked_tokens_config_t config,
-                                                nk_capability_t capabilities) noexcept {
+                                                gpu_numerics_t const &numerics) noexcept {
     using result_t = expected<masked_tokens_t>;
     if (config.vocabulary == 0 || config.hidden == 0 || config.max_tokens == 0)
         return result_t::fail(status_t::shape_unsupported_k,
@@ -332,7 +332,7 @@ expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, masked_token
                               config.vocabulary, config.hidden, config.max_tokens);
     masked_tokens_t head;
     head.config_ = config;
-    head.capabilities_ = capabilities;
+    head.numerics_ = numerics;
 
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
@@ -347,7 +347,7 @@ expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, masked_token
     if (!head.decoder_weight_ || !head.decoder_weight_grad_ || !head.logits_ || !head.logit_grad_ ||
         !head.position_loss_ || !head.gradient_scale_)
         return result_t::fail(status_t::bad_alloc_k, "masked head allocation failed (arena_used={})", arena.used());
-    if (expected_t allocated = allocate_head_products_(arena, head.capabilities_, config.vocabulary, config.hidden,
+    if (expected_t allocated = allocate_head_products_(arena, head.numerics_, config.vocabulary, config.hidden,
                                                        config.max_tokens, head.packed_decoder_,
                                                        head.packed_decoder_transposed_, head.transposed_grad_,
                                                        head.transposed_input_, head.packed_input_, head.products_);
@@ -368,7 +368,7 @@ expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, masked_token
 
 expected_t masked_tokens_t::pack_weights(gpu_stream_t &stream) noexcept {
     return pack_weight_bf16(decoder_weight_.view(), transposed_input_.span(), packed_decoder_.span(),
-                            packed_decoder_transposed_.span(), capabilities_, stream);
+                            packed_decoder_transposed_.span(), numerics_, stream);
 }
 
 expected_t masked_tokens_t::corrupt(tokens_view_t clean, tokens_span_t distorted, u32r1_span_t loss_weights,
@@ -417,7 +417,7 @@ expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t c
     f32r2_span_t const normalized_products {products_.data(), tokens, hidden};
     expected_t staged = launch_kernel(&masked_count_kernel_, one_block, block_shape, stream, loss_weights,
                                       gradient_scale_.span(), config_.weight);
-    if (staged) staged = multiply_bf16(normalized, packed_decoder_.view(), logits_.span(), capabilities_, stream);
+    if (staged) staged = multiply_bf16(normalized, packed_decoder_.view(), logits_.span(), numerics_, stream);
     if (staged)
         staged = launch_kernel(&masked_cross_entropy_kernel_, row_grid, block_shape, stream, logits_.view(),
                                clean_targets, loss_weights, gradient_scale_.view(), position_loss_.span(), logit_grad);
@@ -425,16 +425,15 @@ expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t c
         staged = launch_kernel(&masked_finalize_kernel_, one_block, block_shape, stream, position_loss_.view(),
                                gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
-        staged = multiply_bf16(logit_grad, packed_decoder_transposed_.view(), normalized_products, capabilities_,
-                               stream);
+        staged = multiply_bf16(logit_grad, packed_decoder_transposed_.view(), normalized_products, numerics_, stream);
     if (staged)
-        staged = numkong_result(nk_cast_best(normalized_products.data(), nk_f32_k, normalized_grad.data(), nk_bf16_k,
-                                             tokens * hidden, capabilities_, stream.numkong()),
+        staged = numkong_result(numerics_.cast(normalized_products.data(), nk_f32_k, normalized_grad.data(), nk_bf16_k,
+                                               tokens * hidden, stream.numkong()),
                                 "masked token gradient narrowing");
     if (staged)
         staged = weight_gradient_bf16(logit_grad, normalized, decoder_weight_grad_.span(), transposed_grad_.span(),
                                       transposed_input_.span(), packed_input_.span(), products_.span(), b8r1_span_t {},
-                                      capabilities_, stream);
+                                      numerics_, stream);
     return staged;
 }
 
@@ -465,7 +464,7 @@ expected_t masked_tokens_t::choose(bf16r2_view_t normalized, multimodal_batch_vi
     f32r1_span_t const weight_products {products_.data(), vocabulary * hidden};
     expected_t staged = launch_kernel(&choices_gather_kernel_, segment_grid, block_shape, stream, normalized, batch,
                                       gathered_.span(), gradient_scale_.span(), config.weight);
-    if (staged) staged = multiply_bf16(gathered_.view(), packed_decoder_.view(), logits, capabilities_, stream);
+    if (staged) staged = multiply_bf16(gathered_.view(), packed_decoder_.view(), logits, numerics_, stream);
     if (staged)
         staged = launch_kernel(&choices_cross_entropy_kernel_, segment_grid, block_shape, stream, f32r2_view_t {logits},
                                batch, gradient_scale_.view(), config.brier_weight, position_loss_.span(), logit_grad);
@@ -473,27 +472,25 @@ expected_t masked_tokens_t::choose(bf16r2_view_t normalized, multimodal_batch_vi
         staged = launch_kernel(&masked_finalize_kernel_, one_block, block_shape, stream,
                                position_loss[nk::range(std::size_t {0}, segments), nk::slice], gradient_scale_.view(),
                                loss_summands, config.weight);
-    if (staged)
-        staged = multiply_bf16(logit_grad, packed_decoder_transposed_.view(), gathered_grad, capabilities_, stream);
+    if (staged) staged = multiply_bf16(logit_grad, packed_decoder_transposed_.view(), gathered_grad, numerics_, stream);
     if (staged)
         staged = launch_kernel(&choices_scatter_kernel_, segment_grid, block_shape, stream,
                                f32r2_view_t {gathered_grad}, batch, normalized_grad);
     if (staged)
-        staged = numkong_result(nk_cast_best(decoder_weight_grad_.data(), nk_bf16_k, widened_weight_grad.data(),
-                                             nk_f32_k, vocabulary * hidden, capabilities_, stream.numkong()),
+        staged = numkong_result(numerics_.cast(decoder_weight_grad_.data(), nk_bf16_k, widened_weight_grad.data(),
+                                               nk_f32_k, vocabulary * hidden, stream.numkong()),
                                 "decoder gradient widening");
     if (staged)
         staged = weight_gradient_bf16(logit_grad, gathered_.view(), decoder_weight_grad_.span(),
                                       transposed_grad_.span(), transposed_input_.span(), packed_input_.span(),
-                                      weight_products, b8r1_span_t {}, capabilities_, stream);
+                                      weight_products, b8r1_span_t {}, numerics_, stream);
     if (staged)
-        staged = numkong_result(
-            nk_each_sum_f32_best(widened_weight_grad.data(), weight_products.data(), vocabulary * hidden,
-                                 widened_weight_grad.data(), capabilities_, stream.numkong()),
-            "decoder gradient addition");
+        staged = numkong_result(numerics_.sum_f32(widened_weight_grad.data(), weight_products.data(),
+                                                  vocabulary * hidden, widened_weight_grad.data(), stream.numkong()),
+                                "decoder gradient addition");
     if (staged)
-        staged = numkong_result(nk_cast_best(widened_weight_grad.data(), nk_f32_k, decoder_weight_grad_.data(),
-                                             nk_bf16_k, vocabulary * hidden, capabilities_, stream.numkong()),
+        staged = numkong_result(numerics_.cast(widened_weight_grad.data(), nk_f32_k, decoder_weight_grad_.data(),
+                                               nk_bf16_k, vocabulary * hidden, stream.numkong()),
                                 "decoder gradient narrowing");
     return staged;
 }
@@ -580,7 +577,7 @@ static __global__ void patch_count_kernel_(u32r1_view_t mask, f32r1_span_t scale
         live += static_cast<f32_t>(mask[index]);
     f32_t const total = block_reduce_broadcast<kernel_block_size_default_k>(live);
     if (threadIdx.x != 0u) return;
-    scale_and_count[0] = weight * 2.0f / (static_cast<f32_t>(patch_pixels) * fmaxf(total, 1.0f));
+    scale_and_count[0] = weight * 2.0f / (static_cast<f32_t>(patch_pixels) * std::fmax(total, 1.0f));
     scale_and_count[1] = total;
 }
 
@@ -606,7 +603,7 @@ static __global__ void patch_mae_loss_kernel_(bf16r2_view_t predicted, bf16r2_vi
     }
     f32_t const mean_target = block_reduce_broadcast<kernel_block_size_default_k>(sum_target) * inverse_pixels;
     f32_t const mean_sq_target = block_reduce_broadcast<kernel_block_size_default_k>(sumsq_target) * inverse_pixels;
-    f32_t const inverse_std_target = rsqrtf(fmaxf(mean_sq_target - mean_target * mean_target, 0.0f) +
+    f32_t const inverse_std_target = rsqrtf(std::fmax(mean_sq_target - mean_target * mean_target, 0.0f) +
                                             patch_variance_epsilon_k);
 
     f32_t const scale = live ? scale_and_count[0] : 0.0f;
@@ -623,7 +620,7 @@ static __global__ void patch_mae_loss_kernel_(bf16r2_view_t predicted, bf16r2_vi
 }
 
 expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, masked_patches_config_t config,
-                                                  nk_capability_t capabilities) noexcept {
+                                                  gpu_numerics_t const &numerics) noexcept {
     using result_t = expected<masked_patches_t>;
     if (config.hidden == 0 || config.patch_pixels == 0 || config.max_patches == 0 || config.temporal_groups == 0 ||
         config.max_patches % config.temporal_groups != 0)
@@ -632,7 +629,7 @@ expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, masked_pat
                               config.hidden, config.patch_pixels, config.max_patches, config.temporal_groups);
     masked_patches_t head;
     head.config_ = config;
-    head.capabilities_ = capabilities;
+    head.numerics_ = numerics;
 
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
@@ -653,7 +650,7 @@ expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, masked_pat
     head.widened_grad_ = f32r1_tensor_arena_t::uninitialized({config.max_patches * config.hidden}, f32_alloc).value;
     if (!head.widened_grad_)
         return result_t::fail(status_t::bad_alloc_k, "patch head allocation failed (arena_used={})", arena.used());
-    if (expected_t allocated = allocate_head_products_(arena, head.capabilities_, config.patch_pixels, config.hidden,
+    if (expected_t allocated = allocate_head_products_(arena, head.numerics_, config.patch_pixels, config.hidden,
                                                        config.max_patches, head.packed_recon_,
                                                        head.packed_recon_transposed_, head.transposed_grad_,
                                                        head.transposed_input_, head.packed_input_, head.products_);
@@ -664,7 +661,7 @@ expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, masked_pat
 
 expected_t masked_patches_t::pack_weights(gpu_stream_t &stream) noexcept {
     return pack_weight_bf16(recon_weight_.view(), transposed_input_.span(), packed_recon_.span(),
-                            packed_recon_transposed_.span(), capabilities_, stream);
+                            packed_recon_transposed_.span(), numerics_, stream);
 }
 
 expected_t masked_patches_t::sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch, u32r1_view_t segment_offsets,
@@ -706,10 +703,10 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
     f32r2_span_t const normalized_products {products_.data(), rows, static_cast<std::size_t>(hidden)};
     expected_t staged = launch_kernel(&patch_count_kernel_, one_block, block_shape, stream, mask_.view(),
                                       gradient_scale_.span(), config_.weight, patch_pixels);
-    if (staged) staged = multiply_bf16(normalized, packed_recon_.view(), predicted_products, capabilities_, stream);
+    if (staged) staged = multiply_bf16(normalized, packed_recon_.view(), predicted_products, numerics_, stream);
     if (staged)
-        staged = numkong_result(nk_cast_best(predicted_products.data(), nk_f32_k, predicted_.data(), nk_bf16_k,
-                                             rows * outputs, capabilities_, stream.numkong()),
+        staged = numkong_result(numerics_.cast(predicted_products.data(), nk_f32_k, predicted_.data(), nk_bf16_k,
+                                               rows * outputs, stream.numkong()),
                                 "prediction narrowing");
     if (staged)
         staged = launch_kernel(&patch_mae_loss_kernel_, row_grid, block_shape, stream, predicted_view, clean_patches,
@@ -718,24 +715,24 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
         staged = launch_kernel(&masked_finalize_kernel_, one_block, block_shape, stream, position_loss_.view(),
                                gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
-        staged = multiply_bf16(predicted_grad_.view(), packed_recon_transposed_.view(), normalized_products,
-                               capabilities_, stream);
+        staged = multiply_bf16(predicted_grad_.view(), packed_recon_transposed_.view(), normalized_products, numerics_,
+                               stream);
     if (staged)
-        staged = numkong_result(nk_cast_best(normalized_grad.data(), nk_bf16_k, widened_grad_.data(), nk_f32_k,
-                                             rows * hidden, capabilities_, stream.numkong()),
+        staged = numkong_result(numerics_.cast(normalized_grad.data(), nk_bf16_k, widened_grad_.data(), nk_f32_k,
+                                               rows * hidden, stream.numkong()),
                                 "normalized gradient widening");
     if (staged)
-        staged = numkong_result(nk_each_sum_f32_best(widened_grad_.data(), normalized_products.data(), rows * hidden,
-                                                     widened_grad_.data(), capabilities_, stream.numkong()),
+        staged = numkong_result(numerics_.sum_f32(widened_grad_.data(), normalized_products.data(), rows * hidden,
+                                                  widened_grad_.data(), stream.numkong()),
                                 "normalized gradient addition");
     if (staged)
-        staged = numkong_result(nk_cast_best(widened_grad_.data(), nk_f32_k, normalized_grad.data(), nk_bf16_k,
-                                             rows * hidden, capabilities_, stream.numkong()),
+        staged = numkong_result(numerics_.cast(widened_grad_.data(), nk_f32_k, normalized_grad.data(), nk_bf16_k,
+                                               rows * hidden, stream.numkong()),
                                 "normalized gradient narrowing");
     if (staged)
         staged = weight_gradient_bf16(predicted_grad_.view(), normalized, recon_weight_grad_.span(),
                                       transposed_grad_.span(), transposed_input_.span(), packed_input_.span(),
-                                      products_.span(), b8r1_span_t {}, capabilities_, stream);
+                                      products_.span(), b8r1_span_t {}, numerics_, stream);
     return staged;
 }
 
@@ -779,7 +776,7 @@ static __global__ void frame_count_kernel_(u32r1_view_t mask, f32r1_span_t scale
         live += static_cast<f32_t>(mask[index]);
     f32_t const total = block_reduce_broadcast<kernel_block_size_default_k>(live);
     if (threadIdx.x != 0u) return;
-    scale_and_count[0] = weight * 2.0f / (static_cast<f32_t>(chunk_samples) * fmaxf(total, 1.0f));
+    scale_and_count[0] = weight * 2.0f / (static_cast<f32_t>(chunk_samples) * std::fmax(total, 1.0f));
     scale_and_count[1] = total;
 }
 
@@ -808,7 +805,7 @@ static __global__ void frame_mae_loss_kernel_(bf16r2_view_t predicted, f32r2_vie
     }
     f32_t const mean_target = block_reduce_broadcast<kernel_block_size_default_k>(sum_target) * inverse_samples;
     f32_t const mean_sq_target = block_reduce_broadcast<kernel_block_size_default_k>(sumsq_target) * inverse_samples;
-    f32_t const inverse_std_target = rsqrtf(fmaxf(mean_sq_target - mean_target * mean_target, 0.0f) +
+    f32_t const inverse_std_target = rsqrtf(std::fmax(mean_sq_target - mean_target * mean_target, 0.0f) +
                                             patch_variance_epsilon_k);
 
     f32_t const scale = live ? scale_and_count[0] : 0.0f;
@@ -825,7 +822,7 @@ static __global__ void frame_mae_loss_kernel_(bf16r2_view_t predicted, f32r2_vie
 }
 
 expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, masked_frames_config_t config,
-                                                nk_capability_t capabilities) noexcept {
+                                                gpu_numerics_t const &numerics) noexcept {
     using result_t = expected<masked_frames_t>;
     if (config.hidden == 0 || config.chunk_samples == 0 || config.max_frames == 0)
         return result_t::fail(status_t::shape_unsupported_k,
@@ -833,7 +830,7 @@ expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, masked_frame
                               config.chunk_samples, config.max_frames);
     masked_frames_t head;
     head.config_ = config;
-    head.capabilities_ = capabilities;
+    head.numerics_ = numerics;
 
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
@@ -854,7 +851,7 @@ expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, masked_frame
     head.widened_grad_ = f32r1_tensor_arena_t::uninitialized({config.max_frames * config.hidden}, f32_alloc).value;
     if (!head.widened_grad_)
         return result_t::fail(status_t::bad_alloc_k, "frame head allocation failed (arena_used={})", arena.used());
-    if (expected_t allocated = allocate_head_products_(arena, head.capabilities_, config.chunk_samples, config.hidden,
+    if (expected_t allocated = allocate_head_products_(arena, head.numerics_, config.chunk_samples, config.hidden,
                                                        config.max_frames, head.packed_recon_,
                                                        head.packed_recon_transposed_, head.transposed_grad_,
                                                        head.transposed_input_, head.packed_input_, head.products_);
@@ -865,7 +862,7 @@ expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, masked_frame
 
 expected_t masked_frames_t::pack_weights(gpu_stream_t &stream) noexcept {
     return pack_weight_bf16(recon_weight_.view(), transposed_input_.span(), packed_recon_.span(),
-                            packed_recon_transposed_.span(), capabilities_, stream);
+                            packed_recon_transposed_.span(), numerics_, stream);
 }
 
 expected_t masked_frames_t::sample_mask(masking_recipe_t recipe, data_epoch_t data_epoch, u32r1_view_t segment_offsets,
@@ -906,10 +903,10 @@ expected_t masked_frames_t::operator()(bf16r2_view_t normalized, f32r2_view_t cl
     f32r2_span_t const normalized_products {products_.data(), rows, static_cast<std::size_t>(hidden)};
     expected_t staged = launch_kernel(&frame_count_kernel_, one_block, block_shape, stream, mask_.view(),
                                       gradient_scale_.span(), config_.weight, chunk_samples);
-    if (staged) staged = multiply_bf16(normalized, packed_recon_.view(), predicted_products, capabilities_, stream);
+    if (staged) staged = multiply_bf16(normalized, packed_recon_.view(), predicted_products, numerics_, stream);
     if (staged)
-        staged = numkong_result(nk_cast_best(predicted_products.data(), nk_f32_k, predicted_.data(), nk_bf16_k,
-                                             rows * outputs, capabilities_, stream.numkong()),
+        staged = numkong_result(numerics_.cast(predicted_products.data(), nk_f32_k, predicted_.data(), nk_bf16_k,
+                                               rows * outputs, stream.numkong()),
                                 "prediction narrowing");
     if (staged)
         staged = launch_kernel(&frame_mae_loss_kernel_, row_grid, block_shape, stream, predicted_view, clean_frames,
@@ -918,24 +915,24 @@ expected_t masked_frames_t::operator()(bf16r2_view_t normalized, f32r2_view_t cl
         staged = launch_kernel(&masked_finalize_kernel_, one_block, block_shape, stream, position_loss_.view(),
                                gradient_scale_.view(), loss_summands, config_.weight);
     if (staged)
-        staged = multiply_bf16(predicted_grad_.view(), packed_recon_transposed_.view(), normalized_products,
-                               capabilities_, stream);
+        staged = multiply_bf16(predicted_grad_.view(), packed_recon_transposed_.view(), normalized_products, numerics_,
+                               stream);
     if (staged)
-        staged = numkong_result(nk_cast_best(normalized_grad.data(), nk_bf16_k, widened_grad_.data(), nk_f32_k,
-                                             rows * hidden, capabilities_, stream.numkong()),
+        staged = numkong_result(numerics_.cast(normalized_grad.data(), nk_bf16_k, widened_grad_.data(), nk_f32_k,
+                                               rows * hidden, stream.numkong()),
                                 "normalized gradient widening");
     if (staged)
-        staged = numkong_result(nk_each_sum_f32_best(widened_grad_.data(), normalized_products.data(), rows * hidden,
-                                                     widened_grad_.data(), capabilities_, stream.numkong()),
+        staged = numkong_result(numerics_.sum_f32(widened_grad_.data(), normalized_products.data(), rows * hidden,
+                                                  widened_grad_.data(), stream.numkong()),
                                 "normalized gradient addition");
     if (staged)
-        staged = numkong_result(nk_cast_best(widened_grad_.data(), nk_f32_k, normalized_grad.data(), nk_bf16_k,
-                                             rows * hidden, capabilities_, stream.numkong()),
+        staged = numkong_result(numerics_.cast(widened_grad_.data(), nk_f32_k, normalized_grad.data(), nk_bf16_k,
+                                               rows * hidden, stream.numkong()),
                                 "normalized gradient narrowing");
     if (staged)
         staged = weight_gradient_bf16(predicted_grad_.view(), normalized, recon_weight_grad_.span(),
                                       transposed_grad_.span(), transposed_input_.span(), packed_input_.span(),
-                                      products_.span(), b8r1_span_t {}, capabilities_, stream);
+                                      products_.span(), b8r1_span_t {}, numerics_, stream);
     return staged;
 }
 

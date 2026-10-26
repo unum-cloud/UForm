@@ -35,14 +35,13 @@ export type {
   UFormError,
 } from "./types.js";
 export { EncodeVerbs, Outputs, Probabilities, Rows, States } from "./encode.js";
-export type { ChooseConfig, Chosen, EncodeConfig, EncodeStats, Encoded, Pixels } from "./encode.js";
+export type { ChooseConfig, Chosen, EncodeConfig, EncodeStats, Encoded, Pixels, Tape } from "./encode.js";
 export { Model, ModelDeferredOn, ModelOn } from "./model.js";
 export type { ModelDescription, ModelLoadRamConfig, ModelLoadVramConfig } from "./model.js";
 export { Mesh, Trainer, TrainerDeferredOn } from "./train.js";
 export type {
   BatchShape,
   Choices,
-  ChoicesView,
   Contrastive,
   Edges,
   LateInteraction,
@@ -55,7 +54,7 @@ export type {
   TrainerConfig,
   TrainerStepConfig,
 } from "./train.js";
-export type { ProgressCallback } from "./library.js";
+export type { Offsets, ProgressCallback } from "./library.js";
 
 /** The library's version, as the release tooling stamped it. Calls `uform_version_name`. */
 export function version(): string {

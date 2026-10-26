@@ -84,7 +84,6 @@
 #include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fread`, `std::rename`
 #include <cstdlib> // `std::getenv`
 #include <cerrno>  // `errno`, `EEXIST`, `ENOMEM` — the directory creation's failures
-#include <ctime>   // `nanosleep` — the rendezvous backoff, as the InfiniBand completion poll does
 
 #include <unistd.h>   // `::gethostname`, `::fsync`
 #include <sys/stat.h> // `::mkdir` — the exchange directory, created level by level
@@ -222,10 +221,10 @@ struct mesh_location_t {
 }
 
 /**
- *  @brief Discover the single-host_domain shape: all three domains coincide with the visible device
- *      count. Neither multicast nor P2P is required here: a @ref multimem_domain_t without
- *      multicast runs its peer-read tier, and only a domain asks @ref peers_reach_each_other of its
- *      own members.
+ *  @brief Discover the single-host_domain shape: all three domains span the visible devices.
+ *
+ *  Neither multicast nor P2P is required here: a @ref multimem_domain_t without multicast runs its
+ *  peer-read tier, and only a domain asks @ref peers_reach_each_other of its own members.
  *
  *  Covers the common one-box world (an HGX box driven by one process); the multi-host_domain world builds
  *  on it through @ref mesh_topology_t::bootstrap . The probe sees @b only this process's devices — a wider
@@ -361,6 +360,9 @@ __device__ inline void trap_with(gpu_fault_t *fault, gpu_fault_code_t code, u32_
 
 #endif // defined(__CUDACC__)
 
+/** The wait between two reads of the exchange directory, picked by whoever bootstraps the mesh. */
+using mesh_pause_t = void (*)() noexcept;
+
 /**
  *  @brief The bootstrapped world: the validated @ref mesh_shape_t , this host_domain's identity, every
  *      peer host_domain's published facts, and the once-per-job exchange primitives later wiring phases
@@ -445,6 +447,9 @@ struct mesh_topology_t {
     /** The resolved @c <directory>/<job_id> exchange root; empty in a single-host_domain world. */
     sz::string_t exchange_directory {};
 
+    /** The wait between two reads of @ref exchange_directory while a peer's payload is missing. */
+    mesh_pause_t poll_pause = nullptr;
+
     /** Number of host_domains in the world — the table's extent, agreeing with
      *  @c shape.host_domain_count() by construction: @ref bootstrap sizes both from the same argument
      *  and never resizes either. */
@@ -485,25 +490,25 @@ struct mesh_topology_t {
      *      launcher (see @ref host_domain_index_from_environment ).
      *  @param[in] host_domain_count Number of host_domains in the job — explicit, never guessed: a
      *      host_domain cannot know how many peers will eventually arrive.
+     *  @param[in] poll_pause The wait between two reads of the exchange directory, kept as
+     *      @ref poll_pause for every later wiring phase.
      *  @param[in] gpus_per_multimem_domain The NVLink multicast extent — a fabric property no local probe
      *      can observe, so it is explicit: @c 0 resolves @c $UFORM_GPUS_PER_MULTIMEM_DOMAIN , then
      *      defaults to the host_domain itself (every pre-NVL72 box, where multicast ends at the box).
-     *  @param[in] directory The shared directory every host_domain sees; @c nullptr resolves
+     *  @param[in] directory The shared directory every host_domain sees; empty resolves
      *      @c $UFORM_EXCHANGE_DIR . A multi-host_domain bootstrap without one fails loudly — there is no
      *      guessable default.
-     *  @param[in] job_id The launch's unique namespace; @c nullptr resolves @c $UFORM_JOB_ID , and a
+     *  @param[in] job_id The launch's unique namespace; empty resolves @c $UFORM_JOB_ID , and a
      *      multi-host_domain bootstrap without one fails loudly — an anonymous shared namespace is how
      *      node families collide.
      *  @param[in] timeout_seconds Upper bound on every await; a missing peer fails loudly, never hangs.
      *  @param[in] capabilities The NumKong capabilities this host_domain's GPUs dispatch with after
      *      any class pin, which every peer must share, so no two replicas run different kernels.
      */
-    [[nodiscard]] static expected<mesh_topology_t> bootstrap(u32_t host_domain_index, u32_t host_domain_count,
-                                                             u32_t gpus_per_multimem_domain = 0,
-                                                             char const *directory = nullptr,
-                                                             char const *job_id = nullptr,
-                                                             f64_t timeout_seconds = 120.0,
-                                                             u64_t capabilities = 0) noexcept {
+    [[nodiscard]] static expected<mesh_topology_t> bootstrap(
+        u32_t host_domain_index, u32_t host_domain_count, mesh_pause_t poll_pause, u32_t gpus_per_multimem_domain = 0,
+        sz::string_view_t directory = {}, sz::string_view_t job_id = {}, f64_t timeout_seconds = 120.0,
+        u64_t capabilities = 0) noexcept {
         if (host_domain_count == 0 || host_domain_index >= host_domain_count)
             return expected<mesh_topology_t>::fail( //
                 status_t::invalid_input_k,
@@ -531,6 +536,7 @@ struct mesh_topology_t {
         mesh_topology_t topology;
         topology.shape = shape.value_;
         topology.host_domain_index = host_domain_index;
+        topology.poll_pause = poll_pause;
         if (st::failed(topology.host_domains.resize(host_domain_count)))
             return expected<mesh_topology_t>::fail(
                 status_t::bad_alloc_k, "host_domain table allocation failed (host_domains={})", host_domain_count);
@@ -541,20 +547,28 @@ struct mesh_topology_t {
 
         // The exchange root and the job id are explicit configuration; guessing either is how worlds hang
         // (an unshared directory) or how node families collide (an anonymous namespace).
-        char const *base = directory != nullptr ? directory : std::getenv("UFORM_EXCHANGE_DIR");
-        if (base == nullptr)
+        sz::string_view_t base = directory, job = job_id;
+        if (base.empty())
+            if (char const *value = std::getenv("UFORM_EXCHANGE_DIR"); value != nullptr) // vendor-boundary
+                base = sz::string_view_t {value};
+        if (base.empty())
             return expected<mesh_topology_t>::fail( //
                 status_t::invalid_input_k,
                 "a multi-host_domain bootstrap needs a shared exchange directory: pass one or set " //
                 "$UFORM_EXCHANGE_DIR (host_domain_count={})",
                 host_domain_count);
-        char const *job = job_id != nullptr ? job_id : std::getenv("UFORM_JOB_ID");
-        if (job == nullptr)
+        if (job.empty())
+            if (char const *value = std::getenv("UFORM_JOB_ID"); value != nullptr) // vendor-boundary
+                job = sz::string_view_t {value};
+        if (job.empty())
             return expected<mesh_topology_t>::fail( //
                 status_t::invalid_input_k,
                 "a multi-host_domain bootstrap needs a unique job id: pass one or set $UFORM_JOB_ID " //
                 "(host_domain_count={})",
                 host_domain_count);
+        if (base.contains('\0') || job.contains('\0'))
+            return expected<mesh_topology_t>::fail(status_t::invalid_input_k,
+                                                   "the exchange directory and the job id hold no NUL byte");
         if (!format_into(topology.exchange_directory, "{}/{}", base, job))
             return expected<mesh_topology_t>::fail(status_t::bad_alloc_k, "exchange path assembly failed");
         if (int const directory_error = make_directories_(topology.exchange_directory.view()); directory_error != 0)
@@ -611,8 +625,8 @@ struct mesh_topology_t {
         return {};
     }
 
-    /** Spin-wait (50 ms polls) until @p peer_host_domain 's payload under @p key exists, then read
-     *  it whole into @p out ; fails with the full path when @p timeout_seconds elapses first. */
+    /** Poll, through @ref poll_pause , until @p peer_host_domain 's payload under @p key exists,
+     *  then read it whole into @p out ; fails naming the full path once @p timeout_seconds pass. */
     [[nodiscard]] expected_t await_text(u32_t peer_host_domain, sz::string_view_t key, sz::string_t &out,
                                         f64_t timeout_seconds) const noexcept {
         expected<sz::string_t> path = host_domain_file_path_(peer_host_domain, key);
@@ -634,7 +648,7 @@ struct mesh_topology_t {
             if (std::chrono::steady_clock::now() >= deadline)
                 return expected_t::fail(status_t::io_error_k, "no payload \"{}\" appeared within {}s", path.value_,
                                         timeout_seconds);
-            sleep_briefly_();
+            poll_pause();
         }
     }
 
@@ -708,9 +722,9 @@ struct mesh_topology_t {
     }
 
     /** Bounded copy of a token into a fixed char field, always NUL-terminated. */
-    static void copy_token_(sz::string_view_t token, char *destination, std::size_t capacity) noexcept {
-        std::size_t const count = token.size() < capacity - 1u ? token.size() : capacity - 1u;
-        std::memcpy(destination, token.data(), count);
+    static void copy_token_(sz::string_view_t token, std::span<char> destination) noexcept {
+        std::size_t const count = token.size() < destination.size() - 1u ? token.size() : destination.size() - 1u;
+        std::memcpy(destination.data(), token.data(), count);
         destination[count] = '\0';
     }
 
@@ -848,10 +862,10 @@ struct mesh_topology_t {
         auto parse_row = [&take_token](sz::string_view_t row, mesh_host_domain_t &entry) noexcept {
             if (take_token(row) != "host_domain" || !parse_u32_(take_token(row), entry.host_domain_index)) return false;
             if (take_token(row) != "hostname") return false;
-            copy_token_(take_token(row), entry.hostname, hostname_capacity_k);
+            copy_token_(take_token(row), entry.hostname);
             if (take_token(row) != "devices" || !parse_u32_(take_token(row), entry.device_count)) return false;
             if (take_token(row) != "device_name") return false;
-            copy_token_(take_token(row), entry.device_name, device_name_capacity_k);
+            copy_token_(take_token(row), entry.device_name);
             return entry.hostname[0] != '\0' && entry.device_name[0] != '\0';
         };
 
@@ -927,8 +941,8 @@ struct mesh_topology_t {
             mesh_host_domain_t peer;
             peer.host_domain_index = peer_index;
             peer.device_count = facts.devices;
-            copy_token_(facts.hostname, peer.hostname, hostname_capacity_k);
-            copy_token_(facts.device_name, peer.device_name, device_name_capacity_k);
+            copy_token_(facts.hostname, peer.hostname);
+            copy_token_(facts.device_name, peer.device_name);
             if (peer.device_count != self.device_count || std::strcmp(peer.device_name, self.device_name) != 0)
                 return expected_t::fail( //
                     status_t::shape_unsupported_k,
@@ -1002,13 +1016,6 @@ struct mesh_topology_t {
         return expected<sz::string_t> {std::move(path)};
     }
 
-    /** The 50 ms exchange poll interval — long enough to spare the shared filesystem, short enough
-     *  that a once-per-job wait never registers. */
-    static void sleep_briefly_() noexcept {
-        timespec const interval {0, 50'000'000};
-        nanosleep(&interval, nullptr);
-    }
-
     /** Create @p path and every missing parent, as @c mkdir @c -p does: zero once all exist, else
      *  the @c errno of the level that failed. */
     [[nodiscard]] static int make_directories_(sz::string_view_t path) noexcept {
@@ -1046,6 +1053,7 @@ struct mesh_topology_t {
         std::swap(host_domain_index, other.host_domain_index);
         std::swap(host_domains, other.host_domains);
         std::swap(exchange_directory, other.exchange_directory);
+        std::swap(poll_pause, other.poll_pause);
         std::swap(next_collective_id_, other.next_collective_id_);
         std::swap(fault_context_, other.fault_context_);
         std::swap(faults_, other.faults_);

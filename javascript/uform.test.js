@@ -138,6 +138,9 @@ test("text lands embeddings and states with Arrow offsets and stats", () => {
   const alone = model.textEncode(["hello"], new Arena());
   assert.strictEqual(alone.states, undefined);
   assert.deepStrictEqual(Array.from(alone.embeddings.row(0)), reference.hello);
+  const packed = model.textEncode({ data: Buffer.from("hello"), offsets: Uint32Array.of(0, 5) }, new Arena());
+  assert.deepStrictEqual(Array.from(packed.embeddings.row(0)), reference.hello);
+  throwsStatus(() => model.textEncode({ data: Buffer.from("hello"), offsets: [0, 5] }, arena), Status.InvalidArgument);
   throwsStatus(() => model.textEncode(["hello"], arena, { outputs: 0 }), Status.InvalidArgument);
   throwsStatus(() => model.textEncode(["hello"], arena, { outputsScalar: Scalar.I8 }), Status.Unsupported);
   const halves = model.textEncode(["hello"], arena, { outputsScalar: Scalar.BF16 });
@@ -177,6 +180,10 @@ test("receivers choose completion and the verb stays: blocking and deferred agre
   assert.strictEqual(call.status, Status.Success);
   assert.deepStrictEqual(Array.from(awaited.embeddings.data), reference.hello);
   assert.strictEqual(call.wait(), awaited);
+  // A packed tape whose offsets are as wide as `size_t` is lent, so the deferred call holds both arrays.
+  const tape = { data: new TextEncoder().encode("hello"), offsets: BigUint64Array.of(0n, 5n) };
+  const lent = await model.deferred(executor).textEncode(tape, arena);
+  assert.deepStrictEqual(Array.from(lent.embeddings.data), reference.hello);
 
   const waited = model.deferred(executor).describe().wait();
   assert.strictEqual(waited.dimensions, dimensions);

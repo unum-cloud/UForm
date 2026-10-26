@@ -58,9 +58,8 @@
 #include <cuda.h>      // `CUstream`, `CUgraph`, `CUgraphExec`, `CUevent`
 #include <cuda_bf16.h> // `__nv_bfloat16` — the training-currency scalar of the rank-1 aliases
 
-#include <numkong/cast.h>     // `nk_cast_best` — narrowing a weight gradient's Float32 product
-#include <numkong/dots.h>     // `nk_dots_pack_bf16_best`, `nk_dots_packed_bf16_best` — every matrix product
-#include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span` for the typed transfer helpers
+#include <numkong/capabilities.h> // `nk_dots_pack_size_punned_t`, `nk_kernel_cast_punned_t` — the untyped kernel shapes
+#include <numkong/tensor.hpp>     // `nk::tensor_view`, `nk::tensor_span` for the typed transfer helpers
 
 #include "uform/core/gpu_allocators.hpp" // `gpu_arena_alloc`, `bf16_t`, `cuda_failure`
 #include "uform/core/types.hpp" // `expected`, `expected_t`, `status_t`, `st::basic_vector` for the node-guard walk
@@ -283,6 +282,105 @@ template <typename value_type_, std::size_t rank_>
     return reinterpret_cast<nk_e4m3_t const *>(scalars);
 }
 
+#pragma region Numerics
+
+/** NumKong's per-capability kernel shapes the training engine calls, where they take typed
+ *  scalars. */
+using dots_pack_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const *b, nk_size_t columns, nk_size_t depth,
+                                                nk_size_t b_stride, void *b_packed, nk_size_t columns_begin,
+                                                nk_size_t columns_end, nk_stream_t stream);
+using dots_pack_e4m3_kernel_t = nk_status_t (*)(nk_e4m3_t const *b, nk_size_t columns, nk_size_t depth,
+                                                nk_size_t b_stride, void *b_packed, nk_size_t columns_begin,
+                                                nk_size_t columns_end, nk_stream_t stream);
+using dots_packed_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const *a, void const *b_packed, nk_f32_t *c, nk_size_t rows,
+                                                  nk_size_t columns, nk_size_t depth, nk_size_t a_stride,
+                                                  nk_size_t c_stride, void *workspace, nk_size_t workspace_bytes,
+                                                  nk_stream_t stream);
+using dots_packed_e4m3_kernel_t = nk_status_t (*)(nk_e4m3_t const *a, void const *b_packed, nk_f32_t *c, nk_size_t rows,
+                                                  nk_size_t columns, nk_size_t depth, nk_size_t a_stride,
+                                                  nk_size_t c_stride, void *workspace, nk_size_t workspace_bytes,
+                                                  nk_stream_t stream);
+using attention_pack_bf16_kernel_t = nk_status_t (*)(nk_size_t key_value_head_count, nk_size_t depth,
+                                                     nk_u32_t const *key_offsets, nk_u32_t const *key_lengths,
+                                                     nk_size_t segment_count, nk_bf16_t const *keys,
+                                                     nk_size_t key_stride, nk_bf16_t const *values,
+                                                     nk_size_t value_stride, void *key_value_packed,
+                                                     nk_size_t tasks_begin, nk_size_t tasks_end, nk_stream_t stream);
+using attention_pack_e4m3_kernel_t = nk_status_t (*)(nk_size_t key_value_head_count, nk_size_t depth,
+                                                     nk_u32_t const *key_offsets, nk_u32_t const *key_lengths,
+                                                     nk_size_t segment_count, nk_e4m3_t const *keys,
+                                                     nk_size_t key_stride, nk_e4m3_t const *values,
+                                                     nk_size_t value_stride, void *key_value_packed,
+                                                     nk_size_t tasks_begin, nk_size_t tasks_end, nk_stream_t stream);
+using attention_packed_bf16_kernel_t = nk_status_t (*)(
+    nk_size_t head_count, nk_size_t key_value_head_count, nk_size_t depth, nk_u32_t const *query_offsets,
+    nk_size_t query_token_count, nk_f32_t scale, nk_size_t keys_before, nk_size_t keys_after, nk_bf16_t const *queries,
+    nk_size_t query_stride, void const *key_value_packed, nk_f32_t *output, nk_size_t output_stride,
+    nk_f32_t *log_sum_exp, nk_size_t tasks_begin, nk_size_t tasks_end, void *workspace, nk_size_t workspace_bytes,
+    nk_stream_t stream);
+using attention_packed_e4m3_kernel_t = nk_status_t (*)(
+    nk_size_t head_count, nk_size_t key_value_head_count, nk_size_t depth, nk_u32_t const *query_offsets,
+    nk_size_t query_token_count, nk_f32_t scale, nk_size_t keys_before, nk_size_t keys_after, nk_e4m3_t const *queries,
+    nk_size_t query_stride, void const *key_value_packed, nk_f32_t *output, nk_size_t output_stride,
+    nk_f32_t *log_sum_exp, nk_size_t tasks_begin, nk_size_t tasks_end, void *workspace, nk_size_t workspace_bytes,
+    nk_stream_t stream);
+using attention_packed_gradients_bf16_kernel_t = nk_status_t (*)(
+    nk_size_t head_count, nk_size_t key_value_head_count, nk_size_t depth, nk_u32_t const *query_offsets,
+    nk_size_t query_token_count, nk_f32_t scale, nk_size_t keys_before, nk_size_t keys_after, nk_bf16_t const *queries,
+    nk_size_t query_stride, void const *key_value_packed, nk_f32_t const *output, nk_f32_t const *output_gradient,
+    nk_size_t output_stride, nk_f32_t const *log_sum_exp, nk_f32_t *query_gradient, nk_size_t query_gradient_stride,
+    nk_f32_t *key_gradient, nk_f32_t *value_gradient, nk_size_t key_value_gradient_stride, nk_size_t tasks_begin,
+    nk_size_t tasks_end, void *workspace, nk_size_t workspace_bytes, nk_stream_t stream);
+using attention_rope_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const *x, nk_f32_t const *cos, nk_f32_t const *sin,
+                                                     nk_bf16_t *y, nk_size_t rows, nk_size_t head_count,
+                                                     nk_size_t depth, nk_size_t x_stride, nk_size_t y_stride,
+                                                     nk_stream_t stream);
+using each_sum_f32_kernel_t = nk_status_t (*)(nk_f32_t const *a, nk_f32_t const *b, nk_size_t count, nk_f32_t *result,
+                                              nk_stream_t stream);
+using each_rmsnorm_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const *x, nk_f32_t const *gamma, nk_bf16_t *y,
+                                                   nk_size_t rows, nk_size_t groups, nk_size_t columns,
+                                                   nk_size_t x_stride, nk_size_t y_stride, nk_f32_t epsilon,
+                                                   nk_stream_t stream);
+using each_rmscast_bf16_kernel_t = nk_status_t (*)(nk_f32_t const *x, nk_f32_t const *gamma, nk_bf16_t *y,
+                                                   nk_size_t rows, nk_size_t groups, nk_size_t columns,
+                                                   nk_size_t x_stride, nk_size_t y_stride, nk_f32_t epsilon,
+                                                   nk_stream_t stream);
+using each_swiglu_f32_kernel_t = nk_status_t (*)(nk_f32_t const *gate, nk_f32_t const *up, nk_f32_t *y, nk_size_t rows,
+                                                 nk_size_t columns, nk_size_t gate_stride, nk_size_t up_stride,
+                                                 nk_size_t y_stride, nk_f32_t gate_scale, nk_f32_t output_scale,
+                                                 nk_stream_t stream);
+using each_swiglu_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const *gate, nk_bf16_t const *up, nk_bf16_t *y,
+                                                  nk_size_t rows, nk_size_t columns, nk_size_t gate_stride,
+                                                  nk_size_t up_stride, nk_size_t y_stride, nk_f32_t gate_scale,
+                                                  nk_f32_t output_scale, nk_stream_t stream);
+
+/** The NumKong kernels the training engine calls, each the GPU class's own; @c src/ fills it. */
+struct gpu_numerics_t {
+    nk_dots_pack_size_punned_t pack_size_bf16 = nullptr;
+    dots_pack_bf16_kernel_t pack_bf16 = nullptr;
+    dots_packed_bf16_kernel_t multiply_bf16 = nullptr;
+    nk_dots_packed_workspace_size_punned_t multiply_workspace_size_bf16 = nullptr;
+    nk_dots_pack_size_punned_t pack_size_e4m3 = nullptr;
+    dots_pack_e4m3_kernel_t pack_e4m3 = nullptr;
+    dots_packed_e4m3_kernel_t multiply_e4m3 = nullptr;
+    nk_attention_pack_size_punned_t attention_pack_size_bf16 = nullptr;
+    attention_pack_bf16_kernel_t attention_pack_bf16 = nullptr;
+    attention_packed_bf16_kernel_t attend_bf16 = nullptr;
+    attention_packed_gradients_bf16_kernel_t attend_gradients_bf16 = nullptr;
+    nk_attention_pack_size_punned_t attention_pack_size_e4m3 = nullptr;
+    attention_pack_e4m3_kernel_t attention_pack_e4m3 = nullptr;
+    attention_packed_e4m3_kernel_t attend_e4m3 = nullptr;
+    attention_rope_bf16_kernel_t rope_bf16 = nullptr;
+    nk_kernel_cast_punned_t cast = nullptr;
+    each_sum_f32_kernel_t sum_f32 = nullptr;
+    each_rmsnorm_bf16_kernel_t rmsnorm_bf16 = nullptr;
+    each_rmscast_bf16_kernel_t rmscast_bf16 = nullptr;
+    each_swiglu_f32_kernel_t swiglu_f32 = nullptr;
+    each_swiglu_bf16_kernel_t swiglu_bf16 = nullptr;
+};
+
+#pragma endregion Numerics
+
 #if defined(__CUDACC__)
 
 /** Grid cap of every grid-strided launch: a bandwidth-bound kernel gains nothing past this, and
@@ -384,24 +482,24 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
     return expected_t::fail(status_t::cuda_error_k, "{} failed: {}", step, nk_status_name(status));
 }
 
-/** The bytes NumKong's pack of a @b [columns,depth] BFloat16 B operand takes on @p capabilities . */
+/** The bytes the pack of a @b [columns,depth] BFloat16 B operand takes under @p numerics . */
 [[nodiscard]] expected<std::size_t> pack_bytes_bf16(std::size_t columns, std::size_t depth,
-                                                    nk_capability_t capabilities) noexcept;
+                                                    gpu_numerics_t const &numerics) noexcept;
 
 /** Allocate off @p arena a buffer for the NumKong pack of a @b [columns,depth] BFloat16 B operand. */
 [[nodiscard]] expected<b8r1_tensor_arena_t> allocate_pack_bf16(std::size_t columns, std::size_t depth,
-                                                               nk_capability_t capabilities,
+                                                               gpu_numerics_t const &numerics,
                                                                gpu_arena_t &arena) noexcept;
 
 /** Enqueue NumKong's pack of @p b , read row-major as the @b [columns,depth] B operand of
  *  @ref multiply_bf16 , into @p packed , sized by @ref pack_bytes_bf16 . */
-[[nodiscard]] expected_t pack_bf16(bf16r2_view_t b, b8r1_span_t packed, nk_capability_t capabilities,
+[[nodiscard]] expected_t pack_bf16(bf16r2_view_t b, b8r1_span_t packed, gpu_numerics_t const &numerics,
                                    gpu_stream_t &stream) noexcept;
 
 /** Enqueue the Float32 product @c c=a·Bᵀ against @p packed_b , the pack of a @b [columns,depth] B with
  *  @c columns=c.extent(1) and @c depth=a.extent(1) . NumKong products replay bit-identically. */
 [[nodiscard]] expected_t multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t c,
-                                       nk_capability_t capabilities, gpu_stream_t &stream) noexcept;
+                                       gpu_numerics_t const &numerics, gpu_stream_t &stream) noexcept;
 
 /**
  *  @brief Pack @p weight @b [outputs,inputs] as the B operand of its forward product into @p packed , and its
@@ -410,15 +508,15 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
  *  @param[in] transposed At least @c inputs·round_up(outputs,8) scalars of scratch.
  */
 [[nodiscard]] expected_t pack_weight_bf16(bf16r2_view_t weight, bf16r1_span_t transposed, b8r1_span_t packed,
-                                          b8r1_span_t packed_transposed, nk_capability_t capabilities,
+                                          b8r1_span_t packed_transposed, gpu_numerics_t const &numerics,
                                           gpu_stream_t &stream) noexcept;
 
 /** The workspace bytes @ref weight_gradient_bf16 takes for a @b [outputs,inputs] weight over
- *  @p tokens on @p capabilities , where NumKong splits the token depth into slices it sums in a
+ *  @p tokens under @p numerics , where NumKong splits the token depth into slices it sums in a
  *  fixed order. */
 [[nodiscard]] expected<std::size_t> weight_gradient_workspace_bytes_bf16(std::size_t outputs, std::size_t inputs,
                                                                          std::size_t tokens,
-                                                                         nk_capability_t capabilities) noexcept;
+                                                                         gpu_numerics_t const &numerics) noexcept;
 
 /**
  *  @brief One weight gradient @c dW=dYᵀ·X : transposes @p output_grad and @p input with token rows padded to 8,
@@ -438,7 +536,7 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
 [[nodiscard]] expected_t weight_gradient_bf16(bf16r2_view_t output_grad, bf16r2_view_t input, bf16r2_span_t weight_grad,
                                               bf16r1_span_t transposed_grad, bf16r1_span_t transposed_input,
                                               b8r1_span_t packed_input, f32r1_span_t product, b8r1_span_t workspace,
-                                              nk_capability_t capabilities, gpu_stream_t &stream) noexcept;
+                                              gpu_numerics_t const &numerics, gpu_stream_t &stream) noexcept;
 
 /**
  *  @brief All-lanes-get-the-total shuffle sum of one warp — the fixed-order tree every deterministic

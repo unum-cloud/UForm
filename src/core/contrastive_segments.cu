@@ -5,13 +5,13 @@
  *  @author Ash Vardanian
  *  @date July 2, 2026
  */
+#include <cmath> // `std::sqrt`, `std::fmax` — the prefix norms and their floored squares
+
 #include <algorithm> // `std::max` — the largest product pack
 #include <iterator>  // `std::size` — the retrieval sums
 #include <limits>    // `std::numeric_limits` — the empty maximum
 
 #include <cub/block/block_scan.cuh> // `cub::BlockScan` — the ranked rows' positive ranks
-
-#include <numkong/each.h> // `nk_each_sum_f32_best` — the nested prefixes and the per-subgraph forces
 
 #include "uform/core/contrastive_segments.cuh"
 
@@ -75,7 +75,7 @@ static __global__ void contrastive_prefix_norms_kernel_(bf16r2_view_t embeddings
             thread_partial += value * value;
         }
         running_sum_squares += block_reduce_broadcast<kernel_block_size_default_k>(thread_partial);
-        if (threadIdx.x == 0u) norms[prefix_index, row_index] = sqrtf(running_sum_squares);
+        if (threadIdx.x == 0u) norms[prefix_index, row_index] = std::sqrt(running_sum_squares);
     }
 }
 
@@ -233,7 +233,7 @@ static __global__ void contrastive_from_vertex_self_fold_kernel_(bf16r2_view_t o
             if (channel_index >= prefixes[prefix_index]) continue;
             f32_t const vertex_norm = from_vertex_norms[prefix_index, vertex_index];
             fold += from_vertex_self_coefficients[prefix_index, vertex_index] /
-                    fmaxf(vertex_norm * vertex_norm, cosine_denominator_floor_k);
+                    std::fmax(vertex_norm * vertex_norm, cosine_denominator_floor_k);
         }
         from_vertices_grad_f32[vertex_index, channel_index] -= fold * __bfloat162float(
                                                                           owned_vertices[vertex_index, channel_index]);
@@ -261,7 +261,7 @@ static __global__ void contrastive_to_vertex_self_fold_kernel_(bf16r2_view_t nei
             if (channel_index >= prefixes[prefix_index]) continue;
             f32_t const neighbor_norm = to_vertex_norms[prefix_index, neighbor_local];
             fold += to_vertex_self_coefficients[prefix_index, neighbor_local] /
-                    fmaxf(neighbor_norm * neighbor_norm, cosine_denominator_floor_k);
+                    std::fmax(neighbor_norm * neighbor_norm, cosine_denominator_floor_k);
         }
         to_vertices_grad[neighbor_local, channel_index] -= fold *
                                                            __bfloat162float(neighbors[neighbor_local, channel_index]);
@@ -600,10 +600,11 @@ static __global__ void contrastive_centre_alignment_kernel_(bf16r2_view_t vertic
 
 /**
  *  @brief One row's retrieval over the full-width scaled cosines: the rank of its best positive
- *      among the scored cells, the mean cosines of its attract and ambient cells, its hard
- *      negatives above that positive, and its products with every live vertex once each unit
- *      vertex has the world's mean unit vector @c m subtracted, @c cos−a_i−a_j+‖m‖² with
- *      @c a_j=û_j·m , formed per cell so no sum of near-unit cosines cancels.
+ *      among the scored cells and the mean cosines of its attract and ambient cells.
+ *
+ *  It also counts the row's hard negatives above that positive, and forms its products with every
+ *  live vertex once each unit vertex has the world's mean unit vector @c m subtracted,
+ *  @c cos−a_i−a_j+‖m‖² with @c a_j=û_j·m , per cell so no sum of near-unit cosines cancels.
  *
  *  __grid_size__ @c [rows,1,1] ; one CTA per row, the threads stripe the candidates; no dynamic
  *  shared memory.
@@ -743,7 +744,7 @@ expected_t contrastive_pair_loss_t::operator()(f32r4_span_t logits, contrastive_
 
 expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena, contrastive_segments_config_t config,
                                                               u32r1_view_t prefix_dims,
-                                                              nk_capability_t capabilities) noexcept {
+                                                              gpu_numerics_t const &numerics) noexcept {
     if (config.from_vertices_per_gpu == 0 || config.hidden == 0)
         return expected<contrastive_segments_t>::fail(status_t::shape_unsupported_k,
                                                       "the segments loss scores pooled rows (vertices={} hidden={})",
@@ -763,7 +764,7 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
     contrastive_segments_t loss;
     loss.prefixes_ = prefixes.value_;
     loss.config_ = config;
-    loss.capabilities_ = capabilities;
+    loss.numerics_ = numerics;
 
     // Scratch tensors — the former "workspace", owned like the relation columns are: plain
     // `uninitialized` allocations, checked in named groups so a failure names the arena pressure.
@@ -825,7 +826,7 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
                                               {width, to_vertices_per_gpu},
                                               {width, rows}};
         for (auto const &[columns, depth] : pack_shapes) {
-            expected<std::size_t> shape_bytes = pack_bytes_bf16(columns, depth, loss.capabilities_);
+            expected<std::size_t> shape_bytes = pack_bytes_bf16(columns, depth, loss.numerics_);
             if (!shape_bytes) return expected<contrastive_segments_t>::fail(std::move(shape_bytes));
             packed_bytes = std::max(packed_bytes, shape_bytes.value_);
         }
@@ -886,8 +887,8 @@ expected_t contrastive_segments_t::score_(bf16r2_view_t vertices, nk::tensor_vie
                                          round_up_to_multiple(rows, std::size_t {8})};
     bf16r2_span_t const vertices_transposed = vertices_padded[nk::all, nk::range(0, rows), nk::slice];
     auto multiply = [&](bf16r2_view_t a, bf16r2_view_t b, f32r2_span_t c) noexcept {
-        expected_t multiplied = pack_bf16(b, packed_.span(), capabilities_, stream);
-        if (multiplied) multiplied = multiply_bf16(a, packed_.view(), c, capabilities_, stream);
+        expected_t multiplied = pack_bf16(b, packed_.span(), numerics_, stream);
+        if (multiplied) multiplied = multiply_bf16(a, packed_.view(), c, numerics_, stream);
         return multiplied;
     };
 
@@ -919,10 +920,9 @@ expected_t contrastive_segments_t::score_(bf16r2_view_t vertices, nk::tensor_vie
                                           subgraph.to_vertices[nk::all, band, nk::slice], raw_dot_plane);
             if (product && segment != 0) {
                 f32r2_view_t const previous_plane = raw_dot_[segment - 1u, subgraph_index, nk::slice];
-                product = numkong_result(
-                    nk_each_sum_f32_best(raw_dot_plane.data(), previous_plane.data(), cells_per_prefix,
-                                         raw_dot_plane.data(), capabilities_, stream.numkong()),
-                    "prefix dot nesting");
+                product = numkong_result(numerics_.sum_f32(raw_dot_plane.data(), previous_plane.data(),
+                                                           cells_per_prefix, raw_dot_plane.data(), stream.numkong()),
+                                         "prefix dot nesting");
             }
             if (!product) return product;
         }
@@ -1029,8 +1029,8 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
     bf16r3_span_t const raw_dot_grad_planes =
         raw_dot_grad_bf16_[nk::all, nk::all, nk::range(0, num_neighbors), nk::slice];
     auto multiply = [&](bf16r2_view_t a, bf16r2_view_t b, f32r2_span_t c) noexcept {
-        expected_t multiplied = pack_bf16(b, packed_.span(), capabilities_, stream);
-        if (multiplied) multiplied = multiply_bf16(a, packed_.view(), c, capabilities_, stream);
+        expected_t multiplied = pack_bf16(b, packed_.span(), numerics_, stream);
+        if (multiplied) multiplied = multiply_bf16(a, packed_.view(), c, numerics_, stream);
         return multiplied;
     };
 
@@ -1094,10 +1094,9 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
                                    subgraph.to_vertices_grad[nk::all, band, nk::slice]);
             if (!product) return product;
         }
-        launched = numkong_result(
-            nk_each_sum_f32_best(from_vertices_grad_f32_.data(), from_vertices_grad_products_.data(), rows * hidden,
-                                 from_vertices_grad_f32_.data(), capabilities_, stream.numkong()),
-            "vertex force addition");
+        launched = numkong_result(numerics_.sum_f32(from_vertices_grad_f32_.data(), from_vertices_grad_products_.data(),
+                                                    rows * hidden, from_vertices_grad_f32_.data(), stream.numkong()),
+                                  "vertex force addition");
         if (!launched) return launched;
 
         launched = launch_kernel(&contrastive_from_vertex_self_fold_kernel_, vertex_grid, block_shape, stream, vertices,
@@ -1111,6 +1110,10 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
     }
 
     // Cast the owned-vertex force to BFloat16 — every vertex is owned by exactly one rank.
+    if (from_vertices_grad.is_contiguous())
+        return numkong_result(numerics_.cast(from_vertices_grad_f32_.data(), nk_f32_k, from_vertices_grad.data(),
+                                             nk_bf16_k, rows * hidden, stream.numkong()),
+                              "vertex force narrowing");
     return launch_kernel(&contrastive_cast_f32_to_bf16_kernel_, dim3 {grid_size_for(rows * hidden), 1u, 1u},
                          block_shape, stream, from_vertices_grad_f32_.view(), from_vertices_grad);
 }
@@ -1133,7 +1136,7 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
     std::span<gpu_stream_t> streams, std::span<bf16r2_view_t const> towers,
     std::span<contrastive_relations_view_t const> relations, std::span<bf16r2_span_t const> from_vertices_grads,
-    contrastive_segments_config_t config, u32r1_view_t prefix_dims, nk_capability_t capabilities,
+    contrastive_segments_config_t config, u32r1_view_t prefix_dims, gpu_numerics_t const &numerics,
     f64_t timeout_seconds) noexcept {
     using result_t = expected<distributed_contrastive_segments_t>;
     std::size_t const gpus = arenas.size();
@@ -1206,7 +1209,7 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
         switch_to_gpu_t gpu_scope {streams[rank]};
         if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (rank={})", rank);
         expected<contrastive_segments_t> loss = contrastive_segments_t::make(arenas[rank], config, prefix_dims,
-                                                                             capabilities);
+                                                                             numerics);
         if (!loss) return result_t::fail(std::move(loss));
         distributed.losses_[rank] = std::move(loss.value_);
         distributed.world_scalars_[rank] =

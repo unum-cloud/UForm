@@ -15,6 +15,7 @@
  *  vertices the referenced items landed on.
  */
 #include <cmath> // `std::sqrt` — the rows a curved footprint fits
+#include <ctime> // `nanosleep` — the pause between two polls of the exchange directory
 
 #include <unistd.h> // `getpid`
 
@@ -25,15 +26,70 @@
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 #include <nvml.h> // `nvmlDeviceGetComputeRunningProcesses_v3` — the bytes this process holds
 
-#include "uform/media/audio.hpp"    // `decode_audio`
-#include "uform/media/image.hpp"    // `plan_image`, `decode_image`, `image_channels_k`
-#include "uform/media/planning.hpp" // `video_tube_grid`
-#include "uform/media/video.hpp"    // `demux_video`, `decode_video_frames`, `video_channels_k`
+#include "uform/encoder/vram_kits.hpp" // `vram_products_ladder`, `vram_attention_ladder`, `vram_elementwise_ladder`
+#include "uform/media/audio.hpp"       // `decode_audio`
+#include "uform/media/image.hpp"       // `plan_image`, `decode_image`, `image_channels_k`
+#include "uform/media/planning.hpp"    // `video_tube_grid`
+#include "uform/media/video.hpp"       // `demux_video`, `decode_video_frames`, `video_channels_k`
 #include "uform/train/trainer.hpp"
+
+#include "lib.hpp"            // `gpu_class_t`, `gpu_class_of`, `numkong_capabilities_of`
+#include "train/numerics.hpp" // `gpu_numerics_of`
 
 using namespace unum::uform::core;
 using namespace unum::uform::train;
 namespace um = unum::uform::media;
+namespace ut = unum::uform::train;
+
+#pragma region Numerics
+
+/** The kernels GPU class @p gpu_class_ trains with, each its products, attention or element-wise
+ *  kit's own. */
+template <uf::gpu_class_t gpu_class_>
+static gpu_numerics_t gpu_numerics_of() noexcept {
+    constexpr nk_capability_t capabilities_k = gpu_class_ == uf::gpu_class_t::unknown_k
+                                                   ? nk_cap_cuda_k
+                                                   : uf::numkong_capabilities_of(gpu_class_);
+    using products_kit_t = typename uf::encoder::vram_products_ladder<capabilities_k>::kit_t;
+    using attention_kit_t = typename uf::encoder::vram_attention_ladder<capabilities_k>::kit_t;
+    using elementwise_kit_t = typename uf::encoder::vram_elementwise_ladder<capabilities_k>::kit_t;
+    gpu_numerics_t numerics;
+    numerics.pack_size_bf16 = products_kit_t::pack_size_bf16;
+    numerics.pack_bf16 = products_kit_t::pack_bf16;
+    numerics.multiply_bf16 = products_kit_t::multiply_bf16;
+    numerics.multiply_workspace_size_bf16 = products_kit_t::multiply_workspace_size_bf16;
+    numerics.pack_size_e4m3 = products_kit_t::pack_size_e4m3;
+    numerics.pack_e4m3 = products_kit_t::pack_e4m3;
+    numerics.multiply_e4m3 = products_kit_t::multiply_e4m3;
+    numerics.attention_pack_size_bf16 = attention_kit_t::pack_size_bf16;
+    numerics.attention_pack_bf16 = attention_kit_t::pack_bf16;
+    numerics.attend_bf16 = attention_kit_t::attend_bf16;
+    numerics.attend_gradients_bf16 = attention_kit_t::attend_gradients_bf16;
+    numerics.attention_pack_size_e4m3 = attention_kit_t::pack_size_e4m3;
+    numerics.attention_pack_e4m3 = attention_kit_t::pack_e4m3;
+    numerics.attend_e4m3 = attention_kit_t::attend_e4m3;
+    numerics.rope_bf16 = elementwise_kit_t::rope_bf16;
+    numerics.cast = elementwise_kit_t::cast;
+    numerics.sum_f32 = elementwise_kit_t::sum_f32;
+    numerics.rmsnorm_bf16 = elementwise_kit_t::rmsnorm_bf16;
+    numerics.rmscast_bf16 = elementwise_kit_t::rmscast_bf16;
+    numerics.swiglu_f32 = elementwise_kit_t::swiglu_f32;
+    numerics.swiglu_bf16 = elementwise_kit_t::swiglu_bf16;
+    return numerics;
+}
+
+gpu_numerics_t ut::gpu_numerics_of(nk_capability_t capabilities) noexcept {
+    switch (uf::gpu_class_of(capabilities)) {
+    case uf::gpu_class_t::nvidia_blackwellrtx_k: return ::gpu_numerics_of<uf::gpu_class_t::nvidia_blackwellrtx_k>();
+    case uf::gpu_class_t::nvidia_blackwell_k: return ::gpu_numerics_of<uf::gpu_class_t::nvidia_blackwell_k>();
+    case uf::gpu_class_t::nvidia_hopper_k: return ::gpu_numerics_of<uf::gpu_class_t::nvidia_hopper_k>();
+    case uf::gpu_class_t::nvidia_ada_k: return ::gpu_numerics_of<uf::gpu_class_t::nvidia_ada_k>();
+    case uf::gpu_class_t::nvidia_ampere_k: return ::gpu_numerics_of<uf::gpu_class_t::nvidia_ampere_k>();
+    default: return ::gpu_numerics_of<uf::gpu_class_t::unknown_k>();
+    }
+}
+
+#pragma endregion Numerics
 
 /** A vertex, item or segment index that names nothing. */
 static constexpr u32_t absent_k = std::numeric_limits<u32_t>::max();
@@ -64,6 +120,13 @@ struct summand_pair_t {
 
 #pragma region Mesh
 
+/** Pauses 50 ms between two polls of the exchange directory: long enough to spare the shared
+ *  filesystem, short enough that a wait once per wiring phase never registers. */
+static void pause_between_polls_() noexcept {
+    timespec const interval {0, 50'000'000};
+    nanosleep(&interval, nullptr);
+}
+
 expected_t mesh_t::make(mesh_t &placed, mesh_options_t const &options, std::span<i32_t const> devices) noexcept {
     if (devices.empty()) return expected_t::fail(status_t::invalid_input_k, "a mesh needs at least one device");
     if (options.host_domain_count == 0 || options.host_domain_index >= options.host_domain_count)
@@ -72,14 +135,11 @@ expected_t mesh_t::make(mesh_t &placed, mesh_options_t const &options, std::span
     if (options.host_domain_count > 1 && (options.directory.empty() || options.job.empty()))
         return expected_t::fail(status_t::invalid_input_k, "a run with peers needs an exchange directory and a job");
     if (CUresult result = cuInit(0); result != CUDA_SUCCESS) return cuda_failure(result, "driver start failed");
-    sz::string_t directory, job;
-    if (sz::failed(directory.assign(options.directory)) || sz::failed(job.assign(options.job)))
-        return expected_t::fail(status_t::bad_alloc_k, "exchange path staging failed");
     u32_t const multimem = options.gpus_per_multimem_domain ? options.gpus_per_multimem_domain
                                                             : static_cast<u32_t>(devices.size());
     expected<mesh_topology_t> topology = mesh_topology_t::bootstrap(
-        options.host_domain_index, options.host_domain_count, multimem, directory.c_str(), job.c_str(),
-        options.timeout_seconds, options.capabilities);
+        options.host_domain_index, options.host_domain_count, &pause_between_polls_, multimem, options.directory,
+        options.job, options.timeout_seconds, options.capabilities);
     if (!topology) return expected_t::fail(std::move(topology));
 
     bool own_members = devices.size() == topology.value_.shape.gpus_per_host_domain;
@@ -180,11 +240,11 @@ struct device_budget_t {
     return result_t {held};
 }
 
-/** Bind @p placed to @p mesh , @p config , @p devices and @p capabilities , make one stream per
+/** Bind @p placed to @p mesh , @p config , @p devices and @p numerics , make one stream per
  *  device, and record what each device has free and this process holds into @p budgets — the part
  *  of @ref trainer_t::make before the envelope is known. */
 [[nodiscard]] static expected_t prepare_(trainer_t &placed, mesh_t &mesh, trainer_config_t const &config,
-                                         std::span<i32_t const> devices, nk_capability_t capabilities,
+                                         std::span<i32_t const> devices, gpu_numerics_t const &numerics,
                                          std::span<device_budget_t> budgets) noexcept {
     mesh_topology_t const &topology = mesh.topology;
     std::size_t const gpus = devices.size();
@@ -193,7 +253,7 @@ struct device_budget_t {
                                 topology.shape.gpus_per_host_domain, gpus);
     placed.config = config;
     placed.mesh = &mesh;
-    placed.capabilities = capabilities;
+    placed.numerics = numerics;
     if (st::failed(placed.devices.assign(devices)))
         return expected_t::fail(status_t::bad_alloc_k, "device table allocation failed");
     for (std::size_t member = 0; member != gpus; ++member) {
@@ -230,13 +290,13 @@ struct device_budget_t {
  *  the free memory, take one synthetic step, and read every device's footprint against
  *  @p budgets , what it had free and held before the first probe. */
 [[nodiscard]] static expected_t probe_footprint_(mesh_t &mesh, trainer_config_t config, std::span<i32_t const> devices,
-                                                 nk_capability_t capabilities, u32_t rows,
+                                                 gpu_numerics_t const &numerics, u32_t rows,
                                                  std::span<device_budget_t const> budgets,
                                                  std::span<footprint_t> footprints) noexcept {
     config.batch = batch_capacity(config.batch, rows, segments_per_row_(config));
     trainer_t probe;
     device_budget_t probe_budgets[max_gpus_per_host_k] = {};
-    expected_t built = prepare_(probe, mesh, config, devices, capabilities, {probe_budgets, devices.size()});
+    expected_t built = prepare_(probe, mesh, config, devices, numerics, {probe_budgets, devices.size()});
     if (built) built = assemble_(probe, mesh, probe.envelope.free_bytes);
     if (!built) return built;
     synthetic_source_t source;
@@ -340,7 +400,7 @@ struct device_budget_t {
  */
 [[nodiscard]] static expected<envelope_t> measure_envelope_(mesh_t &mesh, trainer_config_t const &config,
                                                             std::span<i32_t const> devices,
-                                                            nk_capability_t capabilities,
+                                                            gpu_numerics_t const &numerics,
                                                             std::span<device_budget_t const> budgets) noexcept {
     using result_t = expected<envelope_t>;
     if (config.late_interacts() && config.batch.max_rows_per_gpu == 0)
@@ -349,12 +409,12 @@ struct device_budget_t {
                               "are set, never fitted to memory: pass --rows, or the batch's max_rows_per_device");
     std::size_t const gpus = devices.size();
     footprint_t smaller[max_gpus_per_host_k] = {}, middle[max_gpus_per_host_k] = {}, larger[max_gpus_per_host_k] = {};
-    expected_t probed = probe_footprint_(mesh, config, devices, capabilities, smaller_probe_rows_k, budgets,
+    expected_t probed = probe_footprint_(mesh, config, devices, numerics, smaller_probe_rows_k, budgets,
                                          {smaller, gpus});
     if (probed)
-        probed = probe_footprint_(mesh, config, devices, capabilities, middle_probe_rows_k, budgets, {middle, gpus});
+        probed = probe_footprint_(mesh, config, devices, numerics, middle_probe_rows_k, budgets, {middle, gpus});
     if (probed)
-        probed = probe_footprint_(mesh, config, devices, capabilities, larger_probe_rows_k, budgets, {larger, gpus});
+        probed = probe_footprint_(mesh, config, devices, numerics, larger_probe_rows_k, budgets, {larger, gpus});
     if (!probed) return result_t::fail(std::move(probed));
 
     f64_t const low_rows = smaller_probe_rows_k, middle_rows = middle_probe_rows_k, high_rows = larger_probe_rows_k;
@@ -443,8 +503,7 @@ struct device_budget_t {
         if (!ledger) return expected_t::fail(std::move(ledger));
         placed.ledger = std::move(ledger.value_);
     }
-    auto loss_probe = [&](char const *name, bool live, telemetry_probe_t &into) noexcept -> expected_t {
-        if (!live) return {};
+    auto loss_probe = [&](char const *name, telemetry_probe_t &into) noexcept -> expected_t {
         expected<telemetry_probe_t> registered = placed.ledger.register_probe(name, telemetry_losses_k,
                                                                               finite_signal_k);
         if (!registered) return expected_t::fail(std::move(registered));
@@ -452,26 +511,18 @@ struct device_budget_t {
         return {};
     };
     bool const reconstructs = config.reconstructs();
-    if (expected_t probed = loss_probe("base/token_ce", reconstructs, placed.probes.token); !probed) return probed;
-    if (expected_t probed = loss_probe("base/image_mse", reconstructs && config.batch.contains(modality_t::image_k),
-                                       placed.probes.image);
-        !probed)
-        return probed;
-    if (expected_t probed = loss_probe("base/video_mse", reconstructs && config.batch.contains(modality_t::video_k),
-                                       placed.probes.video);
-        !probed)
-        return probed;
-    if (expected_t probed = loss_probe("base/audio_mse", reconstructs && config.batch.contains(modality_t::audio_k),
-                                       placed.probes.audio);
-        !probed)
-        return probed;
-    if (expected_t probed = loss_probe("base/contrastive", config.contrasts(), placed.probes.contrastive); !probed)
-        return probed;
-    if (expected_t probed = loss_probe("base/late_interaction", config.late_interacts(),
-                                       placed.probes.late_interaction);
-        !probed)
-        return probed;
-    if (expected_t probed = loss_probe("base/choices", config.chooses(), placed.probes.choices); !probed) return probed;
+    expected_t probed {};
+    if (probed && reconstructs) probed = loss_probe("base/token_ce", placed.probes.token);
+    if (probed && reconstructs && config.batch.contains(modality_t::image_k))
+        probed = loss_probe("base/image_mse", placed.probes.image);
+    if (probed && reconstructs && config.batch.contains(modality_t::video_k))
+        probed = loss_probe("base/video_mse", placed.probes.video);
+    if (probed && reconstructs && config.batch.contains(modality_t::audio_k))
+        probed = loss_probe("base/audio_mse", placed.probes.audio);
+    if (probed && config.contrasts()) probed = loss_probe("base/contrastive", placed.probes.contrastive);
+    if (probed && config.late_interacts()) probed = loss_probe("base/late_interaction", placed.probes.late_interaction);
+    if (probed && config.chooses()) probed = loss_probe("base/choices", placed.probes.choices);
+    if (!probed) return probed;
     for (std::size_t member = 0; member != gpus; ++member) {
         sz::string_t name;
         if (!format_into(name, "base/round/{}", member))
@@ -489,7 +540,7 @@ struct device_budget_t {
         switch_to_gpu_t gpu_scope {placed.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
         expected<base_replica_t> replica = base_replica_t::make(placed.arenas[member], config, vertices_per_mesh,
-                                                                placed.capabilities);
+                                                                placed.numerics);
         if (!replica) return expected_t::fail(std::move(replica));
         if (placed.replicas.push_back(std::move(replica.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "replica table full");
@@ -559,7 +610,7 @@ struct device_budget_t {
     }
     expected<distributed_adafactor_t> optimizer = distributed_adafactor_t::make(
         placed.domain, placed.world_reduce, placed.arenas, registrations, lead_weights.size(),
-        adafactor_config_t {.beta1 = config.adafactor_beta1}, placed.streams, placed.ledger);
+        adafactor_config_t {.beta1 = config.adafactor_beta1}, placed.numerics, placed.streams, placed.ledger);
     if (!optimizer) return expected_t::fail(std::move(optimizer));
     placed.optimizer = std::move(optimizer.value_);
 
@@ -581,7 +632,7 @@ struct device_budget_t {
                                           : u32r1_view_t {full_width, 1};
         expected<distributed_contrastive_segments_t> contrastive = distributed_contrastive_segments_t::make(
             placed.domain, mesh.colocated, placed.arenas, placed.streams, towers.view(), relations.view(),
-            forces.view(), contrastive_config, prefixes, placed.capabilities, mesh.timeout_seconds);
+            forces.view(), contrastive_config, prefixes, placed.numerics, mesh.timeout_seconds);
         if (!contrastive) return expected_t::fail(std::move(contrastive));
         placed.contrastive = std::move(contrastive.value_);
         for (std::size_t member = 0; member != gpus; ++member) {
@@ -597,7 +648,7 @@ struct device_budget_t {
     }
     if (config.late_interacts()) {
         expected<distributed_contrastive_tokens_t> tokens = distributed_contrastive_tokens_t::make(
-            placed.domain, mesh.colocated, placed.arenas, placed.streams, tokens_config, placed.capabilities,
+            placed.domain, mesh.colocated, placed.arenas, placed.streams, tokens_config, placed.numerics,
             mesh.timeout_seconds);
         if (!tokens) return expected_t::fail(std::move(tokens));
         placed.late_interaction = std::move(tokens.value_);
@@ -617,13 +668,12 @@ struct device_budget_t {
 }
 
 expected_t trainer_t::make(trainer_t &placed, mesh_t &mesh, trainer_config_t const &requested,
-                           std::span<i32_t const> devices, nk_capability_t capabilities) noexcept {
+                           std::span<i32_t const> devices, gpu_numerics_t const &numerics) noexcept {
     device_budget_t budgets[max_gpus_per_host_k] = {};
-    if (expected_t prepared = prepare_(placed, mesh, requested, devices, capabilities, {budgets, devices.size()});
+    if (expected_t prepared = prepare_(placed, mesh, requested, devices, numerics, {budgets, devices.size()});
         !prepared)
         return prepared;
-    expected<envelope_t> measured = measure_envelope_(mesh, requested, devices, capabilities,
-                                                      {budgets, devices.size()});
+    expected<envelope_t> measured = measure_envelope_(mesh, requested, devices, numerics, {budgets, devices.size()});
     if (!measured) return expected_t::fail(std::move(measured));
     placed.envelope = *measured;
     if (!requested.batch.max_rows_per_gpu || !requested.batch.max_segments_per_gpu)
@@ -1018,15 +1068,9 @@ expected_t synthetic_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch,
     return {};
 }
 
-/** The bytes of item @p item . */
-[[nodiscard]] static std::span<b8_t const> item_bytes_(training_items_t const &items, std::size_t item) noexcept {
-    return {items.contents + items.offsets[item], items.offsets[item + 1] - items.offsets[item]};
-}
-
 /** How many choices item @p item offers, zero when the step names none. */
 [[nodiscard]] static std::size_t item_choice_count_(training_items_t const &items, std::size_t item) noexcept {
-    if (!items.choices.offsets) return 0;
-    return items.choices.offsets[item + 1] - items.choices.offsets[item];
+    return items.choices.bytes.empty() ? 0 : items.choices.bytes[item].size();
 }
 
 /** Write item @p item 's choices and targets into row @p segment of @p staged , padding the rest;
@@ -1034,15 +1078,16 @@ expected_t synthetic_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch,
 [[nodiscard]] static expected_t stage_choices_(training_items_t const &items, std::size_t item,
                                                multimodal_batch_on_cpu_t &staged, std::size_t segment) noexcept {
     std::size_t const width = staged.segment_choices.extent(1), offered = item_choice_count_(items, item);
-    std::size_t const first = offered != 0 ? items.choices.offsets[item] : 0u;
+    std::span<u8_t const> const bytes = offered != 0 ? items.choices.bytes[item] : std::span<u8_t const> {};
+    std::span<f32_t const> const targets = offered != 0 ? items.choices.targets[item] : std::span<f32_t const> {};
     for (std::size_t choice = 0; choice != width; ++choice) {
         bool const live = choice < offered;
-        token_id_t const byte = live ? token_id_t {items.choices.bytes[first + choice]} : byte_pad_k;
+        token_id_t const byte = live ? token_id_t {bytes[choice]} : byte_pad_k;
         for (std::size_t earlier = 0; live && earlier != choice; ++earlier)
             if (staged.segment_choices[segment, earlier] == byte)
                 return expected_t::fail(status_t::invalid_input_k, "item {} offers byte {} twice", item, byte);
         staged.segment_choices[segment, choice] = byte;
-        staged.segment_choice_targets[segment, choice] = live ? items.choices.targets[first + choice] : 0.0f;
+        staged.segment_choice_targets[segment, choice] = live ? targets[choice] : 0.0f;
     }
     return {};
 }
@@ -1144,7 +1189,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
 
     for (std::size_t item = 0; item != count; ++item) {
         modality_t const modality = items.modalities[item];
-        std::span<b8_t const> const bytes = item_bytes_(items, item);
+        std::span<b8_t const> const bytes = items.contents[item];
         if (!shape.contains(modality))
             return expected_t::fail(status_t::shape_unsupported_k, "item {} has a modality the run left out", item);
         std::size_t const offered = item_choice_count_(items, item);
@@ -1189,7 +1234,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
         report.truncated += spanned > kept;
         order_[item] = static_cast<u32_t>(item);
     }
-    if (items.bags)
+    if (!items.bags.empty())
         std::sort(order_.begin(), order_.begin() + count, [&](u32_t left, u32_t right) noexcept {
             return items.bags[left] != items.bags[right] ? items.bags[left] < items.bags[right] : left < right;
         });
@@ -1200,7 +1245,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
     std::size_t group = 0;
     for (std::size_t begin = 0, end = 0; begin != count; begin = end, ++group) {
         end = begin + 1;
-        while (items.bags && end != count && items.bags[order_[end]] == items.bags[order_[begin]]) ++end;
+        while (!items.bags.empty() && end != count && items.bags[order_[end]] == items.bags[order_[begin]]) ++end;
         u32_t live = 0;
         for (std::size_t position = begin; position != end; ++position) live += tokens_[order_[position]] != 0;
         if (live == 0) continue;
@@ -1228,7 +1273,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
             u32_t const segment = used_segments[device]++, offset = cursors[device];
             cursors[device] += kept;
             modality_t const modality = items.modalities[item];
-            std::span<b8_t const> const bytes = item_bytes_(items, item);
+            std::span<b8_t const> const bytes = items.contents[item];
             staged.segment_offsets[segment] = offset;
             staged.segment_lengths[segment] = kept;
             staged.segment_modality[segment] = modality;
@@ -1236,7 +1281,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
             staged.segment_role[segment] = segment_role_t::anchor_k;
             staged.segment_prefix_length[segment] = 0u;
             staged.segment_key[segment] = 0u;
-            staged.segment_side[segment] = items.sides ? items.sides[item] : late_interaction_side_t::none_k;
+            staged.segment_side[segment] = items.sides.empty() ? late_interaction_side_t::none_k : items.sides[item];
             std::size_t const offered = item_choice_count_(items, item);
             if (expected_t staged_choices = stage_choices_(items, item, staged, segment); !staged_choices)
                 return staged_choices;
@@ -1403,9 +1448,10 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
             for (std::size_t row = 0; row != segments; ++row) {
                 u32_t const item = sources_[member, row];
                 u32_t const row_begin = written;
-                if (item != absent_k && edges_of.offsets)
-                    for (std::size_t edge = edges_of.offsets[item]; edge != edges_of.offsets[item + 1]; ++edge) {
-                        u32_t const target = edges_of.ids[edge];
+                if (item != absent_k && !edges_of.ids.empty())
+                    for (std::size_t edge = edges_of.ids.offsets[item]; edge != edges_of.ids.offsets[item + 1];
+                         ++edge) {
+                        u32_t const target = edges_of.ids.elements[edge];
                         if (target >= count)
                             return expected_t::fail(status_t::invalid_input_k, "item {} names item {} of {}", item,
                                                     target, count);
@@ -1414,7 +1460,8 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
                             return expected_t::fail(status_t::invalid_input_k,
                                                     "a device's edges exceed the {} it holds per set", edges);
                         ids[written] = destinations_[target];
-                        if (!weights.empty()) weights[written] = edges_of.weights ? edges_of.weights[edge] : 1.0f;
+                        if (!weights.empty())
+                            weights[written] = edges_of.weights.empty() ? 1.0f : edges_of.weights[edge];
                         ++written;
                     }
                 auto const row_edges = nk::range(row_begin, written);
@@ -1426,7 +1473,8 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
         }
         for (std::size_t row = 0; row != segments; ++row) {
             u32_t const item = sources_[member, row];
-            u32_t const group = item != absent_k && items.temperature_groups ? items.temperature_groups[item] : 0u;
+            u32_t const group = item != absent_k && !items.temperature_groups.empty() ? items.temperature_groups[item]
+                                                                                      : 0u;
             if (group >= groups)
                 return expected_t::fail(status_t::invalid_input_k, "item {} selects group {} of {}", item, group,
                                         groups);
@@ -1437,7 +1485,7 @@ expected_t items_source_t::relate_(trainer_t &trainer) noexcept {
         gpu_stream_t &stream = trainer.streams[member];
         switch_to_gpu_t gpu_scope {stream};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-        bool const ignores = items.ignore.offsets != nullptr;
+        bool const ignores = !items.ignore.ids.empty();
         expected_t staged = copy_host_to_device(std::span<u32_t const> {lengths_}, replica.to_vertex_lengths.span(),
                                                 stream);
         if (staged)

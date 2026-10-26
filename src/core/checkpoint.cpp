@@ -50,8 +50,11 @@ struct checkpoint_file_t {
         if (descriptor_ >= 0) ::close(descriptor_);
     }
 
-    /** Open @p path with the POSIX @p flags , creating it @c 0644 when they ask to. */
+    /** Open @p path with the POSIX @p flags , creating it @c 0644 when they ask to; a path
+     *  holding a NUL, which `open` would cut short there, is refused. */
     [[nodiscard]] static expected<checkpoint_file_t> make(sz::string_view_t path, int flags) noexcept {
+        if (path.contains('\0'))
+            return expected<checkpoint_file_t>::fail(status_t::invalid_input_k, "the path holds a NUL byte");
         sz::string_t path_text; // `open` needs a NUL-terminated `c_str`; short paths stay inline
         if (sz::failed(path_text.assign(path)))
             return expected<checkpoint_file_t>::fail(status_t::bad_alloc_k, "path staging failed");
@@ -68,20 +71,17 @@ struct checkpoint_file_t {
     int descriptor_ = -1;
 };
 
-/** Write @p count bytes at @p offset , whole or fail — looped, because one `pwrite` moves at
+/** Write @p bytes at @p offset , whole or fail — looped, because one `pwrite` moves at
  *  most ~2 GB on Linux and may stop short before that. */
-[[nodiscard]] static expected_t write_at_(checkpoint_file_t const &file, std::size_t offset, void const *bytes,
-                                          std::size_t count) noexcept {
-    char const *cursor = static_cast<char const *>(bytes);
-    std::size_t remaining = count;
-    while (remaining != 0) {
-        ssize_t const moved = ::pwrite(file.get(), cursor, remaining, static_cast<off_t>(offset));
+[[nodiscard]] static expected_t write_at_(checkpoint_file_t const &file, std::size_t offset,
+                                          bytes_view_t bytes) noexcept {
+    for (bytes_view_t remaining = bytes; !remaining.empty();) {
+        ssize_t const moved = ::pwrite(file.get(), remaining.data(), remaining.size(), static_cast<off_t>(offset));
         if (moved <= 0)
             return expected_t::fail(status_t::io_error_k, "pwrite failed at {} ({} bytes left of {})", offset,
-                                    remaining, count);
-        cursor += moved;
+                                    remaining.size(), bytes.size());
         offset += static_cast<std::size_t>(moved);
-        remaining -= static_cast<std::size_t>(moved);
+        remaining = remaining.subspan(static_cast<std::size_t>(moved));
     }
     return {};
 }
@@ -225,17 +225,17 @@ expected_t checkpoint_to_save_t::insert(sz::string_view_t name, nk::tensor_view<
     if (data.stride_bytes(1) != sizeof(nk_bf16_t) ||
         data.stride_bytes(0) != static_cast<std::ptrdiff_t>(data.extent(1) * sizeof(nk_bf16_t)))
         return expected_t::fail(status_t::shape_unsupported_k, "{} must be contiguous", name);
-    return insert_(name, checkpoint_dtype_t::bf16_k, data.data(), data.extent(0), data.extent(1));
+    return insert_(name, checkpoint_dtype_t::bf16_k, bytes_of(data), data.extent(0), data.extent(1));
 }
 
 expected_t checkpoint_to_save_t::insert(sz::string_view_t name, nk::tensor_view<f32_t, 2> data) noexcept {
     if (data.stride_bytes(1) != sizeof(f32_t) ||
         data.stride_bytes(0) != static_cast<std::ptrdiff_t>(data.extent(1) * sizeof(f32_t)))
         return expected_t::fail(status_t::shape_unsupported_k, "{} must be contiguous", name);
-    return insert_(name, checkpoint_dtype_t::f32_k, data.data(), data.extent(0), data.extent(1));
+    return insert_(name, checkpoint_dtype_t::f32_k, bytes_of(data), data.extent(0), data.extent(1));
 }
 
-expected_t checkpoint_to_save_t::insert_(sz::string_view_t name, checkpoint_dtype_t dtype, void const *data,
+expected_t checkpoint_to_save_t::insert_(sz::string_view_t name, checkpoint_dtype_t dtype, bytes_view_t data,
                                          std::size_t rows, std::size_t cols) noexcept {
     if (name.empty() || rows * cols == 0)
         return expected_t::fail(status_t::invalid_input_k, "an entry needs a name and data");
@@ -260,7 +260,7 @@ expected_t checkpoint_to_save_t::insert_(sz::string_view_t name, checkpoint_dtyp
     std::size_t const bytes = rows * cols * scalar_size;
     if (st::failed(payload_.resize(st::assume_uninitialized, entry.byte_offset + bytes)))
         return expected_t::fail(status_t::bad_alloc_k, "payload growth failed ({} bytes)", entry.byte_offset + bytes);
-    std::memcpy(payload_.data() + entry.byte_offset, data, bytes);
+    std::memcpy(payload_.data() + entry.byte_offset, data.data(), bytes);
     if (st::failed(entries_.push_back(std::move(entry)))) {
         (void)payload_.resize(payload_.size() - bytes); // a shrink never fails
         return expected_t::fail(status_t::bad_alloc_k, "entry table growth failed");
@@ -318,14 +318,16 @@ expected_t checkpoint_to_save_t::save(sz::string_view_t path) noexcept {
     {
         expected<checkpoint_file_t> file = checkpoint_file_t::make(partial_path.view(), O_WRONLY | O_CREAT | O_TRUNC);
         if (!file) return expected_t::fail(std::move(file));
-        expected_t written = write_at_(*file, 0, &header_length, sizeof(header_length));
-        if (written) written = write_at_(*file, sizeof(header_length), header.data(), header.size());
+        std::string_view const header_text = header;
+        expected_t written = write_at_(*file, 0, std::as_bytes(std::span {&header_length, 1}));
+        if (written) written = write_at_(*file, sizeof(header_length), std::as_bytes(std::span {header_text}));
         if (written && header_length != header.size())
-            written = write_at_(*file, sizeof(header_length) + header.size(), padding, header_length - header.size());
+            written = write_at_(*file, sizeof(header_length) + header.size(),
+                                std::as_bytes(std::span {padding}).first(header_length - header.size()));
 
         // The payload is already contiguous in insertion order — one write moves all of it.
         std::size_t const payload_base = sizeof(header_length) + header_length;
-        if (written) written = write_at_(*file, payload_base, payload_.data(), payload_.size());
+        if (written) written = write_at_(*file, payload_base, payload_);
         if (written && ::fsync(file->get()) != 0)
             written = expected_t::fail(status_t::io_error_k, "fsync failed: {}", partial_path.view());
         if (!written) return written;
@@ -420,7 +422,7 @@ expected<checkpoint_to_load_t> checkpoint_to_load_t::view(std::span<b8_t const> 
         if (st::failed(loaded.index_.upsert(st::mapping<u64_t, u32_t> {key, static_cast<u32_t>(position)})))
             return loaded_t::fail(status_t::bad_alloc_k, "entry index growth failed");
     }
-    loaded.payload_ = buffer.data() + sizeof(header_length) + header_length;
+    loaded.payload_ = buffer.subspan(sizeof(header_length) + header_length);
     return loaded_t {std::move(loaded)};
 }
 
@@ -435,7 +437,7 @@ nk::tensor_view<nk_bf16_t, 2> checkpoint_to_load_t::operator[](sz::string_view_t
     checkpoint_entry_t const *entry = find_(name, checkpoint_dtype_t::bf16_k);
     if (entry == nullptr) return {};
     return nk::tensor_view<nk_bf16_t, 2> {
-        static_cast<nk_bf16_t const *>(static_cast<void const *>(payload_ + entry->byte_offset)), entry->rows,
+        static_cast<nk_bf16_t const *>(static_cast<void const *>(payload_.data() + entry->byte_offset)), entry->rows,
         entry->cols};
 }
 
@@ -443,7 +445,8 @@ nk::tensor_view<f32_t, 2> checkpoint_to_load_t::float32(sz::string_view_t name) 
     checkpoint_entry_t const *entry = find_(name, checkpoint_dtype_t::f32_k);
     if (entry == nullptr) return {};
     return nk::tensor_view<f32_t, 2> {
-        static_cast<f32_t const *>(static_cast<void const *>(payload_ + entry->byte_offset)), entry->rows, entry->cols};
+        static_cast<f32_t const *>(static_cast<void const *>(payload_.data() + entry->byte_offset)), entry->rows,
+        entry->cols};
 }
 
 sz::string_view_t checkpoint_to_load_t::metadata(sz::string_view_t key) const noexcept {

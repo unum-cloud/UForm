@@ -177,6 +177,9 @@ static void test_library_probes(void) {
                "Every modality reads back from its name");
     expect(strcmp(uform_multimem_tier_name(uform_multimem_tier_peer_read_k), "peer-read") == 0,
            "A multimem tier spells its name");
+    expect(uform_multimem_tier_from_name(view_of("peer-read")) == uform_multimem_tier_peer_read_k &&
+               uform_multimem_tier_from_name(view_of("ring")) == uform_multimem_tier_switch_reduced_k,
+           "A multimem tier reads back from its name, and an unrecognized one as switch-reduced");
 
     for (int code = uform_cpu_class_serial_k; code <= uform_cpu_class_wasm64_extended_k; ++code)
         expect(uform_cpu_class_from_name(view_of(uform_cpu_class_name((uform_cpu_class_t)code))) == code,
@@ -242,7 +245,6 @@ static void test_model_load(void) {
     uform_model_description_t description = {0};
     uform_model_t const model = load_model(executor, &description);
     expect(description.quantization == uform_scalar_bf16_k, "A model runs in the quantization asked for");
-    expect(description.capabilities != NULL, "A model names the kernels it dispatched to");
     expect(description.cpu_class != uform_cpu_class_unknown_k, "A RAM model names the class it was packed for");
     expect(description.gpu_class == uform_gpu_class_unknown_k, "A RAM model names no GPU class");
 
@@ -313,6 +315,14 @@ static void test_model_load(void) {
                                                     .quantization = uform_scalar_bf16_k});
     expect(outcome.status == uform_status_io_k, "A missing checkpoint is an I/O failure");
     expect(refused == NULL, "A failed load leaves no model");
+    char const nul_path[] = "tiny.safetensors\0.missing";
+    uform_model_load_ram(&(uform_model_load_ram_t) {.model = &refused,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .path = {(uint8_t const *)nul_path, sizeof(nul_path) - 1},
+                                                    .quantization = uform_scalar_bf16_k});
+    expect(outcome.status == uform_status_invalid_argument_k, "A checkpoint path holding a NUL is refused");
+    expect(refused == NULL, "A refused path leaves no model");
 
     uform_model_free(buffered);
     uform_model_free(model);

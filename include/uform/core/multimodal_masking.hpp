@@ -182,10 +182,10 @@ struct masked_frames_config_t {
  */
 struct masked_tokens_t {
 
-    /** Allocate the decoder, its NumKong packs, and every scratch — once, at setup — dispatching
-     *  with @p capabilities . */
+    /** Allocate the decoder, its NumKong packs, and every scratch — once, at setup — calling the
+     *  kernels of @p numerics . */
     [[nodiscard]] static expected<masked_tokens_t> make(gpu_arena_t &arena, masked_tokens_config_t config,
-                                                        nk_capability_t capabilities) noexcept;
+                                                        gpu_numerics_t const &numerics) noexcept;
 
     /** Pack the decoder for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
      *  step, after the weights change and before the first @ref operator() . */
@@ -271,8 +271,8 @@ struct masked_tokens_t {
   private:
     masked_tokens_config_t config_ {};
 
-    /** The NumKong capabilities of the arena's device, picking every product and cast. */
-    nk_capability_t capabilities_ = 0;
+    /** The NumKong kernels of the arena's device class: every product and cast. */
+    gpu_numerics_t numerics_ {};
 
     /** The untied decoder @b [vocabulary,hidden] and its gradient buffer. */
     bf16r2_tensor_arena_t decoder_weight_ {}, decoder_weight_grad_ {};
@@ -326,10 +326,10 @@ struct masked_tokens_t {
  */
 struct masked_patches_t {
 
-    /** Allocate the recon head, its NumKong packs, and every scratch — once, at setup — dispatching
-     *  with @p capabilities . */
+    /** Allocate the recon head, its NumKong packs, and every scratch — once, at setup — calling the
+     *  kernels of @p numerics . */
     [[nodiscard]] static expected<masked_patches_t> make(gpu_arena_t &arena, masked_patches_config_t config,
-                                                         nk_capability_t capabilities) noexcept;
+                                                         gpu_numerics_t const &numerics) noexcept;
 
     /** Pack the recon head for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
      *  step, after the weights change and before the first @ref operator() . */
@@ -381,8 +381,8 @@ struct masked_patches_t {
   private:
     masked_patches_config_t config_ {};
 
-    /** The NumKong capabilities of the arena's device, picking every product and cast. */
-    nk_capability_t capabilities_ = 0;
+    /** The NumKong kernels of the arena's device class: every product and cast. */
+    gpu_numerics_t numerics_ {};
 
     /** The linear reconstruction head @b [patch_pixels,hidden] and its gradient buffer. */
     bf16r2_tensor_arena_t recon_weight_ {}, recon_weight_grad_ {};
@@ -431,10 +431,10 @@ struct masked_patches_t {
  */
 struct masked_frames_t {
 
-    /** Allocate the recon head, its NumKong packs, and every scratch — once, at setup — dispatching
-     *  with @p capabilities . */
+    /** Allocate the recon head, its NumKong packs, and every scratch — once, at setup — calling the
+     *  kernels of @p numerics . */
     [[nodiscard]] static expected<masked_frames_t> make(gpu_arena_t &arena, masked_frames_config_t config,
-                                                        nk_capability_t capabilities) noexcept;
+                                                        gpu_numerics_t const &numerics) noexcept;
 
     /** Pack the recon head for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
      *  step, after the weights change and before the first @ref operator() . */
@@ -483,8 +483,8 @@ struct masked_frames_t {
   private:
     masked_frames_config_t config_ {};
 
-    /** The NumKong capabilities of the arena's device, picking every product and cast. */
-    nk_capability_t capabilities_ = 0;
+    /** The NumKong kernels of the arena's device class: every product and cast. */
+    gpu_numerics_t numerics_ {};
 
     /** The linear reconstruction head @b [chunk_samples,hidden] and its gradient buffer. */
     bf16r2_tensor_arena_t recon_weight_ {}, recon_weight_grad_ {};

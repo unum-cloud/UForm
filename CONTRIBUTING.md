@@ -16,6 +16,7 @@ ctest --test-dir build_cpu_library
 - `cpu_library` builds the engine for the host alone, and `stub_library` the stand-in in `src_stub/`.
 - `nvidia_amd_library` adds both GPU residencies, while `debug`, `check`, `relwithdebinfo` and `release` also build the trainer and its suites.
 - `wasm32_emscripten_release` and `wasm32_wasi_release` build for WebAssembly, with Node or Wasmtime running the tests.
+- `-D UFORM_BUILD_BENCH=ON` adds the benchmarks [`bench/README.md`](bench/README.md) describes.
 
 Configuring CMake also arms the hooks in `.githooks/`; to arm them without a build, run `git config core.hooksPath .githooks`.
 
@@ -23,7 +24,7 @@ Configuring CMake also arms the hooks in `.githooks/`; to arm them without a bui
 
 | Path                     | Contents                                                      | Namespace              |
 | :----------------------- | :------------------------------------------------------------ | :--------------------- |
-| `c/uform/*.h`            | the C ABI, `uform.h` over the model, encode and train headers | none                   |
+| `c/uform/*.h`            | the C ABI, `uform.h` over the four headers beside it          | none                   |
 | `include/uform/core/`    | types, batches, device memory, cells, the mesh and transports | `unum::uform::core`    |
 | `include/uform/encoder/` | the encoder towers and kits, their geometry and entries       | `unum::uform::encoder` |
 | `include/uform/media/`   | image, video and audio decoding on the host                   | `unum::uform::media`   |
@@ -35,10 +36,13 @@ Configuring CMake also arms the hooks in `.githooks/`; to arm them without a bui
 | `src/core/`              | the compiled bodies of `include/uform/core/`                  | `unum::uform::core`    |
 | `src/loaders/`           | the compiled bodies of `include/uform/loaders/`               | `unum::uform::loaders` |
 | `src/train/`             | the compiled bodies of `include/uform/train/`                 | `unum::uform::train`   |
-| `src_stub/`              | the stand-in, every verb over the C++ standard library alone  | `unum::uform`          |
-| `tools/`                 | the `uform_base` trainer binary and its command line          | `unum::uform::tools`   |
+| `src_stub/`              | the stand-in, every verb over the C++ library and ForkUnion   | `unum::uform`          |
+| `tools/`                 | the `uform_base`, `uform_eval` and `uform_grow` binaries      | none                   |
+| `bench/`                 | the encoder and training-kernel benchmarks and their harness  | `unum::uform::bench`   |
 | `test/`                  | one conformance suite per cell, the harness, Python suites    | `unum::uform::test`    |
-| `scripts/data/`          | acquisition, repack and mining scripts, mixture JSONs, tests  | none                   |
+| `verification/`          | Promela models of the mesh protocols and their Spin runner    | none                   |
+| `scripts/data/`          | acquisition, repack and mining scripts, and their tests       | none                   |
+| `scripts/mixtures/`      | the dataset mixture JSONs a run trains on                     | none                   |
 | `scripts/slurm/`         | the `.sbatch` runners and the cluster notes                   | none                   |
 | `python/`                | the CPython extension over the C ABI                          | none                   |
 | `rust/`                  | the Rust crate over the C ABI                                 | none                   |
@@ -52,11 +56,23 @@ Templates and model implementations live in `include/uform/<dir>/` and are alway
 Dependencies run one way:
 
 - `encoder` and `media` build on the host libraries alone and never include an NVIDIA header; each vendor's kernels sit in their own `vram_kernels_<vendor>` unit.
-- Only `src/train/` and `src/train.cpp` touch the mesh, the multimem collectives and InfiniBand.
-- `loaders` and `train` build on `core`, `tools` builds on `train`, and `test` may include any of them.
+- The mesh, the multimem collectives and InfiniBand live in `core` beside the losses that use them, and of the verbs only `src/train.cpp` reaches them.
+- `loaders` and `train` build on `core`, `tools` and `bench` build on `train`, `core` or the C ABI, and `test` may include any of them.
 - `c/uform/` includes only itself and C headers, and every binding includes only `c/uform/`.
 
 The pre-commit hook refuses a namespace no directory backs and a nameless one.
+
+## Code Rules
+
+- __Atomics.__
+  Shared words are plain values touched through the class's ForkUnion atomic reference, and waits go through the class's waiter by address.
+  `std::atomic`, `std::atomic_ref`, `std::atomic_flag` and `notify_*` appear nowhere; device code uses `cuda::atomic_ref`.
+- __Numerics.__
+  Engines call kit verbs; kits call NumKong's per-capability kernels by name.
+  `_serial` kernels appear only in the serial class's kit rows and in test oracles, and `_best` or a capability mask never appears under `include/`.
+  An operation NumKong lacks is a kit operation in UForm, composed from NumKong components or written custom.
+- __Ranges.__
+  Past the C boundary a range is a `std::span`, a NumKong `tensor_view` or `tensor_span`, or a `tape_view`; a pointer with a count is a C ABI or vendor shape only.
 
 ## Data Scripts
 

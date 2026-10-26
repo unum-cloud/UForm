@@ -65,11 +65,11 @@ def test_relations_take_edges_or_tuples():
     assert relations.repel.weights is None and relations.ignore is None
 
 
-def test_choices_view_keeps_its_buffers():
-    """A `ChoicesView` keeps its three buffers as given, for the step to lend."""
-    offsets, choice_bytes, targets = array("Q", [0, 2, 2]), b"yn", array("f", [1.0, 0.0])
-    choices = uform.ChoicesView(offsets=offsets, bytes=choice_bytes, targets=targets)
-    assert choices.offsets is offsets and choices.bytes is choice_bytes and choices.targets is targets
+def test_mesh_job_is_a_name(executor: uform.Executor, tmp_path: Path):
+    """The job is a name, a `str`, refused as bytes or a path before the library is reached."""
+    for job in (b"run-17", tmp_path):
+        with pytest.raises(TypeError):
+            uform.Mesh.bootstrap(executor, uform.MeshOptions(directory=tmp_path, job=job))
 
 
 def test_step_report_starts_empty():
@@ -95,9 +95,11 @@ def test_mesh_and_trainer_need_a_gpu(executor: uform.Executor, tmp_path: Path):
     """On a build without GPUs, the bootstrap and the trainer report `DeviceError`."""
     if "serial" not in uform.capabilities_compiled():
         pytest.skip("the build carries a GPU backend")
-    options = uform.MeshOptions(host_domain_count=1, directory=tmp_path, job="run-17", timeout_seconds=1.5)
-    with pytest.raises(uform.DeviceError):
-        uform.Mesh.bootstrap(executor, options)
+    # A path crosses as the OS's bytes, so one that is not UTF-8 reaches the library too.
+    for directory in (tmp_path, bytes(tmp_path) + b"/\xff"):
+        options = uform.MeshOptions(host_domain_count=1, directory=directory, job="run-17", timeout_seconds=1.5)
+        with pytest.raises(uform.DeviceError):
+            uform.Mesh.bootstrap(executor, options)
     with pytest.raises(uform.DeviceError):
         uform.Trainer.init_vram(
             executor,

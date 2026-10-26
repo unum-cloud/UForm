@@ -773,7 +773,8 @@ static char const doc_Model_text_choose[] =                                     
     "  stats (TextEncodeStats, optional): Overwritten with this call's report.\n"                  //
     "\n"                                                                                           //
     "Returns:\n"                                                                                   //
-    "  RowsTape: One float32 probability per choice, in `choices` order, split by `offsets`.";
+    "  RowsTape: A flat (choices,) float32 tape, one probability per choice in `choices` order,\n" //
+    "    split by its `offsets`; `(tape, tape.offsets)` is what `Trainer.step` takes as targets.";
 
 static PyObject *Model_text_choose(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
                                    PyObject *args_names_tuple) {
@@ -834,8 +835,6 @@ static PyObject *Model_text_choose(PyObject *self, PyObject *const *args, Py_ssi
 
 #pragma endregion Verbs
 
-#pragma region Registration
-
 PyMethodDef uform_py_encode_verbs[] = {
     {"text_encode", (PyCFunction)Model_text_encode, uform_py_method_flags_k, doc_Model_text_encode},
     {"image_encode", (PyCFunction)Model_image_encode, uform_py_method_flags_k, doc_Model_image_encode},
@@ -848,5 +847,3 @@ PyMethodDef uform_py_encode_verbs[] = {
     {"text_choose", (PyCFunction)Model_text_choose, uform_py_method_flags_k, doc_Model_text_choose},
     {NULL, NULL, 0, NULL},
 };
-
-#pragma endregion Registration

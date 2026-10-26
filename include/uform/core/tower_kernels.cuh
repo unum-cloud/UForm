@@ -19,7 +19,7 @@
  */
 #pragma once
 
-#include <cmath>   // `fmaxf`, `fabsf`
+#include <cmath>   // `std::fmax`, `std::fabs`
 #include <cstddef> // `std::size_t`
 
 #include "uform/core/multimodal_batch.hpp" // `modality_t`
@@ -96,27 +96,28 @@ template <typename coords_type_, typename angles_type_>
     return angles.width[static_cast<std::size_t>(coords[token, 2]), pair - temporal_pairs - height_pairs];
 }
 
-/** Rotate the channel pairs @c [first,…) every @p stride of the @b [tokens,heads,head_width/2] grid in place,
- *  each NeoX split-half pair @c (k,k+head_width/2) of the role at @p role_offset by @p angle_sign times its
- *  angle; a sign of @c -1 is the inverse rotation. */
+/** Rotate the channel pairs @c [first,…) every @p stride of the @b [tokens,head_width/2] grid in
+ *  place: each pair's sine and cosine, of @p angle_sign times its angle, turn the NeoX split-half
+ *  pair @c (k,k+head_width/2) of all @p heads heads from @p role_offset ; a sign of @c -1 is the
+ *  inverse rotation. */
 template <typename values_type_, typename coords_type_, typename angles_type_, typename scalars_type_>
 constexpr void rope_rotate(values_type_ values, angles_type_ const &angles, coords_type_ coords, u32_t heads,
                            u32_t head_width, u32_t role_offset, f32_t angle_sign, std::size_t first, std::size_t stride,
                            scalars_type_ const &scalars) noexcept {
     u32_t const pairs_per_head = head_width >> 1u;
-    std::size_t const pairs_per_token = static_cast<std::size_t>(pairs_per_head) * heads;
-    std::size_t const total_pairs = pairs_per_token * values.extent(0);
+    std::size_t const total_pairs = static_cast<std::size_t>(pairs_per_head) * values.extent(0);
     for (std::size_t pair_index = first; pair_index < total_pairs; pair_index += stride) {
-        std::size_t const token = pair_index / pairs_per_token;
-        u32_t const head = static_cast<u32_t>((pair_index % pairs_per_token) / pairs_per_head);
+        std::size_t const token = pair_index / pairs_per_head;
         u32_t const pair = static_cast<u32_t>(pair_index % pairs_per_head);
-        u32_t const channel = role_offset + head * head_width + pair;
-        f32_t const real = scalars.widen(values[token, channel]);
-        f32_t const imaginary = scalars.widen(values[token, channel + pairs_per_head]);
         f32_t sine = 0, cosine = 0;
         scalars.sincos(angle_sign * rope_angle(pair, coords, token, angles), &sine, &cosine);
-        values[token, channel] = scalars.narrow(real * cosine - imaginary * sine);
-        values[token, channel + pairs_per_head] = scalars.narrow(real * sine + imaginary * cosine);
+        for (u32_t head = 0; head != heads; ++head) {
+            u32_t const channel = role_offset + head * head_width + pair;
+            f32_t const real = scalars.widen(values[token, channel]);
+            f32_t const imaginary = scalars.widen(values[token, channel + pairs_per_head]);
+            values[token, channel] = scalars.narrow(real * cosine - imaginary * sine);
+            values[token, channel + pairs_per_head] = scalars.narrow(real * sine + imaginary * cosine);
+        }
     }
 }
 
@@ -127,7 +128,7 @@ template <typename values_type_, typename scalars_type_>
     u32_t const width = static_cast<u32_t>(values.extent(1));
     f32_t largest = 0.0f;
     for (u32_t channel = thread; channel < width; channel += threads)
-        largest = fmaxf(largest, fabsf(scalars.widen(values[token, channel])));
+        largest = std::fmax(largest, std::fabs(scalars.widen(values[token, channel])));
     return largest;
 }
 
@@ -137,7 +138,7 @@ template <typename values_type_, typename shadow_type_, typename scalars_type_>
 constexpr f32_t quantize_token(values_type_ values, shadow_type_ shadow, std::size_t token, f32_t largest, u32_t thread,
                                u32_t threads, scalars_type_ const &scalars) noexcept {
     u32_t const width = static_cast<u32_t>(values.extent(1));
-    f32_t const scale = fmaxf(largest / e4m3_range_k, e4m3_descale_floor_k);
+    f32_t const scale = std::fmax(largest / e4m3_range_k, e4m3_descale_floor_k);
     f32_t const inverse = 1.0f / scale;
     for (u32_t channel = thread; channel < width; channel += threads)
         shadow[token, channel] = scalars.narrow_e4m3(scalars.widen(values[token, channel]) * inverse);
@@ -165,8 +166,9 @@ constexpr void rescale_tokens_cells(products_type_ products, scales_type_ token_
 
 /** The packed rows' layout, serially: @c packed_offsets prefix sums of @p lengths , and @c pool_offsets[s]=s , both
  *  @b [segments+1] . */
-template <typename lengths_type_>
-constexpr void fill_packed_layout(lengths_type_ lengths, u32_t *packed_offsets, u32_t *pool_offsets) noexcept {
+template <typename lengths_type_, typename offsets_type_>
+constexpr void fill_packed_layout(lengths_type_ lengths, offsets_type_ packed_offsets,
+                                  offsets_type_ pool_offsets) noexcept {
     std::size_t const segments = lengths.extent(0);
     u32_t offset = 0;
     for (std::size_t segment = 0; segment != segments; ++segment) {

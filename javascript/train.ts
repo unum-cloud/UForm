@@ -3,7 +3,7 @@
  * contrastive loss into one optimizer step. GPU-only, so the WebAssembly backend reports `unsupported`.
  */
 import type { CompiledMesh, CompiledMeshDescription, CompiledStepped, CompiledTrainer, Completion } from "./library.js";
-import { Rows, bytesTape } from "./encode.js";
+import { Rows, type Tape, bytesTape, samplesTape } from "./encode.js";
 import {
   Answer,
   Arena,
@@ -33,9 +33,9 @@ export interface MeshOptions {
   hostDomainCount?: number;
   /** GPUs one NVLink multicast domain spans; absent derives the host. */
   gpusPerMultimemDomain?: number;
-  /** The directory every host sees, where processes exchange their facts; required with peers. */
+  /** The path of the directory every host sees, crossing as its UTF-8 bytes; required with peers. */
   directory?: string;
-  /** The run's unique name inside `directory`; required with peers. */
+  /** The run's unique name, naming one directory inside `directory`; required with peers. */
   job?: string;
   /** Seconds any wait for a peer lasts before the call fails; absent derives 120. */
   timeoutSeconds?: number;
@@ -190,30 +190,26 @@ export interface Edges {
   weights?: Float32Array | number[];
 }
 
-/** Each item's legal choices and their targets, as compressed sparse rows. Mirrors `uform_choices_view_t`. */
-export interface ChoicesView {
-  /** The step's `count + 1` offsets into `bytes` and `targets`; an item offering none makes no choice. */
-  offsets: Uint32Array | number[];
-  /** Each item's distinct legal bytes, end to end. */
-  bytes: Uint8Array | number[];
-  /** The target probability of each byte, summing to one per item. */
-  targets: Float32Array | number[];
-}
-
 /** This process's share of one step. Mirrors the inputs of `uform_trainer_step_t`. */
 export interface TrainerBatch {
   /** The modality of each item. */
   modalities: readonly Modality[];
-  /** Each item's bytes: UTF-8 text or an encoded file. */
-  contents: readonly (string | Uint8Array)[];
+  /** Each item's bytes, UTF-8 text or an encoded file, or a tape of them. */
+  contents: readonly (string | Uint8Array)[] | Tape<Uint8Array>;
   /** The bag of each item; items sharing a bag land on one device. */
   bags?: Uint32Array | number[];
   /** The temperature group of each item. */
   temperatureGroups?: Uint32Array | number[];
   /** The late-interaction side of each item; absent makes every item `LateInteractionSide.None`. */
   sides?: readonly LateInteractionSide[];
-  /** The choices, read when the run trains them; the call appends the mask byte to each choosing text. */
-  choices?: ChoicesView;
+  /**
+   * Each item's legal choices, one byte each, as `textChoose` takes them; an item offering none makes no choice. Read
+   * when the run trains choices; the call appends the mask byte to each choosing text.
+   */
+  choices?: readonly (string | Uint8Array)[] | Tape<Uint8Array>;
+  /** The target probability of each choice, an entry per item as long as its choices and summing to one, as
+   *  `textChoose` answers its `Probabilities`; required with `choices`. */
+  choiceTargets?: readonly Float32Array[] | Tape<Float32Array>;
   /** The contrastive targets. */
   relations?: { attract?: Edges; repel?: Edges; ignore?: Edges };
 }
@@ -257,7 +253,10 @@ abstract class TrainerVerbs<Receiving extends "blocking" | "deferred"> {
     const contents = bytesTape(batch.contents);
     const modalities = Int32Array.from(batch.modalities, modalityCode);
     const { attract, repel, ignore } = batch.relations ?? {};
-    const choices = batch.choices;
+    if ((batch.choices === undefined) !== (batch.choiceTargets === undefined))
+      throw fail(Status.InvalidArgument, "Pass both 'choices' and 'choiceTargets', or neither.");
+    const choices = batch.choices && bytesTape(batch.choices);
+    const choiceTargets = batch.choiceTargets && samplesTape(batch.choiceTargets);
     const arena = config.arena?.compiled;
     const scalar = arena ? scalarCode(config.outputsScalar ?? Scalar.F32) : undefined;
     return submitAs(
@@ -272,9 +271,10 @@ abstract class TrainerVerbs<Receiving extends "blocking" | "deferred"> {
           uint32Of(batch.bags),
           uint32Of(batch.temperatureGroups),
           batch.sides && Int32Array.from(batch.sides),
-          uint32Of(choices?.offsets),
-          choices && (choices.bytes instanceof Uint8Array ? choices.bytes : Uint8Array.from(choices.bytes)),
-          float32Of(choices?.targets),
+          choices?.data,
+          choices?.offsets,
+          choiceTargets?.data,
+          choiceTargets?.offsets,
           uint32Of(attract?.offsets),
           uint32Of(attract?.ids),
           float32Of(attract?.weights),

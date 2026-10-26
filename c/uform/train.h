@@ -35,6 +35,12 @@
  *  mesh before the forward. Items sharing a bag travel together. Relations index the step's own items; the
  *  library rebases them onto the global axis after the shuffle.
  *
+ *  @section train_paths Paths
+ *
+ *  A path arrives as a @c uform_bytes_view_t of the operating system's own bytes, not necessarily
+ *  UTF-8 and never terminated; an embedded NUL, which no path can hold, is refused with
+ *  @c uform_status_invalid_argument_k. A name, like the mesh's @c job, is UTF-8.
+ *
  *  @code{.c}
  *  uform_mesh_t mesh = NULL;
  *  uform_mesh_bootstrap(&(uform_mesh_bootstrap_t){.mesh = &mesh, .executor = executor, .outcome = &outcome,
@@ -373,10 +379,11 @@ typedef struct uform_mesh_options_t {
     /** GPUs one NVLink multicast domain spans, a fabric property no local probe sees; zero derives the host. */
     size_t gpus_per_multimem_domain;
 
-    /** The directory every host sees, where processes exchange their facts; required with peers. */
+    /** The path of the directory every host sees, where processes exchange their facts; required
+     *  with peers. */
     uform_bytes_view_t directory;
 
-    /** The run's unique name inside @c directory; required with peers. */
+    /** The run's unique name, naming one directory inside @c directory; required with peers. */
     uform_bytes_view_t job;
 
     /** Seconds any wait for a peer lasts before the call fails; zero derives 120. */
@@ -475,6 +482,9 @@ UFORM_EXPORT void uform_mesh_free(uform_mesh_t mesh);
 /** The canonical spelling of a multimem tier, as @c uform_multimem_tier_peer_read_k spells "peer-read". */
 UFORM_EXPORT char const* uform_multimem_tier_name(uform_multimem_tier_t tier);
 
+/** Reads a multimem tier back; @c uform_multimem_tier_switch_reduced_k when unrecognized. */
+UFORM_EXPORT uform_multimem_tier_t uform_multimem_tier_from_name(uform_bytes_view_t name);
+
 /** A training run: the tower replicas, gradients, optimizer moments, heads, temperatures and the collectives
  *  sized by them, on the executor's devices. */
 typedef struct uform_trainer_handle_t* uform_trainer_t;
@@ -494,8 +504,8 @@ typedef struct uform_trainer_init_vram_t {
     /** Whether the call blocks or returns once queued; zero blocks. Peers wait for each other either way. */
     uform_completion_t completion;
 
-    /** The @b optional checkpoint to continue from, at its saved step; empty starts from @c seed. A
-     *  checkpoint of another geometry reports @c uform_status_config_mismatch_k. */
+    /** The @b optional path of the checkpoint to continue from, at its saved step; empty starts
+     *  from @c seed. A checkpoint of another geometry reports @c uform_status_config_mismatch_k. */
     uform_bytes_view_t resume;
 
     /** Transformer blocks stacked. */
@@ -611,20 +621,6 @@ typedef struct uform_trainer_step_stats_t {
     size_t dropped;
 } uform_trainer_step_stats_t;
 
-/** Each item's legal choices and their targets: @c count + 1 offsets into both, in host memory. */
-typedef struct uform_choices_view_t {
-
-    /** The step's @c count + 1 non-decreasing offsets; @c NULL makes no choices, and an item
-     *  offering none makes none. */
-    size_t const* offsets;
-
-    /** Item @c i offers the distinct bytes @c bytes[offsets[i]] up to @c bytes[offsets[i+1]]. */
-    uint8_t const* bytes;
-
-    /** The target probability of each byte, paired with @c bytes, summing to one per item. */
-    float const* targets;
-} uform_choices_view_t;
-
 /** The arguments of @c uform_trainer_step. */
 typedef struct uform_trainer_step_t {
 
@@ -648,7 +644,9 @@ typedef struct uform_trainer_step_t {
      *  @c uform_status_unsupported_k. */
     uform_modality_t const* modalities;
 
-    /** The items' bytes, one entry each, of @c uform_scalar_u8_k: UTF-8 text or an encoded file. */
+    /** The items' bytes, one entry each, of @c uform_scalar_u8_k: UTF-8 text or an encoded file,
+     *  as @c modalities tags it. One tape mixes the modalities, so it is not the encode verbs'
+     *  @c texts. */
     uform_tape_view_t contents;
 
     /** The @b optional bag of each item, @c count of them in host memory; items sharing a bag land on one
@@ -663,10 +661,17 @@ typedef struct uform_trainer_step_t {
      *  @c NULL makes every item @c uform_late_interaction_side_none_k. */
     uform_late_interaction_side_t const* sides;
 
-    /** The @b optional choices, read when the run trains them: a text item offering any is the
-     *  state its answer follows, and the call appends the mask byte, cutting a state longer than a
-     *  row at its head. */
-    uform_choices_view_t choices;
+    /** The @b optional legal choices of each item, one byte each, @c uform_scalar_u8_k, as
+     *  @c uform_text_choose_t reads them; @c NULL offsets make no choices, and an item offering
+     *  none makes none. Read when the run trains choices: a text item offering any is the state
+     *  its answer follows, and the call appends the mask byte, cutting a state longer than a row
+     *  at its head. */
+    uform_tape_view_t choices;
+
+    /** The target probability of each choice, @c uform_scalar_f32_k, in @c choices order, as
+     *  @c uform_text_choose_t lands its probabilities: each item's entry as long as its entry of
+     *  @c choices, summing to one. Read with @c choices. */
+    uform_tape_view_t choice_targets;
 
     /** The contrastive targets, read unless the objective is masked alone; a contrastive step naming no
      *  attract edge reports @c uform_status_invalid_argument_k. */

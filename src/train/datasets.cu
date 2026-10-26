@@ -126,6 +126,7 @@ using namespace unum::uform::train;
 
 expected<mixture_t> mixture_t::read(sz::string_view_t path) noexcept {
     using result_t = expected<mixture_t>;
+    if (path.contains('\0')) return result_t::fail(status_t::invalid_input_k, "the mixture path holds a NUL byte");
     sz::string_t terminated;
     if (sz::failed(terminated.assign(path))) return result_t::fail(status_t::bad_alloc_k, "path staging failed");
     yyjson_read_err error {};

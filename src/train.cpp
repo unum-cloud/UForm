@@ -18,6 +18,7 @@
 #include "uform/train/trainer.hpp"
 
 #include "lib.hpp"
+#include "train/numerics.hpp" // `gpu_numerics_of`
 
 using namespace unum::uform;
 namespace ut = unum::uform::train;
@@ -31,8 +32,9 @@ using core::u32_t;
 struct uform_mesh_handle_t {
     uform_executor_t executor = nullptr;
 
-    /** Trainers borrowing the mesh; a free waits for zero. */
-    std::atomic<std::size_t> trainers {0};
+    /** Trainers borrowing the mesh, touched through the standard atomic reference; a free waits for
+     *  zero. */
+    u64_t trainers = 0;
 
     std::unique_ptr<ut::mesh_t> mesh;
 };
@@ -62,10 +64,10 @@ struct uform_trainer_handle_t {
     return executor && std::holds_alternative<vram_executor_t>(executor->executor);
 }
 
-/** The device ordinals of a VRAM @p executor , the members of its mesh. */
+/** The CUDA ordinals of a VRAM @p executor 's devices, the members of its mesh. */
 [[nodiscard]] static bool devices_of(uform_executor_t executor, st::basic_vector<i32_t> &devices) noexcept {
     for (vram_device_t const &device : std::get<vram_executor_t>(executor->executor).devices)
-        if (st::failed(devices.push_back(i32_t {device.ordinal}))) return false;
+        if (st::failed(devices.push_back(i32_t {device.vendor_ordinal}))) return false;
     return true;
 }
 
@@ -94,11 +96,93 @@ struct uform_trainer_handle_t {
     return nullptr;
 }
 
-/** Publish a training @p failure with @p message , or, when the device failed, with the first
- *  fault a GPU of @p mesh recorded before it trapped; a null @p mesh , one that dies with the
- *  call, has none. */
+/** The static messages one verb's engine failures carry, one per engine status, since the engine's
+ *  own formatted description cannot outlive the call. */
+struct failure_messages_t {
+    char const *other;
+    char const *out_of_memory;
+    char const *invalid;
+    char const *unsupported;
+    char const *device;
+    char const *io;
+};
+
+static constexpr failure_messages_t bootstrap_failures_k {
+    "The mesh bootstrap failed",
+    "Host memory ran out during the mesh bootstrap",
+    "The mesh options are invalid: an index past the count, or peers without a directory and a job",
+    "The processes disagree on the mesh's shape, GPU class or capabilities",
+    "A GPU of the mesh could not be probed or pinned",
+    "The exchange directory could not be written, or a peer never arrived",
+};
+
+static constexpr failure_messages_t build_failures_k {
+    "The trainer could not be built",
+    "Device memory ran out building the trainer",
+    "The trainer's geometry does not fit its devices",
+    "The trainer's geometry is unsupported on these devices",
+    "A device failed while building the trainer",
+    "A peer never arrived to wire the trainer's collectives",
+};
+
+static constexpr failure_messages_t resume_failures_k {
+    "The checkpoint could not be resumed",
+    "Memory ran out placing the checkpoint",
+    "The checkpoint is malformed or holds another geometry",
+    "The checkpoint holds tensors of another geometry",
+    "A device failed placing the checkpoint",
+    "The checkpoint could not be read",
+};
+
+static constexpr failure_messages_t source_failures_k {
+    "The items source could not be built",
+    "Memory ran out building the items source",
+    "The items source does not fit the trainer's batch",
+    "The items source does not support the run's modalities",
+    "A device failed building the items source",
+    "The items source could not read what it stages",
+};
+
+static constexpr failure_messages_t step_failures_k {
+    "The step failed",
+    "Memory ran out during the step",
+    "The step's items, choices or relations are invalid",
+    "The step's items do not fit the run's envelope or modalities",
+    "A device failed during the step",
+    "A peer missed the step's exchange",
+};
+
+static constexpr failure_messages_t save_failures_k {
+    "The checkpoint could not be written",
+    "Memory ran out staging the checkpoint",
+    "The checkpoint path or its tensors are invalid",
+    "The checkpoint holds tensors the format cannot store",
+    "The weights could not be read back from the devices",
+    "The checkpoint file could not be written or renamed into place",
+};
+
+/** The message of @p messages naming @p failure 's status. */
+[[nodiscard]] static char const *message_of(core::expected_t const &failure,
+                                            failure_messages_t const &messages) noexcept {
+    switch (failure.status_) {
+    case core::status_t::bad_alloc_k: return messages.out_of_memory;
+    case core::status_t::invalid_input_k: return messages.invalid;
+    case core::status_t::shape_unsupported_k: return messages.unsupported;
+    case core::status_t::cuda_error_k: return messages.device;
+    case core::status_t::io_error_k: return messages.io;
+    default: return messages.other;
+    }
+}
+
+/** Whether @p path holds a NUL byte, which no path can and a C string would cut it short at. */
+[[nodiscard]] static bool holds_nul(uform_bytes_view_t path) noexcept { return text_of(path).contains('\0'); }
+
+/** Publish a training @p failure with the message of @p messages naming its status, or, when
+ *  the device failed, with the first fault a GPU of @p mesh recorded before it trapped; a null
+ *  @p mesh , one that dies with the call, has none. */
 static bool propagate_train_error(core::expected_t const &failure, uform_mesh_handle_t *mesh, uform_outcome_t *outcome,
-                                  char const *message) noexcept {
+                                  failure_messages_t const &messages) noexcept {
+    char const *message = message_of(failure, messages);
     if (failure.status_ == core::status_t::cuda_error_k && mesh)
         for (core::gpu_fault_t const &fault : mesh->mesh->topology.faults())
             if (char const *const recorded = fault_message(fault.code)) {
@@ -112,6 +196,9 @@ static bool propagate_train_error(core::expected_t const &failure, uform_mesh_ha
 [[nodiscard]] static std::unique_ptr<uform_mesh_handle_t> bootstrap(uform_executor_t executor,
                                                                     uform_mesh_options_t const &options,
                                                                     uform_outcome_t *outcome) noexcept {
+    if (holds_nul(options.directory) || holds_nul(options.job))
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The directory and the job hold no NUL byte"),
+               nullptr;
     st::basic_vector<i32_t> devices;
     if (!devices_of(executor, devices))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the devices"), nullptr;
@@ -132,7 +219,7 @@ static bool propagate_train_error(core::expected_t const &failure, uform_mesh_ha
         uform_status_t const status = joined.status_ == core::status_t::shape_unsupported_k
                                           ? uform_status_config_mismatch_k
                                           : train_status_of(joined);
-        return propagate_error(status, outcome, "The mesh bootstrap failed"), nullptr;
+        return propagate_error(status, outcome, message_of(joined, bootstrap_failures_k)), nullptr;
     }
     handle->executor = executor;
     return handle;
@@ -252,9 +339,11 @@ static bool propagate_train_error(core::expected_t const &failure, uform_mesh_ha
     }
 }
 
-/** Every edge set of @p view as the engine reads it. */
-[[nodiscard]] static ut::item_edges_t edges_of(uform_edges_view_t const &view) noexcept {
-    return {view.offsets, view.ids, view.weights};
+/** The edge set @p view over @p count items as the engine reads it. */
+[[nodiscard]] static ut::item_edges_t edges_of(uform_edges_view_t const &view, std::size_t count) noexcept {
+    if (!view.offsets) return {};
+    std::size_t const edges = view.offsets[count];
+    return {{{view.ids, edges}, {view.offsets, count + 1}}, {view.weights, view.weights ? edges : 0}};
 }
 
 /** Land the pooled vertex of every item of the last step in @p memory as @p scalar rows, zero for items that carried
@@ -333,9 +422,9 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t *arguments) {
 UFORM_EXPORT void uform_mesh_free(uform_mesh_t mesh) {
     if (!mesh) return;
     finish_calls_using(mesh);
-    for (std::size_t trainers = mesh->trainers.load(std::memory_order_acquire); trainers;
-         trainers = mesh->trainers.load(std::memory_order_acquire))
-        mesh->trainers.wait(trainers, std::memory_order_acquire);
+    fu::standard_atomic_ref<u64_t> trainers {mesh->trainers};
+    for (u64_t seen = trainers.load(std::memory_order_acquire); seen; seen = trainers.load(std::memory_order_acquire))
+        mesh->executor->host_verbs->wait(mesh->trainers, seen);
     delete mesh;
 }
 
@@ -352,6 +441,8 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t *arguments) 
     ut::trainer_config_t config;
     if (char const *refused = configure(*arguments, config))
         return propagate_error(uform_status_invalid_argument_k, outcome, refused), void();
+    if (holds_nul(arguments->resume))
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The resume path holds a NUL byte"), void();
 
     std::unique_ptr<uform_trainer_handle_t> handle {new (std::nothrow) uform_trainer_handle_t {}};
     if (!handle)
@@ -369,24 +460,25 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t *arguments) 
     if (!handle->trainer || !handle->items || !devices_of(executor, devices))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the trainer"), void();
     if (core::expected_t const built = ut::trainer_t::make(*handle->trainer, *mesh_of(*handle).mesh, config, devices,
-                                                           capabilities_of(executor));
+                                                           ut::gpu_numerics_of(capabilities_of(executor)));
         !built)
-        return propagate_train_error(built, arguments->mesh, outcome, "The trainer could not be built"), void();
+        return propagate_train_error(built, arguments->mesh, outcome, build_failures_k), void();
     if (arguments->resume.length) {
         if (core::expected_t const resumed = handle->trainer->resume(text_of(arguments->resume)); !resumed)
-            return propagate_error(resume_status_of(resumed), outcome, "The checkpoint could not be resumed"), void();
+            return propagate_error(resume_status_of(resumed), outcome, message_of(resumed, resume_failures_k)), void();
         std::size_t const tensors = handle->trainer->replicas[0].weights.size();
         progress_ticks_t ticks(arguments->progress, tensors);
         if (ticks(tensors) == continuation_t::cancel_k)
             return propagate_error(uform_status_cancelled_k, outcome, "The handler cancelled the resume"), void();
     }
     if (core::expected_t const sourced = ut::items_source_t::make(*handle->items, *handle->trainer); !sourced)
-        return propagate_train_error(sourced, arguments->mesh, outcome, "The items source could not be built"), void();
+        return propagate_train_error(sourced, arguments->mesh, outcome, source_failures_k), void();
     std::size_t const segments = devices.size() * config.batch.max_segments_per_gpu;
     if (st::failed(handle->modalities.resize(segments)) || st::failed(handle->sides.resize(segments)) ||
         st::failed(handle->embeddings.resize(segments * config.hidden * sizeof(f32_t))))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the step columns"), void();
-    if (arguments->mesh) arguments->mesh->trainers.fetch_add(1, std::memory_order_acq_rel);
+    if (arguments->mesh)
+        fu::standard_atomic_ref<u64_t> {arguments->mesh->trainers}.fetch_add(1, std::memory_order_acq_rel);
     *arguments->trainer = handle.release();
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
@@ -426,14 +518,21 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) {
             return propagate_error(uform_status_invalid_argument_k, outcome, "An item's side is unrecognized"), void();
         handle->sides[item] = static_cast<core::late_interaction_side_t>(arguments->sides[item]);
     }
-    uform_choices_view_t const &choices = arguments->choices;
+    uform_tape_view_t const &choices = arguments->choices, &targets = arguments->choice_targets;
     if (choices.offsets && !config.chooses())
         return propagate_error(uform_status_unsupported_k, outcome, "The run trains no choices"), void();
-    if (choices.offsets && count && (!choices.bytes || !choices.targets))
+    if (choices.offsets && count && (!choices.data || !targets.data || !targets.offsets))
         return propagate_error(uform_status_invalid_argument_k, outcome, "Choices need bytes and targets"), void();
-    for (std::size_t item = 0; choices.offsets && item != count; ++item)
+    if (choices.offsets && count && (choices.scalar != uform_scalar_u8_k || targets.scalar != uform_scalar_f32_k))
+        return propagate_error(uform_status_unsupported_layout_k, outcome, "Choices are bytes, their targets f32"),
+               void();
+    for (std::size_t item = 0; choices.offsets && item != count; ++item) {
         if (choices.offsets[item + 1] < choices.offsets[item])
             return propagate_error(uform_status_malformed_k, outcome, "The choice offsets must not decrease"), void();
+        std::size_t const offered = choices.offsets[item + 1] - choices.offsets[item];
+        if (targets.offsets[item + 1] - targets.offsets[item] != offered)
+            return propagate_error(uform_status_shape_mismatch_k, outcome, "Every choice needs one target"), void();
+    }
     uform_edges_view_t const &attract = arguments->relations.attract;
     if (config.contrasts() && (!attract.offsets || attract.offsets[count] == attract.offsets[0]))
         return propagate_error(uform_status_invalid_argument_k, outcome, "A contrastive step names attract edges"),
@@ -448,19 +547,18 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) {
 
     ut::items_source_t &source = *handle->items;
     source.items = {{handle->modalities.data(), count},
-                    static_cast<b8_t const *>(contents.data),
-                    contents.offsets,
-                    arguments->bags,
-                    arguments->temperature_groups,
-                    edges_of(attract),
-                    edges_of(arguments->relations.repel),
-                    edges_of(arguments->relations.ignore),
-                    arguments->sides ? handle->sides.data() : nullptr,
-                    {choices.offsets, choices.bytes, choices.targets}};
+                    tape_of<b8_t const>(contents, count),
+                    {arguments->bags, arguments->bags ? count : 0},
+                    {arguments->temperature_groups, arguments->temperature_groups ? count : 0},
+                    edges_of(attract, count),
+                    edges_of(arguments->relations.repel, count),
+                    edges_of(arguments->relations.ignore, count),
+                    {handle->sides.data(), arguments->sides ? count : 0},
+                    {tape_of<core::u8_t const>(choices, count), tape_of<f32_t const>(targets, count)}};
     core::optimizer_step_t const optimizer_step {trainer.completed_steps};
     ut::step_report_t report;
     if (core::expected_t const stepped = trainer.step(ut::batch_source_of(source), optimizer_step, report); !stepped)
-        return propagate_train_error(stepped, &mesh_of(*handle), outcome, "The step failed"), void();
+        return propagate_train_error(stepped, &mesh_of(*handle), outcome, step_failures_k), void();
     if (arguments->stats) {
         ut::telemetry_t const telemetry = trainer.telemetry(optimizer_step);
         *arguments->stats = {optimizer_step.ordinal + 1u,
@@ -491,8 +589,10 @@ UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t *arguments) {
     if (!handle || handle->executor != arguments->executor || !arguments->path.length)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The trainer, its executor and a path"),
                void();
+    if (holds_nul(arguments->path))
+        return propagate_error(uform_status_invalid_argument_k, outcome, "The path holds a NUL byte"), void();
     if (core::expected_t const saved = handle->trainer->save(text_of(arguments->path)); !saved)
-        return propagate_train_error(saved, &mesh_of(*handle), outcome, "The checkpoint could not be written"), void();
+        return propagate_train_error(saved, &mesh_of(*handle), outcome, save_failures_k), void();
     std::size_t const tensors = handle->trainer->replicas[0].weights.size();
     progress_ticks_t ticks(arguments->progress, tensors);
     (void)ticks(tensors);
@@ -504,10 +604,8 @@ UFORM_EXPORT void uform_trainer_free(uform_trainer_t trainer) {
     finish_calls_using(trainer);
     trainer->items.reset();
     trainer->trainer.reset();
-    if (uform_mesh_t const *borrowed = std::get_if<uform_mesh_t>(&trainer->mesh)) {
-        (*borrowed)->trainers.fetch_sub(1, std::memory_order_acq_rel);
-        (*borrowed)->trainers.notify_all();
-    }
+    if (uform_mesh_t const *borrowed = std::get_if<uform_mesh_t>(&trainer->mesh))
+        fu::standard_atomic_ref<u64_t> {(*borrowed)->trainers}.fetch_sub(1, std::memory_order_acq_rel);
     delete trainer;
 }
 

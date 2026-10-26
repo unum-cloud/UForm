@@ -105,18 +105,16 @@ extern "C" {
 /** Marks exported functions: exported while building the shared library, imported when consuming it on
  *  Windows, and of default visibility on ELF and Mach-O. Define it to override. */
 #ifndef UFORM_EXPORT
-#if defined(_WIN32) || defined(__CYGWIN__)
-#if defined(UFORM_EXPORTING)
+#if (defined(_WIN32) || defined(__CYGWIN__)) && defined(UFORM_EXPORTING)
 #define UFORM_EXPORT __declspec(dllexport)
-#else
+#elif defined(_WIN32) || defined(__CYGWIN__)
 #define UFORM_EXPORT __declspec(dllimport)
-#endif
 #elif defined(__GNUC__) || defined(__clang__)
 #define UFORM_EXPORT __attribute__((visibility("default")))
 #else
 #define UFORM_EXPORT
 #endif
-#endif
+#endif // UFORM_EXPORT
 
 /** The library's version, which the release tooling rewrites in place. */
 #define UFORM_VERSION_MAJOR 4
@@ -559,7 +557,8 @@ typedef struct uform_ram_options_t {
     size_t memory_domains_count;
 
     /** The class to dispatch as if the CPU were of it, admitting every rung whose features it
-     *  holds; @c uform_cpu_class_unknown_k derives the CPU's own. */
+     *  holds; @c uform_cpu_class_unknown_k derives the CPU's own. A class this CPU cannot run
+     *  reports @c uform_status_unsupported_k. */
     uform_cpu_class_t cpu_class;
 } uform_ram_options_t;
 
@@ -574,7 +573,9 @@ typedef struct uform_vram_options_t {
     size_t devices_count;
 
     /** The class every named device dispatches as; @c uform_gpu_class_unknown_k derives the
-     *  devices' own, which must agree, or the call reports @c uform_status_config_mismatch_k. */
+     *  devices' own, which must agree, or the call reports @c uform_status_config_mismatch_k. A
+     *  class a named device cannot run, or no compiled variant takes, reports
+     *  @c uform_status_unsupported_k. */
     uform_gpu_class_t gpu_class;
 } uform_vram_options_t;
 
@@ -658,7 +659,9 @@ typedef struct uform_executor_for_vram_t {
     /** The devices of the models it will drive; copied, not borrowed. */
     uform_vram_options_t vram;
 
-    /** The @b optional borrowed CUDA streams, one per device in @c vram order; @c NULL creates its own. */
+    /** The @b optional borrowed CUDA streams, one per device in @c vram order; @c NULL creates its
+     *  own. Borrowing is not wired yet, so any non-null value reports
+     *  @c uform_status_unsupported_k. */
     void* const* streams;
 
     /** The @b optional ceiling on scratch bytes per device; zero lets scratch grow as batches ask. A batch
@@ -670,8 +673,9 @@ typedef struct uform_executor_for_vram_t {
 } uform_executor_for_vram_t;
 
 /**
- *  @brief Opens one submission stream on every named device, or borrows the caller's, all of them driven by
- *      whichever host thread submits.
+ *  @brief Opens one submission stream on every named device, all of them driven by whichever
+ *      host thread submits; borrowing the caller's streams reports @c uform_status_unsupported_k
+ *      for now.
  *
  *  Text and JPEG images never leave the device; the rest of decoding - container demux, PNG and WebP, audio,
  *  and every modality on AMD - runs on host threads the executor spawns beside its streams, 7/8 of the cores

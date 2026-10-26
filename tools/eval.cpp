@@ -39,7 +39,6 @@
 #include <cstring> // `std::memcpy`, `std::strcmp`
 
 #include <algorithm>        // `std::min`, `std::max`
-#include <atomic>           // `std::atomic`, `std::atomic_ref`
 #include <initializer_list> // `std::initializer_list`
 #include <limits>           // `std::numeric_limits` — the peak a softmax starts below
 #include <span>             // `std::span` — the fixed-size hit and recall tables
@@ -49,7 +48,7 @@
 #include <fmt/format.h> // `fmt::println`, `fmt::format_to_n`
 #include <yyjson.h>     // `yyjson_read_file`
 
-#include <forkunion.hpp>                   // `fu::flat_pool_t` - the scoring threads
+#include <forkunion.hpp>                   // `fu::flat_pool_t`, `fu::standard_atomic_ref` - the scoring threads
 #include <numkong/capabilities.h>          // `nk_cpu_capabilities_enabled`
 #include <numkong/dots.h>                  // `nk_dots_pack_f32_best`, `nk_dots_packed_f32_best`
 #include <smashtable/basic_hash_table.hpp> // `hash_map` — COCO image IDs to their files
@@ -391,7 +390,7 @@ static constexpr std::size_t score_block_rows_k = 64;
         nk_dots_pack_f32_best(items.data(), items_count, dimensions, dimensions * sizeof(float), packed.data(), 0,
                               items_count, capabilities, nullptr) != nk_success_k)
         return false;
-    std::atomic<bool> scored {true};
+    bool scored = true;
     std::size_t const blocks_count = uc::divide_round_up(queries_count, score_block_rows_k);
     pool.for_n_dynamic(blocks_count, [&](std::size_t block, fu::thread_in_domain_t at) noexcept {
         std::size_t const first = block * score_block_rows_k;
@@ -400,7 +399,7 @@ static constexpr std::size_t score_block_rows_k = 64;
         if (nk_dots_packed_f32_best(queries.data() + first * dimensions, packed.data(), scores, count, items_count,
                                     dimensions, dimensions * sizeof(float), items_count * sizeof(nk_f64_t), nullptr, 0,
                                     capabilities, nullptr) != nk_success_k)
-            return scored.store(false, std::memory_order_relaxed);
+            return fu::standard_atomic_ref<bool> {scored}.store(false, std::memory_order_relaxed);
         std::size_t block_hits[3] = {};
         for (std::size_t query = first; query != first + count; ++query) {
             nk_f64_t const *row = scores + (query - first) * items_count;
@@ -412,9 +411,9 @@ static constexpr std::size_t score_block_rows_k = 64;
             for (std::size_t k = 0; k != 3; ++k) block_hits[k] += rank < recall_depths_k[k];
         }
         for (std::size_t k = 0; k != 3; ++k)
-            std::atomic_ref<std::size_t> {hits[k]}.fetch_add(block_hits[k], std::memory_order_relaxed);
+            fu::standard_atomic_ref<std::size_t> {hits[k]}.fetch_add(block_hits[k], std::memory_order_relaxed);
     });
-    return scored.load(std::memory_order_relaxed);
+    return scored; // `for_n_dynamic` joined every thread
 }
 
 /** Score every caption against every medium on @p encoder 's thread count, report both directions,
@@ -771,7 +770,9 @@ int main(int argc, char **argv) {
     uform_model_describe(&describe_arguments);
     encoder.dimensions = description.dimensions;
     fmt::println("uform_eval: {} ({} dimensions, context {}, {})", checkpoint, description.dimensions,
-                 description.context, description.capabilities ? description.capabilities : "?");
+                 description.context,
+                 description.cpu_class != uform_cpu_class_unknown_k ? uform_cpu_class_name(description.cpu_class)
+                                                                    : uform_gpu_class_name(description.gpu_class));
 
     bool evaluated = true;
     struct named_t {

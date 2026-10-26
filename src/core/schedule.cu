@@ -31,10 +31,17 @@ expected_t barrier_round_t::advance(gpu_stream_t &stream) noexcept {
                          increment_);
 }
 
+/** Whether a transpose's rows start and stride on 16-byte boundaries, so they load in vectors. */
+enum class transpose_alignment_t : bool {
+    unaligned_k,
+    aligned_k,
+};
+
 /** Loads the eight elements at @p column of @p row as four packed words; out-of-range cells read zero. */
 [[nodiscard]] static __device__ inline uint4 transpose_load_(bf16_t const *row_start, std::size_t column,
-                                                             std::size_t columns, bool aligned) {
-    if (aligned && column + 8u <= columns) {
+                                                             std::size_t columns,
+                                                             transpose_alignment_t alignment) noexcept {
+    if (alignment == transpose_alignment_t::aligned_k && column + 8u <= columns) {
         uint4 vector;
         asm("ld.global.v4.u32 {%0, %1, %2, %3}, [%4];"
             : "=r"(vector.x), "=r"(vector.y), "=r"(vector.z), "=r"(vector.w)
@@ -54,6 +61,8 @@ __global__ void __launch_bounds__(256) uc::transpose_bf16_kernel(bf16r2_view_t s
     std::size_t const destination_stride = destination.stride_bytes(0) / sizeof(bf16_t);
     bool const aligned = cuda::is_aligned(source.data(), 16u) && cuda::is_aligned(destination.data(), 16u) &&
                          ((source.stride_bytes(0) | destination.stride_bytes(0)) & 15) == 0;
+    transpose_alignment_t const alignment = aligned ? transpose_alignment_t::aligned_k
+                                                    : transpose_alignment_t::unaligned_k;
     std::size_t const row_start = static_cast<std::size_t>(blockIdx.y) * 64u;
     std::size_t const column_start = static_cast<std::size_t>(blockIdx.x) * 64u;
     u32_t const pair = threadIdx.x >> 3, quad = threadIdx.x & 7u;
@@ -61,10 +70,10 @@ __global__ void __launch_bounds__(256) uc::transpose_bf16_kernel(bf16r2_view_t s
     std::size_t const upper_row = row_start + 2u * pair, column = column_start + quad * 8u;
     uint4 const zero = make_uint4(0u, 0u, 0u, 0u);
     uint4 const upper = upper_row < rows
-                            ? transpose_load_(source.data() + upper_row * source_stride, column, columns, aligned)
+                            ? transpose_load_(source.data() + upper_row * source_stride, column, columns, alignment)
                             : zero;
     uint4 const lower = upper_row + 1u < rows ? transpose_load_(source.data() + (upper_row + 1u) * source_stride,
-                                                                column, columns, aligned)
+                                                                column, columns, alignment)
                                               : zero;
     u32_t const first[4] = {upper.x, upper.y, upper.z, upper.w};
     u32_t const second[4] = {lower.x, lower.y, lower.z, lower.w};
@@ -81,7 +90,7 @@ __global__ void __launch_bounds__(256) uc::transpose_bf16_kernel(bf16r2_view_t s
         if (target_row >= columns || target_column >= rows) continue;
         u32_t const *words = &tile[chunk >> 3][(chunk & 7u) * 4u];
         bf16_t *const target = destination.data() + target_row * destination_stride + target_column;
-        if (aligned && target_column + 8u <= rows)
+        if (alignment == transpose_alignment_t::aligned_k && target_column + 8u <= rows)
             asm volatile("st.global.v4.u32 [%0], {%1, %2, %3, %4};"
                          :
                          : "l"(target), "r"(words[0]), "r"(words[1]), "r"(words[2]), "r"(words[3])
@@ -93,19 +102,18 @@ __global__ void __launch_bounds__(256) uc::transpose_bf16_kernel(bf16r2_view_t s
 }
 
 expected<std::size_t> uc::pack_bytes_bf16(std::size_t columns, std::size_t depth,
-                                          nk_capability_t capabilities) noexcept {
+                                          gpu_numerics_t const &numerics) noexcept {
     nk_size_t bytes = 0;
-    if (nk_status_t const status = nk_dots_pack_size_bf16_best(columns, depth, capabilities, &bytes);
-        status != nk_success_k)
+    if (nk_status_t const status = numerics.pack_size_bf16(columns, depth, &bytes); status != nk_success_k)
         return expected<std::size_t>::fail(status_t::cuda_error_k, "pack sizing [{}x{}] failed: {}", columns, depth,
                                            nk_status_name(status));
     return expected<std::size_t> {static_cast<std::size_t>(bytes)};
 }
 
 expected<b8r1_tensor_arena_t> uc::allocate_pack_bf16(std::size_t columns, std::size_t depth,
-                                                     nk_capability_t capabilities, gpu_arena_t &arena) noexcept {
+                                                     gpu_numerics_t const &numerics, gpu_arena_t &arena) noexcept {
     using result_t = expected<b8r1_tensor_arena_t>;
-    expected<std::size_t> bytes = pack_bytes_bf16(columns, depth, capabilities);
+    expected<std::size_t> bytes = pack_bytes_bf16(columns, depth, numerics);
     if (!bytes) return result_t::fail(std::move(bytes));
     b8r1_tensor_arena_t packed =
         b8r1_tensor_arena_t::uninitialized({bytes.value_}, gpu_arena_alloc<b8_t> {arena}).value;
@@ -115,43 +123,42 @@ expected<b8r1_tensor_arena_t> uc::allocate_pack_bf16(std::size_t columns, std::s
     return result_t {std::move(packed)};
 }
 
-expected_t uc::pack_bf16(bf16r2_view_t b, b8r1_span_t packed, nk_capability_t capabilities,
+expected_t uc::pack_bf16(bf16r2_view_t b, b8r1_span_t packed, gpu_numerics_t const &numerics,
                          gpu_stream_t &stream) noexcept {
     std::size_t const columns = b.extent(0);
-    return numkong_result(nk_dots_pack_bf16_best(numkong_scalars(b.data()), columns, b.extent(1), b.stride_bytes(0),
-                                                 packed.data(), 0, columns, capabilities, stream.numkong()),
+    return numkong_result(numerics.pack_bf16(numkong_scalars(b.data()), columns, b.extent(1), b.stride_bytes(0),
+                                             packed.data(), 0, columns, stream.numkong()),
                           "packing");
 }
 
-expected_t uc::multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t c, nk_capability_t capabilities,
+expected_t uc::multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t c, gpu_numerics_t const &numerics,
                              gpu_stream_t &stream) noexcept {
     if (c.extent(0) != a.extent(0))
         return expected_t::fail(status_t::shape_unsupported_k, "[{}x{}]·Bᵀ cannot fill [{}x{}]", a.extent(0),
                                 a.extent(1), c.extent(0), c.extent(1));
-    return numkong_result(nk_dots_packed_bf16_best(numkong_scalars(a.data()), packed_b.data(), c.data(), a.extent(0),
-                                                   c.extent(1), a.extent(1), a.stride_bytes(0), c.stride_bytes(0),
-                                                   NUMKONG_NULL, 0, capabilities, stream.numkong()),
-                          "product");
+    return numkong_result(
+        numerics.multiply_bf16(numkong_scalars(a.data()), packed_b.data(), c.data(), a.extent(0), c.extent(1),
+                               a.extent(1), a.stride_bytes(0), c.stride_bytes(0), NUMKONG_NULL, 0, stream.numkong()),
+        "product");
 }
 
 expected_t uc::pack_weight_bf16(bf16r2_view_t weight, bf16r1_span_t transposed, b8r1_span_t packed,
-                                b8r1_span_t packed_transposed, nk_capability_t capabilities,
+                                b8r1_span_t packed_transposed, gpu_numerics_t const &numerics,
                                 gpu_stream_t &stream) noexcept {
     std::size_t const outputs = weight.extent(0), inputs = weight.extent(1);
     bf16r2_span_t const padded {transposed.data(), inputs, round_up_to_multiple(outputs, std::size_t {8})};
     bf16r2_span_t const weight_transposed = padded[nk::all, nk::range(0, outputs), nk::slice];
-    expected_t staged = pack_bf16(weight, packed, capabilities, stream);
+    expected_t staged = pack_bf16(weight, packed, numerics, stream);
     if (staged) staged = transpose_bf16(weight, weight_transposed, stream);
-    if (staged) staged = pack_bf16(weight_transposed, packed_transposed, capabilities, stream);
+    if (staged) staged = pack_bf16(weight_transposed, packed_transposed, numerics, stream);
     return staged;
 }
 
 expected<std::size_t> uc::weight_gradient_workspace_bytes_bf16(std::size_t outputs, std::size_t inputs,
                                                                std::size_t tokens,
-                                                               nk_capability_t capabilities) noexcept {
+                                                               gpu_numerics_t const &numerics) noexcept {
     nk_size_t bytes = 0;
-    if (nk_status_t const status = nk_dots_packed_workspace_size_bf16_best(outputs, inputs, tokens, capabilities,
-                                                                           &bytes);
+    if (nk_status_t const status = numerics.multiply_workspace_size_bf16(outputs, inputs, tokens, &bytes);
         status != nk_success_k)
         return expected<std::size_t>::fail(status_t::cuda_error_k,
                                            "weight gradient workspace sizing [{}x{}x{}] failed: {}", outputs, inputs,
@@ -162,7 +169,7 @@ expected<std::size_t> uc::weight_gradient_workspace_bytes_bf16(std::size_t outpu
 expected_t uc::weight_gradient_bf16(bf16r2_view_t output_grad, bf16r2_view_t input, bf16r2_span_t weight_grad,
                                     bf16r1_span_t transposed_grad, bf16r1_span_t transposed_input,
                                     b8r1_span_t packed_input, f32r1_span_t product, b8r1_span_t workspace,
-                                    nk_capability_t capabilities, gpu_stream_t &stream) noexcept {
+                                    gpu_numerics_t const &numerics, gpu_stream_t &stream) noexcept {
     std::size_t const tokens = output_grad.extent(0), outputs = output_grad.extent(1), inputs = input.extent(1);
     std::size_t const padded_tokens = round_up_to_multiple(tokens, std::size_t {8});
     bf16r2_span_t const output_grad_padded {transposed_grad.data(), outputs, padded_tokens};
@@ -171,17 +178,16 @@ expected_t uc::weight_gradient_bf16(bf16r2_view_t output_grad, bf16r2_view_t inp
     bf16r2_span_t const input_transposed = input_padded[nk::all, nk::range(0, tokens), nk::slice];
     expected_t staged = transpose_bf16(output_grad, output_grad_transposed, stream);
     if (staged) staged = transpose_bf16(input, input_transposed, stream);
-    if (staged) staged = pack_bf16(input_transposed, packed_input, capabilities, stream);
+    if (staged) staged = pack_bf16(input_transposed, packed_input, numerics, stream);
     if (staged)
         staged = numkong_result(
-            nk_dots_packed_bf16_best(numkong_scalars(output_grad_transposed.data()), packed_input.data(),
-                                     product.data(), outputs, inputs, tokens, output_grad_transposed.stride_bytes(0),
-                                     inputs * sizeof(f32_t), workspace.data(), workspace.extent(0), capabilities,
-                                     stream.numkong()),
+            numerics.multiply_bf16(numkong_scalars(output_grad_transposed.data()), packed_input.data(), product.data(),
+                                   outputs, inputs, tokens, output_grad_transposed.stride_bytes(0),
+                                   inputs * sizeof(f32_t), workspace.data(), workspace.extent(0), stream.numkong()),
             "weight gradient product");
     if (staged)
-        staged = numkong_result(nk_cast_best(product.data(), nk_f32_k, weight_grad.data(), nk_bf16_k, outputs * inputs,
-                                             capabilities, stream.numkong()),
-                                "weight gradient narrowing");
+        staged = numkong_result(
+            numerics.cast(product.data(), nk_f32_k, weight_grad.data(), nk_bf16_k, outputs * inputs, stream.numkong()),
+            "weight gradient narrowing");
     return staged;
 }

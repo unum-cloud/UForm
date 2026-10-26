@@ -9,6 +9,7 @@ import type {
   CompiledRows,
   CompiledStates,
   Completion,
+  Offsets,
   ProgressCallback,
 } from "./library.js";
 import { Answer, Arena, ArenaView, Executor, Scalar, Status, fail, scalarCode, submitAs } from "./types.js";
@@ -203,10 +204,25 @@ export interface Chosen {
   stats: EncodeStats;
 }
 
-/** A ragged batch as the C interface reads it: elements end to end, and one more offset than entries. */
-interface Tape<Elements> {
+/**
+ * A ragged batch packed as the C interface reads it: elements end to end, and `count + 1` offsets into them. Mirrors
+ * `uform_tape_view_t`.
+ *
+ * Every verb taking an array of entries also takes a packed tape, which the Node addon lends to the call as it is when
+ * its offsets are a `BigUint64Array`; an array of entries is first gathered into one tape, the one copy that path makes.
+ * A `Probabilities` answer is itself a tape, so it trains a step's `choiceTargets` as it lands.
+ */
+export interface Tape<Elements extends Uint8Array | Float32Array> {
   data: Elements;
-  offsets: Uint32Array;
+  offsets: Offsets;
+}
+
+/** Lends a packed tape as it is, refusing anything that is neither one nor an array of entries. */
+function packed<Elements extends Uint8Array | Float32Array>(tape: Tape<Elements>): Tape<Elements> {
+  const offsets = tape?.offsets;
+  if (!ArrayBuffer.isView(tape?.data) || !(offsets instanceof BigUint64Array || offsets instanceof Uint32Array))
+    throw fail(Status.InvalidArgument, "A batch is an array of entries, or a tape of data and offsets.");
+  return tape;
 }
 
 /** Lays `entries` end to end, each measured by `length` and copied by `place`. */
@@ -217,15 +233,18 @@ function tapeOf<Entry, Elements extends Uint8Array | Float32Array>(
   place: (data: Elements, entry: Entry, at: number) => void,
 ): Tape<Elements> {
   if (!Array.isArray(entries)) throw fail(Status.InvalidArgument, "A batch is an array of entries.");
-  const offsets = new Uint32Array(entries.length + 1);
-  for (let entry = 0; entry < entries.length; entry++) offsets[entry + 1] = offsets[entry] + length(entries[entry]);
-  const data = allocate(offsets[entries.length]);
-  for (let entry = 0; entry < entries.length; entry++) place(data, entries[entry], offsets[entry]);
+  const offsets = new BigUint64Array(entries.length + 1);
+  let total = 0;
+  for (let entry = 0; entry < entries.length; entry++) offsets[entry + 1] = BigInt((total += length(entries[entry])));
+  const data = allocate(total);
+  for (let entry = 0; entry < entries.length; entry++) place(data, entries[entry], Number(offsets[entry]));
   return { data, offsets };
 }
 
-/** Lays UTF-8 texts or byte runs end to end, so text and every encoded-file verb share one tape. */
-export function bytesTape(entries: readonly (string | Uint8Array)[]): Tape<Uint8Array> {
+/** Lays UTF-8 texts or byte runs end to end, so text and every encoded-file verb share one tape, or lends a packed
+ *  tape as it is. */
+export function bytesTape(entries: readonly (string | Uint8Array)[] | Tape<Uint8Array>): Tape<Uint8Array> {
+  if (!Array.isArray(entries)) return packed(entries as Tape<Uint8Array>);
   const encoder = new TextEncoder();
   const encoded = entries.map((entry) => (typeof entry === "string" ? encoder.encode(entry) : entry));
   for (const entry of encoded)
@@ -266,8 +285,9 @@ function pixelsTape(images: readonly Pixels[]): Tape<Uint8Array> & { heights: Ui
   return { ...tape, heights, widths };
 }
 
-/** Lays mono recordings end to end. */
-function samplesTape(recordings: readonly Float32Array[]): Tape<Float32Array> {
+/** Lays mono recordings or other runs of floats end to end, or lends a packed tape as it is. */
+export function samplesTape(recordings: readonly Float32Array[] | Tape<Float32Array>): Tape<Float32Array> {
+  if (!Array.isArray(recordings)) return packed(recordings as Tape<Float32Array>);
   for (const recording of recordings)
     if (!(recording instanceof Float32Array)) throw fail(Status.InvalidArgument, "Every recording is a Float32Array.");
   return tapeOf(
@@ -325,12 +345,16 @@ export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
   /**
    * Encodes texts through one forward; every UTF-8 byte is a token. Calls `uform_text_encode`.
    *
-   * @param {Array<string|Uint8Array>} texts - Strings, or UTF-8 bytes already encoded.
+   * @param {Array<string|Uint8Array>|Tape<Uint8Array>} texts - Strings, UTF-8 bytes already encoded, or a tape of them.
    * @param {Arena} arena - The memory the outputs land in, rewound by the call.
    * @param {EncodeConfig} [config] - The surfaces, their scalar, and a progress handler.
    * @return {Encoded} The outputs, viewed inside `arena`.
    */
-  textEncode(texts: readonly (string | Uint8Array)[], arena: Arena, config: EncodeConfig = {}): Answer<Receiving, Encoded> {
+  textEncode(
+    texts: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
+    arena: Arena,
+    config: EncodeConfig = {},
+  ): Answer<Receiving, Encoded> {
     const tape = bytesTape(texts);
     const executor = this.executor?.compiled;
     return this.#encode(
@@ -344,15 +368,15 @@ export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
    * Scores each item's legal choices through one forward, a softmax over them alone at the item's group's calibrated
    * inverse temperature; a model without the byte decoder reports `unsupported`. Calls `uform_text_choose`.
    *
-   * @param {Array<string|Uint8Array>} texts - The states, each ending where its choice goes.
-   * @param {Array<string|Uint8Array>} choices - Each item's legal choices, one byte each, like "yn".
+   * @param {Array<string|Uint8Array>|Tape<Uint8Array>} texts - The states, each ending where its choice goes.
+   * @param {Array<string|Uint8Array>|Tape<Uint8Array>} choices - Each item's legal choices, one byte each, like "yn".
    * @param {Arena} arena - The memory the probabilities land in, rewound by the call.
    * @param {ChooseConfig} [config] - The question types and a progress handler.
    * @return {Chosen} The probabilities, viewed inside `arena`.
    */
   textChoose(
-    texts: readonly (string | Uint8Array)[],
-    choices: readonly (string | Uint8Array)[],
+    texts: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
+    choices: readonly (string | Uint8Array)[] | Tape<Uint8Array>,
     arena: Arena,
     config: ChooseConfig = {},
   ): Answer<Receiving, Chosen> {
@@ -385,11 +409,15 @@ export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
   /**
    * Decodes and encodes JPEG, PNG or WebP files; the browser build reports `unsupported`. Calls `uform_image_encode`.
    *
-   * @param {Uint8Array[]} images - One encoded file per item.
+   * @param {Uint8Array[]|Tape<Uint8Array>} images - One encoded file per item, or a tape of them.
    * @param {Arena} arena - The memory the outputs land in, rewound by the call.
    * @param {EncodeConfig} [config] - The surfaces, their scalar, and a progress handler.
    */
-  imageEncode(images: readonly Uint8Array[], arena: Arena, config: EncodeConfig = {}): Answer<Receiving, Encoded> {
+  imageEncode(
+    images: readonly Uint8Array[] | Tape<Uint8Array>,
+    arena: Arena,
+    config: EncodeConfig = {},
+  ): Answer<Receiving, Encoded> {
     const tape = bytesTape(images);
     const executor = this.executor?.compiled;
     return this.#encode(
@@ -428,11 +456,15 @@ export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
   /**
    * Decodes and encodes MP4 or WebM clips; the browser build reports `unsupported`. Calls `uform_video_encode`.
    *
-   * @param {Uint8Array[]} videos - One encoded file per item.
+   * @param {Uint8Array[]|Tape<Uint8Array>} videos - One encoded file per item, or a tape of them.
    * @param {Arena} arena - The memory the outputs land in, rewound by the call.
    * @param {EncodeConfig} [config] - The surfaces, their scalar, and a progress handler.
    */
-  videoEncode(videos: readonly Uint8Array[], arena: Arena, config: EncodeConfig = {}): Answer<Receiving, Encoded> {
+  videoEncode(
+    videos: readonly Uint8Array[] | Tape<Uint8Array>,
+    arena: Arena,
+    config: EncodeConfig = {},
+  ): Answer<Receiving, Encoded> {
     const tape = bytesTape(videos);
     const executor = this.executor?.compiled;
     return this.#encode(
@@ -445,11 +477,15 @@ export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
   /**
    * Decodes and encodes WAV, FLAC, MP3 or Opus files; the browser build reports `unsupported`. Calls `uform_audio_encode`.
    *
-   * @param {Uint8Array[]} recordings - One encoded file per item.
+   * @param {Uint8Array[]|Tape<Uint8Array>} recordings - One encoded file per item, or a tape of them.
    * @param {Arena} arena - The memory the outputs land in, rewound by the call.
    * @param {EncodeConfig} [config] - The surfaces, their scalar, and a progress handler.
    */
-  audioEncode(recordings: readonly Uint8Array[], arena: Arena, config: EncodeConfig = {}): Answer<Receiving, Encoded> {
+  audioEncode(
+    recordings: readonly Uint8Array[] | Tape<Uint8Array>,
+    arena: Arena,
+    config: EncodeConfig = {},
+  ): Answer<Receiving, Encoded> {
     const tape = bytesTape(recordings);
     const executor = this.executor?.compiled;
     return this.#encode(
@@ -462,13 +498,13 @@ export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
   /**
    * Encodes decoded mono recordings, resampled to the model's rate where `sampleRate` differs. Calls `uform_audio_encode_samples`.
    *
-   * @param {Float32Array[]} recordings - One run of samples per item.
+   * @param {Float32Array[]|Tape<Float32Array>} recordings - One run of samples per item, or a tape of them.
    * @param {number} sampleRate - Samples per second shared by every recording.
    * @param {Arena} arena - The memory the outputs land in, rewound by the call.
    * @param {EncodeConfig} [config] - The surfaces, their scalar, and a progress handler.
    */
   audioEncodeSamples(
-    recordings: readonly Float32Array[],
+    recordings: readonly Float32Array[] | Tape<Float32Array>,
     sampleRate: number,
     arena: Arena,
     config: EncodeConfig = {},

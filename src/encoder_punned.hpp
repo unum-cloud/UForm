@@ -11,7 +11,10 @@
  */
 #pragma once
 
-#include <span> // `std::span` — the scratch a call borrows
+#include <span>        // `std::span` — the scratch a call borrows
+#include <type_traits> // `std::conditional_t`
+
+#include "uform/encoder/vram_kits.hpp" // `vram_nvidia_entries_kit_t`, `vram_amd_entries_kit_t`
 
 #include "lib.hpp" // `encoder_home_t`, `cpu_class_t`, `gpu_class_t`, the ladders
 
@@ -38,7 +41,8 @@ struct encoder_verbs {
     core::expected<void *> (*create)(core::checkpoint_to_load_t const &checkpoint, encoder::geometry_t const &geometry,
                                      encoder::precision_t precision, nk_stream_t stream) noexcept;
     void (*destroy)(void *tower) noexcept;
-    core::expected<std::size_t> (*scratch_bytes)(void const *tower, std::size_t tokens, std::size_t segments) noexcept;
+    core::expected<std::size_t> (*scratch_bytes)(void const *tower, std::size_t tokens, std::size_t segments,
+                                                 executor_t executor) noexcept;
     core::expected_t (*encode)(void const *tower, core::multimodal_batch_view_t batch, encoder::outputs_t outputs,
                                std::span<b8_t> scratch, executor_t executor) noexcept;
 };
@@ -55,8 +59,15 @@ constexpr nk_capability_t vendor_of(encoder_home_t home) noexcept {
     return home == encoder_home_t::vram_amd_k ? nk_cap_rocm_k : nk_cap_cuda_k;
 }
 
-/** The newest compiled class on @p ladder that @p available runs and @p pinned takes, as its verbs;
- *  the serial floor always answers. */
+/** The entries kit of a device home's vendor: the steps and copies every class of the vendor
+ *  shares, defined only in a build compiling the vendor, so a caller first asks
+ *  @ref gpu_vendor_compiled . */
+template <encoder_home_t home_>
+using entries_kit_of = std::conditional_t<home_ == encoder_home_t::vram_amd_k, encoder::vram_amd_entries_kit_t,
+                                          encoder::vram_nvidia_entries_kit_t>;
+
+/** The newest compiled class on @p ladder whose kits @p available runs, whose atomic reference
+ *  ForkUnion admits, and which @p pinned takes, as its verbs; the serial floor always answers. */
 template <cpu_class_t... classes_>
 encoder_verbs<encoder_home_t::ram_k> const *pick_cpu_variant(cpu_ladder<classes_...>, uform_cpu_class_t pinned,
                                                              nk_capability_t available) noexcept {
@@ -65,7 +76,7 @@ encoder_verbs<encoder_home_t::ram_k> const *pick_cpu_variant(cpu_ladder<classes_
         if constexpr (cpu_class_compiled(class_)) {
             if (picked) return;
             if (class_ != cpu_class_t::serial_k &&
-                (!cpu_pin_takes(pinned, class_) || !numkong_admits(available, class_)))
+                (!cpu_pin_takes(pinned, class_) || !numkong_admits(available, class_) || !forkunion_admits(class_)))
                 return;
             picked = encoder_class_tables<encoder_home_t::ram_k, class_>::find();
         }

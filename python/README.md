@@ -131,7 +131,7 @@ A model without the byte decoder, its `choice_temperature_groups` zero, raises `
 `uform.Model.load_ram(path)` and `uform.Model.load_vram(path, devices=[0])` copy a safetensors checkpoint into host memory or onto GPUs, and `load_ram_buffer` and `load_vram_buffer` take the checkpoint's bytes instead.
 Each takes `quantization`, `Scalar.BF16` as stored or `Scalar.E4M3` quantized at load, an optional `executor` the load runs on, and a `progress` handler.
 The RAM loads take a `cpu_class` pin and the VRAM loads a `gpu_class` pin, and a class the hardware cannot run raises `UnsupportedError`.
-`model.describe()` answers a `uform.ModelDescription` of `dimensions`, `context`, `quantization`, `memory_usage`, `capabilities`, `cpu_class`, `gpu_class`, `token_width` and `choice_temperature_groups`.
+`model.describe()` answers a `uform.ModelDescription` of `dimensions`, `context`, `quantization`, `memory_usage`, `cpu_class`, `gpu_class`, `token_width` and `choice_temperature_groups`.
 
 ## Training
 
@@ -155,7 +155,8 @@ trainer.save("checkpoint.safetensors")
 `BatchShape` nests an `ImageShape`, a `VideoShape` and an `AudioShape`, each also taken as a tuple of its fields in order.
 `Masking`, `Contrastive`, `LateInteraction`, `Choices` and `Schedule` configure the objectives, and `Relations` holds three `Edges` sets of buffers: `size_t` offsets, `uint32` IDs and optional `float32` weights.
 `Contrastive` and `LateInteraction` take a `uform.PairLossForm`, and `trainer.step` takes each item's `uform.LateInteractionSide` as `sides`.
-A `ChoicesView` of `size_t` offsets, `uint8` bytes and `float32` targets trains the calibrated choices, within the batch's `max_choices_per_item`.
+`choices`, taken as `text_choose` takes them, and `choice_targets`, a `float32` tape shaped as the `RowsTape` it answers, train the calibrated choices within the batch's `max_choices_per_item`, so `(probabilities, probabilities.offsets)` from one model can train another.
+Paths, like the mesh's `directory`, cross as `os.fsencode` gives their bytes, while its `job` is a `str` name.
 `trainer.step` answers the pooled embeddings the loss scored when given an `arena`, and `None` otherwise.
 `mesh.describe()` answers a `uform.MeshDescription`, its `multimem_tier` a `uform.MultimemTier` and its `gpu_class` the `uform.GPUClass` every GPU of the run dispatches as.
 

@@ -39,8 +39,6 @@ export interface ModelDescription {
   quantization: Scalar;
   /** Bytes the model holds; activations are the executor's. */
   memoryUsage: number;
-  /** Codename of the kernels the model dispatched to on this machine. */
-  capabilities: string;
   /** The CPU class a RAM model's tower was packed for, like "intel-haswell"; `null` for a VRAM model. */
   cpuClass: string | null;
   /** The GPU class every replica of a VRAM model runs as, like "nvidia-hopper"; `null` for a RAM model. */

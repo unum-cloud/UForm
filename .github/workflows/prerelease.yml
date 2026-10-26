@@ -74,6 +74,25 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: .githooks/lint-range "$BASE_SHA"
 
+  lint_tree:
+    name: Lint Every Tracked File
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set Up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install Linters
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --group lint
+
+      # With no base, every tracked file reads as added, so no rule holds only for the lines a change touched.
+      - name: Check
+        run: .githooks/lint-range
+
   test_data_scripts:
     name: Test Data Scripts
     runs-on: ubuntu-26.04

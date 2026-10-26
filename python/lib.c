@@ -50,9 +50,8 @@ static struct {
 
 /** The keyword-built structures, readied from their field tables; nested ones before the ones holding them. */
 static uform_py_fields_t *const module_fields[] = {
-    &ImageShapeType,  &VideoShapeType,      &AudioShapeType,  &BatchShapeType, &MaskingType,
-    &ContrastiveType, &LateInteractionType, &ChoicesType,     &ScheduleType,   &MeshOptionsType,
-    &EdgesType,       &RelationsType,       &ChoicesViewType,
+    &ImageShapeType,      &VideoShapeType, &AudioShapeType, &BatchShapeType,  &MaskingType, &ContrastiveType,
+    &LateInteractionType, &ChoicesType,    &ScheduleType,   &MeshOptionsType, &EdgesType,   &RelationsType,
 };
 
 /** Rows of the merged tables: a receiver offers ten verbs, a model fourteen, a trainer five. */

@@ -1,8 +1,8 @@
 # The synchronous stand-in for the C interface: a separate library defining the same symbols a different way, so any
 # consumer - a binding suite, a downstream SDK, a bisect - runs in seconds against the ABI instead of waiting on a build
-# of the engine. It needs the C headers and the C++ standard library and nothing else - no NumKong, no ForkUnion, no
-# CUDA - so it sets by hand the few properties consumers depend on. The one runtime it resolves is the platform's
-# threads, since a caller may wait on another thread's deferred call.
+# of the engine. It needs the C headers, the C++ standard library and ForkUnion's header-only waiters and atomic
+# references, and nothing else - no NumKong, no CUDA - so it sets by hand the few properties consumers depend on. The
+# one runtime it resolves is the platform's threads, since a caller may wait on another thread's deferred call.
 #
 # The file names match what `c/` produces - `libuform_shared` and `libuform_static` - and land in a directory of their
 # own, so a suite chooses an implementation with one `-L` and the two libraries can never shadow one another.
@@ -21,7 +21,7 @@ foreach (target_ uform_shared_stub uform_static_stub)
         PUBLIC ${PROJECT_SOURCE_DIR}/c
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
     )
-    target_link_libraries(${target_} PRIVATE Threads::Threads)
+    target_link_libraries(${target_} PRIVATE Threads::Threads forkunion::header)
     target_compile_definitions(${target_} PRIVATE UFORM_EXPORTING)
     set_target_properties(
         ${target_}

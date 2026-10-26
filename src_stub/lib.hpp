@@ -18,7 +18,6 @@
 #include <cstdint> // `std::uint64_t`
 #include <cstring> // `std::memcpy`
 
-#include <atomic>           // `std::atomic_ref`
 #include <bit>              // `std::bit_cast`
 #include <initializer_list> // `std::initializer_list`
 #include <memory>           // `std::unique_ptr`
@@ -28,6 +27,8 @@
 #include <utility>          // `std::move`
 #include <variant>          // `std::variant`
 #include <vector>           // `std::vector`
+
+#include <forkunion.hpp> // `fu::standard_atomic_ref`, `fu::standard_yield_t` - the outcome's status word
 
 #include "uform/uform.h" // every argument structure a call copies
 
@@ -62,6 +63,8 @@ struct uform_trainer_handle_t {};
 
 namespace unum::uform {
 
+namespace fu = ashvardanian::forkunion;
+
 /** Scalars per embedding row every stand-in model reports. */
 inline constexpr std::size_t dimensions_k = 64;
 
@@ -87,17 +90,17 @@ inline bool named(uform_bytes_view_t name, std::string_view spelling) { return a
 
 /** Marks @p outcome deferred, every verb's first act, so a waiter never reads a stale status. */
 inline void propagate_deferred(uform_outcome_t *outcome) {
-    if (outcome) std::atomic_ref(outcome->status).store(uform_status_deferred_k, std::memory_order_relaxed);
+    if (outcome)
+        fu::standard_atomic_ref<uform_status_t> {outcome->status}.store(uform_status_deferred_k,
+                                                                        std::memory_order_relaxed);
 }
 
-/** The one final write to @p outcome: the message, then the status with release ordering, waking every
- *  waiter. The message is null exactly on success. */
+/** The one final write to @p outcome: the message, then the status with release ordering, which
+ *  every waiter acquires. The message is null exactly on success. */
 inline void propagate_error(uform_status_t status, uform_outcome_t *outcome, char const *message) {
     if (!outcome) return;
     outcome->message = status == uform_status_success_k ? nullptr : message;
-    std::atomic_ref final_status(outcome->status);
-    final_status.store(status, std::memory_order_release);
-    final_status.notify_all();
+    fu::standard_atomic_ref<uform_status_t> {outcome->status}.store(status, std::memory_order_release);
 }
 
 /** Lets go of @p arena if the call whose outcome is @p call holds it. */

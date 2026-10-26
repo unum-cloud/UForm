@@ -28,6 +28,7 @@ import type {
   CompiledModel,
   CompiledRows,
   CompiledStates,
+  Offsets,
   ProgressCallback,
 } from "./library.js";
 import { Status, backend, bind, fail } from "./types.js";
@@ -122,7 +123,6 @@ const descriptionLayout = struct([
   ["context", "size"],
   ["quantization", "enum"],
   ["memory_usage", "size"],
-  ["capabilities", "pointer"],
   ["cpu_class", "enum"],
   ["gpu_class", "enum"],
   ["token_width", "size"],
@@ -364,12 +364,13 @@ function wasmBackend(module: WasmModule): Compiled {
   }
 
   /** The tape fields of an encode structure: elements and `size_t` offsets, which a `Uint32Array` matches on wasm32. */
-  type Inputs = { data: ArrayBufferView; offsets: Uint32Array; scalar: number };
+  type Inputs = { data: ArrayBufferView; offsets: Offsets; scalar: number };
 
-  /** Lays `inputs` into the tape `tape` of the structure at `call`. */
+  /** Lays `inputs` into the tape `tape` of the structure at `call`, narrowing 64-bit offsets to wasm32's `size_t`. */
   function storeTape(frame: Frame, call: number, layout: Layout, tape: string, inputs: Inputs): void {
+    const offsets = inputs.offsets instanceof BigUint64Array ? Uint32Array.from(inputs.offsets, Number) : inputs.offsets;
     frame.store(call + layout.at[`${tape}.data`], frame.copy(inputs.data));
-    frame.store(call + layout.at[`${tape}.offsets`], frame.copy(inputs.offsets));
+    frame.store(call + layout.at[`${tape}.offsets`], frame.copy(offsets));
     frame.store(call + layout.at[`${tape}.scalar`], inputs.scalar);
   }
 
@@ -551,7 +552,6 @@ function wasmBackend(module: WasmModule): Compiled {
             context: frame.load(description + descriptionLayout.at.context),
             quantization: text(module._uform_scalar_name(frame.load(description + descriptionLayout.at.quantization))),
             memoryUsage: frame.load(description + descriptionLayout.at.memory_usage),
-            capabilities: text(frame.load(description + descriptionLayout.at.capabilities)),
             cpuClass: className(module._uform_cpu_class_name, frame.load(description + descriptionLayout.at.cpu_class)),
             gpuClass: className(module._uform_gpu_class_name, frame.load(description + descriptionLayout.at.gpu_class)),
             tokenWidth: frame.load(description + descriptionLayout.at.token_width),
@@ -567,7 +567,7 @@ function wasmBackend(module: WasmModule): Compiled {
       executor: CompiledExecutor | undefined,
       completion: number,
       bytes: Uint8Array,
-      offsets: Uint32Array,
+      offsets: Offsets,
       arena: CompiledArena,
       outputs: number,
       outputsScalar: number,
@@ -594,7 +594,7 @@ function wasmBackend(module: WasmModule): Compiled {
       executor: CompiledExecutor | undefined,
       completion: number,
       rgb: Uint8Array,
-      offsets: Uint32Array,
+      offsets: Offsets,
       heights: Uint32Array,
       widths: Uint32Array,
       arena: CompiledArena,
@@ -626,7 +626,7 @@ function wasmBackend(module: WasmModule): Compiled {
       executor: CompiledExecutor | undefined,
       completion: number,
       samples: Float32Array,
-      offsets: Uint32Array,
+      offsets: Offsets,
       sampleRate: number,
       arena: CompiledArena,
       outputs: number,
@@ -654,9 +654,9 @@ function wasmBackend(module: WasmModule): Compiled {
       executor: CompiledExecutor | undefined,
       completion: number,
       bytes: Uint8Array,
-      offsets: Uint32Array,
+      offsets: Offsets,
       choices: Uint8Array,
-      choiceOffsets: Uint32Array,
+      choiceOffsets: Offsets,
       temperatureGroups: Uint32Array | undefined,
       arenaValue: CompiledArena,
       progress: ProgressCallback | undefined,
@@ -769,11 +769,11 @@ export type {
   UFormError,
 } from "./types.js";
 export { EncodeVerbs, Outputs, Probabilities, Rows, States } from "./encode.js";
-export type { ChooseConfig, Chosen, EncodeConfig, EncodeStats, Encoded, Pixels } from "./encode.js";
+export type { ChooseConfig, Chosen, EncodeConfig, EncodeStats, Encoded, Pixels, Tape } from "./encode.js";
 export { Model, ModelDeferredOn, ModelOn } from "./model.js";
 export type { ModelDescription, ModelLoadRamConfig, ModelLoadVramConfig } from "./model.js";
 export { Mesh, Trainer, TrainerDeferredOn } from "./train.js";
-export type { ProgressCallback } from "./library.js";
+export type { Offsets, ProgressCallback } from "./library.js";
 
 /** The library's version, as the release tooling stamped it. Calls `uform_version_name`. */
 export function version(): string {

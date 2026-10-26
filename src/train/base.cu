@@ -524,7 +524,7 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
 }
 
 expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config_t const &config,
-                                              std::size_t vertices_per_mesh, nk_capability_t capabilities) noexcept {
+                                              std::size_t vertices_per_mesh, gpu_numerics_t const &numerics) noexcept {
     using result_t = expected<base_replica_t>;
     multimodal_batch_shape_t const &shape = config.batch;
     u32_t const max_tokens = shape.max_rows_per_gpu * shape.max_columns_per_row;
@@ -538,7 +538,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
             shape.video.tube_frames, shape.video.frame_stride);
 
     base_replica_t replica;
-    expected<encoder_tower_bf16_t> tower = encoder_tower_bf16_t::make(arena, tower_config, shape, capabilities);
+    expected<encoder_tower_bf16_t> tower = encoder_tower_bf16_t::make(arena, tower_config, shape, numerics);
     if (!tower) return result_t::fail(std::move(tower));
     replica.tower = std::move(tower.value_);
     expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {arena}, shape);
@@ -561,7 +561,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
         tokens_config.max_tokens = max_tokens;
         tokens_config.weight = config.text_weight;
         tokens_config.max_segments = chooses ? shape.max_segments_per_gpu : 0u;
-        expected<masked_tokens_t> tokens = masked_tokens_t::make(arena, tokens_config, capabilities);
+        expected<masked_tokens_t> tokens = masked_tokens_t::make(arena, tokens_config, numerics);
         if (!tokens) return result_t::fail(std::move(tokens));
         replica.tokens = std::move(tokens.value_);
         replica.normalized_grad = bf16r2_tensor_arena_t::uninitialized({max_tokens, config.hidden}, bf16_alloc).value;
@@ -589,7 +589,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
         head_config.mask_ratio = config.image_mask_ratio;
         head_config.weight = config.image_weight;
         head_config.modality = modality_t::image_k;
-        expected<masked_patches_t> head = masked_patches_t::make(arena, head_config, capabilities);
+        expected<masked_patches_t> head = masked_patches_t::make(arena, head_config, numerics);
         if (!head) return result_t::fail(std::move(head));
         replica.image = std::move(head.value_);
         replica.clean_image_patches =
@@ -607,7 +607,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
         head_config.mask_ratio = config.video_mask_ratio;
         head_config.weight = config.video_weight;
         head_config.modality = modality_t::video_k;
-        expected<masked_patches_t> head = masked_patches_t::make(arena, head_config, capabilities);
+        expected<masked_patches_t> head = masked_patches_t::make(arena, head_config, numerics);
         if (!head) return result_t::fail(std::move(head));
         replica.video = std::move(head.value_);
         replica.clean_video_patches =
@@ -623,7 +623,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
         head_config.max_frames = max_tokens;
         head_config.mask_ratio = config.audio_mask_ratio;
         head_config.weight = config.audio_weight;
-        expected<masked_frames_t> head = masked_frames_t::make(arena, head_config, capabilities);
+        expected<masked_frames_t> head = masked_frames_t::make(arena, head_config, numerics);
         if (!head) return result_t::fail(std::move(head));
         replica.audio = std::move(head.value_);
         replica.clean_audio =

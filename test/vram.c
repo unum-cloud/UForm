@@ -5,6 +5,7 @@
  *  @brief The C interface on one NVIDIA GPU against the same checkpoint on the host: text, pixels and samples,
  *      blocking, deferred and split into slices, each landing within the BFloat16 floor of the RAM outputs.
  *
+ *  The token head's vectors and the byte decoder's choices over the same texts land within it too.
  *  A one-process mesh over every visible GPU must report the class they dispatch as.
  *  The outputs of a VRAM call stay on the device, so only this test copies them back, with the CUDA driver API.
  *  The checkpoint comes from @c argv[1], as written by @c test/tiny_checkpoint.cpp.
@@ -196,6 +197,55 @@ static float relative_error(float const *rows, float const *reference, size_t co
     return worst;
 }
 
+enum { choices_count = 2 + 3 + 4 + 2 };
+static uint8_t const choice_bytes[choices_count] = {'y', 'n', 'A', 'B', 'C', '0', '1', '2', '3', 's', 't'};
+static size_t const choice_offsets[items_count + 1] = {0, 2, 5, 9, 11};
+
+/** The token head's vectors and the byte decoder's choices over the texts, copied to the host. */
+typedef struct heads_t {
+    float *token_vectors;
+    size_t token_offsets[items_count + 1];
+    float probabilities[choices_count];
+    size_t probability_offsets[items_count + 1];
+} heads_t;
+
+static heads_t read_heads(inputs_t const *inputs, uform_model_t model, uform_executor_t executor, uform_arena_t arena,
+                          size_t token_width, bool on_device) {
+    heads_t heads = {0};
+    uform_outcome_t outcome = {0};
+    uform_tape_view_t const texts = {inputs->texts, inputs->text_offsets, uform_scalar_u8_k};
+    uform_rows_tape_view_t token_vectors = {0};
+    uform_text_encode(&(uform_text_encode_t) {.model = model,
+                                              .executor = executor,
+                                              .outcome = &outcome,
+                                              .count = items_count,
+                                              .texts = texts,
+                                              .token_vectors = &token_vectors,
+                                              .arena = arena,
+                                              .outputs_scalar = uform_scalar_f32_k});
+    expect_success(&outcome, "Token vectors");
+    expect(token_vectors.rows.stride == token_width * sizeof(float), "Token vectors are packed f32");
+    copy_out(heads.token_offsets, token_vectors.offsets, sizeof(heads.token_offsets), on_device);
+    size_t const tokens = heads.token_offsets[items_count];
+    heads.token_vectors = malloc((tokens ? tokens : 1) * token_width * sizeof(float));
+    expect(heads.token_vectors != NULL, "Host copy of the token vectors");
+    copy_out(heads.token_vectors, token_vectors.rows.data, tokens * token_width * sizeof(float), on_device);
+
+    uform_tape_view_t probabilities = {0};
+    uform_text_choose(&(uform_text_choose_t) {.model = model,
+                                              .executor = executor,
+                                              .outcome = &outcome,
+                                              .count = items_count,
+                                              .texts = texts,
+                                              .choices = {choice_bytes, choice_offsets, uform_scalar_u8_k},
+                                              .probabilities = &probabilities,
+                                              .arena = arena});
+    expect_success(&outcome, "Choose");
+    copy_out(heads.probability_offsets, probabilities.offsets, sizeof(heads.probability_offsets), on_device);
+    copy_out(heads.probabilities, probabilities.data, sizeof(heads.probabilities), on_device);
+    return heads;
+}
+
 static uform_continuation_t carry_on(size_t completed, size_t total, void *state) {
     (void)completed, (void)total;
     ++*(size_t *)state;
@@ -236,7 +286,8 @@ int main(int argc, char *argv[]) {
                                                     .description = &description});
     expect_success(&outcome, "Describe");
     size_t const dimensions = description.dimensions;
-    printf("VRAM model: %zu dimensions, %zu context, %s\n", dimensions, description.context, description.capabilities);
+    printf("VRAM model: %zu dimensions, %zu context, %s\n", dimensions, description.context,
+           uform_gpu_class_name(description.gpu_class));
 
     uform_arena_t host_arena = NULL, gpu_arena = NULL;
     uform_arena_init(&(uform_arena_init_t) {.arena = &host_arena, .executor = host, .outcome = &outcome});
@@ -270,6 +321,32 @@ int main(int argc, char *argv[]) {
     uform_mesh_free(mesh);
     uform_executor_free(box);
 
+    // A load names its device by the UForm ordinal, which counts AMD devices after NVIDIA's.
+    uform_gpu_device_t listed[64];
+    size_t listed_count = 0;
+    uform_gpu_devices(&(uform_gpu_devices_t) {.outcome = &outcome,
+                                              .devices = listed,
+                                              .devices_capacity = 64,
+                                              .devices_count = &listed_count});
+    expect_success(&outcome, "Device listing");
+    for (size_t position = 0; position != listed_count && position != 64; ++position) {
+        int32_t const ordinal = (int32_t)position;
+        uform_executor_t single = NULL;
+        uform_model_t replica = NULL;
+        uform_executor_for_vram(
+            &(uform_executor_for_vram_t) {.executor = &single, .outcome = &outcome, .vram = {&ordinal, 1}});
+        expect_success(&outcome, "A VRAM executor opens on every listed ordinal");
+        uform_model_load_vram(&(uform_model_load_vram_t) {.model = &replica,
+                                                          .executor = single,
+                                                          .outcome = &outcome,
+                                                          .path = path,
+                                                          .vram = {&ordinal, 1},
+                                                          .quantization = uform_scalar_bf16_k});
+        expect_success(&outcome, "A VRAM load names its device by the UForm ordinal");
+        uform_model_free(replica);
+        uform_executor_free(single);
+    }
+
     static inputs_t inputs;
     fill_inputs(&inputs);
     float worst = 0.0f;
@@ -301,6 +378,33 @@ int main(int argc, char *argv[]) {
         }
         free(reference.embeddings), free(reference.states);
     }
+
+    size_t const token_width = description.token_width;
+    heads_t const reference = read_heads(&inputs, host_model, host, host_arena, token_width, false);
+    heads_t const fetched = read_heads(&inputs, gpu_model, gpu, gpu_arena, token_width, true);
+    expect(memcmp(fetched.token_offsets, reference.token_offsets, sizeof(fetched.token_offsets)) == 0,
+           "Token vector offsets agree");
+    expect(memcmp(fetched.probability_offsets, choice_offsets, sizeof(choice_offsets)) == 0 &&
+               memcmp(reference.probability_offsets, choice_offsets, sizeof(choice_offsets)) == 0,
+           "One probability per choice");
+    float const token_vectors = relative_error(fetched.token_vectors, reference.token_vectors,
+                                               reference.token_offsets[items_count], token_width);
+    float probabilities = 0.0f;
+    for (size_t item = 0; item != items_count; ++item) {
+        float fetched_sum = 0.0f, reference_sum = 0.0f;
+        for (size_t choice = choice_offsets[item]; choice != choice_offsets[item + 1]; ++choice) {
+            float const delta = fabsf(fetched.probabilities[choice] - reference.probabilities[choice]);
+            probabilities = delta > probabilities ? delta : probabilities;
+            fetched_sum += fetched.probabilities[choice], reference_sum += reference.probabilities[choice];
+        }
+        expect(fabsf(fetched_sum - 1.0f) < 1e-3f && fabsf(reference_sum - 1.0f) < 1e-3f,
+               "Each item's probabilities sum to one");
+    }
+    printf("heads    blocking   tokens %4zu: max relative error token vectors %.5f, probabilities %.5f\n",
+           reference.token_offsets[items_count], token_vectors, probabilities);
+    worst = token_vectors > worst ? token_vectors : worst;
+    worst = probabilities > worst ? probabilities : worst;
+    free(fetched.token_vectors), free(reference.token_vectors);
     expect(worst <= tolerance, "VRAM outputs stay within the BFloat16 floor of RAM's");
 
     uform_arena_free(gpu_arena);

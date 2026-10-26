@@ -13,14 +13,14 @@
 // The C mirror keeps the C spelling of every name.
 #![allow(non_camel_case_types)]
 
-use core::ffi::{c_char, c_void};
+use core::ffi::c_void;
 use core::marker::PhantomData;
 use core::ops::Deref;
 use core::ptr;
 use std::path::Path;
 
 use crate::types::{
-    check, fail, lower_progress, path_view, ram_options, static_string, uform_bytes_view_t,
+    check, fail, lower_progress, path_view, ram_options, uform_bytes_view_t,
     uform_completion_blocking_k, uform_completion_t, uform_cpu_class_t, uform_executor_t, uform_gpu_class_t,
     uform_outcome_t, uform_progress_t, uform_ram_options_t, uform_scalar_t, uform_vram_options_t, vram_options,
     Blocking, CPUClass, Callbacks, Calling, Completion, Deferring, Executor, GPUClass, Handles, On, ProgressCallback,
@@ -85,7 +85,6 @@ pub struct uform_model_description_t {
     pub context: usize,
     pub quantization: uform_scalar_t,
     pub memory_usage: usize,
-    pub capabilities: *const c_char,
     pub cpu_class: uform_cpu_class_t,
     pub gpu_class: uform_gpu_class_t,
     pub token_width: usize,
@@ -99,7 +98,6 @@ impl Default for uform_model_description_t {
             context: 0,
             quantization: 0,
             memory_usage: 0,
-            capabilities: ptr::null(),
             cpu_class: 0,
             gpu_class: 0,
             token_width: 0,
@@ -145,8 +143,6 @@ pub struct ModelDescription {
     pub quantization: Scalar,
     /// Bytes the model holds; activations are the executor's.
     pub memory_usage: usize,
-    /// The capability codename of the kernels the model dispatched to on this machine.
-    pub capabilities: &'static str,
     /// The class a RAM model's tower was packed for; `None` for a VRAM model.
     pub cpu_class: Option<CPUClass>,
     /// The class every replica of a VRAM model runs as; `None` for a RAM model.
@@ -600,7 +596,6 @@ impl Calling for ModelDescribe {
                 "the library reported a quantization this binding cannot name",
             ))?,
             memory_usage: self.description.memory_usage,
-            capabilities: unsafe { static_string(self.description.capabilities) },
             cpu_class: CPUClass::from_raw(self.description.cpu_class),
             gpu_class: GPUClass::from_raw(self.description.gpu_class),
             token_width: self.description.token_width,
@@ -660,7 +655,7 @@ pub(crate) mod tests {
 
         let word = size_of::<usize>();
         let cpu_class = offset_of!(uform_model_description_t, cpu_class);
-        assert_eq!(cpu_class, 5 * word);
+        assert_eq!(cpu_class, 4 * word);
         assert_eq!(offset_of!(uform_model_description_t, gpu_class), cpu_class + 4);
         assert_eq!(offset_of!(uform_model_description_t, token_width), cpu_class + 8);
         assert_eq!(size_of::<uform_model_description_t>(), cpu_class + 8 + 2 * word);

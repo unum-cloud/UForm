@@ -197,15 +197,13 @@ typedef struct uform_model_description_t {
     /** Bytes the model holds; activations are the executor's. */
     size_t memory_usage;
 
-    /** Static codename of the kernels the model dispatched to on this machine. */
-    char const* capabilities;
-
     /** The class a RAM model's tower was packed for; @c uform_cpu_class_unknown_k for a VRAM
      *  model. */
     uform_cpu_class_t cpu_class;
 
     /** The class every replica of a VRAM model runs as; @c uform_gpu_class_unknown_k for a RAM
-     *  model. */
+     *  model, and for one on its vendor's generic kernels, whose devices have no class of their
+     *  own. */
     uform_gpu_class_t gpu_class;
 
     /** Scalars per token vector; zero when the checkpoint carries no token head. */

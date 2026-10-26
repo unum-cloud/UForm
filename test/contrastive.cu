@@ -25,10 +25,13 @@
 #include "uform/core/infiniband_collectives.cuh" // `infiniband_coordinates_t` — the corrupt-payload negative test
 #include "uform/train/trainer.hpp"               // `trainer_t`, `items_source_t` — the sides case's step
 
+#include "train/numerics.hpp" // `gpu_numerics_of`
+
 #include "harness.hpp" // `test_suite_t`
 
 using namespace unum::uform::core;
 using namespace unum::uform::test;
+namespace ut = unum::uform::train;
 
 /** Whether the driver shows at least @p wanted devices. */
 [[nodiscard]] static bool cuda_devices_visible_(int wanted) noexcept {
@@ -265,7 +268,8 @@ static void run_oracle_case(test_suite_t &suite, std::size_t num_vertices, std::
     nk_capability_t capabilities = 0;
     if (nk_cuda_capabilities_enabled(0, &capabilities) != nk_success_k)
         return suite.check(false, "capability query failed");
-    auto loss_made = contrastive_segments_t::make(arena, config, std::span {prefixes}, capabilities);
+    gpu_numerics_t const numerics = ut::gpu_numerics_of(capabilities);
+    auto loss_made = contrastive_segments_t::make(arena, config, std::span {prefixes}, numerics);
     if (!loss_made) return suite.check(false, "loss make: {}", loss_made.description_);
     contrastive_segments_t loss = std::move(loss_made.value_);
 
@@ -645,8 +649,9 @@ static void run_sharded_oracle_case(test_suite_t &suite, oracle_graph_t graph, c
     nk_capability_t capabilities = 0;
     if (nk_cuda_capabilities_enabled(0, &capabilities) != nk_success_k)
         return suite.check(false, "capability query failed");
-    auto sharded_loss = contrastive_segments_t::make(arena, sharded_config, {prefixes, 1}, capabilities);
-    auto global_loss = contrastive_segments_t::make(arena, global_config, {prefixes, 1}, capabilities);
+    gpu_numerics_t const numerics = ut::gpu_numerics_of(capabilities);
+    auto sharded_loss = contrastive_segments_t::make(arena, sharded_config, {prefixes, 1}, numerics);
+    auto global_loss = contrastive_segments_t::make(arena, global_config, {prefixes, 1}, numerics);
     constexpr u32_t sharded_edges_k = 64, global_edges_k = ranks_k * sharded_edges_k;
     auto sharded_relations = contrastive_relations_t::make(arena, vertices_k, sharded_edges_k);
     auto global_relations = contrastive_relations_t::make(arena, world_k, global_edges_k);
@@ -787,7 +792,8 @@ static void run_distributed_case(test_suite_t &suite) {
     }
     // A one-process world: the whole box is one host_domain and one multimem_domain (D=1), so the
     // colocated domain is the trivial identity and no exchange happens.
-    auto topology = mesh_topology_t::bootstrap(0, 1, 0, "/tmp/uform_exchange_local", "distributed_case");
+    auto topology = mesh_topology_t::bootstrap(0, 1, &pause_between_polls, 0, "/tmp/uform_exchange_local",
+                                               "distributed_case");
     if (!topology) return suite.check(false, "single-domain bootstrap: {}", topology.description_);
     auto domain = multimem_domain_t::make(
         topology.value_, {devices, gpus},
@@ -798,9 +804,10 @@ static void run_distributed_case(test_suite_t &suite) {
     nk_capability_t capabilities = 0;
     if (nk_cuda_capabilities_enabled(0, &capabilities) != nk_success_k)
         return suite.check(false, "capability query failed");
+    gpu_numerics_t const numerics = ut::gpu_numerics_of(capabilities);
     auto distributed = distributed_contrastive_segments_t::make(domain.value_, colocated.value_, arenas, streams,
                                                                 {towers, gpus}, {relations, gpus}, {grads, gpus},
-                                                                config, {prefix_dims, 1}, capabilities);
+                                                                config, {prefix_dims, 1}, numerics);
     if (!distributed) return suite.check(false, "distributed make: {}", distributed.description_);
     auto ran = distributed.value_(contrastive_recipe_t {}, streams);
     if (!ran) return suite.check(false, "distributed run: {}", ran.description_);
@@ -862,7 +869,7 @@ static void run_cross_domain_case(test_suite_t &suite) {
     cuDeviceGetCount(&device_count);
     u32_t const gpus = u32_t(device_count);
     u32_t const domain = u32_t(std::atoi(std::getenv("UFORM_HOST_DOMAIN_INDEX")));
-    auto topology_made = mesh_topology_t::bootstrap(domain, 2, gpus);
+    auto topology_made = mesh_topology_t::bootstrap(domain, 2, &pause_between_polls, gpus);
     if (!topology_made) return suite.check(false, "bootstrap: {}", topology_made.description_);
     mesh_topology_t topology = std::move(topology_made.value_);
 
@@ -920,9 +927,10 @@ static void run_cross_domain_case(test_suite_t &suite) {
     nk_capability_t capabilities = 0;
     if (nk_cuda_capabilities_enabled(0, &capabilities) != nk_success_k)
         return suite.check(false, "capability query failed");
+    gpu_numerics_t const numerics = ut::gpu_numerics_of(capabilities);
     auto distributed = distributed_contrastive_segments_t::make(
         multimem.value_, colocated.value_, arenas, streams, {towers.data(), gpus}, {relations.data(), gpus},
-        {grads.data(), gpus}, config, {prefix_dims, 1}, capabilities);
+        {grads.data(), gpus}, config, {prefix_dims, 1}, numerics);
     if (!distributed) return suite.check(false, "cross-domain make: {}", distributed.description_);
     sz::string_view_t const tier = multimem.value_.description();
     u32_t const world_domains = distributed.value_.world_domains();
@@ -1004,6 +1012,7 @@ static void run_pool_parity_case(test_suite_t &suite) {
     nk_capability_t capabilities = 0;
     if (nk_cuda_capabilities_enabled(0, &capabilities) != nk_success_k)
         return suite.check(false, "capability query failed");
+    gpu_numerics_t const numerics = ut::gpu_numerics_of(capabilities);
     cuCtxPushCurrent(stream.value_.context());
     auto arena = gpu_arena_t::make(0, 1ull << 30, {});
     if (!arena) {
@@ -1021,7 +1030,7 @@ static void run_pool_parity_case(test_suite_t &suite) {
     config.block.max_segment_tokens = columns_k;
     config.rope_max_positions = columns_k;
     multimodal_batch_shape_t shape {rows_k, segments_k, columns_k};
-    auto tower = encoder_tower_bf16_t::make(arena.value_, config, shape, capabilities);
+    auto tower = encoder_tower_bf16_t::make(arena.value_, config, shape, numerics);
     if (!tower) {
         suite.check(false, "pool-parity tower make: {}", tower.description_);
         cuCtxPopCurrent(nullptr);
@@ -1220,7 +1229,7 @@ static void run_pool_parity_case(test_suite_t &suite) {
 
     // The tower's d(normalized) is overwritten by the block stack's backward before it returns, so a second
     // pool replays forward + backward over the tower's states and query, into the spent vertices buffer.
-    auto pool = tower_pool_t::make(arena.value_, config.block, capabilities);
+    auto pool = tower_pool_t::make(arena.value_, config.block, numerics);
     f32r2_tensor_arena_t states_grad =
         f32r2_tensor_arena_t::uninitialized({tokens_k, hidden_k}, gpu_arena_alloc<f32_t> {arena.value_}).value;
     f32r2_tensor_arena_t value_grad =
@@ -1558,7 +1567,8 @@ static void run_tokens_oracle_case(test_suite_t &suite) {
     nk_capability_t capabilities = 0;
     if (nk_cuda_capabilities_enabled(0, &capabilities) != nk_success_k)
         return suite.check(false, "capability query failed");
-    expected<contrastive_tokens_t> loss = contrastive_tokens_t::make(arena, tokens_config_(1, 1), capabilities);
+    gpu_numerics_t const numerics = ut::gpu_numerics_of(capabilities);
+    expected<contrastive_tokens_t> loss = contrastive_tokens_t::make(arena, tokens_config_(1, 1), numerics);
     if (!loss) return suite.check(false, "loss make: {}", loss.description_);
     f64_t const beta = 4.0;
     contrastive_recipe_t recipe;
@@ -1612,6 +1622,7 @@ static void run_tokens_distributed_case(test_suite_t &suite) {
     nk_capability_t capabilities = 0;
     if (nk_cuda_capabilities_enabled(0, &capabilities) != nk_success_k)
         return suite.check(false, "capability query failed");
+    gpu_numerics_t const numerics = ut::gpu_numerics_of(capabilities);
     host_relations_t host;
     for (std::size_t rank = 0; rank != gpus; ++rank) append_tokens_relations(host, rank, gpus);
     std::size_t const world_segments = gpus * layout_t::segments_k;
@@ -1631,7 +1642,7 @@ static void run_tokens_distributed_case(test_suite_t &suite) {
         expected<device_tokens_inputs_t> inputs = stage_tokens_inputs(*arena, staging, 0, gpus, host, world_segments,
                                                                       stream);
         expected<contrastive_tokens_t> loss = inputs ? contrastive_tokens_t::make(*arena, tokens_config_(gpus, 1),
-                                                                                  capabilities)
+                                                                                  numerics)
                                                      : expected<contrastive_tokens_t>::fail(std::move(inputs));
         expected_t ran = loss ? (*loss)(inputs->token_vectors, inputs->token_offsets, inputs->batch,
                                         inputs->relations.view(), recipe, inputs->loss_out, inputs->token_vectors_grad,
@@ -1665,7 +1676,8 @@ static void run_tokens_distributed_case(test_suite_t &suite) {
         cuCtxPopCurrent(nullptr);
     }
     contrastive_tokens_config_t const config = tokens_config_(1, gpus);
-    auto topology = mesh_topology_t::bootstrap(0, 1, 0, "/tmp/uform_exchange_local", "tokens_distributed_case");
+    auto topology = mesh_topology_t::bootstrap(0, 1, &pause_between_polls, 0, "/tmp/uform_exchange_local",
+                                               "tokens_distributed_case");
     if (!topology) return suite.check(false, "single-domain bootstrap: {}", topology.description_);
     auto domain = multimem_domain_t::make(topology.value_, {devices, gpus},
                                           distributed_contrastive_tokens_t::payload_scalars_needed(config), streams,
@@ -1674,7 +1686,7 @@ static void run_tokens_distributed_case(test_suite_t &suite) {
     auto colocated = colocated_domain_t::make(topology.value_);
     if (!colocated) return suite.check(false, "colocated domain make: {}", colocated.description_);
     auto distributed = distributed_contrastive_tokens_t::make(domain.value_, colocated.value_, arenas, streams, config,
-                                                              capabilities);
+                                                              numerics);
     if (!distributed) return suite.check(false, "distributed make: {}", distributed.description_);
     gpu_tokens_inputs_t step_inputs[max_gpus_per_host_k];
     for (std::size_t rank = 0; rank != gpus; ++rank)
@@ -1734,8 +1746,7 @@ static void run_tokens_cross_domain_case(test_suite_t &suite) {
     sz::string_t job;
     if (!format_into(job, "{}-tokens", launcher_job != nullptr ? launcher_job : "cross_domain"))
         return suite.check(false, "job name formatting");
-    auto topology_made = mesh_topology_t::bootstrap(home_domain, 2, u32_t(gpus), std::getenv("UFORM_EXCHANGE_DIR"),
-                                                    job.c_str());
+    auto topology_made = mesh_topology_t::bootstrap(home_domain, 2, &pause_between_polls, u32_t(gpus), {}, job.view());
     if (!topology_made) return suite.check(false, "bootstrap: {}", topology_made.description_);
     mesh_topology_t topology = std::move(topology_made.value_);
     std::size_t const world_gpus = 2u * gpus, rank_scalars = layout_t::head_rows_k * layout_t::width_k;
@@ -1747,6 +1758,7 @@ static void run_tokens_cross_domain_case(test_suite_t &suite) {
     nk_capability_t capabilities = 0;
     if (nk_cuda_capabilities_enabled(0, &capabilities) != nk_success_k)
         return suite.check(false, "capability query failed");
+    gpu_numerics_t const numerics = ut::gpu_numerics_of(capabilities);
     host_relations_t host;
     for (std::size_t world_gpu = 0; world_gpu != world_gpus; ++world_gpu)
         append_tokens_relations(host, world_gpu, world_gpus);
@@ -1769,7 +1781,7 @@ static void run_tokens_cross_domain_case(test_suite_t &suite) {
         expected<device_tokens_inputs_t> inputs = stage_tokens_inputs(*arena, staging, 0, world_gpus, host,
                                                                       world_segments, stream);
         expected<contrastive_tokens_t> loss = inputs ? contrastive_tokens_t::make(*arena, tokens_config_(world_gpus, 1),
-                                                                                  capabilities)
+                                                                                  numerics)
                                                      : expected<contrastive_tokens_t>::fail(std::move(inputs));
         expected_t ran = loss ? (*loss)(inputs->token_vectors, inputs->token_offsets, inputs->batch,
                                         inputs->relations.view(), recipe, inputs->loss_out, inputs->token_vectors_grad,
@@ -1809,7 +1821,7 @@ static void run_tokens_cross_domain_case(test_suite_t &suite) {
     auto colocated = colocated_domain_t::make(topology);
     if (!colocated) return suite.check(false, "colocated domain make: {}", colocated.description_);
     auto distributed = distributed_contrastive_tokens_t::make(multimem.value_, colocated.value_, arenas, streams,
-                                                              config, capabilities);
+                                                              config, numerics);
     if (!distributed) return suite.check(false, "cross-domain make: {}", distributed.description_);
     gpu_tokens_inputs_t step_inputs[max_gpus_per_host_k];
     for (std::size_t rank = 0; rank != gpus; ++rank)
@@ -1868,7 +1880,6 @@ static void run_tokens_cross_domain_case(test_suite_t &suite) {
  *  documents and the step reports a finite, nonzero late-interaction term. The source copies every
  *  item's side into the batch, which it once left unset. */
 static void run_items_sides_case(test_suite_t &suite) {
-    namespace ut = unum::uform::train;
     int device_count = 0;
     if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 1) return suite.skip(no_cuda_device_k);
     st::basic_vector<i32_t> devices;
@@ -1894,7 +1905,9 @@ static void run_items_sides_case(test_suite_t &suite) {
     config.late_interaction.weight = 1.0f;
     config.late_interaction.width = 32;
     ut::trainer_t trainer;
-    if (expected_t built = ut::trainer_t::make(trainer, mesh, config, devices, options.capabilities); !built)
+    if (expected_t built = ut::trainer_t::make(trainer, mesh, config, devices,
+                                               ut::gpu_numerics_of(options.capabilities));
+        !built)
         return suite.check(false, "trainer: {}", built.description_);
     ut::items_source_t source;
     if (expected_t made = ut::items_source_t::make(source, trainer); !made)
@@ -1912,10 +1925,9 @@ static void run_items_sides_case(test_suite_t &suite) {
     late_interaction_side_t const sides[] = {late_interaction_side_t::query_k, late_interaction_side_t::document_k,
                                              late_interaction_side_t::query_k, late_interaction_side_t::document_k};
     source.items.modalities = modalities;
-    source.items.contents = static_cast<b8_t const *>(static_cast<void const *>(text));
-    source.items.offsets = offsets;
+    source.items.contents = {std::as_bytes(std::span {text}), offsets};
     source.items.bags = bags;
-    source.items.attract = {attract_offsets, attract_ids, nullptr};
+    source.items.attract = {{attract_ids, attract_offsets}, {}};
     source.items.sides = sides;
     ut::step_report_t report;
     if (expected_t stepped = trainer.step(ut::batch_source_of(source), optimizer_step_t {0}, report); !stepped)

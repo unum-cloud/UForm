@@ -96,6 +96,12 @@ public struct MultimemTier: Hashable, Sendable, CustomStringConvertible {
     /// The tier as the library spells it. Calls `uform_multimem_tier_name`.
     public var description: String { String(cString: uform_multimem_tier_name(raw)) }
 
+    /// Reads a spelling back, and nil for one no tier carries. Calls `uform_multimem_tier_from_name`.
+    public init?(name: String) {
+        guard let raw = parsed(name, uform_multimem_tier_from_name, uform_multimem_tier_name) else { return nil }
+        self.raw = raw
+    }
+
     init(raw: uform_multimem_tier_t) { self.raw = raw }
 }
 
@@ -493,24 +499,6 @@ public struct Relations: Sendable {
     }
 }
 
-/// Each item's legal choices and their targets: item `i` offers the distinct bytes `bytes[offsets[i] ..<
-/// offsets[i + 1]]`, an item offering none makes no choice, and the targets pair with `bytes`, summing to one per
-/// item. Mirrors `uform_choices_view_t`.
-public struct ChoicesView: Sendable {
-    /// The step's count + 1 non-decreasing offsets into `bytes`.
-    public var offsets: [Int]
-    /// Every item's legal bytes, end to end.
-    public var bytes: [UInt8]
-    /// The target probability of each byte.
-    public var targets: [Float]
-
-    public init(offsets: [Int], bytes: [UInt8], targets: [Float]) {
-        self.offsets = offsets
-        self.bytes = bytes
-        self.targets = targets
-    }
-}
-
 /// What a step reports, every loss its world mean. Mirrors `uform_trainer_step_stats_t`.
 public struct TrainerStepStats: Sendable {
     /// The optimizer step the call applied, counted from one across resumes.
@@ -639,8 +627,10 @@ public final class Trainer: @unchecked Sendable {
 
     /// Applies one optimizer step over this process's items and every peer's; every process of the run calls it
     /// once per step. With an `arena`, the step also lands the pooled embeddings it scored there, as
-    /// `outputsScalar`. `sides` places each item in the late-interaction loss, nil leaving every item out, and
-    /// `choices` names the legal bytes and targets the choices term reads. Calls `uform_trainer_step`.
+    /// `outputsScalar`. `sides` places each item in the late-interaction loss, nil leaving every item out,
+    /// `choices` names each item's legal bytes as `textChoose` takes them, and `choiceTargets` their target
+    /// probabilities, an entry as long as the item's choices. Each list of items is gathered into one tape, the one
+    /// copy this form makes before lending it as the packed form does. Calls `uform_trainer_step`.
     public func step(
         modalities: [Modality],
         contents: [[UInt8]],
@@ -648,17 +638,48 @@ public final class Trainer: @unchecked Sendable {
         temperatureGroups: [UInt32]? = nil,
         sides: [LateInteractionSide]? = nil,
         relations: Relations = Relations(),
-        choices: ChoicesView? = nil,
+        choices: [[UInt8]]? = nil,
+        choiceTargets: [[Float]]? = nil,
         arena: Arena? = nil,
         outputsScalar: Scalar = .f32
     ) throws(UFormError) -> TrainerStep {
-        let count = contents.count
+        try step(
+            modalities: modalities,
+            contents: packed(contents),
+            bags: bags,
+            temperatureGroups: temperatureGroups,
+            sides: sides,
+            relations: relations,
+            choices: choices.map(packed),
+            choiceTargets: choiceTargets.map(packed),
+            arena: arena,
+            outputsScalar: outputsScalar
+        )
+    }
+
+    /// Applies one optimizer step over tapes already packed as `data` and its `count + 1` Apache Arrow `offsets`,
+    /// lent to the library in place, without a copy, until the step returns. Calls `uform_trainer_step`.
+    public func step(
+        modalities: [Modality],
+        contents: (data: [UInt8], offsets: [Int]),
+        bags: [UInt32]? = nil,
+        temperatureGroups: [UInt32]? = nil,
+        sides: [LateInteractionSide]? = nil,
+        relations: Relations = Relations(),
+        choices: (data: [UInt8], offsets: [Int])? = nil,
+        choiceTargets: (data: [Float], offsets: [Int])? = nil,
+        arena: Arena? = nil,
+        outputsScalar: Scalar = .f32
+    ) throws(UFormError) -> TrainerStep {
+        let count = modalities.count
         // The C side reads one entry per item, and one offset more, behind pointers that carry no count.
         let edges = [relations.attract, relations.repel, relations.ignore].compactMap { $0 }
-        guard modalities.count == count, bags.map({ $0.count == count }) ?? true,
+        guard bounds(contents.offsets, count, contents.data.count), bags.map({ $0.count == count }) ?? true,
             temperatureGroups.map({ $0.count == count }) ?? true, sides.map({ $0.count == count }) ?? true,
             edges.allSatisfy({ $0.offsets.count == count + 1 && ($0.weights?.count ?? $0.ids.count) == $0.ids.count }),
-            choices.map({ $0.offsets.count == count + 1 && $0.targets.count == $0.bytes.count }) ?? true
+            (choices == nil) == (choiceTargets == nil),
+            choices.map({ bounds($0.offsets, count, $0.data.count) }) ?? true,
+            choiceTargets.map({ bounds($0.offsets, count, $0.data.count) }) ?? true
         else {
             throw UFormError(status: .shapeMismatch, message: "every per-item list must name one entry per item")
         }
@@ -681,17 +702,9 @@ public final class Trainer: @unchecked Sendable {
         arguments.completion = landing.completion
         arguments.count = count
         arguments.modalities = landing.lend(modalities.map(\.raw))
-        arguments.contents = landing.tape(contents, .u8)
         arguments.bags = bags.flatMap { landing.lend($0) }
         arguments.temperature_groups = temperatureGroups.flatMap { landing.lend($0) }
         arguments.sides = sides.flatMap { landing.lend($0.map(\.raw)) }
-        if let choices {
-            arguments.choices = uform_choices_view_t(
-                offsets: landing.lend(choices.offsets),
-                bytes: landing.lend(choices.bytes),
-                targets: landing.lend(choices.targets)
-            )
-        }
         arguments.relations = uform_relations_view_t(
             attract: lent(relations.attract),
             repel: lent(relations.repel),
@@ -701,7 +714,17 @@ public final class Trainer: @unchecked Sendable {
         arguments.arena = arena?.raw
         arguments.outputs_scalar = outputsScalar.raw
         arguments.stats = stats
-        uform_trainer_step(&arguments)
+        // The step blocks, so the tapes' own storage outlives the call it is lent to.
+        withTape(contents, .u8) { contents in
+            withTape(choices, .u8) { choices in
+                withTape(choiceTargets, .f32) { choiceTargets in
+                    arguments.contents = contents
+                    arguments.choices = choices
+                    arguments.choice_targets = choiceTargets
+                    uform_trainer_step(&arguments)
+                }
+            }
+        }
         return try landing.read {
             TrainerStep(
                 stats: TrainerStepStats(stats.pointee),
@@ -724,5 +747,40 @@ public final class Trainer: @unchecked Sendable {
         )
         uform_trainer_save(&arguments)
         try landing.read {}
+    }
+}
+
+// MARK: - Tapes
+
+/// Gathers `items` end to end with Apache Arrow offsets around them.
+private func packed<Item: Collection>(_ items: [Item]) -> (data: [Item.Element], offsets: [Int]) {
+    var tape = (data: [Item.Element](), offsets: [0])
+    tape.offsets.reserveCapacity(items.count + 1)
+    for item in items {
+        tape.data.append(contentsOf: item)
+        tape.offsets.append(tape.data.count)
+    }
+    return tape
+}
+
+/// Whether `offsets` bound `count` entries of a run of `elements`: one more of them, from zero up, never
+/// decreasing, the last inside the run.
+private func bounds(_ offsets: [Int], _ count: Int, _ elements: Int) -> Bool {
+    offsets.count == count + 1 && offsets[0] >= 0 && offsets[count] <= elements
+        && zip(offsets, offsets.dropFirst()).allSatisfy { $0 <= $1 }
+}
+
+/// Runs `body` with `tape` lent in place over its arrays' own storage, valid only until `body` returns; nil lends an
+/// empty tape.
+private func withTape<Element: BitwiseCopyable>(
+    _ tape: (data: [Element], offsets: [Int])?,
+    _ scalar: Scalar,
+    _ body: (uform_tape_view_t) -> Void
+) {
+    guard let tape else { return body(uform_tape_view_t()) }
+    tape.data.withUnsafeBytes { data in
+        tape.offsets.withUnsafeBufferPointer { offsets in
+            body(uform_tape_view_t(data: data.baseAddress, offsets: offsets.baseAddress, scalar: scalar.raw))
+        }
     }
 }

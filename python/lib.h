@@ -276,7 +276,7 @@ typedef struct Fields {
 } Fields;
 
 extern uform_py_fields_t ImageShapeType, VideoShapeType, AudioShapeType, BatchShapeType, MaskingType, ContrastiveType,
-    LateInteractionType, ChoicesType, ScheduleType, MeshOptionsType, EdgesType, RelationsType, ChoicesViewType;
+    LateInteractionType, ChoicesType, ScheduleType, MeshOptionsType, EdgesType, RelationsType;
 
 /** Readies @p fields, its members generated from its field table and kept as long as the process, like the module;
  *  returns 0 or -1 with an exception set. */
@@ -475,7 +475,9 @@ int uform_py_size_from_object(PyObject *object, char const *field, size_t *value
 int uform_py_ordinals_from_object(PyObject *object, char const *field, int32_t **ordinals, size_t *count);
 
 /**
- *  @brief Borrows a filesystem path from a @c str, @c bytes, or @c os.PathLike.
+ *  @brief Borrows a filesystem path from a @c str, @c bytes, or @c os.PathLike, as the OS's own
+ *      bytes that @c os.fsencode gives, not necessarily UTF-8; an embedded NUL raises
+ *      @c ValueError.
  *  @param[out] decoded A new reference the caller must release once @p path is spent.
  *  @return 0 on success, -1 with an exception set otherwise.
  */

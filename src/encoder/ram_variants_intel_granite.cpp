@@ -9,3 +9,4 @@
 #include "encoder_specializations.hpp"
 
 template struct uf::encoder_class_tables<uf::encoder_home_t::ram_k, uf::cpu_class_t::intel_granite_k>;
+template struct uf::host_class_tables<uf::cpu_class_t::intel_granite_k>;

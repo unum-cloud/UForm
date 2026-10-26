@@ -161,14 +161,15 @@ struct flat_column_t {
  *  positions are unsigned sizes, so the one @c cudf::cast to @c UINT64 both widens and unsigns.
  *  Writes the borrow into @p span and the owning column into @p owner . */
 static void widen_offsets_(cudf::column_view const &offsets, rmm::cuda_stream_view stream, std::span<u64_t const> &span,
-                           std::unique_ptr<cudf::column> &owner) {
+                           std::unique_ptr<cudf::column> &owner) { // vendor-boundary: cuDF throws into the caller's try
     owner = cudf::cast(offsets, cudf::data_type {cudf::type_id::UINT64}, stream);
     span = {owner->view().data<u64_t>(), static_cast<std::size_t>(offsets.size())};
 }
 
 /** Widen a flattened column's offsets into an owned @ref column_span_t — the decode tail every
  *  reader shares once cuDF hands back a @ref flat_column_t . */
-[[nodiscard]] static expected<column_span_t> adopt_flat_(expected<flat_column_t> flat, rmm::cuda_stream_view stream) {
+[[nodiscard]] static expected<column_span_t> adopt_flat_(
+    expected<flat_column_t> flat, rmm::cuda_stream_view stream) { // vendor-boundary: cuDF throws into the caller's try
     if (!flat) return expected<column_span_t>::fail(std::move(flat));
     column_span_t column;
     column.payload = flat->payload;
@@ -204,7 +205,7 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
 [[nodiscard]] static expected<column_span_t> read_tar_members_(
     cudf::column_view byte_offsets, cudf::column_view byte_lengths, sz::string_view_t extension,
     std::span<sz::string_view_t const> paths, std::span<std::size_t const> rows_per_shard, rmm::cuda_stream_view stream,
-    rmm::device_buffer &payload) {
+    rmm::device_buffer &payload) { // vendor-boundary: cuDF throws into the caller's try
     using result_t = expected<column_span_t>;
     std::size_t const rows = static_cast<std::size_t>(byte_offsets.size());
     st::basic_vector<i64_t> offsets, lengths;
@@ -334,6 +335,8 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
     if (!row_groups.empty() && row_groups.size() != paths.size())
         return result_t::fail(status_t::invalid_input_k, "{} row-group lists for {} shards", row_groups.size(),
                               paths.size());
+    for (sz::string_view_t path : paths)
+        if (path.contains('\0')) return result_t::fail(status_t::invalid_input_k, "a shard path holds a NUL byte");
     try {
         std::vector<std::string> path_texts; // vendor-boundary: cuDF's source_info takes std::strings
         std::vector<std::string> names;      // vendor-boundary: cuDF's column selector takes std::strings
@@ -503,8 +506,8 @@ expected<parquet_length_metadata_t> parquet_file_t::column_metadata(gpu_direct_s
     try {
         // Footer only — no row-group decode: the row count and the column's total uncompressed byte size.
         cudf::io::parquet_metadata const meta = cudf::io::read_parquet_metadata(
-            cudf::io::source_info {std::string {path.data(), path.size()}}); // vendor-boundary
-        std::string const name {column.data(), column.size()};               // vendor-boundary
+            cudf::io::source_info {std::string {path}}); // vendor-boundary
+        std::string const name {column};                 // vendor-boundary
         auto const &sizes = meta.columnchunk_metadata();
         auto const found = sizes.find(name);
         if (found == sizes.end())
@@ -553,14 +556,14 @@ expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, 
         rmm::cuda_stream_view const cudf_stream {stream.get()};
         // One JSON object per line; KvikIO / GDS streams the bytes, cuDF decodes on the GPU.
         auto options = cudf::io::json_reader_options::builder(
-                           cudf::io::source_info {std::string {path.data(), path.size()}}) // vendor-boundary
+                           cudf::io::source_info {std::string {path}}) // vendor-boundary
                            .lines(true)
                            .build();
         cudf::io::table_with_metadata loaded = cudf::io::read_json(options, cudf_stream);
         if (loaded.tbl == nullptr) return result_t::fail(status_t::io_error_k, "empty JSONL read of {}", path);
 
         // Select `field` among the decoded top-level columns by name.
-        std::string const wanted {field.data(), field.size()}; // vendor-boundary
+        std::string const wanted {field}; // vendor-boundary
         std::size_t const column_count = loaded.metadata.schema_info.size();
         std::size_t field_index = column_count;
         for (std::size_t index = 0; index != column_count; ++index) // vendor-boundary
@@ -642,12 +645,11 @@ expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::
         switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
         if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed for the read");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
-        std::string const name {column.data(), column.size()}; // vendor-boundary
+        std::string const name {column}; // vendor-boundary
         // Read only the wanted column, forced to string so type inference cannot surprise us; KvikIO /
         // GDS streams the bytes, cuDF decodes on the GPU.
         auto options =
-            cudf::io::csv_reader_options::builder(
-                cudf::io::source_info {std::string {path.data(), path.size()}}) // vendor-boundary
+            cudf::io::csv_reader_options::builder(cudf::io::source_info {std::string {path}}) // vendor-boundary
                 .delimiter(delimiter)
                 .header(header == csv_header_t::named_k ? 0 : -1)
                 .use_cols_names({name})                                                         // vendor-boundary

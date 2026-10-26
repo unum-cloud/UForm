@@ -33,11 +33,8 @@ inline constexpr std::size_t audio_avio_buffer_bytes_k = 32u * 1024u;
 /** Backing state for the in-memory AVIO read and seek callbacks over one clip's bytes. */
 struct audio_memory_reader_t {
 
-    /** The clip's bytes — borrowed, not owned. */
-    b8_t const *data = nullptr;
-
-    /** Total size of @c data in bytes — the seek's end bound. */
-    std::size_t size = 0;
+    /** The clip's bytes — borrowed, not owned; their end is the seek's bound. */
+    uc::bytes_view_t bytes {};
 
     /** The read cursor, advanced by every read and moved by every seek. */
     std::size_t position = 0;
@@ -46,11 +43,11 @@ struct audio_memory_reader_t {
 /** @c AVIOContext read callback: copy up to @p buffer_size bytes, @c AVERROR_EOF at the end. */
 static int audio_memory_read_(void *opaque, u8_t *buffer, int buffer_size) noexcept {
     auto *reader = static_cast<audio_memory_reader_t *>(opaque);
-    std::size_t const remaining = reader->size - reader->position;
+    std::size_t const remaining = reader->bytes.size() - reader->position;
     std::size_t const requested = static_cast<std::size_t>(buffer_size);
     int const to_read = static_cast<int>(requested < remaining ? requested : remaining);
     if (to_read == 0) return AVERROR_EOF;
-    std::memcpy(buffer, reader->data + reader->position, static_cast<std::size_t>(to_read));
+    std::memcpy(buffer, reader->bytes.data() + reader->position, static_cast<std::size_t>(to_read));
     reader->position += static_cast<std::size_t>(to_read);
     return to_read;
 }
@@ -58,13 +55,14 @@ static int audio_memory_read_(void *opaque, u8_t *buffer, int buffer_size) noexc
 /** @c AVIOContext seek callback: honors @c SEEK_SET/CUR/END and the @c AVSEEK_SIZE query, @c -1 out of range. */
 static i64_t audio_memory_seek_(void *opaque, i64_t offset, int whence) noexcept {
     auto *reader = static_cast<audio_memory_reader_t *>(opaque);
-    if (whence == AVSEEK_SIZE) return static_cast<i64_t>(reader->size);
+    i64_t const size = static_cast<i64_t>(reader->bytes.size());
+    if (whence == AVSEEK_SIZE) return size;
     i64_t position = 0;
     if (whence == SEEK_SET) position = offset;
     else if (whence == SEEK_CUR) position = static_cast<i64_t>(reader->position) + offset;
-    else if (whence == SEEK_END) position = static_cast<i64_t>(reader->size) + offset;
+    else if (whence == SEEK_END) position = size + offset;
     else return -1;
-    if (position < 0 || position > static_cast<i64_t>(reader->size)) return -1;
+    if (position < 0 || position > size) return -1;
     reader->position = static_cast<std::size_t>(position);
     return position;
 }
@@ -83,22 +81,22 @@ struct audio_decoder_ {
     audio_memory_reader_t reader {};
 
     /** The custom in-memory @c AVIOContext feeding the demuxer the clip's bytes. */
-    AVIOContext *avio = nullptr;
+    AVIOContext *avio = nullptr; // vendor-boundary
 
     /** The opened demuxer context. */
-    AVFormatContext *format = nullptr;
+    AVFormatContext *format = nullptr; // vendor-boundary
 
     /** The audio decoder context bound to the picked stream's codec parameters. */
-    AVCodecContext *decoder = nullptr;
+    AVCodecContext *decoder = nullptr; // vendor-boundary
 
     /** The libswresample context converting the decoded audio to mono Float32 at the target rate. */
-    SwrContext *resampler = nullptr;
+    SwrContext *resampler = nullptr; // vendor-boundary
 
     /** The reusable packet the demuxer reads each compressed unit into. */
-    AVPacket *packet = nullptr;
+    AVPacket *packet = nullptr; // vendor-boundary
 
     /** The reusable frame the decoder emits each PCM block into. */
-    AVFrame *frame = nullptr;
+    AVFrame *frame = nullptr; // vendor-boundary
 
     /** The picked audio stream's index in @c format->streams . */
     int audio_stream_index = -1;
@@ -128,7 +126,7 @@ struct audio_decoder_ {
  */
 [[nodiscard]] static status_t open_audio_(std::span<b8_t const> encoded, u32_t sample_rate,
                                           audio_decoder_ &session) noexcept {
-    session.reader = audio_memory_reader_t {encoded.data(), encoded.size(), 0u};
+    session.reader = audio_memory_reader_t {encoded, 0u};
     u8_t *avio_buffer = static_cast<u8_t *>(av_malloc(audio_avio_buffer_bytes_k));
     if (avio_buffer == nullptr) return status_t::bad_alloc_k;
     session.avio = avio_alloc_context(avio_buffer, static_cast<int>(audio_avio_buffer_bytes_k), 0, &session.reader,

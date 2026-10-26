@@ -365,17 +365,16 @@ static PyStructSequence_Field ModelDescription_fields[] = {
     {"context", "Tokens one item may span before it is truncated."},
     {"quantization", "The `Scalar` the transformer blocks run in."},
     {"memory_usage", "Bytes the model holds; activations are the executor's."},
-    {"capabilities", "The codename of the kernels the model dispatched to on this machine."},
     {"cpu_class", "The `CPUClass` a RAM model was packed for, or None for a VRAM model."},
     {"gpu_class", "The `GPUClass` every replica of a VRAM model runs as, or None for a RAM model."},
     {"token_width", "Scalars per token vector; 0 when the checkpoint carries no token head."},
-    {"choice_temperature_groups", "Question types `text_choose` was calibrated over: 0 without the byte decoder."},
+    {"choice_temperature_groups", "Question types of `text_choose`: 0 without the byte decoder, 1 when uncalibrated."},
     {NULL, NULL},
 };
 
 PyStructSequence_Desc uform_py_model_description_desc = {
     "uform.ModelDescription", "What a loaded model reports about itself, as `uform_model_description_t` holds it.",
-    ModelDescription_fields, 9};
+    ModelDescription_fields, 8};
 
 PyTypeObject ModelDescriptionType;
 
@@ -401,17 +400,16 @@ static void describe_submit(void *call) { uform_model_describe(&((describe_call_
 
 static PyObject *describe_answer(void *erased) {
     uform_model_description_t const *const description = &((describe_call_t *)erased)->description;
-    PyObject *fields[9] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
+    PyObject *fields[8] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
     (void)((fields[0] = PyLong_FromSize_t(description->dimensions)) &&
            (fields[1] = PyLong_FromSize_t(description->context)) &&
            (fields[2] = uform_py_enum_to_object(&uform_py_scalar, (int)description->quantization)) &&
            (fields[3] = PyLong_FromSize_t(description->memory_usage)) &&
-           (fields[4] = PyUnicode_FromString(description->capabilities ? description->capabilities : "")) &&
-           (fields[5] = uform_py_class_to_object(&uform_py_cpu_class, (int)description->cpu_class)) &&
-           (fields[6] = uform_py_class_to_object(&uform_py_gpu_class, (int)description->gpu_class)) &&
-           (fields[7] = PyLong_FromSize_t(description->token_width)) &&
-           (fields[8] = PyLong_FromSize_t(description->choice_temperature_groups)));
-    return uform_py_struct_sequence_steal(&ModelDescriptionType, fields, 9);
+           (fields[4] = uform_py_class_to_object(&uform_py_cpu_class, (int)description->cpu_class)) &&
+           (fields[5] = uform_py_class_to_object(&uform_py_gpu_class, (int)description->gpu_class)) &&
+           (fields[6] = PyLong_FromSize_t(description->token_width)) &&
+           (fields[7] = PyLong_FromSize_t(description->choice_temperature_groups)));
+    return uform_py_struct_sequence_steal(&ModelDescriptionType, fields, 8);
 }
 
 static uform_py_verb_t const describe_verb = {sizeof(describe_call_t), describe_submit, describe_answer,

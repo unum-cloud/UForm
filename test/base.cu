@@ -27,6 +27,7 @@
  *        again at the bootstrapped world's full width. Each cell steps eagerly, then captures and replays over
  *        the same trainer, so both model-region modes run under every mixture.
  *      - @ref graph_capture — the capture contract holds and two replays agree, on the one-GPU mesh.
+ *      - @ref choices_replay — choices alone replay through the items source: their term falls.
  */
 #include <cmath>   // `std::isfinite`
 #include <cstdlib> // `std::getenv`, `std::strtod`
@@ -38,6 +39,8 @@
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
 #include "uform/train/trainer.hpp" // `trainer_config_t`, `trainer_t`, `mesh_t`, `synthetic_source_t`
+
+#include "train/numerics.hpp" // `gpu_numerics_of`
 
 #include "harness.hpp" // `test_suite_t` — the cumulative pass/fail tally
 
@@ -83,11 +86,11 @@ using namespace unum::uform::test;
 inline constexpr f64_t test_rendezvous_timeout_seconds_k = 60.0;
 
 /** One width tier: the mesh every cell of the tier builds its trainer over, the devices it drives,
- *  and the capabilities they dispatch with. */
+ *  and the kernels they call. */
 struct tier_t {
     mesh_t &mesh;
     std::span<i32_t const> devices;
-    nk_capability_t capabilities;
+    gpu_numerics_t numerics;
 };
 
 /**
@@ -154,7 +157,7 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
 /** Build @p placed over @p tier for @p config , tallying bring-up failures into @p health . */
 [[nodiscard]] static expected_t make_trainer_(trainer_t &placed, tier_t tier, trainer_config_t const &config,
                                               world_health_t &health) noexcept {
-    expected_t built = trainer_t::make(placed, tier.mesh, config, tier.devices, tier.capabilities);
+    expected_t built = trainer_t::make(placed, tier.mesh, config, tier.devices, tier.numerics);
     health.consecutive_setup_failures = built ? 0u : health.consecutive_setup_failures + 1u;
     return built;
 }
@@ -705,6 +708,54 @@ static void late_interaction_resume(test_suite_t &suite, world_health_t &health,
                 resumed[0], continued[continued.size() / 2], resumed[resumed.size() / 2]);
 }
 
+/** Calibrated choices train end to end through the items source the C verb drives: four text
+ *  states, each offering two or three legal bytes against a one-hot or soft target, replay eight
+ *  captured steps with the masked term weighted out — the choices term reads finite and positive
+ *  first, falls by the last step, and the token term stays zero throughout. */
+static void choices_replay(test_suite_t &suite, world_health_t &health, tier_t tier) {
+    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
+    trainer_config_t config = test_geometry_(false);
+    // Rows as wide as the model: the envelope's one-row probe reads choices off its tokens.
+    config.batch = multimodal_batch_shape_t {2u, 4u, 256u};
+    config.batch.max_choices_per_segment = 4u;
+    config.steps = 8;
+    config.text_weight = 0.0f;
+    config.choices.weight = 1.0f;
+    trainer_t trainer;
+    if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
+        return suite.check(false, "choices trainer bring-up: {}", built.description_);
+    items_source_t source;
+    if (expected_t made = items_source_t::make(source, trainer); !made)
+        return suite.check(false, "choices items source: {}", made.description_);
+
+    char const text[] = "2+2=" "is ice cold? " "pick a vowel: " "is fire cold? ";
+    std::size_t const offsets[] = {0, 4, 17, 31, sizeof(text) - 1};
+    modality_t const modalities[] = {modality_t::text_k, modality_t::text_k, modality_t::text_k, modality_t::text_k};
+    std::size_t const choice_offsets[] = {0, 3, 5, 8, 10};
+    u8_t const choice_bytes[] = {'3', '4', '5', 'Y', 'N', 'a', 'e', 'x', 'Y', 'N'};
+    f32_t const targets[] = {0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.5f, 0.5f, 0.0f, 0.0f, 1.0f};
+    source.items.modalities = modalities;
+    source.items.contents = {std::as_bytes(std::span {text}), offsets};
+    source.items.choices = {{choice_bytes, choice_offsets}, {targets, choice_offsets}};
+
+    f32_t first = 0.0f, last = 0.0f, token = 0.0f;
+    step_report_t report;
+    for (u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
+        if (expected_t stepped = trainer.step(batch_source_of(source), optimizer_step_t {ordinal}, report); !stepped)
+            return suite.check(false, "choices step {}: {}", ordinal, stepped.description_);
+        telemetry_t const telemetry = trainer.telemetry(optimizer_step_t {ordinal});
+        if (ordinal == 0u) first = telemetry.choices;
+        last = telemetry.choices;
+        token = std::max(token, std::fabs(telemetry.token_ce));
+    }
+    suite.check(std::isfinite(first) && first > 0.0f, "the first choices term is finite and positive: {}", first);
+    // Seed 42 settles from 1.17 onto the soft target's entropy floor, ln2/4 ≈ 0.17: a wide margin.
+    suite.check(std::isfinite(last) && last < 0.5f * first, "the choices term halves: first {} last {}", first, last);
+    suite.check(token == 0.0f, "the weighted-out token term reads zero: peak {}", token);
+    if (expected_t drained = trainer.synchronize(); !drained)
+        suite.check(false, "choices end-of-case drain: {}", drained.description_);
+}
+
 int main(int, char **argv) {
     // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins: the spinning
     // wait blocks its context, the peer's next launch blocks on module loading behind it, and neither
@@ -720,6 +771,7 @@ int main(int, char **argv) {
     if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) {
         suite.skip("capture/replay", no_cuda_device_k);
         suite.skip("resume/late_interaction", no_cuda_device_k);
+        suite.skip("choices/replay", no_cuda_device_k);
         suite.skip("conformance/tokens", no_cuda_device_k);
         suite.skip("conformance/omni", no_cuda_device_k);
         suite.skip("sweep", no_cuda_device_k);
@@ -756,14 +808,16 @@ int main(int, char **argv) {
         suite.check(false, "narrowed mesh: {}", narrowed.description_);
         return suite.finish();
     }
-    tier_t const wide {wide_mesh, devices, options.capabilities};
-    tier_t const cheap {cheap_mesh, std::span<i32_t const> {devices}.first(1), options.capabilities};
+    gpu_numerics_t const numerics = gpu_numerics_of(options.capabilities);
+    tier_t const wide {wide_mesh, devices, numerics};
+    tier_t const cheap {cheap_mesh, std::span<i32_t const> {devices}.first(1), numerics};
 
     world_health_t health;
     suite.run("segment_budget", segment_budget);
     suite.run("packed_rows", packed_rows, health, cheap);
     suite.run("capture/replay", graph_capture, health, cheap);
     suite.run("resume/late_interaction", late_interaction_resume, health, cheap);
+    suite.run("choices/replay", choices_replay, health, cheap);
     suite.run("conformance/tokens", run_base_conformance, health, "tokens", test_geometry_(false), wide);
     suite.run("conformance/omni", run_base_conformance, health, "omni", test_geometry_(true), wide);
     mixture_sweep(suite, health, wide, cheap);

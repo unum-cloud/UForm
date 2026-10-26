@@ -97,7 +97,7 @@ threads.drain(Mood::Spinning)?;                                         // waits
 
 The second argument pins a `CPUClass` or a `GPUClass` to dispatch as, and `None` derives the hardware's own.
 `gpu_devices(&mut devices)` fills a slice of `GPUDevice` and answers how many GPUs the process can drive, and a device's position there is the ordinal `for_vram` and `load_vram` name it by.
-`for_vram` and `on_pool` are `unsafe`, since the streams or the pool they borrow must outlive the executor; `on_pool` mirrors the C verb and answers `Status::Unsupported` until borrowing is designed.
+`for_vram` and `on_pool` are `unsafe`, since the streams or the pool they borrow must outlive the executor; `on_pool` mirrors the C verb and answers `Status::Unsupported` until borrowing is designed, as `for_vram` does for borrowed streams.
 Each constructor ends with a `deferred_limit` sizing its table of deferred calls, where zero takes the default.
 Calls on one executor run in submission order, so two threads that genuinely overlap take one apiece; an executor is `Send` but not `Sync`, while models stay freely shared.
 Dropping an executor drains it, unless a GPU arena it made still holds it, which then does so on its own drop.
@@ -171,7 +171,7 @@ Each group is a question type below the model's `choice_temperature_groups`, and
 ## Models
 
 `Model::load_ram(path)` and `Model::load_vram(path)` copy a safetensors checkpoint into host memory or onto GPUs, and `load_ram_buffer` and `load_vram_buffer` take the checkpoint's bytes instead.
-A bare path or buffer loads on the calling thread with `Scalar::BF16` blocks, and its config reaches the executor, the placement, `Scalar::E4M3` quantization and a progress handler:
+A bare path or buffer loads on the calling thread with `Scalar::BF16` blocks, and its config reaches the executor, the placement and its class pin, `Scalar::E4M3` quantization and a progress handler:
 
 ```rust
 let model = Model::load_vram(ModelLoadVramConfig {
@@ -223,7 +223,8 @@ trainer.on(&executor).save("checkpoint.safetensors")?;
 
 `BatchShape` nests an `ImageShape`, a `VideoShape` and an `AudioShape`, while `Masking`, `Contrastive`, `LateInteraction`, `Choices` and `Schedule` configure the objectives, and `PairLossForm` picks each contrastive term's pair loss.
 `Relations` holds three `Edges` sets as compressed sparse rows, which the binding checks against the step's items before the call.
-A step's `sides` give each item a `LateInteractionSide`, and its `ChoicesView` gives each choice item its legal bytes and their target probabilities, checked the same way.
+A step's `sides` give each item a `LateInteractionSide`, and its `choices` and `choice_targets` give each choice item its legal bytes and their target probabilities as `(data, offsets)` tapes, the shapes `text_choose` takes and answers, checked the same way.
+Paths cross as the OS's bytes on Unix, not necessarily UTF-8, while the mesh's `job` is a name and a `&str`.
 `step` answers the pooled embeddings the loss scored when its config names an arena, and `None` otherwise.
 A trainer borrows its mesh, so the mesh outlives every trainer made over it, and `mesh.describe()` answers a `MeshDescription` whose `multimem_tier` is a `MultimemTier` and whose `gpu_class` is the `GPUClass` every GPU of the run dispatches as.
 

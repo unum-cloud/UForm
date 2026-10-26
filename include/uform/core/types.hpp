@@ -16,6 +16,7 @@
 #include <cstdint> // `std::int32_t`, `std::uint32_t`
 
 #include <utility>         // `std::move`
+#include <span>            // `std::span` — byte runs and tape offsets
 #include <new>             // `std::launder` — typed spans over byte regions
 #include <type_traits>     // `std::is_implicit_lifetime_v`
 #include <format>          // `std::vformat_to`, `std::make_format_args`, `std::formatter`
@@ -29,16 +30,16 @@
  *  no conversion shims at call sites. */
 template <>
 struct std::formatter<ashvardanian::stringzilla::string_view_t> : std::formatter<std::string_view> {
-    auto format(ashvardanian::stringzilla::string_view_t text, std::format_context &context) const {
-        return std::formatter<std::string_view>::format(std::string_view {text.data(), text.size()}, context);
+    auto format(ashvardanian::stringzilla::string_view_t text, std::format_context &context) const noexcept {
+        return std::formatter<std::string_view>::format(std::string_view {text}, context);
     }
 };
 
 /** `std::format` support for owning StringZilla strings — same bridge, by reference. */
 template <>
 struct std::formatter<ashvardanian::stringzilla::string_t> : std::formatter<std::string_view> {
-    auto format(ashvardanian::stringzilla::string_t const &text, std::format_context &context) const {
-        return std::formatter<std::string_view>::format(std::string_view {text.data(), text.size()}, context);
+    auto format(ashvardanian::stringzilla::string_t const &text, std::format_context &context) const noexcept {
+        return std::formatter<std::string_view>::format(std::string_view {text}, context);
     }
 };
 
@@ -107,6 +108,40 @@ template <typename value_type_>
     static_assert(std::is_implicit_lifetime_v<value_type_>);
     std::size_t const count = bytes.extent(0) / sizeof(value_type_);
     return {std::launder(static_cast<value_type_ const *>(static_cast<void const *>(bytes.data()))), count};
+}
+
+/** Entries end to end and @c count+1 offsets into them, as the C ABI's tapes carry them;
+ *  @c elements runs from where every offset counts to the last offset, and an empty tape holds no
+ *  entries. */
+template <typename element_type_>
+struct tape_view {
+    std::span<element_type_> elements {};
+    std::span<std::size_t const> offsets {};
+
+    [[nodiscard]] std::size_t size() const noexcept { return offsets.empty() ? 0 : offsets.size() - 1; }
+    [[nodiscard]] bool empty() const noexcept { return offsets.empty(); }
+    [[nodiscard]] std::span<element_type_> operator[](std::size_t index) const noexcept {
+        return elements.subspan(offsets[index], offsets[index + 1] - offsets[index]);
+    }
+};
+
+/** A read-only run of raw bytes. */
+using bytes_view_t = std::span<b8_t const>;
+
+/** A writable run of raw bytes. */
+using bytes_span_t = std::span<b8_t>;
+
+/** The bytes the contiguous @p tensor spans, the currency of the byte copy and zero steps. */
+template <typename value_type_, std::size_t rank_>
+[[nodiscard]] inline bytes_span_t bytes_of(nk::tensor_span<value_type_, rank_> tensor) noexcept {
+    return {static_cast<b8_t *>(static_cast<void *>(tensor.byte_data())), tensor.numel() * sizeof(value_type_)};
+}
+
+/** The read-only twin of @ref bytes_of . */
+template <typename value_type_, std::size_t rank_>
+[[nodiscard]] inline bytes_view_t bytes_of(nk::tensor_view<value_type_, rank_> tensor) noexcept {
+    return {static_cast<b8_t const *>(static_cast<void const *>(tensor.byte_data())),
+            tensor.numel() * sizeof(value_type_)};
 }
 
 /** One vocabulary entry's index — the byte-level vocabulary (256 bytes + the special tokens)
@@ -453,7 +488,7 @@ using expected_t = expected<void>;
 /** `std::format` support for statuses, printing the name @c to_string gives. */
 template <>
 struct std::formatter<unum::uform::core::status_t> : std::formatter<std::string_view> {
-    auto format(auto status, std::format_context &context) const {
+    auto format(auto status, std::format_context &context) const noexcept {
         return std::formatter<std::string_view>::format(to_string(status), context);
     }
 };

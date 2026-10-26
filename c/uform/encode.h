@@ -133,7 +133,7 @@ typedef struct uform_text_choose_t {
     uint32_t const* temperature_groups;
 
     /** Output for one probability per choice in @c choices order, @c uform_scalar_f32_k, inside
-     *  @c arena. */
+     *  @c arena: the shape a training step reads its @c choice_targets in. */
     uform_tape_view_t* probabilities;
 
     /** Memory for every output, rewound by the call. */
