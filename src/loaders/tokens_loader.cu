@@ -45,22 +45,22 @@ static __global__ void sample_rows_kernel_(u64r1_span_t record_indices, u64_t se
  *      is a strict scan.
  *
  *  It reads each drawn document's byte count through its reservoir row index, truncates to the row width,
- *  and jumps the cursor past any row boundary the segment would cross. A segment that would overflow the
- *  rectangle is dropped loudly (zero length). Segments past the drawn documents PAD: zero length, repeated
- *  offset.
+ *  and jumps the cursor past any row boundary the segment would cross. A segment that would
+ *  overflow the rectangle is dropped (zero length) and counted into @p dropped . Segments past the
+ *  drawn documents PAD: zero length, repeated offset.
  *
  *  __grid_size__ @c [1,1,1] , one thread live; no dynamic shared memory.
  */
 static __global__ void tokens_geometry_kernel_(u64r1_view_t reservoir_offsets, u64r1_view_t record_indices,
                                                std::size_t prefix_bytes, u32r1_span_t segment_offsets,
                                                u32r1_span_t segment_lengths, modality_span_t segment_modality,
-                                               tokens_matrix_span_t tokens) {
+                                               u32r1_span_t dropped, tokens_matrix_span_t tokens) {
     if (threadIdx.x != 0u || blockIdx.x != 0u) return;
     u32_t const columns_per_row = static_cast<u32_t>(tokens.extent(1));
     u32_t const capacity = static_cast<u32_t>(tokens.extent(0) * tokens.extent(1));
     u32_t const live_segments = static_cast<u32_t>(record_indices.extent(0));
     u32_t const total_segments = static_cast<u32_t>(segment_lengths.extent(0));
-    u32_t cursor = 0;
+    u32_t cursor = 0, overflowed = 0;
     for (u32_t segment_index = 0; segment_index != total_segments; ++segment_index) {
         u32_t columns = 0;
         if (segment_index < live_segments) {
@@ -71,10 +71,7 @@ static __global__ void tokens_geometry_kernel_(u64r1_view_t reservoir_offsets, u
         // A segment never crosses its row: jump the cursor to the next row when it would.
         u32_t const room_in_row = columns_per_row - cursor % columns_per_row;
         if (columns > room_in_row) cursor += room_in_row;
-        if (cursor + columns > capacity) {
-            printf("uform: loaded batch overflows at segment %u — dropped\n", segment_index);
-            columns = 0;
-        }
+        if (cursor + columns > capacity) ++overflowed, columns = 0;
         segment_offsets[segment_index] = cursor;
         segment_lengths[segment_index] = columns;
         // Every fill owns the whole segment table — a reused batch may hold another modality's tags, and
@@ -83,6 +80,7 @@ static __global__ void tokens_geometry_kernel_(u64r1_view_t reservoir_offsets, u
         cursor += columns;
     }
     segment_offsets[total_segments] = cursor;
+    dropped[0] += overflowed;
 }
 
 /**
@@ -114,7 +112,7 @@ static __global__ void tokens_gather_kernel_(b8r1_view_t reservoir_payload, u64r
 
 expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view_t prefix, tokens_matrix_span_t tokens,
                            u32r1_span_t segment_offsets, u32r1_span_t segment_lengths, modality_span_t segment_modality,
-                           gpu_stream_t &gpu_stream) noexcept {
+                           u32r1_span_t dropped, gpu_stream_t &gpu_stream) noexcept {
     if (elements.extent(0) > segment_lengths.extent(0) || segment_offsets.extent(0) != segment_lengths.extent(0) + 1u ||
         segment_modality.extent(0) != segment_lengths.extent(0))
         return expected_t::fail(status_t::shape_unsupported_k, "{} documents exceed a table of {} segments",
@@ -125,7 +123,7 @@ expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view
     dim3 const one_block {1u, 1u, 1u};
     expected_t packed = launch_kernel(&tokens_geometry_kernel_, one_block, one_block, gpu_stream, texts.offsets,
                                       elements, prefix.extent(0), segment_offsets, segment_lengths, segment_modality,
-                                      tokens);
+                                      dropped, tokens);
     if (packed)
         packed = launch_kernel(&tokens_gather_kernel_, dim3 {static_cast<u32_t>(elements.extent(0)), 1u, 1u},
                                dim3 {kernel_block_size_default_k, 1u, 1u}, gpu_stream, texts.payload, texts.offsets,
@@ -164,7 +162,7 @@ expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view
         multimodal_batch_on_gpu_t &loaded = batches[batch];
         if (expected_t packed = pack_tokens(reservoir_column, batch_records[batch, nk::slice], {}, loaded.tokens.span(),
                                             loaded.segment_offsets.span(), loaded.segment_lengths.span(),
-                                            loaded.segment_modality.span(), gpu_stream);
+                                            loaded.segment_modality.span(), loaded.dropped.span(), gpu_stream);
             !packed)
             return packed;
         // A document names no role, key, prefix or late-interaction side; none keeps stale bytes.

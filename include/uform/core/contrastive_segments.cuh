@@ -341,9 +341,11 @@ struct contrastive_segments_t {
      *  @param[in] config The baked geometry (see @ref contrastive_segments_config_t ); @c hidden a multiple of 8.
      *  @param[in] prefix_dims Matryoshka prefix widths, validated through @ref matryoshka_prefixes_t , each
      *      a multiple of 8 so every segment's column band starts on NumKong's 16-byte boundary.
+     *  @param[in] capabilities The NumKong capabilities every product dispatches with.
      */
     [[nodiscard]] static expected<contrastive_segments_t> make(gpu_arena_t &arena, contrastive_segments_config_t config,
-                                                               u32r1_view_t prefix_dims) noexcept;
+                                                               u32r1_view_t prefix_dims,
+                                                               nk_capability_t capabilities) noexcept;
 
     /**
      *  @brief Rank-local forward + backward for one step — enqueue-only, capture-safe. Inputs and outputs
@@ -496,12 +498,14 @@ struct distributed_contrastive_segments_t {
      *  @param[in] config The per-rank geometry; @c gpu_subgraphs_per_step must equal the @b world GPU
      *      count and both row counts must agree (the self-scoring shape).
      *  @param[in] prefix_dims Matryoshka prefix widths, shared by every rank.
+     *  @param[in] capabilities The NumKong capabilities every rank's products dispatch with.
      */
     [[nodiscard]] static expected<distributed_contrastive_segments_t> make(
         multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
         std::span<gpu_stream_t> streams, std::span<bf16r2_view_t const> towers,
         std::span<contrastive_relations_view_t const> relations, std::span<bf16r2_span_t const> from_vertices_grads,
-        contrastive_segments_config_t config, u32r1_view_t prefix_dims, f64_t timeout_seconds = 120.0) noexcept;
+        contrastive_segments_config_t config, u32r1_view_t prefix_dims, nk_capability_t capabilities,
+        f64_t timeout_seconds = 120.0) noexcept;
 
     /** The @b [gpus] rank-local loss summands of the last call — sum for the global mean. */
     [[nodiscard]] f32r1_view_t loss_outs() const noexcept { return loss_outs_.view(); }

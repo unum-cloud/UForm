@@ -75,7 +75,7 @@ def test_choices_view_keeps_its_buffers():
 def test_step_report_starts_empty():
     """A fresh report has counted nothing."""
     stats = uform.TrainerStepStats()
-    assert (stats.step, stats.loss, stats.truncated) == (0, 0.0, 0)
+    assert (stats.step, stats.loss, stats.truncated, stats.dropped) == (0, 0.0, 0, 0)
     assert (stats.late_interaction_loss, stats.choices_loss) == (0.0, 0.0)
     with pytest.raises(TypeError):
         uform.TrainerStepStats(1)

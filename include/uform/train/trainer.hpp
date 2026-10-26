@@ -47,6 +47,9 @@ struct mesh_options_t {
 
     /** Seconds any wait for a peer lasts before failing. */
     f64_t timeout_seconds = 120.0;
+
+    /** The NumKong capabilities this process's GPUs dispatch with, which every peer must share. */
+    nk_capability_t capabilities = 0;
 };
 
 /** One process's place among the processes of a run: the topology every process agreed on at bootstrap, and the
@@ -135,6 +138,10 @@ struct telemetry_t {
 
     /** The domain's barrier round after this optimizer step. */
     concurrency_round_t concurrency_round {};
+
+    /** Segments dropped whole because the batch had no room for them, every member's since the
+     *  last read. */
+    std::size_t dropped = 0;
 
     /** The composite loss — every live term. */
     [[nodiscard]] f32_t composite() const noexcept {
@@ -311,6 +318,9 @@ struct trainer_t {
     /** The device ordinals this process drives. */
     st::basic_vector<i32_t> devices {};
 
+    /** The NumKong capabilities every component dispatches with, after the executor's pin. */
+    nk_capability_t capabilities = 0;
+
     /** The measured envelope @ref config 's batch was sized from. */
     envelope_t envelope {};
 
@@ -378,10 +388,11 @@ struct trainer_t {
      *  Zero rows in @p requested take the most rows that leave the margin free on every device of
      *  every process; configured rows are honoured or refused, never shrunk. The arenas reserve the
      *  fitted high-water mark, see @ref envelope_t .
+     *  Every component dispatches with @p capabilities .
      *  @retval status_t::bad_alloc_k The envelope does not fit, with the measured numbers.
      */
     [[nodiscard]] static expected_t make(trainer_t &placed, mesh_t &mesh, trainer_config_t const &requested,
-                                         std::span<i32_t const> devices) noexcept;
+                                         std::span<i32_t const> devices, nk_capability_t capabilities) noexcept;
 
     /**
      *  @brief Load every replica from the checkpoint at @p path and continue from its saved step,

@@ -399,7 +399,8 @@ static expected_t project_media_weight_grads(multimodal_batch_on_gpu_t const &ba
 }
 
 expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, encoder_tower_config_t config,
-                                                          multimodal_batch_shape_t shape) noexcept {
+                                                          multimodal_batch_shape_t shape,
+                                                          nk_capability_t capabilities) noexcept {
     using result_t = expected<encoder_tower_bf16_t>;
     if (config.depth == 0) return result_t::fail(status_t::invalid_input_k, "a tower needs at least one block");
     if (config.vocabulary == 0)
@@ -410,11 +411,7 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, en
 
     encoder_tower_bf16_t tower;
     tower.config_ = config;
-    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
-                                                                &tower.capabilities_);
-        status != nk_success_k)
-        return result_t::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}", arena.device(),
-                              nk_status_name(status));
+    tower.capabilities_ = capabilities;
 
     std::size_t const hidden = config.block.hidden;
     std::size_t const tokens = config.block.max_tokens;
@@ -492,11 +489,12 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, en
     if (!angles) return result_t::fail(std::move(angles));
     tower.angles_ = std::move(angles.value_);
 
-    expected<tower_pool_t> pool = tower_pool_t::make(arena, config.block);
+    expected<tower_pool_t> pool = tower_pool_t::make(arena, config.block, capabilities);
     if (!pool) return result_t::fail(std::move(pool));
     tower.pool_ = std::move(pool.value_);
     if (config.token_width != 0) {
-        expected<tower_token_head_t> token_head = tower_token_head_t::make(arena, config.block, config.token_width);
+        expected<tower_token_head_t> token_head = tower_token_head_t::make(arena, config.block, config.token_width,
+                                                                           capabilities);
         if (!token_head) return result_t::fail(std::move(token_head));
         tower.token_head_ = std::move(token_head.value_);
     }
@@ -593,25 +591,23 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, en
         return result_t::fail(status_t::bad_alloc_k, "block table allocation failed ({})", config.depth);
     u32_t const entry_scalars[3] = {image_patch_scalars, video_tube_scalars, audio_frame_scalars};
     expected<transformer_scratch_t> scratch = transformer_scratch_t::make(arena, config.block, entry_scalars,
-                                                                          config.token_width);
+                                                                          config.token_width, capabilities);
     if (!scratch) return result_t::fail(std::move(scratch));
     tower.scratch_ = std::make_unique<transformer_scratch_t>(std::move(scratch.value_));
     for (u32_t layer_index = 0; layer_index != config.depth; ++layer_index) {
-        expected<transformer_block_bf16_t> block = transformer_block_bf16_t::make(arena, *tower.scratch_, config.block);
+        expected<transformer_block_bf16_t> block = transformer_block_bf16_t::make(arena, *tower.scratch_, config.block,
+                                                                                  capabilities);
         if (!block) return result_t::fail(std::move(block));
         tower.blocks_[layer_index] = std::move(block.value_);
     }
     return result_t {std::move(tower)};
 }
 
-expected<tower_pool_t> tower_pool_t::make(gpu_arena_t &arena, transformer_block_config_t const &block) noexcept {
+expected<tower_pool_t> tower_pool_t::make(gpu_arena_t &arena, transformer_block_config_t const &block,
+                                          nk_capability_t capabilities) noexcept {
     using result_t = expected<tower_pool_t>;
     tower_pool_t pool;
-    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
-                                                                &pool.capabilities_);
-        status != nk_success_k)
-        return result_t::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}", arena.device(),
-                              nk_status_name(status));
+    pool.capabilities_ = capabilities;
     std::size_t const segments = block.max_segments;
     std::size_t const heads = block.hidden / transformer_head_dim_k;
 
@@ -819,18 +815,14 @@ static __global__ void tower_token_normalize_backward_kernel_(f32r2_view_t proje
 }
 
 expected<tower_token_head_t> tower_token_head_t::make(gpu_arena_t &arena, transformer_block_config_t const &block,
-                                                      u32_t width) noexcept {
+                                                      u32_t width, nk_capability_t capabilities) noexcept {
     using result_t = expected<tower_token_head_t>;
     if (width == 0 || width % 8u != 0u)
         return result_t::fail(status_t::shape_unsupported_k, "the token width must be a positive multiple of 8 ({})",
                               width);
     tower_token_head_t head;
     head.epsilon_ = block.rms_eps;
-    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
-                                                                &head.capabilities_);
-        status != nk_success_k)
-        return result_t::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}", arena.device(),
-                              nk_status_name(status));
+    head.capabilities_ = capabilities;
     std::size_t const hidden = block.hidden, tokens = block.max_tokens;
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
@@ -945,7 +937,7 @@ expected_t tower_token_head_t::pack_weights(bf16r1_span_t transposed, gpu_stream
 expected<tower_token_head_t> tower_token_head_t::snapshot(gpu_arena_t &arena, transformer_block_config_t const &block,
                                                           gpu_stream_t &stream) const noexcept {
     using result_t = expected<tower_token_head_t>;
-    expected<tower_token_head_t> made = make(arena, block, static_cast<u32_t>(projection_.extent(0)));
+    expected<tower_token_head_t> made = make(arena, block, static_cast<u32_t>(projection_.extent(0)), capabilities_);
     if (!made) return made;
     tower_token_head_t &copy = made.value_;
     expected_t copied = copy_device_to_device(norm_scale_.view(), copy.norm_scale_.span(), stream);
@@ -1518,7 +1510,7 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
                                   arena.used());
     }
 
-    expected<tower_pool_t> pool = tower_pool_t::make(arena, twin.config_.block);
+    expected<tower_pool_t> pool = tower_pool_t::make(arena, twin.config_.block, capabilities_);
     if (!pool) return result_t::fail(std::move(pool));
     twin.pool_ = std::move(pool.value_);
     if (config_.token_width != 0) {

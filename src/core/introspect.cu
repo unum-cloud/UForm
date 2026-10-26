@@ -26,7 +26,7 @@ inline constexpr std::size_t telemetry_sample_budget_k = 32u * 256u;
  *  __grid_size__ @c [1,1,1] , one warp; no dynamic shared memory.
  */
 static __global__ void telemetry_signal_probe_kernel_(f32r1_view_t values, nk::tensor_span<telemetry_row_t, 1> row,
-                                                      telemetry_policy_t policy, u32_t row_index) {
+                                                      telemetry_policy_t policy, u32_t row_index, gpu_fault_t *fault) {
     if (threadIdx.x >= 32u) return;
     std::size_t const scalars = values.extent(0);
     std::size_t const samples = scalars < telemetry_sample_budget_k ? scalars : telemetry_sample_budget_k;
@@ -58,9 +58,8 @@ static __global__ void telemetry_signal_probe_kernel_(f32r1_view_t values, nk::t
     }
     if (nonfinite_mask != 0u) {
         state.nonfinite_observations += 1u;
-        printf("uform: telemetry probe %u observed a non-finite signal (%llu of %llu scalars sampled)\n", row_index,
-               static_cast<unsigned long long>(samples), static_cast<unsigned long long>(scalars));
-        __trap();
+        trap_with(fault, gpu_fault_code_t::nonfinite_signal_k, row_index, static_cast<u32_t>(samples),
+                  static_cast<u32_t>(scalars));
     }
 }
 
@@ -124,12 +123,12 @@ expected<telemetry_probe_t> telemetry_ledger_t::register_probe(sz::string_view_t
     return result_t {telemetry_probe_t {registered_}};
 }
 
-expected_t telemetry_ledger_t::probe_signal(telemetry_probe_t probe, f32r1_view_t values,
+expected_t telemetry_ledger_t::probe_signal(telemetry_probe_t probe, f32r1_view_t values, gpu_fault_t *fault,
                                             gpu_stream_t &stream) noexcept {
     if (probe.row == 0u || values.extent(0) == 0) return {};
     nk::tensor_span<telemetry_row_t, 1> const row {rows_.data() + probe.row, 1u};
     return launch_kernel(&telemetry_signal_probe_kernel_, dim3 {1u, 1u, 1u}, dim3 {32u, 1u, 1u}, stream, values, row,
-                         policies_[probe.row], probe.row);
+                         policies_[probe.row], probe.row, fault);
 }
 
 expected_t telemetry_ledger_t::probe_round(telemetry_probe_t probe, multimem_member_t member,

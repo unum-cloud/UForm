@@ -3,6 +3,7 @@
 # capabilities through the C interface. Labels sort the suites by what they need: `host` runs anywhere, `cuda` wants a
 # GPU, and `cluster` names the preflight every multi-node sbatch runs first.
 add_executable(uform_tiny_checkpoint tiny_checkpoint.cpp)
+target_link_libraries(uform_tiny_checkpoint PRIVATE fmt::fmt)
 add_test(NAME uform_tiny_checkpoint COMMAND uform_tiny_checkpoint "${PROJECT_BINARY_DIR}/tiny.safetensors")
 set_tests_properties(uform_tiny_checkpoint PROPERTIES FIXTURES_SETUP uform_tiny_checkpoint LABELS host)
 add_executable(uform_test_inference inference.cpp)

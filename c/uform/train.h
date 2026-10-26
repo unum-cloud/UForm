@@ -414,7 +414,7 @@ typedef struct uform_mesh_bootstrap_t {
 } uform_mesh_bootstrap_t;
 
 /** Joins this process to the run's mesh; every process of the run calls it with the same count, multicast
- *  extent, directory and job. */
+ *  extent, directory, job and GPU class, or the call reports @c uform_status_config_mismatch_k. */
 UFORM_EXPORT void uform_mesh_bootstrap(uform_mesh_bootstrap_t* arguments);
 
 /** How a mesh's NVLink domains reduce. */
@@ -447,6 +447,9 @@ typedef struct uform_mesh_description_t {
 
     /** How its NVLink domains reduce. */
     uform_multimem_tier_t multimem_tier;
+
+    /** The class every GPU of the run dispatches as: the executor's pin, or the devices' own. */
+    uform_gpu_class_t gpu_class;
 } uform_mesh_description_t;
 
 /** The arguments of @c uform_mesh_describe. */
@@ -602,6 +605,10 @@ typedef struct uform_trainer_step_stats_t {
 
     /** Items cut at a row's width. */
     size_t truncated;
+
+    /** Segments dropped whole because the batch had no room for them, since the last step that
+     *  read its stats. */
+    size_t dropped;
 } uform_trainer_step_stats_t;
 
 /** Each item's legal choices and their targets: @c count + 1 offsets into both, in host memory. */

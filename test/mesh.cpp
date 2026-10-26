@@ -16,11 +16,12 @@
  *        from the local probe and never opens the exchange directory.
  *      - @ref world_reconciles — the substance: a lead reads a peer's facts, validates agreement, and
  *        assembles the world; a follower adopts the lead's manifest. Both are driven against a @b matching
- *        simulated peer planted with this box's real GPU identity, so agreement genuinely passes. Needs a
- *        visible GPU (bootstrap front-loads `discover_mesh_shape`); a box without one SKIPs.
+ *        simulated peer planted with this box's real GPU identity, so agreement genuinely passes,
+ *        and a peer of other capabilities is refused. Needs a visible GPU (bootstrap front-loads
+ *        `discover_mesh_shape`); a box without one SKIPs.
  *      - @ref barrier_traps_past_deadline — a domain barrier no other arrival reaches traps after
- *        the domain's timeout rather than hanging. Needs a visible GPU and runs last, since the
- *        trap poisons the context.
+ *        the domain's timeout rather than hanging, and leaves the sentence naming why in the mesh's
+ *        fault table. Needs a visible GPU and runs last, since the trap poisons the context.
  *
  *  The genuine multi-node happy path is @ref run_cluster_exchange , driven by
  *  `scripts/slurm/test_mesh-4-8-16.sbatch`: every rank bootstraps for real and must assemble a @b byte-identical
@@ -53,12 +54,12 @@ namespace fs = std::filesystem;
 /** One host_domain's facts in the exact line-oriented wire format `build_facts_` emits — what a
  *  peer publishes under its `mesh` key for the lead to read. */
 static sz::string_t facts_payload(sz::string_view_t job, u32_t index, u32_t count, u32_t multimem, u32_t devices,
-                                  sz::string_view_t hostname, sz::string_view_t device_name) {
+                                  sz::string_view_t hostname, sz::string_view_t device_name, u64_t capabilities) {
     sz::string_t text;
     (void)format_into(text,
                       "schema {}\njob {}\nhost_domain_index {}\nhost_domain_count {}\n" //
-                      "multimem {}\nhostname {}\ndevices {}\ndevice_name {}\nuuids",
-                      mesh_schema_k, job, index, count, multimem, hostname, devices, device_name);
+                      "multimem {}\ncapabilities {:x}\nhostname {}\ndevices {}\ndevice_name {}\nuuids",
+                      mesh_schema_k, job, index, count, multimem, capabilities, hostname, devices, device_name);
     // Synthetic per-GPU UUIDs, distinct across host_domains and never colliding with a real GPU id, so the
     // lead's world-uniqueness check sees this faux peer's devices as its own disjoint set.
     for (u32_t gpu = 0; gpu != devices; ++gpu)
@@ -215,9 +216,9 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
         fs::path const directory = base / job;
         fs::create_directories(directory, error);
         plant(directory / "host_domain1.mesh",
-              facts_payload(job, 1, 2, local_devices, local_devices, "faux-peer", device_name));
+              facts_payload(job, 1, 2, local_devices, local_devices, "faux-peer", device_name, 0x3));
         plant(directory / "host_domain1.mesh.arrive", "1\n"); // the peer's arrival at the closing barrier
-        auto result = mesh_topology_t::bootstrap(0, 2, local_devices, base.c_str(), job, 10.0);
+        auto result = mesh_topology_t::bootstrap(0, 2, local_devices, base.c_str(), job, 10.0, 0x3);
         if (!result) suite.check(false, "lead should assemble the world: {}", result.description_);
         else {
             mesh_topology_t lead = std::move(*result);
@@ -230,6 +231,18 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
             suite.check(sz::string_view_t {peer.device_name} == device_name.view(), "peer device_name: got {} want {}",
                         sz::string_view_t {peer.device_name}, device_name);
         }
+    }
+
+    // The lead refuses a peer whose GPUs dispatch with other capabilities.
+    {
+        char const *job = "reconcile_capabilities";
+        fs::path const directory = base / job;
+        fs::create_directories(directory, error);
+        plant(directory / "host_domain1.mesh",
+              facts_payload(job, 1, 2, local_devices, local_devices, "faux-peer", device_name, 0x1));
+        auto result = mesh_topology_t::bootstrap(0, 2, local_devices, base.c_str(), job, 10.0, 0x3);
+        suite.check(!result && result.status_ == status_t::shape_unsupported_k,
+                    "lead should refuse a peer of other capabilities: {}", result.description_);
     }
 
     // A follower rebuilds the same world by adopting the lead's manifest, validating its own row.
@@ -254,8 +267,9 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
 }
 
 /** A barrier whose other arrivals never come traps once it outwaits the domain's timeout instead of
- *  hanging. Member 0's round scalar is set one round ahead, so even a one-GPU domain waits for an
- *  arrival no member will make. The trap poisons the context, so this case runs last. */
+ *  hanging, and member 0's fault record names the barrier target it gave up on. Member 0's round
+ *  scalar is set one round ahead, so even a one-GPU domain waits for an arrival no member will
+ *  make. The trap poisons the context, so this case runs last. */
 static void barrier_traps_past_deadline(test_suite_t &suite, fs::path const &base, u32_t local_devices) {
     if (local_devices == 0) return suite.skip(no_cuda_device_k);
     auto bootstrapped = mesh_topology_t::bootstrap(0, 1, local_devices, base.c_str(), "barrier_deadline", 10.0);
@@ -287,6 +301,12 @@ static void barrier_traps_past_deadline(test_suite_t &suite, fs::path const &bas
     suite.check(drained != CUDA_SUCCESS, "the starved barrier should trap, not pass");
     suite.check(waited.count() < 10.0 * timeout_seconds, "the trap should land near the {}s timeout, took {}s",
                 timeout_seconds, waited.count());
+
+    sz::string_t expected_sentence, sentence;
+    (void)format_into(expected_sentence, "member 0 waited past its deadline at barrier target {}", local_devices + 1u);
+    std::span<gpu_fault_t> const faults = topology.faults();
+    (void)format_fault_into(sentence, faults[0]);
+    suite.check(sentence.view() == expected_sentence.view(), "the trap should record why: got \"{}\"", sentence);
 }
 
 /** The cluster tier, activated by `$UFORM_HOST_DOMAIN_INDEX` and driven by `mesh-4-8-16.sbatch`:

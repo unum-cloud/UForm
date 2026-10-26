@@ -47,10 +47,8 @@ extern "C" __global__ void multimem_barrier_switch_kernel_(multimem_member_t mem
     multimem_red_add_release_(member.multimem_flag, 1u);
     u64_t const deadline = global_nanoseconds() + member.wait_nanoseconds;
     while (multimem_load_acquire_(member.own_flag()) < target)
-        if (global_nanoseconds() > deadline) {
-            printf("uform: member %u waited past its deadline at barrier target %u\n", member.member_index, target);
-            __trap();
-        }
+        if (global_nanoseconds() > deadline)
+            trap_with(member.fault, gpu_fault_code_t::barrier_deadline_k, member.member_index, target, 0u);
     __threadfence_system();
     *member.round = target; // Self-advance: only this member's own kernels ever read its round.
 }

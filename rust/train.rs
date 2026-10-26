@@ -20,9 +20,10 @@ use std::path::Path;
 
 use crate::types::{
     check, fail, lower_progress, path_view, read_spelling, spelling, uform_arena_t, uform_bytes_view_t,
-    uform_completion_blocking_k, uform_completion_t, uform_executor_t, uform_outcome_t, uform_progress_t,
-    uform_rows_view_t, uform_scalar_t, uform_tape_view_t, Accepts, Arena, Callbacks, Calling, Completion, Deferring,
-    Error, Executor, Exported, Gathered, Handles, On, ProgressCallback, Result, Rows, Scalar, Status, TapeView,
+    uform_completion_blocking_k, uform_completion_t, uform_executor_t, uform_gpu_class_t, uform_outcome_t,
+    uform_progress_t, uform_rows_view_t, uform_scalar_t, uform_tape_view_t, Accepts, Arena, Callbacks, Calling,
+    Completion, Deferring, Error, Executor, Exported, GPUClass, Gathered, Handles, On, ProgressCallback, Result, Rows,
+    Scalar, Status, TapeView,
 };
 
 // region: Raw Declarations
@@ -84,6 +85,7 @@ pub struct uform_mesh_description_t {
     pub host_domain_index: usize,
     pub first_gpu_index: usize,
     pub multimem_tier: uform_multimem_tier_t,
+    pub gpu_class: uform_gpu_class_t,
 }
 
 #[repr(C)]
@@ -645,6 +647,8 @@ pub struct MeshDescription {
     pub first_gpu_index: usize,
     /// How its NVLink domains reduce.
     pub multimem_tier: MultimemTier,
+    /// The class every GPU of the run dispatches as: the executor's pin, or the devices' own.
+    pub gpu_class: Option<GPUClass>,
 }
 
 /// The geometry, objective and starting point of a run; see [`Trainer::init_vram`].
@@ -781,6 +785,9 @@ pub struct TrainerStepStats {
     pub choices_loss: f32,
     /// Items cut at a row's width.
     pub truncated: usize,
+    /// Segments dropped whole because the batch had no room for them, since the last step that
+    /// read its stats.
+    pub dropped: usize,
 }
 
 /// Each item's legal choices and their targets, as compressed sparse rows; empty offsets make no
@@ -982,6 +989,7 @@ impl Mesh {
                 Status::Internal,
                 "the library reported a tier this binding cannot name",
             ))?,
+            gpu_class: GPUClass::from_raw(description.gpu_class),
         })
     }
 }
@@ -1351,6 +1359,8 @@ mod tests {
         let late_interaction_loss = offset_of!(TrainerStepStats, late_interaction_loss);
         assert_eq!(late_interaction_loss, offset_of!(TrainerStepStats, masked_audio_loss) + 4);
         assert_eq!(offset_of!(TrainerStepStats, choices_loss), late_interaction_loss + 4);
+        assert_eq!(offset_of!(TrainerStepStats, dropped), offset_of!(TrainerStepStats, truncated) + word);
+        assert_eq!(offset_of!(uform_mesh_description_t, gpu_class), 5 * word + 4);
     }
 
     /// Training is GPU-only, so a build without GPUs refuses both constructors as the device's fault.

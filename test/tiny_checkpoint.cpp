@@ -15,11 +15,13 @@
  *  Usage: `tiny_checkpoint <output.safetensors>`.
  */
 #include <cstdint> // `std::uint16_t`, `std::uint32_t`, `std::uint64_t`
-#include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fclose`, `std::fputs`, `std::printf`
+#include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fclose`, `std::fputs`
 
 #include <bit>    // `std::bit_cast`
 #include <string> // `std::string`, `std::to_string`
 #include <vector> // `std::vector`
+
+#include <fmt/format.h> // `fmt::println`
 
 /** The tower's geometry, every value spelled as the metadata spells it. */
 static constexpr std::size_t hidden_k = 256, depth_k = 2, ffn_expansion_k = 2, patch_side_k = 8, tube_frames_k = 2;
@@ -157,7 +159,6 @@ int main(int argc, char **argv) {
         std::fputs("tiny_checkpoint: the checkpoint could not be written\n", stderr);
         return 1;
     }
-    std::printf("tiny_checkpoint: %zu tensors, %llu payload bytes -> %s\n", plans.size(),
-                static_cast<unsigned long long>(offset), argv[1]);
+    fmt::println(stderr, "tiny_checkpoint: {} tensors, {} payload bytes -> {}", plans.size(), offset, argv[1]);
     return 0;
 }

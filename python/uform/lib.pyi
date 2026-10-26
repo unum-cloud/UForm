@@ -881,7 +881,7 @@ class ChoicesView(_Fields):
     ) -> Self: ...
 
 @final
-class MeshDescription(structseq[Any], tuple[int, int, int, int, int, MultimemTier]):
+class MeshDescription(structseq[Any], tuple[int, int, int, int, int, MultimemTier, GPUClass | None]):
     """What a mesh reports about itself, as `uform_mesh_description_t` holds it."""
 
     __match_args__: Final = (
@@ -891,6 +891,7 @@ class MeshDescription(structseq[Any], tuple[int, int, int, int, int, MultimemTie
         "host_domain_index",
         "first_gpu_index",
         "multimem_tier",
+        "gpu_class",
     )
 
     @property
@@ -905,6 +906,8 @@ class MeshDescription(structseq[Any], tuple[int, int, int, int, int, MultimemTie
     def first_gpu_index(self) -> int: ...
     @property
     def multimem_tier(self) -> MultimemTier: ...
+    @property
+    def gpu_class(self) -> GPUClass | None: ...
 
 @final
 class Mesh:
@@ -947,6 +950,8 @@ class TrainerStepStats:
     def choices_loss(self) -> float: ...
     @property
     def truncated(self) -> int: ...
+    @property
+    def dropped(self) -> int: ...
 
 @final
 class Trainer:

@@ -331,6 +331,10 @@ struct multimem_member_t {
     /** How long the barrier spins for the other members before it traps. */
     u64_t wait_nanoseconds = 0;
 
+    /** Where a trapping kernel of this member records why: its GPU's record in the mesh's
+     *  @ref mesh_topology_t::faults ; null for a member another process drives. */
+    gpu_fault_t *fault = nullptr;
+
 #if defined(__CUDACC__)
 
     /** Member @p member 's payload replica base. */
@@ -509,6 +513,8 @@ struct multimem_domain_t {
         addresses.member_index = static_cast<u32_t>(member_index);
         addresses.member_count = static_cast<u32_t>(member_count());
         addresses.wait_nanoseconds = wait_nanoseconds_;
+        std::size_t const local = member_index - member_offset_; // wraps past the records for a remote member
+        addresses.fault = local < faults_.size() ? &faults_[local] : nullptr;
         return addresses;
     }
 
@@ -540,6 +546,7 @@ struct multimem_domain_t {
         std::swap(reserved_scalars_, other.reserved_scalars_);
         std::swap(member_offset_, other.member_offset_);
         std::swap(wait_nanoseconds_, other.wait_nanoseconds_);
+        std::swap(faults_, other.faults_);
     }
 
     /** Reverse the multicast machinery; the symmetric arena member tears itself down after. This
@@ -585,6 +592,9 @@ struct multimem_domain_t {
 
     /** How long a barrier spins for the other members before it traps, from the timeout. */
     u64_t wait_nanoseconds_ = 0;
+
+    /** The mesh's fault records of this process's members, borrowed for the domain's lifetime. */
+    std::span<gpu_fault_t> faults_ {};
 };
 
 } // namespace unum::uform::core

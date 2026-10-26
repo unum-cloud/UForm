@@ -79,7 +79,7 @@ expected_t mesh_t::make(mesh_t &placed, mesh_options_t const &options, std::span
                                                             : static_cast<u32_t>(devices.size());
     expected<mesh_topology_t> topology = mesh_topology_t::bootstrap(
         options.host_domain_index, options.host_domain_count, multimem, directory.c_str(), job.c_str(),
-        options.timeout_seconds);
+        options.timeout_seconds, options.capabilities);
     if (!topology) return expected_t::fail(std::move(topology));
 
     bool own_members = devices.size() == topology.value_.shape.gpus_per_host_domain;
@@ -180,11 +180,12 @@ struct device_budget_t {
     return result_t {held};
 }
 
-/** Bind @p placed to @p mesh , @p config and @p devices , make one stream per device, and record
- *  what each device has free and this process holds into @p budgets — the part of
- *  @ref trainer_t::make before the envelope is known. */
+/** Bind @p placed to @p mesh , @p config , @p devices and @p capabilities , make one stream per
+ *  device, and record what each device has free and this process holds into @p budgets — the part
+ *  of @ref trainer_t::make before the envelope is known. */
 [[nodiscard]] static expected_t prepare_(trainer_t &placed, mesh_t &mesh, trainer_config_t const &config,
-                                         std::span<i32_t const> devices, std::span<device_budget_t> budgets) noexcept {
+                                         std::span<i32_t const> devices, nk_capability_t capabilities,
+                                         std::span<device_budget_t> budgets) noexcept {
     mesh_topology_t const &topology = mesh.topology;
     std::size_t const gpus = devices.size();
     if (gpus == 0 || gpus != topology.shape.gpus_per_host_domain)
@@ -192,6 +193,7 @@ struct device_budget_t {
                                 topology.shape.gpus_per_host_domain, gpus);
     placed.config = config;
     placed.mesh = &mesh;
+    placed.capabilities = capabilities;
     if (st::failed(placed.devices.assign(devices)))
         return expected_t::fail(status_t::bad_alloc_k, "device table allocation failed");
     for (std::size_t member = 0; member != gpus; ++member) {
@@ -228,12 +230,13 @@ struct device_budget_t {
  *  the free memory, take one synthetic step, and read every device's footprint against
  *  @p budgets , what it had free and held before the first probe. */
 [[nodiscard]] static expected_t probe_footprint_(mesh_t &mesh, trainer_config_t config, std::span<i32_t const> devices,
-                                                 u32_t rows, std::span<device_budget_t const> budgets,
+                                                 nk_capability_t capabilities, u32_t rows,
+                                                 std::span<device_budget_t const> budgets,
                                                  std::span<footprint_t> footprints) noexcept {
     config.batch = batch_capacity(config.batch, rows, segments_per_row_(config));
     trainer_t probe;
     device_budget_t probe_budgets[max_gpus_per_host_k] = {};
-    expected_t built = prepare_(probe, mesh, config, devices, {probe_budgets, devices.size()});
+    expected_t built = prepare_(probe, mesh, config, devices, capabilities, {probe_budgets, devices.size()});
     if (built) built = assemble_(probe, mesh, probe.envelope.free_bytes);
     if (!built) return built;
     synthetic_source_t source;
@@ -337,6 +340,7 @@ struct device_budget_t {
  */
 [[nodiscard]] static expected<envelope_t> measure_envelope_(mesh_t &mesh, trainer_config_t const &config,
                                                             std::span<i32_t const> devices,
+                                                            nk_capability_t capabilities,
                                                             std::span<device_budget_t const> budgets) noexcept {
     using result_t = expected<envelope_t>;
     if (config.late_interacts() && config.batch.max_rows_per_gpu == 0)
@@ -345,9 +349,12 @@ struct device_budget_t {
                               "are set, never fitted to memory: pass --rows, or the batch's max_rows_per_device");
     std::size_t const gpus = devices.size();
     footprint_t smaller[max_gpus_per_host_k] = {}, middle[max_gpus_per_host_k] = {}, larger[max_gpus_per_host_k] = {};
-    expected_t probed = probe_footprint_(mesh, config, devices, smaller_probe_rows_k, budgets, {smaller, gpus});
-    if (probed) probed = probe_footprint_(mesh, config, devices, middle_probe_rows_k, budgets, {middle, gpus});
-    if (probed) probed = probe_footprint_(mesh, config, devices, larger_probe_rows_k, budgets, {larger, gpus});
+    expected_t probed = probe_footprint_(mesh, config, devices, capabilities, smaller_probe_rows_k, budgets,
+                                         {smaller, gpus});
+    if (probed)
+        probed = probe_footprint_(mesh, config, devices, capabilities, middle_probe_rows_k, budgets, {middle, gpus});
+    if (probed)
+        probed = probe_footprint_(mesh, config, devices, capabilities, larger_probe_rows_k, budgets, {larger, gpus});
     if (!probed) return result_t::fail(std::move(probed));
 
     f64_t const low_rows = smaller_probe_rows_k, middle_rows = middle_probe_rows_k, high_rows = larger_probe_rows_k;
@@ -481,7 +488,8 @@ struct device_budget_t {
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {placed.streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
-        expected<base_replica_t> replica = base_replica_t::make(placed.arenas[member], config, vertices_per_mesh);
+        expected<base_replica_t> replica = base_replica_t::make(placed.arenas[member], config, vertices_per_mesh,
+                                                                placed.capabilities);
         if (!replica) return expected_t::fail(std::move(replica));
         if (placed.replicas.push_back(std::move(replica.value_)) != status_t::success_k)
             return expected_t::fail(status_t::bad_alloc_k, "replica table full");
@@ -573,7 +581,7 @@ struct device_budget_t {
                                           : u32r1_view_t {full_width, 1};
         expected<distributed_contrastive_segments_t> contrastive = distributed_contrastive_segments_t::make(
             placed.domain, mesh.colocated, placed.arenas, placed.streams, towers.view(), relations.view(),
-            forces.view(), contrastive_config, prefixes, mesh.timeout_seconds);
+            forces.view(), contrastive_config, prefixes, placed.capabilities, mesh.timeout_seconds);
         if (!contrastive) return expected_t::fail(std::move(contrastive));
         placed.contrastive = std::move(contrastive.value_);
         for (std::size_t member = 0; member != gpus; ++member) {
@@ -589,7 +597,8 @@ struct device_budget_t {
     }
     if (config.late_interacts()) {
         expected<distributed_contrastive_tokens_t> tokens = distributed_contrastive_tokens_t::make(
-            placed.domain, mesh.colocated, placed.arenas, placed.streams, tokens_config, mesh.timeout_seconds);
+            placed.domain, mesh.colocated, placed.arenas, placed.streams, tokens_config, placed.capabilities,
+            mesh.timeout_seconds);
         if (!tokens) return expected_t::fail(std::move(tokens));
         placed.late_interaction = std::move(tokens.value_);
         for (std::size_t member = 0; member != gpus; ++member) {
@@ -608,11 +617,13 @@ struct device_budget_t {
 }
 
 expected_t trainer_t::make(trainer_t &placed, mesh_t &mesh, trainer_config_t const &requested,
-                           std::span<i32_t const> devices) noexcept {
+                           std::span<i32_t const> devices, nk_capability_t capabilities) noexcept {
     device_budget_t budgets[max_gpus_per_host_k] = {};
-    if (expected_t prepared = prepare_(placed, mesh, requested, devices, {budgets, devices.size()}); !prepared)
+    if (expected_t prepared = prepare_(placed, mesh, requested, devices, capabilities, {budgets, devices.size()});
+        !prepared)
         return prepared;
-    expected<envelope_t> measured = measure_envelope_(mesh, requested, devices, {budgets, devices.size()});
+    expected<envelope_t> measured = measure_envelope_(mesh, requested, devices, capabilities,
+                                                      {budgets, devices.size()});
     if (!measured) return expected_t::fail(std::move(measured));
     placed.envelope = *measured;
     if (!requested.batch.max_rows_per_gpu || !requested.batch.max_segments_per_gpu)
@@ -866,6 +877,10 @@ telemetry_t trainer_t::telemetry(optimizer_step_t optimizer_step) noexcept {
         if (!gpu_scope.ok()) continue;
         cuStreamSynchronize(streams[member].get());
         base_replica_t &replica = replicas[member];
+        u32_t dropped = 0; // pageable, so the copy has landed once the call returns
+        if (copy_device_to_host(replica.batch.dropped.view(), std::span<u32_t> {&dropped, 1}, streams[member]) &&
+            zero_async(replica.batch.dropped.span(), streams[member]))
+            telemetry.dropped += dropped;
         accumulate(token, replica.tokens_summands, streams[member]);
         accumulate(image, replica.image_summands, streams[member]);
         accumulate(video, replica.video_summands, streams[member]);
@@ -963,6 +978,8 @@ void telemetry_t::report() const noexcept {
     term("contrastive", contrastive);
     term("late interaction", late_interaction);
     term("choices", choices);
+    line.clear();
+    if (dropped != 0 && format_into(line, "            dropped {} segments", dropped)) report_line(line.view());
 }
 
 void retrieval_t::report() const noexcept {
@@ -1322,6 +1339,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
         if (copied)
             copied = copy_host_to_device(staged.audio_samples.view().flatten<1>(),
                                          loaded.audio_samples.span().flatten<1>(), stream);
+        if (copied) copied = zero_async(loaded.dropped.span(), stream);
         if (!copied) return copied;
     }
     return {};

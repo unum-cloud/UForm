@@ -178,6 +178,8 @@ public struct MeshDescription: Sendable {
     public var firstGpuIndex: Int
     /// How its NVLink domains reduce.
     public var multimemTier: MultimemTier
+    /// The class every GPU of the run dispatches as: the executor's pin, or the devices' own.
+    public var gpuClass: GPUClass?
 
     init(_ raw: uform_mesh_description_t) {
         gpusPerHostDomain = raw.gpus_per_host_domain
@@ -186,6 +188,7 @@ public struct MeshDescription: Sendable {
         hostDomainIndex = raw.host_domain_index
         firstGpuIndex = raw.first_gpu_index
         multimemTier = MultimemTier(raw: raw.multimem_tier)
+        gpuClass = GPUClass(reported: raw.gpu_class)
     }
 }
 
@@ -525,6 +528,9 @@ public struct TrainerStepStats: Sendable {
     public var choicesLoss: Float
     /// Items cut at a row's width.
     public var truncated: Int
+    /// Segments dropped whole because the batch had no room for them, since the last step that
+    /// read its stats.
+    public var dropped: Int
 
     init(_ raw: uform_trainer_step_stats_t) {
         step = raw.step
@@ -538,6 +544,7 @@ public struct TrainerStepStats: Sendable {
         lateInteractionLoss = raw.late_interaction_loss
         choicesLoss = raw.choices_loss
         truncated = raw.truncated
+        dropped = raw.dropped
     }
 }
 

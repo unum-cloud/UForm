@@ -104,6 +104,7 @@ export interface CompiledMeshDescription {
   hostDomainIndex: number;
   firstGpuIndex: number;
   multimemTier: string;
+  gpuClass: string | null;
 }
 
 /** What one optimizer step reports, and the embeddings it scored when an arena was given. */
@@ -120,6 +121,7 @@ export interface CompiledStepped {
     lateInteractionLoss: number;
     choicesLoss: number;
     truncated: number;
+    dropped: number;
   };
   embeddings?: CompiledRows;
 }

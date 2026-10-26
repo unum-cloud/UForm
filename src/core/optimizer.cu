@@ -465,6 +465,7 @@ expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, 
     if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed ({})", rank);
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     std::size_t const member = domain_->member_offset() + rank;
+    gpu_fault_t *const fault = domain_->member(member).fault;
     f32_t *const window_base = domain_->payload(member).data() + window_.offset;
     auto stage = [&]() noexcept -> expected_t {
         expected_t staged {};
@@ -485,7 +486,8 @@ expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, 
     if (staged && gateway_across_domains) staged = stage(); // once every member read the last mean out of its window
     if (!staged) return staged;
     std::size_t const scalars = ranks_[rank].state.gradient_scalars();
-    if (staged) staged = ledger_->probe_signal(ranks_[rank].staged_window, f32r1_view_t {window_base, scalars}, stream);
+    if (staged)
+        staged = ledger_->probe_signal(ranks_[rank].staged_window, f32r1_view_t {window_base, scalars}, fault, stream);
     if (!staged) return staged;
     // The mean over gpus_per_colocated_domain, so the update's learning-rate semantics are
     // world-size-invariant — the same scalar on every rank, keeping the replicas bitwise identical.
@@ -497,7 +499,8 @@ expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, 
         // Every peer reads this member's window in its reduce, so no member stages the next step
         // until all have.
         if (staged) staged = domain_->barrier(member, stream);
-        if (staged) staged = ledger_->probe_signal(ranks_[rank].world_payload, ranks_[rank].reduced.view(), stream);
+        if (staged)
+            staged = ledger_->probe_signal(ranks_[rank].world_payload, ranks_[rank].reduced.view(), fault, stream);
         if (staged) staged = ranks_[rank].state.step(learning_rate, stream, ranks_[rank].reduced.view());
         return staged;
     }
@@ -530,6 +533,7 @@ expected_t distributed_adafactor_t::world_gradient_step_(std::size_t rank, f32_t
                                                          gpu_stream_t &stream) noexcept {
     std::size_t const scalars = ranks_[rank].state.gradient_scalars();
     std::size_t const member = domain_->member_offset() + rank;
+    gpu_fault_t *const fault = domain_->member(member).fault;
     f32r1_span_t const world_mean {domain_->payload(0).data() + window_.offset, scalars};
     expected_t staged {};
     if (member == 0) {
@@ -542,12 +546,13 @@ expected_t distributed_adafactor_t::world_gradient_step_(std::size_t rank, f32_t
                                   stream);
         if (staged) staged = (*world_reduce_)(stream);
         if (staged)
-            staged = ledger_->probe_signal(ranks_[rank].world_payload, f32r1_view_t {world_gradient, scalars}, stream);
+            staged = ledger_->probe_signal(ranks_[rank].world_payload, f32r1_view_t {world_gradient, scalars}, fault,
+                                           stream);
         if (staged) staged = copy_device_to_device(f32r1_view_t {world_gradient, scalars}, world_mean, stream);
     }
     if (staged) staged = domain_->barrier(member, stream);
     if (staged && member != 0) // reads the mean out of the gateway's window, peer-mapped wherever its process sits
-        staged = ledger_->probe_signal(ranks_[rank].world_readback, f32r1_view_t {world_mean}, stream);
+        staged = ledger_->probe_signal(ranks_[rank].world_readback, f32r1_view_t {world_mean}, fault, stream);
     if (staged) staged = ranks_[rank].state.step(learning_rate, stream, f32r1_view_t {world_mean});
     return staged;
 }

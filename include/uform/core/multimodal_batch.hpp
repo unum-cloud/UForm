@@ -410,6 +410,11 @@ struct multimodal_batch {
      *  summing to one per segment; zero under the pads. */
     nk::tensor<f32_t, rebound<f32_t>, 2> segment_choice_targets {};
 
+    /** @b [1] segments dropped whole because the batch had no room for them. Its owner zeroes it
+     *  before a fill and reads it after, and every placement walk adds its drops; the mixer adds a
+     *  loaded batch's count and its own drops to the mixed batch's. */
+    nk::tensor<u32_t, rebound<u32_t>, 1> dropped {};
+
     /** The segment capacity of this batch — @c max_segments_per_gpu , PAD-inclusive, the pooling and
      *  routing axis every modality shares. Modalities do not own disjoint row bands, so a segment count
      *  (not a per-modality row count) is the only axis with a batch-wide meaning. */
@@ -486,9 +491,10 @@ struct multimodal_batch {
         batch.video_shapes = nk::tensor<u16_t, rebound<u16_t>, 2>::uninitialized({shape.max_segments_per_gpu, 3u},
                                                                                  rebound<u16_t> {allocator})
                                  .value;
+        batch.dropped = nk::tensor<u32_t, rebound<u32_t>, 1>::uninitialized({1u}, rebound<u32_t> {allocator}).value;
         if (!batch.segment_offsets || !batch.segment_lengths || !batch.segment_modality || !batch.segment_bag ||
             !batch.segment_role || !batch.segment_prefix_length || !batch.segment_key || !batch.segment_side ||
-            !batch.tokens || !batch.image_shapes || !batch.video_shapes)
+            !batch.tokens || !batch.image_shapes || !batch.video_shapes || !batch.dropped)
             return result_t::fail(status_t::bad_alloc_k, "batch allocation failed (rows={} segments={} columns={})",
                                   shape.max_rows_per_gpu, shape.max_segments_per_gpu, shape.max_columns_per_row);
         if (shape.image.patch_side != 0) {

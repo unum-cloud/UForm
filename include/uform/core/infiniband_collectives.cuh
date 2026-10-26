@@ -307,6 +307,10 @@ struct infiniband_link_t {
 
     /** How long the flag wait and the completion drain spin before they trap. */
     u64_t wait_nanoseconds = 0;
+
+    /** Where the flag wait and the completion drain record why they trap: this rank's GPU's record
+     *  in @ref mesh_topology_t::faults . */
+    gpu_fault_t *fault = nullptr;
 };
 
 #if defined(UFORM_WITH_INFINIBAND)
@@ -982,12 +986,13 @@ __device__ inline void infiniband_post_write(infiniband_queue_handles_t handles,
  *  @brief Reap exactly @b one signaled send completion entirely from device code — the GDAKI drain.
  *
  *  Acquire-spins on the consumer cell's owner bit until the NIC flips it to this pass's polarity,
- *  traps loudly on a requester error or once the spin outlasts @p wait_nanoseconds , then bumps the
- *  consumer index and publishes it to the set-consumer-index doorbell so the small ring never fills
- *  across replays. Call from @b one thread; bound every signaled post with one drain.
+ *  traps on a requester error or once the spin outlasts @p wait_nanoseconds , recording why in
+ *  @p fault , then bumps the consumer index and publishes it to the set-consumer-index doorbell so
+ *  the small ring never fills across replays. Call from @b one thread; bound every signaled post
+ *  with one drain.
  */
-__device__ inline void infiniband_drain_one(infiniband_completion_handles_t completion,
-                                            u64_t wait_nanoseconds) noexcept {
+__device__ inline void infiniband_drain_one(infiniband_completion_handles_t completion, u64_t wait_nanoseconds,
+                                            gpu_fault_t *fault) noexcept {
     u32_t const consumer_index = *completion.consumer_index;
     u32_t const cell = consumer_index & (completion.entry_count - 1u);
     std::byte *cell_bytes = completion.ring.data() + static_cast<std::size_t>(cell) * completion.entry_size;
@@ -997,24 +1002,17 @@ __device__ inline void infiniband_drain_one(infiniband_completion_handles_t comp
 
     u64_t const deadline = global_nanoseconds() + wait_nanoseconds;
     while (true) {
-        if (global_nanoseconds() > deadline) {
-            std::printf("uform: completion queue %u waited past its deadline at consumer index %u\n",
-                        completion.completion_queue_number, consumer_index);
-            __trap();
-        }
+        if (global_nanoseconds() > deadline)
+            trap_with(fault, gpu_fault_code_t::completion_deadline_k, completion.completion_queue_number,
+                      consumer_index, 0u);
         u8_t const op_own = infiniband_load_acquire_u8(&entry->op_own);
         if ((static_cast<u32_t>(op_own) & mlx5_completion_owner_mask_k) != expected_owner) continue; // not yet ours
         u32_t const opcode = static_cast<u32_t>(op_own) >> 4;
         if (opcode == static_cast<u32_t>(MLX5_CQE_INVALID)) continue; // owner flipped before the NIC wrote
         if (opcode == static_cast<u32_t>(MLX5_CQE_REQ_ERR)) {
             auto const *error = reinterpret_cast<mlx5_err_cqe const *>(entry);
-            // `printf` is the ONLY vendor-supported device-side formatter (`std::format` is host-only,
-            // allocating, throwing) — and this dying kernel's one channel to name its syndrome
-            // before the trap.
-            std::printf("infiniband_drain_one: send completion error syndrome=0x%x vendor=0x%x cqn=%u\n",
-                        static_cast<u32_t>(error->syndrome), static_cast<u32_t>(error->vendor_err_synd),
-                        completion.completion_queue_number);
-            __trap();
+            trap_with(fault, gpu_fault_code_t::completion_error_k, static_cast<u32_t>(error->syndrome),
+                      static_cast<u32_t>(error->vendor_err_synd), completion.completion_queue_number);
         }
         break;
     }

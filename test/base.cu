@@ -82,10 +82,12 @@ using namespace unum::uform::test;
  *  of seconds (a warm local rendezvous completes in well under one). */
 inline constexpr f64_t test_rendezvous_timeout_seconds_k = 60.0;
 
-/** One width tier: the mesh every cell of the tier builds its trainer over, and the devices it drives. */
+/** One width tier: the mesh every cell of the tier builds its trainer over, the devices it drives,
+ *  and the capabilities they dispatch with. */
 struct tier_t {
     mesh_t &mesh;
     std::span<i32_t const> devices;
+    nk_capability_t capabilities;
 };
 
 /**
@@ -152,7 +154,7 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
 /** Build @p placed over @p tier for @p config , tallying bring-up failures into @p health . */
 [[nodiscard]] static expected_t make_trainer_(trainer_t &placed, tier_t tier, trainer_config_t const &config,
                                               world_health_t &health) noexcept {
-    expected_t built = trainer_t::make(placed, tier.mesh, config, tier.devices);
+    expected_t built = trainer_t::make(placed, tier.mesh, config, tier.devices, tier.capabilities);
     health.consecutive_setup_failures = built ? 0u : health.consecutive_setup_failures + 1u;
     return built;
 }
@@ -740,6 +742,10 @@ int main(int, char **argv) {
         options.directory = sz::string_view_t {directory, std::strlen(directory)};
     if (char const *job = std::getenv("UFORM_JOB_ID"); job != nullptr)
         options.job = sz::string_view_t {job, std::strlen(job)};
+    if (nk_cuda_capabilities_enabled(0, &options.capabilities) != nk_success_k) {
+        suite.check(false, "NumKong cannot query device 0");
+        return suite.finish();
+    }
     mesh_t wide_mesh;
     if (expected_t joined = mesh_t::make(wide_mesh, options, devices); !joined) {
         suite.check(false, "mesh bootstrap: {}", joined.description_);
@@ -750,8 +756,8 @@ int main(int, char **argv) {
         suite.check(false, "narrowed mesh: {}", narrowed.description_);
         return suite.finish();
     }
-    tier_t const wide {wide_mesh, devices};
-    tier_t const cheap {cheap_mesh, std::span<i32_t const> {devices}.first(1)};
+    tier_t const wide {wide_mesh, devices, options.capabilities};
+    tier_t const cheap {cheap_mesh, std::span<i32_t const> {devices}.first(1), options.capabilities};
 
     world_health_t health;
     suite.run("segment_budget", segment_budget);

@@ -33,10 +33,11 @@
  *
  *  Secondary roles, in descending importance: @b phase @b ordering (arenas allocated → MRs registered → QPs
  *  connected → training starts; @ref mesh_topology_t::barrier keeps any host_domain from running ahead),
- *  @b agreement @b validation (GPU model and count, world size, multimem extent, schema and job identity),
- *  and @b boot @b verification (a bounded await turns a wedged host_domain into a named failure, never a
- *  hang). The exchange runs once per job, before step 0; the moment the transport is wired, all
- *  synchronization moves onto NVLink / InfiniBand and the directory is never touched again.
+ *  @b agreement @b validation (GPU model, count and capabilities, world size, multimem extent,
+ *  schema and job identity), and @b boot @b verification (a bounded await turns a wedged
+ *  host_domain into a named failure, never a hang). The exchange runs once per job, before step 0;
+ *  the moment the transport is wired, all synchronization moves onto NVLink / InfiniBand and the
+ *  directory is never touched again.
  *
  *  @section mesh_worlds Three concrete worlds
  *
@@ -273,7 +274,7 @@ inline constexpr std::size_t device_name_capacity_k = 64u;
 
 /** Version tag heading every exchange payload, so a foreign or future-format file in the exchange
  *  directory fails loudly on its first line instead of misparsing. */
-inline constexpr char mesh_schema_k[] = "uform.mesh.1";
+inline constexpr char mesh_schema_k[] = "uform.mesh.2";
 
 /** One host_domain's published facts — the payload of the bootstrap exchange, one entry per
  *  host_domain in @ref mesh_topology_t::host_domains . POD, so an @c st::basic_vector holds the
@@ -294,6 +295,72 @@ struct mesh_host_domain_t {
     char device_name[device_name_capacity_k] = {};
 };
 
+/** Why a kernel trapped — the meaning of a @ref gpu_fault_t 's three operands. */
+enum class gpu_fault_code_t : u32_t {
+    none_k = 0,
+
+    /** A multimem barrier outwaited its deadline: member index, barrier target. */
+    barrier_deadline_k,
+
+    /** An InfiniBand round outwaited its arrival flag: round, flag target. */
+    flag_deadline_k,
+
+    /** An InfiniBand completion queue outwaited its completion: queue number, consumer index. */
+    completion_deadline_k,
+
+    /** An InfiniBand send completed with an error: syndrome, vendor syndrome, queue number. */
+    completion_error_k,
+
+    /** A telemetry probe sampled a non-finite value: probe row, scalars sampled, scalars probed. */
+    nonfinite_signal_k,
+};
+
+/** Why a kernel trapped, written to pinned memory the host reads after the context dies. */
+struct gpu_fault_t {
+    gpu_fault_code_t code;
+    u32_t first;
+    u32_t second;
+    u32_t third;
+};
+
+/** Append the sentence naming @p fault to @p text ; @c false only on allocation failure. */
+[[nodiscard]] inline bool format_fault_into(sz::string_t &text, gpu_fault_t const &fault) noexcept {
+    switch (fault.code) {
+    case gpu_fault_code_t::none_k: return format_into(text, "no fault");
+    case gpu_fault_code_t::barrier_deadline_k:
+        return format_into(text, "member {} waited past its deadline at barrier target {}", fault.first, fault.second);
+    case gpu_fault_code_t::flag_deadline_k:
+        return format_into(text, "round {} waited past its deadline at flag target {}", fault.first, fault.second);
+    case gpu_fault_code_t::completion_deadline_k:
+        return format_into(text, "completion queue {} waited past its deadline at consumer index {}", fault.first,
+                           fault.second);
+    case gpu_fault_code_t::completion_error_k:
+        return format_into(text, "send completion error syndrome=0x{:x} vendor=0x{:x} cqn={}", fault.first,
+                           fault.second, fault.third);
+    case gpu_fault_code_t::nonfinite_signal_k:
+        return format_into(text, "telemetry probe {} observed a non-finite signal ({} of {} scalars sampled)",
+                           fault.first, fault.second, fault.third);
+    }
+    return format_into(text, "unknown fault {}", static_cast<u32_t>(fault.code));
+}
+
+#if defined(__CUDACC__)
+
+/** Record why this kernel dies in @p fault , when it has one, then trap. */
+__device__ inline void trap_with(gpu_fault_t *fault, gpu_fault_code_t code, u32_t first, u32_t second,
+                                 u32_t third) noexcept {
+    if (fault != nullptr) {
+        fault->first = first;
+        fault->second = second;
+        fault->third = third;
+        fault->code = code;
+        __threadfence_system();
+    }
+    __trap();
+}
+
+#endif // defined(__CUDACC__)
+
 /**
  *  @brief The bootstrapped world: the validated @ref mesh_shape_t , this host_domain's identity, every
  *      peer host_domain's published facts, and the once-per-job exchange primitives later wiring phases
@@ -306,12 +373,12 @@ struct mesh_host_domain_t {
  *  published (write-temp + @c fsync + @c rename , so a peer never reads a half-written file). The
  *  exchange is @b lead-aggregated and costs @b O(host_domain_count) file operations, never
  *  O(host_domain_count²): every host_domain publishes one facts file; the lead reads them all,
- *  validates agreement (identical GPU model and count, identical world size and multimem extent,
- *  identical job — a mismatch fails loudly naming both parties), and publishes @b one merged
- *  manifest; every follower reads only that manifest. The same @ref publish_text / @ref await_text
- *  / @ref barrier primitives then carry every later wiring phase — InfiniBand queue-pair
- *  coordinates, memory-region rkeys, symmetric-heap base addresses, multicast fabric handles — so
- *  the transport adds payloads, not machinery.
+ *  validates agreement (identical GPU model, count and capabilities, world size, multimem extent
+ *  and job — a mismatch fails loudly naming both parties), and publishes @b one merged manifest;
+ *  every follower reads only that manifest. The same @ref publish_text / @ref await_text / @ref
+ *  barrier primitives then carry every later wiring phase — InfiniBand queue-pair coordinates,
+ *  memory-region rkeys, symmetric-heap base addresses, multicast fabric handles — so the transport
+ *  adds payloads, not machinery.
  *
  *  The exchange directory is @b explicit configuration ( @c bootstrap argument or @c $UFORM_EXCHANGE_DIR )
  *  — there is no default path, because a guessed directory that exists locally but is not actually shared
@@ -326,18 +393,19 @@ struct mesh_host_domain_t {
  *
  *  @code{.sh}
  *  $ cat /shared/exchange/20260702-193412-8841/host_domain7.mesh
- *  schema uform.mesh.1
+ *  schema uform.mesh.2
  *  job 20260702-193412-8841
  *  host_domain_index 7
  *  host_domain_count 36
  *  multimem 72
+ *  capabilities 17000000000000
  *  hostname nvl72-rack0-tray7
  *  devices 4
  *  device_name NVIDIA_GB200
  *  uuids 5c1e0a...c9 5c1e0a...ca 5c1e0a...cb 5c1e0a...cc
  *
  *  $ cat /shared/exchange/20260702-193412-8841/host_domain0.manifest
- *  schema uform.mesh.1
+ *  schema uform.mesh.2
  *  job 20260702-193412-8841
  *  multimem 72
  *  host_domain 0 hostname nvl72-rack0-tray0 devices 4 device_name NVIDIA_GB200
@@ -347,9 +415,23 @@ struct mesh_host_domain_t {
  *
  *  A single-host_domain world ( @c host_domain_count()==1 ) never touches the filesystem. The whole
  *  exchange happens once per job, on the host, outside any CUDA-graph capture. Move-only; the shape is
- *  immutable after @ref bootstrap returns — the topology is identity, not state.
+ *  immutable after @ref bootstrap returns — the topology is identity, not state. It also owns the
+ *  @ref faults table its local GPUs' kernels record into before they trap.
  */
 struct mesh_topology_t {
+
+    mesh_topology_t() noexcept = default;
+    mesh_topology_t(mesh_topology_t const &) = delete;
+    mesh_topology_t &operator=(mesh_topology_t const &) = delete;
+    mesh_topology_t(mesh_topology_t &&other) noexcept { swap_(other); }
+    mesh_topology_t &operator=(mesh_topology_t &&other) noexcept {
+        if (this != &other) {
+            destroy_();
+            swap_(other);
+        }
+        return *this;
+    }
+    ~mesh_topology_t() noexcept { destroy_(); }
 
     /** The validated three-domain shape — see the concrete worlds in the file header. */
     mesh_shape_t shape {};
@@ -389,6 +471,12 @@ struct mesh_topology_t {
         return shape.index_in_multimem_domain(first_gpu_index()) == 0;
     }
 
+    /** One pinned fault record per local GPU, in local order, readable after a trap killed its
+     *  context; empty for a topology @ref bootstrap did not make. */
+    [[nodiscard]] std::span<gpu_fault_t> faults() const noexcept {
+        return {faults_, faults_ != nullptr ? shape.gpus_per_host_domain : 0u};
+    }
+
     /**
      *  @brief Probe the local hardware, exchange facts with every peer host_domain, validate agreement,
      *      and assemble the world — the one construction path for @ref mesh_topology_t .
@@ -407,12 +495,15 @@ struct mesh_topology_t {
      *      multi-host_domain bootstrap without one fails loudly — an anonymous shared namespace is how
      *      node families collide.
      *  @param[in] timeout_seconds Upper bound on every await; a missing peer fails loudly, never hangs.
+     *  @param[in] capabilities The NumKong capabilities this host_domain's GPUs dispatch with after
+     *      any class pin, which every peer must share, so no two replicas run different kernels.
      */
     [[nodiscard]] static expected<mesh_topology_t> bootstrap(u32_t host_domain_index, u32_t host_domain_count,
                                                              u32_t gpus_per_multimem_domain = 0,
                                                              char const *directory = nullptr,
                                                              char const *job_id = nullptr,
-                                                             f64_t timeout_seconds = 120.0) noexcept {
+                                                             f64_t timeout_seconds = 120.0,
+                                                             u64_t capabilities = 0) noexcept {
         if (host_domain_count == 0 || host_domain_index >= host_domain_count)
             return expected<mesh_topology_t>::fail( //
                 status_t::invalid_input_k,
@@ -444,6 +535,8 @@ struct mesh_topology_t {
             return expected<mesh_topology_t>::fail(
                 status_t::bad_alloc_k, "host_domain table allocation failed (host_domains={})", host_domain_count);
         topology.host_domains[host_domain_index] = probed.value_.facts;
+        if (expected_t pinned = topology.pin_faults_(); !pinned)
+            return expected<mesh_topology_t>::fail(std::move(pinned));
         if (host_domain_count == 1) return expected<mesh_topology_t> {std::move(topology)};
 
         // The exchange root and the job id are explicit configuration; guessing either is how worlds hang
@@ -470,14 +563,15 @@ struct mesh_topology_t {
                                                    topology.exchange_directory, directory_error);
 
         sz::string_t facts_text;
-        if (!build_facts_(facts_text, probed.value_.facts, topology.shape, job, probed.value_.uuids.view()))
+        if (!build_facts_(facts_text, probed.value_.facts, topology.shape, job, capabilities,
+                          probed.value_.uuids.view()))
             return expected<mesh_topology_t>::fail(status_t::bad_alloc_k, "facts assembly failed (host_domain={})",
                                                    host_domain_index);
         if (expected_t published = topology.publish_text("mesh", facts_text.view()); !published)
             return expected<mesh_topology_t>::fail(std::move(published));
 
         expected_t exchanged = host_domain_index == 0
-                                   ? topology.collect_world_as_lead_(job, probed.value_, timeout_seconds)
+                                   ? topology.collect_world_as_lead_(job, probed.value_, capabilities, timeout_seconds)
                                    : topology.adopt_manifest_(job, probed.value_.facts, timeout_seconds);
         if (!exchanged) return expected<mesh_topology_t>::fail(std::move(exchanged));
 
@@ -581,6 +675,9 @@ struct mesh_topology_t {
         u32_t host_domain_count = 0;
         u32_t multimem = 0;
         u32_t devices = 0;
+
+        /** The NumKong capabilities the process's GPUs dispatch with, after its executor's pin. */
+        u64_t capabilities = 0;
     };
 
     /** One probed physical GPU identity paired with the host_domain that claims it — the flat table
@@ -601,6 +698,12 @@ struct mesh_topology_t {
     /** Parse a whole decimal token; @c false on anything but a clean number. */
     [[nodiscard]] static bool parse_u32_(sz::string_view_t token, u32_t &value) noexcept {
         std::from_chars_result const result = std::from_chars(token.data(), token.data() + token.size(), value);
+        return result.ec == std::errc {} && result.ptr == token.data() + token.size();
+    }
+
+    /** Parse a whole hexadecimal token; @c false on anything but a clean number. */
+    [[nodiscard]] static bool parse_hex_u64_(sz::string_view_t token, u64_t &value) noexcept {
+        std::from_chars_result const result = std::from_chars(token.data(), token.data() + token.size(), value, 16);
         return result.ec == std::errc {} && result.ptr == token.data() + token.size();
     }
 
@@ -670,7 +773,7 @@ struct mesh_topology_t {
     /** Assemble the line-oriented facts payload — the exact inverse of @ref parse_facts_ .
      *  @c false only on allocation failure. */
     [[nodiscard]] static bool build_facts_(sz::string_t &text, mesh_host_domain_t const &self,
-                                           mesh_shape_t const &shape, sz::string_view_t job,
+                                           mesh_shape_t const &shape, sz::string_view_t job, u64_t capabilities,
                                            std::span<CUuuid const> uuids) noexcept {
         bool built = format_into(text,
                                  "schema {}\n"            //
@@ -678,12 +781,14 @@ struct mesh_topology_t {
                                  "host_domain_index {}\n" //
                                  "host_domain_count {}\n" //
                                  "multimem {}\n"          //
+                                 "capabilities {:x}\n"    //
                                  "hostname {}\n"          //
                                  "devices {}\n"           //
                                  "device_name {}\n"       //
                                  "uuids",
                                  mesh_schema_k, job, self.host_domain_index, shape.host_domain_count(),
-                                 shape.gpus_per_multimem_domain, self.hostname, self.device_count, self.device_name);
+                                 shape.gpus_per_multimem_domain, capabilities, self.hostname, self.device_count,
+                                 self.device_name);
         for (CUuuid const &uuid : uuids) built = built && format_into(text, " ") && format_uuid_(text, uuid);
         return built;
     }
@@ -693,7 +798,8 @@ struct mesh_topology_t {
      *  field-level agreement stays with the caller, which owns the diagnostics. */
     [[nodiscard]] static bool parse_facts_(sz::string_view_t payload, facts_t &facts) noexcept {
         sz::byteset_t const whitespaces = sz::whitespaces_set();
-        bool index_parsed = false, count_parsed = false, multimem_parsed = false, devices_parsed = false;
+        bool index_parsed = false, count_parsed = false, multimem_parsed = false, devices_parsed = false,
+             capabilities_parsed = false;
         for (sz::string_view_t line : payload.split(sz::newlines_set())) {
             auto [key, match, value] = line.partition(' ');
             value = value.strip(whitespaces);
@@ -705,10 +811,12 @@ struct mesh_topology_t {
             else if (key == "host_domain_index") index_parsed = parse_u32_(value, facts.host_domain_index);
             else if (key == "host_domain_count") count_parsed = parse_u32_(value, facts.host_domain_count);
             else if (key == "multimem") multimem_parsed = parse_u32_(value, facts.multimem);
+            else if (key == "capabilities") capabilities_parsed = parse_hex_u64_(value, facts.capabilities);
             else if (key == "devices") devices_parsed = parse_u32_(value, facts.devices);
         }
-        return index_parsed && count_parsed && multimem_parsed && devices_parsed && !facts.schema.empty() &&
-               !facts.job.empty() && !facts.hostname.empty() && !facts.device_name.empty() && !facts.uuids.empty();
+        return index_parsed && count_parsed && multimem_parsed && capabilities_parsed && devices_parsed &&
+               !facts.schema.empty() && !facts.job.empty() && !facts.hostname.empty() && !facts.device_name.empty() &&
+               !facts.uuids.empty();
     }
 
     /** Assemble the manifest payload from a complete table — the exact inverse of
@@ -769,10 +877,10 @@ struct mesh_topology_t {
     }
 
     /** The lead's half of the exchange: read every peer's facts, validate agreement against this
-     *  host_domain's own @p probed facts and the world @ref shape , fill @ref host_domains , and
-     *  publish the merged manifest. */
+     *  host_domain's own @p probed facts, @p self_capabilities and the world @ref shape , fill
+     *  @ref host_domains , and publish the merged manifest. */
     [[nodiscard]] expected_t collect_world_as_lead_(sz::string_view_t job, local_probe_t const &probed,
-                                                    f64_t timeout_seconds) noexcept {
+                                                    u64_t self_capabilities, f64_t timeout_seconds) noexcept {
         mesh_host_domain_t const &self = probed.facts;
         st::basic_vector<claimed_gpu_t> claimed;
         // The world's physical GPU identities, this host_domain's first; sorted once at the end to prove
@@ -811,6 +919,11 @@ struct mesh_topology_t {
                     status_t::shape_unsupported_k,
                     "multimem-extent disagreement: host_domain {} was launched with {}, host_domain 0 with {}",
                     peer_index, facts.multimem, shape.gpus_per_multimem_domain);
+            if (facts.capabilities != self_capabilities)
+                return expected_t::fail( //
+                    status_t::shape_unsupported_k,
+                    "capability disagreement: host_domain {} dispatches with {:#x}, host_domain 0 with {:#x}",
+                    peer_index, facts.capabilities, self_capabilities);
             mesh_host_domain_t peer;
             peer.host_domain_index = peer_index;
             peer.device_count = facts.devices;
@@ -908,8 +1021,60 @@ struct mesh_topology_t {
         return 0;
     }
 
+    /** Pin the zeroed @ref faults table inside device 0's primary context, retained for as long as
+     *  the table lives; unified addressing maps it at the same address on every device. */
+    [[nodiscard]] expected_t pin_faults_() noexcept {
+        CUdevice device = 0;
+        if (CUresult result = cuDeviceGet(&device, 0); result != CUDA_SUCCESS)
+            return cuda_failure(result, "device handle query failed (device=0)");
+        if (CUresult result = cuDevicePrimaryCtxRetain(&fault_context_, device); result != CUDA_SUCCESS)
+            return cuda_failure(result, "primary context retain failed (device=0)");
+        if (CUresult result = cuCtxPushCurrent(fault_context_); result != CUDA_SUCCESS)
+            return cuda_failure(result, "context push failed (device=0)");
+        std::size_t const bytes = shape.gpus_per_host_domain * sizeof(gpu_fault_t);
+        void *table = nullptr;
+        CUresult const pinned = cuMemHostAlloc(&table, bytes, CU_MEMHOSTALLOC_PORTABLE | CU_MEMHOSTALLOC_DEVICEMAP);
+        cuCtxPopCurrent(nullptr);
+        if (pinned != CUDA_SUCCESS) return cuda_failure(pinned, "fault table allocation failed ({} bytes)", bytes);
+        std::memset(table, 0, bytes);
+        faults_ = static_cast<gpu_fault_t *>(table);
+        return {};
+    }
+
+    void swap_(mesh_topology_t &other) noexcept {
+        std::swap(shape, other.shape);
+        std::swap(host_domain_index, other.host_domain_index);
+        std::swap(host_domains, other.host_domains);
+        std::swap(exchange_directory, other.exchange_directory);
+        std::swap(next_collective_id_, other.next_collective_id_);
+        std::swap(fault_context_, other.fault_context_);
+        std::swap(faults_, other.faults_);
+    }
+
+    /** Free the fault table, then let go of the context it lives in; a free after a trap killed
+     *  that context may fail, and nothing is left to do about it. */
+    void destroy_() noexcept {
+        if (faults_ != nullptr) {
+            cuCtxPushCurrent(fault_context_);
+            cuMemFreeHost(faults_);
+            cuCtxPopCurrent(nullptr);
+            faults_ = nullptr;
+        }
+        if (fault_context_ != nullptr) {
+            CUdevice device = 0;
+            if (cuDeviceGet(&device, 0) == CUDA_SUCCESS) cuDevicePrimaryCtxRelease(device);
+            fault_context_ = nullptr;
+        }
+    }
+
     /** The generation the next wiring phase keys its payloads and barriers with. */
     u32_t next_collective_id_ = 0;
+
+    /** Device 0's primary context, retained while @ref faults_ lives in it. */
+    CUcontext fault_context_ = nullptr;
+
+    /** The pinned @ref faults table; null for a topology @ref bootstrap did not make. */
+    gpu_fault_t *faults_ = nullptr;
 };
 
 /** This host_domain's index in the world, read from whichever launcher spawned the process —

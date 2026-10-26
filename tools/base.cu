@@ -100,7 +100,7 @@ using namespace unum::uform::train;
 
 /** Bootstrap the mesh over every visible device, make the trainer and the source @p mixture names,
  *  and step. */
-[[nodiscard]] static int train_(trainer_config_t config, mesh_options_t const &options, mixture_t mixture) noexcept {
+[[nodiscard]] static int train_(trainer_config_t config, mesh_options_t options, mixture_t mixture) noexcept {
     if (cuInit(0) != CUDA_SUCCESS) return fail_out_("cuInit failed");
     int device_count = 0;
     if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) return fail_out_("no CUDA devices");
@@ -108,6 +108,8 @@ using namespace unum::uform::train;
     for (int device = 0; device != device_count; ++device)
         if (st::failed(devices.push_back(static_cast<i32_t>(device))))
             return fail_out_("device table allocation failed");
+    if (nk_cuda_capabilities_enabled(0, &options.capabilities) != nk_success_k)
+        return fail_out_("NumKong cannot query device 0");
 
     mesh_t mesh;
     if (expected_t joined = mesh_t::make(mesh, options, devices); !joined) return fail_out_(joined.description_.view());
@@ -140,7 +142,7 @@ using namespace unum::uform::train;
     }
 
     trainer_t trainer;
-    if (expected_t built = trainer_t::make(trainer, mesh, config, devices); !built)
+    if (expected_t built = trainer_t::make(trainer, mesh, config, devices, options.capabilities); !built)
         return fail_out_(built.description_.view());
     envelope_t const &envelope = trainer.envelope;
     f64_t const mebibyte = 1024.0 * 1024.0;

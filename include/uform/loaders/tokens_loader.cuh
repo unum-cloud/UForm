@@ -58,12 +58,14 @@ using tokens_matrix_span_t = nk::tensor_span<token_id_t, 2>;
  *      the back.
  *  @param[out] segment_lengths @b [segments] the bytes each segment kept, its prefix included.
  *  @param[out] segment_modality @b [segments] @c text_k throughout.
+ *  @param[inout] dropped @b [1] the batch's drop count, which every segment overflowing @p tokens
+ *      adds one to.
  *  @param[inout] gpu_stream The stream the geometry and the gather run on.
  */
 [[nodiscard]] expected_t pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view_t prefix,
                                      tokens_matrix_span_t tokens, u32r1_span_t segment_offsets,
                                      u32r1_span_t segment_lengths, modality_span_t segment_modality,
-                                     gpu_stream_t &gpu_stream) noexcept;
+                                     u32r1_span_t dropped, gpu_stream_t &gpu_stream) noexcept;
 
 /** The Parquet tokens loader's baked knobs — a different config is a different loader. */
 struct tokens_base_loader_parquet_config_t {

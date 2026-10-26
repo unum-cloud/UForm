@@ -323,7 +323,8 @@ static expected_t allocate_head_products_(gpu_arena_t &arena, nk_capability_t ca
     return {};
 }
 
-expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, masked_tokens_config_t config) noexcept {
+expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, masked_tokens_config_t config,
+                                                nk_capability_t capabilities) noexcept {
     using result_t = expected<masked_tokens_t>;
     if (config.vocabulary == 0 || config.hidden == 0 || config.max_tokens == 0)
         return result_t::fail(status_t::shape_unsupported_k,
@@ -331,11 +332,7 @@ expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, masked_token
                               config.vocabulary, config.hidden, config.max_tokens);
     masked_tokens_t head;
     head.config_ = config;
-    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
-                                                                &head.capabilities_);
-        status != nk_success_k)
-        return result_t::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}", arena.device(),
-                              nk_status_name(status));
+    head.capabilities_ = capabilities;
 
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
@@ -625,7 +622,8 @@ static __global__ void patch_mae_loss_kernel_(bf16r2_view_t predicted, bf16r2_vi
     position_loss[row] = live ? total_loss * inverse_pixels : 0.0f;
 }
 
-expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, masked_patches_config_t config) noexcept {
+expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, masked_patches_config_t config,
+                                                  nk_capability_t capabilities) noexcept {
     using result_t = expected<masked_patches_t>;
     if (config.hidden == 0 || config.patch_pixels == 0 || config.max_patches == 0 || config.temporal_groups == 0 ||
         config.max_patches % config.temporal_groups != 0)
@@ -634,11 +632,7 @@ expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, masked_pat
                               config.hidden, config.patch_pixels, config.max_patches, config.temporal_groups);
     masked_patches_t head;
     head.config_ = config;
-    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
-                                                                &head.capabilities_);
-        status != nk_success_k)
-        return result_t::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}", arena.device(),
-                              nk_status_name(status));
+    head.capabilities_ = capabilities;
 
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};
@@ -830,7 +824,8 @@ static __global__ void frame_mae_loss_kernel_(bf16r2_view_t predicted, f32r2_vie
     position_loss[row] = live ? total_loss * inverse_samples : 0.0f;
 }
 
-expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, masked_frames_config_t config) noexcept {
+expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, masked_frames_config_t config,
+                                                nk_capability_t capabilities) noexcept {
     using result_t = expected<masked_frames_t>;
     if (config.hidden == 0 || config.chunk_samples == 0 || config.max_frames == 0)
         return result_t::fail(status_t::shape_unsupported_k,
@@ -838,11 +833,7 @@ expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, masked_frame
                               config.chunk_samples, config.max_frames);
     masked_frames_t head;
     head.config_ = config;
-    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
-                                                                &head.capabilities_);
-        status != nk_success_k)
-        return result_t::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}", arena.device(),
-                              nk_status_name(status));
+    head.capabilities_ = capabilities;
 
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
     gpu_arena_alloc<f32_t> f32_alloc {arena};

@@ -373,17 +373,12 @@ static __global__ void transformer_token_rescale_kernel_(f32r2_view_t products, 
 
 expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
                                                             transformer_block_config_t const &config,
-                                                            std::span<u32_t const> entry_inputs,
-                                                            u32_t token_width) noexcept {
+                                                            std::span<u32_t const> entry_inputs, u32_t token_width,
+                                                            nk_capability_t capabilities) noexcept {
     using result_t = expected<transformer_scratch_t>;
     if (config.hidden == 0 || config.max_tokens == 0)
         return result_t::fail(status_t::invalid_input_k, "scratch capacities must be positive (hidden={} tokens={})",
                               config.hidden, config.max_tokens);
-    nk_capability_t capabilities = 0;
-    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()), &capabilities);
-        status != nk_success_k)
-        return result_t::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}", arena.device(),
-                              nk_status_name(status));
     std::size_t const hidden = config.hidden;
     std::size_t const ffn = static_cast<std::size_t>(config.ffn_expansion) * hidden;
     std::size_t const tokens = config.max_tokens;
@@ -471,7 +466,8 @@ expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
 }
 
 expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &arena, transformer_scratch_t &scratch,
-                                                                  transformer_block_config_t config) noexcept {
+                                                                  transformer_block_config_t config,
+                                                                  nk_capability_t capabilities) noexcept {
     if (config.hidden == 0 || config.hidden % transformer_head_dim_k != 0)
         return expected<transformer_block_bf16_t>::fail(status_t::shape_unsupported_k,
                                                         "hidden must be a positive multiple of {} (got {})",
@@ -483,11 +479,7 @@ expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &a
     transformer_block_bf16_t block;
     block.config_ = config;
     block.scratch_ = &scratch;
-    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
-                                                                &block.capabilities_);
-        status != nk_success_k)
-        return expected<transformer_block_bf16_t>::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}",
-                                                        arena.device(), nk_status_name(status));
+    block.capabilities_ = capabilities;
 
     std::size_t const hidden = config.hidden;
     std::size_t const ffn = static_cast<std::size_t>(config.ffn_expansion) * hidden;
@@ -973,11 +965,7 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
     using result_t = expected<transformer_block_e4m3_t>;
     transformer_block_e4m3_t block;
     block.config_ = config_;
-    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(stream.device()),
-                                                                &block.capabilities_);
-        status != nk_success_k)
-        return result_t::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}", stream.device(),
-                              nk_status_name(status));
+    block.capabilities_ = capabilities_;
 
     std::size_t const hidden = config_.hidden;
     std::size_t const ffn = static_cast<std::size_t>(config_.ffn_expansion) * hidden;

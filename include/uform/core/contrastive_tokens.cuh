@@ -117,9 +117,10 @@ struct gpu_query_subgraph_t {
  *  forces over them, all baked at @ref make — a call is a pure enqueue. */
 struct contrastive_tokens_t {
 
-    /** Validate @p config and allocate every tile, pack and scratch tensor off @p arena . */
-    [[nodiscard]] static expected<contrastive_tokens_t> make(gpu_arena_t &arena,
-                                                             contrastive_tokens_config_t config) noexcept;
+    /** Validate @p config and allocate every tile, pack and scratch tensor off @p arena ,
+     *  dispatching with @p capabilities . */
+    [[nodiscard]] static expected<contrastive_tokens_t> make(gpu_arena_t &arena, contrastive_tokens_config_t config,
+                                                             nk_capability_t capabilities) noexcept;
 
     /**
      *  @brief Single-GPU forward and backward for one step.
@@ -328,10 +329,12 @@ struct distributed_contrastive_tokens_t {
      *  @param[in] streams @b [gpus] per-GPU streams scoping each per-device setup.
      *  @param[in] config The per-GPU geometry; @c gpu_subgraphs_per_step must equal the world's
      *      GPUs.
+     *  @param[in] capabilities The NumKong capabilities every GPU's products dispatch with.
      */
     [[nodiscard]] static expected<distributed_contrastive_tokens_t> make(
         multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
-        std::span<gpu_stream_t> streams, contrastive_tokens_config_t config, f64_t timeout_seconds = 120.0) noexcept;
+        std::span<gpu_stream_t> streams, contrastive_tokens_config_t config, nk_capability_t capabilities,
+        f64_t timeout_seconds = 120.0) noexcept;
 
     /** One step over every local GPU, enqueued phase by phase across @p inputs and @p streams . */
     [[nodiscard]] expected_t operator()(std::span<gpu_tokens_inputs_t const> inputs,

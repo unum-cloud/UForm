@@ -51,22 +51,23 @@ inline constexpr std::size_t header_probe_bytes_k = 1u << 12;
  *      @p grids factorization), and several images pack into one row.
  *
  *  Thread 0 walks the segments serially — a strict scan — jumping the cursor past a row boundary a segment
- *  would cross (never crossing a row), dropping loudly (zero length) any segment that would overflow the
- *  @c rows·columns grid, and tagging each placed live segment @c image_k (a dropped one PADs to @c text_k ,
- *  length 0). It also lands each live segment's @c (patch_rows,patch_cols) into @p image_shapes on the
- *  device — the descriptors are arena (device) memory, so the loader never writes them from the host.
- *  Segments past @p live_images PAD: zero length, repeated offset, @c text_k .
+ *  would cross (never crossing a row), dropping (zero length) and counting into @p dropped any
+ *  segment that would overflow the @c rows·columns grid, and tagging each placed live segment
+ *  @c image_k (a dropped one PADs to @c text_k , length 0). It also lands each live segment's
+ *  @c (patch_rows,patch_cols) into @p image_shapes on the device — the descriptors are arena
+ *  (device) memory, so the loader never writes them from the host. Segments past @p live_images
+ *  PAD: zero length, repeated offset, @c text_k .
  *
  *  __grid_size__ @c [1,1,1] , one thread live; no dynamic shared memory.
  */
 static __global__ void image_segments_kernel_(patch_grid_t const *grids, u32_t live_images, u32_t columns_per_row,
                                               u32_t capacity, image_shape_span_t image_shapes,
                                               u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
-                                              modality_span_t segment_modality) {
+                                              modality_span_t segment_modality, u32r1_span_t dropped) {
     if (threadIdx.x != 0u || blockIdx.x != 0u) return;
     u32_t const total_segments = static_cast<u32_t>(segment_lengths.extent(0));
     u32_t const live = live_images < total_segments ? live_images : total_segments;
-    u32_t cursor = 0;
+    u32_t cursor = 0, overflowed = 0;
     for (u32_t segment = 0; segment != total_segments; ++segment) {
         bool const is_live_image = segment < live;
         u32_t columns = 0;
@@ -78,10 +79,7 @@ static __global__ void image_segments_kernel_(patch_grid_t const *grids, u32_t l
         // Every image owns half a row from its start.
         u32_t const half_row = media_cells(modality_t::image_k, columns_per_row);
         cursor = (cursor + half_row - 1u) / half_row * half_row;
-        if (cursor + columns > capacity) {
-            printf("uform: loaded image batch overflows at segment %u — segment dropped\n", segment);
-            columns = 0;
-        }
+        if (cursor + columns > capacity) ++overflowed, columns = 0;
         segment_offsets[segment] = cursor;
         segment_lengths[segment] = columns;
         // A live image that overflowed and dropped (length 0) reads as PAD, not a zero-length image_k segment.
@@ -89,6 +87,7 @@ static __global__ void image_segments_kernel_(patch_grid_t const *grids, u32_t l
         cursor += columns;
     }
     segment_offsets[total_segments] = cursor;
+    dropped[0] += overflowed;
 }
 
 /** One image's header-gather descriptor: where its compressed bytes start in the device tape and how
@@ -674,7 +673,7 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
 expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, column_view_t tape,
                              u64r1_view_t drawn_rows, std::span<image_batch_shape_t const> representations,
                              pixel_patches_span_t pixels, image_shape_span_t shapes, u32r1_span_t segment_offsets,
-                             u32r1_span_t segment_lengths, modality_span_t segment_modality,
+                             u32r1_span_t segment_lengths, modality_span_t segment_modality, u32r1_span_t dropped,
                              gpu_stream_t &stream) noexcept {
     std::size_t const images = drawn_rows.size();
     if (images == 0) return {};
@@ -721,7 +720,7 @@ expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, co
     if (expected_t segmented = launch_kernel(&image_segments_kernel_, dim3 {1u, 1u, 1u}, dim3 {1u, 1u, 1u}, stream,
                                              device_grids.data(), static_cast<u32_t>(images), columns_per_row,
                                              static_cast<u32_t>(capacity), shapes, segment_offsets, segment_lengths,
-                                             segment_modality);
+                                             segment_modality, dropped);
         !segmented)
         return segmented;
 
@@ -855,7 +854,7 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
         if (expected_t decoded = decode_images(decoder, *pool_, tape, batch_records[batch, nk::slice], representations,
                                                loaded.images.span(), loaded.image_shapes.span(),
                                                loaded.segment_offsets.span(), loaded.segment_lengths.span(),
-                                               loaded.segment_modality.span(), gpu_stream);
+                                               loaded.segment_modality.span(), loaded.dropped.span(), gpu_stream);
             !decoded)
             return decoded;
     }

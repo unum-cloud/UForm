@@ -82,10 +82,12 @@ using namespace unum::uform::test;
     return true;
 }
 
-/** The GPU every case borrows, owned by @c main : one stream whose context the cases enter. Each
- *  case allocates its own arena, so a case's allocations die with it. */
+/** The GPU every case borrows, owned by @c main : one stream whose context the cases enter, and the
+ *  capabilities they dispatch with. Each case allocates its own arena, so a case's allocations die
+ *  with it. */
 struct device_t {
     gpu_stream_t stream;
+    nk_capability_t capabilities = 0;
 };
 
 /** Bytes one case's arena reserves: the omni replica at the test geometry needs about a quarter of
@@ -118,7 +120,7 @@ inline constexpr f64_t finite_difference_tolerance_k = 0x1.0p-4;
 [[nodiscard]] static expected<base_replica_t> make_replica_(gpu_arena_t &arena, device_t &device,
                                                             trainer_config_t const &config,
                                                             data_epoch_t epoch) noexcept {
-    expected<base_replica_t> replica = base_replica_t::make(arena, config, 0);
+    expected<base_replica_t> replica = base_replica_t::make(arena, config, 0, device.capabilities);
     expected_t staged = replica ? seed_weights(replica->weights, device.stream) : expected_t::fail(std::move(replica));
     if (staged) staged = replica->draw(config, 0, epoch, device.stream);
     if (staged) staged = replica->prepare(config, epoch, device.stream);
@@ -298,7 +300,8 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
     config.late_interaction.width = 32;
     expected<gpu_arena_t> arena = gpu_arena_t::make(0, case_arena_bytes_k);
     if (!arena) return suite.check(false, "arena: {}", arena.description_);
-    expected<base_replica_t> made = base_replica_t::make(*arena, config, config.batch.max_segments_per_gpu);
+    expected<base_replica_t> made = base_replica_t::make(*arena, config, config.batch.max_segments_per_gpu,
+                                                         device.capabilities);
     expected_t staged = made ? seed_weights(made->weights, device.stream) : expected_t::fail(std::move(made));
     if (staged) staged = made->draw(config, 0, data_epoch_t {0}, device.stream);
     if (!staged) return suite.check(false, "replica: {}", staged.description_);
@@ -766,7 +769,7 @@ static void choices_cross_entropy(test_suite_t &suite, device_t &device) {
     if (!arena) return suite.check(false, "arena: {}", arena.description_);
     masked_tokens_config_t head_config;
     head_config.hidden = hidden, head_config.max_tokens = tokens, head_config.max_segments = rows;
-    expected<masked_tokens_t> head = masked_tokens_t::make(*arena, head_config);
+    expected<masked_tokens_t> head = masked_tokens_t::make(*arena, head_config, device.capabilities);
     if (!head) return suite.check(false, "head: {}", head.description_);
     multimodal_batch_shape_t shape {rows, rows, columns};
     shape.max_choices_per_segment = width;
@@ -990,9 +993,10 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
     config.max_tokens = tokens;
     config.max_segments = segments;
     config.max_segment_tokens = sequence;
-    expected<transformer_scratch_t> scratch = transformer_scratch_t::make(*arena, config, {}, 0);
+    expected<transformer_scratch_t> scratch = transformer_scratch_t::make(*arena, config, {}, 0, device.capabilities);
     if (!scratch) return suite.check(false, "scratch: {}", scratch.description_);
-    expected<transformer_block_bf16_t> block = transformer_block_bf16_t::make(*arena, *scratch, config);
+    expected<transformer_block_bf16_t> block = transformer_block_bf16_t::make(*arena, *scratch, config,
+                                                                              device.capabilities);
     if (!block) return suite.check(false, "block: {}", block.description_);
     expected<rope_angles_t> angles = rope_angles_t::make(*arena, sequence, rope_shape_t {},
                                                          static_cast<f32_t>(rope_base_k));
@@ -1212,11 +1216,13 @@ static void block_recompute_replays(test_suite_t &suite, device_t &device) {
     config.max_tokens = tokens;
     config.max_segments = segments;
     config.max_segment_tokens = sequence;
-    expected<transformer_scratch_t> scratch = transformer_scratch_t::make(*arena, config, {}, 0);
+    expected<transformer_scratch_t> scratch = transformer_scratch_t::make(*arena, config, {}, 0, device.capabilities);
     if (!scratch) return suite.check(false, "scratch: {}", scratch.description_);
-    expected<transformer_block_bf16_t> block = transformer_block_bf16_t::make(*arena, *scratch, config);
+    expected<transformer_block_bf16_t> block = transformer_block_bf16_t::make(*arena, *scratch, config,
+                                                                              device.capabilities);
     if (!block) return suite.check(false, "block: {}", block.description_);
-    expected<transformer_block_bf16_t> other = transformer_block_bf16_t::make(*arena, *scratch, config);
+    expected<transformer_block_bf16_t> other = transformer_block_bf16_t::make(*arena, *scratch, config,
+                                                                              device.capabilities);
     if (!other) return suite.check(false, "other block: {}", other.description_);
     expected<rope_angles_t> angles = rope_angles_t::make(*arena, sequence, rope_shape_t {},
                                                          static_cast<f32_t>(rope_base_k));
@@ -1306,6 +1312,10 @@ int main(int, char **argv) {
     }
     switch_to_gpu_t scope {*stream};
     device_t device {std::move(*stream)};
+    if (nk_cuda_capabilities_enabled(0, &device.capabilities) != nk_success_k) {
+        suite.check(false, "NumKong cannot query device 0");
+        return suite.finish();
+    }
     suite.run("gradients/tokens", finite_differences_tokens, device);
     suite.run("gradients/omni", finite_differences_omni, device);
     suite.run("gradients/token_head", token_head_finite_differences, device);

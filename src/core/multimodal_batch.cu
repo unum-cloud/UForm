@@ -185,23 +185,24 @@ struct batch_sources_t_ {
  *  bags: a source bag's live segments (the contiguous run tagged with its index) land together, its
  *  anchors in a trailing band after every other role's segments, and @p mixed_bags renumbers them
  *  to the destination-local bag. A bag that would overflow the destination rectangle or the segment
- *  table is dropped loudly and @b whole — never split — so a surviving bag is always intact; the
- *  packer's budgets make any drop a bug, not a case.
+ *  table is dropped @b whole — never split — so a surviving bag is always intact; the packer's
+ *  budgets make any drop a bug, not a case. Answers how many live segments found no room, every
+ *  lane alike.
  *
  *  Empty @p mixed_offsets and @p mixed_bags route a destination for its lengths and sources
  *  alone, the way @ref batch_world_geometry_kernel_ derives every other GPU's mix, which lands
  *  nowhere and reports no drop.
  */
 template <typename sources_type_>
-static __device__ void route_destination_(sources_type_ const &sources, u32r1_span_t mixed_offsets,
-                                          u32r1_span_t mixed_lengths, u32r1_span_t mixed_sources,
-                                          u32r1_span_t mixed_bags, u32_t member_index, data_epoch_t data_epoch,
-                                          u64_t seed, u32_t segments_per_gpu, u32_t rows_per_gpu, u32_t columns_per_row,
-                                          u32_t max_bags_per_gpu) {
+static __device__ u32_t route_destination_(sources_type_ const &sources, u32r1_span_t mixed_offsets,
+                                           u32r1_span_t mixed_lengths, u32r1_span_t mixed_sources,
+                                           u32r1_span_t mixed_bags, u32_t member_index, data_epoch_t data_epoch,
+                                           u64_t seed, u32_t segments_per_gpu, u32_t rows_per_gpu,
+                                           u32_t columns_per_row, u32_t max_bags_per_gpu) {
     bool const lands = !mixed_offsets.empty();
     bool const leader = threadIdx.x % warp_size_k == 0u; // every lane walks the same cursor, one stores it
     u32_t const capacity = rows_per_gpu * columns_per_row;
-    u32_t cursor = 0;
+    u32_t cursor = 0, dropped = 0;
 
     if (max_bags_per_gpu == 0u) {
         // Per-segment routing — the masked pipeline's degenerate case: one segment per bag, the world
@@ -215,12 +216,7 @@ static __device__ void route_destination_(sources_type_ const &sources, u32r1_sp
             cursor = row_aligned_cursor_(cursor, columns, peer.segment_modality[source % segments_per_gpu],
                                          columns_per_row);
             if (!lands && cursor + columns > capacity) columns = 0; // the world pass drops silently
-            if (cursor + columns > capacity) {
-                if (leader)
-                    printf("uform: mixed batch overflows at segment %u (member %u) — segment dropped\n", segment,
-                           member_index);
-                columns = 0;
-            }
+            if (cursor + columns > capacity) ++dropped, columns = 0;
             if (leader) {
                 if (lands) mixed_offsets[segment] = cursor;
                 mixed_lengths[segment] = columns;
@@ -229,7 +225,7 @@ static __device__ void route_destination_(sources_type_ const &sources, u32r1_sp
             cursor += columns;
         }
         if (lands && leader) mixed_offsets[segments_per_gpu] = cursor;
-        return;
+        return dropped;
     }
 
     // Bag-cohesive routing: the destination walks its bag budget, each drawing one world bag;
@@ -271,9 +267,7 @@ static __device__ void route_destination_(sources_type_ const &sources, u32r1_sp
                        rows_per_gpu;
             }
             if (!fits) {
-                if (writes && lands && leader)
-                    printf("uform: bag %u cannot land whole on member %u (rows or segment budget), dropped whole\n",
-                           bag, member_index);
+                if (writes && lands) dropped += run_end - run_begin;
                 continue;
             }
             for (u32_t source_segment = run_begin; source_segment != run_end; ++source_segment) {
@@ -294,7 +288,7 @@ static __device__ void route_destination_(sources_type_ const &sources, u32r1_sp
             }
         }
     }
-    if (!leader) return;
+    if (!leader) return dropped;
     // The unclaimed tail is PAD: zero length, no source, and the one-past-the-last-bag `end` sentinel.
     u32_t const end = trail_segments != 0u ? trail_begin + trail_cursor : lead_cursor;
     for (u32_t segment = lead_segments + trail_segments; segment != segments_per_gpu; ++segment) {
@@ -303,23 +297,28 @@ static __device__ void route_destination_(sources_type_ const &sources, u32r1_sp
         mixed_sources[segment] = mixed_source_absent_k;
     }
     if (lands) mixed_offsets[segments_per_gpu] = end;
+    return dropped;
 }
 
 /**
  *  @brief Write the mixed batch's geometry through @ref route_destination_ for world GPU
- *      @p member_index .
+ *      @p member_index , adding the member's loaded drops and the routing's own to
+ *      @p mixed_dropped .
  *
  *  __grid_size__ @c [1,1,1] of one warp; no dynamic shared memory.
  */
 template <typename sources_type_>
 static __global__ void batch_geometry_kernel_(sources_type_ sources, u32r1_span_t mixed_offsets,
                                               u32r1_span_t mixed_lengths, u32r1_span_t mixed_sources,
-                                              u32r1_span_t mixed_bags, u32_t member_index, data_epoch_t data_epoch,
+                                              u32r1_span_t mixed_bags, u32r1_view_t loaded_dropped,
+                                              u32r1_span_t mixed_dropped, u32_t member_index, data_epoch_t data_epoch,
                                               u64_t seed, u32_t segments_per_gpu, u32_t rows_per_gpu,
                                               u32_t columns_per_row, u32_t max_bags_per_gpu) {
     if (blockIdx.x != 0u) return;
-    route_destination_(sources, mixed_offsets, mixed_lengths, mixed_sources, mixed_bags, member_index, data_epoch, seed,
-                       segments_per_gpu, rows_per_gpu, columns_per_row, max_bags_per_gpu);
+    u32_t const dropped = route_destination_(sources, mixed_offsets, mixed_lengths, mixed_sources, mixed_bags,
+                                             member_index, data_epoch, seed, segments_per_gpu, rows_per_gpu,
+                                             columns_per_row, max_bags_per_gpu);
+    if (threadIdx.x == 0u) mixed_dropped[0] += loaded_dropped[0] + dropped;
 }
 
 /**
@@ -668,12 +667,13 @@ static expected_t pack_batch_into_block_(multimodal_batch_on_gpu_t const &loaded
 }
 
 /** Enqueue one member's mix over @p sources : the geometry pass, the gather into @p mixed , and the
- *  world pass into @p world_lengths and @p world_sources , whose own slice the gather reads. */
+ *  world pass into @p world_lengths and @p world_sources , whose own slice the gather reads. The
+ *  geometry pass adds @p loaded_dropped , the member's own loaded drops, to the mixed batch's. */
 template <typename sources_type_>
-static expected_t mix_(sources_type_ const &sources, multimodal_batch_on_gpu_t &mixed, u32r2_span_t world_lengths,
-                       u32r2_span_t world_sources, u64r2_span_t world_keys, u32_t gpu_index_in_colocated_domain,
-                       data_epoch_t data_epoch, u64_t seed, multimodal_batch_shape_t const &shape,
-                       gpu_stream_t &stream) noexcept {
+static expected_t mix_(sources_type_ const &sources, u32r1_view_t loaded_dropped, multimodal_batch_on_gpu_t &mixed,
+                       u32r2_span_t world_lengths, u32r2_span_t world_sources, u64r2_span_t world_keys,
+                       u32_t gpu_index_in_colocated_domain, data_epoch_t data_epoch, u64_t seed,
+                       multimodal_batch_shape_t const &shape, gpu_stream_t &stream) noexcept {
     u32r1_span_t const mixed_sources = world_sources[gpu_index_in_colocated_domain, nk::slice];
     // This member's mixed batch is the scatter target; an absent modality leaves an empty span.
     std::size_t const cells = mixed.tokens.numel();
@@ -697,10 +697,10 @@ static expected_t mix_(sources_type_ const &sources, multimodal_batch_on_gpu_t &
     dim3 const one_block {1u, 1u, 1u}, one_warp {warp_size_k, 1u, 1u};
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const segment_grid {shape.max_segments_per_gpu, 1u, 1u};
-    expected_t staged = launch_kernel(&batch_geometry_kernel_<sources_type_>, one_block, one_warp, stream, sources,
-                                      mixed_offsets, mixed_lengths, mixed_sources, mixed_bags,
-                                      gpu_index_in_colocated_domain, data_epoch, seed, shape.max_segments_per_gpu,
-                                      shape.max_rows_per_gpu, shape.max_columns_per_row, shape.max_bags_per_gpu);
+    expected_t staged = launch_kernel(
+        &batch_geometry_kernel_<sources_type_>, one_block, one_warp, stream, sources, mixed_offsets, mixed_lengths,
+        mixed_sources, mixed_bags, loaded_dropped, mixed.dropped.span(), gpu_index_in_colocated_domain, data_epoch,
+        seed, shape.max_segments_per_gpu, shape.max_rows_per_gpu, shape.max_columns_per_row, shape.max_bags_per_gpu);
     if (staged)
         staged = launch_kernel(&batch_gather_kernel_<sources_type_>, segment_grid, block_shape, stream, sources, dest,
                                u32r1_view_t {mixed_offsets}, u32r1_view_t {mixed_lengths}, u32r1_view_t {mixed_sources},
@@ -857,11 +857,11 @@ expected_t multimodal_batch_mixer_t::operator()(std::size_t local, data_epoch_t 
         windows.layout = block_layout;
         windows.members = static_cast<u32_t>(multimem_->member_count());
         windows.count = windows.members * domains_;
-        return mix_(windows, mixed, world_lengths, world_sources, world_keys, gpu_index_in_colocated_domain, data_epoch,
-                    seed_, shape_, stream);
+        return mix_(windows, loaded[local].dropped.view(), mixed, world_lengths, world_sources, world_keys,
+                    gpu_index_in_colocated_domain, data_epoch, seed_, shape_, stream);
     }
-    return mix_(sources, mixed, world_lengths, world_sources, world_keys, gpu_index_in_colocated_domain, data_epoch,
-                seed_, shape_, stream);
+    return mix_(sources, loaded[local].dropped.view(), mixed, world_lengths, world_sources, world_keys,
+                gpu_index_in_colocated_domain, data_epoch, seed_, shape_, stream);
 }
 
 expected_t multimodal_batch_mixer_t::operator()(data_epoch_t data_epoch,

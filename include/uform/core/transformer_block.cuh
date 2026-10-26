@@ -236,11 +236,11 @@ struct transformer_scratch_t {
     /** Allocate every transient off @p arena for @p config 's capacities, wide enough for the
      *  weight gradients of every entry projecting one of @p entry_inputs scalars per token, of the
      *  tower head over the segments, and of a token head of @p token_width outputs when nonzero;
-     *  the NumKong pack and workspace sizes come from the capabilities of the arena's device. */
+     *  the NumKong pack and workspace sizes come from @p capabilities . */
     [[nodiscard]] static expected<transformer_scratch_t> make(gpu_arena_t &arena,
                                                               transformer_block_config_t const &config,
-                                                              std::span<u32_t const> entry_inputs,
-                                                              u32_t token_width) noexcept;
+                                                              std::span<u32_t const> entry_inputs, u32_t token_width,
+                                                              nk_capability_t capabilities) noexcept;
 
     /** Float32 @b [tokens·ffn] the SwiGLU output before its cast, then each data gradient before the
      *  house kernel or cast consuming it. */
@@ -304,9 +304,11 @@ struct transformer_scratch_t {
 struct transformer_block_bf16_t {
 
     /** Allocate the weights and their gradients, every stash the backward reads, and the weight
-     *  packs; construction validates the config, and every call after it is a pure enqueue. */
+     *  packs; construction validates the config, and every call after it is a pure enqueue,
+     *  dispatching with @p capabilities . */
     [[nodiscard]] static expected<transformer_block_bf16_t> make(gpu_arena_t &arena, transformer_scratch_t &scratch,
-                                                                 transformer_block_config_t config) noexcept;
+                                                                 transformer_block_config_t config,
+                                                                 nk_capability_t capabilities) noexcept;
 
     /** Pack the four weights as the forward's B operands and their transposes as the data gradients' —
      *  pure enqueue, capture-safe. Call once per optimizer step, after the weights change and before the

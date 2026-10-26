@@ -139,8 +139,8 @@ struct tower_pool_t {
      *  @c {0,1,…,segments} that give every segment the one query, the K=V pack sized for every segment at
      *  @c max_segment_tokens , the Float32 pooled rows with their log-sum-exps, and the Float32 gradient
      *  rows the backward reads and writes. Uploads the offsets — outside any capture. */
-    [[nodiscard]] static expected<tower_pool_t> make(gpu_arena_t &arena,
-                                                     transformer_block_config_t const &block) noexcept;
+    [[nodiscard]] static expected<tower_pool_t> make(gpu_arena_t &arena, transformer_block_config_t const &block,
+                                                     nk_capability_t capabilities) noexcept;
 
     /**
      *  @brief Pool every segment of @p states — pure enqueue: pack K=V, attend, cast to BFloat16.
@@ -202,9 +202,9 @@ struct tower_pool_t {
 struct tower_token_head_t {
 
     /** Allocate the weights, their gradients, the packs and every stash off @p arena for @p block
-     *  's capacities. */
+     *  's capacities, dispatching with @p capabilities . */
     [[nodiscard]] static expected<tower_token_head_t> make(gpu_arena_t &arena, transformer_block_config_t const &block,
-                                                           u32_t width) noexcept;
+                                                           u32_t width, nk_capability_t capabilities) noexcept;
 
     /**
      *  @brief Project the late-interaction tokens of @p states — pure enqueue: lay out the compact
@@ -294,9 +294,10 @@ struct encoder_tower_bf16_t {
 
     /** Allocate and plan the whole tower off @p arena — token / media entries, @c depth blocks,
      *  the attention pool, and the head — validating each present modality's patch count against
-     *  @p shape 's @c max_columns_per_row . */
+     *  @p shape 's @c max_columns_per_row . Every part dispatches with @p capabilities . */
     [[nodiscard]] static expected<encoder_tower_bf16_t> make(gpu_arena_t &arena, encoder_tower_config_t config,
-                                                             multimodal_batch_shape_t shape) noexcept;
+                                                             multimodal_batch_shape_t shape,
+                                                             nk_capability_t capabilities) noexcept;
 
     /** One tower forward over @p batch — pure enqueue; every stash the backward reads is written
      *  along the way, including the per-token rotary @b (t,h,w) coordinates @ref coords_ derives fresh

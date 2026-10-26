@@ -182,8 +182,10 @@ struct masked_frames_config_t {
  */
 struct masked_tokens_t {
 
-    /** Allocate the decoder, its NumKong packs, and every scratch — once, at setup. */
-    [[nodiscard]] static expected<masked_tokens_t> make(gpu_arena_t &arena, masked_tokens_config_t config) noexcept;
+    /** Allocate the decoder, its NumKong packs, and every scratch — once, at setup — dispatching
+     *  with @p capabilities . */
+    [[nodiscard]] static expected<masked_tokens_t> make(gpu_arena_t &arena, masked_tokens_config_t config,
+                                                        nk_capability_t capabilities) noexcept;
 
     /** Pack the decoder for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
      *  step, after the weights change and before the first @ref operator() . */
@@ -324,8 +326,10 @@ struct masked_tokens_t {
  */
 struct masked_patches_t {
 
-    /** Allocate the recon head, its NumKong packs, and every scratch — once, at setup. */
-    [[nodiscard]] static expected<masked_patches_t> make(gpu_arena_t &arena, masked_patches_config_t config) noexcept;
+    /** Allocate the recon head, its NumKong packs, and every scratch — once, at setup — dispatching
+     *  with @p capabilities . */
+    [[nodiscard]] static expected<masked_patches_t> make(gpu_arena_t &arena, masked_patches_config_t config,
+                                                         nk_capability_t capabilities) noexcept;
 
     /** Pack the recon head for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
      *  step, after the weights change and before the first @ref operator() . */
@@ -427,8 +431,10 @@ struct masked_patches_t {
  */
 struct masked_frames_t {
 
-    /** Allocate the recon head, its NumKong packs, and every scratch — once, at setup. */
-    [[nodiscard]] static expected<masked_frames_t> make(gpu_arena_t &arena, masked_frames_config_t config) noexcept;
+    /** Allocate the recon head, its NumKong packs, and every scratch — once, at setup — dispatching
+     *  with @p capabilities . */
+    [[nodiscard]] static expected<masked_frames_t> make(gpu_arena_t &arena, masked_frames_config_t config,
+                                                        nk_capability_t capabilities) noexcept;
 
     /** Pack the recon head for NumKong's products — pure enqueue, capture-safe. Call once per optimizer
      *  step, after the weights change and before the first @ref operator() . */

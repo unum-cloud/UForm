@@ -79,13 +79,15 @@ static napi_value uform_js_mesh_describe(napi_env env, napi_callback_info info) 
     uform_mesh_describe(&describe);
     if (!uform_js_succeeded(env, &outcome)) return NULL;
     static char const *const names[] = {"gpusPerHostDomain", "gpusPerMultimemDomain", "gpusPerColocatedDomain",
-                                        "hostDomainIndex",   "firstGpuIndex",         "multimemTier"};
+                                        "hostDomainIndex",   "firstGpuIndex",         "multimemTier",
+                                        "gpuClass"};
     napi_value const values[] = {uform_js_number(env, description.gpus_per_host_domain),
                                  uform_js_number(env, description.gpus_per_multimem_domain),
                                  uform_js_number(env, description.gpus_per_colocated_domain),
                                  uform_js_number(env, description.host_domain_index),
                                  uform_js_number(env, description.first_gpu_index),
-                                 uform_js_static_string(env, uform_multimem_tier_name(description.multimem_tier))};
+                                 uform_js_static_string(env, uform_multimem_tier_name(description.multimem_tier)),
+                                 uform_js_class_name(env, uform_gpu_class_name(description.gpu_class))};
     return uform_js_object(env, sizeof(names) / sizeof(names[0]), names, values);
 }
 
@@ -328,7 +330,8 @@ static napi_value uform_js_finish_step(napi_env env, uform_js_call_t *call, napi
                                         "maskedAudioLoss",
                                         "lateInteractionLoss",
                                         "choicesLoss",
-                                        "truncated"};
+                                        "truncated",
+                                        "dropped"};
     napi_value values[sizeof(names) / sizeof(names[0])];
     float const reals[] = {stats->learning_rate,     stats->loss,
                            stats->contrastive_loss,  stats->masked_text_loss,
@@ -340,6 +343,7 @@ static napi_value uform_js_finish_step(napi_env env, uform_js_call_t *call, napi
     for (size_t position = 0; position != reals_count; ++position)
         napi_create_double(env, reals[position], &values[position + 1]);
     values[reals_count + 1] = uform_js_number(env, stats->truncated);
+    values[reals_count + 2] = uform_js_number(env, stats->dropped);
     napi_value const report = uform_js_object(env, sizeof(names) / sizeof(names[0]), names, values);
     napi_value object = NULL;
     if (!report || napi_create_object(env, &object) != napi_ok ||

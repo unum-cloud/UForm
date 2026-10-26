@@ -527,7 +527,7 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
             if (!media)
                 return pack_tokens(tape, drawn_of(drawn_on_gpu.data(), role), positive_prefix,
                                    loaded.tokens[nk::range(row_begin, row_end), nk::slice], offsets_of(role),
-                                   lengths_of(role), modalities_of(role), gpu_stream);
+                                   lengths_of(role), modalities_of(role), loaded.dropped.span(), gpu_stream);
             nk::tensor_span<u16_t, 2> const shapes_of_role = media_shape_tables[shapes_row, nk::slice];
             return decode(loaded, row_begin, row_end, tape, drawn_of(drawn.data(), role),
                           shapes_of_role[nk::range(std::size_t {0}, admitted), nk::slice], offsets_of(role),
@@ -540,7 +540,7 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
             filled = pack_tokens(anchors, drawn_of(drawn_on_gpu.data(), anchor_role_k), anchor_prefix,
                                  loaded.tokens[nk::range(rows - anchor_rows, rows), nk::slice],
                                  offsets_of(anchor_role_k), lengths_of(anchor_role_k), modalities_of(anchor_role_k),
-                                 gpu_stream);
+                                 loaded.dropped.span(), gpu_stream);
         if (!filled) return filled;
 
         segment_shapes_span_t const shapes = modality_ == modality_t::image_k   ? loaded.image_shapes.span()
@@ -582,7 +582,7 @@ expected_t paired_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_sessio
                      modality_span_t modalities) noexcept {
                      pixel_patches_span_t const pixels = loaded.images[nk::range(row_begin, row_end), nk::slice];
                      return decode_images(decoder, *pool_, tape, drawn, {&shape_.image, 1}, pixels, shapes, offsets,
-                                          lengths, modalities, gpu_stream);
+                                          lengths, modalities, loaded.dropped.span(), gpu_stream);
                  });
 }
 
@@ -615,6 +615,6 @@ expected_t paired_loader_parquet_t::fill(gpu_stream_t &gpu_stream, u32_t gpu_ran
             modality_span_t modalities) noexcept {
             audio_samples_span_t const samples = loaded.audio_samples[nk::range(row_begin, row_end), nk::slice];
             return decode_audios(*pool_, tape, drawn, {&shape_.audio, 1}, samples, offsets, lengths, modalities,
-                                 gpu_stream);
+                                 loaded.dropped.span(), gpu_stream);
         });
 }

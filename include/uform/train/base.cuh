@@ -388,9 +388,11 @@ struct base_replica_t {
 
     /** Build the replica over the world-owned @p arena , publishing its parameter matrices into
      *  @ref weights in the same order on every replica. @p vertices_per_mesh sizes the contrastive
-     *  to-vertex column. Constructs no stream or arena, and seeds nothing. */
+     *  to-vertex column, and every component dispatches with @p capabilities . Constructs no stream
+     *  or arena, and seeds nothing. */
     [[nodiscard]] static expected<base_replica_t> make(gpu_arena_t &arena, trainer_config_t const &config,
-                                                       std::size_t vertices_per_mesh) noexcept;
+                                                       std::size_t vertices_per_mesh,
+                                                       nk_capability_t capabilities) noexcept;
 
     /** Draw the keyed synthetic mixture into @ref batch — row partition and contents, pure functions of
      *  @c config.seed , @p data_epoch , and @p gpu_index_in_colocated_domain , the world coordinate, so every

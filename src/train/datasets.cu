@@ -475,6 +475,9 @@ expected_t dataset_source_t::fill_member_(trainer_t &trainer, std::size_t member
     gpu_stream_t &stream = trainer.streams[member];
     u32_t const step = data_epoch.ordinal;
     expected_t filled;
+    for (multimodal_batch_on_gpu_t &batch : batches)
+        if (filled) filled = zero_async(batch.dropped.span(), stream);
+    if (!filled) return filled;
     if (auto *parquet = std::get_if<tokens_loader_parquet_t>(&loaders_[entry]))
         filled = parquet->fill(stream, {dataset.text.view()}, gpu_index, step, batches);
     else if (auto *jsonl = std::get_if<tokens_loader_jsonl_t>(&loaders_[entry]))

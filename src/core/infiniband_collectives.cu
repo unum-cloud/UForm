@@ -49,7 +49,7 @@ static __global__ void infiniband_allreduce_post_kernel_(infiniband_links_view_t
     infiniband_post_write(link.queue, nullptr, link.local_access_key,
                           link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
                           link.remote_access_key, sizeof(u32_t), infiniband_signaling_t::signaled_k, &flag_value);
-    infiniband_drain_one(link.completion, link.wait_nanoseconds);
+    infiniband_drain_one(link.completion, link.wait_nanoseconds, link.fault);
 }
 
 /** Flag-wait step of one round: lane 0 acquire-spins until the inbound flag reaches the absolute
@@ -65,10 +65,8 @@ static __global__ void infiniband_flag_wait_kernel_(infiniband_links_view_t link
         u64_t const deadline = global_nanoseconds() + link.wait_nanoseconds;
         // Spin until the partner's flag write for this round lands; its payload already did.
         while (infiniband_load_acquire_u32(link.arrival_flag + step_parity) < target)
-            if (global_nanoseconds() > deadline) {
-                printf("uform: round %u waited past its deadline at flag target %u\n", round, target);
-                __trap();
-            }
+            if (global_nanoseconds() > deadline)
+                trap_with(link.fault, gpu_fault_code_t::flag_deadline_k, round, target, 0u);
         __threadfence_system();
     }
     __syncthreads();
@@ -120,7 +118,7 @@ static __global__ void infiniband_allgather_post_kernel_(infiniband_links_view_t
     infiniband_post_write(link.queue, nullptr, link.local_access_key,
                           link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
                           link.remote_access_key, sizeof(u32_t), infiniband_signaling_t::signaled_k, &flag_value);
-    infiniband_drain_one(link.completion, link.wait_nanoseconds);
+    infiniband_drain_one(link.completion, link.wait_nanoseconds, link.fault);
 }
 
 /**
@@ -149,7 +147,7 @@ static __global__ void infiniband_alltoall_post_kernel_(infiniband_links_view_t 
     infiniband_post_write(link.queue, nullptr, link.local_access_key,
                           link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
                           link.remote_access_key, sizeof(u32_t), infiniband_signaling_t::signaled_k, &flag_value);
-    infiniband_drain_one(link.completion, link.wait_nanoseconds);
+    infiniband_drain_one(link.completion, link.wait_nanoseconds, link.fault);
 }
 
 /** The leading 12 bytes of an IPv4-mapped IPv6 address, as a RoCEv2 GID carrying IPv4 opens. */
@@ -557,6 +555,9 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
     st::basic_vector<infiniband_link_t> host_links {};
     if (st::failed(host_links.resize(layout.rounds)))
         return result_t::fail(status_t::bad_alloc_k, "host link staging failed");
+    std::span<gpu_fault_t> const faults = topology.faults();
+    u32_t const local_member = member_index - shape.index_in_multimem_domain(topology.first_gpu_index());
+    gpu_fault_t *const fault = local_member < faults.size() ? &faults[local_member] : nullptr;
 
     b8r1_span_t const heap_span {member.heap_.data(), heap_bytes};
     for (u32_t round = 0; round != layout.rounds; ++round) {
@@ -624,6 +625,7 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
         link.arrival_flag = typed_span<infiniband_round_t>(member.heap_.span()).data() +
                             link.remote_flag_offset / sizeof(infiniband_round_t);
         link.wait_nanoseconds = static_cast<u64_t>(timeout_seconds * 1e9);
+        link.fault = fault;
         host_links[round] = link;
     }
     if (CUresult result = cuMemcpyHtoD(device_address(member.links_.data()), host_links.data(),

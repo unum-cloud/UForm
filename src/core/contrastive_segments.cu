@@ -742,7 +742,8 @@ expected_t contrastive_pair_loss_t::operator()(f32r4_span_t logits, contrastive_
 }
 
 expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena, contrastive_segments_config_t config,
-                                                              u32r1_view_t prefix_dims) noexcept {
+                                                              u32r1_view_t prefix_dims,
+                                                              nk_capability_t capabilities) noexcept {
     if (config.from_vertices_per_gpu == 0 || config.hidden == 0)
         return expected<contrastive_segments_t>::fail(status_t::shape_unsupported_k,
                                                       "the segments loss scores pooled rows (vertices={} hidden={})",
@@ -762,11 +763,7 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
     contrastive_segments_t loss;
     loss.prefixes_ = prefixes.value_;
     loss.config_ = config;
-    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
-                                                                &loss.capabilities_);
-        status != nk_success_k)
-        return expected<contrastive_segments_t>::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}",
-                                                      arena.device(), nk_status_name(status));
+    loss.capabilities_ = capabilities;
 
     // Scratch tensors — the former "workspace", owned like the relation columns are: plain
     // `uninitialized` allocations, checked in named groups so a failure names the arena pressure.
@@ -1136,7 +1133,8 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
     std::span<gpu_stream_t> streams, std::span<bf16r2_view_t const> towers,
     std::span<contrastive_relations_view_t const> relations, std::span<bf16r2_span_t const> from_vertices_grads,
-    contrastive_segments_config_t config, u32r1_view_t prefix_dims, f64_t timeout_seconds) noexcept {
+    contrastive_segments_config_t config, u32r1_view_t prefix_dims, nk_capability_t capabilities,
+    f64_t timeout_seconds) noexcept {
     using result_t = expected<distributed_contrastive_segments_t>;
     std::size_t const gpus = arenas.size();
     std::size_t const members = domain.member_count();
@@ -1207,7 +1205,8 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     for (std::size_t rank = 0; rank != gpus; ++rank) {
         switch_to_gpu_t gpu_scope {streams[rank]};
         if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (rank={})", rank);
-        expected<contrastive_segments_t> loss = contrastive_segments_t::make(arenas[rank], config, prefix_dims);
+        expected<contrastive_segments_t> loss = contrastive_segments_t::make(arenas[rank], config, prefix_dims,
+                                                                             capabilities);
         if (!loss) return result_t::fail(std::move(loss));
         distributed.losses_[rank] = std::move(loss.value_);
         distributed.world_scalars_[rank] =

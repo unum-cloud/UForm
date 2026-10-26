@@ -461,8 +461,8 @@ static __global__ void contrastive_tokens_weigh_kernel_(f32r1_span_t loss_out,
     for (std::size_t group = threadIdx.x; group < bias_grad.extent(0); group += blockDim.x) bias_grad[group] *= weight;
 }
 
-expected<contrastive_tokens_t> contrastive_tokens_t::make(gpu_arena_t &arena,
-                                                          contrastive_tokens_config_t config) noexcept {
+expected<contrastive_tokens_t> contrastive_tokens_t::make(gpu_arena_t &arena, contrastive_tokens_config_t config,
+                                                          nk_capability_t capabilities) noexcept {
     using result_t = expected<contrastive_tokens_t>;
     if (config.segments_per_gpu == 0 || config.head_tokens_per_gpu == 0 || config.query_tokens_per_gpu == 0 ||
         config.documents_per_gpu == 0 || config.band_tokens == 0 || config.gpu_subgraphs_per_step == 0)
@@ -479,11 +479,7 @@ expected<contrastive_tokens_t> contrastive_tokens_t::make(gpu_arena_t &arena,
 
     contrastive_tokens_t loss;
     loss.config_ = config;
-    if (nk_status_t const status = nk_cuda_capabilities_enabled(static_cast<nk_size_t>(arena.device()),
-                                                                &loss.capabilities_);
-        status != nk_success_k)
-        return result_t::fail(status_t::cuda_error_k, "NumKong cannot query device {}: {}", arena.device(),
-                              nk_status_name(status));
+    loss.capabilities_ = capabilities;
     expected<contrastive_pair_loss_t> pair_loss = contrastive_pair_loss_t::make(
         arena, config.segments_per_gpu, config.segments_per_gpu * config.gpu_subgraphs_per_step, config.pair_loss);
     if (!pair_loss) return result_t::fail(std::move(pair_loss));
@@ -716,7 +712,8 @@ expected_t contrastive_tokens_t::operator()(bf16r2_view_t token_vectors, u32r1_v
 
 expected<distributed_contrastive_tokens_t> distributed_contrastive_tokens_t::make(
     multimem_domain_t &domain, colocated_domain_t &colocated, std::span<gpu_arena_t> arenas,
-    std::span<gpu_stream_t> streams, contrastive_tokens_config_t config, f64_t timeout_seconds) noexcept {
+    std::span<gpu_stream_t> streams, contrastive_tokens_config_t config, nk_capability_t capabilities,
+    f64_t timeout_seconds) noexcept {
     using result_t = expected<distributed_contrastive_tokens_t>;
     std::size_t const gpus = arenas.size();
     u32_t const domains = colocated.multimem_domain_count();
@@ -761,7 +758,7 @@ expected<distributed_contrastive_tokens_t> distributed_contrastive_tokens_t::mak
     for (std::size_t rank = 0; rank != gpus; ++rank) {
         switch_to_gpu_t gpu_scope {streams[rank]};
         if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (rank={})", rank);
-        expected<contrastive_tokens_t> loss = contrastive_tokens_t::make(arenas[rank], config);
+        expected<contrastive_tokens_t> loss = contrastive_tokens_t::make(arenas[rank], config, capabilities);
         if (!loss) return result_t::fail(std::move(loss));
         distributed.losses_[rank] = std::move(loss.value_);
         gpu_arena_alloc<f32_t> f32_alloc {arenas[rank]};

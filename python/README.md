@@ -157,7 +157,7 @@ trainer.save("checkpoint.safetensors")
 `Contrastive` and `LateInteraction` take a `uform.PairLossForm`, and `trainer.step` takes each item's `uform.LateInteractionSide` as `sides`.
 A `ChoicesView` of `size_t` offsets, `uint8` bytes and `float32` targets trains the calibrated choices, within the batch's `max_choices_per_item`.
 `trainer.step` answers the pooled embeddings the loss scored when given an `arena`, and `None` otherwise.
-`mesh.describe()` answers a `uform.MeshDescription`, its `multimem_tier` a `uform.MultimemTier`.
+`mesh.describe()` answers a `uform.MeshDescription`, its `multimem_tier` a `uform.MultimemTier` and its `gpu_class` the `uform.GPUClass` every GPU of the run dispatches as.
 
 ## Errors
 

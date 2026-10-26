@@ -69,10 +69,43 @@ struct uform_trainer_handle_t {
     return true;
 }
 
+/** The NumKong capabilities every GPU of a VRAM @p executor dispatches with, after its pin. */
+[[nodiscard]] static nk_capability_t capabilities_of(uform_executor_t executor) noexcept {
+    return std::get<vram_executor_t>(executor->executor).devices[0].capabilities;
+}
+
 /** The mesh a trainer runs over, borrowed or its own. */
-[[nodiscard]] static ut::mesh_t &mesh_of(uform_trainer_handle_t &trainer) noexcept {
-    if (uform_mesh_t const *borrowed = std::get_if<uform_mesh_t>(&trainer.mesh)) return *(*borrowed)->mesh;
-    return *std::get<std::unique_ptr<uform_mesh_handle_t>>(trainer.mesh)->mesh;
+[[nodiscard]] static uform_mesh_handle_t &mesh_of(uform_trainer_handle_t &trainer) noexcept {
+    if (uform_mesh_t const *borrowed = std::get_if<uform_mesh_t>(&trainer.mesh)) return **borrowed;
+    return *std::get<std::unique_ptr<uform_mesh_handle_t>>(trainer.mesh);
+}
+
+/** The static message an outcome carries for a fault a GPU recorded before it trapped. */
+[[nodiscard]] static char const *fault_message(core::gpu_fault_code_t code) noexcept {
+    switch (code) {
+    case core::gpu_fault_code_t::none_k: return nullptr;
+    case core::gpu_fault_code_t::barrier_deadline_k: return "A GPU waited past its deadline at a multimem barrier";
+    case core::gpu_fault_code_t::flag_deadline_k: return "A GPU waited past its deadline for an InfiniBand round";
+    case core::gpu_fault_code_t::completion_deadline_k:
+        return "A GPU waited past its deadline for an InfiniBand completion";
+    case core::gpu_fault_code_t::completion_error_k: return "An InfiniBand send completed with an error";
+    case core::gpu_fault_code_t::nonfinite_signal_k: return "A telemetry probe sampled a non-finite value";
+    }
+    return nullptr;
+}
+
+/** Publish a training @p failure with @p message , or, when the device failed, with the first
+ *  fault a GPU of @p mesh recorded before it trapped; a null @p mesh , one that dies with the
+ *  call, has none. */
+static bool propagate_train_error(core::expected_t const &failure, uform_mesh_handle_t *mesh, uform_outcome_t *outcome,
+                                  char const *message) noexcept {
+    if (failure.status_ == core::status_t::cuda_error_k && mesh)
+        for (core::gpu_fault_t const &fault : mesh->mesh->topology.faults())
+            if (char const *const recorded = fault_message(fault.code)) {
+                message = recorded;
+                break;
+            }
+    return propagate_error(train_status_of(failure), outcome, message);
 }
 
 /** Bootstrap a mesh over @p executor 's devices from @p options into a new handle. */
@@ -93,8 +126,14 @@ struct uform_trainer_handle_t {
     engine.directory = text_of(options.directory);
     engine.job = text_of(options.job);
     engine.timeout_seconds = options.timeout_seconds > 0.0 ? options.timeout_seconds : 120.0;
-    if (core::expected_t const joined = ut::mesh_t::make(*handle->mesh, engine, devices); !joined)
-        return propagate_error(train_status_of(joined), outcome, "The mesh bootstrap failed"), nullptr;
+    engine.capabilities = capabilities_of(executor);
+    if (core::expected_t const joined = ut::mesh_t::make(*handle->mesh, engine, devices); !joined) {
+        // The engine refuses a world its processes disagree on, as unsupported.
+        uform_status_t const status = joined.status_ == core::status_t::shape_unsupported_k
+                                          ? uform_status_config_mismatch_k
+                                          : train_status_of(joined);
+        return propagate_error(status, outcome, "The mesh bootstrap failed"), nullptr;
+    }
     handle->executor = executor;
     return handle;
 }
@@ -287,6 +326,7 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t *arguments) {
     description.host_domain_index = topology.host_domain_index;
     description.first_gpu_index = topology.first_gpu_index();
     description.multimem_tier = static_cast<uform_multimem_tier_t>(tier.value_.tier);
+    description.gpu_class = static_cast<uform_gpu_class_t>(gpu_class_of(capabilities_of(arguments->mesh->executor)));
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
@@ -328,8 +368,10 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t *arguments) 
     handle->items.reset(new (std::nothrow) ut::items_source_t {});
     if (!handle->trainer || !handle->items || !devices_of(executor, devices))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the trainer"), void();
-    if (core::expected_t const built = ut::trainer_t::make(*handle->trainer, mesh_of(*handle), config, devices); !built)
-        return propagate_error(train_status_of(built), outcome, "The trainer could not be built"), void();
+    if (core::expected_t const built = ut::trainer_t::make(*handle->trainer, *mesh_of(*handle).mesh, config, devices,
+                                                           capabilities_of(executor));
+        !built)
+        return propagate_train_error(built, arguments->mesh, outcome, "The trainer could not be built"), void();
     if (arguments->resume.length) {
         if (core::expected_t const resumed = handle->trainer->resume(text_of(arguments->resume)); !resumed)
             return propagate_error(resume_status_of(resumed), outcome, "The checkpoint could not be resumed"), void();
@@ -339,7 +381,7 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t *arguments) 
             return propagate_error(uform_status_cancelled_k, outcome, "The handler cancelled the resume"), void();
     }
     if (core::expected_t const sourced = ut::items_source_t::make(*handle->items, *handle->trainer); !sourced)
-        return propagate_error(train_status_of(sourced), outcome, "The items source could not be built"), void();
+        return propagate_train_error(sourced, arguments->mesh, outcome, "The items source could not be built"), void();
     std::size_t const segments = devices.size() * config.batch.max_segments_per_gpu;
     if (st::failed(handle->modalities.resize(segments)) || st::failed(handle->sides.resize(segments)) ||
         st::failed(handle->embeddings.resize(segments * config.hidden * sizeof(f32_t))))
@@ -418,7 +460,7 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) {
     core::optimizer_step_t const optimizer_step {trainer.completed_steps};
     ut::step_report_t report;
     if (core::expected_t const stepped = trainer.step(ut::batch_source_of(source), optimizer_step, report); !stepped)
-        return propagate_error(train_status_of(stepped), outcome, "The step failed"), void();
+        return propagate_train_error(stepped, &mesh_of(*handle), outcome, "The step failed"), void();
     if (arguments->stats) {
         ut::telemetry_t const telemetry = trainer.telemetry(optimizer_step);
         *arguments->stats = {optimizer_step.ordinal + 1u,
@@ -431,7 +473,8 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) {
                              telemetry.audio_mse / config.audio_weight,
                              telemetry.late_interaction,
                              config.chooses() ? telemetry.choices / config.choices.weight : 0.0f,
-                             report.truncated};
+                             report.truncated,
+                             telemetry.dropped};
     }
     if (arguments->embeddings) {
         chunked_arena_t &memory = chunks_of(arena->memory);
@@ -449,7 +492,7 @@ UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t *arguments) {
         return propagate_error(uform_status_invalid_argument_k, outcome, "The trainer, its executor and a path"),
                void();
     if (core::expected_t const saved = handle->trainer->save(text_of(arguments->path)); !saved)
-        return propagate_error(train_status_of(saved), outcome, "The checkpoint could not be written"), void();
+        return propagate_train_error(saved, &mesh_of(*handle), outcome, "The checkpoint could not be written"), void();
     std::size_t const tensors = handle->trainer->replicas[0].weights.size();
     progress_ticks_t ticks(arguments->progress, tensors);
     (void)ticks(tensors);

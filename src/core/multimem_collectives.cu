@@ -55,10 +55,8 @@ static __global__ void multimem_barrier_peer_kernel_(multimem_member_t member) {
     }
     u64_t const deadline = global_nanoseconds() + member.wait_nanoseconds;
     while (multimem_load_acquire_(member.own_flag()) < target)
-        if (global_nanoseconds() > deadline) {
-            printf("uform: member %u waited past its deadline at barrier target %u\n", member.member_index, target);
-            __trap();
-        }
+        if (global_nanoseconds() > deadline)
+            trap_with(member.fault, gpu_fault_code_t::barrier_deadline_k, member.member_index, target, 0u);
     __threadfence_system();
     *member.round = target; // Self-advance: only this member's own kernels ever read its round.
 }
@@ -324,6 +322,7 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, s
     domain.payload_scalars_ = payload_scalars;
     domain.member_offset_ = member_offset;
     domain.wait_nanoseconds_ = static_cast<u64_t>(timeout_seconds * 1e9);
+    domain.faults_ = topology.faults();
     // Replica layout: [payload f32×N | flag u32 | round u32], regions cache-line aligned. Each member's
     // round scalar lives in its own replica, self-advanced by its barrier kernels.
     std::size_t const replica_bytes = domain.flag_offset_() + 2 * sizeof(u32_t);

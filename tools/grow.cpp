@@ -30,7 +30,7 @@
  *  item, deletes the output, and exits with 1.
  */
 #include <cmath>   // `std::sqrt`
-#include <cstdio>  // `std::fopen`, `std::fread`, `std::remove`, `std::snprintf`
+#include <cstdio>  // `std::fopen`, `std::fread`, `std::remove`
 #include <cstring> // `std::memset`, `std::strcmp`
 
 #include <dirent.h> // `opendir`, `readdir` — the image directory
@@ -39,7 +39,7 @@
 #include <string_view>      // `std::string_view`
 
 #include <cuda.h>       // `cuMemcpyDtoH`
-#include <fmt/format.h> // `fmt::println`
+#include <fmt/format.h> // `fmt::println`, `fmt::format_to_n`
 
 #include <numkong/cast.h>              // `nk_bf16_to_f32_serial`, `nk_f32_to_bf16_serial`
 #include <smashtable/basic_vector.hpp> // `basic_vector` — every growable table here
@@ -473,7 +473,7 @@ int main(int argc, char **argv) {
         for (dirent *entry = readdir(directory); entry && images.count() != images_count_k;
              entry = readdir(directory)) {
             if (entry->d_name[0] == '.') continue;
-            std::snprintf(path, sizeof(path), "%s/%s", images_directory, entry->d_name);
+            *fmt::format_to_n(path, sizeof(path) - 1, "{}/{}", images_directory, entry->d_name).out = '\0';
             if (!images.append_file(path) || !image_names.append({entry->d_name}))
                 return closedir(directory), fmt::println(stderr, "uform_grow: cannot read {}", path), 1;
         }

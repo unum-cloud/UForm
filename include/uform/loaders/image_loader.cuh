@@ -153,13 +153,16 @@ struct nvjpeg_session_t {
  *  @param[out] segment_offsets @b [max_segments+1] flat start positions (the cursor's terminal at the back).
  *  @param[out] segment_lengths @b [max_segments] each segment's column budget (0 for PAD or overflow-dropped).
  *  @param[out] segment_modality @b [max_segments] @c image_k for a live image, @c text_k for a PAD segment.
+ *  @param[inout] dropped @b [1] the batch's drop count, which every image overflowing @p pixels
+ *      adds one to.
  *  @param[inout] stream The stream the staging, decode, resize, and copies run on.
  */
 [[nodiscard]] expected_t decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, column_view_t tape,
                                        u64r1_view_t drawn_rows, std::span<image_batch_shape_t const> representations,
                                        pixel_patches_span_t pixels, image_shape_span_t shapes,
                                        u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
-                                       modality_span_t segment_modality, gpu_stream_t &stream) noexcept;
+                                       modality_span_t segment_modality, u32r1_span_t dropped,
+                                       gpu_stream_t &stream) noexcept;
 
 /** The Parquet image loader's baked knobs — a different config is a different loader. */
 struct image_loader_parquet_config_t {

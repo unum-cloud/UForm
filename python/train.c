@@ -476,12 +476,13 @@ static PyStructSequence_Field MeshDescription_fields[] = {
     {"host_domain_index", "This process's index among the run's processes."},
     {"first_gpu_index", "The run-wide index of this process's first GPU."},
     {"multimem_tier", "How its NVLink domains reduce, a `MultimemTier`."},
+    {"gpu_class", "The `GPUClass` every GPU of the run dispatches as, or None."},
     {NULL, NULL},
 };
 
 PyStructSequence_Desc uform_py_mesh_description_desc = {
     "uform.MeshDescription", "What a mesh reports about itself, as `uform_mesh_description_t` holds it.",
-    MeshDescription_fields, 6};
+    MeshDescription_fields, 7};
 
 PyTypeObject MeshDescriptionType;
 
@@ -499,14 +500,15 @@ static PyObject *Mesh_describe(Mesh *self, PyObject *unused) {
     uform_mesh_describe(&arguments);
     Py_END_ALLOW_THREADS;
     if (uform_py_raise_on_outcome(&outcome) != 0) return NULL;
-    PyObject *fields[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
+    PyObject *fields[7] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL};
     (void)((fields[0] = PyLong_FromSize_t(description.gpus_per_host_domain)) &&
            (fields[1] = PyLong_FromSize_t(description.gpus_per_multimem_domain)) &&
            (fields[2] = PyLong_FromSize_t(description.gpus_per_colocated_domain)) &&
            (fields[3] = PyLong_FromSize_t(description.host_domain_index)) &&
            (fields[4] = PyLong_FromSize_t(description.first_gpu_index)) &&
-           (fields[5] = uform_py_enum_to_object(&uform_py_multimem_tier, (int)description.multimem_tier)));
-    return uform_py_struct_sequence_steal(&MeshDescriptionType, fields, 6);
+           (fields[5] = uform_py_enum_to_object(&uform_py_multimem_tier, (int)description.multimem_tier)) &&
+           (fields[6] = uform_py_class_to_object(&uform_py_gpu_class, (int)description.gpu_class)));
+    return uform_py_struct_sequence_steal(&MeshDescriptionType, fields, 7);
 }
 
 static PyMethodDef Mesh_methods[] = {
@@ -791,6 +793,9 @@ static PyGetSetDef TrainerStepStats_getset[] = {
      (void *)offsetof(uform_trainer_step_stats_t, choices_loss)},
     {"truncated", (getter)TrainerStepStats_get_count, NULL, "Items cut at a row's width.",
      (void *)offsetof(uform_trainer_step_stats_t, truncated)},
+    {"dropped", (getter)TrainerStepStats_get_count, NULL,
+     "Segments dropped whole because the batch had no room for them, since the last stats read.",
+     (void *)offsetof(uform_trainer_step_stats_t, dropped)},
     {NULL, NULL, NULL, NULL, NULL},
 };
 

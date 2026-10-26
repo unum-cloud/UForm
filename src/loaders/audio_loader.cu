@@ -29,26 +29,23 @@ namespace fu = ashvardanian::forkunion;
  *  Thread 0 packs each clip's @ref media_cells frames into half rows (two clips share a row, at its
  *  start and its middle), and records @c segment_offsets / @c segment_lengths and @c audio_k into
  *  @p segment_modality . Audio is 1-D, so there is no shape descriptor. A segment that overflows
- *  the rectangle is dropped loudly (zero length); PAD segments carry zero length, the repeated
- *  cursor, and @c text_k .
+ *  the rectangle is dropped (zero length) and counted into @p dropped ; PAD segments carry zero
+ *  length, the repeated cursor, and @c text_k .
  *
  *  __grid_size__ @c [1,1,1] , one thread live; no dynamic shared memory.
  */
 static __global__ void audio_segments_kernel_(u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
-                                              modality_span_t segment_modality, u32_t live_clips, u32_t columns_per_row,
-                                              u32_t rows) {
+                                              modality_span_t segment_modality, u32r1_span_t dropped, u32_t live_clips,
+                                              u32_t columns_per_row, u32_t rows) {
     if (threadIdx.x != 0u || blockIdx.x != 0u) return;
     u32_t const total_segments = static_cast<u32_t>(segment_lengths.extent(0));
     u32_t const capacity = columns_per_row * rows;
     u32_t const live = live_clips < total_segments ? live_clips : total_segments;
     u32_t const clip_cells = media_cells(modality_t::audio_k, columns_per_row);
-    u32_t cursor = 0;
+    u32_t cursor = 0, overflowed = 0;
     for (u32_t segment = 0; segment != total_segments; ++segment) {
         u32_t cells = segment < live ? clip_cells : 0u;
-        if (cursor + cells > capacity) {
-            printf("uform: loaded audio batch overflows at segment %u — segment dropped\n", segment);
-            cells = 0u;
-        }
+        if (cursor + cells > capacity) ++overflowed, cells = 0u;
         segment_offsets[segment] = cursor;
         segment_lengths[segment] = cells;
         bool const filled = segment < live && cells != 0u;
@@ -56,6 +53,7 @@ static __global__ void audio_segments_kernel_(u32r1_span_t segment_offsets, u32r
         cursor += cells;
     }
     segment_offsets[total_segments] = cursor;
+    dropped[0] += overflowed;
 }
 
 /** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
@@ -66,7 +64,7 @@ inline constexpr u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
 expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, u64r1_view_t drawn_rows,
                              std::span<audio_batch_shape_t const> representations, audio_samples_span_t audio_samples,
                              u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
-                             modality_span_t segment_modality, gpu_stream_t &stream) noexcept {
+                             modality_span_t segment_modality, u32r1_span_t dropped, gpu_stream_t &stream) noexcept {
     std::size_t const clips = drawn_rows.size();
     if (clips == 0) return {};
     if (representations.empty())
@@ -160,8 +158,8 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, u64r1_
         return hopped;
 
     expected_t staged = launch_kernel(&audio_segments_kernel_, dim3 {1u, 1u, 1u}, dim3 {1u, 1u, 1u}, stream,
-                                      segment_offsets, segment_lengths, segment_modality, static_cast<u32_t>(job_count),
-                                      columns, rows);
+                                      segment_offsets, segment_lengths, segment_modality, dropped,
+                                      static_cast<u32_t>(job_count), columns, rows);
     // Retire the whole stream-ordered chain before the pinned decode landing falls out of scope.
     if (staged && cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
         staged = expected_t::fail(status_t::cuda_error_k, "audio staging synchronization failed");
@@ -294,7 +292,7 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
         if (expected_t decoded = decode_audios(*pool_, tape, batch_records[batch, nk::slice], representations,
                                                loaded.audio_samples.span(), loaded.segment_offsets.span(),
                                                loaded.segment_lengths.span(), loaded.segment_modality.span(),
-                                               gpu_stream);
+                                               loaded.dropped.span(), gpu_stream);
             !decoded)
             return decoded;
     }

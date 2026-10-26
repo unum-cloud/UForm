@@ -159,8 +159,10 @@ struct telemetry_ledger_t {
 
     /** Enqueue one signal probe over @p values on @p stream : one warp stride-samples the span,
      *  updates the probe's row in place (L2, checksum, zero / non-finite counts, violations), and
-     *  traps only on a non-finite value. Capture-safe — pure enqueue, fixed row address. */
-    [[nodiscard]] expected_t probe_signal(telemetry_probe_t probe, f32r1_view_t values, gpu_stream_t &stream) noexcept;
+     *  traps only on a non-finite value, recording why in @p fault , the record of the GPU
+     *  @p stream runs on. Capture-safe — pure enqueue, fixed row address. */
+    [[nodiscard]] expected_t probe_signal(telemetry_probe_t probe, f32r1_view_t values, gpu_fault_t *fault,
+                                          gpu_stream_t &stream) noexcept;
 
     /** Enqueue one round probe over @p member 's own barrier-round scalar: records the value and
      *  counts a violation when it moved backwards. Capture-safe, one thread. */

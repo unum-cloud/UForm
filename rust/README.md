@@ -225,7 +225,7 @@ trainer.on(&executor).save("checkpoint.safetensors")?;
 `Relations` holds three `Edges` sets as compressed sparse rows, which the binding checks against the step's items before the call.
 A step's `sides` give each item a `LateInteractionSide`, and its `ChoicesView` gives each choice item its legal bytes and their target probabilities, checked the same way.
 `step` answers the pooled embeddings the loss scored when its config names an arena, and `None` otherwise.
-A trainer borrows its mesh, so the mesh outlives every trainer made over it, and `mesh.describe()` answers a `MeshDescription` whose `multimem_tier` is a `MultimemTier`.
+A trainer borrows its mesh, so the mesh outlives every trainer made over it, and `mesh.describe()` answers a `MeshDescription` whose `multimem_tier` is a `MultimemTier` and whose `gpu_class` is the `GPUClass` every GPU of the run dispatches as.
 
 ## Errors
 

@@ -1034,15 +1034,13 @@ check_c_limit_macros() {
 # region C++ Surface and Containers
 
 # C stdio printing in C++ sources: the suites, benchmarks and tools print through fmt::, and the libraries never
-# print. A `__global__` or `__device__` function has no fmt::, so its device printf stays. The C tests under c/
-# keep their stdio; the dispatch below only routes C++ translation units here.
+# print. A kernel has no fmt:: either, so it counts what it drops into a word its caller reads back. The C tests
+# under c/ keep their stdio; the dispatch below only routes C++ translation units here.
 check_printf() {
     local prints
     prints=$(blank_c_comments_preserving_columns < "$staged_blob" | awk '
         NR == FNR { added[$1 + 0]; next }
-        # A definition opens at column zero, and its first line names the side it runs on.
-        /^[A-Za-z_[]/ { device = /__(global|device)__/ }
-        (FNR in added) && !device && /(^|[^A-Za-z0-9_])((f|s)?printf|puts)[[:space:]]*\(/ {
+        (FNR in added) && /(^|[^A-Za-z0-9_])((f|s|sn)?printf|puts)[[:space:]]*\(/ {
             printf "line %d: %s\n", FNR, $0
         }' "$staged_lines_path" - || true)
     [ -z "$prints" ] || fail "$prints" \
@@ -1755,8 +1753,8 @@ judge_cuda_path() {
         rejection_count=$((rejection_count + 1))
     fi
     # cstdio formatting is exception-blind and bypasses the cell's one diagnostics spelling: host text
-    # goes through `format_into` + POSIX `::write`. Device-side `printf` (the only device formatter)
-    # stays legal — this bans only `fprintf`.
+    # goes through `format_into` + POSIX `::write`. Device code never prints: a trapping kernel records a
+    # `gpu_fault_t` the host renders after the context dies, and `check_printf` refuses the rest.
     fprintf_calls=$(printf '%s\n' "$added" | grep -inE 'fprintf' || true)
     if [ -n "$fprintf_calls" ]; then
         echo "pre-commit: $file adds fprintf — host diagnostics are format_into + ::write(STDERR_FILENO, ...):"
@@ -1983,6 +1981,10 @@ judge_path() {
         check_gcc_atomics
         check_mutable_and_const_cast
         check_clang_format_on_changed_lines
+        ;;&
+    *.hip)
+        check_printf
+        check_partial_prints
         ;;&
     *.cu | *.cuh)
         check_host_threads

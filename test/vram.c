@@ -5,6 +5,7 @@
  *  @brief The C interface on one NVIDIA GPU against the same checkpoint on the host: text, pixels and samples,
  *      blocking, deferred and split into slices, each landing within the BFloat16 floor of the RAM outputs.
  *
+ *  A one-process mesh over every visible GPU must report the class they dispatch as.
  *  The outputs of a VRAM call stay on the device, so only this test copies them back, with the CUDA driver API.
  *  The checkpoint comes from @c argv[1], as written by @c test/tiny_checkpoint.cpp.
  */
@@ -248,6 +249,26 @@ int main(int argc, char *argv[]) {
     expect(cuInit(0) == CUDA_SUCCESS && cuDeviceGet(&handle, device) == CUDA_SUCCESS, "CUDA driver");
     expect(cuDevicePrimaryCtxRetain(&context, handle) == CUDA_SUCCESS, "Primary context");
     expect(cuCtxSetCurrent(context) == CUDA_SUCCESS, "Current context");
+
+    // A mesh spans every visible GPU, so it gets an executor of its own over all of them.
+    int visible = 0;
+    int32_t members[64];
+    expect(cuDeviceGetCount(&visible) == CUDA_SUCCESS && visible <= 64, "Visible devices");
+    for (int member = 0; member != visible; ++member) members[member] = member;
+    uform_executor_t box = NULL;
+    uform_executor_for_vram(&(uform_executor_for_vram_t) {
+        .executor = &box, .outcome = &outcome, .vram = {members, (size_t)visible}});
+    expect_success(&outcome, "Whole-box VRAM executor");
+    uform_mesh_t mesh = NULL;
+    uform_mesh_bootstrap(&(uform_mesh_bootstrap_t) {.mesh = &mesh, .executor = box, .outcome = &outcome});
+    expect_success(&outcome, "Mesh bootstrap");
+    uform_mesh_description_t layout = {0};
+    uform_mesh_describe(&(uform_mesh_describe_t) {.mesh = mesh, .outcome = &outcome, .description = &layout});
+    expect_success(&outcome, "Mesh describe");
+    expect(layout.gpu_class != uform_gpu_class_unknown_k, "The mesh dispatches as a known GPU class");
+    printf("Mesh: %zu GPUs dispatching as %s\n", layout.gpus_per_host_domain, uform_gpu_class_name(layout.gpu_class));
+    uform_mesh_free(mesh);
+    uform_executor_free(box);
 
     static inputs_t inputs;
     fill_inputs(&inputs);

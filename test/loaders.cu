@@ -587,31 +587,34 @@ static void pack_tokens_starts_with_prefix(test_suite_t &suite, gpu_arena_t &are
     auto segment_modality = nk::tensor<modality_t, gpu_arena_alloc<modality_t>, 1>::uninitialized(
                                 {2u}, gpu_arena_alloc<modality_t> {arena})
                                 .value;
+    auto dropped = u32s_t::uninitialized({1u}, gpu_arena_alloc<u32_t> {arena}).value;
     if (!payload || !prefix || !offsets || !elements || !tokens || !segment_offsets || !segment_lengths ||
-        !segment_modality)
+        !segment_modality || !dropped)
         return suite.check(false, "pack scratch alloc failed");
     bool const staged = copy_host_to_device<b8_t>(std::as_bytes(std::span {text, 5}), payload.span(), stream) &&
                         copy_host_to_device<b8_t>(std::as_bytes(std::span {prefix_text, 2}), prefix.span(), stream) &&
                         copy_host_to_device<u64_t>(std::span {host_offsets}, offsets.span(), stream) &&
-                        copy_host_to_device<u64_t>(std::span {host_elements}, elements.span(), stream);
+                        copy_host_to_device<u64_t>(std::span {host_elements}, elements.span(), stream) &&
+                        zero_async(dropped.span(), stream);
     if (!staged) return suite.check(false, "pack staging failed");
     expected_t packed = pack_tokens(column_view_t {payload.view(), offsets.view()}, elements.view(), prefix.view(),
                                     tokens.span(), segment_offsets.span(), segment_lengths.span(),
-                                    segment_modality.span(), stream);
+                                    segment_modality.span(), dropped.span(), stream);
     if (!packed) return suite.check(false, "pack_tokens failed: {}", packed.description_);
 
     token_id_t host_tokens[16] = {};
-    u32_t host_lengths[2] = {};
+    u32_t host_lengths[2] = {}, host_dropped = 1;
     bool const landed = copy_device_to_host(tokens.view().flatten<1>(), std::span {host_tokens}, stream) &&
                         copy_device_to_host(segment_lengths.view(), std::span {host_lengths}, stream) &&
+                        copy_device_to_host(dropped.view(), std::span {&host_dropped, 1}, stream) &&
                         cuStreamSynchronize(stream.get()) == CUDA_SUCCESS;
     if (!landed) return suite.check(false, "pack readback failed");
     char const expected[] = "q:deq:abc";
-    bool matches = host_lengths[0] == 4u && host_lengths[1] == 5u;
+    bool matches = host_lengths[0] == 4u && host_lengths[1] == 5u && host_dropped == 0u;
     for (std::size_t index = 0; index != 9; ++index)
         matches = matches && host_tokens[index] == static_cast<token_id_t>(static_cast<u8_t>(expected[index]));
-    suite.check(matches, "two segments read \"q:de\" and \"q:abc\" (lengths {} and {})", host_lengths[0],
-                host_lengths[1]);
+    suite.check(matches, "two segments read \"q:de\" and \"q:abc\" (lengths {} and {}, {} dropped)", host_lengths[0],
+                host_lengths[1], host_dropped);
 }
 
 /**
@@ -648,7 +651,7 @@ static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, st::b
     std::span<audio_batch_shape_t const> const representations {&representation, 1};
     expected_t decoded = decode_audios(pool, tape.view(), drawn.view(), representations, batch.audio_samples.span(),
                                        batch.segment_offsets.span(), batch.segment_lengths.span(),
-                                       batch.segment_modality.span(), stream);
+                                       batch.segment_modality.span(), batch.dropped.span(), stream);
     suite.check(static_cast<bool>(decoded), "[{}] decode_audios should succeed: {}", label, to_string(decoded.status_));
     if (!decoded) return;
 
@@ -723,7 +726,7 @@ static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_s
     std::span<audio_batch_shape_t const> const representations {&representation, 1};
     expected_t decoded = decode_audios(pool, tape.view(), drawn.view(), representations, batch.audio_samples.span(),
                                        batch.segment_offsets.span(), batch.segment_lengths.span(),
-                                       batch.segment_modality.span(), stream);
+                                       batch.segment_modality.span(), batch.dropped.span(), stream);
     suite.check(static_cast<bool>(decoded), "one corrupt clip among good must not fail the batch: {}",
                 to_string(decoded.status_));
     if (!decoded) return;
@@ -782,7 +785,8 @@ static void run_image_decode(test_suite_t &suite, sz::string_view_t label, st::b
     std::span<image_batch_shape_t const> const representations {&representation, 1};
     expected_t decoded = decode_images(jpeg, pool, tape.view(), drawn.view(), representations, batch.images.span(),
                                        batch.image_shapes.span(), batch.segment_offsets.span(),
-                                       batch.segment_lengths.span(), batch.segment_modality.span(), stream);
+                                       batch.segment_lengths.span(), batch.segment_modality.span(),
+                                       batch.dropped.span(), stream);
     suite.check(static_cast<bool>(decoded), "[{}] decode_images should succeed: {}", label, decoded.description_);
     if (!decoded) return;
 
@@ -853,7 +857,7 @@ static void image_batch_matches_single(test_suite_t &suite, std::span<st::basic_
         multimodal_batch_on_gpu_t batch = std::move(made.value_);
         if (!decode_images(jpeg, pool, tape.view(), drawn, {&representation, 1}, batch.images.span(),
                            batch.image_shapes.span(), batch.segment_offsets.span(), batch.segment_lengths.span(),
-                           batch.segment_modality.span(), stream))
+                           batch.segment_modality.span(), batch.dropped.span(), stream))
             return false;
         landed.offsets = u32r1_tensor_pinned_t::zeros({images + 1u}, pinned_alloc<u32_t> {}).value;
         landed.lengths = u32r1_tensor_pinned_t::zeros({images}, pinned_alloc<u32_t> {}).value;
@@ -1022,7 +1026,7 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
     std::span<audio_batch_shape_t const> const audio_reps {&audio_representation, 1};
     if (!decode_audios(pool, audio_tape.view(), audio_drawn.view(), audio_reps, audio_batch.audio_samples.span(),
                        audio_batch.segment_offsets.span(), audio_batch.segment_lengths.span(),
-                       audio_batch.segment_modality.span(), stream))
+                       audio_batch.segment_modality.span(), audio_batch.dropped.span(), stream))
         return suite.check(false, "multimodal: audio decode failed");
 
     // Decode the blob into an image-only batch → its real segment length and (patch_rows,patch_cols).
@@ -1046,7 +1050,8 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
     std::span<image_batch_shape_t const> const image_reps {&image_representation, 1};
     if (!decode_images(jpeg, pool, image_tape.view(), image_drawn.view(), image_reps, image_batch.images.span(),
                        image_batch.image_shapes.span(), image_batch.segment_offsets.span(),
-                       image_batch.segment_lengths.span(), image_batch.segment_modality.span(), stream))
+                       image_batch.segment_lengths.span(), image_batch.segment_modality.span(),
+                       image_batch.dropped.span(), stream))
         return suite.check(false, "multimodal: image decode failed");
 
     // Read both decodes' real geometry back before assembling the mixed row.

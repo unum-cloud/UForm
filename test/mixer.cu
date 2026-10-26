@@ -289,15 +289,17 @@ using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_
  *  @param[in] epoch The data epoch the mix ran at.
  *  @param[in] rows The mixed grid's row capacity.
  *  @param[in] columns_per_row The mixed grid's row width.
+ *  @param[out] dropped The segments of the bags skipped whole.
  */
 [[nodiscard]] static mirrored_geometry_t mirror_bag_geometry_(u32_t member, u32_t world_member_count, u64_t seed,
-                                                              data_epoch_t epoch, u32_t rows,
-                                                              u32_t columns_per_row) noexcept {
+                                                              data_epoch_t epoch, u32_t rows, u32_t columns_per_row,
+                                                              u32_t &dropped) noexcept {
     u32_t const L = tokens_per_segment_k;
     u32_t const capacity = rows * columns_per_row;
     std::size_t const world_bags = static_cast<std::size_t>(bags_per_member_k) * world_member_count;
     mirrored_geometry_t mirror;
     u32_t cursor = 0;
+    dropped = 0;
     for (u32_t bag = 0; bag != bags_per_member_k; ++bag) {
         std::size_t const destination_bag = static_cast<std::size_t>(member) * bags_per_member_k + bag;
         std::size_t const source_bag_world = epoch_permutation(seed, epoch, destination_bag, world_bags);
@@ -313,7 +315,10 @@ using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_
             fits = trial_cursor + L <= capacity;
             trial_cursor += L;
         }
-        if (!fits) continue; // dropped whole, exactly as the kernel drops it
+        if (!fits) { // dropped whole, exactly as the kernel drops it
+            dropped += degree;
+            continue;
+        }
 
         for (u32_t position = 0; position != degree; ++position) {
             u32_t const room_in_row = columns_per_row - cursor % columns_per_row;
@@ -360,21 +365,27 @@ using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_
     auto offsets = pinned1_t<u32_t>::uninitialized({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {}).value;
     auto lengths = pinned1_t<u32_t>::uninitialized({S}, pinned_alloc<u32_t> {}).value;
     auto bags = pinned1_t<u32_t>::uninitialized({S}, pinned_alloc<u32_t> {}).value;
+    auto dropped = pinned1_t<u32_t>::uninitialized({1}, pinned_alloc<u32_t> {}).value;
     auto tokens = pinned1_t<token_id_t>::uninitialized({static_cast<std::size_t>(rows) * columns},
                                                        pinned_alloc<token_id_t> {})
                       .value;
-    if (!offsets || !lengths || !bags || !tokens)
+    if (!offsets || !lengths || !bags || !dropped || !tokens)
         return expected_t::fail(status_t::bad_alloc_k, "bagged readback scratch alloc failed");
 
     if (expected_t read = copy_device_to_host(mixed.segment_offsets.view(), offsets.span(), stream); !read) return read;
     if (expected_t read = copy_device_to_host(mixed.segment_lengths.view(), lengths.span(), stream); !read) return read;
     if (expected_t read = copy_device_to_host(mixed.segment_bag.view(), bags.span(), stream); !read) return read;
+    if (expected_t read = copy_device_to_host(mixed.dropped.view(), dropped.span(), stream); !read) return read;
     if (expected_t read = copy_device_to_host(mixed.tokens.view().flatten<1>(), tokens.span(), stream); !read)
         return read;
     if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
         return cuda_failure(synced, "bagged readback sync failed for member {}", member);
 
-    mirrored_geometry_t const mirror = mirror_bag_geometry_(member, world_member_count, seed, epoch, rows, columns);
+    u32_t mirrored_dropped = 0;
+    mirrored_geometry_t const mirror = mirror_bag_geometry_(member, world_member_count, seed, epoch, rows, columns,
+                                                            mirrored_dropped);
+    suite.check(dropped[0] == mirrored_dropped, "member {}: counted {} dropped segments, the mirror drops {}", member,
+                dropped[0], mirrored_dropped);
     u32_t const placed = static_cast<u32_t>(mirror.size());
     for (u32_t s = 0; s != placed; ++s) {
         mirrored_segment_t const &want = mirror[s];
@@ -444,6 +455,9 @@ struct mixer_members_t {
         auto mixed_made = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {members.arenas[member]}, shape);
         if (!mixed_made) return result_t::fail(std::move(mixed_made));
         (void)members.mixed.push_back(std::move(mixed_made.value_));
+        expected_t zeroed = zero_async(members.loaded[member].dropped.span(), members.streams[member]);
+        if (zeroed) zeroed = zero_async(members.mixed[member].dropped.span(), members.streams[member]);
+        if (!zeroed) return result_t::fail(std::move(zeroed));
     }
     return result_t {std::move(members)};
 }

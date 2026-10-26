@@ -46,7 +46,7 @@
 #include <string_view>      // `std::string_view`
 
 #include <cuda.h>       // `cuMemcpyDtoH`
-#include <fmt/format.h> // `fmt::println`
+#include <fmt/format.h> // `fmt::println`, `fmt::format_to_n`
 #include <yyjson.h>     // `yyjson_read_file`
 
 #include <forkunion.hpp>                   // `fu::flat_pool_t` - the scoring threads
@@ -359,8 +359,8 @@ enum class encoded_t { ok_k, skipped_k, failed_k };
 static void report_(split_t const &split, std::span<double const[3], 2> recalls_at) noexcept {
     std::size_t const counts[2] = {split.captions.count(), split.files.count()};
     char directions[2][32];
-    std::snprintf(directions[0], sizeof(directions[0]), "text → %s", split.media_name);
-    std::snprintf(directions[1], sizeof(directions[1]), "%s → text", split.media_name);
+    *fmt::format_to_n(directions[0], sizeof(directions[0]) - 1, "text → {}", split.media_name).out = '\0';
+    *fmt::format_to_n(directions[1], sizeof(directions[1]) - 1, "{} → text", split.media_name).out = '\0';
     for (std::size_t direction = 0; direction != 2; ++direction)
         fmt::println("{}  {:<14}  R@1 {:.4f}  R@5 {:.4f}  R@10 {:.4f}  {} queries over {} items", split.name,
                      directions[direction], recalls_at[direction][0], recalls_at[direction][1],
@@ -476,14 +476,14 @@ static constexpr std::size_t score_block_rows_k = 64;
     st::basic_vector<float> media;
     char name[64];
     for (char const *translator : {"google", "bing", "nllb"}) {
-        std::snprintf(name, sizeof(name), "meta/%s.json", translator);
+        *fmt::format_to_n(name, sizeof(name) - 1, "meta/{}.json", translator).out = '\0';
         yyjson_doc *document = read_json_(directory, name);
         if (!document) return false;
         double means_at[2][3] = {};
         std::size_t index, count;
         yyjson_val *language, *entries;
         yyjson_obj_foreach(yyjson_doc_get_root(document), index, count, language, entries) {
-            std::snprintf(name, sizeof(name), "coco-sm %s %s", translator, yyjson_get_str(language));
+            *fmt::format_to_n(name, sizeof(name) - 1, "coco-sm {} {}", translator, yyjson_get_str(language)).out = '\0';
             split.name = name;
             if (!load_coco_sm_(images, entries, split)) return yyjson_doc_free(document), false;
             st::basic_vector<float> captions;
@@ -496,7 +496,7 @@ static constexpr std::size_t score_block_rows_k = 64;
                 for (std::size_t k = 0; k != 3; ++k) means_at[direction][k] += recalls_at[direction][k] / double(count);
         }
         yyjson_doc_free(document);
-        std::snprintf(name, sizeof(name), "coco-sm %s mean of %zu", translator, count);
+        *fmt::format_to_n(name, sizeof(name) - 1, "coco-sm {} mean of {}", translator, count).out = '\0';
         split.name = name;
         report_(split, means_at);
     }
