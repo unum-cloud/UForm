@@ -13,7 +13,7 @@
 #include <webp/decode.h> // vendor-boundary: WebP decode
 
 #include "uform/core/types.hpp" // `st::basic_vector` — the decode scratch
-#include "media/image.hpp"
+#include "uform/media/image.hpp"
 
 namespace um = unum::uform::media;
 using namespace um;

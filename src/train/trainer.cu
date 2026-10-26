@@ -1,9 +1,9 @@
 /**
- *  @brief The composition declared in @c src/train/trainer.hpp : the mesh bootstrap, the trainer's wire-ordered
- *      construction and its step, and the two batch sources.
  *  @file src/train/trainer.cu
  *  @author Ash Vardanian
  *  @date October 18, 2026
+ *  @brief The composition declared in @c uform/train/trainer.hpp : the mesh bootstrap, the
+ *      trainer's wire-ordered construction and its step, and the two batch sources.
  *
  *  @section trainer_impl_items How caller items reach the mixer
  *
@@ -25,11 +25,11 @@
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 #include <nvml.h> // `nvmlDeviceGetComputeRunningProcesses_v3` — the bytes this process holds
 
-#include "media/audio.hpp"    // `decode_audio`
-#include "media/image.hpp"    // `plan_image`, `decode_image`, `image_channels_k`
-#include "media/planning.hpp" // `video_tube_grid`
-#include "media/video.hpp"    // `demux_video`, `decode_video_frames`, `video_channels_k`
-#include "train/trainer.hpp"
+#include "uform/media/audio.hpp"    // `decode_audio`
+#include "uform/media/image.hpp"    // `plan_image`, `decode_image`, `image_channels_k`
+#include "uform/media/planning.hpp" // `video_tube_grid`
+#include "uform/media/video.hpp"    // `demux_video`, `decode_video_frames`, `video_channels_k`
+#include "uform/train/trainer.hpp"
 
 using namespace unum::uform::core;
 using namespace unum::uform::train;
@@ -238,7 +238,8 @@ struct device_budget_t {
     if (!built) return built;
     synthetic_source_t source;
     step_report_t report;
-    if (expected_t stepped = probe.step(source, optimizer_step_t {0}, report); !stepped) return stepped;
+    if (expected_t stepped = probe.step(batch_source_of(source), optimizer_step_t {0}, report); !stepped)
+        return stepped;
     if (expected_t drained = probe.synchronize(); !drained) return drained;
     // A data source fills every GPU's batches for the next steps and mixes them from the arenas
     // after the trainer, so the probe allocates the same, and the fit carries them per row; a
@@ -463,6 +464,7 @@ struct device_budget_t {
                                        placed.probes.late_interaction);
         !probed)
         return probed;
+    if (expected_t probed = loss_probe("base/choices", config.chooses(), placed.probes.choices); !probed) return probed;
     for (std::size_t member = 0; member != gpus; ++member) {
         sz::string_t name;
         if (!format_into(name, "base/round/{}", member))
@@ -688,7 +690,7 @@ expected_t trainer_t::capture() noexcept {
         switch_to_gpu_t gpu_scope {streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
         expected<gpu_replay_graph_t> forward = gpu_replay_graph_t::make(
-            streams[member].get(), [&]() noexcept { return replicas[member].forward_region(streams[member]); });
+            streams[member].get(), [&]() noexcept { return replicas[member].forward_region(config, streams[member]); });
         if (!forward) return expected_t::fail(std::move(forward));
         expected<gpu_replay_graph_t> backward = gpu_replay_graph_t::make(
             streams[member].get(), [&]() noexcept { return replicas[member].backward_region(streams[member]); });
@@ -700,12 +702,12 @@ expected_t trainer_t::capture() noexcept {
     return {};
 }
 
-expected_t trainer_t::step(batch_source_t &source, optimizer_step_t optimizer_step, step_report_t &report) noexcept {
+expected_t trainer_t::step(batch_source_t source, optimizer_step_t optimizer_step, step_report_t &report) noexcept {
     data_epoch_t const data_epoch {optimizer_step.ordinal};
     report.optimizer_step = optimizer_step;
     report.learning_rate = config.learning_rate_for(optimizer_step);
     report.truncated = 0;
-    if (expected_t filled = source.fill(*this, data_epoch, report); !filled) return filled;
+    if (expected_t filled = source.fill(source.state, *this, data_epoch, report); !filled) return filled;
     std::size_t const gpus = replicas.size();
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {streams[member]};
@@ -713,7 +715,7 @@ expected_t trainer_t::step(batch_source_t &source, optimizer_step_t optimizer_st
         expected_t stepped = replicas[member].prepare(config, data_epoch, streams[member]);
         if (stepped)
             stepped = forward_graphs.size() ? forward_graphs[member].launch(streams[member].get())
-                                            : replicas[member].forward_region(streams[member]);
+                                            : replicas[member].forward_region(config, streams[member]);
         if (!stepped) return stepped;
     }
     if (config.contrasts())
@@ -753,11 +755,12 @@ expected_t trainer_t::step(batch_source_t &source, optimizer_step_t optimizer_st
     return {};
 }
 
-expected<retrieval_t> trainer_t::evaluate(batch_source_t &source, data_epoch_t data_epoch) noexcept {
+expected<retrieval_t> trainer_t::evaluate(batch_source_t source, data_epoch_t data_epoch) noexcept {
     using result_t = expected<retrieval_t>;
     if (!config.contrasts()) return result_t::fail(status_t::invalid_input_k, "only a contrastive run pools vertices");
     step_report_t report;
-    if (expected_t filled = source.fill(*this, data_epoch, report); !filled) return result_t::fail(std::move(filled));
+    if (expected_t filled = source.fill(source.state, *this, data_epoch, report); !filled)
+        return result_t::fail(std::move(filled));
     std::size_t const gpus = replicas.size(), columns = std::size_t(retrieval_column_t::count_k);
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {streams[member]};
@@ -851,7 +854,7 @@ telemetry_t trainer_t::telemetry(optimizer_step_t optimizer_step) noexcept {
     if (gpus == 0) return telemetry;
     // Accumulate every member's summands before the fold — at wide worlds a lead-only reading is a coin flip,
     // not a statistic. The all-member pairs are also what the ledger's loss rows accumulate.
-    summand_pair_t token {}, image {}, video {}, audio {};
+    summand_pair_t token {}, image {}, video {}, audio {}, choices {};
     auto accumulate = [](summand_pair_t &into, f32r1_tensor_arena_t &summands, gpu_stream_t &stream) noexcept {
         if (summands.empty()) return;
         summand_pair_t const read = read_summands_(summands, stream);
@@ -867,6 +870,7 @@ telemetry_t trainer_t::telemetry(optimizer_step_t optimizer_step) noexcept {
         accumulate(image, replica.image_summands, streams[member]);
         accumulate(video, replica.video_summands, streams[member]);
         accumulate(audio, replica.audio_summands, streams[member]);
+        accumulate(choices, replica.choices_summands, streams[member]);
         (void)ledger.probe_round(probes.rounds[member], domain.member(domain.member_offset() + member),
                                  streams[member]);
     }
@@ -874,10 +878,12 @@ telemetry_t trainer_t::telemetry(optimizer_step_t optimizer_step) noexcept {
     telemetry.image_mse = image.count != 0.0 ? static_cast<f32_t>(image.sum / image.count) : 0.0f;
     telemetry.video_mse = video.count != 0.0 ? static_cast<f32_t>(video.sum / video.count) : 0.0f;
     telemetry.audio_mse = audio.count != 0.0 ? static_cast<f32_t>(audio.sum / audio.count) : 0.0f;
+    telemetry.choices = choices.count != 0.0 ? static_cast<f32_t>(choices.sum / choices.count) : 0.0f;
     ledger.scalar(probes.token, token.sum, token.count);
     ledger.scalar(probes.image, image.sum, image.count);
     ledger.scalar(probes.video, video.sum, video.count);
     ledger.scalar(probes.audio, audio.sum, audio.count);
+    ledger.scalar(probes.choices, choices.sum, choices.count);
 
     switch_to_gpu_t gpu_scope {streams[0]};
     if (!gpu_scope.ok()) return telemetry;
@@ -956,6 +962,7 @@ void telemetry_t::report() const noexcept {
     term("audio MSE", audio_mse);
     term("contrastive", contrastive);
     term("late interaction", late_interaction);
+    term("choices", choices);
 }
 
 void retrieval_t::report() const noexcept {
@@ -999,6 +1006,30 @@ expected_t synthetic_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch,
     return {items.contents + items.offsets[item], items.offsets[item + 1] - items.offsets[item]};
 }
 
+/** How many choices item @p item offers, zero when the step names none. */
+[[nodiscard]] static std::size_t item_choice_count_(training_items_t const &items, std::size_t item) noexcept {
+    if (!items.choices.offsets) return 0;
+    return items.choices.offsets[item + 1] - items.choices.offsets[item];
+}
+
+/** Write item @p item 's choices and targets into row @p segment of @p staged , padding the rest;
+ *  a byte offered twice is refused, since one logit holds one target. */
+[[nodiscard]] static expected_t stage_choices_(training_items_t const &items, std::size_t item,
+                                               multimodal_batch_on_cpu_t &staged, std::size_t segment) noexcept {
+    std::size_t const width = staged.segment_choices.extent(1), offered = item_choice_count_(items, item);
+    std::size_t const first = offered != 0 ? items.choices.offsets[item] : 0u;
+    for (std::size_t choice = 0; choice != width; ++choice) {
+        bool const live = choice < offered;
+        token_id_t const byte = live ? token_id_t {items.choices.bytes[first + choice]} : byte_pad_k;
+        for (std::size_t earlier = 0; live && earlier != choice; ++earlier)
+            if (staged.segment_choices[segment, earlier] == byte)
+                return expected_t::fail(status_t::invalid_input_k, "item {} offers byte {} twice", item, byte);
+        staged.segment_choices[segment, choice] = byte;
+        staged.segment_choice_targets[segment, choice] = live ? items.choices.targets[first + choice] : 0.0f;
+    }
+    return {};
+}
+
 /** The video slice of @p shape with its frame stride read as at least one. */
 [[nodiscard]] static video_batch_shape_t video_shape_(multimodal_batch_shape_t const &shape) noexcept {
     video_batch_shape_t video = shape.video;
@@ -1007,6 +1038,8 @@ expected_t synthetic_source_t::fill(trainer_t &trainer, data_epoch_t data_epoch,
 }
 
 expected_t items_source_t::make(items_source_t &placed, trainer_t &trainer) noexcept {
+    switch_to_gpu_t lead_scope {trainer.streams[0]}; // pinned host pages allocate inside a context
+    if (!lead_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
     trainer_config_t const &config = trainer.config;
     multimodal_batch_shape_t const &shape = config.batch;
     std::size_t const gpus = trainer.replicas.size(), segments = shape.max_segments_per_gpu;
@@ -1088,6 +1121,7 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
         return expected_t::fail(status_t::invalid_input_k, "{} items exceed the {} segments of the devices", count,
                                 gpus * segments);
     video_batch_shape_t const video = video_shape_(shape);
+    std::size_t const choices_width = staged_[0].segment_choices.extent(1);
 
     if (expected_t drained = trainer.synchronize(); !drained) return drained; // prior uploads read the pinned twins
 
@@ -1096,8 +1130,18 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
         std::span<b8_t const> const bytes = item_bytes_(items, item);
         if (!shape.contains(modality))
             return expected_t::fail(status_t::shape_unsupported_k, "item {} has a modality the run left out", item);
+        std::size_t const offered = item_choice_count_(items, item);
+        if (offered != 0 && modality != modality_t::text_k)
+            return expected_t::fail(status_t::shape_unsupported_k, "item {} makes a choice, which only text makes",
+                                    item);
+        if (offered > choices_width)
+            return expected_t::fail(status_t::invalid_input_k,
+                                    "item {} offers {} choices, more than the {} a segment holds", item, offered,
+                                    choices_width);
         std::size_t kept = 0, spanned = 0;
-        if (modality == modality_t::text_k) spanned = bytes.size(), kept = std::min<std::size_t>(spanned, columns);
+        // A choice appends the mask byte, and a long state loses its head, never its end.
+        if (modality == modality_t::text_k)
+            spanned = bytes.size() + (offered != 0), kept = std::min<std::size_t>(spanned, columns);
         else if (modality == modality_t::image_k) {
             expected<um::image_plan_t> planned = um::plan_image(bytes, shape.image.patch_side, columns);
             if (!planned) return expected_t::fail(std::move(planned));
@@ -1172,14 +1216,23 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
             staged.segment_lengths[segment] = kept;
             staged.segment_modality[segment] = modality;
             staged.segment_bag[segment] = used_bags[device];
+            staged.segment_role[segment] = segment_role_t::anchor_k;
+            staged.segment_prefix_length[segment] = 0u;
+            staged.segment_key[segment] = 0u;
+            staged.segment_side[segment] = items.sides ? items.sides[item] : late_interaction_side_t::none_k;
+            std::size_t const offered = item_choice_count_(items, item);
+            if (expected_t staged_choices = stage_choices_(items, item, staged, segment); !staged_choices)
+                return staged_choices;
             packed_items_[device, segment] = item;
             std::size_t const cells = staged.tokens.numel();
             auto const run = nk::range(offset, offset + kept);
             if (modality == modality_t::text_k) {
                 tokens_span_t const cell_tokens = staged.tokens.flatten<1>();
                 tokens_span_t const tokens = cell_tokens[run, nk::slice];
-                for (std::size_t token = 0; token != kept; ++token)
-                    tokens[token] = static_cast<token_id_t>(bytes[token]);
+                std::size_t const state = kept - (offered != 0), first = offered != 0 ? bytes.size() - state : 0u;
+                for (std::size_t token = 0; token != state; ++token)
+                    tokens[token] = static_cast<token_id_t>(bytes[first + token]);
+                if (offered != 0) tokens[state] = byte_mask_k;
             }
             else if (modality == modality_t::image_k) {
                 expected<um::image_plan_t> planned = um::plan_image(bytes, shape.image.patch_side, columns);
@@ -1224,6 +1277,14 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
             staged.segment_lengths[segment] = 0u;
             staged.segment_modality[segment] = modality_t::text_k;
             staged.segment_bag[segment] = bags_per_gpu;
+            staged.segment_role[segment] = segment_role_t::anchor_k;
+            staged.segment_prefix_length[segment] = 0u;
+            staged.segment_key[segment] = 0u;
+            staged.segment_side[segment] = late_interaction_side_t::none_k;
+            for (std::size_t choice = 0; choice != choices_width; ++choice) {
+                staged.segment_choices[segment, choice] = byte_pad_k;
+                staged.segment_choice_targets[segment, choice] = 0.0f;
+            }
         }
         staged.segment_offsets[segments] = cursors[device];
         gpu_stream_t &stream = trainer.streams[device];
@@ -1234,6 +1295,18 @@ expected_t items_source_t::pack_(trainer_t &trainer, step_report_t &report) noex
         if (copied)
             copied = copy_host_to_device(staged.segment_modality.view(), loaded.segment_modality.span(), stream);
         if (copied) copied = copy_host_to_device(staged.segment_bag.view(), loaded.segment_bag.span(), stream);
+        if (copied) copied = copy_host_to_device(staged.segment_role.view(), loaded.segment_role.span(), stream);
+        if (copied)
+            copied = copy_host_to_device(staged.segment_prefix_length.view(), loaded.segment_prefix_length.span(),
+                                         stream);
+        if (copied) copied = copy_host_to_device(staged.segment_key.view(), loaded.segment_key.span(), stream);
+        if (copied) copied = copy_host_to_device(staged.segment_side.view(), loaded.segment_side.span(), stream);
+        if (copied && choices_width != 0)
+            copied = copy_host_to_device(staged.segment_choices.view().flatten<1>(),
+                                         loaded.segment_choices.span().flatten<1>(), stream);
+        if (copied && choices_width != 0)
+            copied = copy_host_to_device(staged.segment_choice_targets.view().flatten<1>(),
+                                         loaded.segment_choice_targets.span().flatten<1>(), stream);
         if (copied)
             copied = copy_host_to_device(staged.tokens.view().flatten<1>(), loaded.tokens.span().flatten<1>(), stream);
         if (copied)

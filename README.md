@@ -168,18 +168,19 @@ And each entry can carry _several positives and explicit hard negatives_, which 
 
 ### ColBERT-style Late-interaction Rerankers
 
-A reranker shares almost everything with the embedder above — still a SigLIP sigmoid-BCE objective, still one loss sharded across the whole NVLink domain — but it scores documents differently.
+A reranker shares almost everything with the embedder above — still a sigmoid cross-entropy objective, still one loss sharded across the whole NVLink domain — but it scores documents differently.
 Instead of pooling a passage into a single attention-pooled embedding, it reads the _full encoder output_ — one embedding per byte, refined through a per-byte projection head — and scores a query against a candidate with a [ColBERT](https://arxiv.org/abs/2004.12832)-style late-interaction MaxSim.
 Keeping per-byte geometry preserves far more of a passage's meaning than collapsing it into one dense embedding, which is exactly the granularity a reranker is asked for in the second stage of a retrieval pipeline.
 
-Writing $q_t$ for a query byte and $d_s$ for a candidate byte, both cosine-normalized, the document score softens the hard "each query byte matches its single best candidate byte" rule into a temperature-$\tau$ log-sum-exp, summed over the query and normalized by length,
+Writing $q_t$ for a query byte past its prefix and $d_s$ for a candidate byte, both unit vectors from the projection head, the document score is the hard MaxSim: each query byte keeps its single best candidate byte, averaged over the query,
 
 $$
-S(q, d) = \frac{1}{\sqrt{L}} \sum_{t} \tau \cdot \mathop{\mathrm{LSE}}\limits_{s} \frac{\cos(q_t, d_s)}{\tau},
+S(q, d) = \frac{1}{|q|} \sum_{t} \max_{s} \langle q_t, d_s \rangle,
 $$
 
-which converges to hard MaxSim as $\tau \to 0$, carries a dense gradient with no argmax, and stays MaxSim-compatible at serving — the FAQ derives the surrogate in full.
-These $S(q, d)$ scores fill the same $[N, N]$ band the embedder builds, scored by the identical sigmoid-BCE with the diagonal as the positive, so the reranker inherits the large-batch and false-negative-robustness story wholesale; only the per-cell score grows from one cosine into a full late interaction, and the all-gathered tower grows from one vector per document to one per byte.
+the very score a MaxSim index computes at serving, with each query byte's gradient flowing through its best match alone.
+These $S(q, d)$ scores fill the same $[N, N]$ band the embedder builds, and by default each query's row is scored by the ranked sigmoid cross-entropy of every positive's score over every negative's, where the bias cancels, so a query's own score scale never shifts its threshold; the balanced and SigLIP forms stay selectable.
+The reranker thus inherits the large-batch and false-negative-robustness story wholesale; only the per-cell score grows from one cosine into a full late interaction, and the all-gathered tower grows from one vector per document to one per byte.
 Because the encoder weights are shared with the byte-MLM head, the reranker warm-starts from the MLM base with an encoder that already reconstructs masked bytes, then fine-tunes for per-byte contrastive scoring, with explicit hard negatives gated in per example.
 
 The cost is storage.
@@ -262,7 +263,7 @@ The compute mode is a single flag set at construction — `infer_bf16` or `infer
 
 ### Optimizing via Adafactor (the Sole Optimizer)
 
-UForm trains exclusively with a custom CUDA [Adafactor](https://arxiv.org/abs/1804.04235) implementation in [`optimizer.hpp`](src/core/optimizer.hpp).
+UForm trains exclusively with a custom CUDA [Adafactor](https://arxiv.org/abs/1804.04235) implementation in [`optimizer.hpp`](include/uform/core/optimizer.hpp).
 Neither [Lion](https://arxiv.org/abs/2302.06675) nor [AdamW](https://arxiv.org/abs/1711.05101) ships in the stack; both appear below only as ablation baselines.
 Lion is hyperparameter-economical — two betas, no second-moment state — but its sign-only update $\mathrm{sign}(\mathrm{EMA}(g))$ discards gradient _magnitude_ and steps every parameter by the same amount.
 On a unit-RMSNorm encoder that is fatal: the variance-destroying low-rank direction costs the optimizer no more than an informative one, so the pooled embedding slides into rank collapse.
@@ -314,7 +315,7 @@ A text-only mixture uses the byte-gather frontend only; a mixture with media att
 Every tier ships in three or more capability variants, warm-started in sequence — a Net2Net step grows each tier from the one below it, and each scale trains Base → Reranker → Embedder on top of its own Base:
 
 - __Base__ — span-masked byte modelling on the per-byte encoder output; the pretraining root.
-- __Reranker__ — ColBERT-style per-byte soft-MaxSim on the per-byte encoder output.
+- __Reranker__ — ColBERT-style per-byte hard MaxSim on the per-byte encoder output, under the ranked sigmoid loss.
 - __Embedder__ — attention-pooled embedding under Matryoshka SigLIP.
 
 The Base `i18n` mixture spans a superset of the 21 languages UForm v3 shipped — English, German, Spanish, French, Italian, Russian, Japanese, Korean, Turkish, Chinese, Polish, Arabic, Armenian, Hebrew, Hindi, Indonesian, Persian, Portuguese, Thai, Ukrainian, Vietnamese — drawn from FineWeb-2's 42-language crawl and FineWiki's 29, balanced roughly:
@@ -347,7 +348,7 @@ uform/
 ├── c/                the C ABI in uform/*.h, shared by every binding, and its test
 ├── src/              the engine behind the C ABI, one namespace per folder
 │   ├── *.cpp         the verbs of each header: types, model, encode and train
-│   ├── inference/    the tower on the host, and the NVIDIA and AMD kernels beside it
+│   ├── encoder/      the tower on the host, and the NVIDIA and AMD kernels beside it
 │   ├── media/        image, video and audio decoding on the host
 │   ├── core/         device memory, batches, streams, mesh, transports, model cells, checkpoints
 │   ├── loaders/      storage sessions, shard readers, and GPU image, video and audio decode

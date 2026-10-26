@@ -122,6 +122,66 @@ export enum MultimemTier {
   PeerRead = "peer-read",
 }
 
+/**
+ * How a contrastive term turns a row of scores into forces, numbered as `uform_pair_loss_form_t` numbers them.
+ * @enum {number}
+ * @readonly
+ */
+export enum PairLossForm {
+  /** The term's own form: sigmoid for pooled embeddings, ranked for token vectors. */
+  Derived = 0,
+  /** The sigmoid cross-entropy of every cell, its attract and repel halves normalized apart. */
+  Balanced = 1,
+  /** The sigmoid cross-entropy of every positive's score over every negative's, where the bias cancels. */
+  Ranked = 2,
+  /** SigLIP's sigmoid cross-entropy of every cell, each repel weighed like an attract. */
+  Sigmoid = 3,
+}
+
+/**
+ * Which side of a late-interaction score an item takes, numbered as `uform_late_interaction_side_t` numbers them.
+ * @enum {number}
+ * @readonly
+ */
+export enum LateInteractionSide {
+  /** The item takes no part in late interaction. */
+  None = 0,
+  /** The item's tokens score the documents it attracts and repels. */
+  Query = 1,
+  /** The item's tokens are scored by the queries naming it. */
+  Document = 2,
+  /** The item plays both sides. */
+  QueryAndDocument = 3,
+}
+
+/**
+ * The runtime that drives a GPU, numbered as `uform_gpu_vendor_t` numbers them.
+ * @enum {number}
+ * @readonly
+ */
+export enum GpuVendor {
+  Unknown = 0,
+  Nvidia = 1,
+  Amd = 2,
+  Apple = 3,
+}
+
+/** One GPU this process can drive. Mirrors `uform_gpu_device_t`. */
+export interface GpuDevice {
+  /** The vendor whose runtime drives the device. */
+  vendor: GpuVendor;
+  /** The device's ordinal in its vendor's runtime, as `nvidia-smi` or `rocm-smi` lists it. */
+  vendorOrdinal: number;
+  /** The class whose kernels run on it, as `uform_gpu_class_name` spells it, like "nvidia-hopper". */
+  gpuClass: string | null;
+  /** Streaming multiprocessors or compute units. */
+  computeUnits: number;
+  /** Device memory in bytes. */
+  memoryBytes: number;
+  /** The vendor's own name for the device. */
+  name: string;
+}
+
 let bound: Compiled | undefined;
 
 /** Installs the backend every class made from now on runs on: the Node addon, or the WebAssembly module. */
@@ -167,10 +227,20 @@ export function negativesCode(negatives: Negatives): number {
   return code;
 }
 
+/**
+ * Lists every GPU this process can drive, NVIDIA devices first, then AMD, so a device's position is the ordinal VRAM
+ * placements name it by; a machine without GPUs lists none. Calls `uform_gpu_devices`.
+ */
+export function gpuDevices(): GpuDevice[] {
+  return backend().gpuDevices() as GpuDevice[];
+}
+
 /** Where the host threads of a RAM executor are placed, how many there are, and how many deferred calls it tracks. */
 export interface ExecutorForRamConfig {
   /** NUMA node IDs the threads are spread over; absent spreads them over every node. */
   memoryDomains?: number[];
+  /** The CPU class to dispatch as, spelled like "intel-haswell"; absent derives the CPU's own. */
+  cpuClass?: string;
   /** Threads to spawn; absent takes 7/8 of the cores the domains carry. */
   threads?: number;
   /** Deferred calls tracked at once; absent takes a default. */
@@ -181,14 +251,18 @@ export interface ExecutorForRamConfig {
 export interface ExecutorOnPoolConfig {
   /** NUMA node IDs of the models it will drive; absent derives every node. */
   memoryDomains?: number[];
+  /** The CPU class to dispatch as, spelled like "intel-haswell"; absent derives the CPU's own. */
+  cpuClass?: string;
   /** Deferred calls tracked at once; absent takes a default. */
   deferredLimit?: number;
 }
 
 /** Which devices a VRAM executor drives, and on which streams. */
 export interface ExecutorForVramConfig {
-  /** CUDA ordinals to drive; absent takes one free device. */
+  /** Device ordinals, positions in {@link gpuDevices}, to drive; absent takes one free device. */
   devices?: number[];
+  /** The GPU class every device dispatches as, spelled like "nvidia-hopper"; absent derives the devices' own. */
+  gpuClass?: string;
   /** Borrowed CUDA stream addresses, one per device in `devices` order; absent creates its own. */
   streams?: bigint[];
   /** Ceiling on scratch bytes per device; absent lets scratch grow as batches ask. */

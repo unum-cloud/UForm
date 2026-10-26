@@ -10,7 +10,7 @@
 
 #include <numkong/each.h> // `nk_each_sum_f32_best` — the media heads adding onto the shared gradient
 
-#include "core/multimodal_masking.hpp"
+#include "uform/core/multimodal_masking.hpp"
 
 using namespace unum::uform::core;
 
@@ -63,20 +63,21 @@ static __device__ void mask_token_(tokens_span_t distorted, u32r1_span_t loss_we
  *  zero.
  *
  *  A segment the walk leaves uncovered gets one span from a keyed anchor, at its first byte that is
- *  not PAD, so every text row with bytes is scored. A non- @c text_k segment is skipped outright —
- *  media rows keep their clean tokens and zero weight.
+ *  not PAD, so every text row with bytes is scored. A non- @c text_k segment and a choice segment
+ *  are skipped outright — they keep their clean tokens and zero weight.
  *
  *  __grid_size__ @c [grid_size_for(segments),1,1] , one thread per segment; no dynamic shared memory.
  */
 static __global__ void masked_token_corrupt_kernel_(tokens_view_t clean, tokens_span_t distorted,
                                                     u32r1_span_t loss_weights, u32r1_view_t segment_offsets,
                                                     u32r1_view_t segment_lengths, modality_view_t segment_modality,
-                                                    u64_t seed, data_epoch_t data_epoch, f32_t open_rate,
-                                                    f32_t continue_rate, f32_t replace_fraction,
-                                                    f32_t random_fraction) {
+                                                    nk::tensor_view<token_id_t, 2> segment_choices, u64_t seed,
+                                                    data_epoch_t data_epoch, f32_t open_rate, f32_t continue_rate,
+                                                    f32_t replace_fraction, f32_t random_fraction) {
     u32_t const segment = blockIdx.x * blockDim.x + threadIdx.x;
     if (segment >= segment_lengths.extent(0)) return;
     if (segment_modality[segment] != modality_t::text_k) return; // media segments stay clean, weight zero
+    if (!segment_choices.empty() && segment_choices[segment, 0] != byte_pad_k) return;
     u32_t const base = segment_offsets[segment];
     u32_t const length = segment_lengths[segment];
     bool in_span = false, covered = false;
@@ -183,6 +184,112 @@ static __global__ void masked_finalize_kernel_(f32r1_view_t position_loss, f32r1
     loss_summands[1] += scale_and_count[1];
 }
 
+/** Whether segment @p segment of @p batch makes a choice: it holds tokens and its first legal
+ *  byte is not the pad. */
+[[nodiscard]] static __device__ bool chooses_(multimodal_batch_view_t const &batch, u32_t segment) noexcept {
+    return batch.segment_lengths[segment] != 0u && batch.segment_choices[segment, 0] != byte_pad_k;
+}
+
+/**
+ *  @brief Copy each choice segment's last row of @p normalized into its row of @p gathered , zeros
+ *      for a segment that makes no choice, and publish @c {λ/max(count,1), count} over them.
+ *
+ *  __grid_size__ @c [segments,1,1] , threads stripe the hidden width; no dynamic shared memory.
+ */
+static __global__ void choices_gather_kernel_(bf16r2_view_t normalized, multimodal_batch_view_t batch,
+                                              bf16r2_span_t gathered, f32r1_span_t scale_and_count, f32_t weight) {
+    u32_t const segment = blockIdx.x, hidden = static_cast<u32_t>(gathered.extent(1));
+    bool const live = chooses_(batch, segment);
+    u32_t const row = live ? batch.segment_offsets[segment] + batch.segment_lengths[segment] - 1u : 0u;
+    for (u32_t column = threadIdx.x; column < hidden; column += blockDim.x)
+        gathered[segment, column] = live ? normalized[row, column] : __float2bfloat16(0.0f);
+    if (segment != 0u) return;
+    f32_t live_segments = 0.0f;
+    for (u32_t index = threadIdx.x; index < gathered.extent(0); index += blockDim.x)
+        live_segments += chooses_(batch, index) ? 1.0f : 0.0f;
+    f32_t const total = block_reduce_broadcast<kernel_block_size_default_k>(live_segments);
+    if (threadIdx.x != 0u) return;
+    scale_and_count[0] = weight / std::max(total, 1.0f);
+    scale_and_count[1] = total;
+}
+
+/**
+ *  @brief SLCD over one choice segment: softmax restricted to its bytes, soft-target cross-entropy
+ *      plus λ_B·Brier, and the pre-scaled gradient written only at its bytes' columns, zeros
+ *      elsewhere.
+ *
+ *  With @c p_c the restricted softmax and @c t_c the targets, the logit gradient of a byte is
+ *  @c (p_c−t_c)+λ_B·2·p_c·((p_c−t_c)−r) for @c r=Σ(p_v−t_v)·p_v . A pad entry is no choice, and a
+ *  segment making none, a PAD among them, writes zeros and scores nothing.
+ *
+ *  __grid_size__ @c [segments,1,1] , one block per segment; no dynamic shared memory.
+ */
+static __global__ void choices_cross_entropy_kernel_(f32r2_view_t logits, multimodal_batch_view_t batch,
+                                                     f32r1_view_t scale_and_count, f32_t brier_weight,
+                                                     f32r1_span_t choice_loss, bf16r2_span_t logit_grad) {
+    nk::tensor_view<token_id_t, 2> const choices = batch.segment_choices;
+    f32r2_view_t const targets = batch.segment_choice_targets;
+    u32_t const row = blockIdx.x, vocabulary = static_cast<u32_t>(logits.extent(1));
+    u32_t const width = static_cast<u32_t>(choices.extent(1));
+    for (u32_t byte = threadIdx.x; byte < vocabulary; byte += blockDim.x)
+        logit_grad[row, byte] = __float2bfloat16(0.0f);
+    if (!chooses_(batch, row)) {
+        if (threadIdx.x == 0u) choice_loss[row] = 0.0f;
+        return;
+    }
+    __syncthreads();
+
+    f32_t thread_max = -std::numeric_limits<f32_t>::infinity();
+    for (u32_t choice = threadIdx.x; choice < width; choice += blockDim.x)
+        if (choices[row, choice] != byte_pad_k) thread_max = std::max(thread_max, logits[row, choices[row, choice]]);
+    f32_t const row_max = block_reduce_max_broadcast_<kernel_block_size_default_k>(thread_max);
+
+    f32_t thread_sum = 0.0f;
+    for (u32_t choice = threadIdx.x; choice < width; choice += blockDim.x)
+        if (choices[row, choice] != byte_pad_k) thread_sum += __expf(logits[row, choices[row, choice]] - row_max);
+    f32_t const log_denominator = __logf(block_reduce_broadcast<kernel_block_size_default_k>(thread_sum));
+
+    f32_t thread_cross_entropy = 0.0f, thread_brier = 0.0f, thread_correlation = 0.0f;
+    for (u32_t choice = threadIdx.x; choice < width; choice += blockDim.x) {
+        if (choices[row, choice] == byte_pad_k) continue;
+        f32_t const log_probability = logits[row, choices[row, choice]] - row_max - log_denominator;
+        f32_t const probability = __expf(log_probability), miss = probability - targets[row, choice];
+        thread_cross_entropy -= targets[row, choice] * log_probability;
+        thread_brier += miss * miss;
+        thread_correlation += miss * probability;
+    }
+    f32_t const cross_entropy = block_reduce_broadcast<kernel_block_size_default_k>(thread_cross_entropy);
+    f32_t const brier = block_reduce_broadcast<kernel_block_size_default_k>(thread_brier);
+    f32_t const correlation = block_reduce_broadcast<kernel_block_size_default_k>(thread_correlation);
+
+    f32_t const scale = scale_and_count[0];
+    for (u32_t choice = threadIdx.x; choice < width; choice += blockDim.x) {
+        token_id_t const byte = choices[row, choice];
+        if (byte == byte_pad_k) continue;
+        f32_t const probability = __expf(logits[row, byte] - row_max - log_denominator);
+        f32_t const miss = probability - targets[row, choice];
+        f32_t const gradient = miss + brier_weight * 2.0f * probability * (miss - correlation);
+        logit_grad[row, byte] = __float2bfloat16(gradient * scale);
+    }
+    if (threadIdx.x == 0u) choice_loss[row] = cross_entropy + brier_weight * brier;
+}
+
+/**
+ *  @brief Add each choice segment's row of @p gathered_grad onto its last row of
+ *      @p normalized_grad , where the masked head's force may already sit.
+ *
+ *  __grid_size__ @c [segments,1,1] , threads stripe the hidden width; no dynamic shared memory.
+ */
+static __global__ void choices_scatter_kernel_(f32r2_view_t gathered_grad, multimodal_batch_view_t batch,
+                                               bf16r2_span_t normalized_grad) {
+    u32_t const segment = blockIdx.x, hidden = static_cast<u32_t>(gathered_grad.extent(1));
+    if (!chooses_(batch, segment)) return;
+    u32_t const row = batch.segment_offsets[segment] + batch.segment_lengths[segment] - 1u;
+    for (u32_t column = threadIdx.x; column < hidden; column += blockDim.x)
+        normalized_grad[row, column] = __float2bfloat16(__bfloat162float(normalized_grad[row, column]) +
+                                                        gathered_grad[segment, column]);
+}
+
 /** Allocate off @p arena one linear head's NumKong packs and transients: its @b [outputs,hidden] weight packed
  *  both ways, the weight gradient's transposes over @p rows states (the input one wide enough to stage the
  *  weight's padded transpose too), the @c normalizedᵀ pack, and the Float32 products of all three products. */
@@ -249,6 +356,16 @@ expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, masked_token
                                                        head.transposed_input_, head.packed_input_, head.products_);
         !allocated)
         return result_t::fail(std::move(allocated));
+    if (config.max_segments == 0) return result_t {std::move(head)};
+    // The choices reuse the token rows' logits, which also widen the decoder gradient they add to.
+    if (config.max_segments > config.max_tokens || config.max_tokens < config.hidden)
+        return result_t::fail(status_t::shape_unsupported_k,
+                              "choices need no more segments than tokens, and tokens past the width " //
+                              "(segments={} tokens={} hidden={})",
+                              config.max_segments, config.max_tokens, config.hidden);
+    head.gathered_ = bf16r2_tensor_arena_t::uninitialized({config.max_segments, config.hidden}, bf16_alloc).value;
+    if (!head.gathered_)
+        return result_t::fail(status_t::bad_alloc_k, "choice rows allocation failed (arena_used={})", arena.used());
     return result_t {std::move(head)};
 }
 
@@ -259,8 +376,8 @@ expected_t masked_tokens_t::pack_weights(gpu_stream_t &stream) noexcept {
 
 expected_t masked_tokens_t::corrupt(tokens_view_t clean, tokens_span_t distorted, u32r1_span_t loss_weights,
                                     u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                    modality_view_t segment_modality, masking_recipe_t recipe, data_epoch_t data_epoch,
-                                    gpu_stream_t &stream) noexcept {
+                                    modality_view_t segment_modality, nk::tensor_view<token_id_t, 2> segment_choices,
+                                    masking_recipe_t recipe, data_epoch_t data_epoch, gpu_stream_t &stream) noexcept {
     std::size_t const tokens = clean.extent(0);
     if (distorted.extent(0) != tokens || loss_weights.extent(0) != tokens)
         return expected_t::fail(status_t::shape_unsupported_k, "corrupt buffers disagree on token count ({})", tokens);
@@ -279,8 +396,8 @@ expected_t masked_tokens_t::corrupt(tokens_view_t clean, tokens_span_t distorted
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const segment_grid {grid_size_for(segments), 1u, 1u};
     return launch_kernel(&masked_token_corrupt_kernel_, segment_grid, block_shape, stream, clean, distorted,
-                         loss_weights, segment_offsets, segment_lengths, segment_modality, recipe.seed, data_epoch,
-                         open_rate, continue_rate, recipe.replace_fraction, recipe.random_fraction);
+                         loss_weights, segment_offsets, segment_lengths, segment_modality, segment_choices, recipe.seed,
+                         data_epoch, open_rate, continue_rate, recipe.replace_fraction, recipe.random_fraction);
 }
 
 expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t clean_targets, u32r1_view_t loss_weights,
@@ -321,6 +438,66 @@ expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t c
         staged = weight_gradient_bf16(logit_grad, normalized, decoder_weight_grad_.span(), transposed_grad_.span(),
                                       transposed_input_.span(), packed_input_.span(), products_.span(), b8r1_span_t {},
                                       capabilities_, stream);
+    return staged;
+}
+
+expected_t masked_tokens_t::choose(bf16r2_view_t normalized, multimodal_batch_view_t const &batch,
+                                   choices_config_t config, f32r1_span_t loss_summands, bf16r2_span_t normalized_grad,
+                                   gpu_stream_t &stream) noexcept {
+    std::size_t const hidden = config_.hidden, vocabulary = config_.vocabulary, segments = gathered_.extent(0);
+    if (segments == 0 || batch.segment_choices.extent(0) != segments ||
+        batch.segment_choice_targets.extent(0) != segments ||
+        batch.segment_choice_targets.extent(1) != batch.segment_choices.extent(1))
+        return expected_t::fail(status_t::shape_unsupported_k, "choices need [{},width] choice and target tables",
+                                segments);
+    if (normalized.extent(0) != config_.max_tokens || normalized_grad.extent(0) != config_.max_tokens ||
+        normalized.extent(1) != hidden || normalized_grad.extent(1) != hidden || loss_summands.extent(0) != 2)
+        return expected_t::fail(status_t::shape_unsupported_k, "choice head geometry mismatch (hidden={})", hidden);
+
+    dim3 const one_block {1u, 1u, 1u};
+    dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
+    dim3 const segment_grid {static_cast<u32_t>(segments), 1u, 1u};
+    f32r2_span_t const logits {logits_.data(), segments, vocabulary};
+    bf16r2_span_t const padded_logit_grad = logit_grad_.span();
+    bf16r2_span_t const logit_grad =
+        padded_logit_grad[nk::range(std::size_t {0}, segments), nk::range(std::size_t {0}, vocabulary), nk::slice];
+    f32r1_view_t const position_loss = position_loss_.view();
+    f32r2_span_t const gathered_grad {products_.data(), segments, hidden};
+    // The widened decoder gradient reuses the logits, dead once the cross-entropy read them.
+    f32r1_span_t const widened_weight_grad {logits_.data(), vocabulary * hidden};
+    f32r1_span_t const weight_products {products_.data(), vocabulary * hidden};
+    expected_t staged = launch_kernel(&choices_gather_kernel_, segment_grid, block_shape, stream, normalized, batch,
+                                      gathered_.span(), gradient_scale_.span(), config.weight);
+    if (staged) staged = multiply_bf16(gathered_.view(), packed_decoder_.view(), logits, capabilities_, stream);
+    if (staged)
+        staged = launch_kernel(&choices_cross_entropy_kernel_, segment_grid, block_shape, stream, f32r2_view_t {logits},
+                               batch, gradient_scale_.view(), config.brier_weight, position_loss_.span(), logit_grad);
+    if (staged)
+        staged = launch_kernel(&masked_finalize_kernel_, one_block, block_shape, stream,
+                               position_loss[nk::range(std::size_t {0}, segments), nk::slice], gradient_scale_.view(),
+                               loss_summands, config.weight);
+    if (staged)
+        staged = multiply_bf16(logit_grad, packed_decoder_transposed_.view(), gathered_grad, capabilities_, stream);
+    if (staged)
+        staged = launch_kernel(&choices_scatter_kernel_, segment_grid, block_shape, stream,
+                               f32r2_view_t {gathered_grad}, batch, normalized_grad);
+    if (staged)
+        staged = numkong_result(nk_cast_best(decoder_weight_grad_.data(), nk_bf16_k, widened_weight_grad.data(),
+                                             nk_f32_k, vocabulary * hidden, capabilities_, stream.numkong()),
+                                "decoder gradient widening");
+    if (staged)
+        staged = weight_gradient_bf16(logit_grad, gathered_.view(), decoder_weight_grad_.span(),
+                                      transposed_grad_.span(), transposed_input_.span(), packed_input_.span(),
+                                      weight_products, b8r1_span_t {}, capabilities_, stream);
+    if (staged)
+        staged = numkong_result(
+            nk_each_sum_f32_best(widened_weight_grad.data(), weight_products.data(), vocabulary * hidden,
+                                 widened_weight_grad.data(), capabilities_, stream.numkong()),
+            "decoder gradient addition");
+    if (staged)
+        staged = numkong_result(nk_cast_best(widened_weight_grad.data(), nk_f32_k, decoder_weight_grad_.data(),
+                                             nk_bf16_k, vocabulary * hidden, capabilities_, stream.numkong()),
+                                "decoder gradient narrowing");
     return staged;
 }
 

@@ -1,10 +1,10 @@
 /**
+ *  @file include/uform/core/encoder_tower.hpp
+ *  @author Ash Vardanian
+ *  @date July 3, 2026
  *  @brief The encoder tower: everything between a @ref multimodal_batch and the pooled contrastive
  *      vertices — the per-modality entry (token embedding or image / video / audio patch projection),
  *      the transformer block stack, the final norm, the attention pool, and the projection head.
- *  @file src/core/encoder_tower.hpp
- *  @author Ash Vardanian
- *  @date July 3, 2026
  *
  *  Two function objects: @ref encoder_tower_bf16_t (training, forward + backward) and its quantized
  *  forward-only twin @ref encoder_tower_e4m3_t , constructed only through
@@ -64,9 +64,9 @@
 #include <numkong/cast.h>      // `nk_cast_best` — the pooled Float32 rows into BFloat16
 #include <numkong/tensor.hpp>  // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "core/types.hpp"             // `expected`, `expected_t`, `status_t`, `differentiable_weights_t`
-#include "core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`, `modality_t`
-#include "core/transformer_block.cuh" // the block stack, `rope_angles_t`, shared `rmsnorm_*`
+#include "uform/core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`, `modality_t`
+#include "uform/core/transformer_block.cuh" // the block stack, `rope_angles_t`, shared `rmsnorm_*`
+#include "uform/core/types.hpp"             // `expected`, `expected_t`, `status_t`, `differentiable_weights_t`
 
 namespace unum::uform::core {
 
@@ -237,6 +237,11 @@ struct tower_token_head_t {
 
     /** Pack the projection for its forward and data-gradient products, once per optimizer step. */
     [[nodiscard]] expected_t pack_weights(bf16r1_span_t transposed, gpu_stream_t &stream) noexcept;
+
+    /** A copy of this head off @p arena for @p block 's capacities, its projection packed once for
+     *  the forward of a twin whose weights never change. */
+    [[nodiscard]] expected<tower_token_head_t> snapshot(gpu_arena_t &arena, transformer_block_config_t const &block,
+                                                        gpu_stream_t &stream) const noexcept;
 
     /** @b [tokens,width] the unit token vectors of the last @ref forward . */
     [[nodiscard]] bf16r2_view_t token_vectors() const noexcept { return vectors_.view(); }
@@ -478,6 +483,13 @@ struct encoder_tower_e4m3_t {
     /** The per-token final-norm states — the masked head's input on the masked path. */
     [[nodiscard]] bf16r2_view_t normalized() const noexcept { return normalized_.view(); }
 
+    /** @b [tokens,token_width] the late-interaction token vectors of the last forward, empty
+     *  without the head. */
+    [[nodiscard]] bf16r2_view_t token_vectors() const noexcept { return token_head_.token_vectors(); }
+
+    /** @b [segments+1] each segment's first row in @ref token_vectors . */
+    [[nodiscard]] u32r1_view_t token_offsets() const noexcept { return token_head_.token_offsets(); }
+
     /** The baked geometry. */
     [[nodiscard]] encoder_tower_config_t const &config() const noexcept { return config_; }
 
@@ -523,6 +535,9 @@ struct encoder_tower_e4m3_t {
 
     /** The head projections packed as their B operands, once — the twin's weights never change. */
     b8r1_tensor_arena_t packed_head_fc1_ {}, packed_head_fc2_ {};
+
+    /** The late-interaction head, BFloat16, present iff @c config.token_width is nonzero. */
+    tower_token_head_t token_head_ {};
 
     /** RoPE angle tables (model state). */
     rope_angles_t angles_ {};

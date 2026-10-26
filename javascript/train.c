@@ -149,7 +149,8 @@ static bool uform_js_float_field(napi_env env, napi_value object, char const *na
     return true;
 }
 
-/** Reads a batch envelope: the row, segment, column and bag capacities, and the image, video and audio slices. */
+/** Reads a batch envelope: the row, segment, column, bag and choice capacities, and the image,
+ *  video and audio slices. */
 static bool uform_js_batch_from_value(napi_env env, napi_value value, uform_batch_shape_t *batch) {
     napi_value const image = uform_js_property(env, value, "image");
     napi_value const video = uform_js_property(env, value, "video");
@@ -158,6 +159,7 @@ static bool uform_js_batch_from_value(napi_env env, napi_value value, uform_batc
            uform_js_size_field(env, value, "maxSegmentsPerDevice", &batch->max_segments_per_device) &&
            uform_js_size_field(env, value, "maxColumnsPerRow", &batch->max_columns_per_row) &&
            uform_js_size_field(env, value, "maxBagsPerDevice", &batch->max_bags_per_device) &&
+           uform_js_size_field(env, value, "maxChoicesPerItem", &batch->max_choices_per_item) &&
            uform_js_size_field(env, image, "patchSide", &batch->image.patch_side) &&
            uform_js_size_field(env, image, "channels", &batch->image.channels) &&
            uform_js_size_field(env, video, "patchSide", &batch->video.patch_side) &&
@@ -186,15 +188,17 @@ static bool uform_js_masking_from_value(napi_env env, napi_value value, uform_ma
 /** Reads the contrastive loss's scoring; the Matryoshka widths land in a block the caller frees. */
 static bool uform_js_contrastive_from_value(napi_env env, napi_value value, uform_contrastive_t *contrastive,
                                             size_t **widths) {
-    size_t negatives = 0;
+    size_t negatives = 0, pair_loss = 0;
     if (!uform_js_size_field(env, value, "temperatureGroups", &contrastive->temperature_groups) ||
         !uform_js_float_field(env, value, "inverseTemperature", &contrastive->inverse_temperature) ||
         !uform_js_float_field(env, value, "bias", &contrastive->bias) ||
         !uform_js_size_field(env, value, "negatives", &negatives) ||
         !uform_js_float_field(env, value, "ambientRepulsionWeight", &contrastive->ambient_repulsion_weight) ||
-        !uform_js_size_field(env, value, "maxEdgesPerDevice", &contrastive->max_edges_per_device))
+        !uform_js_size_field(env, value, "maxEdgesPerDevice", &contrastive->max_edges_per_device) ||
+        !uform_js_size_field(env, value, "pairLoss", &pair_loss))
         return false;
     contrastive->negatives = (uform_negatives_t)negatives;
+    contrastive->pair_loss = (uform_pair_loss_form_t)pair_loss;
     int32_t *ordinals = NULL;
     size_t count = 0;
     if (!uform_js_ordinals_from_value(env, uform_js_property(env, value, "matryoshkaDimensions"),
@@ -212,8 +216,27 @@ static bool uform_js_contrastive_from_value(napi_env env, napi_value value, ufor
     return true;
 }
 
-/** @c initVram(executor, mesh, {resume, depth, hidden, batch, objective, masking, contrastive, schedule, seed})
- *  → a trainer, its creation blocking on @p executor. */
+/** Reads the late-interaction loss's scoring of the per-token vectors. */
+static bool uform_js_late_interaction_from_value(napi_env env, napi_value value,
+                                                 uform_late_interaction_t *late_interaction) {
+    size_t pair_loss = 0;
+    if (!uform_js_float_field(env, value, "weight", &late_interaction->weight) ||
+        !uform_js_size_field(env, value, "width", &late_interaction->width) ||
+        !uform_js_float_field(env, value, "inverseTemperature", &late_interaction->inverse_temperature) ||
+        !uform_js_float_field(env, value, "bias", &late_interaction->bias) ||
+        !uform_js_size_field(env, value, "maxQuerySpan", &late_interaction->max_query_span) ||
+        !uform_js_size_field(env, value, "maxQueryTokensPerDevice", &late_interaction->max_query_tokens_per_device) ||
+        !uform_js_size_field(env, value, "maxDocumentsPerDevice", &late_interaction->max_documents_per_device) ||
+        !uform_js_size_field(env, value, "maxDocumentTokensPerDevice",
+                             &late_interaction->max_document_tokens_per_device) ||
+        !uform_js_size_field(env, value, "pairLoss", &pair_loss))
+        return false;
+    late_interaction->pair_loss = (uform_pair_loss_form_t)pair_loss;
+    return true;
+}
+
+/** @c initVram(executor, mesh, {resume, depth, hidden, batch, objective, masking, contrastive,
+ *  lateInteraction, choices, schedule, seed}) → a trainer, its creation blocking on @p executor. */
 static napi_value uform_js_trainer_init_vram(napi_env env, napi_callback_info info) {
     napi_value arguments[3];
     uform_outcome_t outcome = {uform_status_success_k, NULL};
@@ -231,6 +254,7 @@ static napi_value uform_js_trainer_init_vram(napi_env env, napi_callback_info in
     }
     napi_value const config = arguments[2];
     napi_value const schedule = uform_js_property(env, config, "schedule");
+    napi_value const choices = uform_js_property(env, config, "choices");
     napi_value const resume = uform_js_property(env, config, "resume");
     size_t objective = 0, seed = 0;
     size_t *widths = NULL;
@@ -241,6 +265,10 @@ static napi_value uform_js_trainer_init_vram(napi_env env, napi_callback_info in
         !uform_js_size_field(env, config, "seed", &seed) ||
         !uform_js_batch_from_value(env, uform_js_property(env, config, "batch"), &init.batch) ||
         !uform_js_masking_from_value(env, uform_js_property(env, config, "masking"), &init.masking) ||
+        !uform_js_late_interaction_from_value(env, uform_js_property(env, config, "lateInteraction"),
+                                              &init.late_interaction) ||
+        !uform_js_float_field(env, choices, "weight", &init.choices.weight) ||
+        !uform_js_float_field(env, choices, "brierWeight", &init.choices.brier_weight) ||
         !uform_js_float_field(env, schedule, "learningRate", &init.schedule.learning_rate) ||
         !uform_js_float_field(env, schedule, "minLearningRate", &init.schedule.min_learning_rate) ||
         !uform_js_size_field(env, schedule, "warmupSteps", &init.schedule.warmup_steps) ||
@@ -298,16 +326,20 @@ static napi_value uform_js_finish_step(napi_env env, uform_js_call_t *call, napi
                                         "maskedImageLoss",
                                         "maskedVideoLoss",
                                         "maskedAudioLoss",
+                                        "lateInteractionLoss",
+                                        "choicesLoss",
                                         "truncated"};
     napi_value values[sizeof(names) / sizeof(names[0])];
     float const reals[] = {stats->learning_rate,     stats->loss,
                            stats->contrastive_loss,  stats->masked_text_loss,
                            stats->masked_image_loss, stats->masked_video_loss,
-                           stats->masked_audio_loss};
+                           stats->masked_audio_loss, stats->late_interaction_loss,
+                           stats->choices_loss};
+    size_t const reals_count = sizeof(reals) / sizeof(reals[0]);
     values[0] = uform_js_number(env, stats->step);
-    for (size_t position = 0; position != sizeof(reals) / sizeof(reals[0]); ++position)
+    for (size_t position = 0; position != reals_count; ++position)
         napi_create_double(env, reals[position], &values[position + 1]);
-    values[8] = uform_js_number(env, stats->truncated);
+    values[reals_count + 1] = uform_js_number(env, stats->truncated);
     napi_value const report = uform_js_object(env, sizeof(names) / sizeof(names[0]), names, values);
     napi_value object = NULL;
     if (!report || napi_create_object(env, &object) != napi_ok ||
@@ -339,35 +371,43 @@ static bool uform_js_edges_from_value(napi_env env, napi_value const *arguments,
     return true;
 }
 
-/** Borrows an @b optional @c Uint32Array of exactly @p count entries, one per item. */
-static bool uform_js_per_item_from_value(napi_env env, napi_value value, char const *field, size_t count,
-                                         uint32_t const **result) {
-    void *data = NULL;
-    size_t elements = 0;
-    *result = NULL;
-    if (uform_js_value_absent(env, value)) return true;
-    if (!uform_js_array_from_value(env, value, field, napi_uint32_array, &data, &elements)) return false;
-    if (elements != count) return uform_js_throw_field(env, field, "must hold one entry per item");
-    *result = (uint32_t const *)data;
+/** Reads the @b optional choices: widened offsets, borrowed bytes, and one target per byte. */
+static bool uform_js_choices_from_value(napi_env env, napi_value const *arguments, size_t count, uform_js_call_t *call,
+                                        uform_choices_view_t *choices) {
+    size_t offsets_count = 0, bytes_count = 0, targets_count = 0;
+    void *bytes = NULL, *targets = NULL;
+    if (!uform_js_offsets_from_value(env, arguments[0], "choices", call, &choices->offsets, &offsets_count))
+        return false;
+    if (!choices->offsets) return true;
+    if (offsets_count != count) return uform_js_throw_field(env, "choices", "must hold one more offset than items");
+    if (!uform_js_array_from_value(env, arguments[1], "bytes", napi_uint8_array, &bytes, &bytes_count) ||
+        !uform_js_array_from_value(env, arguments[2], "targets", napi_float32_array, &targets, &targets_count))
+        return false;
+    if (choices->offsets[count] > bytes_count || targets_count != bytes_count)
+        return uform_js_throw(env, uform_status_shape_mismatch_k, "The choices reach past their bytes or targets");
+    choices->bytes = (uint8_t const *)bytes;
+    choices->targets = (float const *)targets;
     return true;
 }
 
-/** @c step(executor, completion, modalities, contents, offsets, bags, temperatureGroups, attractOffsets,
- *  attractIds, attractWeights, repelOffsets, repelIds, repelWeights, ignoreOffsets, ignoreIds, arena,
- *  outputsScalar) → @c {stats, embeddings}, the embeddings present when an arena was given. */
+/** @c step(executor, completion, modalities, contents, offsets, bags, temperatureGroups, sides,
+ *  choiceOffsets, choiceBytes, choiceTargets, attractOffsets, attractIds, attractWeights,
+ *  repelOffsets, repelIds, repelWeights, ignoreOffsets, ignoreIds, arena, outputsScalar) →
+ *  @c {stats, embeddings}, the embeddings present when an arena was given. */
 static napi_value uform_js_trainer_step(napi_env env, napi_callback_info info) {
-    napi_value arguments[17], self = NULL, deferred = NULL;
-    uform_js_trainer_t *const trainer = uform_js_trainer_live(env, info, 17, arguments, &self);
+    napi_value arguments[21], self = NULL, deferred = NULL;
+    uform_js_trainer_t *const trainer = uform_js_trainer_live(env, info, 21, arguments, &self);
     if (!trainer) return NULL;
     uform_js_trainer_call_t local;
     uform_trainer_step_t step = {.trainer = trainer->handle};
     uform_js_trainer_call_t *const call = (uform_js_trainer_call_t *)uform_js_call_open_on(
         env, arguments, &local.call, sizeof(local), &step.executor, &step.completion);
     if (!call) return NULL;
-    void *modalities = NULL;
-    size_t modalities_count = 0;
-    napi_value const ignore[3] = {arguments[13], arguments[14], NULL};
-    bool const with_arena = !uform_js_value_absent(env, arguments[15]);
+    void *modalities = NULL, *sides = NULL;
+    size_t modalities_count = 0, sides_count = 0;
+    napi_value const ignore[3] = {arguments[17], arguments[18], NULL};
+    bool const with_arena = !uform_js_value_absent(env, arguments[19]);
+    bool const with_sides = !uform_js_value_absent(env, arguments[7]);
     bool parsed =
         uform_js_tape_from_value(env, arguments[3], arguments[4], "contents", napi_uint8_array, &call->call,
                                  &step.count, &step.contents) &&
@@ -375,22 +415,28 @@ static napi_value uform_js_trainer_step(napi_env env, napi_callback_info info) {
         (modalities_count == step.count || uform_js_throw_field(env, "modalities", "must hold one entry per item")) &&
         uform_js_per_item_from_value(env, arguments[5], "bags", step.count, &step.bags) &&
         uform_js_per_item_from_value(env, arguments[6], "temperatureGroups", step.count, &step.temperature_groups) &&
-        uform_js_edges_from_value(env, arguments + 7, &call->call, &step.relations.attract) &&
-        uform_js_edges_from_value(env, arguments + 10, &call->call, &step.relations.repel) &&
+        (!with_sides ||
+         (uform_js_array_from_value(env, arguments[7], "sides", napi_int32_array, &sides, &sides_count) &&
+          (sides_count == step.count || uform_js_throw_field(env, "sides", "must hold one entry per item")))) &&
+        uform_js_choices_from_value(env, arguments + 8, step.count, &call->call, &step.choices) &&
+        uform_js_edges_from_value(env, arguments + 11, &call->call, &step.relations.attract) &&
+        uform_js_edges_from_value(env, arguments + 14, &call->call, &step.relations.repel) &&
         uform_js_edges_from_value(env, ignore, &call->call, &step.relations.ignore);
     if (parsed && with_arena)
-        parsed = uform_js_scalar_from_value(env, arguments[16], "outputsScalar", &step.outputs_scalar) &&
-                 uform_js_arena_from_value(env, arguments[15], &call->call, &step.arena);
+        parsed = uform_js_scalar_from_value(env, arguments[20], "outputsScalar", &step.outputs_scalar) &&
+                 uform_js_arena_from_value(env, arguments[19], &call->call, &step.arena);
     if (!parsed) {
         uform_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    napi_value const slots[uform_js_slots_k] = {self,         arguments[0],  arguments[15], arguments[3],
-                                                arguments[2], arguments[5],  arguments[6],  arguments[8],
-                                                arguments[9], arguments[11], arguments[12], arguments[14]};
+    napi_value const slots[uform_js_slots_k] = {self,          arguments[0],  arguments[19], arguments[3],
+                                                arguments[2],  arguments[5],  arguments[6],  arguments[7],
+                                                arguments[9],  arguments[10], arguments[12], arguments[13],
+                                                arguments[15], arguments[16], arguments[18]};
     call->call.finish = uform_js_finish_step;
     call->count = step.count;
     step.modalities = (uform_modality_t const *)modalities;
+    step.sides = (uform_late_interaction_side_t const *)sides;
     step.outcome = &call->call.outcome;
     step.embeddings = with_arena ? &call->embeddings : NULL;
     step.stats = &call->stats;

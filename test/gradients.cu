@@ -28,6 +28,8 @@
  *        check exact enough for the attention and rotary paths.
  *      - @ref block_recompute_replays : a block's forward replayed from its input stash after
  *        another block overwrote their shared scratch reproduces its backward bitwise.
+ *      - @ref choices_cross_entropy : the calibrated choices' loss, their force on the answer rows
+ *        and the decoder's gradient against a Float64 oracle, then a central difference.
  *
  *  The forward and the backward both round their activations to BFloat16, so a forward's loss
  *  carries a few thousandths of a nat of rounding noise and a finite difference agrees with the
@@ -48,10 +50,11 @@
 
 #include <numkong/reduce.hpp> // `nk::reduce_moments`
 
-#include "train/base.cuh"             // `base_replica_t`, `trainer_config_t`, `seed_weights`
-#include "core/optimizer.hpp"         // `adafactor_t`
-#include "core/transformer_block.cuh" // `transformer_block_bf16_t`, `transformer_scratch_t`
-#include "harness.hpp"                // `test_suite_t`, `dot`, `narrow_to_bf16`, `widen_from_bf16`
+#include "uform/core/optimizer.hpp"         // `adafactor_t`
+#include "uform/core/transformer_block.cuh" // `transformer_block_bf16_t`, `transformer_scratch_t`
+#include "uform/train/base.cuh"             // `base_replica_t`, `trainer_config_t`, `seed_weights`
+
+#include "harness.hpp" // `test_suite_t`, `dot`, `narrow_to_bf16`, `widen_from_bf16`
 
 using namespace unum::uform::core;
 using namespace unum::uform::train;
@@ -143,16 +146,17 @@ struct summand_pair_t {
     return summand_pair_t {host[0], host[1]};
 }
 
-/** Run the forward region from zeroed summands and return the composite loss the backward
- *  differentiates: every live head's weighted sum over its own count. */
-[[nodiscard]] static expected<f64_t> forward_loss_(base_replica_t &replica, gpu_stream_t &stream) noexcept {
+/** Run the forward region of @p config from zeroed summands and return the composite loss the
+ *  backward differentiates: every live head's weighted sum over its own count. */
+[[nodiscard]] static expected<f64_t> forward_loss_(base_replica_t &replica, trainer_config_t const &config,
+                                                   gpu_stream_t &stream) noexcept {
     f32r1_tensor_arena_t *const pairs[] = {&replica.tokens_summands, &replica.image_summands, &replica.video_summands,
                                            &replica.audio_summands};
     for (f32r1_tensor_arena_t *pair : pairs)
         if (!pair->empty())
             if (expected_t zeroed = zero_async(pair->span(), stream); !zeroed)
                 return expected<f64_t>::fail(std::move(zeroed));
-    if (expected_t forwarded = replica.forward_region(stream); !forwarded)
+    if (expected_t forwarded = replica.forward_region(config, stream); !forwarded)
         return expected<f64_t>::fail(std::move(forwarded));
     if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
         return cuda_failure<f64_t>(result, "forward drain failed");
@@ -178,7 +182,7 @@ static void finite_differences(test_suite_t &suite, device_t &device, bool omni)
     expected<base_replica_t> made = make_replica_(*arena, device, config, data_epoch_t {0});
     if (!made) return suite.check(false, "replica: {}", made.description_);
     base_replica_t &replica = *made;
-    expected<f64_t> const base_loss = forward_loss_(replica, device.stream);
+    expected<f64_t> const base_loss = forward_loss_(replica, config, device.stream);
     if (!base_loss) return suite.check(false, "forward: {}", base_loss.description_);
     if (expected_t backward = replica.backward_region(device.stream); !backward)
         return suite.check(false, "backward: {}", backward.description_);
@@ -212,9 +216,9 @@ static void finite_differences(test_suite_t &suite, device_t &device, bool omni)
             predicted = dot(gradient, plus) - dot(gradient, minus);
         }
         bool uploaded = upload_narrowed_(plus, matrix.weights.data());
-        expected<f64_t> const loss_plus = forward_loss_(replica, device.stream);
+        expected<f64_t> const loss_plus = forward_loss_(replica, config, device.stream);
         uploaded = uploaded && upload_narrowed_(minus, matrix.weights.data());
-        expected<f64_t> const loss_minus = forward_loss_(replica, device.stream);
+        expected<f64_t> const loss_minus = forward_loss_(replica, config, device.stream);
         uploaded = uploaded && upload_narrowed_(weights, matrix.weights.data());
         if (!uploaded || !loss_plus || !loss_minus)
             return suite.check(false, "perturbed forward of {} failed", matrix.name);
@@ -478,7 +482,7 @@ static void masked_media_rows(test_suite_t &suite, device_t &device) {
     if (!replica) return suite.check(false, "replica: {}", replica.description_);
     for (u32_t epoch = 0; epoch != 4u; ++epoch) {
         expected_t drawn = epoch == 0 ? expected_t {} : redraw_(*replica, config, data_epoch_t {epoch}, device.stream);
-        expected<f64_t> const loss = drawn ? forward_loss_(*replica, device.stream)
+        expected<f64_t> const loss = drawn ? forward_loss_(*replica, config, device.stream)
                                            : expected<f64_t>::fail(std::move(drawn));
         if (!loss) return suite.check(false, "epoch {}: {}", epoch, loss.description_);
         host_segments_t const segments = read_segments_(replica->batch);
@@ -515,7 +519,7 @@ static void chance_cross_entropy(test_suite_t &suite, device_t &device) {
     if (!arena) return suite.check(false, "arena: {}", arena.description_);
     expected<base_replica_t> replica = make_replica_(*arena, device, config, data_epoch_t {0});
     if (!replica) return suite.check(false, "replica: {}", replica.description_);
-    expected<f64_t> const loss = forward_loss_(*replica, device.stream);
+    expected<f64_t> const loss = forward_loss_(*replica, config, device.stream);
     if (!loss) return suite.check(false, "forward: {}", loss.description_);
     f64_t const uniform = std::log(static_cast<f64_t>(byte_vocabulary_k));
     suite.check(*loss > uniform - 0.25 && *loss < uniform + 1.0,
@@ -727,6 +731,189 @@ static void adafactor_small_steps(test_suite_t &suite, device_t &device) {
     // standard error.
     suite.check(std::fabs(mean_step - learning_rate) < 0.1 * learning_rate,
                 "the mean step is {:.4g}, the learning rate {:.4g}", mean_step, learning_rate);
+}
+
+/** The Float64 oracle of one choice: the soft-target cross-entropy plus @p brier_weight times the
+ *  Brier term of the softmax of @p logits against @p targets , its logit gradient written into
+ *  @p gradient . */
+[[nodiscard]] static f64_t choice_loss_(std::span<f64_t const> logits, std::span<f64_t const> targets,
+                                        f64_t brier_weight, std::span<f64_t> gradient) noexcept {
+    f64_t largest = logits[0], total = 0, cross_entropy = 0, brier = 0, correlation = 0;
+    for (f64_t const logit : logits) largest = std::max(largest, logit);
+    for (f64_t const logit : logits) total += std::exp(logit - largest);
+    for (std::size_t choice = 0; choice != logits.size(); ++choice) {
+        f64_t const probability = std::exp(logits[choice] - largest) / total, miss = probability - targets[choice];
+        cross_entropy -= targets[choice] * std::log(probability);
+        brier += miss * miss, correlation += miss * probability;
+    }
+    for (std::size_t choice = 0; choice != logits.size(); ++choice) {
+        f64_t const probability = std::exp(logits[choice] - largest) / total, miss = probability - targets[choice];
+        gradient[choice] = miss + brier_weight * 2.0 * probability * (miss - correlation);
+    }
+    return cross_entropy + brier_weight * brier;
+}
+
+/** The choices term over a seeded decoder against its Float64 oracle: a segment of targets
+ *  @c {1,0} , one of @c {0.5,0.5} , one making no choice and a PAD. The loss counts the two
+ *  choices, the force lands on @c d(normalized) at their answer rows alone, added onto what was
+ *  there, the decoder's gradient is added onto too, and a central difference of the loss along
+ *  that gradient agrees with it. */
+static void choices_cross_entropy(test_suite_t &suite, device_t &device) {
+    switch_to_gpu_t scope {device.stream};
+    u32_t const rows = 4, columns = 64, hidden = 256, width = 4, tokens = rows * columns;
+    std::size_t const decoder_scalars = std::size_t {byte_vocabulary_k} * hidden;
+    expected<gpu_arena_t> arena = gpu_arena_t::make(0, case_arena_bytes_k);
+    if (!arena) return suite.check(false, "arena: {}", arena.description_);
+    masked_tokens_config_t head_config;
+    head_config.hidden = hidden, head_config.max_tokens = tokens, head_config.max_segments = rows;
+    expected<masked_tokens_t> head = masked_tokens_t::make(*arena, head_config);
+    if (!head) return suite.check(false, "head: {}", head.description_);
+    multimodal_batch_shape_t shape {rows, rows, columns};
+    shape.max_choices_per_segment = width;
+    expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {*arena}, shape);
+    if (!batch) return suite.check(false, "batch: {}", batch.description_);
+    gpu_arena_alloc<bf16_t> bf16_alloc {*arena};
+    bf16r2_tensor_arena_t normalized = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
+    bf16r2_tensor_arena_t normalized_grad = bf16r2_tensor_arena_t::uninitialized({tokens, hidden}, bf16_alloc).value;
+    f32r1_tensor_arena_t summands = f32r1_tensor_arena_t::uninitialized({2}, gpu_arena_alloc<f32_t> {*arena}).value;
+    if (!normalized || !normalized_grad || !summands) return suite.check(false, "choice scratch allocation failed");
+
+    // Segment s spans row s, the PAD at the end none; an answer sits at its segment's last token.
+    u32_t const offsets[rows + 1] = {0, 64, 128, 192, 192}, lengths[rows] = {64, 40, 64, 0};
+    u32_t const answers[2] = {63, 103};
+    token_id_t const pad = byte_pad_k;
+    token_id_t const choices[rows * width] = {'A', 'B', pad, pad, 's', 'r', pad, pad,
+                                              pad, pad, pad, pad, pad, pad, pad, pad};
+    f32_t const targets[rows * width] = {1.0f, 0.0f, 0, 0, 0.5f, 0.5f, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    cuMemcpyHtoD(device_address(batch->segment_offsets.data()), offsets, sizeof(offsets));
+    cuMemcpyHtoD(device_address(batch->segment_lengths.data()), lengths, sizeof(lengths));
+    cuMemcpyHtoD(device_address(batch->segment_choices.data()), choices, sizeof(choices));
+    cuMemcpyHtoD(device_address(batch->segment_choice_targets.data()), targets, sizeof(targets));
+
+    st::basic_vector<differentiable_weights_t> table;
+    if (expected_t listed = head->fill("masked_tokens", table); !listed)
+        return suite.check(false, "{}", listed.description_);
+    if (expected_t seeded = seed_weights(table, device.stream); !seeded)
+        return suite.check(false, "{}", seeded.description_);
+    st::basic_vector<f64_t> states, prior_grad, prior_weight_grad, decoder;
+    if (st::failed(states.resize(std::size_t {tokens} * hidden)) ||
+        st::failed(prior_grad.resize(std::size_t {tokens} * hidden)) ||
+        st::failed(prior_weight_grad.resize(decoder_scalars)))
+        return suite.check(false, "host staging failed");
+    for (std::size_t index = 0; index != states.size(); ++index)
+        states[index] = keyed_uniform_(suite.settings.seed, 72u, index) * 1.7320508f,
+        prior_grad[index] = keyed_uniform_(suite.settings.seed, 73u, index) * 0.01f;
+    for (std::size_t index = 0; index != decoder_scalars; ++index)
+        prior_weight_grad[index] = keyed_uniform_(suite.settings.seed, 74u, index) * 0.01f;
+    if (!upload_narrowed_(states, normalized.data()) || !upload_narrowed_(prior_grad, normalized_grad.data()) ||
+        !upload_narrowed_(prior_weight_grad, head->decoder_gradients().data()) ||
+        !download_widened_(table[0].weights.data(), decoder_scalars, decoder))
+        return suite.check(false, "state staging failed");
+
+    choices_config_t const config {2.0f, 0.5f};
+    auto const choose = [&]() noexcept -> expected<summand_pair_t> {
+        expected_t chosen = zero_async(summands.span(), device.stream);
+        if (chosen) chosen = head->pack_weights(device.stream);
+        if (chosen)
+            chosen = head->choose(normalized.view(), batch->view(), config, summands.span(), normalized_grad.span(),
+                                  device.stream);
+        if (!chosen) return expected<summand_pair_t>::fail(std::move(chosen));
+        cuStreamSynchronize(device.stream.get());
+        return expected<summand_pair_t> {read_pair_(summands)};
+    };
+    expected<summand_pair_t> const scored = choose();
+    if (!scored) return suite.check(false, "choose: {}", scored.description_);
+
+    // The oracle over the two choices, each force scaled by λ over the live choice count.
+    std::size_t const offered = 2;
+    f64_t const scale = config.weight / 2.0;
+    st::basic_vector<f64_t> force, weight_force;
+    if (st::failed(force.resize(states.size())) || st::failed(weight_force.resize(decoder_scalars)))
+        return suite.check(false, "oracle staging failed");
+    nk::tensor_view<token_id_t, 2> const choice_rows {choices, rows, width};
+    f32r2_view_t const target_rows {targets, rows, width};
+    f64r2_view_t const decoder_rows {decoder.data(), byte_vocabulary_k, hidden};
+    f64r2_view_t const state_rows {states.data(), tokens, hidden};
+    f64r2_span_t const force_rows {force.data(), tokens, hidden};
+    f64r2_span_t const weight_force_rows {weight_force.data(), byte_vocabulary_k, hidden};
+    f64_t oracle = 0;
+    for (std::size_t live = 0; live != 2; ++live) {
+        f64_t logits[offered] = {}, wanted[offered] = {}, gradient[offered] = {};
+        std::size_t const row = answers[live];
+        for (std::size_t choice = 0; choice != offered; ++choice) {
+            std::size_t const byte = choice_rows[live, choice];
+            for (std::size_t channel = 0; channel != hidden; ++channel)
+                logits[choice] += decoder_rows[byte, channel] * state_rows[row, channel];
+            wanted[choice] = target_rows[live, choice];
+        }
+        oracle += choice_loss_(logits, wanted, config.brier_weight, gradient);
+        for (std::size_t choice = 0; choice != offered; ++choice) {
+            std::size_t const byte = choice_rows[live, choice];
+            for (std::size_t channel = 0; channel != hidden; ++channel) {
+                force_rows[row, channel] += scale * gradient[choice] * decoder_rows[byte, channel];
+                weight_force_rows[byte, channel] += scale * gradient[choice] * state_rows[row, channel];
+            }
+        }
+    }
+    f64_t const oracle_loss = config.weight * oracle / 2.0, measured_loss = scored->sum / scored->count;
+    suite.check(scored->count == 2.0, "two segments make a choice, {} counted", scored->count);
+    suite.check(std::fabs(measured_loss - oracle_loss) <= 1.0e-3 * std::max(1.0, oracle_loss),
+                "the choices loss is {:.6f}, the Float64 oracle {:.6f}", measured_loss, oracle_loss);
+
+    st::basic_vector<f64_t> landed_grad, landed_weight_grad;
+    if (!download_widened_(normalized_grad.data(), states.size(), landed_grad) ||
+        !download_widened_(head->decoder_gradients().data(), decoder_scalars, landed_weight_grad))
+        return suite.check(false, "gradient readback failed");
+    f64_t untouched = 0, gap = 0, magnitude = 0;
+    for (std::size_t index = 0; index != states.size(); ++index) {
+        std::size_t const row = index / hidden;
+        f64_t const added = landed_grad[index] - prior_grad[index];
+        if (row != answers[0] && row != answers[1]) untouched = std::max(untouched, std::fabs(added));
+        else gap += (added - force[index]) * (added - force[index]), magnitude += force[index] * force[index];
+    }
+    suite.check(untouched == 0.0, "rows without an answer keep their force, off by {:.3g}", untouched);
+    suite.check(std::sqrt(gap) <= 2.0e-2 * std::sqrt(magnitude),
+                "the answer rows' added force matches the oracle: relative {:.3g}", std::sqrt(gap / magnitude));
+    gap = 0, magnitude = 0;
+    for (std::size_t index = 0; index != decoder_scalars; ++index) {
+        f64_t const added = landed_weight_grad[index] - prior_weight_grad[index];
+        gap += (added - weight_force[index]) * (added - weight_force[index]);
+        magnitude += weight_force[index] * weight_force[index];
+    }
+    suite.check(std::sqrt(gap) <= 2.0e-2 * std::sqrt(magnitude),
+                "the decoder's added gradient matches the oracle: relative {:.3g}", std::sqrt(gap / magnitude));
+
+    // A central difference along the oracle's decoder gradient, the step doubled until the
+    // BFloat16-rounded move predicts an eighth of the loss.
+    st::basic_vector<f64_t> plus, minus;
+    if (st::failed(plus.resize(decoder_scalars)) || st::failed(minus.resize(decoder_scalars)))
+        return suite.check(false, "perturbation staging failed");
+    st::basic_vector<nk_bf16_t> staging;
+    if (st::failed(staging.resize(st::assume_uninitialized, decoder_scalars)))
+        return suite.check(false, "perturbation staging failed");
+    f64_t largest = 0, predicted = 0;
+    for (f64_t const value : weight_force) largest = std::max(largest, std::fabs(value));
+    f64_t const weight_rms = std::sqrt(dot(decoder, decoder) / static_cast<f64_t>(decoder_scalars));
+    f64_t const first_step = largest / (8.0 * dot(weight_force, weight_force));
+    for (f64_t step = first_step; step == first_step || (predicted < 0.125 * oracle_loss && step <= weight_rms);
+         step *= 2) {
+        for (std::size_t index = 0; index != decoder_scalars; ++index)
+            plus[index] = decoder[index] + step * weight_force[index] / largest,
+            minus[index] = decoder[index] - step * weight_force[index] / largest;
+        if (!narrow_to_bf16(plus, staging) || !narrow_to_bf16(minus, staging))
+            return suite.check(false, "host rounding failed");
+        predicted = dot(weight_force, plus) - dot(weight_force, minus);
+    }
+    bool uploaded = upload_narrowed_(plus, table[0].weights.data());
+    expected<summand_pair_t> const loss_plus = choose();
+    uploaded = uploaded && upload_narrowed_(minus, table[0].weights.data());
+    expected<summand_pair_t> const loss_minus = choose();
+    if (!uploaded || !loss_plus || !loss_minus) return suite.check(false, "perturbed choose failed");
+    f64_t const measured = loss_plus->sum / loss_plus->count - loss_minus->sum / loss_minus->count;
+    f64_t const error = std::fabs(measured - predicted) / std::max(std::fabs(predicted), 1.0e-6);
+    suite.check(error <= finite_difference_tolerance_k,
+                "the decoder: loss moved {:.6g}, the gradient predicts {:.6g}, off by {:.3g} relative", measured,
+                predicted, error);
 }
 
 /** Unit RMS normalization of the run @p input into @p output , the forward's own epsilon. */
@@ -1104,10 +1291,10 @@ int main(int, char **argv) {
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
     test_suite_t suite = test_suite_t::make(argv[0]);
     int device_count = 0;
-    char const *const cases[] = {"gradients/tokens",    "gradients/omni",         "gradients/token_head",
-                                 "masking/text_rows",   "masking/media_rows",     "init/chance_entropy",
-                                 "adafactor/reference", "adafactor/first_moment", "adafactor/small_steps",
-                                 "block/host_replay",   "block/recompute_replays"};
+    char const *const cases[] = {"gradients/tokens",    "gradients/omni",          "gradients/token_head",
+                                 "masking/text_rows",   "masking/media_rows",      "init/chance_entropy",
+                                 "adafactor/reference", "adafactor/first_moment",  "adafactor/small_steps",
+                                 "block/host_replay",   "block/recompute_replays", "choices/cross_entropy"};
     if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) {
         for (char const *name : cases) suite.skip(name, no_cuda_device_k);
         return suite.finish();
@@ -1130,5 +1317,6 @@ int main(int, char **argv) {
     suite.run("adafactor/small_steps", adafactor_small_steps, device);
     suite.run("block/host_replay", block_host_replay, device);
     suite.run("block/recompute_replays", block_recompute_replays, device);
+    suite.run("choices/cross_entropy", choices_cross_entropy, device);
     return suite.finish();
 }

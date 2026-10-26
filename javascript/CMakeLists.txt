@@ -27,6 +27,8 @@ if (EMSCRIPTEN)
         _uform_objective_name
         _uform_negatives_name
         _uform_multimem_tier_name
+        _uform_cpu_class_name
+        _uform_gpu_class_name
         _uform_version_name
         _uform_capabilities_compiled
         _uform_capabilities_available
@@ -36,6 +38,7 @@ if (EMSCRIPTEN)
         _uform_text_encode
         _uform_image_encode_pixels
         _uform_audio_encode_samples
+        _uform_text_choose
     )
 
     # An executable needs a source of its own; the module's whole content comes from the archive.

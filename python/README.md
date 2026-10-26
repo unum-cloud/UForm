@@ -4,7 +4,7 @@ The bindings are pure CPython, with no PyBind11, no NanoBind, and no SWIG.
 They need CPython 3.12 or newer on Linux, macOS or Windows, free-threaded builds included, and the extension never requires NumPy.
 Every verb is a batch over buffer-protocol inputs, and every output whose length the call decides lands in an arena you reuse.
 
-- `uform.Model` encodes text, images, video and audio into pooled embeddings and per-token states.
+- `uform.Model` encodes text, images, video and audio into pooled embeddings, per-token states and token vectors, and scores calibrated choices over texts.
 - `uform.Trainer` trains one on GPUs, joined across hosts by a `uform.Mesh`.
 - `uform.Executor` owns the threads or streams every call runs on, apart from any model.
 
@@ -55,7 +55,9 @@ A trainer runs `step` and `save` blocking on the executor it was created on, and
 
 ## Executors
 
-`uform.Executor.for_ram(threads=0, *, memory_domains=None, deferred_limit=0)` spawns host threads, and `uform.Executor.for_vram(devices=None, *, scratch_limit=0, deferred_limit=0)` opens one stream per device.
+`uform.Executor.for_ram(threads=0, *, memory_domains=None, deferred_limit=0, cpu_class=None)` spawns host threads, and `uform.Executor.for_vram(devices=None, *, scratch_limit=0, deferred_limit=0, gpu_class=None)` opens one stream per device.
+A device is named by its position in `uform.gpu_devices()`, which lists every GPU the process can drive as a `uform.GPUDevice`, NVIDIA devices first, then AMD.
+A `uform.CPUClass` or `uform.GPUClass` pin dispatches as that class, and `None` derives the hardware's own.
 `uform.Executor.on_pool(pool)` mirrors the C verb that borrows a ForkUnion pool, and raises `UnsupportedError` until borrowing is designed.
 Calls on one executor run in submission order, and a deferred call finding its `deferred_limit` table full raises `ContendedError` once waited for.
 `executor.drain(uform.Mood.PARKED)` waits for every earlier call and sets what the executor does once idle.
@@ -102,20 +104,34 @@ encoded = model.text_encode((data, offsets), arena)
 
 ```python
 encoded = model.text_encode(texts, arena, outputs=uform.Outputs.EMBEDDINGS | uform.Outputs.STATES)
-embeddings, states = encoded  # an `ArenaBuffer` of (count, dimensions) and a `RowsTape` of (tokens, dimensions)
+embeddings, states, token_vectors = encoded  # an `ArenaBuffer` of (count, dimensions), a `RowsTape`, and None
 offsets = np.asarray(states.offsets)  # item `i` spans rows `offsets[i]` up to `offsets[i + 1]`
 ```
 
 `Outputs.EMBEDDINGS` is the default, and a surface left out answers `None` and costs nothing past the final norm.
+`Outputs.TOKEN_VECTORS` keeps the token head's unit vectors, a `RowsTape` of `(tokens, token_width)` on the states' offsets, for late-interaction reranking; a model whose `describe().token_width` is zero raises `UnsupportedError`.
 `outputs_scalar` picks the scalar every output lands as, `Scalar.F32` by default; `Scalar.BF16` outputs export as raw bytes, a `(count, row_bytes)` run of `'B'`.
 `stats=uform.TextEncodeStats()` and its siblings are overwritten with the truncated items and the encoded tokens.
 `progress=handler` is called with `(completed, total)` items, and a handler returning `False` stops the call, which raises `uform.CancelledError`; one that raises stops it too, and its own exception reaches the caller.
+
+## Choices
+
+`text_choose(texts, choices, arena)` scores each text's legal single-byte choices through one forward, a softmax over them alone at the calibrated inverse temperature of the text's question type:
+
+```python
+probabilities = model.text_choose(["keep this candidate? ", "expand which neighbour? "], ["yn", "ABCD"], arena)
+offsets = np.asarray(probabilities.offsets)  # [0, 2, 6]: one float32 per choice, in `choices` order
+```
+
+`temperature_groups` names each text's question type, below the model's `choice_temperature_groups`, and `None` puts every text in group zero.
+A model without the byte decoder, its `choice_temperature_groups` zero, raises `UnsupportedError`.
 
 ## Models
 
 `uform.Model.load_ram(path)` and `uform.Model.load_vram(path, devices=[0])` copy a safetensors checkpoint into host memory or onto GPUs, and `load_ram_buffer` and `load_vram_buffer` take the checkpoint's bytes instead.
 Each takes `quantization`, `Scalar.BF16` as stored or `Scalar.E4M3` quantized at load, an optional `executor` the load runs on, and a `progress` handler.
-`model.describe()` answers a `uform.ModelDescription` of `dimensions`, `context`, `quantization`, `memory_usage` and `capabilities`.
+The RAM loads take a `cpu_class` pin and the VRAM loads a `gpu_class` pin, and a class the hardware cannot run raises `UnsupportedError`.
+`model.describe()` answers a `uform.ModelDescription` of `dimensions`, `context`, `quantization`, `memory_usage`, `capabilities`, `cpu_class`, `gpu_class`, `token_width` and `choice_temperature_groups`.
 
 ## Training
 
@@ -137,7 +153,9 @@ trainer.save("checkpoint.safetensors")
 ```
 
 `BatchShape` nests an `ImageShape`, a `VideoShape` and an `AudioShape`, each also taken as a tuple of its fields in order.
-`Masking`, `Contrastive` and `Schedule` configure the objectives, and `Relations` holds three `Edges` sets of buffers: `size_t` offsets, `uint32` ids and optional `float32` weights.
+`Masking`, `Contrastive`, `LateInteraction`, `Choices` and `Schedule` configure the objectives, and `Relations` holds three `Edges` sets of buffers: `size_t` offsets, `uint32` IDs and optional `float32` weights.
+`Contrastive` and `LateInteraction` take a `uform.PairLossForm`, and `trainer.step` takes each item's `uform.LateInteractionSide` as `sides`.
+A `ChoicesView` of `size_t` offsets, `uint8` bytes and `float32` targets trains the calibrated choices, within the batch's `max_choices_per_item`.
 `trainer.step` answers the pooled embeddings the loss scored when given an `arena`, and `None` otherwise.
 `mesh.describe()` answers a `uform.MeshDescription`, its `multimem_tier` a `uform.MultimemTier`.
 

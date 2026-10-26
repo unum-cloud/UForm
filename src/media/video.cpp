@@ -16,7 +16,7 @@ extern "C" {
 #include <libswscale/swscale.h>   // vendor-boundary: `sws_*`, `SwsContext`
 }
 
-#include "media/video.hpp"
+#include "uform/media/video.hpp"
 
 namespace um = unum::uform::media;
 using namespace um;

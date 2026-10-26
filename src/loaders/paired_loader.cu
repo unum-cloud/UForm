@@ -18,7 +18,7 @@
 
 #include <cuda.h> // `cuStreamSynchronize`
 
-#include "loaders/paired_loader.cuh"
+#include "uform/loaders/paired_loader.cuh"
 
 namespace uc = unum::uform::core;
 namespace ul = unum::uform::loaders;

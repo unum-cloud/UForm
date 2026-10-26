@@ -1,9 +1,10 @@
 /**
- *  @brief The Base pre-training library: one @ref trainer_config_t run description and one @ref base_replica_t model
- *      copy per GPU, composed by @c trainer_t in @c src/train/trainer.hpp .
- *  @file src/train/base.cuh
+ *  @file include/uform/train/base.cuh
  *  @author Ash Vardanian
  *  @date July 6, 2026
+ *  @brief The Base pre-training library: one @ref trainer_config_t run description and one
+ *      @ref base_replica_t model copy per GPU, composed by @c trainer_t in
+ *      @c include/uform/train/trainer.hpp .
  *
  *  Declared here, defined in @c src/train/base.cu , and consumed by the composition in @c src/train/trainer.cu ,
  *  which the training binary ( @c tools/base.cu ), the conformance test ( @c test/base.cu ) and the C verbs
@@ -32,15 +33,15 @@
 
 #include <array> // `std::array` — the summand pairs
 
-#include "core/array.hpp"                // `per_gpu_array`
-#include "core/checkpoint.hpp"           // `checkpoint_to_load_t`
-#include "core/gpu_allocators.hpp"       // `gpu_arena_t`
-#include "core/schedule.cuh"             // `gpu_stream_t`, replay graphs
-#include "core/introspect.cuh"           // `telemetry_losses_k` and the other ledger channels
-#include "core/multimodal_batch.cuh"     // `multimodal_batch_shape_t`, `multimodal_batch_on_gpu_t`, `modality_t`
-#include "core/multimodal_masking.hpp"   // `masking_recipe_t`, the masked heads
-#include "core/contrastive_segments.cuh" // `max_matryoshka_prefixes_k`, `contrastive_relations_t`
-#include "core/encoder_tower.hpp"        // `encoder_tower_bf16_t`
+#include "uform/core/array.hpp"                // `per_gpu_array`
+#include "uform/core/checkpoint.hpp"           // `checkpoint_to_load_t`
+#include "uform/core/contrastive_segments.cuh" // `max_matryoshka_prefixes_k`, `contrastive_relations_t`
+#include "uform/core/encoder_tower.hpp"        // `encoder_tower_bf16_t`
+#include "uform/core/gpu_allocators.hpp"       // `gpu_arena_t`
+#include "uform/core/introspect.cuh"           // `telemetry_losses_k` and the other ledger channels
+#include "uform/core/multimodal_batch.cuh"     // `multimodal_batch_shape_t`, `multimodal_batch_on_gpu_t`, `modality_t`
+#include "uform/core/multimodal_masking.hpp"   // `masking_recipe_t`, the masked heads
+#include "uform/core/schedule.cuh"             // `gpu_stream_t`, replay graphs
 
 namespace unum::uform::train {
 
@@ -143,8 +144,8 @@ inline constexpr trainer_tier_t trainer_tiers_k[] = {
 };
 
 /** One run's whole description, parsed once and threaded by const reference. The modality mixture is the
- *  @ref batch envelope itself: a media modality trains iff its nested slice is live, and the token head is
- *  present whenever the objective reconstructs. */
+ *  @ref batch envelope itself: a media modality trains iff its nested slice is live, and the byte
+ *  decoder is present whenever the objective reconstructs or the run chooses. */
 struct trainer_config_t {
 
     /** The batch envelope — the aggregate row / segment / column budgets plus each modality's own
@@ -198,6 +199,10 @@ struct trainer_config_t {
     /** The late-interaction loss over the token head, beside the pooled one when its weight is
      *  positive. */
     late_interaction_config_t late_interaction {};
+
+    /** The calibrated choices over the byte decoder, beside every other term when its weight is
+     *  positive. */
+    choices_config_t choices {};
 
     /** The tensor-condition-regularization distortion target @c ε² . Not consumed anywhere yet —
      *  carried from the validated draft envelope until the regularizer lands. */
@@ -290,6 +295,9 @@ struct trainer_config_t {
 
     /** Whether the run trains the token head through the late-interaction loss. */
     [[nodiscard]] bool late_interacts() const noexcept { return late_interaction.weight > 0.0f; }
+
+    /** Whether the run trains calibrated choices through the byte decoder. */
+    [[nodiscard]] bool chooses() const noexcept { return choices.weight > 0.0f; }
 };
 
 /**
@@ -309,7 +317,8 @@ struct base_replica_t {
     /** The input batch; after @ref prepare its tokens / media carry the distorted stream. */
     multimodal_batch_on_gpu_t batch {};
 
-    /** The span-masking corruptor + untied byte decoder with fused cross-entropy. */
+    /** The span-masking corruptor + untied byte decoder with fused cross-entropy, present when the
+     *  run reconstructs or chooses. */
     masked_tokens_t tokens {};
 
     /** The image / video masked-patch reconstruction heads. */
@@ -335,8 +344,13 @@ struct base_replica_t {
      *  multiple of @c report_every . */
     f32r1_tensor_arena_t tokens_summands {}, image_summands {}, video_summands {}, audio_summands {};
 
+    /** The choices term's @c {λ·Σ, count} pair, present when the run chooses, reset with the
+     *  heads'. */
+    f32r1_tensor_arena_t choices_summands {};
+
     /** The one shared @c d(normalized) @b [max_tokens, hidden] every live head accumulates into (the
-     *  token head overwrites first, media heads add) and the tower's backward consumes. */
+     *  token head overwrites first, media heads and the choices add) and the tower's backward
+     *  consumes. */
     bf16r2_tensor_arena_t normalized_grad {};
 
     /** The pooled vertices @b [max_segments, hidden] the contrastive loss scores, and their forces. */
@@ -389,9 +403,10 @@ struct base_replica_t {
     [[nodiscard]] expected_t prepare(trainer_config_t const &config, data_epoch_t data_epoch,
                                      gpu_stream_t &stream) noexcept;
 
-    /** The captured forward region: tower forward, pooling into @ref vertices when they exist, then every
-     *  live head scores its clean target into @ref normalized_grad . Pure enqueue, shape-stable. */
-    [[nodiscard]] expected_t forward_region(gpu_stream_t &stream) noexcept;
+    /** The captured forward region: tower forward, pooling into @ref vertices when they exist, then
+     *  every live head scores its clean target into @ref normalized_grad , and the choices term of
+     *  @p config adds its force there. Pure enqueue, shape-stable. */
+    [[nodiscard]] expected_t forward_region(trainer_config_t const &config, gpu_stream_t &stream) noexcept;
 
     /** The captured backward region: the tower's backward from the vertex forces, the masked forces
      *  and the token-vector forces, joined at the final-norm states. Pure enqueue, shape-stable. */
@@ -406,14 +421,15 @@ struct base_replica_t {
 
   private:
 
-    /** The four summand pairs in @ref modality_t order, the absent heads' empty. */
-    [[nodiscard]] std::array<f32r1_tensor_arena_t *, 4> summand_pairs_() noexcept {
-        return {&tokens_summands, &image_summands, &video_summands, &audio_summands};
+    /** The four summand pairs in @ref modality_t order, then the choices', absent ones empty. */
+    [[nodiscard]] std::array<f32r1_tensor_arena_t *, 5> summand_pairs_() noexcept {
+        return {&tokens_summands, &image_summands, &video_summands, &audio_summands, &choices_summands};
     }
 };
 
 /** @p shape at @p rows rows, with as many segments as @p segments_per_row fill them, at least one
- *  per row and at most one per cell. The only writer of the row and segment budgets. */
+ *  per row and at most one per cell, and its bags keeping their share of the segments. The only
+ *  writer of the row and segment budgets. */
 [[nodiscard]] multimodal_batch_shape_t batch_capacity(multimodal_batch_shape_t shape, std::size_t rows,
                                                       f64_t segments_per_row) noexcept;
 
@@ -426,6 +442,9 @@ struct base_replica_t {
 /**
  *  @brief Upload every matrix of @p weights from @p checkpoint by name, all or nothing, on @p stream ; the caller
  *      drains before the checkpoint is released.
+ *
+ *  A @c masked_tokens decoder or a @c token_head.* matrix the checkpoint misses is re-seeded as
+ *  @ref seed_weights seeds it, so a run adds the head its base never trained.
  *  @retval status_t::invalid_input_k A matrix the checkpoint misses.
  *  @retval status_t::shape_unsupported_k A matrix of another shape.
  */

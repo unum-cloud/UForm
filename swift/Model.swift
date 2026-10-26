@@ -20,6 +20,15 @@ public struct ModelDescription: Sendable {
     public var memoryUsage: Int
     /// The codename of the kernels the model dispatched to on this machine.
     public var capabilities: String
+    /// The class a RAM model's tower was packed for, or nil for a VRAM model.
+    public var cpuClass: CPUClass?
+    /// The class every replica of a VRAM model runs as, or nil for a RAM model.
+    public var gpuClass: GPUClass?
+    /// Scalars per token vector; zero when the checkpoint carries no token head.
+    public var tokenWidth: Int
+    /// Question types the choice temperatures were calibrated over: zero without the byte decoder, one when
+    /// uncalibrated.
+    public var choiceTemperatureGroups: Int
 
     init(_ raw: uform_model_description_t) {
         dimensions = raw.dimensions
@@ -27,6 +36,10 @@ public struct ModelDescription: Sendable {
         quantization = Scalar(raw: raw.quantization)
         memoryUsage = raw.memory_usage
         capabilities = raw.capabilities.map { String(cString: $0) } ?? ""
+        cpuClass = CPUClass(reported: raw.cpu_class)
+        gpuClass = GPUClass(reported: raw.gpu_class)
+        tokenWidth = raw.token_width
+        choiceTemperatureGroups = raw.choice_temperature_groups
     }
 }
 
@@ -46,12 +59,13 @@ public final class Model: @unchecked Sendable {
 
     /// Copies a safetensors checkpoint file into host memory on `memoryDomains`, an empty list deriving every
     /// node the process may allocate on, and packs it for the CPU. `quantization` is the scalar the blocks run
-    /// in: `bf16` as stored, or `e4m3` quantized at load. `progress` hears tensors placed. Calls
-    /// `uform_model_load_ram`.
+    /// in: `bf16` as stored, or `e4m3` quantized at load. A `cpuClass` packs as if the CPU were of that class; nil
+    /// derives its own. `progress` hears tensors placed. Calls `uform_model_load_ram`.
     public static func loadRam(
         path: String,
         executor: Executor? = nil,
         memoryDomains: [Int32] = [],
+        cpuClass: CPUClass? = nil,
         quantization: Scalar = .bf16,
         progress: Progress? = nil,
         progressSteps: Int = 0
@@ -64,10 +78,7 @@ public final class Model: @unchecked Sendable {
             outcome: landing.outcome,
             completion: landing.completion,
             path: landing.lend(path),
-            ram: uform_ram_options_t(
-                memory_domains: landing.lend(memoryDomains),
-                memory_domains_count: memoryDomains.count
-            ),
+            ram: landing.ram(memoryDomains, cpuClass),
             quantization: quantization.raw,
             progress: landing.lend(progress, steps: progressSteps)
         )
@@ -81,6 +92,7 @@ public final class Model: @unchecked Sendable {
         _ buffer: RawSpan,
         executor: Executor? = nil,
         memoryDomains: [Int32] = [],
+        cpuClass: CPUClass? = nil,
         quantization: Scalar = .bf16,
         progress: Progress? = nil,
         progressSteps: Int = 0
@@ -94,10 +106,7 @@ public final class Model: @unchecked Sendable {
                 outcome: landing.outcome,
                 completion: landing.completion,
                 buffer: uform_bytes_view_t(bytes),
-                ram: uform_ram_options_t(
-                    memory_domains: landing.lend(memoryDomains),
-                    memory_domains_count: memoryDomains.count
-                ),
+                ram: landing.ram(memoryDomains, cpuClass),
                 quantization: quantization.raw,
                 progress: landing.lend(progress, steps: progressSteps)
             )
@@ -107,11 +116,13 @@ public final class Model: @unchecked Sendable {
     }
 
     /// Copies a checkpoint file onto the named GPUs, replicated on each, an empty list deriving one free device,
-    /// and packs it there. Calls `uform_model_load_vram`.
+    /// and packs it there. A `gpuClass` dispatches every device as that class; nil derives theirs. Calls
+    /// `uform_model_load_vram`.
     public static func loadVram(
         path: String,
         executor: Executor? = nil,
         devices: [Int32] = [],
+        gpuClass: GPUClass? = nil,
         quantization: Scalar = .bf16,
         progress: Progress? = nil,
         progressSteps: Int = 0
@@ -124,7 +135,7 @@ public final class Model: @unchecked Sendable {
             outcome: landing.outcome,
             completion: landing.completion,
             path: landing.lend(path),
-            vram: uform_vram_options_t(devices: landing.lend(devices), devices_count: devices.count),
+            vram: landing.vram(devices, gpuClass),
             quantization: quantization.raw,
             progress: landing.lend(progress, steps: progressSteps)
         )
@@ -138,6 +149,7 @@ public final class Model: @unchecked Sendable {
         _ buffer: RawSpan,
         executor: Executor? = nil,
         devices: [Int32] = [],
+        gpuClass: GPUClass? = nil,
         quantization: Scalar = .bf16,
         progress: Progress? = nil,
         progressSteps: Int = 0
@@ -151,7 +163,7 @@ public final class Model: @unchecked Sendable {
                 outcome: landing.outcome,
                 completion: landing.completion,
                 buffer: uform_bytes_view_t(bytes),
-                vram: uform_vram_options_t(devices: landing.lend(devices), devices_count: devices.count),
+                vram: landing.vram(devices, gpuClass),
                 quantization: quantization.raw,
                 progress: landing.lend(progress, steps: progressSteps)
             )

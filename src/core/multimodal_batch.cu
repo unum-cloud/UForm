@@ -10,7 +10,7 @@
  *  routes in-register from the keyed bijection, so the mixer owns no memory at all; the coordinate adapter
  *  is equally a pure enqueue.
  */
-#include "core/multimodal_batch.cuh"
+#include "uform/core/multimodal_batch.cuh"
 
 namespace uc = unum::uform::core;
 using namespace uc;
@@ -88,6 +88,15 @@ expected_t uc::fill_coords(u32r1_span_t segment_offsets, u32r1_span_t segment_le
                          frame_stride == 0u ? 1u : frame_stride, coords);
 }
 
+expected_t uc::pad_choices(multimodal_batch_on_gpu_t &batch, gpu_stream_t &stream) noexcept {
+    if (batch.segment_choices.empty()) return {};
+    if (CUresult result = cuMemsetD16Async(device_address(batch.segment_choices.data()), byte_pad_k,
+                                           batch.segment_choices.numel(), stream.get());
+        result != CUDA_SUCCESS)
+        return cuda_failure(result, "choice padding failed");
+    return zero_async(batch.segment_choice_targets.span().flatten<1>(), stream);
+}
+
 /** One member's batch, the gather kernels' read view of a peer. Carries every per-segment
  *  descriptor and every modality's content as @b [cells,scalars] rows, so a routed segment's media
  *  survives the cross-GPU shuffle, not just its tokens. Positions index the flat @c tokens run. A
@@ -103,6 +112,8 @@ struct batch_source_t_ {
     nk::tensor_view<u16_t, 2> image_shapes {}, video_shapes {};
     nk::tensor_view<pixel_t, 2> images {}, videos {};
     f32r2_view_t audio_samples {};
+    nk::tensor_view<token_id_t, 2> segment_choices {};
+    f32r2_view_t segment_choice_targets {};
 };
 
 /** This member's mixed batch, the gather kernel's scatter target. Mirrors the routed descriptors
@@ -118,6 +129,8 @@ struct batch_dest_t_ {
     nk::tensor_span<u16_t, 2> image_shapes {}, video_shapes {};
     nk::tensor_span<pixel_t, 2> images {}, videos {};
     f32r2_span_t audio_samples {};
+    nk::tensor_span<token_id_t, 2> segment_choices {};
+    f32r2_span_t segment_choice_targets {};
 };
 
 /** The sentinel the mixer's routing scratch carries for a mixed PAD segment that has no world
@@ -335,13 +348,13 @@ static __global__ void batch_world_geometry_kernel_(sources_type_ sources, u32r2
  *      segment).
  *
  *  It copies the peer's per-segment descriptors ( @ref batch_source_t_::segment_modality , the
- *  role, prefix, key and side, and the image / video @c *_shapes rows — thread 0, so the mixed
- *  batch is fully typed) and then, dispatching on the segment's modality, copies its content (
- *  @c tokens , or the @c [begin,begin+columns) rows of patch, tube or frame cells) from the peer's
- *  loaded batch into this member's mixed batch, threads striding the run. A sourceless PAD (a
- *  dropped bag or the unclaimed tail) is a @c text_k anchor outside late interaction and carries
- *  nothing, and every PAD is keyless. The destination geometry is what @ref batch_geometry_kernel_
- *  wrote.
+ *  role, prefix, key and side, the choice and target rows, and the image / video @c *_shapes rows —
+ *  thread 0, so the mixed batch is fully typed) and then, dispatching on the segment's modality,
+ *  copies its content ( @c tokens , or the @c [begin,begin+columns) rows of patch, tube or frame
+ *  cells) from the peer's loaded batch into this member's mixed batch, threads striding the run. A
+ *  sourceless PAD (a dropped bag or the unclaimed tail) is a @c text_k anchor outside late
+ *  interaction that makes no choice and carries nothing, and every PAD is keyless. The destination
+ *  geometry is what @ref batch_geometry_kernel_ wrote.
  *
  *  __grid_size__ @c [segments_per_gpu,1,1] , threads stripe the content run; no dynamic shared memory.
  */
@@ -358,6 +371,10 @@ static __global__ void batch_gather_kernel_(sources_type_ sources, batch_dest_t_
         if (!dest.segment_prefix_length.empty()) dest.segment_prefix_length[segment] = 0u;
         if (!dest.segment_key.empty()) dest.segment_key[segment] = 0u;
         if (!dest.segment_side.empty()) dest.segment_side[segment] = late_interaction_side_t::none_k;
+        for (std::size_t choice = 0; choice != dest.segment_choices.extent(1); ++choice) {
+            dest.segment_choices[segment, choice] = byte_pad_k;
+            dest.segment_choice_targets[segment, choice] = 0.0f;
+        }
         return;
     }
     batch_source_t_ const &peer = sources[source / segments_per_gpu];
@@ -379,6 +396,10 @@ static __global__ void batch_gather_kernel_(sources_type_ sources, batch_dest_t_
             for (u32_t i = 0; i != 2u; ++i) dest.image_shapes[segment, i] = peer.image_shapes[source_segment, i];
         if (!dest.video_shapes.empty() && !peer.video_shapes.empty())
             for (u32_t i = 0; i != 3u; ++i) dest.video_shapes[segment, i] = peer.video_shapes[source_segment, i];
+        for (std::size_t choice = 0; choice != dest.segment_choices.extent(1); ++choice) {
+            dest.segment_choices[segment, choice] = peer.segment_choices[source_segment, choice];
+            dest.segment_choice_targets[segment, choice] = peer.segment_choice_targets[source_segment, choice];
+        }
     }
 
     u32_t const columns = mixed_lengths[segment];
@@ -428,7 +449,7 @@ static __global__ void batch_world_keys_kernel_(sources_type_ sources, u32r2_vie
     }
 }
 
-/** The fourteen batch tensors, in their fixed block-serialization order — the index into a
+/** The sixteen batch tensors, in their fixed block-serialization order — the index into a
  *  @ref batch_block_layout_t_ . A fixed family, so it is an enum, not a run of constants; every GPU
  *  shares one shape, so the order (and thus every landing's byte layout) is identical across
  *  multimem_domains. */
@@ -447,10 +468,12 @@ enum batch_block_tensor_t_ : u32_t {
     block_images_k = 11,
     block_videos_k = 12,
     block_audio_samples_k = 13,
+    block_segment_choices_k = 14,
+    block_segment_choice_targets_k = 15,
 };
 
 /** How many tensors one exchanged block serializes — the extent of @ref batch_block_tensor_t_ . */
-static constexpr u32_t block_tensor_count_k = block_audio_samples_k + 1u;
+static constexpr u32_t block_tensor_count_k = block_segment_choice_targets_k + 1u;
 
 /**
  *  @brief The serialization map of one @ref multimodal_batch_on_gpu_t inside an exchanged block: a
@@ -517,6 +540,9 @@ struct batch_block_layout_t_ {
     layout.byte_counts[block_audio_samples_k] = shape.contains(modality_t::audio_k)
                                                     ? cells * shape.audio.chunk_samples * sizeof(f32_t)
                                                     : 0u;
+    std::size_t const choices = segments * shape.max_choices_per_segment;
+    layout.byte_counts[block_segment_choices_k] = choices * sizeof(token_id_t);
+    layout.byte_counts[block_segment_choice_targets_k] = choices * sizeof(f32_t);
     std::size_t running = 0;
     for (u32_t tensor = 0; tensor != block_tensor_count_k; ++tensor) {
         layout.offsets[tensor] = round_up_to_multiple(running, cache_line_bytes_k);
@@ -546,6 +572,8 @@ static batch_source_t_ source_from_loaded_(multimodal_batch_on_gpu_t const &load
     source.images = as_rows(loaded.images, cells);
     source.videos = as_rows(loaded.videos, cells);
     source.audio_samples = as_rows(loaded.audio_samples, cells);
+    source.segment_choices = loaded.segment_choices.view();
+    source.segment_choice_targets = loaded.segment_choice_targets.view();
     return source;
 }
 
@@ -586,6 +614,8 @@ struct batch_windows_t_ {
         source.images = as_rows(region_<pixel_t>(block, block_images_k), cells);
         source.videos = as_rows(region_<pixel_t>(block, block_videos_k), cells);
         source.audio_samples = as_rows(region_<f32_t>(block, block_audio_samples_k), cells);
+        source.segment_choices = as_rows(region_<token_id_t>(block, block_segment_choices_k), segments);
+        source.segment_choice_targets = as_rows(region_<f32_t>(block, block_segment_choice_targets_k), segments);
         return source;
     }
 };
@@ -618,6 +648,8 @@ static expected_t pack_batch_into_block_(multimodal_batch_on_gpu_t const &loaded
         {block_images_k, loaded.images.data()},
         {block_videos_k, loaded.videos.data()},
         {block_audio_samples_k, loaded.audio_samples.data()},
+        {block_segment_choices_k, loaded.segment_choices.data()},
+        {block_segment_choice_targets_k, loaded.segment_choice_targets.data()},
     };
     for (block_copy_t_ const &copy : copies) {
         std::size_t const bytes = layout.byte_count(copy.tensor);
@@ -657,6 +689,8 @@ static expected_t mix_(sources_type_ const &sources, multimodal_batch_on_gpu_t &
     dest.images = as_rows(mixed.images, cells);
     dest.videos = as_rows(mixed.videos, cells);
     dest.audio_samples = as_rows(mixed.audio_samples, cells);
+    dest.segment_choices = mixed.segment_choices.span();
+    dest.segment_choice_targets = mixed.segment_choice_targets.span();
 
     u32r1_span_t const mixed_offsets = mixed.segment_offsets.span(), mixed_lengths = mixed.segment_lengths.span();
     u32r1_span_t const mixed_bags = mixed.segment_bag.span();

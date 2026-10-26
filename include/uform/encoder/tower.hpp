@@ -35,11 +35,11 @@
 #include <numkong/capabilities.h> // `nk_stream_t`, `nk_status_t`
 #include <numkong/memory.hpp>     // `nk::allocator` — packs on NumKong's alignment
 
-#include "uform/core/types.hpp"            // `expected`, `expected_t`, the scalar aliases, `st::basic_vector`
 #include "uform/core/checkpoint.hpp"       // `checkpoint_to_load_t`
 #include "uform/core/multimodal_batch.hpp" // `multimodal_batch_view_t`
-#include "uform/encoder/geometry.hpp"      // `geometry_t`
+#include "uform/core/types.hpp"            // `expected`, `expected_t`, the scalar aliases, `st::basic_vector`
 #include "uform/encoder/entries.hpp"       // `rope_angles_t`, `segment_layout_t`, `e4m3_range_k`
+#include "uform/encoder/geometry.hpp"      // `geometry_t`
 #include "uform/encoder/ram_kits.hpp"      // `serial_elementwise_kit_t` — the host staging of every load
 
 namespace unum::uform::encoder {

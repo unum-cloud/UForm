@@ -1,8 +1,9 @@
 /**
- *  @brief Image and video planning: how many patches an item earns, how they factor, and what gets cropped.
- *  @file src/media/planning.hpp
+ *  @file include/uform/media/planning.hpp
  *  @author Ash Vardanian
  *  @date July 4, 2026
+ *  @brief Image and video planning: how many patches an item earns, how they factor, and what gets
+ *      cropped.
  *
  *  The NVIDIA loaders, the host decoders and inference all plan through these functions, so an item tiles into
  *  the same grid on every residency. They are pure integer arithmetic over native extents and the batch
@@ -10,8 +11,8 @@
  */
 #pragma once
 
-#include "uform/core/types.hpp"            // the scalar aliases
 #include "uform/core/multimodal_batch.hpp" // `video_batch_shape_t`
+#include "uform/core/types.hpp"            // the scalar aliases
 
 namespace unum::uform::media {
 

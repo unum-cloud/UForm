@@ -1,9 +1,9 @@
 /**
- *  @brief The NVIDIA half of the multimodal batch: its device and pinned residencies, the coordinate fill, and the
- *      mixer that shuffles batches across GPUs.
- *  @file src/core/multimodal_batch.cuh
+ *  @file include/uform/core/multimodal_batch.cuh
  *  @author Ash Vardanian
  *  @date July 3, 2026
+ *  @brief The NVIDIA half of the multimodal batch: its device and pinned residencies, the
+ *      coordinate fill, and the mixer that shuffles batches across GPUs.
  *
  *  The batch contract itself — shapes, the allocator-parameterized @ref multimodal_batch , and its views — lives
  *  in @c multimodal_batch.hpp and compiles without CUDA. See its file comment for the layout and the flow.
@@ -14,11 +14,11 @@
 
 #include <span> // `std::span` — the mixer borrows the composition root's per-GPU tables as views
 
-#include "core/multimodal_batch.hpp"       // the shape, the batch template, the views, `modality_t`
-#include "core/gpu_allocators.hpp"         // `gpu_arena_alloc_t`, `pinned_alloc_t`
-#include "core/schedule.cuh"               // `gpu_stream_t` — the mixer's enqueue surface
-#include "core/multimem_collectives.cuh"   // `multimem_domain_t` — the barrier the exchange brackets
-#include "core/infiniband_collectives.cuh" // `colocated_domain_t` — the cross-host_domain lane
+#include "uform/core/gpu_allocators.hpp"         // `gpu_arena_alloc_t`, `pinned_alloc_t`
+#include "uform/core/infiniband_collectives.cuh" // `colocated_domain_t` — the cross-host_domain lane
+#include "uform/core/multimem_collectives.cuh"   // `multimem_domain_t` — the barrier the exchange brackets
+#include "uform/core/multimodal_batch.hpp"       // the shape, the batch template, the views, `modality_t`
+#include "uform/core/schedule.cuh"               // `gpu_stream_t` — the mixer's enqueue surface
 
 namespace unum::uform::core {
 
@@ -47,6 +47,10 @@ using multimodal_batch_on_cpu_t = multimodal_batch<pinned_alloc_t>;
                                      modality_span_t segment_modality, image_shape_view_t image_shapes,
                                      video_shape_view_t video_shapes, u32_t tube_frames, u32_t frame_stride,
                                      i16r2_span_t coords, gpu_stream_t &stream) noexcept;
+
+/** Mark every segment of @p batch as making no choice, @c byte_pad_k across its choice rows and
+ *  zero targets, for a source that names none; a batch without choice columns stays as it is. */
+[[nodiscard]] expected_t pad_choices(multimodal_batch_on_gpu_t &batch, gpu_stream_t &stream) noexcept;
 
 /**
  *  @brief Shuffles the loaded batches between the GPUs of one multimem_domain — and, once wired,

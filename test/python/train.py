@@ -21,6 +21,10 @@ def test_structures_default_to_zero():
     assert batch.image is None
     assert uform.Masking().token_mask_probability == 0.0
     assert uform.Contrastive().negatives is uform.Negatives.AMBIENT
+    assert uform.Contrastive().pair_loss is uform.PairLossForm.DERIVED
+    assert uform.LateInteraction(weight=0.5).pair_loss is uform.PairLossForm.DERIVED
+    assert (uform.Choices().weight, uform.Choices().brier_weight) == (0.0, 0.0)
+    assert batch.max_choices_per_item == 0
     assert uform.MeshOptions().directory is None
 
 
@@ -61,10 +65,18 @@ def test_relations_take_edges_or_tuples():
     assert relations.repel.weights is None and relations.ignore is None
 
 
+def test_choices_view_keeps_its_buffers():
+    """A `ChoicesView` keeps its three buffers as given, for the step to lend."""
+    offsets, choice_bytes, targets = array("Q", [0, 2, 2]), b"yn", array("f", [1.0, 0.0])
+    choices = uform.ChoicesView(offsets=offsets, bytes=choice_bytes, targets=targets)
+    assert choices.offsets is offsets and choices.bytes is choice_bytes and choices.targets is targets
+
+
 def test_step_report_starts_empty():
     """A fresh report has counted nothing."""
     stats = uform.TrainerStepStats()
     assert (stats.step, stats.loss, stats.truncated) == (0, 0.0, 0)
+    assert (stats.late_interaction_loss, stats.choices_loss) == (0.0, 0.0)
     with pytest.raises(TypeError):
         uform.TrainerStepStats(1)
 
@@ -75,6 +87,8 @@ def test_training_enums_spell_the_header():
     assert [member.name for member in uform.Objective] == ["MASKED", "CONTRASTIVE", "JOINT"]
     assert [member.name for member in uform.Negatives] == ["AMBIENT", "NAMED"]
     assert [member.name for member in uform.MultimemTier] == ["SWITCH_REDUCED", "PEER_READ"]
+    assert [member.name for member in uform.PairLossForm] == ["DERIVED", "BALANCED", "RANKED", "SIGMOID"]
+    assert [member.name for member in uform.LateInteractionSide] == ["NONE", "QUERY", "DOCUMENT", "QUERY_AND_DOCUMENT"]
 
 
 def test_mesh_and_trainer_need_a_gpu(executor: uform.Executor, tmp_path: Path):
@@ -90,8 +104,12 @@ def test_mesh_and_trainer_need_a_gpu(executor: uform.Executor, tmp_path: Path):
             depth=2,
             hidden=128,
             objective=uform.Objective.JOINT,
-            batch=uform.BatchShape(max_rows_per_device=4, max_segments_per_device=8, max_columns_per_row=64),
-            contrastive=uform.Contrastive(matryoshka_dimensions=[64, 128]),
+            batch=uform.BatchShape(
+                max_rows_per_device=4, max_segments_per_device=8, max_columns_per_row=64, max_choices_per_item=4
+            ),
+            contrastive=uform.Contrastive(matryoshka_dimensions=[64, 128], pair_loss=uform.PairLossForm.BALANCED),
+            late_interaction=uform.LateInteraction(weight=0.5, width=32),
+            choices=uform.Choices(weight=1.0),
             schedule=uform.Schedule(steps=10),
             seed=42,
         )
@@ -105,6 +123,8 @@ def test_trainer_arguments_are_checked(executor: uform.Executor):
         uform.Trainer.init_vram(executor, mesh=executor)
     with pytest.raises(TypeError):
         uform.Trainer.init_vram(executor, contrastive=uform.Contrastive(matryoshka_dimensions=8))
+    with pytest.raises(TypeError):
+        uform.Trainer.init_vram(executor, choices=uform.LateInteraction())
     with pytest.raises(TypeError):
         uform.Trainer()
     with pytest.raises(TypeError):

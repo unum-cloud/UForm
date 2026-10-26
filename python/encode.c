@@ -2,8 +2,8 @@
  *  @file python/encode.c
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief CPython forward passes: text, images, video and audio in, pooled embeddings and per-token states out,
- *      one verb per input form.
+ *  @brief CPython forward passes: text, images, video and audio in, pooled embeddings, per-token
+ *      states and token vectors out, one verb per input form, plus calibrated choices over texts.
  *
  *  Every verb runs the same tower and keeps whichever surfaces its `outputs` flags name, from one forward. The
  *  flags decide which of the C output pointers the binding passes, so a surface left out costs nothing past the
@@ -15,20 +15,27 @@
 
 #pragma region Outputs
 
-/** The flags of `uform.Outputs`, named after the two output fields of every encode verb. */
+/** The flags of `uform.Outputs`, named after the three output fields of every encode verb. */
 enum {
     outputs_embeddings_k = 1,
     outputs_states_k = 2,
+    outputs_token_vectors_k = 4,
+    outputs_all_k = outputs_embeddings_k | outputs_states_k | outputs_token_vectors_k,
 };
 
 static char const *spell_outputs(int value) {
-    return value == outputs_embeddings_k ? "embeddings" : value == outputs_states_k ? "states" : NULL;
+    switch (value) {
+    case outputs_embeddings_k: return "embeddings";
+    case outputs_states_k: return "states";
+    case outputs_token_vectors_k: return "token-vectors";
+    default: return NULL;
+    }
 }
 
 uform_py_enum_t uform_py_outputs = {.name = "Outputs",
                                     .base = "IntFlag",
                                     .first = outputs_embeddings_k,
-                                    .last = outputs_states_k,
+                                    .last = outputs_token_vectors_k,
                                     .spell = spell_outputs};
 
 /** Reads an `Outputs` flag set, defaulting to embeddings alone; returns 0 or -1 with an exception set. */
@@ -41,23 +48,30 @@ static int outputs_from_object(PyObject *object, int *outputs) {
     }
     long const value = PyLong_AsLong(object);
     if (value == -1 && PyErr_Occurred()) return -1;
-    if (value < 0 || value > (outputs_embeddings_k | outputs_states_k))
+    if (value < 0 || value > outputs_all_k)
         return uform_py_raise(uform_status_invalid_argument_k, "the 'outputs' option holds no such flags: %R", object);
     *outputs = (int)value;
     return 0;
 }
 
-static PyStructSequence_Field Encoded_fields[] = {
-    {"embeddings", "The (count, dimensions) `ArenaBuffer` of pooled embeddings, or None when not asked for."},
-    {"states", "The (tokens, dimensions) `RowsTape` of final-norm states and its offsets, or None when not asked for."},
-    {NULL, NULL},
+static PyStructSequence_Field
+    Encoded_fields
+        [] =
+            {
+                {"embeddings",
+                 "The (count, dimensions) `ArenaBuffer` of pooled embeddings, or None when not asked for."},
+                {"states", "The (tokens, dimensions) `RowsTape` of final-norm states and its offsets, or None when not "
+                           "asked for."},
+                {"token_vectors", "The (tokens, token_width) `RowsTape` of the token head's unit vectors, offset as "
+                                  "the " "states, or " "None when not " "asked for."},
+                {NULL, NULL},
 };
 
 PyStructSequence_Desc uform_py_encoded_desc = {
     "uform.Encoded",
-    "What an encoding wrote into its arena, unpacking as `embeddings, states = encoded`; each views the arena " //
-    "until a later call rewinds it.",
-    Encoded_fields, 2};
+    "What an encoding wrote into its arena, unpacking as `embeddings, states, token_vectors = encoded`; each views " //
+    "the arena until a later call rewinds it.",
+    Encoded_fields, 3};
 
 PyTypeObject EncodedType;
 
@@ -112,10 +126,10 @@ static PyGetSetDef EncodeStats_getset[] = {
     {NULL, NULL, NULL, NULL, NULL},
 };
 
-static char const doc_TextEncodeStats[] =                                      //
-    "TextEncodeStats()\n"                                                      //
-    "\n"                                                                       //
-    "What `text_encode` reports, overwritten by every call it is passed to:\n" //
+static char const doc_TextEncodeStats[] =                                                       //
+    "TextEncodeStats()\n"                                                                       //
+    "\n"                                                                                        //
+    "What `text_encode` and `text_choose` report, overwritten by every call it is passed to:\n" //
     "`truncated` items and `tokens` bytes encoded.";
 
 PyTypeObject TextEncodeStatsType = {
@@ -201,9 +215,10 @@ typedef struct encode_call_t {
     } arguments;
     uform_py_tape_t inputs;
     uform_rows_view_t embeddings;
-    uform_rows_tape_view_t states;
+    uform_rows_tape_view_t states, token_vectors;
 
-    /** Always passed, since its `tokens` is the row count of the states, wherever the arena lives. */
+    /** Always passed, since its `tokens` is the row count of the states and token vectors,
+     *  wherever the arena lives. */
     union {
         uform_text_encode_stats_t text;
         uform_image_encode_stats_t image;
@@ -230,16 +245,20 @@ static PyObject *encode_answer(void *erased) {
         Py_END_CRITICAL_SECTION();
 #endif
     }
-    size_t const count = call->inputs.count;
-    PyObject *fields[2] = {NULL, NULL};
+    size_t const count = call->inputs.count, tokens = call->stats.text.tokens;
+    PyObject *fields[3] = {NULL, NULL, NULL};
     fields[0] = call->outputs & outputs_embeddings_k
                     ? uform_py_rows_answer(&ArenaBufferType, call->call.arena, &call->embeddings, count)
                     : Py_NewRef(Py_None);
     if (fields[0])
         fields[1] = call->outputs & outputs_states_k
-                        ? uform_py_rows_tape_answer(call->call.arena, &call->states, count, call->stats.text.tokens)
+                        ? uform_py_rows_tape_answer(call->call.arena, &call->states, count, tokens)
                         : Py_NewRef(Py_None);
-    return uform_py_struct_sequence_steal(&EncodedType, fields, 2);
+    if (fields[1])
+        fields[2] = call->outputs & outputs_token_vectors_k
+                        ? uform_py_rows_tape_answer(call->call.arena, &call->token_vectors, count, tokens)
+                        : Py_NewRef(Py_None);
+    return uform_py_struct_sequence_steal(&EncodedType, fields, 3);
 }
 
 static void encode_release(void *erased) {
@@ -276,7 +295,7 @@ typedef struct encode_common_t {
     uform_executor_t executor;
     uform_completion_t completion;
     uform_rows_view_t *embeddings;
-    uform_rows_tape_view_t *states;
+    uform_rows_tape_view_t *states, *token_vectors;
     uform_arena_t arena;
     uform_scalar_t outputs_scalar;
     uform_progress_t progress;
@@ -336,6 +355,7 @@ static encode_call_t *encode_open(PyObject *self, encode_verb_t const *descripto
         .completion = receiver->completion,
         .embeddings = outputs & outputs_embeddings_k ? &call->embeddings : NULL,
         .states = outputs & outputs_states_k ? &call->states : NULL,
+        .token_vectors = outputs & outputs_token_vectors_k ? &call->token_vectors : NULL,
         .arena = ((Arena *)call->call.arena)->handle,
         .outputs_scalar = outputs_scalar,
         .progress = uform_py_progress_registered(&call->progress, progress_steps),
@@ -401,7 +421,9 @@ static char const doc_Model_text_encode[] =                                     
     "  texts (Sequence[str | bytes] | tuple[buffer, buffer]): The texts, gathered into one tape,\n"     //
     "    or a (data, offsets) pair of a byte buffer and count + 1 size_t offsets, lent as is.\n"        //
     "  arena (Arena): Where the outputs land, rewound by the call.\n"                                   //
-    "  outputs (Outputs, optional): `Outputs.EMBEDDINGS`, `Outputs.STATES`, or both.\n"                 //
+    "  outputs (Outputs, optional): Any union of `Outputs.EMBEDDINGS`, `Outputs.STATES` and\n"          //
+    "    `Outputs.TOKEN_VECTORS`; a model without a token head raises `UnsupportedError` for\n"         //
+    "    the last.\n"                                                                                   //
     "  outputs_scalar (Scalar, optional): The scalar every output lands as.\n"                          //
     "  progress (callable, optional): Called with (completed, total) items; returning False\n"          //
     "    stops the call and raises `CancelledError`.\n"                                                 //
@@ -409,8 +431,9 @@ static char const doc_Model_text_encode[] =                                     
     "  stats (TextEncodeStats, optional): Overwritten with this call's report.\n"                       //
     "\n"                                                                                                //
     "Returns:\n"                                                                                        //
-    "  Encoded: `embeddings`, a (count, dimensions) `ArenaBuffer`, and `states`, a (tokens,\n"          //
-    "    dimensions) `RowsTape` with `offsets`, each None when `outputs` leaves it out.\n"              //
+    "  Encoded: `embeddings`, a (count, dimensions) `ArenaBuffer`, `states`, a (tokens,\n"              //
+    "    dimensions) `RowsTape` with `offsets`, and `token_vectors`, a (tokens, token_width)\n"         //
+    "    `RowsTape`, each None when `outputs` leaves it out.\n"                                         //
     "\n"                                                                                                //
     "Example:\n"                                                                                        //
     "  >>> model = uform.Model.load_ram_buffer(b'any bytes the stub accepts')\n"                        //
@@ -437,6 +460,7 @@ static PyObject *Model_text_encode(PyObject *self, PyObject *const *args, Py_ssi
         .texts = call->inputs.view,
         .embeddings = common.embeddings,
         .states = common.states,
+        .token_vectors = common.token_vectors,
         .arena = common.arena,
         .outputs_scalar = common.outputs_scalar,
         .progress = common.progress,
@@ -478,6 +502,7 @@ static PyObject *Model_image_encode(PyObject *self, PyObject *const *args, Py_ss
         .images = call->inputs.view,
         .embeddings = common.embeddings,
         .states = common.states,
+        .token_vectors = common.token_vectors,
         .arena = common.arena,
         .outputs_scalar = common.outputs_scalar,
         .progress = common.progress,
@@ -523,6 +548,7 @@ static PyObject *Model_image_encode_pixels(PyObject *self, PyObject *const *args
         .widths = call->inputs.extents ? call->inputs.extents + count : NULL,
         .embeddings = common.embeddings,
         .states = common.states,
+        .token_vectors = common.token_vectors,
         .arena = common.arena,
         .outputs_scalar = common.outputs_scalar,
         .progress = common.progress,
@@ -564,6 +590,7 @@ static PyObject *Model_video_encode(PyObject *self, PyObject *const *args, Py_ss
         .videos = call->inputs.view,
         .embeddings = common.embeddings,
         .states = common.states,
+        .token_vectors = common.token_vectors,
         .arena = common.arena,
         .outputs_scalar = common.outputs_scalar,
         .progress = common.progress,
@@ -605,6 +632,7 @@ static PyObject *Model_audio_encode(PyObject *self, PyObject *const *args, Py_ss
         .recordings = call->inputs.view,
         .embeddings = common.embeddings,
         .states = common.states,
+        .token_vectors = common.token_vectors,
         .arena = common.arena,
         .outputs_scalar = common.outputs_scalar,
         .progress = common.progress,
@@ -663,12 +691,145 @@ static PyObject *Model_audio_encode_samples(PyObject *self, PyObject *const *arg
         .sample_rate = (uint32_t)sample_rate,
         .embeddings = common.embeddings,
         .states = common.states,
+        .token_vectors = common.token_vectors,
         .arena = common.arena,
         .outputs_scalar = common.outputs_scalar,
         .progress = common.progress,
         .stats = &call->stats.audio,
     };
     return uform_py_call_run(&receiver, &audio_encode_samples_verb.verb, call);
+}
+
+/** A @c uform_text_choose call, the inputs it owns or borrows until it is final, and the
+ *  probabilities it lands. */
+typedef struct choose_call_t {
+    uform_py_call_t call;
+    uform_text_choose_t arguments;
+    uform_py_tape_t texts, choices;
+    uform_py_words_t temperature_groups;
+    uform_tape_view_t probabilities;
+    uform_text_encode_stats_t stats;
+
+    /** The caller's report the stats are copied into once the call succeeds, held, or NULL. */
+    PyObject *stats_object;
+    uform_py_callback_t progress;
+} choose_call_t;
+
+static void text_choose_submit(void *call) { uform_text_choose(&((choose_call_t *)call)->arguments); }
+
+static PyObject *choose_answer(void *erased) {
+    choose_call_t *const call = (choose_call_t *)erased;
+    if (call->stats_object) {
+#if PY_VERSION_HEX >= 0x030D0000
+        Py_BEGIN_CRITICAL_SECTION(call->stats_object);
+#endif
+        ((EncodeStats *)call->stats_object)->stats.text = call->stats;
+#if PY_VERSION_HEX >= 0x030D0000
+        Py_END_CRITICAL_SECTION();
+#endif
+    }
+    size_t const count = call->texts.count, *const offsets = call->choices.view.offsets;
+    return uform_py_tape_answer(call->call.arena, &call->probabilities, count, offsets[count] - offsets[0]);
+}
+
+static void choose_release(void *erased) {
+    choose_call_t *const call = (choose_call_t *)erased;
+    uform_py_tape_release(&call->texts);
+    uform_py_tape_release(&call->choices);
+    uform_py_words_release(&call->temperature_groups);
+    Py_CLEAR(call->progress.callable);
+    Py_CLEAR(call->stats_object);
+    uform_py_call_release(&call->call);
+}
+
+static int choose_traverse(void *erased, visitproc visit, void *arg) {
+    choose_call_t *const call = (choose_call_t *)erased;
+    Py_VISIT(call->progress.callable);
+    Py_VISIT(call->stats_object);
+    return 0;
+}
+
+static uform_py_verb_t const text_choose_verb = {sizeof(choose_call_t), text_choose_submit, choose_answer,
+                                                 choose_release, choose_traverse};
+
+static char const doc_Model_text_choose[] =                                                        //
+    "text_choose(texts, choices, arena, /, *, temperature_groups=None, progress=None,\n"           //
+    "    progress_steps=0, stats=None) -> RowsTape\n"                                              //
+    "\n"                                                                                           //
+    "Scores each text's legal choices through one forward, a softmax over them alone at the\n"     //
+    "calibrated inverse temperature of the text's question type. A model without the byte\n"       //
+    "decoder, its `choice_temperature_groups` zero, raises `UnsupportedError`.\n"                  //
+    "Calls `uform_text_choose`.\n"                                                                 //
+    "\n"                                                                                           //
+    "Args:\n"                                                                                      //
+    "  texts (Sequence[str | bytes] | tuple[buffer, buffer]): The states, each ending where the\n" //
+    "    choice goes; one longer than the context loses its head, never its end.\n"                //
+    "  choices (Sequence[str | bytes] | tuple[buffer, buffer]): Each text's legal choices, one\n"  //
+    "    byte each, such as 'yn'; an empty entry chooses nothing.\n"                               //
+    "  arena (Arena): Where the probabilities land, rewound by the call.\n"                        //
+    "  temperature_groups (buffer | Sequence[int], optional): The question type of each text,\n"   //
+    "    below `choice_temperature_groups`; None puts every text in group zero.\n"                 //
+    "  progress, progress_steps: As for `text_encode`.\n"                                          //
+    "  stats (TextEncodeStats, optional): Overwritten with this call's report.\n"                  //
+    "\n"                                                                                           //
+    "Returns:\n"                                                                                   //
+    "  RowsTape: One float32 probability per choice, in `choices` order, split by `offsets`.";
+
+static PyObject *Model_text_choose(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
+                                   PyObject *args_names_tuple) {
+    PyObject *texts_object, *choices_object, *arena_object, *temperature_groups_object, *progress_object,
+        *progress_steps_object, *stats_object;
+    uform_py_argument_t const arguments[] = {
+        {"texts", &texts_object},       {"choices", &choices_object},
+        {"arena", &arena_object},       {"temperature_groups", &temperature_groups_object},
+        {"progress", &progress_object}, {"progress_steps", &progress_steps_object},
+        {"stats", &stats_object},
+    };
+    uform_py_receiver_t receiver;
+    size_t progress_steps = 0;
+    if (uform_py_arguments_parse("text_choose", args, positional_args_count, args_names_tuple, 3, 3, arguments,
+                                 sizeof(arguments) / sizeof(*arguments)) != 0 ||
+        uform_py_receiver_from_object(self, &ModelType, &receiver) != 0 ||
+        uform_py_size_from_object(progress_steps_object, "progress_steps", &progress_steps) != 0)
+        return NULL;
+    if (stats_object && stats_object != Py_None && !Py_IS_TYPE(stats_object, &TextEncodeStatsType)) {
+        PyErr_Format(PyExc_TypeError, "the 'stats' option must be a TextEncodeStats or None, got %S",
+                     Py_TYPE(stats_object));
+        return NULL;
+    }
+
+    choose_call_t stack;
+    choose_call_t *const call = uform_py_call_open(&receiver, &text_choose_verb, &stack);
+    if (!call) return NULL;
+    if (uform_py_tape_from_object(texts_object, "texts", uform_py_element_text_k, &call->texts) != 0 ||
+        uform_py_tape_from_object(choices_object, "choices", uform_py_element_text_k, &call->choices) != 0)
+        return uform_py_call_discard(&receiver, &text_choose_verb, call);
+    size_t const count = call->texts.count;
+    if (call->choices.count != count) {
+        uform_py_raise(uform_status_shape_mismatch_k, "the 'choices' need one entry per text, %zu", count);
+        return uform_py_call_discard(&receiver, &text_choose_verb, call);
+    }
+    if (uform_py_words_from_object(temperature_groups_object, "temperature_groups", count, &call->temperature_groups) !=
+            0 ||
+        uform_py_callback_from_object(progress_object, "progress", &call->call, &call->progress) != 0 ||
+        uform_py_arena_claim(arena_object, &call->call.arena) != 0)
+        return uform_py_call_discard(&receiver, &text_choose_verb, call);
+    if (stats_object && stats_object != Py_None) call->stats_object = Py_NewRef(stats_object);
+    call->arguments = (uform_text_choose_t) {
+        .model = ((Model *)receiver.target)->handle,
+        .executor = receiver.executor,
+        .outcome = &call->call.outcome,
+        .completion = receiver.completion,
+        .count = count,
+        .texts = call->texts.view,
+        .choices = call->choices.view,
+        .temperature_groups = call->temperature_groups.data,
+        .probabilities = &call->probabilities,
+        .arena = ((Arena *)call->call.arena)->handle,
+        .progress = uform_py_progress_registered(&call->progress, progress_steps),
+        .stats = &call->stats,
+    };
+    return uform_py_call_run(&receiver, &text_choose_verb, call);
 }
 
 #pragma endregion Verbs
@@ -684,6 +845,7 @@ PyMethodDef uform_py_encode_verbs[] = {
     {"audio_encode", (PyCFunction)Model_audio_encode, uform_py_method_flags_k, doc_Model_audio_encode},
     {"audio_encode_samples", (PyCFunction)Model_audio_encode_samples, uform_py_method_flags_k,
      doc_Model_audio_encode_samples},
+    {"text_choose", (PyCFunction)Model_text_choose, uform_py_method_flags_k, doc_Model_text_choose},
     {NULL, NULL, 0, NULL},
 };
 

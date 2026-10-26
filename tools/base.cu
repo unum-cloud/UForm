@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date July 6, 2026
  *  @brief The Base training binary — a thin @c main over the training library in
- *      @c src/train/trainer.hpp .
+ *      @c uform/train/trainer.hpp .
  *
  *  It parses the command line into a @ref trainer_config_t , maps the launcher's environment onto
  *  the mesh options, bootstraps the mesh, makes the trainer and its batch source, and steps until
@@ -15,6 +15,10 @@
  *  masked-autoencoder heads (image / video patches, 1-D audio frames) over one heterogeneous batch.
  *  A @c --mixture path to a mixture JSON in @c scripts/mixtures trains on its datasets instead,
  *  lighting the media slices its entries name. @c --eager drops the model-region capture.
+ *
+ *  @c --choices-weight trains calibrated choices through the byte decoder over the mixture's
+ *  @c choices entries, and @c --brier-weight sets the Brier term's weight beside their soft
+ *  cross-entropy, 0.5 unless given.
  */
 #include <cstdlib> // `::setenv`, `std::getenv` — the launcher-contract boundary
 #include <cstring> // `std::strlen`
@@ -23,7 +27,7 @@
 #include <cuda.h>       // `cuInit`, `cuDeviceGetCount`
 #include <fmt/format.h> // `fmt::println`
 
-#include "train/datasets.hpp" // `mixture_t`, `dataset_source_t`, and the trainer
+#include "uform/train/datasets.hpp" // `mixture_t`, `dataset_source_t`, and the trainer
 
 /** Prints a StringZilla view as the text it spans. */
 template <>
@@ -54,8 +58,8 @@ using namespace unum::uform::train;
 /** Step @p trainer from its completed steps to @c config.steps over @p source , with telemetry,
  *  checkpoints and held-out evaluations over @p held_out on cadence, and a checkpoint at the
  *  end. */
-[[nodiscard]] static int step_(trainer_t &trainer, trainer_config_t const &config, batch_source_t &source,
-                               batch_source_t &held_out) noexcept {
+[[nodiscard]] static int step_(trainer_t &trainer, trainer_config_t const &config, batch_source_t source,
+                               batch_source_t held_out) noexcept {
     auto checkpoint = [&]() noexcept {
         expected_t saved = trainer.save(config.checkpoint);
         if (saved)
@@ -158,11 +162,12 @@ using namespace unum::uform::train;
         if (expected_t made = dataset_source_t::make(held_out, trainer, 1); !made)
             return fail_out_(made.description_.view());
     synthetic_source_t synthetic;
-    batch_source_t &evaluated = config.eval_mixture.empty() ? static_cast<batch_source_t &>(synthetic) : held_out;
-    if (config.mixture.empty()) stepped = step_(trainer, config, synthetic, evaluated);
+    batch_source_t const evaluated = config.eval_mixture.empty() ? batch_source_of(synthetic)
+                                                                 : batch_source_of(held_out);
+    if (config.mixture.empty()) stepped = step_(trainer, config, batch_source_of(synthetic), evaluated);
     else if (expected_t made = dataset_source_t::make(datasets, trainer, config.batches_per_fill); !made)
         return fail_out_(made.description_.view());
-    else stepped = step_(trainer, config, datasets, evaluated);
+    else stepped = step_(trainer, config, batch_source_of(datasets), evaluated);
     // No host tears its queue pairs down while a peer still awaits its last acknowledgement.
     if (stepped == 0)
         if (expected_t finished = mesh.topology.barrier("finish", mesh.timeout_seconds); !finished)
@@ -200,6 +205,8 @@ int main(int argc, char **argv) {
         fmt::println("uform_base: mixture {} of {} datasets from {}", mixture.name, mixture.datasets.size(),
                      config.mixture);
     }
+    if (config.chooses() && !config.batch.max_choices_per_segment)
+        return fail_out_("--choices-weight needs a mixture with a \"choices\" entry; pass one or --choices-weight 0");
     // Media runs take rows of two images or recordings; text-only runs take long documents.
     config.batch.max_columns_per_row = config.batch.media_live() ? config.tier.media_columns : config.tier.text_columns;
     fmt::println("uform_base: tier {}: hidden {}, depth {}, {} columns", config.tier.name, config.hidden, config.depth,

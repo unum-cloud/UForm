@@ -132,6 +132,18 @@ int uform_py_register_error_types(PyObject *module) {
 static char const *spell_status(int value) { return uform_status_name((uform_status_t)value); }
 static char const *spell_scalar(int value) { return uform_scalar_name((uform_scalar_t)value); }
 static char const *spell_mood(int value) { return uform_mood_name((uform_mood_t)value); }
+static char const *spell_cpu_class(int value) { return uform_cpu_class_name((uform_cpu_class_t)value); }
+static char const *spell_gpu_class(int value) { return uform_gpu_class_name((uform_gpu_class_t)value); }
+
+/** The C interface spells no vendor, so the binding names the three it lists. */
+static char const *spell_gpu_vendor(int value) {
+    switch (value) {
+    case uform_gpu_vendor_nvidia_k: return "nvidia";
+    case uform_gpu_vendor_amd_k: return "amd";
+    case uform_gpu_vendor_apple_k: return "apple";
+    default: return NULL;
+    }
+}
 
 uform_py_enum_t uform_py_status = {.name = "Status",
                                    .base = "IntEnum",
@@ -148,6 +160,21 @@ uform_py_enum_t uform_py_mood = {.name = "Mood",
                                  .first = uform_mood_parked_k,
                                  .last = uform_mood_spinning_k,
                                  .spell = spell_mood};
+uform_py_enum_t uform_py_cpu_class = {.name = "CPUClass",
+                                      .base = "IntEnum",
+                                      .first = uform_cpu_class_serial_k,
+                                      .last = uform_cpu_class_wasm64_extended_k,
+                                      .spell = spell_cpu_class};
+uform_py_enum_t uform_py_gpu_class = {.name = "GPUClass",
+                                      .base = "IntEnum",
+                                      .first = uform_gpu_class_nvidia_ampere_k,
+                                      .last = uform_gpu_class_apple_metal10_k,
+                                      .spell = spell_gpu_class};
+uform_py_enum_t uform_py_gpu_vendor = {.name = "GPUVendor",
+                                       .base = "IntEnum",
+                                       .first = uform_gpu_vendor_nvidia_k,
+                                       .last = uform_gpu_vendor_apple_k,
+                                       .spell = spell_gpu_vendor};
 
 /** The spelling of @p value, or NULL when no member carries it. */
 static char const *enum_spelling(uform_py_enum_t const *mirrored, long value) {
@@ -186,9 +213,11 @@ static int enum_register(PyObject *module, PyObject *enum_module, PyObject *keyw
 }
 
 int uform_py_register_enums(PyObject *module) {
-    uform_py_enum_t *const mirrored[] = {&uform_py_status,    &uform_py_scalar,       &uform_py_mood,
-                                         &uform_py_outputs,   &uform_py_modality,     &uform_py_objective,
-                                         &uform_py_negatives, &uform_py_multimem_tier};
+    uform_py_enum_t *const mirrored[] = {
+        &uform_py_status,       &uform_py_scalar,     &uform_py_mood,           &uform_py_cpu_class,
+        &uform_py_gpu_class,    &uform_py_gpu_vendor, &uform_py_outputs,        &uform_py_modality,
+        &uform_py_objective,    &uform_py_negatives,  &uform_py_pair_loss_form, &uform_py_late_interaction_side,
+        &uform_py_multimem_tier};
     PyObject *const enum_module = PyImport_ImportModule("enum");
     PyObject *keywords = enum_module ? PyDict_New() : NULL;
     if (keywords && uform_py_dict_steal_item(keywords, "module", PyUnicode_FromString("uform")) != 0)
@@ -223,6 +252,16 @@ PyObject *uform_py_enum_to_object(uform_py_enum_t const *mirrored, int value) {
     PyObject *const member = integer ? PyObject_CallOneArg(mirrored->type, integer) : NULL;
     Py_XDECREF(integer);
     return member;
+}
+
+int uform_py_class_from_object(PyObject *object, char const *field, uform_py_enum_t const *classes, int *value) {
+    *value = 0;
+    if (!object || object == Py_None) return 0;
+    return uform_py_enum_from_object(object, field, classes, value);
+}
+
+PyObject *uform_py_class_to_object(uform_py_enum_t const *classes, int value) {
+    return value ? uform_py_enum_to_object(classes, value) : Py_NewRef(Py_None);
 }
 
 #pragma endregion Enums
@@ -1089,50 +1128,55 @@ int uform_py_executor_optional(PyObject *object, uform_executor_t *executor) {
     return !object || object == Py_None ? 0 : uform_py_executor_from_object(object, executor);
 }
 
-static char const doc_Executor_for_ram[] =                                                   //
-    "for_ram(threads=0, *, memory_domains=None, deferred_limit=0) -> Executor\n"             //
-    "\n"                                                                                     //
-    "Spawns host threads for RAM-resident models, interleaved across the compute domains\n"  //
-    "local to the named memory domains.\n"                                                   //
-    "Calls `uform_executor_for_ram`.\n"                                                      //
-    "\n"                                                                                     //
-    "Args:\n"                                                                                //
-    "  threads (int, optional): Threads to spawn; 0 takes 7/8 of the cores the domains\n"    //
-    "    carry.\n"                                                                           //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs of the models it will\n"      //
-    "    drive; None derives every node the process may allocate on.\n"                      //
-    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a default.\n" //
-    "\n"                                                                                     //
-    "Example:\n"                                                                             //
-    "  >>> with uform.Executor.for_ram(threads=8) as executor:\n"                            //
+static char const doc_Executor_for_ram[] =                                                       //
+    "for_ram(threads=0, *, memory_domains=None, deferred_limit=0, cpu_class=None) -> Executor\n" //
+    "\n"                                                                                         //
+    "Spawns host threads for RAM-resident models, interleaved across the compute domains\n"      //
+    "local to the named memory domains.\n"                                                       //
+    "Calls `uform_executor_for_ram`.\n"                                                          //
+    "\n"                                                                                         //
+    "Args:\n"                                                                                    //
+    "  threads (int, optional): Threads to spawn; 0 takes 7/8 of the cores the domains\n"        //
+    "    carry.\n"                                                                               //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs of the models it will\n"          //
+    "    drive; None derives every node the process may allocate on.\n"                          //
+    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a default.\n"     //
+    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.\n"  //
+    "\n"                                                                                         //
+    "Example:\n"                                                                                 //
+    "  >>> with uform.Executor.for_ram(threads=8) as executor:\n"                                //
     "  ...     executor.drain()";
 
 static PyObject *Executor_for_ram(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
                                   PyObject *args_names_tuple) {
-    PyObject *threads_object, *memory_domains_object, *deferred_limit_object;
+    PyObject *threads_object, *memory_domains_object, *deferred_limit_object, *cpu_class_object;
     uform_py_argument_t const arguments[] = {
         {"threads", &threads_object},
         {"memory_domains", &memory_domains_object},
         {"deferred_limit", &deferred_limit_object},
+        {"cpu_class", &cpu_class_object},
     };
     size_t threads = 0, deferred_limit = 0;
+    int cpu_class = 0;
     int32_t *memory_domains = NULL;
     size_t memory_domains_count = 0;
     if (uform_py_arguments_parse("for_ram", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
         uform_py_size_from_object(threads_object, "threads", &threads) != 0 ||
         uform_py_size_from_object(deferred_limit_object, "deferred_limit", &deferred_limit) != 0 ||
+        uform_py_class_from_object(cpu_class_object, "cpu_class", &uform_py_cpu_class, &cpu_class) != 0 ||
         uform_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                       &memory_domains_count) != 0)
         return NULL;
 
     uform_executor_t handle = NULL;
     uform_outcome_t outcome = {0};
-    uform_executor_for_ram_t executor_arguments = {.executor = &handle,
-                                                   .outcome = &outcome,
-                                                   .ram = {memory_domains, memory_domains_count},
-                                                   .threads = threads,
-                                                   .deferred_limit = deferred_limit};
+    uform_executor_for_ram_t executor_arguments = {
+        .executor = &handle,
+        .outcome = &outcome,
+        .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class},
+        .threads = threads,
+        .deferred_limit = deferred_limit};
     Py_BEGIN_ALLOW_THREADS;
     uform_executor_for_ram(&executor_arguments);
     Py_END_ALLOW_THREADS;
@@ -1143,7 +1187,7 @@ static PyObject *Executor_for_ram(PyTypeObject *type, PyObject *const *args, Py_
 }
 
 static char const doc_Executor_on_pool[] =                                                     //
-    "on_pool(pool, /, *, memory_domains=None, deferred_limit=0) -> Executor\n"                 //
+    "on_pool(pool, /, *, memory_domains=None, deferred_limit=0, cpu_class=None) -> Executor\n" //
     "\n"                                                                                       //
     "Drives RAM-resident models on a ForkUnion pool another library already spawned, so\n"     //
     "UForm, USearch and UStore in one process share one set of threads while each keeps its\n" //
@@ -1156,20 +1200,24 @@ static char const doc_Executor_on_pool[] =                                      
     "    pointers over; the pool must outlive the executor.\n"                                 //
     "  memory_domains (Sequence[int], optional): NUMA node IDs of the models it will\n"        //
     "    drive; None derives every node the process may allocate on.\n"                        //
-    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a default.";
+    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a default.\n"   //
+    "  cpu_class (CPUClass, optional): The class to dispatch as; None derives the CPU's own.";
 
 static PyObject *Executor_on_pool(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
                                   PyObject *args_names_tuple) {
-    PyObject *pool_object, *memory_domains_object, *deferred_limit_object;
+    PyObject *pool_object, *memory_domains_object, *deferred_limit_object, *cpu_class_object;
     uform_py_argument_t const arguments[] = {
         {"pool", &pool_object},
         {"memory_domains", &memory_domains_object},
         {"deferred_limit", &deferred_limit_object},
+        {"cpu_class", &cpu_class_object},
     };
     size_t deferred_limit = 0;
+    int cpu_class = 0;
     if (uform_py_arguments_parse("on_pool", args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
-        uform_py_size_from_object(deferred_limit_object, "deferred_limit", &deferred_limit) != 0)
+        uform_py_size_from_object(deferred_limit_object, "deferred_limit", &deferred_limit) != 0 ||
+        uform_py_class_from_object(cpu_class_object, "cpu_class", &uform_py_cpu_class, &cpu_class) != 0)
         return NULL;
 
     PyObject *const address = PyNumber_Index(pool_object);
@@ -1186,11 +1234,12 @@ static PyObject *Executor_on_pool(PyTypeObject *type, PyObject *const *args, Py_
 
     uform_executor_t handle = NULL;
     uform_outcome_t outcome = {0};
-    uform_executor_on_pool_t executor_arguments = {.executor = &handle,
-                                                   .outcome = &outcome,
-                                                   .ram = {memory_domains, memory_domains_count},
-                                                   .pool = pool,
-                                                   .deferred_limit = deferred_limit};
+    uform_executor_on_pool_t executor_arguments = {
+        .executor = &handle,
+        .outcome = &outcome,
+        .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class},
+        .pool = pool,
+        .deferred_limit = deferred_limit};
     Py_BEGIN_ALLOW_THREADS;
     uform_executor_on_pool(&executor_arguments);
     Py_END_ALLOW_THREADS;
@@ -1200,38 +1249,43 @@ static PyObject *Executor_on_pool(PyTypeObject *type, PyObject *const *args, Py_
     return executor_adopt(type, handle, 0);
 }
 
-static char const doc_Executor_for_vram[] =                                                  //
-    "for_vram(devices=None, *, scratch_limit=0, deferred_limit=0) -> Executor\n"             //
-    "\n"                                                                                     //
-    "Opens one submission stream on every named device, all of them driven by whichever\n"   //
-    "thread submits, and spawns the host threads that decode what the devices cannot.\n"     //
-    "Calls `uform_executor_for_vram`.\n"                                                     //
-    "\n"                                                                                     //
-    "Args:\n"                                                                                //
-    "  devices (Sequence[int], optional): CUDA ordinals to drive; None derives one free\n"   //
-    "    device.\n"                                                                          //
-    "  scratch_limit (int, optional): The ceiling on scratch bytes per device; 0 lets\n"     //
-    "    scratch grow as batches ask, and a batch larger than the ceiling runs in passes.\n" //
-    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a default.\n" //
-    "\n"                                                                                     //
-    "Example:\n"                                                                             //
+static char const doc_Executor_for_vram[] =                                                      //
+    "for_vram(devices=None, *, scratch_limit=0, deferred_limit=0, gpu_class=None) -> Executor\n" //
+    "\n"                                                                                         //
+    "Opens one submission stream on every named device, all of them driven by whichever\n"       //
+    "thread submits, and spawns the host threads that decode what the devices cannot.\n"         //
+    "Calls `uform_executor_for_vram`.\n"                                                         //
+    "\n"                                                                                         //
+    "Args:\n"                                                                                    //
+    "  devices (Sequence[int], optional): Positions in `gpu_devices()` to drive; None\n"         //
+    "    derives one free device.\n"                                                             //
+    "  scratch_limit (int, optional): The ceiling on scratch bytes per device; 0 lets\n"         //
+    "    scratch grow as batches ask, and a batch larger than the ceiling runs in passes.\n"     //
+    "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a default.\n"     //
+    "  gpu_class (GPUClass, optional): The class every device dispatches as; None derives\n"     //
+    "    the devices' own, which must agree.\n"                                                  //
+    "\n"                                                                                         //
+    "Example:\n"                                                                                 //
     "  >>> executor = uform.Executor.for_vram([0, 1])   # doctest: +SKIP";
 
 static PyObject *Executor_for_vram(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
                                    PyObject *args_names_tuple) {
-    PyObject *devices_object, *scratch_limit_object, *deferred_limit_object;
+    PyObject *devices_object, *scratch_limit_object, *deferred_limit_object, *gpu_class_object;
     uform_py_argument_t const arguments[] = {
         {"devices", &devices_object},
         {"scratch_limit", &scratch_limit_object},
         {"deferred_limit", &deferred_limit_object},
+        {"gpu_class", &gpu_class_object},
     };
     size_t scratch_limit = 0, deferred_limit = 0;
+    int gpu_class = 0;
     int32_t *devices = NULL;
     size_t devices_count = 0;
     if (uform_py_arguments_parse("for_vram", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
         uform_py_size_from_object(scratch_limit_object, "scratch_limit", &scratch_limit) != 0 ||
         uform_py_size_from_object(deferred_limit_object, "deferred_limit", &deferred_limit) != 0 ||
+        uform_py_class_from_object(gpu_class_object, "gpu_class", &uform_py_gpu_class, &gpu_class) != 0 ||
         uform_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
         return NULL;
 
@@ -1239,7 +1293,7 @@ static PyObject *Executor_for_vram(PyTypeObject *type, PyObject *const *args, Py
     uform_outcome_t outcome = {0};
     uform_executor_for_vram_t executor_arguments = {.executor = &handle,
                                                     .outcome = &outcome,
-                                                    .vram = {devices, devices_count},
+                                                    .vram = {devices, devices_count, (uform_gpu_class_t)gpu_class},
                                                     .scratch_limit = scratch_limit,
                                                     .deferred_limit = deferred_limit};
     Py_BEGIN_ALLOW_THREADS;
@@ -1625,7 +1679,9 @@ static char const doc_RowsTape[] =                                              
     "\n"                                                                                    //
     "A ragged run of rows a call wrote into an `Arena`, one row per token each item kept\n" //
     "after truncation, viewing it until it rewinds. The rows read as an `ArenaBuffer` of\n" //
-    "(tokens, columns), and `offsets`, (count + 1,) unsigned words, splits them by item.";
+    "(tokens, columns), and `offsets`, (count + 1,) unsigned words, splits them by item.\n" //
+    "A run of one value per row, like the probabilities of `text_choose`, reads as a\n"     //
+    "flat (values,) buffer instead.";
 
 PyTypeObject RowsTapeType = {
     PyVarObject_HEAD_INIT(NULL, 0) //
@@ -1690,6 +1746,16 @@ PyObject *uform_py_rows_tape_answer(PyObject *arena, uform_rows_tape_view_t cons
     RowsTape *rows_tape = (RowsTape *)uform_py_rows_answer(&RowsTapeType, arena, &states->rows, tokens);
     if (!rows_tape) return NULL;
     rows_tape->offsets = (PyObject *)arena_buffer_new(&ArenaBufferType, arena, states->offsets, "N", sizeof(size_t),
+                                                      offsets_shape, 1);
+    if (!rows_tape->offsets) Py_CLEAR(rows_tape);
+    return (PyObject *)rows_tape;
+}
+
+PyObject *uform_py_tape_answer(PyObject *arena, uform_tape_view_t const *tape, size_t count, size_t elements) {
+    Py_ssize_t const shape[1] = {(Py_ssize_t)elements}, offsets_shape[1] = {(Py_ssize_t)count + 1};
+    RowsTape *rows_tape = (RowsTape *)arena_buffer_new(&RowsTapeType, arena, tape->data, "f", sizeof(float), shape, 1);
+    if (!rows_tape) return NULL;
+    rows_tape->offsets = (PyObject *)arena_buffer_new(&ArenaBufferType, arena, tape->offsets, "N", sizeof(size_t),
                                                       offsets_shape, 1);
     if (!rows_tape->offsets) Py_CLEAR(rows_tape);
     return (PyObject *)rows_tape;
@@ -1860,6 +1926,44 @@ int uform_py_tape_from_object(PyObject *object, char const *field, uform_py_elem
     return gathered;
 }
 
+void uform_py_words_release(uform_py_words_t *words) {
+    PyMem_Free(words->gathered);
+    if (words->buffer.obj) PyBuffer_Release(&words->buffer);
+    memset(words, 0, sizeof(*words));
+}
+
+int uform_py_words_from_object(PyObject *object, char const *field, size_t count, uform_py_words_t *words) {
+    if (!object || object == Py_None) return 0;
+    if (PyObject_GetBuffer(object, &words->buffer, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT) == 0) {
+        if (words->buffer.itemsize != sizeof(uint32_t) || buffer_format(&words->buffer) != 'I')
+            return uform_py_raise(uform_status_unsupported_layout_k, "the '%s' buffer must hold uint32 words", field);
+        if ((size_t)words->buffer.len != count * sizeof(uint32_t))
+            return uform_py_raise(uform_status_shape_mismatch_k, "the '%s' buffer must hold %zu words", field, count);
+        words->data = (uint32_t const *)words->buffer.buf;
+        return 0;
+    }
+    PyErr_Clear();
+    PyObject *const sequence = PySequence_Fast(object, "expected a buffer of uint32 or a sequence of integers");
+    if (!sequence) return -1;
+    if ((size_t)PySequence_Fast_GET_SIZE(sequence) != count) {
+        Py_DECREF(sequence);
+        return uform_py_raise(uform_status_shape_mismatch_k, "the '%s' option must hold %zu entries", field, count);
+    }
+    words->gathered = (uint32_t *)PyMem_Malloc((count ? count : 1) * sizeof(uint32_t));
+    int failed = !words->gathered;
+    if (failed) PyErr_NoMemory();
+    for (size_t position = 0; !failed && position != count; ++position) {
+        size_t value = 0;
+        failed = uform_py_size_from_object(PySequence_Fast_GET_ITEM(sequence, position), field, &value) != 0;
+        if (!failed && value > UINT32_MAX)
+            failed = uform_py_raise(uform_status_invalid_argument_k, "the '%s' option exceeds 32 bits", field);
+        if (!failed) words->gathered[position] = (uint32_t)value;
+    }
+    Py_DECREF(sequence);
+    words->data = words->gathered;
+    return failed ? -1 : 0;
+}
+
 #pragma endregion Tapes
 
 #pragma region Library Probes
@@ -1890,6 +1994,69 @@ PyObject *api_capabilities_compiled(PyObject *self, PyObject *unused) {
 
 PyObject *api_capabilities_available(PyObject *self, PyObject *unused) {
     return PyUnicode_FromString(uform_capabilities_available());
+}
+
+static PyStructSequence_Field GPUDevice_fields[] = {
+    {"vendor", "The `GPUVendor` whose runtime drives the device."},
+    {"vendor_ordinal", "The device's ordinal in its vendor's runtime, as nvidia-smi or rocm-smi list it."},
+    {"gpu_class", "The `GPUClass` whose kernels run on it, or None."},
+    {"compute_units", "Streaming multiprocessors or compute units."},
+    {"memory_bytes", "Device memory in bytes."},
+    {"name", "The vendor's own name for the device."},
+    {NULL, NULL},
+};
+
+PyStructSequence_Desc uform_py_gpu_device_desc = {
+    "uform.GPUDevice", "One GPU this process can drive, its position in `gpu_devices()` being its ordinal.",
+    GPUDevice_fields, 6};
+
+PyTypeObject GPUDeviceType;
+
+char const doc_gpu_devices[] =                                                                   //
+    "gpu_devices() -> tuple[GPUDevice, ...]\n"                                                   //
+    "\n"                                                                                         //
+    "Every GPU this process can drive, NVIDIA devices first, then AMD, so a device's position\n" //
+    "is the ordinal `Executor.for_vram` and `Model.load_vram` name it by. A vendor this build\n" //
+    "does not compile, or whose runtime is absent, lists none.\n"                                //
+    "Calls `uform_gpu_devices`.";
+
+/** Lists up to @p capacity devices into @p devices; returns how many there are, or -1. */
+static Py_ssize_t gpu_devices_list(uform_gpu_device_t *devices, size_t capacity) {
+    size_t devices_count = 0;
+    uform_outcome_t outcome = {0};
+    uform_gpu_devices_t arguments = {.outcome = &outcome,
+                                     .devices = devices,
+                                     .devices_capacity = capacity,
+                                     .devices_count = &devices_count};
+    Py_BEGIN_ALLOW_THREADS;
+    uform_gpu_devices(&arguments);
+    Py_END_ALLOW_THREADS;
+    return uform_py_raise_on_outcome(&outcome) == 0 ? (Py_ssize_t)devices_count : -1;
+}
+
+PyObject *api_gpu_devices(PyObject *self, PyObject *unused) {
+    Py_ssize_t const counted = gpu_devices_list(NULL, 0);
+    if (counted < 0) return NULL;
+    uform_gpu_device_t *const devices = (uform_gpu_device_t *)PyMem_Calloc(counted ? (size_t)counted : 1,
+                                                                           sizeof(uform_gpu_device_t));
+    if (!devices) return PyErr_NoMemory();
+    Py_ssize_t const listed = gpu_devices_list(devices, (size_t)counted);
+    PyObject *tuple = listed < 0 ? NULL : PyTuple_New(listed < counted ? listed : counted);
+    for (Py_ssize_t index = 0; tuple && index != PyTuple_GET_SIZE(tuple); ++index) {
+        uform_gpu_device_t const *const device = &devices[index];
+        PyObject *fields[6] = {NULL, NULL, NULL, NULL, NULL, NULL};
+        (void)((fields[0] = uform_py_enum_to_object(&uform_py_gpu_vendor, (int)device->vendor)) &&
+               (fields[1] = PyLong_FromUnsignedLong(device->vendor_ordinal)) &&
+               (fields[2] = uform_py_class_to_object(&uform_py_gpu_class, (int)device->gpu_class)) &&
+               (fields[3] = PyLong_FromUnsignedLong(device->compute_units)) &&
+               (fields[4] = PyLong_FromUnsignedLongLong(device->memory_bytes)) &&
+               (fields[5] = PyUnicode_FromString(device->name)));
+        PyObject *const entry = uform_py_struct_sequence_steal(&GPUDeviceType, fields, 6);
+        if (!entry) Py_CLEAR(tuple);
+        else PyTuple_SET_ITEM(tuple, index, entry);
+    }
+    PyMem_Free(devices);
+    return tuple;
 }
 
 #pragma endregion Library Probes

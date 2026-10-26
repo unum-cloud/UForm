@@ -1,5 +1,5 @@
 /**
- *  @file src/core/contrastive_relations.cuh
+ *  @file include/uform/core/contrastive_relations.cuh
  *  @author Ash Vardanian
  *  @date July 2, 2026
  *  @brief The contrastive relation graph: per-pair attract / repel / ignore semantics over the
@@ -63,10 +63,10 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor`, `nk::tensor_view` — owning columns and borrowed views
 
-#include "core/types.hpp"            // `expected`, `expected_t`, `status_t`
-#include "core/gpu_allocators.hpp"   // `gpu_arena_t`, `gpu_arena_alloc` backing the owning tensors
-#include "core/schedule.cuh"         // `gpu_stream_t` ordering the uploads
-#include "core/multimodal_batch.hpp" // `segment_role_t`, the bag roles the builder reads
+#include "uform/core/gpu_allocators.hpp"   // `gpu_arena_t`, `gpu_arena_alloc` backing the owning tensors
+#include "uform/core/multimodal_batch.hpp" // `segment_role_t`, the bag roles the builder reads
+#include "uform/core/schedule.cuh"         // `gpu_stream_t` ordering the uploads
+#include "uform/core/types.hpp"            // `expected`, `expected_t`, `status_t`
 
 namespace unum::uform::core {
 

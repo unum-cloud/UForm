@@ -1,8 +1,9 @@
 /**
- *  @brief Host audio decoding: any container libav reads, to one mono Float32 clip at the model's rate.
- *  @file src/media/audio.hpp
+ *  @file include/uform/media/audio.hpp
  *  @author Ash Vardanian
  *  @date July 5, 2026
+ *  @brief Host audio decoding: any container libav reads, to one mono Float32 clip at the model's
+ *      rate.
  *
  *  No GPU audio codec exists, so every residency decodes here, on its executor's pool, and uploads the waveform.
  *  The output is the raw signal: the spectral frontend is a learnable layer of the encoder, not a decode step.

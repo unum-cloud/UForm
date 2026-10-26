@@ -18,10 +18,11 @@
 
 #include <cuda.h> // `cuInit`, `cuDeviceGetCount`, `cuDevicePrimaryCtxRetain`
 
-#include "core/gpu_allocators.hpp"         // `gpu_arena_t`, `gpu_registrable_alloc`
-#include "core/mesh.hpp"                   // `host_domain_count_from_environment`
-#include "core/infiniband_collectives.cuh" // `infiniband_nic_t`, `infiniband_endpoint_t` — the probed transport
-#include "harness.hpp"                     // `test_suite_t`
+#include "uform/core/gpu_allocators.hpp"         // `gpu_arena_t`, `gpu_registrable_alloc`
+#include "uform/core/infiniband_collectives.cuh" // `infiniband_nic_t`, `infiniband_endpoint_t` — the probed transport
+#include "uform/core/mesh.hpp"                   // `host_domain_count_from_environment`
+
+#include "harness.hpp" // `test_suite_t`
 
 using namespace unum::uform::core;
 using namespace unum::uform::test;

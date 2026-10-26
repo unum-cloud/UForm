@@ -1,9 +1,9 @@
 /**
- *  @brief The storage configuration handle: one process-wide setup of cuDF's KvikIO layer, made at the
- *      composition root and threaded by reference into every reader.
- *  @file src/loaders/direct_storage.hpp
+ *  @file include/uform/loaders/direct_storage.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
+ *  @brief The storage configuration handle: one process-wide setup of cuDF's KvikIO layer, made at
+ *      the composition root and threaded by reference into every reader.
  *
  *  KvikIO @b is cuDF's GPU Direct Storage path — it reads Parquet column chunks straight into device memory
  *  over cuFile where the filesystem supports it, and transparently falls back to threaded POSIX where it
@@ -17,7 +17,7 @@
  */
 #pragma once
 
-#include "core/types.hpp" // `expected`, `status_t`, the scalar aliases
+#include "uform/core/types.hpp" // `expected`, `status_t`, the scalar aliases
 
 namespace unum::uform::loaders {
 

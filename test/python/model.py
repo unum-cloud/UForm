@@ -24,7 +24,23 @@ def test_version_and_capabilities_are_reported():
     assert uform.capabilities_available()
 
 
-@pytest.mark.parametrize("name", ["Status", "Scalar", "Mood", "Modality", "Objective", "Negatives", "MultimemTier"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Status",
+        "Scalar",
+        "Mood",
+        "CPUClass",
+        "GPUClass",
+        "GPUVendor",
+        "Modality",
+        "Objective",
+        "Negatives",
+        "PairLossForm",
+        "LateInteractionSide",
+        "MultimemTier",
+    ],
+)
 def test_modes_are_int_enums_of_the_package(name: str):
     """Every C enum is an `IntEnum` of the `uform` module, never a string."""
     mirrored = getattr(uform, name)
@@ -40,11 +56,29 @@ def test_enum_values_follow_the_header():
     assert "UNRECOGNIZED" not in uform.Status.__members__
 
 
+def test_classes_are_spelled_by_the_library():
+    """Class members take the library's own spellings and ordinals, and the unknown class is no member."""
+    assert uform.CPUClass.INTEL_HASWELL == 2 and uform.CPUClass.WASM64_EXTENDED == 17
+    assert uform.GPUClass.NVIDIA_HOPPER == 3 and uform.GPUClass.APPLE_METAL10 == 12
+    assert len(uform.CPUClass) == 17 and len(uform.GPUClass) == 12
+    assert "UNKNOWN" not in uform.CPUClass.__members__ and "UNKNOWN" not in uform.GPUClass.__members__
+
+
+def test_gpu_devices_list_the_drivable_ones():
+    """Every listed device names its vendor and a class, and a build without GPUs lists none."""
+    devices = uform.gpu_devices()
+    assert isinstance(devices, tuple)
+    assert all(isinstance(device.vendor, uform.GPUVendor) and device.memory_bytes > 0 for device in devices)
+    if "serial" in uform.capabilities_compiled():
+        assert devices == ()
+
+
 def test_outputs_is_a_flag_set():
     """`Outputs` combines with `|`, one flag per output field of the encode verbs."""
     assert issubclass(uform.Outputs, IntFlag)
     both = uform.Outputs.EMBEDDINGS | uform.Outputs.STATES
     assert int(both) == 3 and uform.Outputs.STATES in both
+    assert uform.Outputs.TOKEN_VECTORS == 4
 
 
 def test_every_failing_status_raises_its_own_class():
@@ -105,10 +139,21 @@ def test_load_ram_and_describe(checkpoint: Path):
     """A load from a path answers a model whose description carries its geometry."""
     model = uform.Model.load_ram(checkpoint, quantization=uform.Scalar.BF16)
     description = model.describe()
-    dimensions, context, quantization, memory_usage, capabilities = description
+    dimensions, context, quantization, memory_usage, capabilities, cpu_class, gpu_class, _, _ = description
     assert dimensions > 0 and context > 0 and memory_usage > 0
     assert quantization is uform.Scalar.BF16
     assert isinstance(capabilities, str)
+    assert isinstance(cpu_class, uform.CPUClass) and gpu_class is None
+
+
+def test_load_ram_pins_a_class(checkpoint: Path):
+    """A serial pin packs for serial, and a class this CPU cannot run is refused."""
+    serial = uform.Model.load_ram(checkpoint, cpu_class=uform.CPUClass.SERIAL)
+    assert serial.describe().cpu_class is uform.CPUClass.SERIAL
+    with pytest.raises(uform.UnsupportedError):
+        uform.Model.load_ram(checkpoint, cpu_class=uform.CPUClass.WASM64_EXTENDED)
+    with pytest.raises(uform.UnknownKindError):
+        uform.Model.load_ram(checkpoint, cpu_class=0)
 
 
 def test_load_ram_buffer_matches_the_path(checkpoint: Path):

@@ -8,10 +8,12 @@ import {
   Answer,
   Arena,
   Executor,
+  LateInteractionSide,
   Modality,
   MultimemTier,
   Negatives,
   Objective,
+  PairLossForm,
   Scalar,
   Status,
   backend,
@@ -90,6 +92,8 @@ export interface BatchShape {
   maxSegmentsPerDevice?: number;
   maxColumnsPerRow?: number;
   maxBagsPerDevice?: number;
+  /** Legal bytes one item offers to choose from at most; absent makes no choices. */
+  maxChoicesPerItem?: number;
   image?: { patchSide?: number; channels?: number };
   video?: { patchSide?: number; tubeFrames?: number; frameStride?: number; channels?: number };
   audio?: { chunkSamples?: number; sampleRate?: number };
@@ -119,6 +123,32 @@ export interface Contrastive {
   negatives?: Negatives;
   ambientRepulsionWeight?: number;
   maxEdgesPerDevice?: number;
+  /** The pair loss over each anchor's row; absent keeps sigmoid. */
+  pairLoss?: PairLossForm;
+}
+
+/** How the late-interaction loss scores token vectors. Mirrors `uform_late_interaction_t`; absent fields derive. */
+export interface LateInteraction {
+  /** The loss weight; absent trains no token head. */
+  weight?: number;
+  /** The token vectors' width, a multiple of 8; absent derives 128. */
+  width?: number;
+  inverseTemperature?: number;
+  bias?: number;
+  maxQuerySpan?: number;
+  maxQueryTokensPerDevice?: number;
+  maxDocumentsPerDevice?: number;
+  maxDocumentTokensPerDevice?: number;
+  /** The pair loss over each query's row of hard MaxSim scores; absent keeps ranked. */
+  pairLoss?: PairLossForm;
+}
+
+/** The calibrated choices over the byte decoder. Mirrors `uform_choices_t`; absent fields derive. */
+export interface Choices {
+  /** The loss weight; absent trains no choices. */
+  weight?: number;
+  /** The Brier term's weight beside the soft cross-entropy; absent derives 0.5. */
+  brierWeight?: number;
 }
 
 /** The learning-rate schedule. Mirrors `uform_schedule_t`. */
@@ -142,6 +172,9 @@ export interface TrainerConfig {
   objective: Objective;
   masking?: Masking;
   contrastive?: Contrastive;
+  lateInteraction?: LateInteraction;
+  /** Read when its weight is positive, which needs the batch's `maxChoicesPerItem`. */
+  choices?: Choices;
   schedule: Schedule;
   /** The base of every keyed draw. */
   seed?: number | bigint;
@@ -157,6 +190,16 @@ export interface Edges {
   weights?: Float32Array | number[];
 }
 
+/** Each item's legal choices and their targets, as compressed sparse rows. Mirrors `uform_choices_view_t`. */
+export interface ChoicesView {
+  /** The step's `count + 1` offsets into `bytes` and `targets`; an item offering none makes no choice. */
+  offsets: Uint32Array | number[];
+  /** Each item's distinct legal bytes, end to end. */
+  bytes: Uint8Array | number[];
+  /** The target probability of each byte, summing to one per item. */
+  targets: Float32Array | number[];
+}
+
 /** This process's share of one step. Mirrors the inputs of `uform_trainer_step_t`. */
 export interface TrainerBatch {
   /** The modality of each item. */
@@ -167,6 +210,10 @@ export interface TrainerBatch {
   bags?: Uint32Array | number[];
   /** The temperature group of each item. */
   temperatureGroups?: Uint32Array | number[];
+  /** The late-interaction side of each item; absent makes every item `LateInteractionSide.None`. */
+  sides?: readonly LateInteractionSide[];
+  /** The choices, read when the run trains them; the call appends the mask byte to each choosing text. */
+  choices?: ChoicesView;
   /** The contrastive targets. */
   relations?: { attract?: Edges; repel?: Edges; ignore?: Edges };
 }
@@ -210,6 +257,7 @@ abstract class TrainerVerbs<Receiving extends "blocking" | "deferred"> {
     const contents = bytesTape(batch.contents);
     const modalities = Int32Array.from(batch.modalities, modalityCode);
     const { attract, repel, ignore } = batch.relations ?? {};
+    const choices = batch.choices;
     const arena = config.arena?.compiled;
     const scalar = arena ? scalarCode(config.outputsScalar ?? Scalar.F32) : undefined;
     return submitAs(
@@ -223,6 +271,10 @@ abstract class TrainerVerbs<Receiving extends "blocking" | "deferred"> {
           contents.offsets,
           uint32Of(batch.bags),
           uint32Of(batch.temperatureGroups),
+          batch.sides && Int32Array.from(batch.sides),
+          uint32Of(choices?.offsets),
+          choices && (choices.bytes instanceof Uint8Array ? choices.bytes : Uint8Array.from(choices.bytes)),
+          float32Of(choices?.targets),
           uint32Of(attract?.offsets),
           uint32Of(attract?.ids),
           float32Of(attract?.weights),

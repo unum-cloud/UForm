@@ -1,9 +1,10 @@
-//! The forward passes: text, images, video and audio in, pooled embeddings and per-token states
-//! out, one verb per input form.
+//! The forward passes: text, images, video and audio in, pooled embeddings, per-token states and
+//! token vectors out, one verb per input form, and calibrated choices over text states.
 //!
 //! Every verb runs the same tower and keeps whichever surfaces its [`Outputs`] name: one pooled
-//! embedding per item, one final-norm state per token left after truncation, or both from one
-//! forward. Both land in the arena the verb borrows, written as the config's `outputs_scalar`.
+//! embedding per item, one final-norm state or one token-head vector per token left after
+//! truncation, or any mix from one forward. All land in the arena the verb borrows, written as the
+//! config's `outputs_scalar`.
 //!
 //! Models are tokenizer-free: text arrives as UTF-8 bytes and every byte is a token. Separate items
 //! are gathered into one tape before the call, while a `(data, offsets)` pair reaches the library
@@ -20,7 +21,7 @@ use crate::model::{uform_model_t, Answer, ModelVerbs};
 use crate::types::{
     fail, lower_progress, uform_arena_t, uform_completion_t, uform_executor_t, uform_outcome_t, uform_progress_t,
     uform_rows_tape_view_t, uform_rows_view_t, uform_scalar_t, uform_tape_view_t, Accepts, Arena, Callbacks, Calling,
-    Completion, Deferring, Exported, Gathered, Handles, ProgressCallback, Result, Rows, RowsTape, Scalar, Status,
+    Completion, Deferring, Exported, Gathered, Handles, ProgressCallback, Result, Rows, RowsTape, Scalar, Status, Tape,
     TapeView,
 };
 
@@ -41,6 +42,7 @@ pub struct uform_text_encode_t {
     pub texts: uform_tape_view_t,
     pub embeddings: *mut uform_rows_view_t,
     pub states: *mut uform_rows_tape_view_t,
+    pub token_vectors: *mut uform_rows_tape_view_t,
     pub arena: uform_arena_t,
     pub outputs_scalar: uform_scalar_t,
     pub progress: uform_progress_t,
@@ -57,6 +59,7 @@ pub struct uform_image_encode_t {
     pub images: uform_tape_view_t,
     pub embeddings: *mut uform_rows_view_t,
     pub states: *mut uform_rows_tape_view_t,
+    pub token_vectors: *mut uform_rows_tape_view_t,
     pub arena: uform_arena_t,
     pub outputs_scalar: uform_scalar_t,
     pub progress: uform_progress_t,
@@ -75,6 +78,7 @@ pub struct uform_image_encode_pixels_t {
     pub widths: *const u32,
     pub embeddings: *mut uform_rows_view_t,
     pub states: *mut uform_rows_tape_view_t,
+    pub token_vectors: *mut uform_rows_tape_view_t,
     pub arena: uform_arena_t,
     pub outputs_scalar: uform_scalar_t,
     pub progress: uform_progress_t,
@@ -91,6 +95,7 @@ pub struct uform_video_encode_t {
     pub videos: uform_tape_view_t,
     pub embeddings: *mut uform_rows_view_t,
     pub states: *mut uform_rows_tape_view_t,
+    pub token_vectors: *mut uform_rows_tape_view_t,
     pub arena: uform_arena_t,
     pub outputs_scalar: uform_scalar_t,
     pub progress: uform_progress_t,
@@ -107,6 +112,7 @@ pub struct uform_audio_encode_t {
     pub recordings: uform_tape_view_t,
     pub embeddings: *mut uform_rows_view_t,
     pub states: *mut uform_rows_tape_view_t,
+    pub token_vectors: *mut uform_rows_tape_view_t,
     pub arena: uform_arena_t,
     pub outputs_scalar: uform_scalar_t,
     pub progress: uform_progress_t,
@@ -124,14 +130,32 @@ pub struct uform_audio_encode_samples_t {
     pub sample_rate: u32,
     pub embeddings: *mut uform_rows_view_t,
     pub states: *mut uform_rows_tape_view_t,
+    pub token_vectors: *mut uform_rows_tape_view_t,
     pub arena: uform_arena_t,
     pub outputs_scalar: uform_scalar_t,
     pub progress: uform_progress_t,
     pub stats: *mut uform_audio_encode_stats_t,
 }
 
+#[repr(C)]
+pub struct uform_text_choose_t {
+    pub model: uform_model_t,
+    pub executor: uform_executor_t,
+    pub outcome: *mut uform_outcome_t,
+    pub completion: uform_completion_t,
+    pub count: usize,
+    pub texts: uform_tape_view_t,
+    pub choices: uform_tape_view_t,
+    pub temperature_groups: *const u32,
+    pub probabilities: *mut uform_tape_view_t,
+    pub arena: uform_arena_t,
+    pub progress: uform_progress_t,
+    pub stats: *mut uform_text_encode_stats_t,
+}
+
 extern "C" {
     pub fn uform_text_encode(arguments: *mut uform_text_encode_t);
+    pub fn uform_text_choose(arguments: *mut uform_text_choose_t);
     pub fn uform_image_encode(arguments: *mut uform_image_encode_t);
     pub fn uform_image_encode_pixels(arguments: *mut uform_image_encode_pixels_t);
     pub fn uform_video_encode(arguments: *mut uform_video_encode_t);
@@ -146,15 +170,20 @@ extern "C" {
 /// The surfaces an encode verb keeps from its one forward, named after the C fields they fill;
 /// [`Outputs::default`] keeps the embeddings alone.
 ///
-/// Rust-only; decides which of the C `embeddings` and `states` pointers a verb passes.
+/// Rust-only; decides which of the C `embeddings`, `states` and `token_vectors` pointers a verb
+/// passes.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Outputs(u32);
 
 impl Outputs {
     /// One pooled embedding per item, past the attention pool and the projection head.
     pub const EMBEDDINGS: Outputs = Outputs(1);
-    /// One final-norm state per token left after truncation, the surface rerankers read.
+    /// One final-norm state per token left after truncation.
     pub const STATES: Outputs = Outputs(2);
+    /// One unit vector of the token head per token left after truncation, the surface
+    /// late-interaction rerankers score; a model without a token head fails the call with
+    /// [`Status::Unsupported`].
+    pub const TOKEN_VECTORS: Outputs = Outputs(4);
 
     /// Whether every surface `other` names is kept.
     pub const fn contains(self, other: Outputs) -> bool { self.0 & other.0 == other.0 }
@@ -175,7 +204,11 @@ impl BitOrAssign for Outputs {
 
 impl fmt::Debug for Outputs {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let names = [(Outputs::EMBEDDINGS, "EMBEDDINGS"), (Outputs::STATES, "STATES")];
+        let names = [
+            (Outputs::EMBEDDINGS, "EMBEDDINGS"),
+            (Outputs::STATES, "STATES"),
+            (Outputs::TOKEN_VECTORS, "TOKEN_VECTORS"),
+        ];
         let mut kept = names
             .iter()
             .filter(|(flag, _)| self.contains(*flag))
@@ -193,6 +226,9 @@ pub struct Encoded<'arena> {
     pub embeddings: Option<Rows<'arena>>,
     /// One final-norm state per token left after truncation, item by item.
     pub states: Option<RowsTape<'arena>>,
+    /// One unit vector of the model's token width per token left after truncation, the prefix
+    /// included, item by item.
+    pub token_vectors: Option<RowsTape<'arena>>,
 }
 
 /// The output views a verb lends the library, and which of them it asked for.
@@ -200,7 +236,15 @@ struct Surfaces {
     outputs: Outputs,
     embeddings: Exported<uform_rows_view_t>,
     states: Exported<uform_rows_tape_view_t>,
+    token_vectors: Exported<uform_rows_tape_view_t>,
     count: usize,
+}
+
+/// The C `embeddings`, `states` and `token_vectors` pointers of one call, null where skipped.
+struct LentSurfaces {
+    embeddings: *mut uform_rows_view_t,
+    states: *mut uform_rows_tape_view_t,
+    token_vectors: *mut uform_rows_tape_view_t,
 }
 
 impl Surfaces {
@@ -209,22 +253,26 @@ impl Surfaces {
             outputs,
             embeddings: Exported::default(),
             states: Exported::default(),
+            token_vectors: Exported::default(),
             count: 0,
         }
     }
 
-    /// The C `embeddings` and `states` pointers for a call over `count` items, null where skipped.
-    fn lend(&mut self, count: usize) -> (*mut uform_rows_view_t, *mut uform_rows_tape_view_t) {
+    /// The output pointers for a call over `count` items.
+    fn lend(&mut self, count: usize) -> LentSurfaces {
         self.count = count;
-        let embeddings = match self.outputs.contains(Outputs::EMBEDDINGS) {
-            true => ptr::from_mut(&mut self.embeddings.0),
-            false => ptr::null_mut(),
-        };
-        let states = match self.outputs.contains(Outputs::STATES) {
-            true => ptr::from_mut(&mut self.states.0),
-            false => ptr::null_mut(),
-        };
-        (embeddings, states)
+        let outputs = self.outputs;
+        fn kept<View>(kept: bool, view: &mut View) -> *mut View {
+            match kept {
+                true => ptr::from_mut(view),
+                false => ptr::null_mut(),
+            }
+        }
+        LentSurfaces {
+            embeddings: kept(outputs.contains(Outputs::EMBEDDINGS), &mut self.embeddings.0),
+            states: kept(outputs.contains(Outputs::STATES), &mut self.states.0),
+            token_vectors: kept(outputs.contains(Outputs::TOKEN_VECTORS), &mut self.token_vectors.0),
+        }
     }
 
     fn finish(self, arena: &Arena) -> Encoded<'_> {
@@ -237,6 +285,11 @@ impl Surfaces {
             states: self.outputs.contains(Outputs::STATES).then_some(RowsTape {
                 arena,
                 view: self.states,
+                count: self.count,
+            }),
+            token_vectors: self.outputs.contains(Outputs::TOKEN_VECTORS).then_some(RowsTape {
+                arena,
+                view: self.token_vectors,
                 count: self.count,
             }),
         }
@@ -452,7 +505,26 @@ impl From<Scalar> for AudioEncodeSamplesConfig<'_> {
     }
 }
 
+/// The question types and the knobs of [`EncodeVerbs::text_choose`]; [`TextChooseConfig::default`]
+/// puts every item in group zero.
+///
+/// Mirrors `uform_text_choose_t`.
+#[derive(Default)]
+pub struct TextChooseConfig<'config> {
+    /// The question type of each item, below the model's `choice_temperature_groups`; empty puts
+    /// every item in group zero.
+    pub temperature_groups: &'config [u32],
+    /// Reports the items scored and stops wherever it says to; a stopped call reports
+    /// [`Status::Cancelled`] and leaves no outputs.
+    pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
+    /// Where the truncation report lands, overwritten by the call.
+    pub stats: Option<&'config mut TextEncodeStats>,
+}
+
 impl Accepts<TextEncodeConfig<'static>> for Deferring {}
+impl Accepts<TextChooseConfig<'static>> for Deferring {}
 impl Accepts<ImageEncodeConfig<'static>> for Deferring {}
 impl Accepts<ImageEncodePixelsConfig<'static>> for Deferring {}
 impl Accepts<VideoEncodeConfig<'static>> for Deferring {}
@@ -491,6 +563,38 @@ pub trait EncodeVerbs<'model>: ModelVerbs<'model> {
             texts,
             gathered: Gathered::default(),
             surfaces: Surfaces::of(outputs),
+            config: config.into(),
+            arena,
+        })
+    }
+
+    /// Scores each item's legal choices through one forward: `texts` are UTF-8 states, each ending
+    /// where its choice goes, and `choices` holds each item's legal bytes, one choice per byte.
+    /// Answers one probability per choice in `choices` order, a softmax over the item's choices
+    /// alone at its question type's calibrated inverse temperature.
+    ///
+    /// A state longer than the model's context loses its head, never its end, and a model without
+    /// the byte decoder fails the call with [`Status::Unsupported`].
+    ///
+    /// Calls `uform_text_choose`.
+    fn text_choose<'config, 'arena, Texts: TapeView<u8>, Choices: TapeView<u8>>(
+        self,
+        texts: Texts,
+        choices: Choices,
+        config: impl Into<TextChooseConfig<'config>>,
+        arena: &'arena mut Arena,
+    ) -> Answer<'model, Self, TextChoose<'config, 'arena, Texts, Choices>>
+    where
+        Self::Completion: Accepts<Texts> + Accepts<Choices> + Accepts<TextChooseConfig<'config>>,
+    {
+        <Self::Completion as Completion>::answer(TextChoose {
+            handles: self.handles(),
+            texts,
+            choices,
+            gathered_texts: Gathered::default(),
+            gathered_choices: Gathered::default(),
+            probabilities: Exported::default(),
+            count: 0,
             config: config.into(),
             arena,
         })
@@ -651,7 +755,7 @@ impl<'arena, Texts: TapeView<u8>> Calling for TextEncode<'_, 'arena, Texts> {
         callbacks: &Callbacks,
     ) -> Result<Self::Arguments> {
         let batch = self.texts.tape(&mut self.gathered)?;
-        let (embeddings, states) = self.surfaces.lend(batch.count);
+        let lent = self.surfaces.lend(batch.count);
         let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         Ok(uform_text_encode_t {
             model: self.handles.handle,
@@ -660,8 +764,9 @@ impl<'arena, Texts: TapeView<u8>> Calling for TextEncode<'_, 'arena, Texts> {
             completion,
             count: batch.count,
             texts: batch.tape,
-            embeddings,
-            states,
+            embeddings: lent.embeddings,
+            states: lent.states,
+            token_vectors: lent.token_vectors,
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
@@ -672,6 +777,69 @@ impl<'arena, Texts: TapeView<u8>> Calling for TextEncode<'_, 'arena, Texts> {
     unsafe fn call(arguments: *mut Self::Arguments) { uform_text_encode(arguments) }
 
     fn finish(self) -> Result<Encoded<'arena>> { Ok(self.surfaces.finish(self.arena)) }
+}
+
+/// A text forward scoring each item's legal choices; see [`EncodeVerbs::text_choose`].
+///
+/// Calls `uform_text_choose`.
+pub struct TextChoose<'config, 'arena, Texts, Choices> {
+    handles: Handles,
+    texts: Texts,
+    choices: Choices,
+    gathered_texts: Gathered<u8>,
+    gathered_choices: Gathered<u8>,
+    probabilities: Exported<uform_tape_view_t>,
+    count: usize,
+    config: TextChooseConfig<'config>,
+    arena: &'arena mut Arena,
+}
+
+impl<'arena, Texts: TapeView<u8>, Choices: TapeView<u8>> Calling for TextChoose<'_, 'arena, Texts, Choices> {
+    type Arguments = uform_text_choose_t;
+    type Output = Tape<'arena>;
+
+    fn arguments(
+        &mut self,
+        outcome: *mut uform_outcome_t,
+        completion: uform_completion_t,
+        callbacks: &Callbacks,
+    ) -> Result<Self::Arguments> {
+        let texts = self.texts.tape(&mut self.gathered_texts)?;
+        let choices = self.choices.tape(&mut self.gathered_choices)?;
+        let groups = self.config.temperature_groups;
+        if choices.count != texts.count || (!groups.is_empty() && groups.len() != texts.count) {
+            return Err(fail(Status::ShapeMismatch, "every item needs its choices and, if any, one group"));
+        }
+        self.count = texts.count;
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
+        Ok(uform_text_choose_t {
+            model: self.handles.handle,
+            executor: self.handles.executor,
+            outcome,
+            completion,
+            count: texts.count,
+            texts: texts.tape,
+            choices: choices.tape,
+            temperature_groups: match groups.is_empty() {
+                true => ptr::null(),
+                false => groups.as_ptr(),
+            },
+            probabilities: ptr::from_mut(&mut self.probabilities.0),
+            arena: self.arena.handle,
+            progress,
+            stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
+        })
+    }
+
+    unsafe fn call(arguments: *mut Self::Arguments) { uform_text_choose(arguments) }
+
+    fn finish(self) -> Result<Tape<'arena>> {
+        Ok(Tape {
+            arena: self.arena,
+            view: self.probabilities,
+            count: self.count,
+        })
+    }
 }
 
 /// An image forward over encoded files; see [`EncodeVerbs::image_encode`].
@@ -697,7 +865,7 @@ impl<'arena, Images: TapeView<u8>> Calling for ImageEncode<'_, 'arena, Images> {
         callbacks: &Callbacks,
     ) -> Result<Self::Arguments> {
         let batch = self.images.tape(&mut self.gathered)?;
-        let (embeddings, states) = self.surfaces.lend(batch.count);
+        let lent = self.surfaces.lend(batch.count);
         let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         Ok(uform_image_encode_t {
             model: self.handles.handle,
@@ -706,8 +874,9 @@ impl<'arena, Images: TapeView<u8>> Calling for ImageEncode<'_, 'arena, Images> {
             completion,
             count: batch.count,
             images: batch.tape,
-            embeddings,
-            states,
+            embeddings: lent.embeddings,
+            states: lent.states,
+            token_vectors: lent.token_vectors,
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
@@ -751,7 +920,7 @@ impl<'arena, Pixels: TapeView<u8>, Heights: AsRef<[u32]>, Widths: AsRef<[u32]>> 
         if heights.len() != batch.count || widths.len() != batch.count {
             return Err(fail(Status::ShapeMismatch, "every item needs one height and one width"));
         }
-        let (embeddings, states) = self.surfaces.lend(batch.count);
+        let lent = self.surfaces.lend(batch.count);
         let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         Ok(uform_image_encode_pixels_t {
             model: self.handles.handle,
@@ -762,8 +931,9 @@ impl<'arena, Pixels: TapeView<u8>, Heights: AsRef<[u32]>, Widths: AsRef<[u32]>> 
             pixels: batch.tape,
             heights: heights.as_ptr(),
             widths: widths.as_ptr(),
-            embeddings,
-            states,
+            embeddings: lent.embeddings,
+            states: lent.states,
+            token_vectors: lent.token_vectors,
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
@@ -799,7 +969,7 @@ impl<'arena, Videos: TapeView<u8>> Calling for VideoEncode<'_, 'arena, Videos> {
         callbacks: &Callbacks,
     ) -> Result<Self::Arguments> {
         let batch = self.videos.tape(&mut self.gathered)?;
-        let (embeddings, states) = self.surfaces.lend(batch.count);
+        let lent = self.surfaces.lend(batch.count);
         let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         Ok(uform_video_encode_t {
             model: self.handles.handle,
@@ -808,8 +978,9 @@ impl<'arena, Videos: TapeView<u8>> Calling for VideoEncode<'_, 'arena, Videos> {
             completion,
             count: batch.count,
             videos: batch.tape,
-            embeddings,
-            states,
+            embeddings: lent.embeddings,
+            states: lent.states,
+            token_vectors: lent.token_vectors,
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
@@ -845,7 +1016,7 @@ impl<'arena, Recordings: TapeView<u8>> Calling for AudioEncode<'_, 'arena, Recor
         callbacks: &Callbacks,
     ) -> Result<Self::Arguments> {
         let batch = self.recordings.tape(&mut self.gathered)?;
-        let (embeddings, states) = self.surfaces.lend(batch.count);
+        let lent = self.surfaces.lend(batch.count);
         let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         Ok(uform_audio_encode_t {
             model: self.handles.handle,
@@ -854,8 +1025,9 @@ impl<'arena, Recordings: TapeView<u8>> Calling for AudioEncode<'_, 'arena, Recor
             completion,
             count: batch.count,
             recordings: batch.tape,
-            embeddings,
-            states,
+            embeddings: lent.embeddings,
+            states: lent.states,
+            token_vectors: lent.token_vectors,
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
@@ -892,7 +1064,7 @@ impl<'arena, Samples: TapeView<f32>> Calling for AudioEncodeSamples<'_, 'arena, 
         callbacks: &Callbacks,
     ) -> Result<Self::Arguments> {
         let batch = self.samples.tape(&mut self.gathered)?;
-        let (embeddings, states) = self.surfaces.lend(batch.count);
+        let lent = self.surfaces.lend(batch.count);
         let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         Ok(uform_audio_encode_samples_t {
             model: self.handles.handle,
@@ -902,8 +1074,9 @@ impl<'arena, Samples: TapeView<f32>> Calling for AudioEncodeSamples<'_, 'arena, 
             count: batch.count,
             samples: batch.tape,
             sample_rate: self.sample_rate,
-            embeddings,
-            states,
+            embeddings: lent.embeddings,
+            states: lent.states,
+            token_vectors: lent.token_vectors,
             arena: self.arena.handle,
             outputs_scalar: self.config.outputs_scalar as uform_scalar_t,
             progress,
@@ -998,7 +1171,7 @@ mod tests {
     }
 
     /// One executor per test, since an executor orders the calls submitted to it.
-    fn executor() -> Result<Executor> { Executor::for_ram(&[], 1, 0) }
+    fn executor() -> Result<Executor> { Executor::for_ram(&[], None, 1, 0) }
 
     /// The rows an embeddings surface holds, copied out of the arena.
     fn embeddings_of(encoded: &Encoded<'_>) -> Result<Vec<f32>> {
@@ -1016,6 +1189,7 @@ mod tests {
         assert!(!Outputs::STATES.contains(Outputs::EMBEDDINGS));
         assert_eq!(Outputs::default(), Outputs::EMBEDDINGS);
         assert_eq!(format!("{both:?}"), "EMBEDDINGS | STATES");
+        assert_eq!(format!("{:?}", Outputs::TOKEN_VECTORS), "TOKEN_VECTORS");
     }
 
     /// One embedding per item, one state per byte, and the same rows from every receiver.
@@ -1067,6 +1241,65 @@ mod tests {
             .deferred(&executor)
             .text_encode(texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
         assert_eq!(embeddings_of(&deferred.wait()?)?, local);
+        Ok(())
+    }
+
+    /// Token vectors share the states' offsets and have unit length, or a model without a token
+    /// head refuses them.
+    #[test]
+    fn token_vectors_follow_the_states_or_are_refused() -> Result<()> {
+        let model = model()?;
+        let token_width = model.describe()?.token_width;
+        let mut arena = Arena::new()?;
+        let encoded = model.text_encode(
+            &["query: uform", "a"],
+            Outputs::STATES | Outputs::TOKEN_VECTORS,
+            Scalar::F32,
+            &mut arena,
+        );
+        if token_width == 0 {
+            assert_eq!(encoded.err().map(|error| error.status), Some(Status::Unsupported));
+            return Ok(());
+        }
+        let encoded = encoded?;
+        let states = encoded.states.ok_or(fail(Status::Internal, "no states"))?;
+        let vectors = encoded.token_vectors.ok_or(fail(Status::Internal, "no token vectors"))?;
+        assert_eq!(vectors.offsets()?, states.offsets()?);
+        let rows = vectors.rows()?;
+        assert_eq!(rows.columns(), token_width);
+        for vector in rows.values::<f32>()?.chunks(token_width) {
+            let squares: f32 = vector.iter().map(|value| value * value).sum();
+            assert!((0.98..1.02).contains(&squares), "every token vector has unit length");
+        }
+        Ok(())
+    }
+
+    /// Each item's probabilities pair with its choices and sum to one, or a model without the byte
+    /// decoder refuses them.
+    #[test]
+    fn choices_sum_to_one_or_are_refused() -> Result<()> {
+        let model = model()?;
+        let groups = model.describe()?.choice_temperature_groups;
+        let mut arena = Arena::new()?;
+        let texts = ["keep this candidate?", "expand which neighbour?"];
+        let choices = ["yn", "ABCD"];
+        let probabilities = model.text_choose(&texts, &choices, TextChooseConfig::default(), &mut arena);
+        if groups == 0 {
+            assert_eq!(probabilities.err().map(|error| error.status), Some(Status::Unsupported));
+            return Ok(());
+        }
+        let probabilities = probabilities?;
+        assert_eq!(probabilities.offsets()?, [0, 2, 6]);
+        for item in 0..texts.len() {
+            let sum: f32 = probabilities.item::<f32>(item)?.iter().sum();
+            assert!((0.999..1.001).contains(&sum), "each item's probabilities sum to one");
+        }
+        let past = TextChooseConfig {
+            temperature_groups: &[0, groups as u32],
+            ..TextChooseConfig::default()
+        };
+        let refused = model.text_choose(&texts, &choices, past, &mut arena);
+        assert_eq!(refused.err().map(|error| error.status), Some(Status::InvalidArgument));
         Ok(())
     }
 
@@ -1258,7 +1491,7 @@ mod tests {
     #[test]
     fn a_full_deferred_table_answers_contended() -> Result<()> {
         let model = model()?;
-        let executor = Executor::for_ram(&[], 1, 1)?;
+        let executor = Executor::for_ram(&[], None, 1, 1)?;
         let (mut first_arena, mut second_arena) = (Arena::new_in(&executor)?, Arena::new_in(&executor)?);
         let receiver = model.deferred(&executor);
         let first = receiver.text_encode(vec!["a"], Outputs::EMBEDDINGS, Scalar::F32, &mut first_arena)?;

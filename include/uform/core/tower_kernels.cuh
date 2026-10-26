@@ -1,9 +1,9 @@
 /**
- *  @brief The element-wise bodies of the encoder tower's entries, rotary and E4M3 scaling steps, shared by the
- *      NVIDIA training kernels and every vendor's inference kernels.
- *  @file src/core/tower_kernels.cuh
+ *  @file include/uform/core/tower_kernels.cuh
  *  @author Ash Vardanian
  *  @date October 17, 2026
+ *  @brief The element-wise bodies of the encoder tower's entries, rotary and E4M3 scaling steps,
+ *      shared by the NVIDIA training kernels and every vendor's inference kernels.
  *
  *  Each body is a @c constexpr template over its views, so a host compiler reads this header too, and device
  *  compilers call it from any kernel through relaxed @c constexpr . A kernel passes its thread's place in the
@@ -22,8 +22,8 @@
 #include <cmath>   // `fmaxf`, `fabsf`
 #include <cstddef> // `std::size_t`
 
-#include "core/types.hpp"            // the scalar aliases and the rank-tagged views
-#include "core/multimodal_batch.hpp" // `modality_t`
+#include "uform/core/multimodal_batch.hpp" // `modality_t`
+#include "uform/core/types.hpp"            // the scalar aliases and the rank-tagged views
 
 namespace unum::uform::core {
 

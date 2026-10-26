@@ -10,7 +10,7 @@
 #include <cub/device/device_radix_sort.cuh> // the deterministic embedding-gradient scatter
 #include <cub/thread/thread_search.cuh>     // `cub::UpperBound` — a compact row's segment
 
-#include "core/encoder_tower.hpp"
+#include "uform/core/encoder_tower.hpp"
 
 using namespace unum::uform::core;
 
@@ -942,6 +942,20 @@ expected_t tower_token_head_t::pack_weights(bf16r1_span_t transposed, gpu_stream
                             packed_projection_transposed_.span(), capabilities_, stream);
 }
 
+expected<tower_token_head_t> tower_token_head_t::snapshot(gpu_arena_t &arena, transformer_block_config_t const &block,
+                                                          gpu_stream_t &stream) const noexcept {
+    using result_t = expected<tower_token_head_t>;
+    expected<tower_token_head_t> made = make(arena, block, static_cast<u32_t>(projection_.extent(0)));
+    if (!made) return made;
+    tower_token_head_t &copy = made.value_;
+    expected_t copied = copy_device_to_device(norm_scale_.view(), copy.norm_scale_.span(), stream);
+    if (copied)
+        copied = copy_device_to_device(projection_.view().flatten<1>(), copy.projection_.span().flatten<1>(), stream);
+    if (copied) copied = pack_bf16(copy.projection_.view(), copy.packed_projection_.span(), copy.capabilities_, stream);
+    if (!copied) return result_t::fail(std::move(copied));
+    return made;
+}
+
 expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t vertices,
                                          gpu_stream_t &stream) noexcept {
     u32_t const hidden = config_.block.hidden;
@@ -1507,6 +1521,11 @@ expected<encoder_tower_e4m3_t> encoder_tower_bf16_t::quantize_weights(gpu_arena_
     expected<tower_pool_t> pool = tower_pool_t::make(arena, twin.config_.block);
     if (!pool) return result_t::fail(std::move(pool));
     twin.pool_ = std::move(pool.value_);
+    if (config_.token_width != 0) {
+        expected<tower_token_head_t> token_head = token_head_.snapshot(arena, config_.block, stream);
+        if (!token_head) return result_t::fail(std::move(token_head));
+        twin.token_head_ = std::move(token_head.value_);
+    }
 
     // The snapshots above are stream-ordered; drain them so the twin owns settled weights.
     if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
@@ -1597,6 +1616,9 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
                            final_norm_scale_.view(), normalized_.span(), final_inverse_rms_.span(),
                            config_.block.rms_eps);
     if (!staged) return staged;
+    if (config_.token_width != 0)
+        if (expected_t projected = token_head_.forward(normalized_.view(), batch.view(), stream); !projected)
+            return projected;
 
     // Masked path stops here; the contrastive path pools + heads, exactly as the training twin.
     if (vertices.empty()) return {};

@@ -15,7 +15,7 @@
 
 #include <numkong/each.h> // `nk_each_sum_f32_best` — the band forces onto their accumulators
 
-#include "core/contrastive_tokens.cuh"
+#include "uform/core/contrastive_tokens.cuh"
 
 using namespace unum::uform::core;
 

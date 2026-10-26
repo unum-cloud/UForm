@@ -123,6 +123,16 @@ struct VocabularyTests {
         #expect(Negatives.named.description == "named")
         #expect(Negatives(name: "ambient") == .ambient)
         #expect(MultimemTier.peerRead.description == "peer-read")
+        #expect(CPUClass.intelHaswell.description == "intel-haswell")
+        #expect(CPUClass(name: "wasm64-extended") == .wasm64Extended)
+        #expect(CPUClass(name: "unknown") == nil)
+        #expect(GPUClass.nvidiaBlackwellRTX.description == "nvidia-blackwellrtx")
+        #expect(GPUClass(name: "amd-cdna4") == .amdCDNA4)
+    }
+
+    /// Every listed device carries a vendor, and a machine without GPUs lists none rather than failing.
+    @Test func gpuDevicesListWhatTheProcessDrives() throws {
+        #expect(try gpuDevices().allSatisfy { $0.vendor != .unknown && $0.gpuClass != nil })
     }
 
     @Test func errorsRenderTheirStatusAndMessage() throws {
@@ -169,6 +179,12 @@ struct ModelTests {
 
         let bytes = [UInt8](try Data(contentsOf: URL(fileURLWithPath: path)))
         #expect(try Model.loadRamBuffer(bytes.span.bytes).describe().dimensions == description.dimensions)
+    }
+
+    /// Serial is every build's floor, so a pin to it loads and is described, and a RAM model names no GPU class.
+    @Test func aSerialPinIsDescribed() throws {
+        let description = try Model.loadRam(path: try checkpoint(), cpuClass: .serial).describe()
+        #expect(description.cpuClass == .serial && description.gpuClass == nil)
     }
 
     @Test func refusalsArriveAsStatuses() throws {
@@ -223,6 +239,45 @@ struct EncodeTests {
         let stated = try model.textEncode(["blue house"], outputs: .states, arena: arena)
         #expect(stated.embeddings == nil && stated.states?[0].count == 10)
         #expect(failureStatus(of: try model.textEncode(["blue house"], outputs: [], arena: arena)) == .invalidArgument)
+    }
+
+    /// Token vectors share the states' offsets and have unit length, or are refused by a model without a token head.
+    @Test func tokenVectorsFollowTheTokenHead() throws {
+        let model = try model()
+        let tokenWidth = try model.describe().tokenWidth
+        let arena = try Arena()
+        let texts = ["ab", "cde"]
+        let outputs: Outputs = [.states, .tokenVectors]
+        guard tokenWidth > 0 else {
+            #expect(failureStatus(of: try model.textEncode(texts, outputs: outputs, arena: arena)) == .unsupported)
+            return
+        }
+        let encoded = try model.textEncode(texts, outputs: outputs, arena: arena)
+        let vectors = try #require(encoded.tokenVectors)
+        #expect(vectors.map(\.count) == encoded.states?.map(\.count))
+        #expect(vectors.rows.columns == tokenWidth)
+        #expect(vectors.rows.allSatisfy { row in abs(row.reduce(0) { $0 + $1 * $1 } - 1) < 0.02 })
+    }
+
+    /// Each item's probabilities cover its choices and sum to one, or a model without the byte decoder refuses.
+    @Test func choicesSumToOnePerItem() throws {
+        let model = try model()
+        let groups = try model.describe().choiceTemperatureGroups
+        let arena = try Arena()
+        let choices: [[UInt8]] = [Array("yn".utf8), Array("ABC".utf8), Array("s".utf8)]
+        let texts = ["keep this candidate? ", "expand which neighbor? ", "stop? "]
+        guard groups > 0 else {
+            #expect(failureStatus(of: try model.textChoose(texts, choices: choices, arena: arena)) == .unsupported)
+            return
+        }
+        let chosen = try model.textChoose(texts, choices: choices, temperatureGroups: [0, 0, 0], arena: arena)
+        #expect(chosen.probabilities.map(\.count) == [2, 3, 1])
+        #expect(chosen.probabilities.allSatisfy { abs($0.reduce(0, +) - 1) < 0.001 })
+        let past = [0, UInt32(groups), 0]
+        let refused = failureStatus(
+            of: try model.textChoose(texts, choices: choices, temperatureGroups: past, arena: arena)
+        )
+        #expect(refused == .invalidArgument)
     }
 
     @Test func longItemsAreTruncatedAtTheContext() throws {

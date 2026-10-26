@@ -1,5 +1,5 @@
 /**
- *  @file src/core/transformer_block.cuh
+ *  @file include/uform/core/transformer_block.cuh
  *  @author Ash Vardanian
  *  @date July 3, 2026
  *  @brief The pre-norm transformer block: @ref transformer_block_bf16_t trains forward and
@@ -49,9 +49,9 @@
 #include <numkong/each.h>      // `nk_each_rmscast_bf16_best`, `nk_each_swiglu_f32_best`, `nk_each_sum_f32_best`
 #include <numkong/tensor.hpp>  // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "core/types.hpp"         // `expected`, `expected_t`, `status_t`, the integer aliases
-#include "core/schedule.cuh"      // `gpu_stream_t`, `launch_kernel`, the NumKong products
-#include "core/tower_kernels.cuh" // the rotary and E4M3 scaling bodies, `e4m3_range_k`
+#include "uform/core/schedule.cuh"      // `gpu_stream_t`, `launch_kernel`, the NumKong products
+#include "uform/core/tower_kernels.cuh" // the rotary and E4M3 scaling bodies, `e4m3_range_k`
+#include "uform/core/types.hpp"         // `expected`, `expected_t`, `status_t`, the integer aliases
 
 namespace unum::uform::core {
 

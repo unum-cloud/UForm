@@ -99,6 +99,36 @@ public struct MultimemTier: Hashable, Sendable, CustomStringConvertible {
     init(raw: uform_multimem_tier_t) { self.raw = raw }
 }
 
+/// How a contrastive term turns a row of scores into forces, carrying the C enumerator.
+public struct PairLossForm: Hashable, Sendable {
+    /// The C enumerator.
+    let raw: uform_pair_loss_form_t
+
+    /// The term's own form: sigmoid for pooled embeddings, ranked for token vectors.
+    public static let derived = PairLossForm(raw: uform_pair_loss_form_derived_k)
+    /// The sigmoid cross-entropy of every cell, its attract and repel halves normalized apart.
+    public static let balanced = PairLossForm(raw: uform_pair_loss_form_balanced_k)
+    /// The sigmoid cross-entropy of every positive's score over every negative's, where the bias cancels.
+    public static let ranked = PairLossForm(raw: uform_pair_loss_form_ranked_k)
+    /// SigLIP's sigmoid cross-entropy of every cell, each repel weighed like an attract.
+    public static let sigmoid = PairLossForm(raw: uform_pair_loss_form_sigmoid_k)
+}
+
+/// Which side of a late-interaction score an item takes, carrying the C enumerator.
+public struct LateInteractionSide: Hashable, Sendable {
+    /// The C enumerator.
+    let raw: uform_late_interaction_side_t
+
+    /// The item takes no part in late interaction.
+    public static let none = LateInteractionSide(raw: uform_late_interaction_side_none_k)
+    /// The item's tokens score the documents it attracts and repels.
+    public static let query = LateInteractionSide(raw: uform_late_interaction_side_query_k)
+    /// The item's tokens are scored by the queries naming it.
+    public static let document = LateInteractionSide(raw: uform_late_interaction_side_document_k)
+    /// The item plays both sides.
+    public static let queryAndDocument = LateInteractionSide(raw: uform_late_interaction_side_query_and_document_k)
+}
+
 // MARK: - Mesh
 
 /// Where this process sits among the processes training one model, and how they meet. Mirrors
@@ -264,6 +294,8 @@ public struct BatchShape: Sendable {
     public var maxColumnsPerRow: Int
     /// Bags one device's step carries; zero keeps every item its own routing unit.
     public var maxBagsPerDevice: Int
+    /// Legal bytes one item offers to choose from at most; zero makes no choices.
+    public var maxChoicesPerItem: Int
     /// The image geometry.
     public var image: ImageShape
     /// The video geometry.
@@ -276,6 +308,7 @@ public struct BatchShape: Sendable {
         maxSegmentsPerDevice: Int = 0,
         maxColumnsPerRow: Int = 0,
         maxBagsPerDevice: Int = 0,
+        maxChoicesPerItem: Int = 0,
         image: ImageShape = ImageShape(),
         video: VideoShape = VideoShape(),
         audio: AudioShape = AudioShape()
@@ -284,6 +317,7 @@ public struct BatchShape: Sendable {
         self.maxSegmentsPerDevice = maxSegmentsPerDevice
         self.maxColumnsPerRow = maxColumnsPerRow
         self.maxBagsPerDevice = maxBagsPerDevice
+        self.maxChoicesPerItem = maxChoicesPerItem
         self.image = image
         self.video = video
         self.audio = audio
@@ -295,6 +329,7 @@ public struct BatchShape: Sendable {
             max_segments_per_device: maxSegmentsPerDevice,
             max_columns_per_row: maxColumnsPerRow,
             max_bags_per_device: maxBagsPerDevice,
+            max_choices_per_item: maxChoicesPerItem,
             image: uform_image_shape_t(patch_side: image.patchSide, channels: image.channels),
             video: uform_video_shape_t(
                 patch_side: video.patchSide,
@@ -352,8 +387,54 @@ public struct Contrastive: Sendable {
     public var negatives: Negatives = .ambient
     public var ambientRepulsionWeight: Float = 0
     public var maxEdgesPerDevice: Int = 0
+    public var pairLoss: PairLossForm = .derived
 
     public init() {}
+}
+
+/// How the late-interaction loss scores the per-token vectors of query and document items. Mirrors
+/// `uform_late_interaction_t`, every zero deriving the default the C field names; a zero `weight` trains no token
+/// head.
+public struct LateInteraction: Sendable {
+    public var weight: Float = 0
+    public var width: Int = 0
+    public var inverseTemperature: Float = 0
+    public var bias: Float = 0
+    public var maxQuerySpan: Int = 0
+    public var maxQueryTokensPerDevice: Int = 0
+    public var maxDocumentsPerDevice: Int = 0
+    public var maxDocumentTokensPerDevice: Int = 0
+    public var pairLoss: PairLossForm = .derived
+
+    public init() {}
+
+    var raw: uform_late_interaction_t {
+        uform_late_interaction_t(
+            weight: weight,
+            width: width,
+            inverse_temperature: inverseTemperature,
+            bias: bias,
+            max_query_span: maxQuerySpan,
+            max_query_tokens_per_device: maxQueryTokensPerDevice,
+            max_documents_per_device: maxDocumentsPerDevice,
+            max_document_tokens_per_device: maxDocumentTokensPerDevice,
+            pair_loss: pairLoss.raw
+        )
+    }
+}
+
+/// Calibrated choices over the byte decoder: each choice item scores the soft cross-entropy of its legal bytes'
+/// softmax, plus `brierWeight` times its Brier score. Mirrors `uform_choices_t`.
+public struct Choices: Sendable {
+    /// The loss weight; zero trains no choices.
+    public var weight: Float
+    /// The Brier term's weight beside the soft cross-entropy; zero derives 0.5.
+    public var brierWeight: Float
+
+    public init(weight: Float = 0, brierWeight: Float = 0) {
+        self.weight = weight
+        self.brierWeight = brierWeight
+    }
 }
 
 /// The learning-rate schedule: a linear warmup to the peak, then a cosine decay to the floor. Mirrors
@@ -409,6 +490,24 @@ public struct Relations: Sendable {
     }
 }
 
+/// Each item's legal choices and their targets: item `i` offers the distinct bytes `bytes[offsets[i] ..<
+/// offsets[i + 1]]`, an item offering none makes no choice, and the targets pair with `bytes`, summing to one per
+/// item. Mirrors `uform_choices_view_t`.
+public struct ChoicesView: Sendable {
+    /// The step's count + 1 non-decreasing offsets into `bytes`.
+    public var offsets: [Int]
+    /// Every item's legal bytes, end to end.
+    public var bytes: [UInt8]
+    /// The target probability of each byte.
+    public var targets: [Float]
+
+    public init(offsets: [Int], bytes: [UInt8], targets: [Float]) {
+        self.offsets = offsets
+        self.bytes = bytes
+        self.targets = targets
+    }
+}
+
 /// What a step reports, every loss its world mean. Mirrors `uform_trainer_step_stats_t`.
 public struct TrainerStepStats: Sendable {
     /// The optimizer step the call applied, counted from one across resumes.
@@ -422,6 +521,8 @@ public struct TrainerStepStats: Sendable {
     public var maskedImageLoss: Float
     public var maskedVideoLoss: Float
     public var maskedAudioLoss: Float
+    public var lateInteractionLoss: Float
+    public var choicesLoss: Float
     /// Items cut at a row's width.
     public var truncated: Int
 
@@ -434,6 +535,8 @@ public struct TrainerStepStats: Sendable {
         maskedImageLoss = raw.masked_image_loss
         maskedVideoLoss = raw.masked_video_loss
         maskedAudioLoss = raw.masked_audio_loss
+        lateInteractionLoss = raw.late_interaction_loss
+        choicesLoss = raw.choices_loss
         truncated = raw.truncated
     }
 }
@@ -477,6 +580,8 @@ public final class Trainer: @unchecked Sendable {
         objective: Objective = .joint,
         masking: Masking = Masking(),
         contrastive: Contrastive = Contrastive(),
+        lateInteraction: LateInteraction = LateInteraction(),
+        choices: Choices = Choices(),
         schedule: Schedule,
         mesh: Mesh? = nil,
         resume: String = "",
@@ -505,8 +610,11 @@ public final class Trainer: @unchecked Sendable {
             bias: contrastive.bias,
             negatives: contrastive.negatives.raw,
             ambient_repulsion_weight: contrastive.ambientRepulsionWeight,
-            max_edges_per_device: contrastive.maxEdgesPerDevice
+            max_edges_per_device: contrastive.maxEdgesPerDevice,
+            pair_loss: contrastive.pairLoss.raw
         )
+        arguments.late_interaction = lateInteraction.raw
+        arguments.choices = uform_choices_t(weight: choices.weight, brier_weight: choices.brierWeight)
         arguments.schedule = uform_schedule_t(
             learning_rate: schedule.learningRate,
             min_learning_rate: schedule.minLearningRate,
@@ -524,13 +632,16 @@ public final class Trainer: @unchecked Sendable {
 
     /// Applies one optimizer step over this process's items and every peer's; every process of the run calls it
     /// once per step. With an `arena`, the step also lands the pooled embeddings it scored there, as
-    /// `outputsScalar`. Calls `uform_trainer_step`.
+    /// `outputsScalar`. `sides` places each item in the late-interaction loss, nil leaving every item out, and
+    /// `choices` names the legal bytes and targets the choices term reads. Calls `uform_trainer_step`.
     public func step(
         modalities: [Modality],
         contents: [[UInt8]],
         bags: [UInt32]? = nil,
         temperatureGroups: [UInt32]? = nil,
+        sides: [LateInteractionSide]? = nil,
         relations: Relations = Relations(),
+        choices: ChoicesView? = nil,
         arena: Arena? = nil,
         outputsScalar: Scalar = .f32
     ) throws(UFormError) -> TrainerStep {
@@ -538,8 +649,9 @@ public final class Trainer: @unchecked Sendable {
         // The C side reads one entry per item, and one offset more, behind pointers that carry no count.
         let edges = [relations.attract, relations.repel, relations.ignore].compactMap { $0 }
         guard modalities.count == count, bags.map({ $0.count == count }) ?? true,
-            temperatureGroups.map({ $0.count == count }) ?? true,
-            edges.allSatisfy({ $0.offsets.count == count + 1 && ($0.weights?.count ?? $0.ids.count) == $0.ids.count })
+            temperatureGroups.map({ $0.count == count }) ?? true, sides.map({ $0.count == count }) ?? true,
+            edges.allSatisfy({ $0.offsets.count == count + 1 && ($0.weights?.count ?? $0.ids.count) == $0.ids.count }),
+            choices.map({ $0.offsets.count == count + 1 && $0.targets.count == $0.bytes.count }) ?? true
         else {
             throw UFormError(status: .shapeMismatch, message: "every per-item list must name one entry per item")
         }
@@ -565,6 +677,14 @@ public final class Trainer: @unchecked Sendable {
         arguments.contents = landing.tape(contents, .u8)
         arguments.bags = bags.flatMap { landing.lend($0) }
         arguments.temperature_groups = temperatureGroups.flatMap { landing.lend($0) }
+        arguments.sides = sides.flatMap { landing.lend($0.map(\.raw)) }
+        if let choices {
+            arguments.choices = uform_choices_view_t(
+                offsets: landing.lend(choices.offsets),
+                bytes: landing.lend(choices.bytes),
+                targets: landing.lend(choices.targets)
+            )
+        }
         arguments.relations = uform_relations_view_t(
             attract: lent(relations.attract),
             repel: lent(relations.repel),

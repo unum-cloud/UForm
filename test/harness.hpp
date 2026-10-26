@@ -45,8 +45,8 @@
 
 #include "uform/types.h" // `uform_version_name`, `uform_capabilities_available`, `uform_gpu_devices`
 
-#include "uform/core/types.hpp" // `format_at_t`, `format_into_t`, `sz`, the scalar aliases
 #include "uform/core/array.hpp" // `per_gpu_array` — the devices
+#include "uform/core/types.hpp" // `format_at_t`, `format_into_t`, `sz`, the scalar aliases
 
 /** Prints a StringZilla view as the text it spans. */
 template <>

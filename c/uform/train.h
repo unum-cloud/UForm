@@ -146,6 +146,9 @@ typedef struct uform_batch_shape_t {
     /** Bags one device's step carries; zero keeps every item its own routing unit. */
     size_t max_bags_per_device;
 
+    /** Legal bytes one item offers to choose from at most; zero makes no choices. */
+    size_t max_choices_per_item;
+
     /** The image geometry. */
     uform_image_shape_t image;
 
@@ -228,6 +231,24 @@ UFORM_EXPORT char const* uform_negatives_name(uform_negatives_t negatives);
 /** Reads a negatives policy back; @c uform_negatives_ambient_k when unrecognized. */
 UFORM_EXPORT uform_negatives_t uform_negatives_from_name(uform_bytes_view_t name);
 
+/** How a contrastive term turns a row of scores into forces, mirroring the trainer's pair-loss
+ *  forms; zero keeps the term's own form: sigmoid for pooled vertices, ranked for token vectors. */
+typedef enum uform_pair_loss_form_t {
+
+    /** The term's own form. */
+    uform_pair_loss_form_derived_k = 0,
+
+    /** The sigmoid cross-entropy of every cell, its attract and repel halves normalized apart. */
+    uform_pair_loss_form_balanced_k = 1,
+
+    /** The sigmoid cross-entropy of every positive's score over every negative's, where the bias
+     *  cancels. */
+    uform_pair_loss_form_ranked_k = 2,
+
+    /** SigLIP's sigmoid cross-entropy of every cell, each repel weighed like an attract. */
+    uform_pair_loss_form_sigmoid_k = 3,
+} uform_pair_loss_form_t;
+
 /** How the contrastive loss scores the pooled embeddings; every zero derives the default named. */
 typedef struct uform_contrastive_t {
 
@@ -241,10 +262,11 @@ typedef struct uform_contrastive_t {
     /** Learnable (inverse temperature, bias) pairs, one per group a step's items select; one. */
     size_t temperature_groups;
 
-    /** The starting inverse temperature of every group; 10, SigLIP's. */
+    /** The starting inverse temperature of every group; 10 under the sigmoid form, SigLIP's,
+     *  else 1. */
     float inverse_temperature;
 
-    /** The starting logit bias of every group; −10, SigLIP's. */
+    /** The starting logit bias of every group; −10 under the sigmoid form, SigLIP's, else zero. */
     float bias;
 
     /** Which pairs repel. */
@@ -256,6 +278,9 @@ typedef struct uform_contrastive_t {
     /** Edges one device's step names per edge set at most; zero derives it from the segments and
      *  the largest bag. */
     size_t max_edges_per_device;
+
+    /** The pair loss over each anchor's row; sigmoid. */
+    uform_pair_loss_form_t pair_loss;
 } uform_contrastive_t;
 
 /** How the late-interaction loss scores the per-token vectors of query and document segments; every
@@ -285,7 +310,40 @@ typedef struct uform_late_interaction_t {
 
     /** Document token rows one device's step holds at most; the batch's tokens per device. */
     size_t max_document_tokens_per_device;
+
+    /** The pair loss over each query's row of hard MaxSim scores; ranked. */
+    uform_pair_loss_form_t pair_loss;
 } uform_late_interaction_t;
+
+/** Which side of a late-interaction score an item takes, mirroring the trainer's sides: a query's
+ *  tokens score a document's, and a symmetric pair plays both. */
+typedef enum uform_late_interaction_side_t {
+
+    /** The item takes no part in late interaction. */
+    uform_late_interaction_side_none_k = 0,
+
+    /** The item's tokens score the documents it attracts and repels. */
+    uform_late_interaction_side_query_k = 1,
+
+    /** The item's tokens are scored by the queries naming it. */
+    uform_late_interaction_side_document_k = 2,
+
+    /** The item plays both sides. */
+    uform_late_interaction_side_query_and_document_k = 3,
+} uform_late_interaction_side_t;
+
+/** SearchJev's calibrated choices over the byte decoder, the masked head's untied byte logits read
+ *  at a mask byte appended to a state and restricted to the item's legal bytes. Each choice item
+ *  scores @c −Σt·log(p) + brier_weight·Σ(p−t)², with @c p that restricted softmax and @c t its
+ *  targets. */
+typedef struct uform_choices_t {
+
+    /** The loss weight; zero trains no choices. */
+    float weight;
+
+    /** The Brier term's weight beside the soft cross-entropy; 0.5. */
+    float brier_weight;
+} uform_choices_t;
 
 /** The learning-rate schedule: a linear warmup to the peak, then a cosine decay to the floor. */
 typedef struct uform_schedule_t {
@@ -458,6 +516,10 @@ typedef struct uform_trainer_init_vram_t {
     /** The late-interaction loss beside the pooled one, read when its weight is positive. */
     uform_late_interaction_t late_interaction;
 
+    /** The calibrated choices beside every other term, read when its weight is positive, which
+     *  needs the batch's @c max_choices_per_item. */
+    uform_choices_t choices;
+
     /** The learning-rate schedule. */
     uform_schedule_t schedule;
 
@@ -532,9 +594,29 @@ typedef struct uform_trainer_step_stats_t {
     /** The audio reconstruction term, before its weight; zero when absent. */
     float masked_audio_loss;
 
+    /** The late-interaction term, weighted; zero when absent. */
+    float late_interaction_loss;
+
+    /** The choices term over the items that made a choice, before its weight; zero when absent. */
+    float choices_loss;
+
     /** Items cut at a row's width. */
     size_t truncated;
 } uform_trainer_step_stats_t;
+
+/** Each item's legal choices and their targets: @c count + 1 offsets into both, in host memory. */
+typedef struct uform_choices_view_t {
+
+    /** The step's @c count + 1 non-decreasing offsets; @c NULL makes no choices, and an item
+     *  offering none makes none. */
+    size_t const* offsets;
+
+    /** Item @c i offers the distinct bytes @c bytes[offsets[i]] up to @c bytes[offsets[i+1]]. */
+    uint8_t const* bytes;
+
+    /** The target probability of each byte, paired with @c bytes, summing to one per item. */
+    float const* targets;
+} uform_choices_view_t;
 
 /** The arguments of @c uform_trainer_step. */
 typedef struct uform_trainer_step_t {
@@ -569,6 +651,15 @@ typedef struct uform_trainer_step_t {
     /** The @b optional temperature group of each item, @c count of them in host memory, each below the run's
      *  @c temperature_groups; @c NULL puts every item in group zero. */
     uint32_t const* temperature_groups;
+
+    /** The @b optional late-interaction side of each item, @c count of them in host memory;
+     *  @c NULL makes every item @c uform_late_interaction_side_none_k. */
+    uform_late_interaction_side_t const* sides;
+
+    /** The @b optional choices, read when the run trains them: a text item offering any is the
+     *  state its answer follows, and the call appends the mask byte, cutting a state longer than a
+     *  row at its head. */
+    uform_choices_view_t choices;
 
     /** The contrastive targets, read unless the objective is masked alone; a contrastive step naming no
      *  attract edge reports @c uform_status_invalid_argument_k. */

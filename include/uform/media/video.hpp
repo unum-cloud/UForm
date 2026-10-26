@@ -1,9 +1,9 @@
 /**
- *  @brief Host video ingest: demux a container to its elementary stream, and decode it in software into a
- *      segment's tube cells.
- *  @file src/media/video.hpp
+ *  @file include/uform/media/video.hpp
  *  @author Ash Vardanian
  *  @date July 5, 2026
+ *  @brief Host video ingest: demux a container to its elementary stream, and decode it in software
+ *      into a segment's tube cells.
  *
  *  @ref demux_video serves every residency: the NVIDIA loader feeds its Annex-B bytes to NVDEC, while the RAM and
  *  AMD executors hand the same @ref demuxed_t to @ref decode_video_frames , a libavcodec decode that scales each
@@ -18,9 +18,9 @@
 
 #include <span> // `std::span`
 
-#include "uform/core/types.hpp"            // `expected`, `status_t`, the scalar aliases, `st::basic_vector`
 #include "uform/core/multimodal_batch.hpp" // `video_batch_shape_t`
-#include "media/planning.hpp"              // `image_extent_t`, `video_grid_t`
+#include "uform/core/types.hpp"            // `expected`, `status_t`, the scalar aliases, `st::basic_vector`
+#include "uform/media/planning.hpp"        // `image_extent_t`, `video_grid_t`
 
 namespace unum::uform::media {
 

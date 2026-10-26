@@ -16,8 +16,8 @@
 #include <numkong/types.h>       // `NUMKONG_ARCH_CUDA_`, which the SIMT casts test before including it
 #include <numkong/cast/simt.cuh> // `nk_bf16_to_f32_simt_`, `nk_f32_to_bf16_simt_`, `nk_f32_to_e4m3_simt_`
 
-#include "core/tower_kernels.cuh"    // the bodies every vendor's kernels share with training
-#include "uform/encoder/entries.hpp" // `segment_layout_t`, `entries_block_threads_k`
+#include "uform/core/tower_kernels.cuh" // the bodies every vendor's kernels share with training
+#include "uform/encoder/entries.hpp"    // `segment_layout_t`, `entries_block_threads_k`
 
 namespace ue = unum::uform::encoder;
 using namespace ue;

@@ -1,10 +1,10 @@
 /**
+ *  @file include/uform/loaders/tokens_loader.cuh
+ *  @author Ash Vardanian
+ *  @date July 4, 2026
  *  @brief The byte-level Parquet tokens loader: tied to a @b dataset, not a GPU. @ref make reads only
  *      each shard's Parquet footer (host, once per dataset), so the shard metadata is never replicated
  *      per GPU.
- *  @file src/loaders/tokens_loader.cuh
- *  @author Ash Vardanian
- *  @date July 4, 2026
  *
  *  Every @ref fill takes the caller's stream and rank, so the @b same loader serves a different GPU on a
  *  different step.
@@ -30,12 +30,12 @@
 
 #include <span> // `std::span`
 
-#include "core/types.hpp"             // `expected`, `status_t`, `token_id_t`, `data_epoch_t`, `epoch_permutation`
-#include "core/gpu_allocators.hpp"    // `gpu_alloc` — the per-fill scratch allocator
-#include "core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`, `grid_size_for`
-#include "core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t` — the packing target
-#include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
-#include "loaders/dataset_shards.hpp" // `parquet_file_t`, `jsonl_file_t`, `expand_glob`, `column_view_t`
+#include "uform/core/gpu_allocators.hpp"    // `gpu_alloc` — the per-fill scratch allocator
+#include "uform/core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t` — the packing target
+#include "uform/core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`, `grid_size_for`
+#include "uform/core/types.hpp"             // `expected`, `status_t`, `token_id_t`, `data_epoch_t`, `epoch_permutation`
+#include "uform/loaders/dataset_shards.hpp" // `parquet_file_t`, `jsonl_file_t`, `expand_glob`, `column_view_t`
+#include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
 
 namespace unum::uform::loaders {
 

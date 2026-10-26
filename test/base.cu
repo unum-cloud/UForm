@@ -1,17 +1,18 @@
 /**
- *  @brief The Base training conformance test: builds the same @ref trainer_t the binary and the C verbs drive and
- *      asserts the invariants the loop itself never checks — deep replay conformance for the tokens and omni
- *      mixtures, plus a cross-product sweep over every media subset, row budget, and model-region mode.
  *  @file test/base.cu
  *  @author Ash Vardanian
  *  @date July 6, 2026
+ *  @brief The Base training conformance test: builds the same @ref trainer_t the binary and the C
+ *      verbs drive and asserts the invariants the loop never checks — deep replay conformance for
+ *      tokens and omni mixtures, and a sweep over media subsets, row budgets, model-region modes.
  *
- *  This is a test: a plain @c int @c main builds one @ref test_suite_t and threads it by reference into every
- *  case, consuming @c src/train/trainer.hpp 's typed surface instead of copying the driver. Two meshes are made
- *  once in @c main — the bootstrapped world and a one-GPU narrowing of it — and every case builds its own trainer
- *  over one of them, exactly as the C verbs compose production. Launched under Slurm via
- *  @c scripts/slurm/test_base-4-8-16.sbatch , the same binary runs the distributed tiers: @c main honors
- *  @c UFORM_HOST_DOMAIN_COUNT , so a two-node world exercises the InfiniBand reduce under every case below.
+ *  This is a test: a plain @c int @c main builds one @ref test_suite_t and threads it by reference
+ *  into every case, consuming @c uform/train/trainer.hpp 's typed surface instead of copying the
+ *  driver. Two meshes are made once in @c main — the bootstrapped world and a one-GPU narrowing of
+ *  it — and every case builds its own trainer over one of them, exactly as the C verbs compose
+ *  production. Launched under Slurm via @c scripts/slurm/test_base-4-8-16.sbatch , the same binary
+ *  runs the distributed tiers: @c main honors @c UFORM_HOST_DOMAIN_COUNT , so a two-node world
+ *  exercises the InfiniBand reduce under every case below.
  *
  *  The case matrix:
  *
@@ -36,8 +37,9 @@
 
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
-#include "train/trainer.hpp" // `trainer_config_t`, `trainer_t`, `mesh_t`, `synthetic_source_t`
-#include "harness.hpp"       // `test_suite_t` — the cumulative pass/fail tally
+#include "uform/train/trainer.hpp" // `trainer_config_t`, `trainer_t`, `mesh_t`, `synthetic_source_t`
+
+#include "harness.hpp" // `test_suite_t` — the cumulative pass/fail tally
 
 using namespace unum::uform::core;
 using namespace unum::uform::train;
@@ -160,7 +162,8 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
     synthetic_source_t source;
     step_report_t report;
     for (u32_t ordinal = begin; ordinal != end; ++ordinal)
-        if (expected_t stepped = trainer.step(source, optimizer_step_t {ordinal}, report); !stepped) return stepped;
+        if (expected_t stepped = trainer.step(batch_source_of(source), optimizer_step_t {ordinal}, report); !stepped)
+            return stepped;
     return {};
 }
 
@@ -342,7 +345,7 @@ static void run_base_conformance(test_suite_t &suite, world_health_t &health, ch
         synthetic_source_t source;
         step_report_t report;
         for (u32_t ordinal = 0; ordinal != config.steps; ++ordinal) {
-            if (expected_t ran = trainer.step(source, optimizer_step_t {ordinal}, report); !ran)
+            if (expected_t ran = trainer.step(batch_source_of(source), optimizer_step_t {ordinal}, report); !ran)
                 return suite.check(false, "[{}] captured step {}: {}", label, ordinal, ran.description_);
             (void)trainer.telemetry(optimizer_step_t {ordinal});
             if (ordinal + 1u == config.steps / 2u)

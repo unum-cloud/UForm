@@ -19,7 +19,7 @@
 #include <infiniband/verbs.h>  // `ibv_context`, `ibv_pd`, `ibv_cq`, `ibv_qp` — the RC bring-up
 #endif
 
-#include "core/infiniband_collectives.cuh" // the declarations these bodies define
+#include "uform/core/infiniband_collectives.cuh" // the declarations these bodies define
 
 using namespace unum::uform::core;
 

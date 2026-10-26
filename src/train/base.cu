@@ -1,10 +1,10 @@
 /**
- *  @brief The implementation of the Base pre-training library declared in @c src/train/base.cuh : the
- *      synthetic-mixture kernels, the weight seeding and checkpoint helpers, and every out-of-line body of
- *      @ref trainer_config_t and @ref base_replica_t .
  *  @file src/train/base.cu
  *  @author Ash Vardanian
  *  @date July 6, 2026
+ *  @brief The implementation of the Base pre-training library declared in @c uform/train/base.cuh :
+ *      the synthetic-mixture kernels, the weight seeding and checkpoint helpers, and every
+ *      out-of-line body of @ref trainer_config_t and @ref base_replica_t .
  *
  *  No @c main lives here — the binary's thin entry is @c tools/base.cu , and the conformance test is
  *  @c test/base.cu .
@@ -37,7 +37,7 @@
 
 #include <cuda.h> // `cuMemcpyHtoDAsync`, `cuMemcpyDtoHAsync`, `cuStreamSynchronize`, `cuMemsetD8`
 
-#include "train/base.cuh"
+#include "uform/train/base.cuh"
 
 using namespace unum::uform::core;
 using namespace unum::uform::train;
@@ -191,34 +191,52 @@ struct grid_factor_t {
 multimodal_batch_shape_t ut::batch_capacity(multimodal_batch_shape_t shape, std::size_t rows,
                                             f64_t segments_per_row) noexcept {
     f64_t const per_row = std::clamp(segments_per_row, 1.0, static_cast<f64_t>(shape.max_columns_per_row));
+    u32_t const segments = static_cast<u32_t>(std::ceil(static_cast<f64_t>(rows) * per_row));
+    if (shape.max_segments_per_gpu) // the bags keep their share of the segments, as each needs one
+        shape.max_bags_per_gpu = static_cast<u32_t>(
+            divide_round_up(std::size_t {shape.max_bags_per_gpu} * segments, std::size_t {shape.max_segments_per_gpu}));
     shape.max_rows_per_gpu = static_cast<u32_t>(rows);
-    shape.max_segments_per_gpu = static_cast<u32_t>(std::ceil(static_cast<f64_t>(rows) * per_row));
+    shape.max_segments_per_gpu = segments;
     return shape;
+}
+
+/** How many matrices of @p list project back into the residual stream, splitting one unit of
+ *  variance. */
+[[nodiscard]] static std::size_t residual_writers_(std::span<differentiable_weights_t const> list) noexcept {
+    std::size_t residual_writers = 0;
+    for (differentiable_weights_t const &matrix : list) residual_writers += writes_residual_(matrix) ? 1u : 0u;
+    return residual_writers;
+}
+
+/** Seed matrix @p weight_index of @p list to its deterministic init, the salt keyed by its
+ *  position, so a matrix re-seeded alone matches the one a whole-list seed writes. */
+[[nodiscard]] static expected_t seed_matrix_(std::span<differentiable_weights_t const> list, std::size_t weight_index,
+                                             std::size_t residual_writers, gpu_stream_t &stream) noexcept {
+    differentiable_weights_t const &matrix = list[weight_index];
+    std::size_t const rows = matrix.weights.extent(0), columns = matrix.weights.extent(1);
+    // Matrices are [outputs,inputs]; the residual writers split one unit of variance across the
+    // stack.
+    std::size_t const fan_in = writes_residual_(matrix) ? columns * residual_writers : columns;
+    f32_t const deviation = 1.0f / std::sqrt(static_cast<f32_t>(fan_in));
+    nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging =
+        nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::uninitialized({rows * columns}, pinned_alloc<bf16_t> {}).value;
+    if (!staging) return expected_t::fail(status_t::bad_alloc_k, "weight staging failed (matrix={})", weight_index);
+    bf16r1_span_t const host = staging.span();
+    for (std::size_t index = 0; index != host.extent(0); ++index)
+        host[index] = __float2bfloat16( //
+            rows == 1 ? 1.0f : hash_fill_(index, static_cast<u32_t>(weight_index) + 11u, deviation));
+    if (expected_t copied = copy_host_to_device(staging.view(), matrix.weights.flatten<1>(), stream); !copied)
+        return copied;
+    // The staging tensor dies with this call — the enqueued copy must land first.
+    cuStreamSynchronize(stream.get());
+    return {};
 }
 
 expected_t ut::seed_weights(st::basic_vector<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept {
     std::span<differentiable_weights_t const> const list {weights};
-    std::size_t residual_writers = 0;
-    for (differentiable_weights_t const &matrix : list) residual_writers += writes_residual_(matrix) ? 1u : 0u;
-    for (std::size_t weight_index = 0; weight_index != list.size(); ++weight_index) {
-        differentiable_weights_t const &matrix = list[weight_index];
-        std::size_t const rows = matrix.weights.extent(0), columns = matrix.weights.extent(1);
-        // Matrices are [outputs,inputs]; the residual writers split one unit of variance across the
-        // stack.
-        f32_t const deviation =
-            1.0f / std::sqrt(static_cast<f32_t>(writes_residual_(matrix) ? columns * residual_writers : columns));
-        nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging =
-            nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1>::uninitialized({rows * columns}, pinned_alloc<bf16_t> {}).value;
-        if (!staging) return expected_t::fail(status_t::bad_alloc_k, "weight staging failed (matrix={})", weight_index);
-        bf16r1_span_t const host = staging.span();
-        for (std::size_t index = 0; index != host.extent(0); ++index)
-            host[index] = __float2bfloat16( //
-                rows == 1 ? 1.0f : hash_fill_(index, static_cast<u32_t>(weight_index) + 11u, deviation));
-        if (expected_t copied = copy_host_to_device(staging.view(), matrix.weights.flatten<1>(), stream); !copied)
-            return copied;
-        // The staging tensor dies this iteration — the enqueued copy must land first.
-        cuStreamSynchronize(stream.get());
-    }
+    std::size_t const residual_writers = residual_writers_(list);
+    for (std::size_t weight_index = 0; weight_index != list.size(); ++weight_index)
+        if (expected_t seeded = seed_matrix_(list, weight_index, residual_writers, stream); !seeded) return seeded;
     return {};
 }
 
@@ -323,12 +341,20 @@ struct row_partition_t {
 expected_t ut::load_weights(checkpoint_to_load_t const &checkpoint,
                             st::basic_vector<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept {
     std::span<differentiable_weights_t const> const list {weights};
+    std::size_t const residual_writers = residual_writers_(list);
     sz::string_t name_text;
-    for (differentiable_weights_t const &matrix : list) {
+    for (std::size_t weight_index = 0; weight_index != list.size(); ++weight_index) {
+        differentiable_weights_t const &matrix = list[weight_index];
         name_text.clear();
         if (!format_into(name_text, "model.{}", matrix.name))
             return expected_t::fail(status_t::bad_alloc_k, "matrix name format failed ({})", matrix.name);
         nk::tensor_view<nk_bf16_t, 2> const saved = checkpoint[name_text.view()];
+        // A base trained without the decoder or the token head warm-starts a run adding either.
+        bool const optional = matrix.name.view() == "masked_tokens" || matrix.name.view().starts_with("token_head.");
+        if (saved.empty() && optional) {
+            if (expected_t seeded = seed_matrix_(list, weight_index, residual_writers, stream); !seeded) return seeded;
+            continue;
+        }
         if (saved.empty())
             return expected_t::fail(status_t::invalid_input_k, "the checkpoint misses {}", name_text.view());
         if (saved.extent(0) != matrix.weights.extent(0) || saved.extent(1) != matrix.weights.extent(1))
@@ -450,6 +476,12 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
         else if (flag == "--late-interaction-weight")
             taken = number(config.late_interaction.weight) && std::isfinite(config.late_interaction.weight) &&
                     config.late_interaction.weight >= 0.0f;
+        else if (flag == "--choices-weight")
+            taken = number(config.choices.weight) && std::isfinite(config.choices.weight) &&
+                    config.choices.weight >= 0.0f;
+        else if (flag == "--brier-weight")
+            taken = number(config.choices.brier_weight) && std::isfinite(config.choices.brier_weight) &&
+                    config.choices.brier_weight >= 0.0f;
         else if (flag == "--objective") {
             if (value == "masked") config.objective = objective_t::masked_k;
             else if (value == "contrastive") config.objective = objective_t::contrastive_k;
@@ -517,25 +549,35 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
     gpu_arena_alloc<f32_t> f32_alloc {arena};
     gpu_arena_alloc<bf16_t> bf16_alloc {arena};
 
-    bool const reconstructs = config.reconstructs();
+    bool const reconstructs = config.reconstructs(), chooses = config.chooses();
     bool const image_live = reconstructs && shape.contains(modality_t::image_k);
     bool const video_live = reconstructs && shape.contains(modality_t::video_k);
     bool const audio_live = reconstructs && shape.contains(modality_t::audio_k);
-    if (reconstructs) {
+    if (chooses && shape.max_choices_per_segment == 0)
+        return result_t::fail(status_t::invalid_input_k, "choices need the batch's max_choices_per_segment");
+    if (reconstructs || chooses) {
         masked_tokens_config_t tokens_config;
         tokens_config.hidden = config.hidden;
         tokens_config.max_tokens = max_tokens;
         tokens_config.weight = config.text_weight;
+        tokens_config.max_segments = chooses ? shape.max_segments_per_gpu : 0u;
         expected<masked_tokens_t> tokens = masked_tokens_t::make(arena, tokens_config);
         if (!tokens) return result_t::fail(std::move(tokens));
         replica.tokens = std::move(tokens.value_);
+        replica.normalized_grad = bf16r2_tensor_arena_t::uninitialized({max_tokens, config.hidden}, bf16_alloc).value;
+        if (!replica.normalized_grad) return result_t::fail(status_t::bad_alloc_k, "decoder scratch allocation failed");
+    }
+    if (reconstructs) {
         replica.clean_tokens = tokens_tensor_arena_t::uninitialized({max_tokens}, token_alloc).value;
         replica.token_loss_weights = u32r1_tensor_arena_t::uninitialized({max_tokens}, u32_alloc).value;
         replica.tokens_summands = f32r1_tensor_arena_t::uninitialized({2}, f32_alloc).value;
-        replica.normalized_grad = bf16r2_tensor_arena_t::uninitialized({max_tokens, config.hidden}, bf16_alloc).value;
-        if (!replica.clean_tokens || !replica.token_loss_weights || !replica.tokens_summands ||
-            !replica.normalized_grad)
+        if (!replica.clean_tokens || !replica.token_loss_weights || !replica.tokens_summands)
             return result_t::fail(status_t::bad_alloc_k, "masked scratch allocation failed");
+    }
+    if (chooses) {
+        replica.choices_summands = f32r1_tensor_arena_t::uninitialized({2}, f32_alloc).value;
+        if (!replica.choices_summands)
+            return result_t::fail(status_t::bad_alloc_k, "choices scratch allocation failed");
     }
 
     // Each live media head with its clean target and summands — the same order on every replica.
@@ -628,7 +670,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
     // The registration list — tower first, then each live head, identical order on every replica. The tower
     // spells its own weight names; the heads take their instance names here, where the modalities are told apart.
     if (expected_t listed = replica.tower.fill(replica.weights); !listed) return result_t::fail(std::move(listed));
-    if (reconstructs)
+    if (reconstructs || chooses)
         if (expected_t listed = replica.tokens.fill("masked_tokens", replica.weights); !listed)
             return result_t::fail(std::move(listed));
     if (image_live)
@@ -680,6 +722,8 @@ expected_t base_replica_t::draw(trainer_config_t const &config, u32_t gpu_index_
         result != CUDA_SUCCESS)
         return cuda_failure(result, "synthetic side fill failed");
     if (expected_t cleared = zero_async(batch.segment_prefix_length.span(), stream); !cleared) return cleared;
+    // No synthetic segment makes a choice.
+    if (expected_t padded = pad_choices(batch, stream); !padded) return padded;
 
     // Each live modality's raw content — filled across the whole tensor, keyed identically every run.
     if (shape.contains(modality_t::image_k)) {
@@ -714,11 +758,11 @@ expected_t base_replica_t::draw(trainer_config_t const &config, u32_t gpu_index_
 
 expected_t base_replica_t::prepare(trainer_config_t const &config, data_epoch_t data_epoch,
                                    gpu_stream_t &stream) noexcept {
-    if (tokens_summands.empty()) return {}; // masked heads exist only where make allocated the token head's summands
     if (config.report_every != 0 && data_epoch.ordinal % config.report_every == 0) // the step after a report
         for (f32r1_tensor_arena_t *pair : summand_pairs_())
             if (!pair->empty())
                 if (expected_t zeroed = zero_async(pair->span(), stream); !zeroed) return zeroed;
+    if (tokens_summands.empty()) return {}; // masked heads exist only where make allocated the token head's summands
     multimodal_batch_shape_t const &shape = config.batch;
     bool const image_live = image_summands.data() != nullptr;
     bool const video_live = video_summands.data() != nullptr;
@@ -732,7 +776,8 @@ expected_t base_replica_t::prepare(trainer_config_t const &config, data_epoch_t 
         return snapshot;
     if (expected_t corrupted = tokens.corrupt(clean_tokens.view(), tokens_flat, token_loss_weights.span(),
                                               batch.segment_offsets.view(), batch.segment_lengths.view(),
-                                              batch.segment_modality.view(), recipe, data_epoch, stream);
+                                              batch.segment_modality.view(), batch.segment_choices.view(), recipe,
+                                              data_epoch, stream);
         !corrupted)
         return corrupted;
     if (!image_live && !video_live && !audio_live) return {};
@@ -785,15 +830,16 @@ expected_t base_replica_t::prepare(trainer_config_t const &config, data_epoch_t 
     return {};
 }
 
-expected_t base_replica_t::forward_region(gpu_stream_t &stream) noexcept {
+expected_t base_replica_t::forward_region(trainer_config_t const &config, gpu_stream_t &stream) noexcept {
     // A head is live iff its summand pair was allocated at make.
     bool const reconstructs = tokens_summands.data() != nullptr;
+    bool const chooses = choices_summands.data() != nullptr;
     bool const image_live = image_summands.data() != nullptr;
     bool const video_live = video_summands.data() != nullptr;
     bool const audio_live = audio_summands.data() != nullptr;
 
     if (expected_t packed = tower.pack_weights(stream); !packed) return packed;
-    if (reconstructs)
+    if (reconstructs || chooses)
         if (expected_t packed = tokens.pack_weights(stream); !packed) return packed;
     if (image_live)
         if (expected_t packed = image.pack_weights(stream); !packed) return packed;
@@ -802,15 +848,24 @@ expected_t base_replica_t::forward_region(gpu_stream_t &stream) noexcept {
     if (audio_live)
         if (expected_t packed = audio.pack_weights(stream); !packed) return packed;
     if (expected_t encoded = tower.forward(batch, vertices.span(), stream); !encoded) return encoded;
-    if (!reconstructs) return {};
+    if (!reconstructs && !chooses) return {};
 
-    // The shared d(normalized): the token head overwrites first, so the reset matters only when media heads add.
-    if (image_live || video_live || audio_live)
+    // The shared d(normalized) and the decoder's gradient: the token head overwrites both first, so
+    // the reset matters only when it does not run and the others add.
+    if (!reconstructs || image_live || video_live || audio_live)
         if (expected_t reset = zero_async(normalized_grad.span(), stream); !reset) return reset;
-    if (expected_t scored = tokens(tower.normalized(), clean_tokens.view(), token_loss_weights.view(),
-                                   tokens_summands.span(), normalized_grad.span(), stream);
-        !scored)
-        return scored;
+    if (!reconstructs)
+        if (expected_t reset = zero_async(tokens.decoder_gradients(), stream); !reset) return reset;
+    if (reconstructs)
+        if (expected_t scored = tokens(tower.normalized(), clean_tokens.view(), token_loss_weights.view(),
+                                       tokens_summands.span(), normalized_grad.span(), stream);
+            !scored)
+            return scored;
+    if (chooses)
+        if (expected_t scored = tokens.choose(tower.normalized(), batch.view(), config.choices, choices_summands.span(),
+                                              normalized_grad.span(), stream);
+            !scored)
+            return scored;
     if (image_live)
         if (expected_t scored = image(tower.normalized(), clean_image_patches.view(), image_summands.span(),
                                       normalized_grad.span(), stream);

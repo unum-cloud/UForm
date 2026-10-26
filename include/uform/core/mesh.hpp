@@ -1,8 +1,9 @@
 /**
- *  @brief The multi-level GPU mesh: nested domain sizes, this rank's coordinate, and the world bootstrap.
- *  @file src/core/mesh.hpp
+ *  @file include/uform/core/mesh.hpp
  *  @author Ash Vardanian
  *  @date July 2, 2026
+ *  @brief The multi-level GPU mesh: nested domain sizes, this rank's coordinate, and the world
+ *      bootstrap.
  *
  *  Four artifacts every distributed primitive keys on:
  *
@@ -79,25 +80,26 @@
 
 #include <cstdint> // `std::uint32_t`
 #include <cstring> // `std::memcpy`, `std::strcmp`
-#include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fread`
+#include <cstdio>  // `std::fopen`, `std::fwrite`, `std::fread`, `std::rename`
 #include <cstdlib> // `std::getenv`
+#include <cerrno>  // `errno`, `EEXIST`, `ENOMEM` — the directory creation's failures
+#include <ctime>   // `nanosleep` — the rendezvous backoff, as the InfiniBand completion poll does
 
-#include <unistd.h> // `::gethostname`, `::fsync`
+#include <unistd.h>   // `::gethostname`, `::fsync`
+#include <sys/stat.h> // `::mkdir` — the exchange directory, created level by level
 
-#include <charconv>   // `std::from_chars`
-#include <chrono>     // `std::chrono::steady_clock` — the exchange timeout clock
-#include <span>       // `std::span` — the probed GPU-uuid list handed to `build_facts_`
-#include <algorithm>  // `std::sort` — the world-GPU-uniqueness check
-#include <filesystem> // `std::filesystem::create_directories` / `rename` — the `std::error_code` overloads
-#include <thread>     // `std::this_thread::sleep_for` — sleeping only; the process stays single-threaded
+#include <charconv>  // `std::from_chars`
+#include <chrono>    // `std::chrono::steady_clock` — the exchange timeout clock
+#include <span>      // `std::span` — the probed GPU-uuid list handed to `build_facts_`
+#include <algorithm> // `std::sort` — the world-GPU-uniqueness check
 
 #include <cuda.h> // `CUdevice`, `cuDeviceGetAttribute`, `cuDeviceCanAccessPeer`
 
 #include <stringzilla/stringzilla.hpp> // `sz::string_t`, `sz::string_view_t` — exception-free text handling
 
-#include "core/types.hpp"          // `expected`, `expected_t`, `status_t`, `format_into`, `st::basic_vector`
-#include "core/array.hpp"          // `per_gpu_array` for the device UUIDs
-#include "core/gpu_allocators.hpp" // `cuda_failure`
+#include "uform/core/array.hpp"          // `per_gpu_array` for the device UUIDs
+#include "uform/core/gpu_allocators.hpp" // `cuda_failure`
+#include "uform/core/types.hpp"          // `expected`, `expected_t`, `status_t`, `format_into`, `st::basic_vector`
 
 namespace unum::uform::core {
 
@@ -462,12 +464,10 @@ struct mesh_topology_t {
                 host_domain_count);
         if (!format_into(topology.exchange_directory, "{}/{}", base, job))
             return expected<mesh_topology_t>::fail(status_t::bad_alloc_k, "exchange path assembly failed");
-        std::error_code directory_error;
-        std::filesystem::create_directories(topology.exchange_directory.c_str(), directory_error);
-        if (directory_error)
+        if (int const directory_error = make_directories_(topology.exchange_directory.view()); directory_error != 0)
             return expected<mesh_topology_t>::fail(status_t::io_error_k,
                                                    "creating the exchange directory failed (path={} error={})",
-                                                   topology.exchange_directory, directory_error.value());
+                                                   topology.exchange_directory, directory_error);
 
         sz::string_t facts_text;
         if (!build_facts_(facts_text, probed.value_.facts, topology.shape, job, probed.value_.uuids.view()))
@@ -511,11 +511,9 @@ struct mesh_topology_t {
         if (!written)
             return expected_t::fail(status_t::io_error_k, "writing {} bytes to \"{}\" failed", text.size(),
                                     temporary_path);
-        std::error_code rename_error;
-        std::filesystem::rename(temporary_path.c_str(), final_path.value_.c_str(), rename_error);
-        if (rename_error)
+        if (std::rename(temporary_path.c_str(), final_path.value_.c_str()) != 0)
             return expected_t::fail(status_t::io_error_k, "renaming \"{}\" into place failed (error={})",
-                                    final_path.value_, rename_error.value());
+                                    final_path.value_, errno);
         return {};
     }
 
@@ -893,7 +891,22 @@ struct mesh_topology_t {
 
     /** The 50 ms exchange poll interval — long enough to spare the shared filesystem, short enough
      *  that a once-per-job wait never registers. */
-    static void sleep_briefly_() noexcept { std::this_thread::sleep_for(std::chrono::milliseconds {50}); }
+    static void sleep_briefly_() noexcept {
+        timespec const interval {0, 50'000'000};
+        nanosleep(&interval, nullptr);
+    }
+
+    /** Create @p path and every missing parent, as @c mkdir @c -p does: zero once all exist, else
+     *  the @c errno of the level that failed. */
+    [[nodiscard]] static int make_directories_(sz::string_view_t path) noexcept {
+        sz::string_t level;
+        for (std::size_t end = 1; end <= path.size(); ++end) {
+            if (end != path.size() && path[end] != '/') continue;
+            if (sz::failed(level.assign(path.substr(0, end)))) return ENOMEM;
+            if (::mkdir(level.c_str(), 0777) != 0 && errno != EEXIST) return errno;
+        }
+        return 0;
+    }
 
     /** The generation the next wiring phase keys its payloads and barriers with. */
     u32_t next_collective_id_ = 0;

@@ -1,5 +1,5 @@
 /**
- *  @file src/train/datasets.hpp
+ *  @file include/uform/train/datasets.hpp
  *  @author Ash Vardanian
  *  @date October 18, 2026
  *  @brief Real data for a run: @ref mixture_t , the weighted datasets a mixture JSON in
@@ -22,16 +22,22 @@
  *  cap its draws at @c epochs passes over its rows, after which @ref mixture_sampler_t retires it.
  *  Pairs route as bags, so one mixture never mixes them with plain text, whose segments route
  *  alone.
+ *
+ *  A choices entry names its columns in a @c choices object: the text @c state an answer follows,
+ *  the legal @c choices bytes, their @c targets probabilities, and the @c group of each question,
+ *  which the calibration pass reads and training does not. Its segments route alone, beside plain
+ *  text.
  */
 #pragma once
 
 #include <span>    // `std::span` — the sampler's borrowed entries
 #include <variant> // `std::variant` — one loader per entry, of the entry's kind
 
-#include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
-#include "loaders/tokens_loader.cuh"  // the Parquet, JSONL and CSV tokens loaders
-#include "loaders/paired_loader.cuh"  // `paired_loader_parquet_t`, `nvjpeg_session_t`, `nvdec_session_t`
-#include "train/trainer.hpp"          // `batch_source_t`, `trainer_t`
+#include "uform/loaders/choices_loader.cuh" // `choices_loader_parquet_t`
+#include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
+#include "uform/loaders/paired_loader.cuh"  // `paired_loader_parquet_t`, `nvjpeg_session_t`, `nvdec_session_t`
+#include "uform/loaders/tokens_loader.cuh"  // the Parquet, JSONL and CSV tokens loaders
+#include "uform/train/trainer.hpp"          // `batch_source_t`, `trainer_t`
 
 namespace unum::uform::train {
 
@@ -52,8 +58,11 @@ struct mixture_entry_t {
      *  absent, for no cap. */
     std::size_t epochs = 0;
 
-    /** A text entry's document column; empty for a pair. */
+    /** A text entry's document column; empty for a pair or a choice. */
     sz::string_t text {};
+
+    /** A choices entry's state, choices, targets and group columns; empty for any other entry. */
+    sz::string_t state {}, choices {}, targets {}, group {};
 
     /** A pair's caption column, its positive column and the media column among them. */
     sz::string_t anchor {}, positive {}, media {};
@@ -92,9 +101,13 @@ struct mixture_t {
     /** Whether any entry's media are of @p modality . */
     [[nodiscard]] bool names(modality_t modality) const noexcept;
 
+    /** Whether any entry is a choices entry. */
+    [[nodiscard]] bool chooses() const noexcept;
+
     /** @p shape with the slice of every media modality the entries name lit at the mixture
      *  geometry: RGBA images in 16-pixel patches, RGB video in 2-frame tubes of 16 pixels, and
-     *  256-sample audio frames at 16 kHz. */
+     *  256-sample audio frames at 16 kHz, and with room for every byte value as a choice when an
+     *  entry chooses. */
     [[nodiscard]] multimodal_batch_shape_t shape(multimodal_batch_shape_t shape) const noexcept;
 };
 
@@ -164,7 +177,7 @@ struct mixture_sampler_t {
  *  process's storage session from the composition root. Placed and never moved, since the loaders
  *  borrow the pool.
  */
-struct dataset_source_t final : batch_source_t {
+struct dataset_source_t {
 
     /** Make one loader per entry of @p mixture over @p storage , before the trainer, and charge
      *  @p config with the device bytes their reservoirs can take outside the arena when one fill
@@ -180,7 +193,7 @@ struct dataset_source_t final : batch_source_t {
 
     /** Take every GPU's batch of this step, refilling a GPU whose period starts here; the mixer
      *  then routes them into the replicas. */
-    [[nodiscard]] expected_t fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept override;
+    [[nodiscard]] expected_t fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept;
 
   private:
 
@@ -192,8 +205,9 @@ struct dataset_source_t final : batch_source_t {
      *  lengths: the segments of a bag attract each other, and text alone keeps self-edges. */
     [[nodiscard]] expected_t relate_(trainer_t &trainer) noexcept;
 
-    using loader_t = std::variant<loaders::tokens_loader_parquet_t, loaders::tokens_loader_jsonl_t,
-                                  loaders::tokens_loader_csv_t, loaders::paired_loader_parquet_t>;
+    using loader_t =
+        std::variant<loaders::tokens_loader_parquet_t, loaders::tokens_loader_jsonl_t, loaders::tokens_loader_csv_t,
+                     loaders::paired_loader_parquet_t, loaders::choices_loader_parquet_t>;
 
     /** The entries the loaders and their columns come from. */
     mixture_t mixture_ {};

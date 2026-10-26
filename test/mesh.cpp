@@ -41,8 +41,9 @@
 
 #include <cuda.h> // `cuInit`, `cuDeviceGet`, `cuDeviceGetName`
 
-#include "core/mesh.hpp"
-#include "core/multimem_collectives.cuh"
+#include "uform/core/mesh.hpp"
+#include "uform/core/multimem_collectives.cuh"
+
 #include "harness.hpp"
 
 using namespace unum::uform::core;

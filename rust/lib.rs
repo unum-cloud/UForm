@@ -5,7 +5,7 @@
 //! ```no_run
 //! use uform::*;
 //!
-//! let executor = Executor::for_ram(&[], 0, 0)?;
+//! let executor = Executor::for_ram(&[], None, 0, 0)?;
 //! let mut arena = Arena::new_in(&executor)?;
 //! let model = Model::load_ram("model.safetensors")?;
 //! let texts = ["a photo of a cat", "a dog on the beach"];
@@ -26,18 +26,21 @@ mod types;
 pub use encode::{
     AudioEncode, AudioEncodeConfig, AudioEncodeSamples, AudioEncodeSamplesConfig, AudioEncodeStats, EncodeVerbs,
     Encoded, ImageEncode, ImageEncodeConfig, ImageEncodePixels, ImageEncodePixelsConfig, ImageEncodeStats, Outputs,
-    TextEncode, TextEncodeConfig, TextEncodeStats, VideoEncode, VideoEncodeConfig, VideoEncodeStats,
+    TextChoose, TextChooseConfig, TextEncode, TextEncodeConfig, TextEncodeStats, VideoEncode, VideoEncodeConfig,
+    VideoEncodeStats,
 };
 pub use model::{
     Model, ModelDescribe, ModelDescription, ModelLoadRamBufferConfig, ModelLoadRamConfig, ModelLoadVramBufferConfig,
     ModelLoadVramConfig, ModelVerbs,
 };
 pub use train::{
-    AudioShape, BatchShape, Contrastive, Edges, ImageShape, Masking, Mesh, MeshDescription, MeshOptions, Modality,
-    MultimemTier, Negatives, Objective, Relations, Schedule, TrainVerbs, Trainer, TrainerInitVramConfig, TrainerSave,
-    TrainerSaveConfig, TrainerStep, TrainerStepConfig, TrainerStepStats, VideoShape,
+    AudioShape, BatchShape, Choices, ChoicesView, Contrastive, Edges, ImageShape, LateInteraction, LateInteractionSide,
+    Masking, Mesh, MeshDescription, MeshOptions, Modality, MultimemTier, Negatives, Objective, PairLossForm, Relations,
+    Schedule, TrainVerbs, Trainer, TrainerInitVramConfig, TrainerSave, TrainerSaveConfig, TrainerStep,
+    TrainerStepConfig, TrainerStepStats, VideoShape,
 };
 pub use types::{
-    capabilities_available, capabilities_compiled, version, Arena, Blocking, Deferred, Deferring, Element, Error,
-    Executor, Mood, On, ProgressCallback, Result, Rows, RowsTape, Scalar, Status, Wait,
+    capabilities_available, capabilities_compiled, gpu_devices, version, Arena, Blocking, CPUClass, Deferred,
+    Deferring, Element, Error, Executor, GPUClass, GPUDevice, GPUVendor, Mood, On, ProgressCallback, Result, Rows,
+    RowsTape, Scalar, Status, Tape, Wait,
 };

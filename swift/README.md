@@ -116,7 +116,8 @@ Every verb runs one forward and keeps the surfaces `outputs` names, deciding whi
 
 - `.embeddings`, the default, lands one pooled row per item as `Rows`;
 - `.states` lands the final-norm states, one row per token each item kept after truncation, as `RowsTape`;
-- naming neither is refused with `invalidArgument`.
+- `.tokenVectors` lands the token head's unit vectors, `tokenWidth` wide, on the same offsets as the states, and a model without a token head refuses it with `unsupported`;
+- naming none is refused with `invalidArgument`.
 
 ```swift
 let encoded = try model.textEncode(texts, outputs: [.embeddings, .states], arena: arena)
@@ -147,6 +148,21 @@ narrow.embeddings!.withUnsafeBytes { bytes in index.add(bytes) }
 
 A handler never runs on two threads at once, but may run on whichever thread advanced the work, hence `@Sendable`; returning `.cancel` stops the call with `cancelled`.
 
+## Calibrated Choices
+
+`textChoose` scores each text's legal choices, one byte each, through one forward of the byte decoder, a softmax over that item's choices alone at its question type's calibrated inverse temperature.
+The call appends the mask byte, and a text longer than the context loses its head, never its end.
+A model whose `choiceTemperatureGroups` is zero carries no byte decoder and refuses with `unsupported`.
+
+```swift
+let chosen = try model.textChoose(
+    ["keep this candidate? ", "expand which neighbor? "],
+    choices: [Array("yn".utf8), Array("ABCD".utf8)],
+    temperatureGroups: [0, 1],
+    arena: arena)
+let keep = chosen.probabilities[0][0]           // one Float per choice, in the order offered
+```
+
 ## Models
 
 Residency is the constructor's name, as in the C lifecycle verbs, so a residency a build lacks has no constructor to call.
@@ -157,9 +173,18 @@ let inVram = try Model.loadVram(path: "model.safetensors", executor: deviceStrea
 let fromBytes = try Model.loadRamBuffer(checkpoint.span.bytes, quantization: .e4m3)
 let description = try inRam.describe()
 print(description.dimensions, description.context, description.quantization, description.memoryUsage)
+print(description.cpuClass, description.tokenWidth, description.choiceTemperatureGroups)
 ```
 
 `quantization` is the scalar the transformer blocks run in: `bf16` as the checkpoint stores it, or `e4m3` quantized at load.
+Every RAM load and executor takes a `cpuClass` pin, and every VRAM one a `gpuClass`, dispatching as if the hardware were of that class; nil derives its own.
+`describe()` reports the class the model runs as, nil on the other residency, the `tokenWidth` of its token head, and its `choiceTemperatureGroups`, each zero when the checkpoint carries no such head.
+`gpuDevices()` lists every GPU the process can drive, and a device's position in it is the ordinal `devices` names it by.
+
+```swift
+let pinned = try Model.loadRam(path: "model.safetensors", cpuClass: CPUClass(name: "intel-haswell"))
+for (ordinal, device) in try gpuDevices().enumerated() { print(ordinal, device.name, device.gpuClass!) }
+```
 
 ## Training
 
@@ -181,6 +206,9 @@ try trainer.save(path: "checkpoint.safetensors")
 ```
 
 `Modality`, `Objective`, `Negatives` and `MultimemTier` spell themselves through the library's own name tables.
+`Contrastive` and `LateInteraction` each take a `PairLossForm`, and a positive `LateInteraction.weight` trains the token head over the items whose `sides` name them a query, a document or both.
+A positive `Choices.weight` trains calibrated choices, which needs `BatchShape.maxChoicesPerItem`, over the legal bytes and targets each step's `ChoicesView` names.
+The step reports both terms as `lateInteractionLoss` and `choicesLoss`.
 
 ## Errors
 
@@ -215,6 +243,6 @@ do {
 - __Arenas are lent and reused, never shared.__
   Every output verb takes an arena and answers views borrowing it; a view remembers which call wrote it and traps once a later one did.
 - __Statuses and modes are enums.__
-  `Status`, `Scalar`, `Mood`, `Modality`, `Objective`, `Negatives` and `MultimemTier` carry their C enumerators and spell themselves through the C name functions, never strings.
+  `Status`, `Scalar`, `Mood`, `CPUClass`, `GPUClass`, `Modality`, `Objective`, `Negatives` and `MultimemTier` carry their C enumerators and spell themselves through the C name functions, never strings.
 - __Nothing costs anything until it is used.__
   Blocking calls take no deferred-table entry, a surface `outputs` leaves out is never computed, and an arena allocates only when a call writes into it.

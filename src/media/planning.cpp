@@ -8,7 +8,7 @@
 
 #include <algorithm> // `std::min`, `std::max`, `std::clamp`
 
-#include "media/planning.hpp"
+#include "uform/media/planning.hpp"
 
 namespace um = unum::uform::media;
 using namespace um;

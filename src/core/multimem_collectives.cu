@@ -8,7 +8,7 @@
  */
 #include <charconv> // `std::from_chars` — fabric-handle hex parsing
 
-#include "core/multimem_collectives.cuh"
+#include "uform/core/multimem_collectives.cuh"
 
 namespace uc = unum::uform::core;
 using namespace uc;

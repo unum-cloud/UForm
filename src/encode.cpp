@@ -19,9 +19,10 @@
  *  Media decode on the executor's threads: its pool on the host, its decoder pool beside GPUs, and one thread of the
  *  caller's without an executor.
  */
+#include "uform/media/audio.hpp"    // `resample_mono`
+#include "uform/media/planning.hpp" // `image_patch_grid`
+
 #include "encode.hpp"
-#include "media/audio.hpp"    // `resample_mono`
-#include "media/planning.hpp" // `image_patch_grid`
 
 using namespace unum::uform;
 

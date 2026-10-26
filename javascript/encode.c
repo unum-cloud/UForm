@@ -2,8 +2,9 @@
  *  @file javascript/encode.c
  *  @author Ash Vardanian
  *  @date October 17, 2026
- *  @brief The Node-API forward passes: text, images, video and audio in, pooled embeddings and per-token states
- *      viewed inside the caller's arena out.
+ *  @brief The Node-API forward passes: text, images, video and audio in, pooled embeddings,
+ *      per-token states, token vectors and choice probabilities viewed inside the caller's arena
+ *      out.
  *
  *  Every verb takes the executor and the completion first, so one native function serves the calling thread, a
  *  blocking receiver and a deferred one alike, then its tape, then the arena, the surfaces it keeps, the scalar
@@ -24,6 +25,9 @@ typedef struct uform_js_encode_call_t {
 
     /** The final-norm states, one row per token kept. */
     uform_rows_tape_view_t states;
+
+    /** The token head's unit vectors, one row per token kept. */
+    uform_rows_tape_view_t token_vectors;
 
     /** The report every encode verb fills, whose four types share one layout. */
     union {
@@ -50,16 +54,32 @@ typedef struct uform_js_encode_arguments_t {
     uform_progress_t progress;
     uform_rows_view_t *embeddings;
     uform_rows_tape_view_t *states;
+    uform_rows_tape_view_t *token_vectors;
 } uform_js_encode_arguments_t;
+
+/** Builds the @c {truncated, tokens} report every encode and choose call fills. */
+static napi_value uform_js_stats_object(napi_env env, uform_text_encode_stats_t const *stats) {
+    static char const *const names[] = {"truncated", "tokens"};
+    napi_value const values[] = {uform_js_number(env, stats->truncated), uform_js_number(env, stats->tokens)};
+    return uform_js_object(env, 2, names, values);
+}
+
+/** Views the ragged rows of @p count items as @c {data, rows, columns, stride, scalar, offsets},
+ *  set as @p name of @p object; @c false with an exception pending. */
+static bool uform_js_rows_tape_set(napi_env env, napi_value object, char const *name, napi_value arena,
+                                   uform_rows_tape_view_t const *tape, size_t count) {
+    size_t const rows = tape->offsets ? tape->offsets[count] : 0;
+    napi_value const offsets = uform_js_offsets_view(env, arena, tape->offsets, count);
+    napi_value const viewed = offsets ? uform_js_rows_object(env, arena, &tape->rows, rows) : NULL;
+    return viewed && napi_set_named_property(env, viewed, "offsets", offsets) == napi_ok &&
+           napi_set_named_property(env, object, name, viewed) == napi_ok;
+}
 
 static napi_value uform_js_finish_encode(napi_env env, uform_js_call_t *call, napi_value const *slots) {
     uform_js_encode_call_t const *const encode = (uform_js_encode_call_t const *)call;
     napi_value const arena = slots[uform_js_slot_arena_k];
-    napi_value object = NULL, stats = NULL, embeddings = NULL, states = NULL;
-    static char const *const stats_names[] = {"truncated", "tokens"};
-    napi_value const stats_values[] = {uform_js_number(env, encode->stats.text.truncated),
-                                       uform_js_number(env, encode->stats.text.tokens)};
-    if (!(stats = uform_js_object(env, 2, stats_names, stats_values)) || napi_create_object(env, &object) != napi_ok ||
+    napi_value object = NULL, stats = NULL, embeddings = NULL;
+    if (!(stats = uform_js_stats_object(env, &encode->stats.text)) || napi_create_object(env, &object) != napi_ok ||
         napi_set_named_property(env, object, "stats", stats) != napi_ok) {
         uform_js_throw(env, uform_status_internal_k, "Could not publish the outputs");
         return NULL;
@@ -68,17 +88,12 @@ static napi_value uform_js_finish_encode(napi_env env, uform_js_call_t *call, na
         embeddings = uform_js_rows_object(env, arena, &encode->embeddings, encode->count);
         if (!embeddings || napi_set_named_property(env, object, "embeddings", embeddings) != napi_ok) return NULL;
     }
-    if (encode->outputs & uform_js_outputs_states_k) {
-        size_t const rows = encode->states.offsets ? encode->states.offsets[encode->count] : 0;
-        bool const wide = sizeof(size_t) == 8;
-        napi_value const offsets = uform_js_arena_view(env, arena, wide ? napi_biguint64_array : napi_uint32_array,
-                                                       encode->states.offsets, (encode->count + 1) * sizeof(size_t),
-                                                       encode->count + 1);
-        states = offsets ? uform_js_rows_object(env, arena, &encode->states.rows, rows) : NULL;
-        if (!states || napi_set_named_property(env, states, "offsets", offsets) != napi_ok ||
-            napi_set_named_property(env, object, "states", states) != napi_ok)
-            return NULL;
-    }
+    if (encode->outputs & uform_js_outputs_states_k &&
+        !uform_js_rows_tape_set(env, object, "states", arena, &encode->states, encode->count))
+        return NULL;
+    if (encode->outputs & uform_js_outputs_token_vectors_k &&
+        !uform_js_rows_tape_set(env, object, "tokenVectors", arena, &encode->token_vectors, encode->count))
+        return NULL;
     return object;
 }
 
@@ -113,6 +128,7 @@ static uform_js_encode_call_t *uform_js_encode_open(napi_env env, napi_callback_
     call->call.finish = uform_js_finish_encode;
     parsed->embeddings = outputs & uform_js_outputs_embeddings_k ? &call->embeddings : NULL;
     parsed->states = outputs & uform_js_outputs_states_k ? &call->states : NULL;
+    parsed->token_vectors = outputs & uform_js_outputs_token_vectors_k ? &call->token_vectors : NULL;
     return call;
 }
 
@@ -151,6 +167,7 @@ static napi_value uform_js_encode_files(napi_env env, napi_callback_info info, u
                                       .texts = parsed.tape,
                                       .embeddings = parsed.embeddings,
                                       .states = parsed.states,
+                                      .token_vectors = parsed.token_vectors,
                                       .arena = parsed.arena,
                                       .outputs_scalar = parsed.outputs_scalar,
                                       .progress = parsed.progress,
@@ -166,6 +183,7 @@ static napi_value uform_js_encode_files(napi_env env, napi_callback_info info, u
                                        .images = parsed.tape,
                                        .embeddings = parsed.embeddings,
                                        .states = parsed.states,
+                                       .token_vectors = parsed.token_vectors,
                                        .arena = parsed.arena,
                                        .outputs_scalar = parsed.outputs_scalar,
                                        .progress = parsed.progress,
@@ -181,6 +199,7 @@ static napi_value uform_js_encode_files(napi_env env, napi_callback_info info, u
                                        .videos = parsed.tape,
                                        .embeddings = parsed.embeddings,
                                        .states = parsed.states,
+                                       .token_vectors = parsed.token_vectors,
                                        .arena = parsed.arena,
                                        .outputs_scalar = parsed.outputs_scalar,
                                        .progress = parsed.progress,
@@ -196,6 +215,7 @@ static napi_value uform_js_encode_files(napi_env env, napi_callback_info info, u
                                        .recordings = parsed.tape,
                                        .embeddings = parsed.embeddings,
                                        .states = parsed.states,
+                                       .token_vectors = parsed.token_vectors,
                                        .arena = parsed.arena,
                                        .outputs_scalar = parsed.outputs_scalar,
                                        .progress = parsed.progress,
@@ -257,6 +277,7 @@ static napi_value uform_js_image_encode_pixels(napi_env env, napi_callback_info 
                                           .widths = (uint32_t const *)widths,
                                           .embeddings = parsed.embeddings,
                                           .states = parsed.states,
+                                          .token_vectors = parsed.token_vectors,
                                           .arena = parsed.arena,
                                           .outputs_scalar = parsed.outputs_scalar,
                                           .progress = parsed.progress,
@@ -293,11 +314,86 @@ static napi_value uform_js_audio_encode_samples(napi_env env, napi_callback_info
                                            .sample_rate = (uint32_t)sample_rate,
                                            .embeddings = parsed.embeddings,
                                            .states = parsed.states,
+                                           .token_vectors = parsed.token_vectors,
                                            .arena = parsed.arena,
                                            .outputs_scalar = parsed.outputs_scalar,
                                            .progress = parsed.progress,
                                            .stats = &call->stats.audio};
     uform_audio_encode_samples(&encode);
+    return uform_js_call_answer(env, &call->call, &local.call, slots, deferred);
+}
+
+/** A choose call: the shared header, then the probabilities and the report it lands. */
+typedef struct uform_js_choose_call_t {
+
+    /** The outcome, the answer builder and the held values. */
+    uform_js_call_t call;
+
+    /** One probability per choice, in the choices' order. */
+    uform_tape_view_t probabilities;
+
+    /** The report, laid out as the text encode verb's. */
+    uform_text_encode_stats_t stats;
+
+    /** Items on the batch axis. */
+    size_t count;
+
+    /** Choices across every item, read from the caller's offsets. */
+    size_t choices;
+} uform_js_choose_call_t;
+
+static napi_value uform_js_finish_choose(napi_env env, uform_js_call_t *call, napi_value const *slots) {
+    uform_js_choose_call_t const *const choose = (uform_js_choose_call_t const *)call;
+    napi_value const arena = slots[uform_js_slot_arena_k];
+    napi_value const offsets = uform_js_offsets_view(env, arena, choose->probabilities.offsets, choose->count);
+    napi_value const probabilities = offsets ? uform_js_arena_view(env, arena, napi_float32_array,
+                                                                   choose->probabilities.data,
+                                                                   choose->choices * sizeof(float), choose->choices)
+                                             : NULL;
+    napi_value const stats = probabilities ? uform_js_stats_object(env, &choose->stats) : NULL;
+    if (!stats) return NULL;
+    static char const *const names[] = {"probabilities", "offsets", "stats"};
+    napi_value const values[] = {probabilities, offsets, stats};
+    return uform_js_object(env, sizeof(names) / sizeof(names[0]), names, values);
+}
+
+/** @c textChoose(executor, completion, bytes, offsets, choices, choiceOffsets, temperatureGroups,
+ *  arena, progress) → @c {probabilities, offsets, stats}, viewed inside @p arena. */
+static napi_value uform_js_text_choose(napi_env env, napi_callback_info info) {
+    napi_value arguments[9], self = NULL, deferred = NULL;
+    uform_js_model_t *const model = (uform_js_model_t *)uform_js_self(env, info, 9, arguments, &self);
+    if (model && !model->handle) uform_js_throw(env, uform_status_invalid_argument_k, "The model was freed");
+    if (!model || !model->handle) return NULL;
+    uform_js_choose_call_t local;
+    uform_text_choose_t choose = {.model = model->handle};
+    uform_js_choose_call_t *const call = (uform_js_choose_call_t *)uform_js_call_open_on(
+        env, arguments, &local.call, sizeof(local), &choose.executor, &choose.completion);
+    if (!call) return NULL;
+    size_t choices_count = 0;
+    bool const parsed =
+        uform_js_tape_from_value(env, arguments[2], arguments[3], "texts", napi_uint8_array, &call->call, &call->count,
+                                 &choose.texts) &&
+        uform_js_tape_from_value(env, arguments[4], arguments[5], "choices", napi_uint8_array, &call->call,
+                                 &choices_count, &choose.choices) &&
+        (choices_count == call->count ||
+         uform_js_throw(env, uform_status_shape_mismatch_k, "Every text needs one run of choices")) &&
+        uform_js_per_item_from_value(env, arguments[6], "temperatureGroups", call->count, &choose.temperature_groups) &&
+        uform_js_progress_from_value(env, arguments[8], choose.executor, &call->call, &choose.progress) &&
+        uform_js_arena_from_value(env, arguments[7], &call->call, &choose.arena);
+    if (!parsed) {
+        uform_js_call_abandon(&call->call, &local.call);
+        return NULL;
+    }
+    napi_value const slots[uform_js_slots_k] = {self,         arguments[0], arguments[7],
+                                                arguments[2], arguments[4], arguments[6]};
+    call->call.finish = uform_js_finish_choose;
+    call->choices = choose.choices.offsets[choices_count];
+    choose.count = call->count;
+    choose.outcome = &call->call.outcome;
+    choose.probabilities = &call->probabilities;
+    choose.stats = &call->stats;
+    if (!uform_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
+    uform_text_choose(&choose);
     return uform_js_call_answer(env, &call->call, &local.call, slots, deferred);
 }
 
@@ -313,6 +409,7 @@ napi_property_descriptor const *uform_js_encode_properties(size_t *count) {
         {"videoEncode", NULL, uform_js_video_encode, NULL, NULL, NULL, napi_default_method, NULL},
         {"audioEncode", NULL, uform_js_audio_encode, NULL, NULL, NULL, napi_default_method, NULL},
         {"audioEncodeSamples", NULL, uform_js_audio_encode_samples, NULL, NULL, NULL, napi_default_method, NULL},
+        {"textChoose", NULL, uform_js_text_choose, NULL, NULL, NULL, napi_default_method, NULL},
     };
     *count = sizeof(properties) / sizeof(properties[0]);
     return properties;

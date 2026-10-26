@@ -1,5 +1,5 @@
 /**
- *  @file src/train/trainer.hpp
+ *  @file include/uform/train/trainer.hpp
  *  @author Ash Vardanian
  *  @date October 18, 2026
  *  @brief A training run: @ref mesh_t , the transport every trainer of a process borrows, and
@@ -18,12 +18,12 @@
 
 #include <span> // `std::span` — devices and item columns as views
 
-#include "core/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_all_reduce`
-#include "core/mesh.hpp"                   // `mesh_topology_t`
-#include "core/introspect.cuh"             // `telemetry_ledger_t`, `telemetry_probe_t`
-#include "core/optimizer.hpp"              // `distributed_adafactor_t`
-#include "core/contrastive_tokens.cuh"     // `distributed_contrastive_tokens_t`
-#include "train/base.cuh"                  // `trainer_config_t`, `base_replica_t`
+#include "uform/core/contrastive_tokens.cuh"     // `distributed_contrastive_tokens_t`
+#include "uform/core/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_all_reduce`
+#include "uform/core/introspect.cuh"             // `telemetry_ledger_t`, `telemetry_probe_t`
+#include "uform/core/mesh.hpp"                   // `mesh_topology_t`
+#include "uform/core/optimizer.hpp"              // `distributed_adafactor_t`
+#include "uform/train/base.cuh"                  // `trainer_config_t`, `base_replica_t`
 
 namespace unum::uform::train {
 
@@ -129,12 +129,16 @@ struct telemetry_t {
      *  none. */
     f32_t late_interaction = 0.0f;
 
+    /** The calibrated choices' mean soft cross-entropy plus Brier term over the live choice
+     *  segments, weighted by its λ, or zero when the run makes none. */
+    f32_t choices = 0.0f;
+
     /** The domain's barrier round after this optimizer step. */
     concurrency_round_t concurrency_round {};
 
     /** The composite loss — every live term. */
     [[nodiscard]] f32_t composite() const noexcept {
-        return contrastive + late_interaction + token_ce + image_mse + video_mse + audio_mse;
+        return contrastive + late_interaction + choices + token_ce + image_mse + video_mse + audio_mse;
     }
 
     /** Print one progress line for this step. */
@@ -175,21 +179,31 @@ struct retrieval_t {
 
 struct trainer_t;
 
-/** The one place data enters a step: fills every replica's batch, and the relations when the objective
- *  contrasts, for one data epoch. */
+/** The one place data enters a step: a fill and the state it is called with, which fills every
+ *  replica's batch, and the relations when the objective contrasts, for one data epoch. */
 struct batch_source_t {
 
     /** Fill every replica's batch of @p trainer for @p data_epoch , counting cut items into @p report . */
-    [[nodiscard]] virtual expected_t fill(trainer_t &trainer, data_epoch_t data_epoch,
-                                          step_report_t &report) noexcept = 0;
+    expected_t (*fill)(void *state, trainer_t &trainer, data_epoch_t data_epoch,
+                       step_report_t &report) noexcept = nullptr;
 
-  protected:
-    ~batch_source_t() noexcept = default;
+    /** The source @ref fill casts back to its type. */
+    void *state = nullptr;
 };
 
+/** The batch source of any type with a matching @c fill member, borrowed for as long as the
+ *  result is used. */
+template <typename source_type_>
+[[nodiscard]] batch_source_t batch_source_of(source_type_ &source) noexcept {
+    return {[](void *state, trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept {
+                return static_cast<source_type_ *>(state)->fill(trainer, data_epoch, report);
+            },
+            &source};
+}
+
 /** The keyed synthetic draw: every world GPU draws distinct data from the run seed, with self-edge relations. */
-struct synthetic_source_t final : batch_source_t {
-    [[nodiscard]] expected_t fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept override;
+struct synthetic_source_t {
+    [[nodiscard]] expected_t fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept;
 };
 
 /** One edge set over a step's items as compressed sparse rows; null offsets name no edges. */
@@ -199,8 +213,17 @@ struct item_edges_t {
     f32_t const *weights = nullptr;
 };
 
-/** This process's share of one step: every item's modality and bytes, and its optional bag, temperature group
- *  and relations, all borrowed until the step returns. */
+/** Each item's legal choice bytes and their targets, @c count+1 offsets into both; null offsets
+ *  make no choice. */
+struct item_choices_t {
+    std::size_t const *offsets = nullptr;
+    u8_t const *bytes = nullptr;
+    f32_t const *targets = nullptr;
+};
+
+/** This process's share of one step: every item's modality and bytes, and its optional bag,
+ *  temperature group, late-interaction side, choices and relations, all borrowed until the step
+ *  returns. */
 struct training_items_t {
     std::span<modality_t const> modalities {};
 
@@ -215,6 +238,12 @@ struct training_items_t {
     u32_t const *temperature_groups = nullptr;
 
     item_edges_t attract {}, repel {}, ignore {};
+
+    /** Null makes every item @c none_k . */
+    late_interaction_side_t const *sides = nullptr;
+
+    /** A text item with choices ends where its answer goes, and the mask byte follows it. */
+    item_choices_t choices {};
 };
 
 /**
@@ -224,7 +253,7 @@ struct training_items_t {
  *  Owns everything the routing needs beside the trainer: the loaded batches the mixer reads, their pinned host
  *  twins, the mixer itself, and the host scratch the relations are rebuilt in — all allocated at @ref make .
  */
-struct items_source_t final : batch_source_t {
+struct items_source_t {
 
     /** The next step's items. */
     training_items_t items {};
@@ -232,7 +261,7 @@ struct items_source_t final : batch_source_t {
     /** Allocate the routing state from @p trainer 's arenas and wire the mixer through its mesh. */
     [[nodiscard]] static expected_t make(items_source_t &placed, trainer_t &trainer) noexcept;
 
-    [[nodiscard]] expected_t fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept override;
+    [[nodiscard]] expected_t fill(trainer_t &trainer, data_epoch_t data_epoch, step_report_t &report) noexcept;
 
     /** The mesh-wide vertex item @p item landed on in the last step, or @c ~0u when it carried no tokens. */
     [[nodiscard]] u32_t destination(std::size_t item) const noexcept { return destinations_[item]; }
@@ -297,7 +326,7 @@ struct trainer_t {
     /** The ledger rows: one loss row per head, one round row per member — inert zero handles whenever their
      *  channels are dark or their head is absent, so feeding them never branches. */
     struct probes_t {
-        telemetry_probe_t token {}, image {}, video {}, audio {}, contrastive {}, late_interaction {};
+        telemetry_probe_t token {}, image {}, video {}, audio {}, contrastive {}, late_interaction {}, choices {};
         per_gpu_array<telemetry_probe_t> rounds {};
     };
     probes_t probes {};
@@ -368,12 +397,12 @@ struct trainer_t {
 
     /** One optimizer step: @p source fills the batches, then per replica the preamble and the forward region, the
      *  contrastive collective, and per replica the backward region and the optimizer's slice. */
-    [[nodiscard]] expected_t step(batch_source_t &source, optimizer_step_t optimizer_step,
+    [[nodiscard]] expected_t step(batch_source_t source, optimizer_step_t optimizer_step,
                                   step_report_t &report) noexcept;
 
     /** Fill every replica from @p source at @p data_epoch , encode it forward only, and score the
      *  pooled vertices' retrieval over the world without a loss or an update. */
-    [[nodiscard]] expected<retrieval_t> evaluate(batch_source_t &source, data_epoch_t data_epoch) noexcept;
+    [[nodiscard]] expected<retrieval_t> evaluate(batch_source_t source, data_epoch_t data_epoch) noexcept;
 
     /** Re-seed every replica's weights and temperatures to the identical deterministic init. */
     [[nodiscard]] expected_t reseed() noexcept;

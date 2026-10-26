@@ -1,5 +1,5 @@
 /**
- *  @file src/core/multimem_collectives.cuh
+ *  @file include/uform/core/multimem_collectives.cuh
  *  @author Ash Vardanian
  *  @date July 3, 2026
  *  @brief Collectives @b inside one multimem_domain: the domain's members reduce and broadcast
@@ -40,11 +40,11 @@
 
 #include <cuda.h> // `cuMulticastCreate`, `cuMulticastBindMem`, `cuMemMap`, `cuMemSetAccess`
 
-#include "core/types.hpp"          // `expected`, `expected_t`, `status_t`, the scalar aliases, `st::basic_vector`
-#include "core/gpu_allocators.hpp" // `gpu_arena_t` conventions, `round_up_to_multiple`
-#include "core/schedule.cuh"       // `gpu_stream_t`, `launch_kernel`, `current_context_t`, the rank-1 aliases
-#include "core/mesh.hpp"           // `mesh_topology_t` — the multimem_domain may span processes; the fabric
-                                   //     handles ride the mesh rendezvous
+#include "uform/core/gpu_allocators.hpp" // `gpu_arena_t` conventions, `round_up_to_multiple`
+#include "uform/core/mesh.hpp"           // `mesh_topology_t` — the multimem_domain may span processes; the fabric
+                                         //     handles ride the mesh rendezvous
+#include "uform/core/schedule.cuh"       // `gpu_stream_t`, `launch_kernel`, `current_context_t`, the rank-1 aliases
+#include "uform/core/types.hpp"          // `expected`, `expected_t`, `status_t`, the scalar aliases, `st::basic_vector`
 
 namespace unum::uform::core {
 

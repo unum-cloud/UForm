@@ -31,6 +31,7 @@ static struct {
     {"Deferred", &DeferredType, NULL},
     {"On", &OnType, NULL},
     {"DeferredOn", &DeferredOnType, NULL},
+    {"GPUDevice", &GPUDeviceType, &uform_py_gpu_device_desc},
 
     {"Model", &ModelType, NULL},
     {"ModelDescription", &ModelDescriptionType, &uform_py_model_description_desc},
@@ -49,11 +50,12 @@ static struct {
 
 /** The keyword-built structures, readied from their field tables; nested ones before the ones holding them. */
 static uform_py_fields_t *const module_fields[] = {
-    &ImageShapeType,  &VideoShapeType, &AudioShapeType,  &BatchShapeType, &MaskingType,
-    &ContrastiveType, &ScheduleType,   &MeshOptionsType, &EdgesType,      &RelationsType,
+    &ImageShapeType,  &VideoShapeType,      &AudioShapeType,  &BatchShapeType, &MaskingType,
+    &ContrastiveType, &LateInteractionType, &ChoicesType,     &ScheduleType,   &MeshOptionsType,
+    &EdgesType,       &RelationsType,       &ChoicesViewType,
 };
 
-/** Rows of the merged tables: each receiver offers nine verbs, a model thirteen methods, a trainer five. */
+/** Rows of the merged tables: a receiver offers ten verbs, a model fourteen, a trainer five. */
 enum { merged_methods_max_k = 16 };
 
 static PyMethodDef model_methods[merged_methods_max_k], trainer_methods[merged_methods_max_k],
@@ -77,6 +79,7 @@ static PyMethodDef module_methods[] = {
     {"version", (PyCFunction)api_version, METH_NOARGS, doc_version},
     {"capabilities_compiled", (PyCFunction)api_capabilities_compiled, METH_NOARGS, doc_capabilities_compiled},
     {"capabilities_available", (PyCFunction)api_capabilities_available, METH_NOARGS, doc_capabilities_available},
+    {"gpu_devices", (PyCFunction)api_gpu_devices, METH_NOARGS, doc_gpu_devices},
     {NULL, NULL, 0, NULL},
 };
 

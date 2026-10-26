@@ -1,11 +1,10 @@
 /**
+ *  @file include/uform/core/infiniband_collectives.cuh
+ *  @author Ash Vardanian
+ *  @date July 2, 2026
  *  @brief Device-initiated InfiniBand collectives across multimem_domains — the vertex all-gather and
  *      the force / gradient all-reduce-sum, each an argument-free method of one member's wired
  *      @ref infiniband_reach_t .
- *
- *  @file src/core/infiniband_collectives.cuh
- *  @author Ash Vardanian
- *  @date July 2, 2026
  *
  *  The doorbell path is the one NVIDIA documents as GDAKI, GPUDirect Async Kernel-Initiated.
  *
@@ -84,10 +83,10 @@
 #include <infiniband/verbs.h>  // `ibv_context`, `ibv_pd`, `ibv_cq`, `ibv_qp` — the RC bring-up
 #endif
 
-#include "core/types.hpp"          // `expected`, `expected_t`, `status_t`, `format_into`
-#include "core/gpu_allocators.hpp" // `gpu_arena_t` backing the device producer / consumer counters
-#include "core/schedule.cuh"       // `b8r1_span_t` — the registered GPU range travels as one typed span
-#include "core/mesh.hpp"           // `mesh_topology_t` — the coordinate exchange rides the mesh rendezvous
+#include "uform/core/gpu_allocators.hpp" // `gpu_arena_t` backing the device producer / consumer counters
+#include "uform/core/mesh.hpp"           // `mesh_topology_t` — the coordinate exchange rides the mesh rendezvous
+#include "uform/core/schedule.cuh"       // `b8r1_span_t` — the registered GPU range travels as one typed span
+#include "uform/core/types.hpp"          // `expected`, `expected_t`, `status_t`, `format_into`
 
 namespace unum::uform::core {
 

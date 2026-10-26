@@ -30,8 +30,8 @@
 #include <numkong/capabilities.h> // `nk_capability_t`, `nk_stream_t`
 #include <numkong/types.h>        // `nk_bf16_t`, `nk_e4m3_t`
 
-#include "uform/core/types.hpp"            // the scalar aliases and the rank-tagged views, `st::basic_vector`
 #include "uform/core/multimodal_batch.hpp" // `modality_t`, the shape views
+#include "uform/core/types.hpp"            // the scalar aliases and the rank-tagged views, `st::basic_vector`
 
 namespace unum::uform::encoder {
 

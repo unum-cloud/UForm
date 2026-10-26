@@ -10,7 +10,7 @@
  *  code of this unit is ever linked: a build without a multicast-capable code embeds an empty
  *  bundle instead.
  */
-#include "core/multimem_collectives.cuh"
+#include "uform/core/multimem_collectives.cuh"
 
 namespace uc = unum::uform::core;
 using namespace uc;

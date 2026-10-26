@@ -20,23 +20,57 @@ static uform_bytes_view_t uform_js_name_view(char const *name) {
 }
 
 /**
- *  @brief Reads a mood through the C name tables.
+ *  @brief Reads a closed-set name into @p name, which the caller reads through the C name tables.
  *
- *  The C reader answers the default for a name it does not know, so a name counts as read only when the C
- *  writer spells the answer back the same way, which refuses a misspelling rather than reading it as parked.
+ *  The C readers answer the default for a name they do not know, so a name counts as read only
+ *  when the C writer spells the answer back the same way, which refuses a misspelling rather than
+ *  reading it as the default.
  */
-static bool uform_js_mood_from_value(napi_env env, napi_value value, uform_mood_t *result) {
-    char name[uform_js_name_capacity_k];
+static bool uform_js_name_from_value(napi_env env, napi_value value, char const *field,
+                                     char name[uform_js_name_capacity_k]) {
     size_t length = 0;
     napi_valuetype kind = napi_undefined;
+    if (napi_typeof(env, value, &kind) != napi_ok || kind != napi_string ||
+        napi_get_value_string_utf8(env, value, name, uform_js_name_capacity_k, &length) != napi_ok)
+        return uform_js_throw_field(env, field, "must be a string");
+    return true;
+}
+
+static bool uform_js_mood_from_value(napi_env env, napi_value value, uform_mood_t *result) {
+    char name[uform_js_name_capacity_k];
     *result = uform_mood_parked_k;
     if (uform_js_value_absent(env, value)) return true;
-    if (napi_typeof(env, value, &kind) != napi_ok || kind != napi_string ||
-        napi_get_value_string_utf8(env, value, name, sizeof(name), &length) != napi_ok)
-        return uform_js_throw_field(env, "mood", "must be a string");
+    if (!uform_js_name_from_value(env, value, "mood", name)) return false;
     *result = uform_mood_from_name(uform_js_name_view(name));
     if (strcmp(uform_mood_name(*result), name) == 0) return true;
     return uform_js_throw_field(env, "mood", "must name a mood");
+}
+
+bool uform_js_cpu_class_from_value(napi_env env, napi_value value, uform_cpu_class_t *result) {
+    char name[uform_js_name_capacity_k];
+    *result = uform_cpu_class_unknown_k;
+    if (uform_js_value_absent(env, value)) return true;
+    if (!uform_js_name_from_value(env, value, "cpuClass", name)) return false;
+    *result = uform_cpu_class_from_name(uform_js_name_view(name));
+    if (*result != uform_cpu_class_unknown_k && strcmp(uform_cpu_class_name(*result), name) == 0) return true;
+    return uform_js_throw(env, uform_status_unknown_kind_k, "The 'cpuClass' argument names no CPU class");
+}
+
+bool uform_js_gpu_class_from_value(napi_env env, napi_value value, uform_gpu_class_t *result) {
+    char name[uform_js_name_capacity_k];
+    *result = uform_gpu_class_unknown_k;
+    if (uform_js_value_absent(env, value)) return true;
+    if (!uform_js_name_from_value(env, value, "gpuClass", name)) return false;
+    *result = uform_gpu_class_from_name(uform_js_name_view(name));
+    if (*result != uform_gpu_class_unknown_k && strcmp(uform_gpu_class_name(*result), name) == 0) return true;
+    return uform_js_throw(env, uform_status_unknown_kind_k, "The 'gpuClass' argument names no GPU class");
+}
+
+napi_value uform_js_class_name(napi_env env, char const *name) {
+    napi_value spelled = NULL;
+    if (!name || strcmp(name, "unknown") == 0) napi_get_null(env, &spelled);
+    else napi_create_string_utf8(env, name, NAPI_AUTO_LENGTH, &spelled);
+    return spelled;
 }
 
 bool uform_js_scalar_from_value(napi_env env, napi_value value, char const *field, uform_scalar_t *result) {
@@ -338,6 +372,18 @@ bool uform_js_tape_from_value(napi_env env, napi_value data_value, napi_value of
     return true;
 }
 
+bool uform_js_per_item_from_value(napi_env env, napi_value value, char const *field, size_t count,
+                                  uint32_t const **result) {
+    void *data = NULL;
+    size_t elements = 0;
+    *result = NULL;
+    if (uform_js_value_absent(env, value)) return true;
+    if (!uform_js_array_from_value(env, value, field, napi_uint32_array, &data, &elements)) return false;
+    if (elements != count) return uform_js_throw_field(env, field, "must hold one entry per item");
+    *result = (uint32_t const *)data;
+    return true;
+}
+
 /** Calls the JavaScript progress handler in place: @c false from it cancels, and so does a throw, which the call
  *  rethrows once it returns. */
 static uform_continuation_t uform_js_progress_relay(size_t completed, size_t total, void *state) {
@@ -550,7 +596,7 @@ static bool uform_js_pointer_from_value(napi_env env, napi_value value, char con
     return true;
 }
 
-/** @c forRam({memoryDomains, threads, deferredLimit}) → host threads over NUMA nodes. */
+/** @c forRam({memoryDomains, cpuClass, threads, deferredLimit}) → host threads over NUMA nodes. */
 static napi_value uform_js_executor_for_ram(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
     uform_outcome_t outcome = {uform_status_success_k, NULL};
@@ -558,6 +604,7 @@ static napi_value uform_js_executor_for_ram(napi_env env, napi_callback_info inf
     uform_executor_for_ram_t for_ram = {.executor = &handle, .outcome = &outcome};
     int32_t *ordinals = NULL;
     if (!uform_js_arguments(env, info, 1, &config, NULL) ||
+        !uform_js_cpu_class_from_value(env, uform_js_property(env, config, "cpuClass"), &for_ram.ram.cpu_class) ||
         !uform_js_size_from_value(env, uform_js_property(env, config, "threads"), "threads", &for_ram.threads) ||
         !uform_js_size_from_value(env, uform_js_property(env, config, "deferredLimit"), "deferredLimit",
                                   &for_ram.deferred_limit) ||
@@ -570,7 +617,8 @@ static napi_value uform_js_executor_for_ram(napi_env env, napi_callback_info inf
     return uform_js_executor_adopt(env, &outcome, handle, uform_js_residency_ram_k);
 }
 
-/** @c onPool(pool, {memoryDomains, deferredLimit}) → an executor borrowing a ForkUnion pool. */
+/** @c onPool(pool, {memoryDomains, cpuClass, deferredLimit}) → an executor borrowing a ForkUnion
+ *  pool. */
 static napi_value uform_js_executor_on_pool(napi_env env, napi_callback_info info) {
     napi_value arguments[2];
     uform_outcome_t outcome = {uform_status_success_k, NULL};
@@ -579,6 +627,7 @@ static napi_value uform_js_executor_on_pool(napi_env env, napi_callback_info inf
     int32_t *ordinals = NULL;
     if (!uform_js_arguments(env, info, 2, arguments, NULL) ||
         !uform_js_pointer_from_value(env, arguments[0], "pool", &on_pool.pool) ||
+        !uform_js_cpu_class_from_value(env, uform_js_property(env, arguments[1], "cpuClass"), &on_pool.ram.cpu_class) ||
         !uform_js_size_from_value(env, uform_js_property(env, arguments[1], "deferredLimit"), "deferredLimit",
                                   &on_pool.deferred_limit) ||
         !uform_js_ordinals_from_value(env, uform_js_property(env, arguments[1], "memoryDomains"), "memoryDomains",
@@ -590,7 +639,7 @@ static napi_value uform_js_executor_on_pool(napi_env env, napi_callback_info inf
     return uform_js_executor_adopt(env, &outcome, handle, uform_js_residency_ram_k);
 }
 
-/** @c forVram({devices, streams, scratchLimit, deferredLimit}) → one stream per device. */
+/** @c forVram({devices, gpuClass, streams, scratchLimit, deferredLimit}) → a stream per device. */
 static napi_value uform_js_executor_for_vram(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
     uform_outcome_t outcome = {uform_status_success_k, NULL};
@@ -598,6 +647,7 @@ static napi_value uform_js_executor_for_vram(napi_env env, napi_callback_info in
     uform_executor_for_vram_t for_vram = {.executor = &handle, .outcome = &outcome};
     int32_t *ordinals = NULL;
     if (!uform_js_arguments(env, info, 1, &config, NULL) ||
+        !uform_js_gpu_class_from_value(env, uform_js_property(env, config, "gpuClass"), &for_vram.vram.gpu_class) ||
         !uform_js_size_from_value(env, uform_js_property(env, config, "scratchLimit"), "scratchLimit",
                                   &for_vram.scratch_limit) ||
         !uform_js_size_from_value(env, uform_js_property(env, config, "deferredLimit"), "deferredLimit",
@@ -882,6 +932,12 @@ napi_value uform_js_rows_object(napi_env env, napi_value arena, uform_rows_view_
     return uform_js_object(env, sizeof(names) / sizeof(names[0]), names, values);
 }
 
+napi_value uform_js_offsets_view(napi_env env, napi_value arena, size_t const *offsets, size_t count) {
+    bool const wide = sizeof(size_t) == 8;
+    return uform_js_arena_view(env, arena, wide ? napi_biguint64_array : napi_uint32_array, offsets,
+                               (count + 1) * sizeof(size_t), count + 1);
+}
+
 /** @c residency → "ram" or "vram", where the executor that made it computes. */
 static napi_value uform_js_arena_residency(napi_env env, napi_callback_info info) {
     uform_js_arena_t const *const arena = (uform_js_arena_t const *)uform_js_self(env, info, 0, NULL, NULL);
@@ -1132,6 +1188,43 @@ napi_value uform_js_capabilities_compiled(napi_env env, napi_callback_info info)
 napi_value uform_js_capabilities_available(napi_env env, napi_callback_info info) {
     (void)info;
     return uform_js_static_string(env, uform_capabilities_available());
+}
+
+/** @c gpuDevices() → @c [{vendor, vendorOrdinal, gpuClass, computeUnits, memoryBytes, name}],
+ *  counted first and then filled. */
+napi_value uform_js_gpu_devices(napi_env env, napi_callback_info info) {
+    (void)info;
+    uform_outcome_t outcome = {uform_status_success_k, NULL};
+    size_t count = 0;
+    uform_gpu_devices(&(uform_gpu_devices_t) {.outcome = &outcome, .devices_count = &count});
+    if (!uform_js_succeeded(env, &outcome)) return NULL;
+    uform_gpu_device_t *const devices = (uform_gpu_device_t *)calloc(count ? count : 1, sizeof(uform_gpu_device_t));
+    if (!devices) {
+        uform_js_throw(env, uform_status_out_of_memory_k, "Could not allocate the device listing");
+        return NULL;
+    }
+    size_t const capacity = count;
+    uform_gpu_devices(&(uform_gpu_devices_t) {.outcome = &outcome,
+                                              .devices = devices,
+                                              .devices_capacity = capacity,
+                                              .devices_count = &count});
+    napi_value listing = NULL;
+    bool listed = uform_js_succeeded(env, &outcome) && napi_create_array(env, &listing) == napi_ok;
+    if (count > capacity) count = capacity;
+    static char const *const names[] = {"vendor", "vendorOrdinal", "gpuClass", "computeUnits", "memoryBytes", "name"};
+    for (size_t position = 0; listed && position != count; ++position) {
+        uform_gpu_device_t const *const device = &devices[position];
+        napi_value const values[] = {uform_js_number(env, (size_t)device->vendor),
+                                     uform_js_number(env, device->vendor_ordinal),
+                                     uform_js_class_name(env, uform_gpu_class_name(device->gpu_class)),
+                                     uform_js_number(env, device->compute_units),
+                                     uform_js_number(env, (size_t)device->memory_bytes),
+                                     uform_js_static_string(env, device->name)};
+        napi_value const entry = uform_js_object(env, sizeof(names) / sizeof(names[0]), names, values);
+        listed = entry && napi_set_element(env, listing, (uint32_t)position, entry) == napi_ok;
+    }
+    free(devices);
+    return listed ? listing : NULL;
 }
 
 #pragma endregion Deferred Calls and Library Probes

@@ -2,7 +2,7 @@
  *  @file src/train/datasets.cu
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief The mixture reader and the dataset source declared in @c src/train/datasets.hpp .
+ *  @brief The mixture reader and the dataset source declared in @c uform/train/datasets.hpp .
  */
 #include <cmath> // `std::ceil` — the reservoir's per-row term at the mixture's density
 
@@ -13,7 +13,7 @@
 
 #include <yyjson.h> // the mixture JSON — exceptions-free C
 
-#include "train/datasets.hpp"
+#include "uform/train/datasets.hpp"
 
 namespace fu = ashvardanian::forkunion;
 using namespace unum::uform::core;
@@ -52,6 +52,26 @@ using namespace unum::uform::train;
     return {};
 }
 
+/** Read a @c choices object into @p entry 's state, choices, targets and group columns. */
+[[nodiscard]] static expected_t read_choices_(yyjson_val *object, mixture_entry_t &entry) noexcept {
+    if (!yyjson_is_obj(object)) return expected_t::fail(status_t::invalid_input_k, "\"choices\" is not an object");
+    std::size_t index = 0, count = 0;
+    yyjson_val *key = nullptr, *value = nullptr;
+    yyjson_obj_foreach(object, index, count, key, value) {
+        sz::string_view_t const name {yyjson_get_str(key), yyjson_get_len(key)};
+        expected_t read;
+        if (name == "state") read = read_string_(value, "state", entry.state);
+        else if (name == "choices") read = read_string_(value, "choices", entry.choices);
+        else if (name == "targets") read = read_string_(value, "targets", entry.targets);
+        else if (name == "group") read = read_string_(value, "group", entry.group);
+        else return expected_t::fail(status_t::invalid_input_k, "unknown choices key \"{}\"", name);
+        if (!read) return read;
+    }
+    if (entry.state.empty() || entry.choices.empty() || entry.targets.empty())
+        return expected_t::fail(status_t::invalid_input_k, "\"choices\" needs \"state\", \"choices\" and \"targets\"");
+    return {};
+}
+
 /** Parse one entry of the @c datasets array into @p entry . */
 [[nodiscard]] static expected_t read_entry_(yyjson_val *object, mixture_entry_t &entry) noexcept {
     if (!yyjson_is_obj(object)) return expected_t::fail(status_t::invalid_input_k, "a dataset is not an object");
@@ -70,6 +90,7 @@ using namespace unum::uform::train;
         else if (name == "anchor_prefix") read = read_string_(value, "anchor_prefix", entry.anchor_prefix);
         else if (name == "positive_prefix") read = read_string_(value, "positive_prefix", entry.positive_prefix);
         else if (name == "query") read = read_query_sides_(value, entry.sides);
+        else if (name == "choices") read = read_choices_(value, entry);
         else if (name == "weight") {
             if (!yyjson_is_num(value)) return expected_t::fail(status_t::invalid_input_k, "\"weight\" is not a number");
             entry.weight = yyjson_get_num(value);
@@ -86,8 +107,9 @@ using namespace unum::uform::train;
     }
     if (entry.name.empty() || entry.glob.empty() || !(entry.weight > 0.0))
         return expected_t::fail(status_t::invalid_input_k, "a dataset needs a name, a glob and a positive weight");
-    if (entry.text.empty() == entry.anchor.empty())
-        return expected_t::fail(status_t::invalid_input_k, "{} needs either \"text\" or \"anchor\"", entry.name.view());
+    if (!entry.text.empty() + !entry.anchor.empty() + !entry.state.empty() != 1)
+        return expected_t::fail(status_t::invalid_input_k, "{} needs one of \"text\", \"anchor\" or \"choices\"",
+                                entry.name.view());
     if (!entry.anchor.empty() && entry.positive.empty())
         return expected_t::fail(status_t::invalid_input_k, "{} pairs its anchor with no \"positive\"",
                                 entry.name.view());
@@ -133,7 +155,7 @@ expected<mixture_t> mixture_t::read(sz::string_view_t path) noexcept {
         u32_t pairs = 0;
         for (mixture_entry_t const &entry : mixture.datasets) pairs += !entry.anchor.empty();
         if (pairs != 0 && pairs != mixture.datasets.size())
-            return expected_t::fail(status_t::invalid_input_k, "pairs and plain text share the mixture");
+            return expected_t::fail(status_t::invalid_input_k, "pairs share the mixture with plain text or choices");
         return {};
     }();
     yyjson_doc_free(document);
@@ -144,6 +166,12 @@ expected<mixture_t> mixture_t::read(sz::string_view_t path) noexcept {
 bool mixture_t::names(modality_t modality) const noexcept {
     for (mixture_entry_t const &entry : datasets)
         if (!entry.media.empty() && entry.modality == modality) return true;
+    return false;
+}
+
+bool mixture_t::chooses() const noexcept {
+    for (mixture_entry_t const &entry : datasets)
+        if (!entry.state.empty()) return true;
     return false;
 }
 
@@ -159,6 +187,8 @@ multimodal_batch_shape_t mixture_t::shape(multimodal_batch_shape_t shape) const 
     if (names(modality_t::image_k)) shape.image = image_batch_shape_t {16u};
     if (names(modality_t::video_k)) shape.video = video_batch_shape_t {16u, 3u, 2u, 1u};
     if (names(modality_t::audio_k)) shape.audio = audio_batch_shape_t {320u, 16000u};
+    // A choice offers distinct bytes, so a segment holds at most every byte value once.
+    if (chooses()) shape.max_choices_per_segment = byte_pad_k;
     return shape;
 }
 
@@ -271,7 +301,12 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
     for (mixture_entry_t const &entry : entries) {
         sz::string_view_t const glob = entry.glob.view();
         expected_t made;
-        if (!pairs && glob.ends_with(".parquet"))
+        if (!entry.state.empty() && glob.ends_with(".parquet"))
+            made = adopt(choices_loader_parquet_t::make(
+                session, glob, config.seed, {entry.state.view(), entry.choices.view(), entry.targets.view()}));
+        else if (!entry.state.empty())
+            made = expected_t::fail(status_t::invalid_input_k, "{} holds no Parquet shards of choices", glob);
+        else if (!pairs && glob.ends_with(".parquet"))
             made = adopt(tokens_loader_parquet_t::make(session, glob, config.seed));
         else if (!pairs && glob.ends_with(".jsonl"))
             made = adopt(tokens_loader_jsonl_t::make(session, glob, config.seed));
@@ -308,7 +343,9 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
             roles = entries[index].negative.empty() ? 2.0 : 3.0;
             density = roles * paired->pairs_per_row(shape.max_columns_per_row);
         }
-        else if (std::holds_alternative<tokens_loader_parquet_t>(loader) && item_cells != 0)
+        else if ((std::holds_alternative<tokens_loader_parquet_t>(loader) ||
+                  std::holds_alternative<choices_loader_parquet_t>(loader)) &&
+                 item_cells != 0)
             density = columns / static_cast<f64_t>(item_cells);
         config.segments_per_row = std::max(config.segments_per_row, density);
         // A fill reads one entry, so a batch row costs that entry's own source rows, a pair or a
@@ -376,6 +413,7 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer, 
         std::size_t counted = 0;
         if (auto const *paired = std::get_if<paired_loader_parquet_t>(&loader)) counted = paired->rows();
         else if (auto const *parquet = std::get_if<tokens_loader_parquet_t>(&loader)) counted = parquet->rows();
+        else if (auto const *choices = std::get_if<choices_loader_parquet_t>(&loader)) counted = choices->rows();
         if (st::failed(rows.push_back(std::size_t {counted})))
             return expected_t::fail(status_t::bad_alloc_k, "row count table allocation failed");
     }
@@ -448,6 +486,8 @@ expected_t dataset_source_t::fill_member_(trainer_t &trainer, std::size_t member
         if (dataset.glob.view().ends_with(".txt")) text.delimiter = '\t', text.header = csv_header_t::positional_k;
         filled = csv->fill(stream, text, gpu_index, step, batches);
     }
+    else if (auto *choices = std::get_if<choices_loader_parquet_t>(&loaders_[entry]))
+        filled = choices->fill(stream, gpu_index, step, batches);
     else {
         paired_loader_parquet_t &paired = std::get<paired_loader_parquet_t>(loaders_[entry]);
         if (paired.modality() == modality_t::image_k)
@@ -459,6 +499,10 @@ expected_t dataset_source_t::fill_member_(trainer_t &trainer, std::size_t member
     if (!filled)
         return expected_t::fail(filled.status_, "{} on GPU {}: {}", dataset.name.view(), gpu_index,
                                 filled.description_.view());
+    // Every other loader names no choice, and a batch reused from a choices fill keeps its rows.
+    if (dataset.state.empty())
+        for (multimodal_batch_on_gpu_t &batch : batches)
+            if (expected_t padded = pad_choices(batch, stream); !padded) return padded;
     return {};
 }
 

@@ -19,11 +19,13 @@
 
 #include <cuda.h> // `cuInit`, `cuCtxPushCurrent`, `cuMemcpyHtoD`, `cuMemsetD8` — the raw staging boundary
 
-#include "core/infiniband_collectives.cuh" // `infiniband_coordinates_t` — the corrupt-payload negative test
-#include "core/contrastive_segments.cuh"
-#include "core/contrastive_tokens.cuh" // `contrastive_tokens_t`, `distributed_contrastive_tokens_t`
-#include "core/encoder_tower.hpp"      // `encoder_tower_bf16_t` — the pool + head the FP64 parity case gates
-#include "harness.hpp"                 // `test_suite_t`
+#include "uform/core/contrastive_segments.cuh"
+#include "uform/core/contrastive_tokens.cuh"     // `contrastive_tokens_t`, `distributed_contrastive_tokens_t`
+#include "uform/core/encoder_tower.hpp"          // `encoder_tower_bf16_t` — the pool + head the FP64 parity case gates
+#include "uform/core/infiniband_collectives.cuh" // `infiniband_coordinates_t` — the corrupt-payload negative test
+#include "uform/train/trainer.hpp"               // `trainer_t`, `items_source_t` — the sides case's step
+
+#include "harness.hpp" // `test_suite_t`
 
 using namespace unum::uform::core;
 using namespace unum::uform::test;
@@ -1834,6 +1836,65 @@ static void run_tokens_cross_domain_case(test_suite_t &suite) {
 #endif
 }
 
+/** Late interaction through the items source the C interface steps: two text pairs whose anchors
+ *  query and whose positives are documents, so the token head scores each query against the
+ *  documents and the step reports a finite, nonzero late-interaction term. The source copies every
+ *  item's side into the batch, which it once left unset. */
+static void run_items_sides_case(test_suite_t &suite) {
+    namespace ut = unum::uform::train;
+    int device_count = 0;
+    if (cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count < 1) return suite.skip(no_cuda_device_k);
+    st::basic_vector<i32_t> devices;
+    for (int device = 0; device != device_count; ++device)
+        if (st::failed(devices.push_back(static_cast<i32_t>(device)))) return suite.check(false, "device table");
+    ut::mesh_t mesh;
+    if (expected_t joined = ut::mesh_t::make(mesh, ut::mesh_options_t {}, devices); !joined)
+        return suite.check(false, "mesh: {}", joined.description_);
+
+    ut::trainer_config_t config;
+    config.batch = multimodal_batch_shape_t {4u, 8u, 64u};
+    config.batch.max_bags_per_gpu = 4u;
+    config.batch.max_bag_segments = 2u;
+    config.depth = 1;
+    config.hidden = 256;
+    config.steps = 1;
+    config.seed = suite.settings.seed;
+    config.capture = eager_k;
+    config.objective = ut::objective_t::contrastive_k;
+    config.late_interaction.weight = 1.0f;
+    config.late_interaction.width = 32;
+    ut::trainer_t trainer;
+    if (expected_t built = ut::trainer_t::make(trainer, mesh, config, devices); !built)
+        return suite.check(false, "trainer: {}", built.description_);
+    ut::items_source_t source;
+    if (expected_t made = ut::items_source_t::make(source, trainer); !made)
+        return suite.check(false, "items source: {}", made.description_);
+
+    char const text[] = "which cat sleeps on the mat?"               //
+                        "the grey cat sleeps on the mat by the door" //
+                        "how far is the moon?"                       //
+                        "the moon is three hundred thousand kilometres away";
+    std::size_t const offsets[] = {0, 28, 70, 90, sizeof(text) - 1};
+    modality_t const modalities[] = {modality_t::text_k, modality_t::text_k, modality_t::text_k, modality_t::text_k};
+    u32_t const bags[] = {0, 0, 1, 1};
+    std::size_t const attract_offsets[] = {0, 1, 2, 3, 4};
+    u32_t const attract_ids[] = {1, 0, 3, 2};
+    late_interaction_side_t const sides[] = {late_interaction_side_t::query_k, late_interaction_side_t::document_k,
+                                             late_interaction_side_t::query_k, late_interaction_side_t::document_k};
+    source.items.modalities = modalities;
+    source.items.contents = static_cast<b8_t const *>(static_cast<void const *>(text));
+    source.items.offsets = offsets;
+    source.items.bags = bags;
+    source.items.attract = {attract_offsets, attract_ids, nullptr};
+    source.items.sides = sides;
+    ut::step_report_t report;
+    if (expected_t stepped = trainer.step(ut::batch_source_of(source), optimizer_step_t {0}, report); !stepped)
+        return suite.check(false, "step: {}", stepped.description_);
+    ut::telemetry_t const telemetry = trainer.telemetry(optimizer_step_t {0});
+    suite.check(std::isfinite(telemetry.late_interaction) && telemetry.late_interaction != 0.0f,
+                "the items' query sides reach late interaction: its term is {}", telemetry.late_interaction);
+}
+
 int main(int, char **argv) {
     // Lazy loading would strand the one host thread still owing other members' barrier arrivals.
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
@@ -1881,5 +1942,6 @@ int main(int, char **argv) {
     suite.run("distributed", run_distributed_case);
     suite.run("tokens/oracle", run_tokens_oracle_case);
     suite.run("tokens/distributed", run_tokens_distributed_case);
+    suite.run("tokens/items_sides", run_items_sides_case);
     return suite.finish();
 }

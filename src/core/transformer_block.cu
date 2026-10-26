@@ -4,7 +4,7 @@
  *  @author Ash Vardanian
  *  @date July 3, 2026
  */
-#include "core/transformer_block.cuh"
+#include "uform/core/transformer_block.cuh"
 
 namespace uc = unum::uform::core;
 using namespace uc;

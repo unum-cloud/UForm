@@ -14,7 +14,7 @@ const named = process.env.UFORM_TEST_CHECKPOINT;
 const checkpointPath = named || path.join(fs.mkdtempSync(path.join(os.tmpdir(), "uform-")), "model.safetensors");
 if (!named) fs.writeFileSync(checkpointPath, Buffer.from("a stand-in checkpoint"));
 const described = Model.loadRam(checkpointPath);
-const { dimensions, context } = described.describe();
+const { dimensions, context, tokenWidth, choiceTemperatureGroups } = described.describe();
 described.free();
 
 // Whether `verb` throws an error whose `code` is `status`.
@@ -266,11 +266,60 @@ test("progress runs on the calling thread, and stops or rethrows", () => {
   throwsStatus(() => model.on(executor).textEncode(["a"], arena, { progress: () => true }), Status.InvalidArgument);
 });
 
+test("classes pin by their C names, and the GPU listing answers", () => {
+  for (const device of uform.gpuDevices()) assert.strictEqual(typeof device.gpuClass, "string");
+  using model = Model.loadRam(checkpointPath, { cpuClass: "serial" });
+  const description = model.describe();
+  assert.strictEqual(description.cpuClass, "serial");
+  assert.strictEqual(description.gpuClass, null);
+  throwsStatus(() => Model.loadRam(checkpointPath, { cpuClass: "intel-pentium" }), Status.UnknownKind);
+  Executor.forRam({ cpuClass: "serial" }).free();
+});
+
+test("token vectors are unit rows beside the states, or unsupported without a token head", () => {
+  using model = Model.loadRam(checkpointPath);
+  using arena = new Arena();
+  const outputs = Outputs.States | Outputs.TokenVectors;
+  if (!tokenWidth) return throwsStatus(() => model.textEncode(["hello"], arena, { outputs }), Status.Unsupported);
+  const encoded = model.textEncode(["hello", "a".repeat(context + 4)], arena, { outputs });
+  assert.strictEqual(encoded.tokenVectors.rows.columns, tokenWidth);
+  assert.deepStrictEqual([...encoded.tokenVectors.offsets], [...encoded.states.offsets]);
+  for (let row = 0; row < encoded.tokenVectors.rows.rows; row++) {
+    const squares = encoded.tokenVectors.rows.row(row).reduce((sum, value) => sum + value * value, 0);
+    assert.ok(squares > 0.98 && squares < 1.02, `row ${row}`);
+  }
+});
+
+test("choices sum to one per item, or unsupported without the byte decoder", () => {
+  using model = Model.loadRam(checkpointPath);
+  using arena = new Arena();
+  const texts = ["keep this candidate?", "expand which neighbour?", "a".repeat(context + 4)];
+  const choices = ["yn", "ABC", "s"];
+  if (!choiceTemperatureGroups)
+    return throwsStatus(() => model.textChoose(texts, choices, arena), Status.Unsupported);
+  const chosen = model.textChoose(texts, choices, arena, { temperatureGroups: [0, 0, 0] });
+  assert.deepStrictEqual([...chosen.probabilities.offsets], [0n, 2n, 5n, 6n]);
+  for (let item = 0; item < texts.length; item++) {
+    const sum = chosen.probabilities.item(item).reduce((total, value) => total + value, 0);
+    assert.ok(Math.abs(sum - 1) < 1e-3, `item ${item}`);
+  }
+  const past = { temperatureGroups: [0, choiceTemperatureGroups, 0] };
+  throwsStatus(() => model.textChoose(texts, choices, arena, past), Status.InvalidArgument);
+});
+
 test("training reports device on a build without GPUs", () => {
   using executor = Executor.forRam();
   throwsStatus(() => uform.Mesh.bootstrap(executor), Status.Device);
   const config = { depth: 2, hidden: 128, batch: { maxRowsPerDevice: 4 }, objective: uform.Objective.Masked, schedule: { steps: 1 } };
   throwsStatus(() => uform.Trainer.initVram(executor, config), Status.Device);
+  const heads = {
+    ...config,
+    batch: { maxRowsPerDevice: 4, maxChoicesPerItem: 16 },
+    lateInteraction: { weight: 1, pairLoss: uform.PairLossForm.Ranked },
+    choices: { weight: 1, brierWeight: 0.5 },
+  };
+  throwsStatus(() => uform.Trainer.initVram(executor, heads), Status.Device);
+  throwsStatus(() => uform.Trainer.initVram(executor, { ...heads, choices: { weight: "heavy" } }), Status.InvalidArgument);
 });
 
 const wasmModule = path.join(__dirname, "dist", "wasm", "uform.mjs");
@@ -321,6 +370,10 @@ test("wasm: pixels, samples, receivers and refusals", { skip: wasmSkip }, async 
   throwsStatus(() => wasm.Executor.forVram(), Status.Unsupported);
   throwsStatus(() => wasm.Trainer.initVram(executor, { objective: uform.Objective.Masked }), Status.Unsupported);
   throwsStatus(() => model.textEncode(["a"], arena, { outputs: 0 }), Status.InvalidArgument);
+  const { tokenWidth: heads, choiceTemperatureGroups: groups } = model.describe();
+  assert.deepStrictEqual([heads, groups], [tokenWidth, choiceTemperatureGroups]);
+  if (!groups) throwsStatus(() => model.textChoose(["stop?"], ["yn"], arena), Status.Unsupported);
+  else assert.strictEqual(model.textChoose(["stop?"], ["yn"], arena).probabilities.data.length, 2);
   arena.free();
   model.free();
   throwsStatus(() => model.describe(), Status.InvalidArgument);

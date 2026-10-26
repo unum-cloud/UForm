@@ -26,9 +26,9 @@
 
 #include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the host demux / decode-drive pool
 
-#include "media/planning.hpp" // `video_tube_grid` — each segment's 3-D factorization
-#include "media/video.hpp"    // `demux_video`, `demuxed_t`, `video_codec_t`
-#include "loaders/video_loader.cuh"
+#include "uform/loaders/video_loader.cuh"
+#include "uform/media/planning.hpp" // `video_tube_grid` — each segment's 3-D factorization
+#include "uform/media/video.hpp"    // `demux_video`, `demuxed_t`, `video_codec_t`
 
 namespace uc = unum::uform::core;
 namespace ul = unum::uform::loaders;

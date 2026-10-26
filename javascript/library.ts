@@ -47,7 +47,7 @@ export interface CompiledRows {
   scalar: string;
 }
 
-/** The final-norm states a call landed inside its arena, with `count + 1` row offsets. */
+/** The final-norm states or the token vectors a call landed inside its arena, with `count + 1` row offsets. */
 export interface CompiledStates extends CompiledRows {
   offsets: BigUint64Array | null;
 }
@@ -62,6 +62,14 @@ export interface CompiledEncodeStats {
 export interface CompiledEncoded {
   embeddings?: CompiledRows;
   states?: CompiledStates;
+  tokenVectors?: CompiledStates;
+  stats: CompiledEncodeStats;
+}
+
+/** One probability per choice a call landed inside its arena, with `count + 1` offsets; `null` over device memory. */
+export interface CompiledChosen {
+  probabilities: Float32Array | null;
+  offsets: BigUint64Array | null;
   stats: CompiledEncodeStats;
 }
 
@@ -72,6 +80,20 @@ export interface CompiledDescription {
   quantization: string;
   memoryUsage: number;
   capabilities: string;
+  cpuClass: string | null;
+  gpuClass: string | null;
+  tokenWidth: number;
+  choiceTemperatureGroups: number;
+}
+
+/** One GPU this process can drive, its position in the listing being the ordinal VRAM placements name it by. */
+export interface CompiledGpuDevice {
+  vendor: number;
+  vendorOrdinal: number;
+  gpuClass: string | null;
+  computeUnits: number;
+  memoryBytes: number;
+  name: string;
 }
 
 /** What a mesh reports about itself. */
@@ -95,6 +117,8 @@ export interface CompiledStepped {
     maskedImageLoss: number;
     maskedVideoLoss: number;
     maskedAudioLoss: number;
+    lateInteractionLoss: number;
+    choicesLoss: number;
     truncated: number;
   };
   embeddings?: CompiledRows;
@@ -123,6 +147,18 @@ export interface CompiledModel {
   audioEncodeSamples(
     ...arguments_: [...On, samples: Float32Array, offsets: Uint32Array, sampleRate: number, ...Landing]
   ): Encoding;
+  textChoose(
+    ...arguments_: [
+      ...On,
+      bytes: Uint8Array,
+      offsets: Uint32Array,
+      choices: Uint8Array,
+      choiceOffsets: Uint32Array,
+      temperatureGroups: Uint32Array | undefined,
+      arena: CompiledArena,
+      progress: ProgressCallback | undefined,
+    ]
+  ): CompiledChosen | CompiledDeferred;
 }
 
 /** The model class, whose loads are the only way to a live handle. */
@@ -132,24 +168,28 @@ export interface CompiledModelConstructor {
     executor: CompiledExecutor | undefined,
     memoryDomains: number[] | undefined,
     quantization: number,
+    cpuClass: string | undefined,
   ): CompiledModel;
   loadRamBuffer(
     buffer: ArrayBufferView,
     executor: CompiledExecutor | undefined,
     memoryDomains: number[] | undefined,
     quantization: number,
+    cpuClass: string | undefined,
   ): CompiledModel;
   loadVram(
     path: string,
     executor: CompiledExecutor | undefined,
     devices: number[] | undefined,
     quantization: number,
+    gpuClass: string | undefined,
   ): CompiledModel;
   loadVramBuffer(
     buffer: ArrayBufferView,
     executor: CompiledExecutor | undefined,
     devices: number[] | undefined,
     quantization: number,
+    gpuClass: string | undefined,
   ): CompiledModel;
 }
 
@@ -175,6 +215,10 @@ export interface CompiledTrainer {
       offsets: Uint32Array,
       bags: Uint32Array | undefined,
       temperatureGroups: Uint32Array | undefined,
+      sides: Int32Array | undefined,
+      choiceOffsets: Uint32Array | undefined,
+      choiceBytes: Uint8Array | undefined,
+      choiceTargets: Float32Array | undefined,
       attractOffsets: Uint32Array | undefined,
       attractIds: Uint32Array | undefined,
       attractWeights: Float32Array | undefined,
@@ -216,6 +260,7 @@ export interface Compiled {
   version(): string;
   capabilitiesCompiled(): string;
   capabilitiesAvailable(): string;
+  gpuDevices(): CompiledGpuDevice[];
 }
 
 /** Walks up from `directory` to the first ancestor holding a build or a prebuild tree. */

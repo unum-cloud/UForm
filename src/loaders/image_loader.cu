@@ -18,9 +18,9 @@
 
 #include <forkunion.hpp> // vendor-boundary: the host-CPU decode worker pool
 
-#include "media/planning.hpp" // the budget, factor pair and center crop
-#include "media/image.hpp"    // the triage probe and the CPU-fallback decode
-#include "loaders/image_loader.cuh"
+#include "uform/loaders/image_loader.cuh"
+#include "uform/media/image.hpp"    // the triage probe and the CPU-fallback decode
+#include "uform/media/planning.hpp" // the budget, factor pair and center crop
 
 namespace uc = unum::uform::core;
 namespace ul = unum::uform::loaders;

@@ -37,10 +37,11 @@
 #include <numkong/memory.h>       // `nk_allocator_t`, `nk_allocator_init_heap`
 #include <numkong/memory.hpp>     // `nk::stream_t` - the stream an executor owns
 
+#include "uform/uform.h" // every argument structure
+
 #include "uform/core/array.hpp"    // `per_gpu_array`
 #include "uform/core/types.hpp"    // `status_t`, the integer aliases, `sz::string_view_t`, `st::basic_vector`
 #include "uform/encoder/tower.hpp" // `geometry_t`, `precision_t`, `outputs_t` - what a model's towers take
-#include "uform/uform.h"           // every argument structure
 
 namespace unum::uform {
 

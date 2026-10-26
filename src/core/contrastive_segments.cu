@@ -13,7 +13,7 @@
 
 #include <numkong/each.h> // `nk_each_sum_f32_best` — the nested prefixes and the per-subgraph forces
 
-#include "core/contrastive_segments.cuh"
+#include "uform/core/contrastive_segments.cuh"
 
 using namespace unum::uform::core;
 

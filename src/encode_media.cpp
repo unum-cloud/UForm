@@ -7,9 +7,10 @@
  *
  *  A build without the codecs links @c encode_media_absent.cpp in its place.
  */
+#include "uform/media/audio.hpp" // `decode_audio`
+#include "uform/media/video.hpp" // `demux_video`, `decode_video_frames`
+
 #include "encode.hpp"
-#include "media/audio.hpp" // `decode_audio`
-#include "media/video.hpp" // `demux_video`, `decode_video_frames`
 
 using namespace unum::uform;
 

@@ -8,7 +8,7 @@
 #include <cuda.h>      // `CUdeviceptr`, driver launch surface
 #include <cuda/memory> // `cuda::is_aligned` — the transpose's 16-byte fast-path test
 
-#include "core/schedule.cuh" // `barrier_round_t`, `launch_kernel`, `transpose_bf16`, the NumKong products
+#include "uform/core/schedule.cuh" // `barrier_round_t`, `launch_kernel`, `transpose_bf16`, the NumKong products
 
 namespace uc = unum::uform::core;
 using namespace uc;

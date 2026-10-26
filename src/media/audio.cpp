@@ -20,7 +20,7 @@ extern "C" {
 #include <libswresample/swresample.h> // vendor-boundary: `swr_*`, `SwrContext`
 }
 
-#include "media/audio.hpp"
+#include "uform/media/audio.hpp"
 
 namespace um = unum::uform::media;
 using namespace um;

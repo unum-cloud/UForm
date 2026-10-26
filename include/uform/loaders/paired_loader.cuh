@@ -1,5 +1,5 @@
 /**
- *  @file src/loaders/paired_loader.cuh
+ *  @file include/uform/loaders/paired_loader.cuh
  *  @author Ash Vardanian
  *  @date October 18, 2026
  *  @brief The Parquet paired loader: an anchor text and its positive, an image, clip, recording
@@ -31,14 +31,14 @@
 
 #include <span> // `std::span`
 
-#include "core/types.hpp"             // `expected`, `status_t`, `epoch_permutation`
-#include "core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`
-#include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
-#include "loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
-#include "loaders/tokens_loader.cuh"  // `pack_tokens`
-#include "loaders/image_loader.cuh"   // `decode_images`, `nvjpeg_session_t`, `cpu_decode_pool_t`
-#include "loaders/audio_loader.cuh"   // `decode_audios`
-#include "loaders/video_loader.cuh"   // `decode_videos`, `nvdec_session_t`
+#include "uform/core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`
+#include "uform/core/types.hpp"             // `expected`, `status_t`, `epoch_permutation`
+#include "uform/loaders/audio_loader.cuh"   // `decode_audios`
+#include "uform/loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
+#include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
+#include "uform/loaders/image_loader.cuh"   // `decode_images`, `nvjpeg_session_t`, `cpu_decode_pool_t`
+#include "uform/loaders/tokens_loader.cuh"  // `pack_tokens`
+#include "uform/loaders/video_loader.cuh"   // `decode_videos`, `nvdec_session_t`
 
 namespace unum::uform::loaders {
 

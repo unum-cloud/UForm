@@ -11,7 +11,7 @@
 
 #include <cudf/io/config_utils.hpp> // vendor-boundary: `cudf::io::kvikio_integration::set_up_kvikio`
 
-#include "loaders/direct_storage.hpp"
+#include "uform/loaders/direct_storage.hpp"
 
 namespace ul = unum::uform::loaders;
 using namespace ul;

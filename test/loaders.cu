@@ -31,21 +31,22 @@
 
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
-#include "core/types.hpp"             // `splitmix64_hash_t`, `epoch_permutation`, `data_epoch_t`, `to_string`
-#include "core/array.hpp"             // `stack_array` — the host-oracle and staging scratch
-#include "core/gpu_allocators.hpp"    // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`, the tensor aliases
-#include "core/schedule.cuh"          // `gpu_stream_t`, `copy_host_to_device`, `copy_device_to_host`
-#include "core/mesh.hpp"              // `mesh_topology_t`, `host_domain_index_from_environment`
-#include "core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, the shape, `fill_coords`, `modality_t`
-#include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
-#include "loaders/dataset_shards.hpp" // `column_view_t`
-#include "loaders/tokens_loader.cuh"  // `tokens_loader_parquet_t`, `drawn_shards`
-#include "loaders/audio_loader.cuh"   // `decode_audios`, `cpu_decode_pool_t`
-#include "loaders/image_loader.cuh"   // `nvjpeg_session_t`, `decode_images`
-#include "loaders/video_loader.cuh"   // `nvdec_session_t`, `decode_videos`
-#include "media/planning.hpp"         // `image_patch_grid`, `video_tube_grid`
-#include "harness.hpp"                // `test_suite_t`
-#include "train/datasets.hpp"         // `mixture_sampler_t`, `mixture_entry_t`
+#include "uform/core/array.hpp"             // `stack_array` — the host-oracle and staging scratch
+#include "uform/core/gpu_allocators.hpp"    // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`, the tensor aliases
+#include "uform/core/mesh.hpp"              // `mesh_topology_t`, `host_domain_index_from_environment`
+#include "uform/core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, the shape, `fill_coords`, `modality_t`
+#include "uform/core/schedule.cuh"          // `gpu_stream_t`, `copy_host_to_device`, `copy_device_to_host`
+#include "uform/core/types.hpp"             // `splitmix64_hash_t`, `epoch_permutation`, `data_epoch_t`, `to_string`
+#include "uform/loaders/audio_loader.cuh"   // `decode_audios`, `cpu_decode_pool_t`
+#include "uform/loaders/dataset_shards.hpp" // `column_view_t`
+#include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
+#include "uform/loaders/image_loader.cuh"   // `nvjpeg_session_t`, `decode_images`
+#include "uform/loaders/tokens_loader.cuh"  // `tokens_loader_parquet_t`, `drawn_shards`
+#include "uform/loaders/video_loader.cuh"   // `nvdec_session_t`, `decode_videos`
+#include "uform/media/planning.hpp"         // `image_patch_grid`, `video_tube_grid`
+#include "uform/train/datasets.hpp"         // `mixture_sampler_t`, `mixture_entry_t`
+
+#include "harness.hpp" // `test_suite_t`
 
 using namespace unum::uform::core;
 using namespace unum::uform::loaders;

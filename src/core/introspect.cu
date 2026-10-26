@@ -10,7 +10,7 @@
 
 #include <cuda.h> // `cuMemsetD8`, `cuMemcpyDtoH`, `cuStreamSynchronize`
 
-#include "core/introspect.cuh"
+#include "uform/core/introspect.cuh"
 
 using namespace unum::uform::core;
 

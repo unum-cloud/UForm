@@ -1,10 +1,10 @@
 /**
+ *  @file include/uform/core/multimodal_masking.hpp
+ *  @author Ash Vardanian
+ *  @date July 3, 2026
  *  @brief The multimodal masked-modeling objective: deterministic corruption of a clean batch into a
  *      distorted one, and the reconstruction heads that score the tower's states against the clean
  *      target.
- *  @file src/core/multimodal_masking.hpp
- *  @author Ash Vardanian
- *  @date July 3, 2026
  *
  *  The heads are byte cross-entropy for tokens, normalized-pixel MSE for image / video patches, and
  *  normalized-sample MSE for 1-D audio frames.
@@ -31,21 +31,12 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "core/types.hpp"            // `expected`, `expected_t`, `status_t`, the scalar aliases, `st::basic_vector`
-#include "core/gpu_allocators.hpp"   // `gpu_arena_t`, `gpu_arena_alloc`
-#include "core/schedule.cuh"         // `gpu_stream_t`, the NumKong products, the view aliases
-#include "core/multimodal_batch.hpp" // `modality_t`, `modality_view_t` — the per-segment routing tag
+#include "uform/core/gpu_allocators.hpp"   // `gpu_arena_t`, `gpu_arena_alloc`
+#include "uform/core/multimodal_batch.hpp" // `modality_t`, `byte_vocabulary_k`, `byte_pad_k`, `byte_mask_k`
+#include "uform/core/schedule.cuh"         // `gpu_stream_t`, the NumKong products, the view aliases
+#include "uform/core/types.hpp" // `expected`, `expected_t`, `status_t`, the scalar aliases, `st::basic_vector`
 
 namespace unum::uform::core {
-
-/** The byte vocabulary: 256 UTF-8 byte values plus the PAD and MASK specials. */
-inline constexpr u32_t byte_vocabulary_k = 258u;
-
-/** The PAD byte id — token 256; ineligible for masking, its loss weight is always zero. */
-inline constexpr token_id_t byte_pad_k = 256u;
-
-/** The MASK byte id — token 257, what the replace fraction of masked positions shows the tower. */
-inline constexpr token_id_t byte_mask_k = 257u;
 
 /** The deterministic corruption policy — a host value type, baked per run. */
 struct masking_recipe_t {
@@ -103,6 +94,20 @@ struct masked_tokens_config_t {
 
     /** λ — the objective's weight inside the composite loss, folded into the gradient scale. */
     f32_t weight = 1.0f;
+
+    /** Most segments one call carries, the answer rows @ref masked_tokens_t::choose gathers; zero
+     *  allocates none and makes no choice. */
+    u32_t max_segments = 0;
+};
+
+/** SearchJev's calibrated choices over the byte decoder; a zero weight trains none. */
+struct choices_config_t {
+
+    /** λ of the choices term in the composite loss. */
+    f32_t weight = 0.0f;
+
+    /** λ_B, the Brier term's weight beside the soft cross-entropy. */
+    f32_t brier_weight = 0.5f;
 };
 
 /**
@@ -187,14 +192,15 @@ struct masked_tokens_t {
     /**
      *  @brief Corrupt @p clean into @p distorted and emit the per-position @p loss_weights — pure enqueue.
      *
-     *  Only @c text_k segments are corrupted; a segment whose @p segment_modality is any media kind is
-     *  skipped outright, leaving its tokens clean with weight zero (mixed rows form at mix time, so this
-     *  routes on the tag rather than trusting media positions to hold PAD). Each text segment's tokens
-     *  are walked left-to-right: geometric spans open at @c token_mask_probability/token_mean_span and
-     *  continue at @c 1-1/token_mean_span ; a covered position is shown MASK / a random byte / its clean
-     *  self per the recipe fractions, and carries a loss weight of one. PAD is never eligible;
-     *  uncovered positions copy clean with weight zero. A segment with bytes the walk leaves
-     *  uncovered gets one span from a keyed anchor, so every text row is scored.
+     *  Only @c text_k segments are corrupted; a segment whose @p segment_modality is any media
+     *  kind, or whose @p segment_choices row opens with a byte other than @c byte_pad_k , is
+     *  skipped outright, leaving its tokens clean with weight zero (mixed rows form at mix time, so
+     *  this routes on the tag rather than trusting media positions to hold PAD). A text segment's
+     *  tokens are walked left-to-right, where geometric spans continue at @c 1-1/token_mean_span
+     *  and open at @c token_mask_probability/token_mean_span ; a covered position is shown MASK / a
+     *  random byte / its clean self per the recipe fractions, and carries a loss weight of one. PAD
+     *  is never eligible; uncovered positions copy clean with weight zero. A segment with bytes the
+     *  walk leaves uncovered gets one span from a keyed anchor, so every text row is scored.
      *
      *  @param[in] clean The clean token stream @b [tokens] in flat @c segment_offsets space.
      *  @param[out] distorted The tower's input @b [tokens] — clean elsewhere, corrupted at covered spans.
@@ -202,11 +208,13 @@ struct masked_tokens_t {
      *  @param[in] segment_offsets @b [segments+1] flat start positions; @p segment_lengths @b [segments]
      *      live token counts (a segment never crosses its row).
      *  @param[in] segment_modality @b [segments] per-segment routing tag; only @c text_k segments corrupt.
+     *  @param[in] segment_choices @b [segments,choices] each segment's legal bytes, empty when the
+     *      batch carries none; a choice segment stays clean.
      */
     [[nodiscard]] expected_t corrupt(tokens_view_t clean, tokens_span_t distorted, u32r1_span_t loss_weights,
                                      u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
-                                     modality_view_t segment_modality, masking_recipe_t recipe, data_epoch_t data_epoch,
-                                     gpu_stream_t &stream) noexcept;
+                                     modality_view_t segment_modality, nk::tensor_view<token_id_t, 2> segment_choices,
+                                     masking_recipe_t recipe, data_epoch_t data_epoch, gpu_stream_t &stream) noexcept;
 
     /**
      *  @brief Forward + backward over every token, gated by its loss weight — pure enqueue on @p stream .
@@ -223,12 +231,40 @@ struct masked_tokens_t {
                                         u32r1_view_t loss_weights, f32r1_span_t loss_summands,
                                         bf16r2_span_t normalized_grad, gpu_stream_t &stream) noexcept;
 
+    /**
+     *  @brief Soft-target cross-entropy plus the Brier term over each choice segment's legal bytes,
+     *      read at its last row of @p normalized , adding into @p normalized_grad ; reuses
+     *      @c logits_ and @c logit_grad_ — pure enqueue on @p stream .
+     *
+     *  Per choice segment, @c p is the softmax of the decoder's logits restricted to its bytes and
+     *  @c t its targets, and the summand is @c −Σt·log(p)+λ_B·Σ(p−t)² , scaled by @c λ over the
+     *  live choice segments. Every other vocabulary column and every other row gets no gradient.
+     *  The decoder's weight gradient is added onto, so the masked @ref operator() runs first when
+     *  both train.
+     *
+     *  @param[in] normalized The tower's final-norm token states @b [tokens,hidden] .
+     *  @param[in] batch The step's segment geometry, choices and targets.
+     *  @param[in] config The weights @c λ and @c λ_B .
+     *  @param[inout] loss_summands @b [2] Float32 the call adds @c {λ·Σ summand, live count} onto.
+     *  @param[inout] normalized_grad @b [tokens,hidden] @c d(normalized) , added onto at the answer
+     *      rows.
+     */
+    [[nodiscard]] expected_t choose(bf16r2_view_t normalized, multimodal_batch_view_t const &batch,
+                                    choices_config_t config, f32r1_span_t loss_summands, bf16r2_span_t normalized_grad,
+                                    gpu_stream_t &stream) noexcept;
+
     /** Append the decoder weight to @p weights under the checkpoint name @p name — the owning
      *  replica spells the instance name, since one head class may serve several modalities. */
     [[nodiscard]] expected_t fill(sz::string_view_t name, st::basic_vector<differentiable_weights_t> &weights) noexcept;
 
     /** The decoder weights @b [vocabulary·hidden] — the checkpoint enumerator's handle. */
     [[nodiscard]] nk::tensor_span<bf16_t, 1> decoder_weights() noexcept { return decoder_weight_.span().flatten<1>(); }
+
+    /** The decoder's gradient @b [vocabulary·hidden] , which a step choosing without reconstructing
+     *  zeroes before @ref choose adds onto it. */
+    [[nodiscard]] nk::tensor_span<bf16_t, 1> decoder_gradients() noexcept {
+        return decoder_weight_grad_.span().flatten<1>();
+    }
 
   private:
     masked_tokens_config_t config_ {};
@@ -249,7 +285,8 @@ struct masked_tokens_t {
      *  to 8 for NumKong's 16-byte stride rule, since the byte vocabulary is 258 wide. */
     bf16r2_tensor_arena_t logit_grad_ {};
 
-    /** @b [max_tokens] per-position cross-entropy summands. */
+    /** @b [max_tokens] per-position cross-entropy summands, the first @c max_segments of which also
+     *  hold the choice summands. */
     f32r1_tensor_arena_t position_loss_ {};
 
     /** @b [2] @c {λ/max(count,1), count} — device-computed, so the count never visits the host. */
@@ -260,6 +297,10 @@ struct masked_tokens_t {
     bf16r1_tensor_arena_t transposed_grad_ {}, transposed_input_ {};
     b8r1_tensor_arena_t packed_input_ {};
     f32r1_tensor_arena_t products_ {};
+
+    /** @b [max_segments,hidden] each choice segment's answer row, contiguous for one product; empty
+     *  without choices. */
+    bf16r2_tensor_arena_t gathered_ {};
 };
 
 /**

@@ -109,6 +109,8 @@ extern PyTypeObject DeferredType;
 extern PyTypeObject OnType;
 extern PyTypeObject DeferredOnType;
 
+extern PyTypeObject GPUDeviceType;
+
 extern PyTypeObject ModelType;
 extern PyTypeObject ModelDescriptionType;
 
@@ -124,6 +126,7 @@ extern PyTypeObject TrainerType;
 extern PyTypeObject TrainerStepStatsType;
 
 /** The layouts of the struct sequences, which `lib.c` readies through their own initializer. */
+extern PyStructSequence_Desc uform_py_gpu_device_desc;
 extern PyStructSequence_Desc uform_py_model_description_desc;
 extern PyStructSequence_Desc uform_py_encoded_desc;
 extern PyStructSequence_Desc uform_py_mesh_description_desc;
@@ -193,8 +196,9 @@ typedef struct uform_py_enum_t {
     PyObject *type;
 } uform_py_enum_t;
 
-extern uform_py_enum_t uform_py_status, uform_py_scalar, uform_py_mood, uform_py_outputs, uform_py_modality,
-    uform_py_objective, uform_py_negatives, uform_py_multimem_tier;
+extern uform_py_enum_t uform_py_status, uform_py_scalar, uform_py_mood, uform_py_cpu_class, uform_py_gpu_class,
+    uform_py_gpu_vendor, uform_py_outputs, uform_py_modality, uform_py_objective, uform_py_negatives,
+    uform_py_pair_loss_form, uform_py_late_interaction_side, uform_py_multimem_tier;
 
 /**
  *  @brief Builds every mirrored enum's class and adds it to @p module, one member per value spelled,
@@ -211,6 +215,16 @@ int uform_py_enum_from_object(PyObject *object, char const *field, uform_py_enum
 
 /** The member of @p mirrored valued @p value; returns a new reference, or @c NULL with an exception set. */
 PyObject *uform_py_enum_to_object(uform_py_enum_t const *mirrored, int value);
+
+/**
+ *  @brief Reads an optional @c CPUClass or @c GPUClass pin, as @p classes names; NULL or None
+ *      leaves @p value at zero, the unknown class that derives the hardware's own.
+ *  @return 0 on success, -1 with an exception set otherwise.
+ */
+int uform_py_class_from_object(PyObject *object, char const *field, uform_py_enum_t const *classes, int *value);
+
+/** The member of @p classes valued @p value, or None for the unknown class; NULL on failure. */
+PyObject *uform_py_class_to_object(uform_py_enum_t const *classes, int value);
 
 /** What one field of a keyword-built structure holds, and how it reaches the C structure. */
 typedef enum uform_py_field_kind_t {
@@ -262,7 +276,7 @@ typedef struct Fields {
 } Fields;
 
 extern uform_py_fields_t ImageShapeType, VideoShapeType, AudioShapeType, BatchShapeType, MaskingType, ContrastiveType,
-    ScheduleType, MeshOptionsType, EdgesType, RelationsType;
+    LateInteractionType, ChoicesType, ScheduleType, MeshOptionsType, EdgesType, RelationsType, ChoicesViewType;
 
 /** Readies @p fields, its members generated from its field table and kept as long as the process, like the module;
  *  returns 0 or -1 with an exception set. */
@@ -522,6 +536,20 @@ int uform_py_tape_from_object(PyObject *object, char const *field, uform_py_elem
 /** Releases whatever @c uform_py_tape_from_object acquired; a zeroed tape is a no-op. */
 void uform_py_tape_release(uform_py_tape_t *tape);
 
+/** A run of @c uint32_t words, lent from a buffer of format 'I' or gathered from integers. */
+typedef struct uform_py_words_t {
+    uint32_t const *data;
+    uint32_t *gathered;
+    Py_buffer buffer;
+} uform_py_words_t;
+
+/** Reads @p count words from @p object; None leaves them NULL. Returns 0 or -1 with an exception
+ *  set, and @p words is released either way by @c uform_py_words_release. */
+int uform_py_words_from_object(PyObject *object, char const *field, size_t count, uform_py_words_t *words);
+
+/** Releases whatever @c uform_py_words_from_object acquired; a zeroed run is a no-op. */
+void uform_py_words_release(uform_py_words_t *words);
+
 /**
  *  @brief Claims the @c Arena @p object for one call, rewinding it: every result over its previous outputs goes
  *      stale.
@@ -551,13 +579,22 @@ PyObject *uform_py_rows_answer(PyTypeObject *type, PyObject *arena, uform_rows_v
  */
 PyObject *uform_py_rows_tape_answer(PyObject *arena, uform_rows_tape_view_t const *states, size_t count, size_t tokens);
 
+/**
+ *  @brief A @c RowsTape over the flat run of @p elements @c f32 values of @p tape a call wrote
+ *      into @p arena, its @c offsets an @c ArenaBuffer of the @p count + 1 @c 'N' words.
+ *  @return A new reference, or NULL with an exception set.
+ */
+PyObject *uform_py_tape_answer(PyObject *arena, uform_tape_view_t const *tape, size_t count, size_t elements);
+
 extern char const doc_version[];
 extern char const doc_capabilities_compiled[];
 extern char const doc_capabilities_available[];
+extern char const doc_gpu_devices[];
 
 PyObject *api_version(PyObject *self, PyObject *unused);
 PyObject *api_capabilities_compiled(PyObject *self, PyObject *unused);
 PyObject *api_capabilities_available(PyObject *self, PyObject *unused);
+PyObject *api_gpu_devices(PyObject *self, PyObject *unused);
 
 #pragma endregion Shared Helpers
 

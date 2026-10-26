@@ -1,9 +1,9 @@
 /**
- *  @brief Host image decoding: triage a compressed blob, decode it to RGBA, and Lanczos-resize its center crop into
- *      the batch's patch layout.
- *  @file src/media/image.hpp
+ *  @file include/uform/media/image.hpp
  *  @author Ash Vardanian
  *  @date July 4, 2026
+ *  @brief Host image decoding: triage a compressed blob, decode it to RGBA, and Lanczos-resize its
+ *      center crop into the batch's patch layout.
  *
  *  JPEG decodes through libjpeg-turbo's TurboJPEG, PNG through libpng and WebP through libwebp, all to interleaved RGBA, JPEG
  *  with a constant @c 255 alpha. The RAM and AMD executors run the whole @ref decode_image ; the NVIDIA loader takes
@@ -17,8 +17,8 @@
 
 #include <span> // `std::span`
 
-#include "uform/core/types.hpp" // `expected`, `status_t`, the scalar aliases
-#include "media/planning.hpp"   // `image_extent_t`, `patch_grid_t`, `crop_t`
+#include "uform/core/types.hpp"     // `expected`, `status_t`, the scalar aliases
+#include "uform/media/planning.hpp" // `image_extent_t`, `patch_grid_t`, `crop_t`
 
 namespace unum::uform::media {
 

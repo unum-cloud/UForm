@@ -55,11 +55,12 @@
 #include <smashtable/basic_hash_table.hpp> // `hash_map` — COCO image IDs to their files
 #include <smashtable/basic_vector.hpp>     // `basic_vector` — every growable table here
 
-#include "uform/core/checkpoint.hpp" // `checkpoint_to_load_t`, `checkpoint_to_save_t` — the calibrated copy
-#include "uform/core/types.hpp"      // `divide_round_up`
 #include "uform/encode.h"
 #include "uform/model.h"
 #include "uform/types.h"
+
+#include "uform/core/checkpoint.hpp" // `checkpoint_to_load_t`, `checkpoint_to_save_t` — the calibrated copy
+#include "uform/core/types.hpp"      // `divide_round_up`
 
 namespace fu = ashvardanian::forkunion;
 namespace st = ashvardanian::smashtable;

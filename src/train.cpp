@@ -15,8 +15,9 @@
 #include <cuda.h>      // `cuMemcpyHtoD`
 #include <cuda_fp16.h> // `__float2half` - embeddings landing as Float16
 
+#include "uform/train/trainer.hpp"
+
 #include "lib.hpp"
-#include "train/trainer.hpp"
 
 using namespace unum::uform;
 namespace ut = unum::uform::train;
@@ -44,8 +45,10 @@ struct uform_trainer_handle_t {
     std::unique_ptr<ut::trainer_t> trainer;
     std::unique_ptr<ut::items_source_t> items;
 
-    /** One step's modalities in the engine's spelling, and its embeddings before they land in the arena. */
+    /** One step's modalities and sides in the engine's spelling, and its embeddings before they
+     *  land in the arena. */
     st::basic_vector<modality_t> modalities;
+    st::basic_vector<core::late_interaction_side_t> sides;
     st::basic_vector<b8_t> embeddings;
 };
 
@@ -96,6 +99,17 @@ struct uform_trainer_handle_t {
     return handle;
 }
 
+/** The engine's pair-loss form @p form names, or @p derived for its zero. */
+[[nodiscard]] static core::contrastive_pair_loss_form_t pair_loss_of(
+    uform_pair_loss_form_t form, core::contrastive_pair_loss_form_t derived) noexcept {
+    switch (form) {
+    case uform_pair_loss_form_balanced_k: return core::contrastive_pair_loss_form_t::balanced_k;
+    case uform_pair_loss_form_ranked_k: return core::contrastive_pair_loss_form_t::ranked_k;
+    case uform_pair_loss_form_sigmoid_k: return core::contrastive_pair_loss_form_t::sigmoid_k;
+    default: return derived;
+    }
+}
+
 /** Fold every field of @p arguments into the engine's run description, or answer the refusal's message. */
 [[nodiscard]] static char const *configure(uform_trainer_init_vram_t const &arguments,
                                            ut::trainer_config_t &config) noexcept {
@@ -109,6 +123,11 @@ struct uform_trainer_handle_t {
     if (arguments.contrastive.matryoshka_dimensions_count > core::max_matryoshka_prefixes_k ||
         (arguments.contrastive.matryoshka_dimensions_count && !arguments.contrastive.matryoshka_dimensions))
         return "The Matryoshka widths are at most eight, and present when counted";
+    if (arguments.contrastive.pair_loss > uform_pair_loss_form_sigmoid_k ||
+        arguments.late_interaction.pair_loss > uform_pair_loss_form_sigmoid_k)
+        return "The pair loss is not one the engine trains";
+    if (arguments.choices.weight > 0.0f && !batch.max_choices_per_item)
+        return "Choices need the batch's max_choices_per_item";
 
     config.depth = static_cast<u32_t>(arguments.depth);
     config.hidden = static_cast<u32_t>(arguments.hidden);
@@ -116,6 +135,7 @@ struct uform_trainer_handle_t {
                                                    static_cast<u32_t>(batch.max_segments_per_device),
                                                    static_cast<u32_t>(batch.max_columns_per_row)};
     config.batch.max_bags_per_gpu = static_cast<u32_t>(batch.max_bags_per_device);
+    config.batch.max_choices_per_segment = static_cast<u32_t>(batch.max_choices_per_item);
     if (batch.image.patch_side)
         config.batch.image = {static_cast<u32_t>(batch.image.patch_side),
                               batch.image.channels ? static_cast<u32_t>(batch.image.channels) : 4u};
@@ -150,8 +170,11 @@ struct uform_trainer_handle_t {
     config.contrastive.temperature_groups = contrastive.temperature_groups
                                                 ? static_cast<u32_t>(contrastive.temperature_groups)
                                                 : 1u;
-    config.contrastive.inverse_temperature = chosen(contrastive.inverse_temperature, 10.0f);
-    config.contrastive.bias = chosen(contrastive.bias, -10.0f);
+    config.contrastive.pair_loss = pair_loss_of(contrastive.pair_loss, core::contrastive_pair_loss_form_t::sigmoid_k);
+    // Each form starts at its own logit scale: the sigmoid sum at SigLIP's β=10, b=−10.
+    bool const sigmoid = config.contrastive.pair_loss == core::contrastive_pair_loss_form_t::sigmoid_k;
+    config.contrastive.inverse_temperature = chosen(contrastive.inverse_temperature, sigmoid ? 10.0f : 1.0f);
+    config.contrastive.bias = chosen(contrastive.bias, sigmoid ? -10.0f : 0.0f);
     config.contrastive.ambient_repulsion_weight = contrastive.negatives == uform_negatives_named_k
                                                       ? 0.0f
                                                       : chosen(contrastive.ambient_repulsion_weight, 1.0f);
@@ -168,6 +191,10 @@ struct uform_trainer_handle_t {
     config.late_interaction.max_documents_per_gpu = static_cast<u32_t>(late_interaction.max_documents_per_device);
     config.late_interaction.max_document_tokens_per_gpu = static_cast<u32_t>(
         late_interaction.max_document_tokens_per_device);
+    config.late_interaction.pair_loss = pair_loss_of(late_interaction.pair_loss,
+                                                     core::contrastive_pair_loss_form_t::ranked_k);
+    config.choices.weight = arguments.choices.weight;
+    config.choices.brier_weight = chosen(arguments.choices.brier_weight, 0.5f);
 
     config.learning_rate = chosen(arguments.schedule.learning_rate, 5.0e-4f);
     config.min_learning_rate = chosen(arguments.schedule.min_learning_rate, 1.0e-5f);
@@ -314,7 +341,7 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t *arguments) 
     if (core::expected_t const sourced = ut::items_source_t::make(*handle->items, *handle->trainer); !sourced)
         return propagate_error(train_status_of(sourced), outcome, "The items source could not be built"), void();
     std::size_t const segments = devices.size() * config.batch.max_segments_per_gpu;
-    if (st::failed(handle->modalities.resize(segments)) ||
+    if (st::failed(handle->modalities.resize(segments)) || st::failed(handle->sides.resize(segments)) ||
         st::failed(handle->embeddings.resize(segments * config.hidden * sizeof(f32_t))))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the step columns"), void();
     if (arguments->mesh) arguments->mesh->trainers.fetch_add(1, std::memory_order_acq_rel);
@@ -352,6 +379,19 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) {
     }
     if (arguments->bags && !config.batch.max_bags_per_gpu)
         return propagate_error(uform_status_invalid_argument_k, outcome, "Bags need the batch's bag budget"), void();
+    for (std::size_t item = 0; arguments->sides && item != count; ++item) {
+        if (arguments->sides[item] > uform_late_interaction_side_query_and_document_k)
+            return propagate_error(uform_status_invalid_argument_k, outcome, "An item's side is unrecognized"), void();
+        handle->sides[item] = static_cast<core::late_interaction_side_t>(arguments->sides[item]);
+    }
+    uform_choices_view_t const &choices = arguments->choices;
+    if (choices.offsets && !config.chooses())
+        return propagate_error(uform_status_unsupported_k, outcome, "The run trains no choices"), void();
+    if (choices.offsets && count && (!choices.bytes || !choices.targets))
+        return propagate_error(uform_status_invalid_argument_k, outcome, "Choices need bytes and targets"), void();
+    for (std::size_t item = 0; choices.offsets && item != count; ++item)
+        if (choices.offsets[item + 1] < choices.offsets[item])
+            return propagate_error(uform_status_malformed_k, outcome, "The choice offsets must not decrease"), void();
     uform_edges_view_t const &attract = arguments->relations.attract;
     if (config.contrasts() && (!attract.offsets || attract.offsets[count] == attract.offsets[0]))
         return propagate_error(uform_status_invalid_argument_k, outcome, "A contrastive step names attract edges"),
@@ -372,10 +412,12 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) {
                     arguments->temperature_groups,
                     edges_of(attract),
                     edges_of(arguments->relations.repel),
-                    edges_of(arguments->relations.ignore)};
+                    edges_of(arguments->relations.ignore),
+                    arguments->sides ? handle->sides.data() : nullptr,
+                    {choices.offsets, choices.bytes, choices.targets}};
     core::optimizer_step_t const optimizer_step {trainer.completed_steps};
     ut::step_report_t report;
-    if (core::expected_t const stepped = trainer.step(source, optimizer_step, report); !stepped)
+    if (core::expected_t const stepped = trainer.step(ut::batch_source_of(source), optimizer_step, report); !stepped)
         return propagate_error(train_status_of(stepped), outcome, "The step failed"), void();
     if (arguments->stats) {
         ut::telemetry_t const telemetry = trainer.telemetry(optimizer_step);
@@ -387,11 +429,12 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) {
                              telemetry.image_mse / config.image_weight,
                              telemetry.video_mse / config.video_weight,
                              telemetry.audio_mse / config.audio_weight,
+                             telemetry.late_interaction,
+                             config.chooses() ? telemetry.choices / config.choices.weight : 0.0f,
                              report.truncated};
     }
     if (arguments->embeddings) {
-        chunked_arena_t &memory = std::visit([](chunked_arena_t &held) noexcept -> chunked_arena_t & { return held; },
-                                             arena->memory);
+        chunked_arena_t &memory = chunks_of(arena->memory);
         if (!land_embeddings(*handle, count, arguments->outputs_scalar, memory, *arguments->embeddings, outcome))
             return;
     }

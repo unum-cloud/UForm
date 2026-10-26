@@ -8,8 +8,9 @@
  *  WebAssembly builds no codec, so the browser decodes with @c createImageBitmap or WebAudio, at the model's rate,
  *  and calls @c uform_image_encode_pixels or @c uform_audio_encode_samples .
  */
+#include "uform/media/audio.hpp" // `resample_mono`
+
 #include "encode.hpp"
-#include "media/audio.hpp" // `resample_mono`
 
 using namespace unum::uform;
 

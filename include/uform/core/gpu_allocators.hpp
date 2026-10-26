@@ -1,9 +1,9 @@
 /**
- *  @brief Single-GPU memory allocators of the UForm v4 primitives cell: a growing bump arena + a
- *      stream-ordered allocator, each owning memory of exactly @b one device.
- *  @file src/core/gpu_allocators.hpp
+ *  @file include/uform/core/gpu_allocators.hpp
  *  @author Ash Vardanian
  *  @date July 2, 2026
+ *  @brief Single-GPU memory allocators of the UForm v4 primitives cell: a growing bump arena + a
+ *      stream-ordered allocator, each owning memory of exactly @b one device.
  *
  *  Two allocators for the two @b single-GPU memory disciplines the stack needs, both on the CUDA Driver
  *  API (the multi-device symmetric memory of a multimem_domain lives with the multimem collectives,
@@ -46,7 +46,7 @@
 #include <cuda_bf16.h> // `__nv_bfloat16` behind the `bf16_t` alias
 #include <cuda_fp8.h>  // `__nv_fp8_e4m3` behind the `e4m3_t` alias
 
-#include "core/types.hpp" // `expected`, `status_t`, `st::basic_vector` for exception-free chunk bookkeeping
+#include "uform/core/types.hpp" // `expected`, `status_t`, `st::basic_vector` for exception-free chunk bookkeeping
 
 namespace unum::uform::core {
 

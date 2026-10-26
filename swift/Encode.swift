@@ -2,8 +2,9 @@
 //  Encode.swift
 //  UForm
 //
-//  The forward passes, mirroring `c/uform/encode.h`: text, images, video and audio in, pooled embeddings and
-//  per-token states out, one verb per input form, each on the model and on both of its receivers.
+//  The forward passes, mirroring `c/uform/encode.h`: text, images, video and audio in, pooled embeddings,
+//  per-token states and token vectors out, one verb per input form, plus calibrated choices over text, each on the
+//  model and on both of its receivers.
 //
 
 import UFormC
@@ -18,6 +19,9 @@ public struct Outputs: OptionSet, Sendable {
     public static let embeddings = Outputs(rawValue: 1 << 0)
     /// The final-norm states, one row per token each item kept after truncation.
     public static let states = Outputs(rawValue: 1 << 1)
+    /// The token head's unit vectors, one row per token each item kept, its prefix included; a model without a
+    /// token head reports `unsupported`.
+    public static let tokenVectors = Outputs(rawValue: 1 << 2)
 }
 
 /// What an encode call reports beside its outputs. Mirrors every `uform_*_encode_stats_t`.
@@ -50,6 +54,16 @@ public struct Encoded {
     public let embeddings: Rows?
     /// One run of rows per item, one row per token kept, or nil when `outputs` left the states out.
     public let states: RowsTape?
+    /// One run of token-width rows per item, one row per token kept, or nil when `outputs` left them out.
+    public let tokenVectors: RowsTape?
+    /// What the call counted on the way.
+    public let stats: EncodeStats
+}
+
+/// What one choose call wrote into its arena, read in place until the arena's next call.
+public struct Chosen {
+    /// One probability per choice, in the order each item offered them.
+    public let probabilities: Tape
     /// What the call counted on the way.
     public let stats: EncodeStats
 }
@@ -128,6 +142,28 @@ extension Model {
     ) throws(UFormError) -> Encoded {
         try here.audioEncodeSamples(samples, sampleRate: sampleRate, outputs: outputs, arena: arena, config: config)
     }
+
+    /// Scores each text's legal `choices`, one byte each, through one forward, a softmax over them alone at the
+    /// calibrated inverse temperature of the item's `temperatureGroups` entry; nil puts every item in group zero.
+    /// The call appends the mask byte, and a text longer than the context loses its head. A model without the
+    /// byte decoder reports `unsupported`. `progress` hears items scored. Calls `uform_text_choose`.
+    public func textChoose(
+        _ texts: [String],
+        choices: [[UInt8]],
+        temperatureGroups: [UInt32]? = nil,
+        arena: Arena,
+        progress: Progress? = nil,
+        progressSteps: Int = 0
+    ) throws(UFormError) -> Chosen {
+        try here.textChoose(
+            texts,
+            choices: choices,
+            temperatureGroups: temperatureGroups,
+            arena: arena,
+            progress: progress,
+            progressSteps: progressSteps
+        )
+    }
 }
 
 // MARK: - Receivers
@@ -199,6 +235,20 @@ extension ModelOn {
             try call.audioEncodeSamples(samples, sampleRate, outputs, arena, config)
         }
     }
+
+    /// Calls `uform_text_choose`.
+    public func textChoose(
+        _ texts: [String],
+        choices: [[UInt8]],
+        temperatureGroups: [UInt32]? = nil,
+        arena: Arena,
+        progress: Progress? = nil,
+        progressSteps: Int = 0
+    ) throws(UFormError) -> Chosen {
+        try run { (call) throws(UFormError) in
+            try call.textChoose(texts, choices, temperatureGroups, arena, progress, progressSteps)
+        }
+    }
 }
 
 extension ModelDeferredOn {
@@ -268,6 +318,20 @@ extension ModelDeferredOn {
             try call.audioEncodeSamples(samples, sampleRate, outputs, arena, config)
         }
     }
+
+    /// Calls `uform_text_choose`.
+    public func textChoose(
+        _ texts: [String],
+        choices: [[UInt8]],
+        temperatureGroups: [UInt32]? = nil,
+        arena: Arena,
+        progress: Progress? = nil,
+        progressSteps: Int = 0
+    ) throws(UFormError) -> Deferred<Chosen> {
+        try submit { (call) throws(UFormError) in
+            try call.textChoose(texts, choices, temperatureGroups, arena, progress, progressSteps)
+        }
+    }
 }
 
 // MARK: - Calls
@@ -295,6 +359,8 @@ protocol EncodeArguments {
     var count: Int { get set }
     var embeddings: UnsafeMutablePointer<uform_rows_view_t>! { get set }
     var states: UnsafeMutablePointer<uform_rows_tape_view_t>! { get set }
+    // swift-format-ignore: AlwaysUseLowerCamelCase
+    var token_vectors: UnsafeMutablePointer<uform_rows_tape_view_t>! { get set }
     var arena: uform_arena_t! { get set }
     // swift-format-ignore: AlwaysUseLowerCamelCase
     var outputs_scalar: uform_scalar_t { get set }
@@ -323,6 +389,7 @@ extension ModelCall {
         var arguments = arguments
         let embeddings = outputs.contains(.embeddings) ? landing.slots(uform_rows_view_t()) : nil
         let states = outputs.contains(.states) ? landing.slots(uform_rows_tape_view_t()) : nil
+        let tokenVectors = outputs.contains(.tokenVectors) ? landing.slots(uform_rows_tape_view_t()) : nil
         let stats = landing.slots(Arguments.Stats())
         let write = landing.lend(arena)
         arguments.model = model.raw
@@ -332,6 +399,7 @@ extension ModelCall {
         arguments.count = count
         arguments.embeddings = embeddings
         arguments.states = states
+        arguments.token_vectors = tokenVectors
         arguments.arena = arena.raw
         arguments.outputs_scalar = config.outputsScalar.raw
         arguments.progress = landing.lend(config.progress, steps: config.progressSteps)
@@ -341,6 +409,44 @@ extension ModelCall {
             Encoded(
                 embeddings: embeddings.map { Rows(write: write, view: $0.pointee, count: count) },
                 states: states.map { RowsTape(write: write, view: $0.pointee, count: count) },
+                tokenVectors: tokenVectors.map { RowsTape(write: write, view: $0.pointee, count: count) },
+                stats: EncodeStats(truncated: stats.pointee.truncated, tokens: stats.pointee.tokens)
+            )
+        }
+    }
+
+    func textChoose(
+        _ texts: [String],
+        _ choices: [[UInt8]],
+        _ temperatureGroups: [UInt32]?,
+        _ arena: Arena,
+        _ progress: Progress?,
+        _ progressSteps: Int
+    ) throws(UFormError) -> Submission<Chosen> {
+        // The C side reads one entry per item behind tapes and pointers whose count is the texts'.
+        guard choices.count == texts.count, temperatureGroups.map({ $0.count == texts.count }) ?? true else {
+            throw UFormError(status: .shapeMismatch, message: "the choices and groups must name one per text")
+        }
+        let probabilities = landing.slots(uform_tape_view_t())
+        let stats = landing.slots(uform_text_encode_stats_t())
+        let write = landing.lend(arena)
+        var arguments = uform_text_choose_t()
+        arguments.model = model.raw
+        arguments.executor = executor?.raw
+        arguments.outcome = landing.outcome
+        arguments.completion = landing.completion
+        arguments.count = texts.count
+        arguments.texts = landing.tape(texts.map(\.utf8), .u8)
+        arguments.choices = landing.tape(choices, .u8)
+        arguments.temperature_groups = temperatureGroups.flatMap { landing.lend($0) }
+        arguments.probabilities = probabilities
+        arguments.arena = arena.raw
+        arguments.progress = landing.lend(progress, steps: progressSteps)
+        arguments.stats = stats
+        uform_text_choose(&arguments)
+        return try landing.submitted {
+            Chosen(
+                probabilities: Tape(write: write, view: probabilities.pointee, count: texts.count),
                 stats: EncodeStats(truncated: stats.pointee.truncated, tokens: stats.pointee.tokens)
             )
         }

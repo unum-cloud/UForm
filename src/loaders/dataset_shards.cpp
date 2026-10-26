@@ -33,10 +33,9 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp> // `rmm::device_buffer` — the gathered tar members
 
-#include "loaders/dataset_shards.hpp"
-
-#include "core/types.hpp"          // `st::basic_vector` — the owned per-column table
-#include "core/gpu_allocators.hpp" // `device_address` — the tar gather's copy endpoints
+#include "uform/core/gpu_allocators.hpp" // `device_address` — the tar gather's copy endpoints
+#include "uform/core/types.hpp"          // `st::basic_vector` — the owned per-column table
+#include "uform/loaders/dataset_shards.hpp"
 
 namespace uc = unum::uform::core;
 namespace ul = unum::uform::loaders;

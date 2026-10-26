@@ -169,6 +169,190 @@ public struct Mood: Hashable, Sendable, CustomStringConvertible {
     init(raw: uform_mood_t) { self.raw = raw }
 }
 
+// MARK: - Classes & Devices
+
+/// A CPU family UForm ships tuned kernels for, carrying the C enumerator; dispatch reports its pick in this
+/// vocabulary, and a RAM placement may pin one.
+public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
+    /// The C enumerator.
+    let raw: uform_cpu_class_t
+
+    /// The portable floor, with no SIMD assumptions.
+    public static let serial = CPUClass(raw: uform_cpu_class_serial_k)
+    /// Haswell-class x86: AVX2 and FMA.
+    public static let intelHaswell = CPUClass(raw: uform_cpu_class_intel_haswell_k)
+    /// Sierra Forest-class x86: AVX-VNNI without AVX-512.
+    public static let intelSierra = CPUClass(raw: uform_cpu_class_intel_sierra_k)
+    /// Skylake-class x86: the AVX-512 foundation.
+    public static let intelSkylake = CPUClass(raw: uform_cpu_class_intel_skylake_k)
+    /// Icelake-class x86: AVX-512 VNNI and VPOPCNT.
+    public static let intelIcelake = CPUClass(raw: uform_cpu_class_intel_icelake_k)
+    /// Genoa-class x86: native bf16 dot products over AVX-512.
+    public static let amdGenoa = CPUClass(raw: uform_cpu_class_amd_genoa_k)
+    /// Sapphire Rapids-class x86: AVX-512 FP16 and the AMX tiles.
+    public static let intelSapphire = CPUClass(raw: uform_cpu_class_intel_sapphire_k)
+    /// Granite Rapids-class x86: the AMX-FP16 tiles.
+    public static let intelGranite = CPUClass(raw: uform_cpu_class_intel_granite_k)
+    /// Diamond Rapids-class x86: AVX10.2's FP8 conversions.
+    public static let intelDiamond = CPUClass(raw: uform_cpu_class_intel_diamond_k)
+    /// Graviton2-class Arm: the bare NEON floor.
+    public static let awsG2 = CPUClass(raw: uform_cpu_class_aws_g2_k)
+    /// Armv8.6 NEON with dot products and bf16.
+    public static let appleM2 = CPUClass(raw: uform_cpu_class_apple_m2_k)
+    /// Apple M4-class Arm: the SME outer-product tiles.
+    public static let appleM4 = CPUClass(raw: uform_cpu_class_apple_m4_k)
+    /// Graviton5-class Arm: Armv9.2.
+    public static let awsG5 = CPUClass(raw: uform_cpu_class_aws_g5_k)
+    /// Vera-class Arm: FP8 dot products.
+    public static let nvidiaVera = CPUClass(raw: uform_cpu_class_nvidia_vera_k)
+    /// Alibaba C930-class RISC-V: RVA23 vectors.
+    public static let alibabaC930 = CPUClass(raw: uform_cpu_class_alibaba_c930_k)
+    /// WebAssembly with fixed-width simd128.
+    public static let wasm32V128 = CPUClass(raw: uform_cpu_class_wasm32_v128_k)
+    /// WebAssembly with relaxed SIMD, threads and 64-bit addressing.
+    public static let wasm64Extended = CPUClass(raw: uform_cpu_class_wasm64_extended_k)
+
+    /// The class as the library spells it, like `intel-haswell`. Calls `uform_cpu_class_name`.
+    public var description: String { String(cString: uform_cpu_class_name(raw)) }
+
+    /// Reads a spelling back, and nil for one no class carries. Calls `uform_cpu_class_from_name`.
+    public init?(name: String) {
+        guard let raw = parsed(name, uform_cpu_class_from_name, uform_cpu_class_name),
+            raw != uform_cpu_class_unknown_k
+        else { return nil }
+        self.raw = raw
+    }
+
+    /// Lifts a reported class, and nil for none.
+    init?(reported raw: uform_cpu_class_t) {
+        guard raw != uform_cpu_class_unknown_k else { return nil }
+        self.raw = raw
+    }
+
+    init(raw: uform_cpu_class_t) { self.raw = raw }
+}
+
+/// A GPU family UForm ships tuned kernels for, carrying the C enumerator; dispatch reports its pick in this
+/// vocabulary, and a VRAM placement may pin one.
+public struct GPUClass: Hashable, Sendable, CustomStringConvertible {
+    /// The C enumerator.
+    let raw: uform_gpu_class_t
+
+    /// Ampere-class NVIDIA, and every NVIDIA GPU without a class of its own.
+    public static let nvidiaAmpere = GPUClass(raw: uform_gpu_class_nvidia_ampere_k)
+    /// Ada-class NVIDIA: the fp8 conversions.
+    public static let nvidiaAda = GPUClass(raw: uform_gpu_class_nvidia_ada_k)
+    /// Hopper-class NVIDIA.
+    public static let nvidiaHopper = GPUClass(raw: uform_gpu_class_nvidia_hopper_k)
+    /// Blackwell-class NVIDIA.
+    public static let nvidiaBlackwell = GPUClass(raw: uform_gpu_class_nvidia_blackwell_k)
+    /// Consumer Blackwell NVIDIA.
+    public static let nvidiaBlackwellRTX = GPUClass(raw: uform_gpu_class_nvidia_blackwellrtx_k)
+    /// Rubin-class NVIDIA.
+    public static let nvidiaRubin = GPUClass(raw: uform_gpu_class_nvidia_rubin_k)
+    /// CDNA3 AMD: gfx942.
+    public static let amdCDNA3 = GPUClass(raw: uform_gpu_class_amd_cdna3_k)
+    /// CDNA4 AMD: gfx950.
+    public static let amdCDNA4 = GPUClass(raw: uform_gpu_class_amd_cdna4_k)
+    /// CDNA5 AMD: gfx1250.
+    public static let amdCDNA5 = GPUClass(raw: uform_gpu_class_amd_cdna5_k)
+    /// Apple7-family GPUs, and every Apple GPU without a class of its own.
+    public static let appleMetal7 = GPUClass(raw: uform_gpu_class_apple_metal7_k)
+    /// Apple9-family GPUs.
+    public static let appleMetal9 = GPUClass(raw: uform_gpu_class_apple_metal9_k)
+    /// Apple10-family GPUs.
+    public static let appleMetal10 = GPUClass(raw: uform_gpu_class_apple_metal10_k)
+
+    /// The class as the library spells it, like `nvidia-hopper`. Calls `uform_gpu_class_name`.
+    public var description: String { String(cString: uform_gpu_class_name(raw)) }
+
+    /// Reads a spelling back, and nil for one no class carries. Calls `uform_gpu_class_from_name`.
+    public init?(name: String) {
+        guard let raw = parsed(name, uform_gpu_class_from_name, uform_gpu_class_name),
+            raw != uform_gpu_class_unknown_k
+        else { return nil }
+        self.raw = raw
+    }
+
+    /// Lifts a reported class, and nil for none.
+    init?(reported raw: uform_gpu_class_t) {
+        guard raw != uform_gpu_class_unknown_k else { return nil }
+        self.raw = raw
+    }
+
+    init(raw: uform_gpu_class_t) { self.raw = raw }
+}
+
+/// The vendor whose runtime drives a GPU, carrying the C enumerator.
+public struct GPUVendor: Hashable, Sendable {
+    /// The C enumerator.
+    let raw: uform_gpu_vendor_t
+
+    /// A vendor this binding has no name for.
+    public static let unknown = GPUVendor(raw: uform_gpu_vendor_unknown_k)
+    /// NVIDIA, through the CUDA driver.
+    public static let nvidia = GPUVendor(raw: uform_gpu_vendor_nvidia_k)
+    /// AMD, through the HIP runtime.
+    public static let amd = GPUVendor(raw: uform_gpu_vendor_amd_k)
+    /// Apple, through Metal.
+    public static let apple = GPUVendor(raw: uform_gpu_vendor_apple_k)
+}
+
+/// One GPU this process can drive; its position in `gpuDevices()` is the ordinal every VRAM placement names it by.
+/// Mirrors `uform_gpu_device_t`.
+public struct GPUDevice: Sendable {
+    /// The vendor whose runtime drives the device.
+    public var vendor: GPUVendor
+    /// The device's ordinal in its vendor's runtime.
+    public var vendorOrdinal: UInt32
+    /// The class whose kernels run on it, or nil for none.
+    public var gpuClass: GPUClass?
+    /// Streaming multiprocessors or compute units.
+    public var computeUnits: UInt32
+    /// Device memory in bytes.
+    public var memoryBytes: UInt64
+    /// The vendor's own name for the device.
+    public var name: String
+
+    init(_ raw: uform_gpu_device_t) {
+        vendor = GPUVendor(raw: raw.vendor)
+        vendorOrdinal = raw.vendor_ordinal
+        gpuClass = GPUClass(reported: raw.gpu_class)
+        computeUnits = raw.compute_units
+        memoryBytes = raw.memory_bytes
+        name = withUnsafeBytes(of: raw.name) { bytes in
+            String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
+        }
+    }
+}
+
+/// Every GPU this process can drive, NVIDIA devices first, then AMD; empty on a machine without GPUs. Calls
+/// `uform_gpu_devices`.
+public func gpuDevices() throws(UFormError) -> [GPUDevice] {
+    let landing = Landing()
+    let count = landing.slots(0)
+    var counting = uform_gpu_devices_t(
+        outcome: landing.outcome,
+        devices: nil,
+        devices_capacity: 0,
+        devices_count: count
+    )
+    uform_gpu_devices(&counting)
+    try landing.read {}
+    let capacity = count.pointee
+    let devices = landing.slots(uform_gpu_device_t(), count: capacity)
+    var listing = uform_gpu_devices_t(
+        outcome: landing.outcome,
+        devices: devices,
+        devices_capacity: capacity,
+        devices_count: count
+    )
+    uform_gpu_devices(&listing)
+    return try landing.read {
+        (0 ..< Swift.min(capacity, count.pointee)).map { GPUDevice(devices[$0]) }
+    }
+}
+
 // MARK: - Progress
 
 /// Whether the call a progress handler is watching carries on or unwinds.
@@ -252,6 +436,24 @@ final class Landing {
     func lend(_ text: String) -> uform_bytes_view_t {
         let bytes = Array(text.utf8)
         return uform_bytes_view_t(data: lend(bytes), length: bytes.count)
+    }
+
+    /// Lends the host placement every RAM load and executor takes; nil `cpuClass` derives the CPU's own.
+    func ram(_ memoryDomains: [Int32], _ cpuClass: CPUClass?) -> uform_ram_options_t {
+        uform_ram_options_t(
+            memory_domains: lend(memoryDomains),
+            memory_domains_count: memoryDomains.count,
+            cpu_class: cpuClass?.raw ?? uform_cpu_class_unknown_k
+        )
+    }
+
+    /// Lends the device placement every VRAM load and executor takes; nil `gpuClass` derives the devices' own.
+    func vram(_ devices: [Int32], _ gpuClass: GPUClass?) -> uform_vram_options_t {
+        uform_vram_options_t(
+            devices: lend(devices),
+            devices_count: devices.count,
+            gpu_class: gpuClass?.raw ?? uform_gpu_class_unknown_k
+        )
     }
 
     /// Lays `items` end to end with Apache Arrow offsets around them, as every ragged input crosses.
@@ -421,10 +623,11 @@ public final class Executor: @unchecked Sendable {
 
     /// Spawns host threads for RAM-resident models, interleaved across the compute domains local to
     /// `memoryDomains`; an empty list derives every node the process may allocate on. Zero `threads` takes 7/8 of
-    /// the cores those domains carry, and zero `deferredLimit` sizes the deferred table by default. Calls
-    /// `uform_executor_for_ram`.
+    /// the cores those domains carry, and zero `deferredLimit` sizes the deferred table by default. A `cpuClass`
+    /// dispatches as if the CPU were of that class; nil derives its own. Calls `uform_executor_for_ram`.
     public static func forRam(
         memoryDomains: [Int32] = [],
+        cpuClass: CPUClass? = nil,
         threads: Int = 0,
         deferredLimit: Int = 0
     ) throws(UFormError) -> Executor {
@@ -433,10 +636,7 @@ public final class Executor: @unchecked Sendable {
         var arguments = uform_executor_for_ram_t(
             executor: executor,
             outcome: landing.outcome,
-            ram: uform_ram_options_t(
-                memory_domains: landing.lend(memoryDomains),
-                memory_domains_count: memoryDomains.count
-            ),
+            ram: landing.ram(memoryDomains, cpuClass),
             threads: threads,
             deferred_limit: deferredLimit
         )
@@ -445,9 +645,10 @@ public final class Executor: @unchecked Sendable {
     }
 
     /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, which must outlive it. Reports `unsupported`
-    /// until the library wires borrowed pools. Calls `uform_executor_on_pool`.
+    /// until the library wires borrowed pools. A `cpuClass` pins as `forRam` does. Calls `uform_executor_on_pool`.
     public static func onPool(
         memoryDomains: [Int32] = [],
+        cpuClass: CPUClass? = nil,
         pool: UnsafeMutableRawPointer,
         deferredLimit: Int = 0
     ) throws(UFormError) -> Executor {
@@ -456,10 +657,7 @@ public final class Executor: @unchecked Sendable {
         var arguments = uform_executor_on_pool_t(
             executor: executor,
             outcome: landing.outcome,
-            ram: uform_ram_options_t(
-                memory_domains: landing.lend(memoryDomains),
-                memory_domains_count: memoryDomains.count
-            ),
+            ram: landing.ram(memoryDomains, cpuClass),
             pool: pool,
             deferred_limit: deferredLimit
         )
@@ -469,9 +667,11 @@ public final class Executor: @unchecked Sendable {
 
     /// Opens one submission stream on every named device, or borrows the caller's `streams`, one per device in
     /// `devices` order; an empty list derives one free device. A zero `scratchLimit` lets per-device scratch grow
-    /// as batches ask. Calls `uform_executor_for_vram`.
+    /// as batches ask. A `gpuClass` dispatches every device as that class; nil derives theirs. Calls
+    /// `uform_executor_for_vram`.
     public static func forVram(
         devices: [Int32] = [],
+        gpuClass: GPUClass? = nil,
         streams: [UnsafeMutableRawPointer?]? = nil,
         scratchLimit: Int = 0,
         deferredLimit: Int = 0
@@ -486,7 +686,7 @@ public final class Executor: @unchecked Sendable {
         var arguments = uform_executor_for_vram_t(
             executor: executor,
             outcome: landing.outcome,
-            vram: uform_vram_options_t(devices: landing.lend(devices), devices_count: devices.count),
+            vram: landing.vram(devices, gpuClass),
             streams: lentStreams,
             scratch_limit: scratchLimit,
             deferred_limit: deferredLimit
@@ -689,6 +889,39 @@ public struct RowsTape: RandomAccessCollection {
             scalar: rows.scalar,
             count: offsets![item + 1] - first
         )
+    }
+}
+
+/// A ragged run of `f32` values a call wrote into its arena, as many per item as the item asked for, read in
+/// place. Mirrors `uform_tape_view_t`.
+public struct Tape: RandomAccessCollection {
+    /// The arena the values live in, and which call wrote them.
+    let write: ArenaWrite
+    /// The first value; nil when the call wrote none.
+    let base: UnsafeRawPointer?
+    /// One more offset than items, in values.
+    let offsets: UnsafePointer<Int>?
+    /// One past the last item.
+    public let endIndex: Int
+
+    /// The first item's position, which a collection walk starts from.
+    public var startIndex: Int { 0 }
+
+    init(write: ArenaWrite, view: uform_tape_view_t, count: Int) {
+        self.write = write
+        base = view.data
+        offsets = view.offsets
+        endIndex = count
+    }
+
+    /// One item's values.
+    public subscript(item: Int) -> Rows.Row {
+        write.check(item, below: endIndex)
+        let first = offsets![item]
+        let length = offsets![item + 1] - first
+        // An item asking for nothing may sit on a null base, which its empty row never reads.
+        let start = base.map { $0 + first * MemoryLayout<Float>.stride } ?? UnsafeRawPointer(bitPattern: 4)!
+        return Rows.Row(write: write, base: start, scalar: .f32, endIndex: length)
     }
 }
 

@@ -1,8 +1,8 @@
 /**
- *  @brief Execution scheduling: owning CUDA streams and capture-once / replay-forever graphs.
- *  @file src/core/schedule.cuh
+ *  @file include/uform/core/schedule.cuh
  *  @author Ash Vardanian
  *  @date July 2, 2026
+ *  @brief Execution scheduling: owning CUDA streams and capture-once / replay-forever graphs.
  *
  *  Two artifacts every step loop keys on:
  *
@@ -62,8 +62,8 @@
 #include <numkong/dots.h>     // `nk_dots_pack_bf16_best`, `nk_dots_packed_bf16_best` — every matrix product
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span` for the typed transfer helpers
 
-#include "core/types.hpp"          // `expected`, `expected_t`, `status_t`, `st::basic_vector` for the node-guard walk
-#include "core/gpu_allocators.hpp" // `gpu_arena_alloc`, `bf16_t`, `cuda_failure`
+#include "uform/core/gpu_allocators.hpp" // `gpu_arena_alloc`, `bf16_t`, `cuda_failure`
+#include "uform/core/types.hpp" // `expected`, `expected_t`, `status_t`, `st::basic_vector` for the node-guard walk
 
 namespace unum::uform::core {
 

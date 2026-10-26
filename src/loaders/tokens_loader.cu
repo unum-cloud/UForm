@@ -10,7 +10,7 @@
  */
 #include <algorithm> // `std::min` (floor), `std::upper_bound` (weighted group pick), `std::find` (dedup), `std::sort`
 
-#include "loaders/tokens_loader.cuh"
+#include "uform/loaders/tokens_loader.cuh"
 
 using namespace unum::uform::core;
 using namespace unum::uform::loaders;

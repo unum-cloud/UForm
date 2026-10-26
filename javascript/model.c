@@ -57,11 +57,12 @@ typedef enum uform_js_load_t {
     uform_js_load_vram_buffer_k,
 } uform_js_load_t;
 
-/** @c loadRam(path, executor, memoryDomains, quantization), @c loadVram(path, executor, devices, quantization),
- *  and their @c Buffer twins taking any @c TypedArray → a model, the load blocking on @p executor. */
+/** @c loadRam(path, executor, memoryDomains, quantization, cpuClass), @c loadVram(path, executor,
+ *  devices, quantization, gpuClass), and their @c Buffer twins taking any @c TypedArray → a model,
+ *  the load blocking on @p executor. */
 static napi_value uform_js_model_load(napi_env env, napi_callback_info info, uform_js_load_t load) {
-    napi_value arguments[4];
-    if (!uform_js_arguments(env, info, 4, arguments, NULL)) return NULL;
+    napi_value arguments[5];
+    if (!uform_js_arguments(env, info, 5, arguments, NULL)) return NULL;
     bool const from_path = load == uform_js_load_ram_k || load == uform_js_load_vram_k;
     char *path = NULL;
     void *buffer = NULL;
@@ -74,8 +75,12 @@ static napi_value uform_js_model_load(napi_env env, napi_callback_info info, ufo
     if (from_path) path = uform_js_string_from_value(env, arguments[0], "path", &bytes);
     else if (uform_js_bytes_from_value(env, arguments[0], "buffer", &buffer, &bytes.length))
         bytes.data = (uint8_t const *)buffer;
+    uform_cpu_class_t cpu_class = uform_cpu_class_unknown_k;
+    uform_gpu_class_t gpu_class = uform_gpu_class_unknown_k;
     bool const read = from_path ? path != NULL : bytes.data != NULL || !bytes.length;
-    if (!read || !uform_js_executor_from_value(env, arguments[1], &executor) ||
+    bool const pinned = load >= uform_js_load_vram_k ? uform_js_gpu_class_from_value(env, arguments[4], &gpu_class)
+                                                     : uform_js_cpu_class_from_value(env, arguments[4], &cpu_class);
+    if (!read || !pinned || !uform_js_executor_from_value(env, arguments[1], &executor) ||
         !uform_js_scalar_from_value(env, arguments[3], "quantization", &quantization) ||
         !uform_js_ordinals_from_value(env, arguments[2], field, &ordinals, &ordinals_count)) {
         free(path);
@@ -84,8 +89,8 @@ static napi_value uform_js_model_load(napi_env env, napi_callback_info info, ufo
 
     uform_model_t handle = NULL;
     uform_outcome_t outcome = {uform_status_success_k, NULL};
-    uform_ram_options_t const ram = {ordinals, ordinals_count};
-    uform_vram_options_t const vram = {ordinals, ordinals_count};
+    uform_ram_options_t const ram = {ordinals, ordinals_count, cpu_class};
+    uform_vram_options_t const vram = {ordinals, ordinals_count, gpu_class};
     switch (load) {
     case uform_js_load_ram_k: {
         uform_model_load_ram_t arguments = {.model = &handle,
@@ -156,11 +161,18 @@ static napi_value uform_js_model_release(napi_env env, napi_callback_info info) 
 
 static napi_value uform_js_finish_describe(napi_env env, uform_js_call_t *call, napi_value const *slots) {
     uform_model_description_t const *const description = &((uform_js_describe_call_t *)call)->description;
-    static char const *const names[] = {"dimensions", "context", "quantization", "memoryUsage", "capabilities"};
-    napi_value const values[] = {
-        uform_js_number(env, description->dimensions), uform_js_number(env, description->context),
-        uform_js_static_string(env, uform_scalar_name(description->quantization)),
-        uform_js_number(env, description->memory_usage), uform_js_static_string(env, description->capabilities)};
+    static char const *const names[] = {"dimensions",  "context",      "quantization",
+                                        "memoryUsage", "capabilities", "cpuClass",
+                                        "gpuClass",    "tokenWidth",   "choiceTemperatureGroups"};
+    napi_value const values[] = {uform_js_number(env, description->dimensions),
+                                 uform_js_number(env, description->context),
+                                 uform_js_static_string(env, uform_scalar_name(description->quantization)),
+                                 uform_js_number(env, description->memory_usage),
+                                 uform_js_static_string(env, description->capabilities),
+                                 uform_js_class_name(env, uform_cpu_class_name(description->cpu_class)),
+                                 uform_js_class_name(env, uform_gpu_class_name(description->gpu_class)),
+                                 uform_js_number(env, description->token_width),
+                                 uform_js_number(env, description->choice_temperature_groups)};
     (void)slots;
     return uform_js_object(env, sizeof(names) / sizeof(names[0]), names, values);
 }

@@ -28,6 +28,10 @@ def capabilities_available() -> str:
     """The hardware capabilities this machine offers at runtime. Calls `uform_capabilities_available`."""
     ...
 
+def gpu_devices() -> tuple[GPUDevice, ...]:
+    """Every GPU this process can drive, a device's position being its ordinal. Calls `uform_gpu_devices`."""
+    ...
+
 # endregion: Library Probes
 
 # region: Shared Vocabulary
@@ -84,11 +88,75 @@ class Mood(IntEnum):
     PARKED = 0
     SPINNING = 1
 
+class CPUClass(IntEnum):
+    """The CPU families dispatch picks from, valued as `uform_cpu_class_t`; a RAM placement may pin one."""
+
+    SERIAL = 1
+    INTEL_HASWELL = 2
+    INTEL_SIERRA = 3
+    INTEL_SKYLAKE = 4
+    INTEL_ICELAKE = 5
+    AMD_GENOA = 6
+    INTEL_SAPPHIRE = 7
+    INTEL_GRANITE = 8
+    INTEL_DIAMOND = 9
+    AWS_G2 = 10
+    APPLE_M2 = 11
+    APPLE_M4 = 12
+    AWS_G5 = 13
+    NVIDIA_VERA = 14
+    ALIBABA_C930 = 15
+    WASM32_V128 = 16
+    WASM64_EXTENDED = 17
+
+class GPUClass(IntEnum):
+    """The GPU families dispatch picks from, valued as `uform_gpu_class_t`; a VRAM placement may pin one."""
+
+    NVIDIA_AMPERE = 1
+    NVIDIA_ADA = 2
+    NVIDIA_HOPPER = 3
+    NVIDIA_BLACKWELL = 4
+    NVIDIA_BLACKWELLRTX = 5
+    NVIDIA_RUBIN = 6
+    AMD_CDNA3 = 7
+    AMD_CDNA4 = 8
+    AMD_CDNA5 = 9
+    APPLE_METAL7 = 10
+    APPLE_METAL9 = 11
+    APPLE_METAL10 = 12
+
+class GPUVendor(IntEnum):
+    """The vendor whose runtime drives a GPU, valued as `uform_gpu_vendor_t`."""
+
+    NVIDIA = 1
+    AMD = 2
+    APPLE = 3
+
+@final
+class GPUDevice(structseq[Any], tuple[GPUVendor, int, GPUClass | None, int, int, str]):
+    """One GPU this process can drive, its position in `gpu_devices()` being its ordinal."""
+
+    __match_args__: Final = ("vendor", "vendor_ordinal", "gpu_class", "compute_units", "memory_bytes", "name")
+
+    @property
+    def vendor(self) -> GPUVendor: ...
+    @property
+    def vendor_ordinal(self) -> int: ...
+    @property
+    def gpu_class(self) -> GPUClass | None: ...
+    @property
+    def compute_units(self) -> int: ...
+    @property
+    def memory_bytes(self) -> int: ...
+    @property
+    def name(self) -> str: ...
+
 class Outputs(IntFlag):
     """Which surfaces an encoding keeps, deciding which of the C output pointers the binding passes."""
 
     EMBEDDINGS = 1
     STATES = 2
+    TOKEN_VECTORS = 4
 
 class Modality(IntEnum):
     """What the bytes of one training item hold, valued as `uform_modality_t`."""
@@ -110,6 +178,22 @@ class Negatives(IntEnum):
 
     AMBIENT = 0
     NAMED = 1
+
+class PairLossForm(IntEnum):
+    """How a contrastive term turns a row of scores into forces, valued as `uform_pair_loss_form_t`."""
+
+    DERIVED = 0
+    BALANCED = 1
+    RANKED = 2
+    SIGMOID = 3
+
+class LateInteractionSide(IntEnum):
+    """Which side of a late-interaction score an item takes, valued as `uform_late_interaction_side_t`."""
+
+    NONE = 0
+    QUERY = 1
+    DOCUMENT = 2
+    QUERY_AND_DOCUMENT = 3
 
 class MultimemTier(IntEnum):
     """How a mesh's NVLink domains reduce, valued as `uform_multimem_tier_t`."""
@@ -168,19 +252,37 @@ class Executor:
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     @classmethod
     def for_ram(
-        cls, threads: int = 0, *, memory_domains: Sequence[int] | None = None, deferred_limit: int = 0
+        cls,
+        threads: int = 0,
+        *,
+        memory_domains: Sequence[int] | None = None,
+        deferred_limit: int = 0,
+        cpu_class: CPUClass | None = None,
     ) -> Executor:
         """Spawns host threads for RAM-resident models. Calls `uform_executor_for_ram`."""
         ...
 
     @classmethod
-    def on_pool(cls, pool: int, /, *, memory_domains: Sequence[int] | None = None, deferred_limit: int = 0) -> Executor:
+    def on_pool(
+        cls,
+        pool: int,
+        /,
+        *,
+        memory_domains: Sequence[int] | None = None,
+        deferred_limit: int = 0,
+        cpu_class: CPUClass | None = None,
+    ) -> Executor:
         """Borrows a ForkUnion pool; raises `UnsupportedError` until borrowing is designed. Calls `uform_executor_on_pool`."""
         ...
 
     @classmethod
     def for_vram(
-        cls, devices: Sequence[int] | None = None, *, scratch_limit: int = 0, deferred_limit: int = 0
+        cls,
+        devices: Sequence[int] | None = None,
+        *,
+        scratch_limit: int = 0,
+        deferred_limit: int = 0,
+        gpu_class: GPUClass | None = None,
     ) -> Executor:
         """Opens one submission stream on every named device. Calls `uform_executor_for_vram`."""
         ...
@@ -225,7 +327,7 @@ class ArenaBuffer:
 
 @final
 class RowsTape(ArenaBuffer):
-    """A ragged run of rows in an `Arena`, one per token each item kept, and the offsets splitting them."""
+    """A ragged run of rows in an `Arena`, one per token each item kept or one value per choice, split by offsets."""
 
     @property
     def offsets(self) -> ArenaBuffer:
@@ -261,10 +363,20 @@ class Deferred[AnswerT]:
 # region: Models
 
 @final
-class ModelDescription(structseq[Any], tuple[int, int, Scalar, int, str]):
+class ModelDescription(structseq[Any], tuple[int, int, Scalar, int, str, CPUClass | None, GPUClass | None, int, int]):
     """What a loaded model reports about itself, as `uform_model_description_t` holds it."""
 
-    __match_args__: Final = ("dimensions", "context", "quantization", "memory_usage", "capabilities")
+    __match_args__: Final = (
+        "dimensions",
+        "context",
+        "quantization",
+        "memory_usage",
+        "capabilities",
+        "cpu_class",
+        "gpu_class",
+        "token_width",
+        "choice_temperature_groups",
+    )
 
     @property
     def dimensions(self) -> int:
@@ -291,11 +403,31 @@ class ModelDescription(structseq[Any], tuple[int, int, Scalar, int, str]):
         """The codename of the kernels the model dispatched to on this machine."""
         ...
 
-@final
-class Encoded(structseq[Any], tuple[ArenaBuffer | None, RowsTape | None]):
-    """What an encoding wrote into its arena, unpacking as `embeddings, states = encoded`."""
+    @property
+    def cpu_class(self) -> CPUClass | None:
+        """The class a RAM model was packed for, or None for a VRAM model."""
+        ...
 
-    __match_args__: Final = ("embeddings", "states")
+    @property
+    def gpu_class(self) -> GPUClass | None:
+        """The class every replica of a VRAM model runs as, or None for a RAM model."""
+        ...
+
+    @property
+    def token_width(self) -> int:
+        """Scalars per token vector; 0 when the checkpoint carries no token head."""
+        ...
+
+    @property
+    def choice_temperature_groups(self) -> int:
+        """Question types `text_choose` was calibrated over: 0 without the byte decoder."""
+        ...
+
+@final
+class Encoded(structseq[Any], tuple[ArenaBuffer | None, RowsTape | None, RowsTape | None]):
+    """What an encoding wrote into its arena, unpacking as `embeddings, states, token_vectors = encoded`."""
+
+    __match_args__: Final = ("embeddings", "states", "token_vectors")
 
     @property
     def embeddings(self) -> ArenaBuffer | None:
@@ -305,6 +437,11 @@ class Encoded(structseq[Any], tuple[ArenaBuffer | None, RowsTape | None]):
     @property
     def states(self) -> RowsTape | None:
         """The (tokens, dimensions) final-norm states and their offsets, or None when not asked for."""
+        ...
+
+    @property
+    def token_vectors(self) -> RowsTape | None:
+        """The (tokens, token_width) unit vectors of the token head, offset as the states, or None."""
         ...
 
 @type_check_only
@@ -322,7 +459,7 @@ class _EncodeStats:
 
 @final
 class TextEncodeStats(_EncodeStats):
-    """What `text_encode` reports, overwritten by every call it is passed to."""
+    """What `text_encode` and `text_choose` report, overwritten by every call it is passed to."""
 
 @final
 class ImageEncodeStats(_EncodeStats):
@@ -348,6 +485,7 @@ class Model:
         /,
         *,
         memory_domains: Sequence[int] | None = None,
+        cpu_class: CPUClass | None = None,
         executor: Executor | None = None,
         quantization: Scalar = ...,
         progress: _Progress | None = None,
@@ -363,6 +501,7 @@ class Model:
         /,
         *,
         memory_domains: Sequence[int] | None = None,
+        cpu_class: CPUClass | None = None,
         executor: Executor | None = None,
         quantization: Scalar = ...,
         progress: _Progress | None = None,
@@ -378,6 +517,7 @@ class Model:
         /,
         *,
         devices: Sequence[int] | None = None,
+        gpu_class: GPUClass | None = None,
         executor: Executor | None = None,
         quantization: Scalar = ...,
         progress: _Progress | None = None,
@@ -393,6 +533,7 @@ class Model:
         /,
         *,
         devices: Sequence[int] | None = None,
+        gpu_class: GPUClass | None = None,
         executor: Executor | None = None,
         quantization: Scalar = ...,
         progress: _Progress | None = None,
@@ -504,6 +645,21 @@ class Model:
         """Encodes 1-D float32 mono recordings. Calls `uform_audio_encode_samples`."""
         ...
 
+    def text_choose(
+        self,
+        texts: _Texts,
+        choices: _Texts,
+        arena: Arena,
+        /,
+        *,
+        temperature_groups: _Words | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: TextEncodeStats | None = None,
+    ) -> RowsTape:
+        """Scores each text's single-byte choices, one probability each. Calls `uform_text_choose`."""
+        ...
+
     def __repr__(self) -> str: ...
 
 # endregion: Models
@@ -550,6 +706,7 @@ class BatchShape(_Fields):
     max_segments_per_device: Final[int]
     max_columns_per_row: Final[int]
     max_bags_per_device: Final[int]
+    max_choices_per_item: Final[int]
     image: Final[ImageShape | None]
     video: Final[VideoShape | None]
     audio: Final[AudioShape | None]
@@ -560,6 +717,7 @@ class BatchShape(_Fields):
         max_segments_per_device: int = 0,
         max_columns_per_row: int = 0,
         max_bags_per_device: int = 0,
+        max_choices_per_item: int = 0,
         image: ImageShape | tuple[int, ...] | None = None,
         video: VideoShape | tuple[int, ...] | None = None,
         audio: AudioShape | tuple[int, ...] | None = None,
@@ -607,6 +765,7 @@ class Contrastive(_Fields):
     negatives: Final[Negatives]
     ambient_repulsion_weight: Final[float]
     max_edges_per_device: Final[int]
+    pair_loss: Final[PairLossForm]
     def __new__(
         cls,
         *,
@@ -617,7 +776,43 @@ class Contrastive(_Fields):
         negatives: Negatives = ...,
         ambient_repulsion_weight: float = 0.0,
         max_edges_per_device: int = 0,
+        pair_loss: PairLossForm = ...,
     ) -> Self: ...
+
+@final
+class LateInteraction(_Fields):
+    """How the late-interaction loss scores the token vectors of queries and documents; every zero derives."""
+
+    weight: Final[float]
+    width: Final[int]
+    inverse_temperature: Final[float]
+    bias: Final[float]
+    max_query_span: Final[int]
+    max_query_tokens_per_device: Final[int]
+    max_documents_per_device: Final[int]
+    max_document_tokens_per_device: Final[int]
+    pair_loss: Final[PairLossForm]
+    def __new__(
+        cls,
+        *,
+        weight: float = 0.0,
+        width: int = 0,
+        inverse_temperature: float = 0.0,
+        bias: float = 0.0,
+        max_query_span: int = 0,
+        max_query_tokens_per_device: int = 0,
+        max_documents_per_device: int = 0,
+        max_document_tokens_per_device: int = 0,
+        pair_loss: PairLossForm = ...,
+    ) -> Self: ...
+
+@final
+class Choices(_Fields):
+    """Calibrated choices over the byte decoder, read when the weight is positive; every zero derives."""
+
+    weight: Final[float]
+    brier_weight: Final[float]
+    def __new__(cls, *, weight: float = 0.0, brier_weight: float = 0.0) -> Self: ...
 
 @final
 class Schedule(_Fields):
@@ -673,6 +868,17 @@ class Relations(_Fields):
     repel: Final[Edges | None]
     ignore: Final[Edges | None]
     def __new__(cls, *, attract: _EdgesLike = None, repel: _EdgesLike = None, ignore: _EdgesLike = None) -> Self: ...
+
+@final
+class ChoicesView(_Fields):
+    """Each item's legal bytes and their targets, as compressed sparse rows of buffers borrowed until the step is final."""
+
+    offsets: Final[Buffer | None]
+    bytes: Final[Buffer | None]
+    targets: Final[Buffer | None]
+    def __new__(
+        cls, *, offsets: Buffer | None = None, bytes: Buffer | None = None, targets: Buffer | None = None
+    ) -> Self: ...
 
 @final
 class MeshDescription(structseq[Any], tuple[int, int, int, int, int, MultimemTier]):
@@ -736,6 +942,10 @@ class TrainerStepStats:
     @property
     def masked_audio_loss(self) -> float: ...
     @property
+    def late_interaction_loss(self) -> float: ...
+    @property
+    def choices_loss(self) -> float: ...
+    @property
     def truncated(self) -> int: ...
 
 @final
@@ -757,6 +967,8 @@ class Trainer:
         objective: Objective = ...,
         masking: Masking | None = None,
         contrastive: Contrastive | None = None,
+        late_interaction: LateInteraction | None = None,
+        choices: Choices | None = None,
         schedule: Schedule | None = None,
         seed: int = 0,
         progress: _Progress | None = None,
@@ -781,6 +993,8 @@ class Trainer:
         *,
         bags: _Words | None = None,
         temperature_groups: _Words | None = None,
+        sides: Sequence[LateInteractionSide] | None = None,
+        choices: ChoicesView | None = None,
         relations: Relations | None = None,
         arena: Arena | None = None,
         outputs_scalar: Scalar = ...,
@@ -880,6 +1094,18 @@ class On[TargetT]:
         progress_steps: int = 0,
         stats: AudioEncodeStats | None = None,
     ) -> Encoded: ...
+    def text_choose(
+        self: On[Model],
+        texts: _Texts,
+        choices: _Texts,
+        arena: Arena,
+        /,
+        *,
+        temperature_groups: _Words | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: TextEncodeStats | None = None,
+    ) -> RowsTape: ...
     def step(
         self: On[Trainer],
         modalities: Sequence[Modality],
@@ -888,6 +1114,8 @@ class On[TargetT]:
         *,
         bags: _Words | None = None,
         temperature_groups: _Words | None = None,
+        sides: Sequence[LateInteractionSide] | None = None,
+        choices: ChoicesView | None = None,
         relations: Relations | None = None,
         arena: Arena | None = None,
         outputs_scalar: Scalar = ...,
@@ -980,6 +1208,18 @@ class DeferredOn[TargetT]:
         progress_steps: int = 0,
         stats: AudioEncodeStats | None = None,
     ) -> Deferred[Encoded]: ...
+    def text_choose(
+        self: DeferredOn[Model],
+        texts: _Texts,
+        choices: _Texts,
+        arena: Arena,
+        /,
+        *,
+        temperature_groups: _Words | None = None,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: TextEncodeStats | None = None,
+    ) -> Deferred[RowsTape]: ...
     def step(
         self: DeferredOn[Trainer],
         modalities: Sequence[Modality],
@@ -988,6 +1228,8 @@ class DeferredOn[TargetT]:
         *,
         bags: _Words | None = None,
         temperature_groups: _Words | None = None,
+        sides: Sequence[LateInteractionSide] | None = None,
+        choices: ChoicesView | None = None,
         relations: Relations | None = None,
         arena: Arena | None = None,
         outputs_scalar: Scalar = ...,

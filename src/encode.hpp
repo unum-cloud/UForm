@@ -22,8 +22,9 @@
 #include <limits>           // `std::numeric_limits` - the peak a choice's softmax starts below
 #include <span>             // `std::span` - an item's bytes as the decoders take them
 
+#include "uform/media/image.hpp" // `image_plan_t`, `image_extent_t`, `image_channels_k`
+
 #include "encoder_punned.hpp" // `encoder_verbs` - what a model's towers answer to
-#include "media/image.hpp"    // `image_plan_t`, `image_extent_t`, `image_channels_k`
 
 namespace unum::uform {
 

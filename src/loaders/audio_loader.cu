@@ -12,8 +12,8 @@
 
 #include <forkunion.hpp> // vendor-boundary: the host-CPU decode worker pool
 
-#include "media/audio.hpp" // `decode_audio` — the libav decode and resample to mono
-#include "loaders/audio_loader.cuh"
+#include "uform/loaders/audio_loader.cuh"
+#include "uform/media/audio.hpp" // `decode_audio` — the libav decode and resample to mono
 
 namespace uc = unum::uform::core;
 namespace ul = unum::uform::loaders;

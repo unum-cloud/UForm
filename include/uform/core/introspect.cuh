@@ -1,10 +1,10 @@
 /**
+ *  @file include/uform/core/introspect.cuh
+ *  @author Ash Vardanian
+ *  @date July 7, 2026
  *  @brief The run's one telemetry and introspection surface: @ref telemetry_ledger_t — a root-owned,
  *      always-real, runtime-disarmed ledger every consumer accepts by reference and feeds from its own
  *      boundaries.
- *  @file src/core/introspect.cuh
- *  @author Ash Vardanian
- *  @date July 7, 2026
  *
  *  The ledger unifies the trainer's loss telemetry with the debug-grade signal, round, and timing probes.
  *
@@ -32,10 +32,10 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor`, `nk::tensor_span` — the device row table
 
-#include "core/types.hpp"                // `expected`, `expected_t`, `status_t`, the scalar aliases, `st::basic_vector`
-#include "core/gpu_allocators.hpp"       // `gpu_arena_t`, `gpu_arena_alloc`
-#include "core/schedule.cuh"             // `gpu_stream_t`
-#include "core/multimem_collectives.cuh" // `multimem_member_t` — the round probe's subject
+#include "uform/core/gpu_allocators.hpp"       // `gpu_arena_t`, `gpu_arena_alloc`
+#include "uform/core/multimem_collectives.cuh" // `multimem_member_t` — the round probe's subject
+#include "uform/core/schedule.cuh"             // `gpu_stream_t`
+#include "uform/core/types.hpp" // `expected`, `expected_t`, `status_t`, the scalar aliases, `st::basic_vector`
 
 namespace unum::uform::core {
 

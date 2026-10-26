@@ -24,14 +24,17 @@ Configuring CMake also arms the hooks in `.githooks/`; to arm them without a bui
 | Path                     | Contents                                                      | Namespace              |
 | :----------------------- | :------------------------------------------------------------ | :--------------------- |
 | `c/uform/*.h`            | the C ABI, `uform.h` over the model, encode and train headers | none                   |
-| `include/uform/core/`    | host-only types, arrays, batches and checkpoints              | `unum::uform::core`    |
-| `include/uform/encoder/` | the encoder tower on the host, its geometry and entries       | `unum::uform::encoder` |
+| `include/uform/core/`    | types, batches, device memory, cells, the mesh and transports | `unum::uform::core`    |
+| `include/uform/encoder/` | the encoder towers and kits, their geometry and entries       | `unum::uform::encoder` |
+| `include/uform/media/`   | image, video and audio decoding on the host                   | `unum::uform::media`   |
+| `include/uform/loaders/` | storage sessions, shard readers, GPU media decode             | `unum::uform::loaders` |
+| `include/uform/train/`   | the composition of a training run, `mesh_t` and `trainer_t`   | `unum::uform::train`   |
 | `src/*.cpp`              | the verbs of each header, over the cells below                | `unum::uform`          |
-| `src/encoder/`           | the encoder's compiled bodies and NVIDIA and AMD kernels      | `unum::uform::encoder` |
-| `src/media/`             | image, video and audio decoding on the host                   | `unum::uform::media`   |
-| `src/core/`              | device memory, graphs, mesh, transports, cells, checkpoint IO | `unum::uform::core`    |
-| `src/loaders/`           | storage sessions, shard readers, GPU media decode             | `unum::uform::loaders` |
-| `src/train/`             | the composition of a training run, `mesh_t` and `trainer_t`   | `unum::uform::train`   |
+| `src/encoder/`           | one unit per CPU and GPU class, and each vendor's kernels     | `unum::uform::encoder` |
+| `src/media/`             | the compiled bodies of `include/uform/media/`                 | `unum::uform::media`   |
+| `src/core/`              | the compiled bodies of `include/uform/core/`                  | `unum::uform::core`    |
+| `src/loaders/`           | the compiled bodies of `include/uform/loaders/`               | `unum::uform::loaders` |
+| `src/train/`             | the compiled bodies of `include/uform/train/`                 | `unum::uform::train`   |
 | `src_stub/`              | the stand-in, every verb over the C++ standard library alone  | `unum::uform`          |
 | `tools/`                 | the `uform_base` trainer binary and its command line          | `unum::uform::tools`   |
 | `test/`                  | one conformance suite per cell, the harness, Python suites    | `unum::uform::test`    |
@@ -44,7 +47,8 @@ Configuring CMake also arms the hooks in `.githooks/`; to arm them without a bui
 | `docs/`                  | the Sphinx site                                               | none                   |
 
 Namespaces mirror directories and nothing else: a directory adds a namespace component, and no namespace groups symbols by theme.
-`c/`, `include/` and `src/` are include roots that add no component, so `src/core/` and `include/uform/core/` both open `unum::uform::core`, and headers include each other as `"core/schedule.cuh"` and `"uform/core/types.hpp"`.
+`c/`, `include/` and `src/` are include roots that add no component, so `src/core/` and `include/uform/core/` both open `unum::uform::core`.
+Templates and model implementations live in `include/uform/<dir>/` and are always spelled `"uform/<dir>/..."`, while `src/` holds their instantiations, the dispatch and the per-class units, with only its flat `lib.hpp`, `encode.hpp` and encoder dispatch headers included as `"lib.hpp"`.
 Dependencies run one way:
 
 - `encoder` and `media` build on the host libraries alone and never include an NVIDIA header; each vendor's kernels sit in their own `vram_kernels_<vendor>` unit.

@@ -11,6 +11,8 @@ export interface ModelLoadRamConfig {
   executor?: Executor;
   /** NUMA node IDs to place the weights in; absent derives every node. */
   memoryDomains?: number[];
+  /** The CPU class to pack the tower for, spelled like "intel-haswell"; absent derives the CPU's own. */
+  cpuClass?: string;
   /** The scalar the transformer blocks run in: `bf16` as the checkpoint stores it, the default, or `e4m3`. */
   quantization?: Scalar;
 }
@@ -19,8 +21,10 @@ export interface ModelLoadRamConfig {
 export interface ModelLoadVramConfig {
   /** The executor the upload runs on, one stream per device; absent uploads on the calling thread. */
   executor?: Executor;
-  /** CUDA ordinals to replicate the weights on; absent takes one free device. */
+  /** Device ordinals, positions in `gpuDevices()`, to replicate the weights on; absent takes one free device. */
   devices?: number[];
+  /** The GPU class every replica runs as, spelled like "nvidia-hopper"; absent derives the devices' own. */
+  gpuClass?: string;
   /** The scalar the transformer blocks run in: `bf16` as the checkpoint stores it, the default, or `e4m3`. */
   quantization?: Scalar;
 }
@@ -37,6 +41,14 @@ export interface ModelDescription {
   memoryUsage: number;
   /** Codename of the kernels the model dispatched to on this machine. */
   capabilities: string;
+  /** The CPU class a RAM model's tower was packed for, like "intel-haswell"; `null` for a VRAM model. */
+  cpuClass: string | null;
+  /** The GPU class every replica of a VRAM model runs as, like "nvidia-hopper"; `null` for a RAM model. */
+  gpuClass: string | null;
+  /** Scalars per token vector; zero when the checkpoint carries no token head. */
+  tokenWidth: number;
+  /** Question types the choice temperatures were calibrated over: zero without the byte decoder, one uncalibrated. */
+  choiceTemperatureGroups: number;
 }
 
 /** The verbs every receiver of a model shares: the encode verbs and the description. */
@@ -134,6 +146,7 @@ export class Model extends ModelOn implements Disposable {
         config.executor?.compiled,
         config.memoryDomains,
         scalarCode(config.quantization ?? Scalar.BF16),
+        config.cpuClass,
       ),
     );
   }
@@ -151,6 +164,7 @@ export class Model extends ModelOn implements Disposable {
         config.executor?.compiled,
         config.memoryDomains,
         scalarCode(config.quantization ?? Scalar.BF16),
+        config.cpuClass,
       ),
     );
   }
@@ -168,6 +182,7 @@ export class Model extends ModelOn implements Disposable {
         config.executor?.compiled,
         config.devices,
         scalarCode(config.quantization ?? Scalar.BF16),
+        config.gpuClass,
       ),
     );
   }
@@ -185,6 +200,7 @@ export class Model extends ModelOn implements Disposable {
         config.executor?.compiled,
         config.devices,
         scalarCode(config.quantization ?? Scalar.BF16),
+        config.gpuClass,
       ),
     );
   }

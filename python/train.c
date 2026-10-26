@@ -20,6 +20,28 @@ static char const *spell_multimem_tier(int value) { return uform_multimem_tier_n
 static char const *spell_objective(int value) { return uform_objective_name((uform_objective_t)value); }
 static char const *spell_negatives(int value) { return uform_negatives_name((uform_negatives_t)value); }
 
+/** The C interface spells no pair-loss form, so the binding names the four it declares. */
+static char const *spell_pair_loss_form(int value) {
+    switch (value) {
+    case uform_pair_loss_form_derived_k: return "derived";
+    case uform_pair_loss_form_balanced_k: return "balanced";
+    case uform_pair_loss_form_ranked_k: return "ranked";
+    case uform_pair_loss_form_sigmoid_k: return "sigmoid";
+    default: return NULL;
+    }
+}
+
+/** The C interface spells no late-interaction side, so the binding names the four it declares. */
+static char const *spell_late_interaction_side(int value) {
+    switch (value) {
+    case uform_late_interaction_side_none_k: return "none";
+    case uform_late_interaction_side_query_k: return "query";
+    case uform_late_interaction_side_document_k: return "document";
+    case uform_late_interaction_side_query_and_document_k: return "query-and-document";
+    default: return NULL;
+    }
+}
+
 uform_py_enum_t uform_py_modality = {.name = "Modality",
                                      .base = "IntEnum",
                                      .first = uform_modality_text_k,
@@ -35,6 +57,16 @@ uform_py_enum_t uform_py_negatives = {.name = "Negatives",
                                       .first = uform_negatives_ambient_k,
                                       .last = uform_negatives_named_k,
                                       .spell = spell_negatives};
+uform_py_enum_t uform_py_pair_loss_form = {.name = "PairLossForm",
+                                           .base = "IntEnum",
+                                           .first = uform_pair_loss_form_derived_k,
+                                           .last = uform_pair_loss_form_sigmoid_k,
+                                           .spell = spell_pair_loss_form};
+uform_py_enum_t uform_py_late_interaction_side = {.name = "LateInteractionSide",
+                                                  .base = "IntEnum",
+                                                  .first = uform_late_interaction_side_none_k,
+                                                  .last = uform_late_interaction_side_query_and_document_k,
+                                                  .spell = spell_late_interaction_side};
 uform_py_enum_t uform_py_multimem_tier = {.name = "MultimemTier",
                                           .base = "IntEnum",
                                           .first = uform_multimem_tier_switch_reduced_k,
@@ -101,6 +133,8 @@ static uform_py_field_t const BatchShape_fields[] = {
      "Positions one row spans, the sequence length."},
     {"max_bags_per_device", uform_py_field_size_k, offsetof(uform_batch_shape_t, max_bags_per_device), NULL,
      "Bags one device's step carries; 0 keeps every item its own routing unit."},
+    {"max_choices_per_item", uform_py_field_size_k, offsetof(uform_batch_shape_t, max_choices_per_item), NULL,
+     "Legal bytes one item offers to choose from at most; 0 makes no choices."},
     {"image", uform_py_field_struct_k, offsetof(uform_batch_shape_t, image), &ImageShapeType,
      "The `ImageShape`, or None leaving images out."},
     {"video", uform_py_field_struct_k, offsetof(uform_batch_shape_t, video), &VideoShapeType,
@@ -111,9 +145,9 @@ static uform_py_field_t const BatchShape_fields[] = {
 
 uform_py_fields_t BatchShapeType = {
     {PyVarObject_HEAD_INIT(NULL, 0).tp_name = "uform.BatchShape",
-     .tp_doc = "BatchShape(*, max_rows_per_device=0, max_segments_per_device=0, max_columns_per_row=0,\n" //
-               "    max_bags_per_device=0, image=None, video=None, audio=None)\n\n"                       //
-               "What one device's step carries at most, whatever the modality mix, fixed at creation.\n"  //
+     .tp_doc = "BatchShape(*, max_rows_per_device=0, max_segments_per_device=0, max_columns_per_row=0,\n"   //
+               "    max_bags_per_device=0, max_choices_per_item=0, image=None, video=None, audio=None)\n\n" //
+               "What one device's step carries at most, whatever the modality mix, fixed at creation.\n"    //
                "A nested shape takes its own structure or a tuple of its fields in order."},
     BatchShape_fields,
     sizeof(BatchShape_fields) / sizeof(*BatchShape_fields),
@@ -161,24 +195,77 @@ static uform_py_field_t const Contrastive_fields[] = {
     {"temperature_groups", uform_py_field_size_k, offsetof(uform_contrastive_t, temperature_groups), NULL,
      "Learnable (inverse temperature, bias) pairs; 0 derives one."},
     {"inverse_temperature", uform_py_field_float_k, offsetof(uform_contrastive_t, inverse_temperature), NULL,
-     "The starting inverse temperature of every group; 0 derives 10, SigLIP's."},
+     "The starting inverse temperature of every group; 0 derives 10 under the sigmoid form, SigLIP's, else 1."},
     {"bias", uform_py_field_float_k, offsetof(uform_contrastive_t, bias), NULL,
-     "The starting logit bias of every group; 0 derives -10, SigLIP's."},
+     "The starting logit bias of every group; 0 derives -10 under the sigmoid form, SigLIP's, else 0."},
     {"negatives", uform_py_field_enum_k, offsetof(uform_contrastive_t, negatives), &uform_py_negatives,
      "Which pairs repel, a `Negatives`."},
     {"ambient_repulsion_weight", uform_py_field_float_k, offsetof(uform_contrastive_t, ambient_repulsion_weight), NULL,
      "The weight of every pair no edge names, under `Negatives.AMBIENT`; 0 derives 1."},
     {"max_edges_per_device", uform_py_field_size_k, offsetof(uform_contrastive_t, max_edges_per_device), NULL,
      "Edges one device's step names per edge set at most; 0 derives `max_segments_per_device`."},
+    {"pair_loss", uform_py_field_enum_k, offsetof(uform_contrastive_t, pair_loss), &uform_py_pair_loss_form,
+     "The `PairLossForm` over each anchor's row; `PairLossForm.DERIVED` takes sigmoid."},
 };
 
 uform_py_fields_t ContrastiveType = {
     {PyVarObject_HEAD_INIT(NULL, 0).tp_name = "uform.Contrastive",
-     .tp_doc = "Contrastive(*, matryoshka_dimensions=None, temperature_groups=0, inverse_temperature=0.0,\n"          //
-               "    bias=0.0, negatives=Negatives.AMBIENT, ambient_repulsion_weight=0.0, max_edges_per_device=0)\n\n" //
+     .tp_doc = "Contrastive(*, matryoshka_dimensions=None, temperature_groups=0, inverse_temperature=0.0,\n"        //
+               "    bias=0.0, negatives=Negatives.AMBIENT, ambient_repulsion_weight=0.0, max_edges_per_device=0,\n" //
+               "    pair_loss=PairLossForm.DERIVED)\n\n"                                                            //
                "How the contrastive loss scores the pooled embeddings; every zero derives."},
     Contrastive_fields,
     sizeof(Contrastive_fields) / sizeof(*Contrastive_fields),
+};
+
+static uform_py_field_t const LateInteraction_fields[] = {
+    {"weight", uform_py_field_float_k, offsetof(uform_late_interaction_t, weight), NULL,
+     "The loss weight; 0 trains no token head."},
+    {"width", uform_py_field_size_k, offsetof(uform_late_interaction_t, width), NULL,
+     "The token vectors' width, a multiple of 8; 0 derives 128."},
+    {"inverse_temperature", uform_py_field_float_k, offsetof(uform_late_interaction_t, inverse_temperature), NULL,
+     "The starting inverse temperature of every contrastive group; 0 derives 1."},
+    {"bias", uform_py_field_float_k, offsetof(uform_late_interaction_t, bias), NULL,
+     "The starting logit bias of every contrastive group."},
+    {"max_query_span", uform_py_field_size_k, offsetof(uform_late_interaction_t, max_query_span), NULL,
+     "Tokens one query segment contributes at most, its first past the prefix; 0 derives 64."},
+    {"max_query_tokens_per_device", uform_py_field_size_k,
+     offsetof(uform_late_interaction_t, max_query_tokens_per_device), NULL,
+     "Query token rows one device's step holds at most; 0 derives `max_query_span` of every segment."},
+    {"max_documents_per_device", uform_py_field_size_k, offsetof(uform_late_interaction_t, max_documents_per_device),
+     NULL, "Document segments one device's step holds at most; 0 derives `max_segments_per_device`."},
+    {"max_document_tokens_per_device", uform_py_field_size_k,
+     offsetof(uform_late_interaction_t, max_document_tokens_per_device), NULL,
+     "Document token rows one device's step holds at most; 0 derives the batch's tokens per device."},
+    {"pair_loss", uform_py_field_enum_k, offsetof(uform_late_interaction_t, pair_loss), &uform_py_pair_loss_form,
+     "The `PairLossForm` over each query's row of hard MaxSim scores; `PairLossForm.DERIVED` takes ranked."},
+};
+
+uform_py_fields_t LateInteractionType = {
+    {PyVarObject_HEAD_INIT(NULL, 0).tp_name = "uform.LateInteraction",
+     .tp_doc = "LateInteraction(*, weight=0.0, width=0, inverse_temperature=0.0, bias=0.0, max_query_span=0,\n" //
+               "    max_query_tokens_per_device=0, max_documents_per_device=0,\n"                               //
+               "    max_document_tokens_per_device=0, pair_loss=PairLossForm.DERIVED)\n\n"                      //
+               "How the late-interaction loss scores the token vectors of query and document items, read\n"     //
+               "when its weight is positive; every zero derives."},
+    LateInteraction_fields,
+    sizeof(LateInteraction_fields) / sizeof(*LateInteraction_fields),
+};
+
+static uform_py_field_t const Choices_fields[] = {
+    {"weight", uform_py_field_float_k, offsetof(uform_choices_t, weight), NULL,
+     "The loss weight; 0 trains no choices."},
+    {"brier_weight", uform_py_field_float_k, offsetof(uform_choices_t, brier_weight), NULL,
+     "The Brier term's weight beside the soft cross-entropy; 0 derives 0.5."},
+};
+
+uform_py_fields_t ChoicesType = {
+    {PyVarObject_HEAD_INIT(NULL, 0).tp_name = "uform.Choices",
+     .tp_doc = "Choices(*, weight=0.0, brier_weight=0.0)\n\n"                                             //
+               "Calibrated choices over the byte decoder, its logits read at a mask byte appended to a\n" //
+               "state and restricted to the item's legal bytes; needs the batch's `max_choices_per_item`."},
+    Choices_fields,
+    sizeof(Choices_fields) / sizeof(*Choices_fields),
 };
 
 static uform_py_field_t const Schedule_fields[] = {
@@ -265,6 +352,27 @@ uform_py_fields_t RelationsType = {
                "`negatives`."},
     Relations_fields,
     sizeof(Relations_fields) / sizeof(*Relations_fields),
+};
+
+/** The indices of the three buffers among the fields of `ChoicesView`. */
+enum { choices_offsets_k = 0, choices_bytes_k = 1, choices_targets_k = 2 };
+
+static uform_py_field_t const ChoicesView_fields[] = {
+    {"offsets", uform_py_field_object_k, 0, NULL,
+     "The step's count + 1 non-decreasing size_t offsets into `bytes`; None makes no choices."},
+    {"bytes", uform_py_field_object_k, 0, NULL,
+     "A uint8 buffer: item `i` offers the distinct bytes `bytes[offsets[i]:offsets[i + 1]]`."},
+    {"targets", uform_py_field_object_k, 0, NULL,
+     "The float32 target probability of each byte, summing to one per item that offers any."},
+};
+
+uform_py_fields_t ChoicesViewType = {
+    {PyVarObject_HEAD_INIT(NULL, 0).tp_name = "uform.ChoicesView",
+     .tp_doc = "ChoicesView(*, offsets=None, bytes=None, targets=None)\n\n"                                    //
+               "Each item's legal choices and their targets, as compressed sparse rows of buffers, borrowed\n" //
+               "until the step is final; a text item offering any is the state its answer follows."},
+    ChoicesView_fields,
+    sizeof(ChoicesView_fields) / sizeof(*ChoicesView_fields),
 };
 
 #pragma endregion Keyword Structures
@@ -482,36 +590,39 @@ static int widths_from_object(PyObject *object, char const *field, size_t **widt
     return 0;
 }
 
-static char const doc_Trainer_init_vram[] =                                                         //
-    "init_vram(executor, /, *, mesh=None, resume=None, depth=0, hidden=0, batch=None,\n"            //
-    "    objective=Objective.MASKED, masking=None, contrastive=None, schedule=None, seed=0,\n"      //
-    "    progress=None, progress_steps=0) -> Trainer\n"                                             //
-    "\n"                                                                                            //
-    "Builds one replica per device of `executor` and starts or resumes the run; every process\n"    //
-    "of the run calls it with the same geometry, objective and seed.\n"                             //
-    "Calls `uform_trainer_init_vram`.\n"                                                            //
-    "\n"                                                                                            //
-    "Args:\n"                                                                                       //
-    "  executor (Executor): A VRAM executor, every device of which holds one replica.\n"            //
-    "  mesh (Mesh, optional): The mesh made over this same executor; None runs alone.\n"            //
-    "  resume (str | bytes | os.PathLike, optional): A checkpoint to continue from at its\n"        //
-    "    saved step; one of another geometry raises `ConfigMismatchError`.\n"                       //
-    "  depth (int): Transformer blocks stacked.\n"                                                  //
-    "  hidden (int): Embedding width, a multiple of 128.\n"                                         //
-    "  batch (BatchShape): What one device's step carries at most.\n"                               //
-    "  objective (Objective, optional): Which losses a step relaxes.\n"                             //
-    "  masking (Masking, optional): The masked objective's corruption and weights.\n"               //
-    "  contrastive (Contrastive, optional): The contrastive loss's scoring.\n"                      //
-    "  schedule (Schedule): The learning-rate schedule.\n"                                          //
-    "  seed (int, optional): The base of every keyed draw.\n"                                       //
-    "  progress (callable, optional): Called with (completed, total) tensors placed on a resume.\n" //
+static char const doc_Trainer_init_vram[] =                                                          //
+    "init_vram(executor, /, *, mesh=None, resume=None, depth=0, hidden=0, batch=None,\n"             //
+    "    objective=Objective.MASKED, masking=None, contrastive=None, late_interaction=None,\n"       //
+    "    choices=None, schedule=None, seed=0, progress=None, progress_steps=0) -> Trainer\n"         //
+    "\n"                                                                                             //
+    "Builds one replica per device of `executor` and starts or resumes the run; every process\n"     //
+    "of the run calls it with the same geometry, objective and seed.\n"                              //
+    "Calls `uform_trainer_init_vram`.\n"                                                             //
+    "\n"                                                                                             //
+    "Args:\n"                                                                                        //
+    "  executor (Executor): A VRAM executor, every device of which holds one replica.\n"             //
+    "  mesh (Mesh, optional): The mesh made over this same executor; None runs alone.\n"             //
+    "  resume (str | bytes | os.PathLike, optional): A checkpoint to continue from at its\n"         //
+    "    saved step; one of another geometry raises `ConfigMismatchError`.\n"                        //
+    "  depth (int): Transformer blocks stacked.\n"                                                   //
+    "  hidden (int): Embedding width, a multiple of 128.\n"                                          //
+    "  batch (BatchShape): What one device's step carries at most.\n"                                //
+    "  objective (Objective, optional): Which losses a step relaxes.\n"                              //
+    "  masking (Masking, optional): The masked objective's corruption and weights.\n"                //
+    "  contrastive (Contrastive, optional): The contrastive loss's scoring.\n"                       //
+    "  late_interaction (LateInteraction, optional): The token-vector loss beside the pooled one.\n" //
+    "  choices (Choices, optional): The calibrated choices beside every other term.\n"               //
+    "  schedule (Schedule): The learning-rate schedule.\n"                                           //
+    "  seed (int, optional): The base of every keyed draw.\n"                                        //
+    "  progress (callable, optional): Called with (completed, total) tensors placed on a resume.\n"  //
     "  progress_steps (int, optional): Reports the call makes at most; 0 derives to ten.";
 
 static PyObject *Trainer_init_vram(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
                                    PyObject *args_names_tuple) {
     PyObject *executor_object, *mesh_object, *resume_object, *depth_object, *hidden_object, *batch_object,
-        *objective_object, *masking_object, *contrastive_object, *schedule_object, *seed_object, *progress_object,
-        *progress_steps_object, *resume_decoded = NULL, *result = NULL;
+        *objective_object, *masking_object, *contrastive_object, *late_interaction_object, *choices_object,
+        *schedule_object, *seed_object, *progress_object, *progress_steps_object, *resume_decoded = NULL,
+                                                                                  *result = NULL;
     uform_py_argument_t const arguments[] = {
         {"executor", &executor_object},
         {"mesh", &mesh_object},
@@ -522,6 +633,8 @@ static PyObject *Trainer_init_vram(PyTypeObject *type, PyObject *const *args, Py
         {"objective", &objective_object},
         {"masking", &masking_object},
         {"contrastive", &contrastive_object},
+        {"late_interaction", &late_interaction_object},
+        {"choices", &choices_object},
         {"schedule", &schedule_object},
         {"seed", &seed_object},
         {"progress", &progress_object},
@@ -543,6 +656,9 @@ static PyObject *Trainer_init_vram(PyTypeObject *type, PyObject *const *args, Py
         uform_py_fields_write(batch_object, "batch", &BatchShapeType, &init.batch) != 0 ||
         uform_py_fields_write(masking_object, "masking", &MaskingType, &init.masking) != 0 ||
         uform_py_fields_write(contrastive_object, "contrastive", &ContrastiveType, &init.contrastive) != 0 ||
+        uform_py_fields_write(late_interaction_object, "late_interaction", &LateInteractionType,
+                              &init.late_interaction) != 0 ||
+        uform_py_fields_write(choices_object, "choices", &ChoicesType, &init.choices) != 0 ||
         uform_py_fields_write(schedule_object, "schedule", &ScheduleType, &init.schedule) != 0 ||
         optional_path(resume_object, "resume", &init.resume, &resume_decoded) != 0 ||
         uform_py_callback_from_object(progress_object, "progress", &call, &progress) != 0)
@@ -668,6 +784,11 @@ static PyGetSetDef TrainerStepStats_getset[] = {
      (void *)offsetof(uform_trainer_step_stats_t, masked_video_loss)},
     {"masked_audio_loss", (getter)TrainerStepStats_get_float, NULL, "The audio reconstruction term, unweighted.",
      (void *)offsetof(uform_trainer_step_stats_t, masked_audio_loss)},
+    {"late_interaction_loss", (getter)TrainerStepStats_get_float, NULL, "The late-interaction term, weighted.",
+     (void *)offsetof(uform_trainer_step_stats_t, late_interaction_loss)},
+    {"choices_loss", (getter)TrainerStepStats_get_float, NULL,
+     "The choices term over the items that made a choice, unweighted.",
+     (void *)offsetof(uform_trainer_step_stats_t, choices_loss)},
     {"truncated", (getter)TrainerStepStats_get_count, NULL, "Items cut at a row's width.",
      (void *)offsetof(uform_trainer_step_stats_t, truncated)},
     {NULL, NULL, NULL, NULL, NULL},
@@ -689,54 +810,6 @@ PyTypeObject TrainerStepStatsType = {
     .tp_dealloc = (destructor)TrainerStepStats_dealloc,
     .tp_getset = TrainerStepStats_getset,
 };
-
-/** A run of @c uint32_t words, lent from a buffer of format 'I' or gathered from a sequence of integers. */
-typedef struct words_t {
-    uint32_t const *data;
-    uint32_t *gathered;
-    Py_buffer buffer;
-} words_t;
-
-static void words_release(words_t *words) {
-    PyMem_Free(words->gathered);
-    if (words->buffer.obj) PyBuffer_Release(&words->buffer);
-    memset(words, 0, sizeof(*words));
-}
-
-/** Reads @p count words from @p object; None leaves them NULL. Returns 0 or -1 with an exception set. */
-static int words_from_object(PyObject *object, char const *field, size_t count, words_t *words) {
-    if (!object || object == Py_None) return 0;
-    if (PyObject_GetBuffer(object, &words->buffer, PyBUF_C_CONTIGUOUS | PyBUF_FORMAT) == 0) {
-        char const *format = words->buffer.format ? words->buffer.format : "B";
-        while (*format == '@' || *format == '=' || *format == '<') ++format;
-        if (words->buffer.itemsize != sizeof(uint32_t) || *format != 'I')
-            return uform_py_raise(uform_status_unsupported_layout_k, "the '%s' buffer must hold uint32 words", field);
-        if ((size_t)words->buffer.len != count * sizeof(uint32_t))
-            return uform_py_raise(uform_status_shape_mismatch_k, "the '%s' buffer must hold %zu words", field, count);
-        words->data = (uint32_t const *)words->buffer.buf;
-        return 0;
-    }
-    PyErr_Clear();
-    PyObject *const sequence = PySequence_Fast(object, "expected a buffer of uint32 or a sequence of integers");
-    if (!sequence) return -1;
-    if ((size_t)PySequence_Fast_GET_SIZE(sequence) != count) {
-        Py_DECREF(sequence);
-        return uform_py_raise(uform_status_shape_mismatch_k, "the '%s' option must hold %zu entries", field, count);
-    }
-    words->gathered = (uint32_t *)PyMem_Malloc((count ? count : 1) * sizeof(uint32_t));
-    int failed = !words->gathered;
-    if (failed) PyErr_NoMemory();
-    for (size_t position = 0; !failed && position != count; ++position) {
-        size_t value = 0;
-        failed = uform_py_size_from_object(PySequence_Fast_GET_ITEM(sequence, position), field, &value) != 0;
-        if (!failed && value > UINT32_MAX)
-            failed = uform_py_raise(uform_status_invalid_argument_k, "the '%s' option exceeds 32 bits", field);
-        if (!failed) words->gathered[position] = (uint32_t)value;
-    }
-    Py_DECREF(sequence);
-    words->data = words->gathered;
-    return failed ? -1 : 0;
-}
 
 /** One edge set's buffers, lent until the step is final. */
 typedef struct edges_t {
@@ -786,14 +859,55 @@ static int edges_from_object(PyObject *object, char const *field, size_t count, 
     return 0;
 }
 
+/** A step's choice buffers, lent until the step is final. */
+typedef struct choices_t {
+    Py_buffer offsets, bytes, targets;
+} choices_t;
+
+static void choices_release(choices_t *choices) {
+    if (choices->offsets.obj) PyBuffer_Release(&choices->offsets);
+    if (choices->bytes.obj) PyBuffer_Release(&choices->bytes);
+    if (choices->targets.obj) PyBuffer_Release(&choices->targets);
+}
+
+/**
+ *  @brief Lends the choices @p object, a @c ChoicesView or None, over @p count items into
+ *      @p view, checking every offset stays inside its bytes and every target pairs with one.
+ *  @return 0 on success, -1 with an exception set otherwise.
+ */
+static int choices_from_object(PyObject *object, size_t count, choices_t *choices, uform_choices_view_t *view) {
+    if (!object || object == Py_None || uform_py_fields_value(object, choices_offsets_k) == Py_None) return 0;
+    if (!Py_IS_TYPE(object, &ChoicesViewType.type)) {
+        PyErr_Format(PyExc_TypeError, "the 'choices' option must be a ChoicesView or None, got %S", Py_TYPE(object));
+        return -1;
+    }
+    if (edges_buffer(uform_py_fields_value(object, choices_offsets_k), "choices", sizeof(size_t), "NQL",
+                     &choices->offsets) != 0 ||
+        edges_buffer(uform_py_fields_value(object, choices_bytes_k), "choices", 1, "B", &choices->bytes) != 0 ||
+        edges_buffer(uform_py_fields_value(object, choices_targets_k), "choices", sizeof(float), "f",
+                     &choices->targets) != 0)
+        return -1;
+    size_t const *const offsets = (size_t const *)choices->offsets.buf;
+    size_t const bytes_count = (size_t)choices->bytes.len;
+    if ((size_t)choices->offsets.len != (count + 1) * sizeof(size_t) || offsets[count] > bytes_count ||
+        (size_t)choices->targets.len != bytes_count * sizeof(float))
+        return uform_py_raise(uform_status_shape_mismatch_k,
+                              "the 'choices' need %zu offsets ending inside their bytes, and one target per byte",
+                              count + 1);
+    *view = (uform_choices_view_t) {offsets, (uint8_t const *)choices->bytes.buf, (float const *)choices->targets.buf};
+    return 0;
+}
+
 /** A @c uform_trainer_step call, the inputs it owns or borrows until it is final, and what it lands. */
 typedef struct step_call_t {
     uform_py_call_t call;
     uform_trainer_step_t arguments;
     uform_py_tape_t contents;
     uform_modality_t *modalities;
-    words_t bags, temperature_groups;
+    uform_late_interaction_side_t *sides;
+    uform_py_words_t bags, temperature_groups;
     edges_t attract, repel, ignore;
+    choices_t choices;
     uform_rows_view_t embeddings;
     uform_trainer_step_stats_t stats;
 
@@ -823,11 +937,14 @@ static void step_release(void *erased) {
     uform_py_tape_release(&call->contents);
     PyMem_Free(call->modalities);
     call->modalities = NULL;
-    words_release(&call->bags);
-    words_release(&call->temperature_groups);
+    PyMem_Free(call->sides);
+    call->sides = NULL;
+    uform_py_words_release(&call->bags);
+    uform_py_words_release(&call->temperature_groups);
     edges_release(&call->attract);
     edges_release(&call->repel);
     edges_release(&call->ignore);
+    choices_release(&call->choices);
     Py_CLEAR(call->stats_object);
     uform_py_call_release(&call->call);
 }
@@ -860,9 +977,33 @@ static int modalities_from_object(PyObject *object, size_t count, uform_modality
     return failed ? -1 : 0;
 }
 
+/** Gathers one side per item into a @c PyMem array of @p count; None leaves it NULL.
+ *  Returns 0 or -1 with an exception set. */
+static int sides_from_object(PyObject *object, size_t count, uform_late_interaction_side_t **sides) {
+    if (!object || object == Py_None) return 0;
+    PyObject *const sequence = PySequence_Fast(object, "expected a sequence of uform.LateInteractionSide");
+    if (!sequence) return -1;
+    if ((size_t)PySequence_Fast_GET_SIZE(sequence) != count) {
+        Py_DECREF(sequence);
+        return uform_py_raise(uform_status_shape_mismatch_k, "the 'sides' need one entry per item, %zu", count);
+    }
+    *sides = (uform_late_interaction_side_t *)PyMem_Malloc((count ? count : 1) * sizeof(uform_late_interaction_side_t));
+    int failed = !*sides;
+    if (failed) PyErr_NoMemory();
+    for (size_t position = 0; !failed && position != count; ++position) {
+        int side = 0;
+        failed = uform_py_enum_from_object(PySequence_Fast_GET_ITEM(sequence, position), "sides",
+                                           &uform_py_late_interaction_side, &side) != 0;
+        if (!failed) (*sides)[position] = (uform_late_interaction_side_t)side;
+    }
+    Py_DECREF(sequence);
+    return failed ? -1 : 0;
+}
+
 static char const doc_Trainer_step[] =                                                            //
-    "step(modalities, contents, /, *, bags=None, temperature_groups=None, relations=None,\n"      //
-    "    arena=None, outputs_scalar=Scalar.F32, stats=None) -> ArenaBuffer | None\n"              //
+    "step(modalities, contents, /, *, bags=None, temperature_groups=None, sides=None,\n"          //
+    "    choices=None, relations=None, arena=None, outputs_scalar=Scalar.F32, stats=None)\n"      //
+    "    -> ArenaBuffer | None\n"                                                                 //
     "\n"                                                                                          //
     "Applies one optimizer step over this process's items and every peer's: forward, losses,\n"   //
     "backward, the world gradient reduction and the update. Every process calls it once per\n"    //
@@ -877,6 +1018,10 @@ static char const doc_Trainer_step[] =                                          
     "    on one device. None keeps every item its own bag.\n"                                     //
     "  temperature_groups (buffer | Sequence[int], optional): The temperature group of each\n"    //
     "    item; None puts every item in group zero.\n"                                             //
+    "  sides (Sequence[LateInteractionSide], optional): The late-interaction side of each\n"      //
+    "    item; None leaves every item out of late interaction.\n"                                 //
+    "  choices (ChoicesView, optional): Each item's legal choices and their targets, read when\n" //
+    "    the run trains choices; the call appends the mask byte to each choosing text.\n"         //
     "  relations (Relations, optional): The contrastive targets over the step's items.\n"         //
     "  arena (Arena, optional): Where the pooled embeddings the loss scored land; None skips\n"   //
     "    the copy.\n"                                                                             //
@@ -888,13 +1033,15 @@ static char const doc_Trainer_step[] =                                          
 
 static PyObject *Trainer_step(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
                               PyObject *args_names_tuple) {
-    PyObject *modalities_object, *contents_object, *bags_object, *temperature_groups_object, *relations_object,
-        *arena_object, *outputs_scalar_object, *stats_object;
+    PyObject *modalities_object, *contents_object, *bags_object, *temperature_groups_object, *sides_object,
+        *choices_object, *relations_object, *arena_object, *outputs_scalar_object, *stats_object;
     uform_py_argument_t const arguments[] = {
         {"modalities", &modalities_object},
         {"contents", &contents_object},
         {"bags", &bags_object},
         {"temperature_groups", &temperature_groups_object},
+        {"sides", &sides_object},
+        {"choices", &choices_object},
         {"relations", &relations_object},
         {"arena", &arena_object},
         {"outputs_scalar", &outputs_scalar_object},
@@ -922,13 +1069,17 @@ static PyObject *Trainer_step(PyObject *self, PyObject *const *args, Py_ssize_t 
     step_call_t *const call = uform_py_call_open(&receiver, &step_verb, &stack);
     if (!call) return NULL;
     uform_relations_view_t relations = {{0}};
+    uform_choices_view_t choices = {0};
     int const has_relations = relations_object && relations_object != Py_None;
     if (uform_py_tape_from_object(contents_object, "contents", uform_py_element_text_k, &call->contents) != 0)
         return uform_py_call_discard(&receiver, &step_verb, call);
     size_t const count = call->contents.count;
     if (modalities_from_object(modalities_object, count, &call->modalities) != 0 ||
-        words_from_object(bags_object, "bags", count, &call->bags) != 0 ||
-        words_from_object(temperature_groups_object, "temperature_groups", count, &call->temperature_groups) != 0 ||
+        sides_from_object(sides_object, count, &call->sides) != 0 ||
+        choices_from_object(choices_object, count, &call->choices, &choices) != 0 ||
+        uform_py_words_from_object(bags_object, "bags", count, &call->bags) != 0 ||
+        uform_py_words_from_object(temperature_groups_object, "temperature_groups", count, &call->temperature_groups) !=
+            0 ||
         (has_relations && (edges_from_object(uform_py_fields_value(relations_object, relations_attract_k), "attract",
                                              count, &call->attract, &relations.attract) != 0 ||
                            edges_from_object(uform_py_fields_value(relations_object, relations_repel_k), "repel", count,
@@ -948,6 +1099,8 @@ static PyObject *Trainer_step(PyObject *self, PyObject *const *args, Py_ssize_t 
         .contents = call->contents.view,
         .bags = call->bags.data,
         .temperature_groups = call->temperature_groups.data,
+        .sides = call->sides,
+        .choices = choices,
         .relations = relations,
         .embeddings = call->call.arena ? &call->embeddings : NULL,
         .arena = call->call.arena ? ((Arena *)call->call.arena)->handle : NULL,

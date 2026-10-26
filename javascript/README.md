@@ -47,6 +47,20 @@ const tokensOfFirst = states.item(0); // rows from states.offsets[0] up to state
 console.log(stats.truncated, stats.tokens);
 ```
 
+A checkpoint with a token head also lands unit token vectors for late-interaction reranking, `tokenWidth` wide and sharing the states' offsets:
+
+```js
+const { tokenWidth } = model.describe(); // zero without a token head, which answers `unsupported`
+const { tokenVectors } = model.textEncode(documents, arena, { outputs: Outputs.TokenVectors });
+```
+
+A checkpoint with the byte decoder scores closed sets of single-byte choices in one forward, each item's probabilities summing to one:
+
+```js
+const { probabilities } = model.textChoose(["keep this candidate?", "expand which neighbour?"], ["yn", "ABCD"], arena);
+const [keep, drop] = probabilities.item(0);
+```
+
 Images, clips and recordings arrive encoded, as JPEG, PNG, WebP, MP4, WebM, WAV, FLAC, MP3 or Opus files:
 
 ```js
@@ -67,6 +81,15 @@ A model on GPUs takes a VRAM executor and lands its outputs in device memory, wh
 ```js
 const gpus = Executor.forVram({ devices: [0, 1] });
 const resident = Model.loadVram("model.safetensors", { executor: gpus, devices: [0, 1] });
+```
+
+Device ordinals are positions in `gpuDevices()`, NVIDIA devices first, then AMD.
+Dispatch picks a CPU or GPU class on its own, and `cpuClass` or `gpuClass` pins one by its name:
+
+```js
+for (const { name, gpuClass, memoryBytes } of gpuDevices()) console.log(name, gpuClass, memoryBytes);
+const portable = Model.loadRam("model.safetensors", { cpuClass: "intel-haswell" });
+console.log(portable.describe().cpuClass); // "intel-haswell"
 ```
 
 ## Browser
@@ -126,6 +149,27 @@ const { stats } = trainer.step({
 await trainer.deferred().save("checkpoint.safetensors"); // or: call.wait()
 ```
 
+A `lateInteraction` term trains the token head over items whose `sides` name them queries or documents, and a `choices` term trains the byte decoder on each item's legal bytes and their target probabilities:
+
+```js
+const reranker = Trainer.initVram(gpus, {
+  depth: 12,
+  hidden: 512,
+  objective: Objective.Contrastive,
+  schedule: { steps: 100000 },
+  batch: { maxRowsPerDevice: 64, maxChoicesPerItem: 16 },
+  lateInteraction: { weight: 1, pairLoss: PairLossForm.Ranked },
+  choices: { weight: 1 },
+});
+reranker.step({
+  modalities: [Modality.Text, Modality.Text],
+  contents: ["red panda diet", "Red pandas eat bamboo."],
+  sides: [LateInteractionSide.Query, LateInteractionSide.Document],
+  choices: { offsets: [0, 2, 2], bytes: [0x79, 0x6e], targets: [0.9, 0.1] },
+  relations: { attract: { offsets: [0, 1, 2], ids: [1, 0] } },
+});
+```
+
 ## Errors
 
 Every error carries a `code` from the `Status` enum, spelled as the C library names it, so a caller branches on the identity of the fault:
@@ -147,6 +191,7 @@ The SDK is a thin layer over the C interface, one module per header: `types`, `m
 - A `Deferred` is `PromiseLike` and `Disposable`: `await` waits on the libuv pool, `wait` blocks the calling thread, `status` polls, and disposing one waits until it is final.
 - Every output verb takes an arena and answers views borrowing it, detached when the arena rewinds or is freed.
 - Statuses, scalars, moods, modalities and multimem tiers are enums read from the C name tables; objectives and negatives carry the C numbers.
+- CPU and GPU classes cross as the strings the C name tables spell, and pair-loss forms, late-interaction sides and GPU vendors as numeric enums of the C numbers.
 - The SDK starts no threads and keeps no queues or caches; the only thread it borrows is the libuv worker an `await` runs its wait on.
 - A progress handler runs only on the calling thread, so only a model's own verbs take one.
 - Blocking calls look as they would without asynchrony, deferred calls reach the same verbs through the language's own idioms, and neither costs anything until used.

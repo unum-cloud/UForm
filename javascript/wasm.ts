@@ -20,6 +20,7 @@
 import type {
   Compiled,
   CompiledArena,
+  CompiledChosen,
   CompiledDeferred,
   CompiledDescription,
   CompiledEncoded,
@@ -46,6 +47,8 @@ export interface WasmModule {
   _uform_modality_name(modality: number): number;
   _uform_objective_name(objective: number): number;
   _uform_negatives_name(negatives: number): number;
+  _uform_cpu_class_name(cpuClass: number): number;
+  _uform_gpu_class_name(gpuClass: number): number;
   _uform_version_name(): number;
   _uform_capabilities_compiled(): number;
   _uform_capabilities_available(): number;
@@ -55,6 +58,7 @@ export interface WasmModule {
   _uform_text_encode(arguments_: number): void;
   _uform_image_encode_pixels(arguments_: number): void;
   _uform_audio_encode_samples(arguments_: number): void;
+  _uform_text_choose(arguments_: number): void;
 }
 
 /** The ES module factory `uform.mjs` exports by default. */
@@ -92,7 +96,11 @@ function struct(fields: ReadonlyArray<readonly [string, Primitive | Layout]>): L
 
 const outcomeLayout = struct([["status", "enum"], ["message", "pointer"]]);
 const bytesViewLayout = struct([["data", "pointer"], ["length", "size"]]);
-const ramOptionsLayout = struct([["memory_domains", "pointer"], ["memory_domains_count", "size"]]);
+const ramOptionsLayout = struct([
+  ["memory_domains", "pointer"],
+  ["memory_domains_count", "size"],
+  ["cpu_class", "enum"],
+]);
 const tapeLayout = struct([["data", "pointer"], ["offsets", "pointer"], ["scalar", "enum"]]);
 const progressLayout = struct([["callback", "pointer"], ["state", "pointer"], ["steps", "size"]]);
 const rowsLayout = struct([["data", "pointer"], ["stride", "size"], ["columns", "size"], ["scalar", "enum"]]);
@@ -115,6 +123,10 @@ const descriptionLayout = struct([
   ["quantization", "enum"],
   ["memory_usage", "size"],
   ["capabilities", "pointer"],
+  ["cpu_class", "enum"],
+  ["gpu_class", "enum"],
+  ["token_width", "size"],
+  ["choice_temperature_groups", "size"],
 ]);
 const describeLayout = struct([
   ["model", "pointer"],
@@ -135,6 +147,7 @@ const encodeHead = [
 const encodeTail = [
   ["embeddings", "pointer"],
   ["states", "pointer"],
+  ["token_vectors", "pointer"],
   ["arena", "pointer"],
   ["outputs_scalar", "enum"],
   ["progress", progressLayout],
@@ -149,6 +162,16 @@ const pixelsEncodeLayout = struct([
   ...encodeTail,
 ]);
 const samplesEncodeLayout = struct([...encodeHead, ["samples", tapeLayout], ["sample_rate", "u32"], ...encodeTail]);
+const textChooseLayout = struct([
+  ...encodeHead,
+  ["texts", tapeLayout],
+  ["choices", tapeLayout],
+  ["temperature_groups", "pointer"],
+  ["probabilities", "pointer"],
+  ["arena", "pointer"],
+  ["progress", progressLayout],
+  ["stats", "pointer"],
+]);
 
 /** The C scalar codes the name tables are asked about, as `uform_scalar_t` numbers them. */
 const scalarCodes = [1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 20, 21, 22];
@@ -161,6 +184,9 @@ const objectiveCodes = [0, 1, 2];
 
 /** The C negatives codes, as `uform_negatives_t` numbers them. */
 const negativesCodes = [0, 1];
+
+/** The C CPU class codes past `unknown`, as `uform_cpu_class_t` numbers them. */
+const cpuClassCodes = Array.from({ length: 17 }, (_, position) => position + 1);
 
 /** The heap blocks one call allocates, freed together once its outputs are copied out. */
 class Frame {
@@ -220,6 +246,10 @@ function wasmBackend(module: WasmModule): Compiled {
   const names = (codes: number[], spell: (code: number) => number) =>
     Object.freeze(Object.fromEntries(codes.map((code) => [text(spell(code)), code])));
   const scalars = names(scalarCodes, module._uform_scalar_name);
+  const cpuClasses = names(cpuClassCodes, module._uform_cpu_class_name);
+
+  /** Spells a class through `spell`, or answers `null` for the unknown class. */
+  const className = (spell: (code: number) => number, code: number) => (code ? text(spell(code)) : null);
 
   /** Throws the failure an outcome at `address` carries. */
   function check(frame: Frame, address: number): void {
@@ -319,47 +349,50 @@ function wasmBackend(module: WasmModule): Compiled {
     return { data: viewOf(scalar, data), rows: count, columns: frame.load(address + rowsLayout.at.columns), stride, scalar };
   }
 
+  /** Copies the `count + 1` wasm32 `size_t` offsets at `address` into 64-bit words owned by `arena`. */
+  function offsetsAt(frame: Frame, arena: WasmArena, address: number, count: number): BigUint64Array {
+    const offsets = new BigUint64Array(arena.adopt(new ArrayBuffer((count + 1) * 8)));
+    for (let position = 0; position <= count; position++)
+      offsets[position] = BigInt(frame.load(address + position * 4));
+    return offsets;
+  }
+
+  /** Reads the ragged rows at `address`, `count` items of them, into copies owned by `arena`. */
+  function rowsTapeAt(frame: Frame, arena: WasmArena, address: number, count: number): CompiledStates {
+    const offsets = offsetsAt(frame, arena, frame.load(address + rowsTapeLayout.at.offsets), count);
+    return { ...rowsAt(frame, arena, address, Number(offsets[count])), offsets };
+  }
+
   /** The tape fields of an encode structure: elements and `size_t` offsets, which a `Uint32Array` matches on wasm32. */
   type Inputs = { data: ArrayBufferView; offsets: Uint32Array; scalar: number };
 
-  /** Lays one encode structure out, runs it blocking, and copies its outputs out of `arena`. */
-  function encode(
-    model: number,
-    verb: (arguments_: number) => void,
-    layout: Layout,
-    tape: string,
-    inputs: Inputs,
-    extra: (frame: Frame, arguments_: number) => void,
-    arenaValue: CompiledArena,
-    outputs: number,
-    outputsScalar: number,
-    progress: ProgressCallback | undefined,
-  ): CompiledEncoded {
-    if (!(arenaValue instanceof WasmArena) || !arenaValue.handle)
+  /** Lays `inputs` into the tape `tape` of the structure at `call`. */
+  function storeTape(frame: Frame, call: number, layout: Layout, tape: string, inputs: Inputs): void {
+    frame.store(call + layout.at[`${tape}.data`], frame.copy(inputs.data));
+    frame.store(call + layout.at[`${tape}.offsets`], frame.copy(inputs.offsets));
+    frame.store(call + layout.at[`${tape}.scalar`], inputs.scalar);
+  }
+
+  /** Refuses anything but a live arena of this backend. */
+  function liveArena(arena: CompiledArena): WasmArena {
+    if (!(arena instanceof WasmArena) || !arena.handle)
       throw fail(Status.InvalidArgument, "The 'arena' argument must be a live Arena of this backend.");
-    const arena = arenaValue;
-    const count = inputs.offsets.length - 1;
-    const frame = new Frame(module);
+    return arena;
+  }
+
+  /** Rewinds `arena` and runs `verb` on the structure at `call`, rethrowing what a progress handler threw. */
+  function invoke(
+    frame: Frame,
+    verb: (arguments_: number) => void,
+    call: number,
+    layout: Layout,
+    outcome: number,
+    arena: WasmArena,
+    progress: ProgressCallback | undefined,
+  ): void {
     let relay = 0;
     let thrown: { error: unknown } | undefined;
     try {
-      const call = frame.zeroed(layout.size);
-      const outcome = frame.zeroed(outcomeLayout.size);
-      const embeddings = outputs & 1 ? frame.zeroed(rowsLayout.size) : 0;
-      const states = outputs & 2 ? frame.zeroed(rowsTapeLayout.size) : 0;
-      const stats = frame.zeroed(encodeStatsLayout.size);
-      frame.store(call + layout.at.model, model);
-      frame.store(call + layout.at.outcome, outcome);
-      frame.store(call + layout.at.count, count);
-      frame.store(call + layout.at[`${tape}.data`], frame.copy(inputs.data));
-      frame.store(call + layout.at[`${tape}.offsets`], frame.copy(inputs.offsets));
-      frame.store(call + layout.at[`${tape}.scalar`], inputs.scalar);
-      frame.store(call + layout.at.embeddings, embeddings);
-      frame.store(call + layout.at.states, states);
-      frame.store(call + layout.at.arena, arena.handle);
-      frame.store(call + layout.at.outputs_scalar, outputsScalar);
-      frame.store(call + layout.at.stats, stats);
-      extra(frame, call);
       if (progress) {
         relay = module.addFunction((completed: number, total: number) => {
           if (thrown) return 1;
@@ -376,24 +409,60 @@ function wasmBackend(module: WasmModule): Compiled {
       verb(call);
       if (thrown) throw thrown.error;
       check(frame, outcome);
-      const landed: CompiledEncoded = {
-        stats: {
-          truncated: frame.load(stats + encodeStatsLayout.at.truncated),
-          tokens: frame.load(stats + encodeStatsLayout.at.tokens),
-        },
-      };
-      if (embeddings) landed.embeddings = rowsAt(frame, arena, embeddings, count);
-      if (states) {
-        const offsetsAddress = frame.load(states + rowsTapeLayout.at.offsets);
-        const offsets = new BigUint64Array(arena.adopt(new ArrayBuffer((count + 1) * 8)));
-        for (let position = 0; position <= count; position++)
-          offsets[position] = BigInt(frame.load(offsetsAddress + position * 4));
-        const rows: CompiledStates = { ...rowsAt(frame, arena, states, Number(offsets[count])), offsets };
-        landed.states = rows;
-      }
-      return landed;
     } finally {
       if (relay) module.removeFunction(relay);
+    }
+  }
+
+  /** Reads the report every encode and choose call fills. */
+  function statsAt(frame: Frame, stats: number): CompiledEncoded["stats"] {
+    return {
+      truncated: frame.load(stats + encodeStatsLayout.at.truncated),
+      tokens: frame.load(stats + encodeStatsLayout.at.tokens),
+    };
+  }
+
+  /** Lays one encode structure out, runs it blocking, and copies its outputs out of `arena`. */
+  function encode(
+    model: number,
+    verb: (arguments_: number) => void,
+    layout: Layout,
+    tape: string,
+    inputs: Inputs,
+    extra: (frame: Frame, arguments_: number) => void,
+    arenaValue: CompiledArena,
+    outputs: number,
+    outputsScalar: number,
+    progress: ProgressCallback | undefined,
+  ): CompiledEncoded {
+    const arena = liveArena(arenaValue);
+    const count = inputs.offsets.length - 1;
+    const frame = new Frame(module);
+    try {
+      const call = frame.zeroed(layout.size);
+      const outcome = frame.zeroed(outcomeLayout.size);
+      const embeddings = outputs & 1 ? frame.zeroed(rowsLayout.size) : 0;
+      const states = outputs & 2 ? frame.zeroed(rowsTapeLayout.size) : 0;
+      const tokenVectors = outputs & 4 ? frame.zeroed(rowsTapeLayout.size) : 0;
+      const stats = frame.zeroed(encodeStatsLayout.size);
+      frame.store(call + layout.at.model, model);
+      frame.store(call + layout.at.outcome, outcome);
+      frame.store(call + layout.at.count, count);
+      storeTape(frame, call, layout, tape, inputs);
+      frame.store(call + layout.at.embeddings, embeddings);
+      frame.store(call + layout.at.states, states);
+      frame.store(call + layout.at.token_vectors, tokenVectors);
+      frame.store(call + layout.at.arena, arena.handle);
+      frame.store(call + layout.at.outputs_scalar, outputsScalar);
+      frame.store(call + layout.at.stats, stats);
+      extra(frame, call);
+      invoke(frame, verb, call, layout, outcome, arena, progress);
+      const landed: CompiledEncoded = { stats: statsAt(frame, stats) };
+      if (embeddings) landed.embeddings = rowsAt(frame, arena, embeddings, count);
+      if (states) landed.states = rowsTapeAt(frame, arena, states, count);
+      if (tokenVectors) landed.tokenVectors = rowsTapeAt(frame, arena, tokenVectors, count);
+      return landed;
+    } finally {
       frame.free();
     }
   }
@@ -432,7 +501,10 @@ function wasmBackend(module: WasmModule): Compiled {
       executor: CompiledExecutor | undefined,
       memoryDomains: number[] | undefined,
       quantization: number,
+      cpuClass: string | undefined,
     ): CompiledModel {
+      const pin = cpuClass === undefined ? 0 : cpuClasses[cpuClass];
+      if (pin === undefined) throw fail(Status.UnknownKind, "The 'cpuClass' argument names no CPU class");
       const frame = new Frame(module);
       try {
         const slot = frame.zeroed(4);
@@ -442,6 +514,7 @@ function wasmBackend(module: WasmModule): Compiled {
         frame.store(load + loadRamBufferLayout.at.outcome, outcome);
         frame.store(load + loadRamBufferLayout.at["buffer.data"], frame.copy(buffer));
         frame.store(load + loadRamBufferLayout.at["buffer.length"], buffer.byteLength);
+        frame.store(load + loadRamBufferLayout.at["ram.cpu_class"], pin);
         frame.store(load + loadRamBufferLayout.at.quantization, quantization);
         module._uform_model_load_ram_buffer(load);
         check(frame, outcome);
@@ -479,6 +552,10 @@ function wasmBackend(module: WasmModule): Compiled {
             quantization: text(module._uform_scalar_name(frame.load(description + descriptionLayout.at.quantization))),
             memoryUsage: frame.load(description + descriptionLayout.at.memory_usage),
             capabilities: text(frame.load(description + descriptionLayout.at.capabilities)),
+            cpuClass: className(module._uform_cpu_class_name, frame.load(description + descriptionLayout.at.cpu_class)),
+            gpuClass: className(module._uform_gpu_class_name, frame.load(description + descriptionLayout.at.gpu_class)),
+            tokenWidth: frame.load(description + descriptionLayout.at.token_width),
+            choiceTemperatureGroups: frame.load(description + descriptionLayout.at.choice_temperature_groups),
           };
         } finally {
           frame.free();
@@ -573,6 +650,50 @@ function wasmBackend(module: WasmModule): Compiled {
       );
     }
 
+    textChoose(
+      executor: CompiledExecutor | undefined,
+      completion: number,
+      bytes: Uint8Array,
+      offsets: Uint32Array,
+      choices: Uint8Array,
+      choiceOffsets: Uint32Array,
+      temperatureGroups: Uint32Array | undefined,
+      arenaValue: CompiledArena,
+      progress: ProgressCallback | undefined,
+    ): CompiledChosen | CompiledDeferred {
+      const model = this.#live();
+      return complete(completion, () => {
+        const arena = liveArena(arenaValue);
+        const count = offsets.length - 1;
+        if (choiceOffsets.length !== offsets.length)
+          throw fail(Status.ShapeMismatch, "Every text needs one run of choices");
+        const frame = new Frame(module);
+        try {
+          const call = frame.zeroed(textChooseLayout.size);
+          const outcome = frame.zeroed(outcomeLayout.size);
+          const probabilities = frame.zeroed(tapeLayout.size);
+          const stats = frame.zeroed(encodeStatsLayout.size);
+          frame.store(call + textChooseLayout.at.model, model);
+          frame.store(call + textChooseLayout.at.outcome, outcome);
+          frame.store(call + textChooseLayout.at.count, count);
+          storeTape(frame, call, textChooseLayout, "texts", { data: bytes, offsets, scalar: scalars.u8 });
+          storeTape(frame, call, textChooseLayout, "choices", { data: choices, offsets: choiceOffsets, scalar: scalars.u8 });
+          if (temperatureGroups)
+            frame.store(call + textChooseLayout.at.temperature_groups, frame.copy(temperatureGroups));
+          frame.store(call + textChooseLayout.at.probabilities, probabilities);
+          frame.store(call + textChooseLayout.at.arena, arena.handle);
+          frame.store(call + textChooseLayout.at.stats, stats);
+          invoke(frame, module._uform_text_choose, call, textChooseLayout, outcome, arena, progress);
+          const landed = offsetsAt(frame, arena, frame.load(probabilities + tapeLayout.at.offsets), count);
+          const total = Number(landed[count]);
+          const data = arena.copy(frame.load(probabilities + tapeLayout.at.data), total * 4);
+          return { probabilities: new Float32Array(data), offsets: landed, stats: statsAt(frame, stats) };
+        } finally {
+          frame.free();
+        }
+      });
+    }
+
     imageEncode(): CompiledEncoded {
       return undecodable();
     }
@@ -603,6 +724,7 @@ function wasmBackend(module: WasmModule): Compiled {
     version: () => text(module._uform_version_name()),
     capabilitiesCompiled: () => text(module._uform_capabilities_compiled()),
     capabilitiesAvailable: () => text(module._uform_capabilities_available()),
+    gpuDevices: () => [],
   };
 }
 
@@ -626,23 +748,28 @@ export {
   ArenaView,
   Deferred,
   Executor,
+  GpuVendor,
+  LateInteractionSide,
   Modality,
   Mood,
   MultimemTier,
   Negatives,
   Objective,
+  PairLossForm,
   Scalar,
   Status,
+  gpuDevices,
 } from "./types.js";
 export type {
   Answer,
   ExecutorForRamConfig,
   ExecutorForVramConfig,
   ExecutorOnPoolConfig,
+  GpuDevice,
   UFormError,
 } from "./types.js";
-export { EncodeVerbs, Outputs, Rows, States } from "./encode.js";
-export type { EncodeConfig, EncodeStats, Encoded, Pixels } from "./encode.js";
+export { EncodeVerbs, Outputs, Probabilities, Rows, States } from "./encode.js";
+export type { ChooseConfig, Chosen, EncodeConfig, EncodeStats, Encoded, Pixels } from "./encode.js";
 export { Model, ModelDeferredOn, ModelOn } from "./model.js";
 export type { ModelDescription, ModelLoadRamConfig, ModelLoadVramConfig } from "./model.js";
 export { Mesh, Trainer, TrainerDeferredOn } from "./train.js";

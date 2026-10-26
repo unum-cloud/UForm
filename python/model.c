@@ -72,23 +72,30 @@ typedef struct load_options_t {
 } load_options_t;
 
 /**
- *  @brief Reads what every load takes: the source as @p source_name, the placement as @p arm_name, then
- *      `executor`, `quantization`, `progress` and `progress_steps` by name.
+ *  @brief Reads what every load takes: the source as @p source_name, the placement as
+ *      @p arm_name, the pin of @p classes as @p pin_name, then `executor`, `quantization`,
+ *      `progress` and `progress_steps` by name.
  *  @return 0 on success, -1 with an exception set otherwise; release @c options->progress either way.
  */
 static int load_parse(char const *verb, PyObject *const *args, Py_ssize_t positional_args_count,
                       PyObject *args_names_tuple, char const *source_name, PyObject **source, char const *arm_name,
-                      PyObject **arm, load_options_t *options) {
-    PyObject *executor_object, *quantization_object, *progress_object, *progress_steps_object;
+                      PyObject **arm, char const *pin_name, uform_py_enum_t const *classes, int *pin,
+                      load_options_t *options) {
+    PyObject *pin_object, *executor_object, *quantization_object, *progress_object, *progress_steps_object;
     uform_py_argument_t const arguments[] = {
-        {source_name, source},          {arm_name, arm},
-        {"executor", &executor_object}, {"quantization", &quantization_object},
-        {"progress", &progress_object}, {"progress_steps", &progress_steps_object},
+        {source_name, source},
+        {arm_name, arm},
+        {pin_name, &pin_object},
+        {"executor", &executor_object},
+        {"quantization", &quantization_object},
+        {"progress", &progress_object},
+        {"progress_steps", &progress_steps_object},
     };
     memset(options, 0, sizeof(*options));
     options->quantization = uform_scalar_bf16_k;
     if (uform_py_arguments_parse(verb, args, positional_args_count, args_names_tuple, 1, 1, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
+        uform_py_class_from_object(pin_object, pin_name, classes, pin) != 0 ||
         uform_py_executor_optional(executor_object, &options->executor) != 0 ||
         uform_py_scalar_from_object(quantization_object, "quantization", &options->quantization) != 0 ||
         uform_py_size_from_object(progress_steps_object, "progress_steps", &options->progress_steps) != 0)
@@ -97,8 +104,8 @@ static int load_parse(char const *verb, PyObject *const *args, Py_ssize_t positi
 }
 
 static char const doc_Model_load_ram[] =                                                           //
-    "load_ram(path, /, *, memory_domains=None, executor=None, quantization=Scalar.BF16,\n"         //
-    "    progress=None, progress_steps=0) -> Model\n"                                              //
+    "load_ram(path, /, *, memory_domains=None, cpu_class=None, executor=None,\n"                   //
+    "    quantization=Scalar.BF16, progress=None, progress_steps=0) -> Model\n"                    //
     "\n"                                                                                           //
     "Copies a safetensors checkpoint into host memory and packs its products for the CPU; the\n"   //
     "checkpoint carries the model's geometry.\n"                                                   //
@@ -108,6 +115,8 @@ static char const doc_Model_load_ram[] =                                        
     "  path (str | bytes | os.PathLike): The checkpoint, read in full and closed.\n"               //
     "  memory_domains (Sequence[int], optional): NUMA node IDs to place the weights in; None\n"    //
     "    derives every node.\n"                                                                    //
+    "  cpu_class (CPUClass, optional): The class to pack for and dispatch as; None derives the\n"  //
+    "    CPU's own.\n"                                                                             //
     "  executor (Executor, optional): The executor the load runs on; None loads on the\n"          //
     "    calling thread.\n"                                                                        //
     "  quantization (Scalar, optional): The scalar the transformer blocks run in, `Scalar.BF16`\n" //
@@ -123,8 +132,9 @@ static PyObject *Model_load_ram(PyTypeObject *type, PyObject *const *args, Py_ss
     uform_bytes_view_t path;
     int32_t *memory_domains = NULL;
     size_t memory_domains_count = 0;
+    int cpu_class = 0;
     if (load_parse("load_ram", args, positional_args_count, args_names_tuple, "path", &path_object, "memory_domains",
-                   &memory_domains_object, &options) != 0 ||
+                   &memory_domains_object, "cpu_class", &uform_py_cpu_class, &cpu_class, &options) != 0 ||
         uform_py_path_from_object(path_object, "path", &path, &decoded) != 0 ||
         uform_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                       &memory_domains_count) != 0)
@@ -136,7 +146,7 @@ static PyObject *Model_load_ram(PyTypeObject *type, PyObject *const *args, Py_ss
         .executor = options.executor,
         .outcome = &options.call.outcome,
         .path = path,
-        .ram = {memory_domains, memory_domains_count},
+        .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class},
         .quantization = options.quantization,
         .progress = uform_py_progress_registered(&options.progress, options.progress_steps),
     };
@@ -152,20 +162,21 @@ release:
     return result;
 }
 
-static char const doc_Model_load_ram_buffer[] =                                                     //
-    "load_ram_buffer(buffer, /, *, memory_domains=None, executor=None, quantization=Scalar.BF16,\n" //
-    "    progress=None, progress_steps=0) -> Model\n"                                               //
-    "\n"                                                                                            //
-    "Copies a safetensors checkpoint held in memory into host memory, as `load_ram` does from\n"    //
-    "a path; nothing of the buffer is kept.\n"                                                      //
-    "Calls `uform_model_load_ram_buffer`.\n"                                                        //
-    "\n"                                                                                            //
-    "Args:\n"                                                                                       //
-    "  buffer (buffer): The checkpoint itself, any contiguous bytes-like object.\n"                 //
-    "  memory_domains (Sequence[int], optional): NUMA node IDs to place the weights in.\n"          //
-    "  executor (Executor, optional): The executor the load runs on.\n"                             //
-    "  quantization (Scalar, optional): The scalar the transformer blocks run in.\n"                //
-    "  progress (callable, optional): Called with (completed, total) tensors placed.\n"             //
+static char const doc_Model_load_ram_buffer[] =                                                  //
+    "load_ram_buffer(buffer, /, *, memory_domains=None, cpu_class=None, executor=None,\n"        //
+    "    quantization=Scalar.BF16, progress=None, progress_steps=0) -> Model\n"                  //
+    "\n"                                                                                         //
+    "Copies a safetensors checkpoint held in memory into host memory, as `load_ram` does from\n" //
+    "a path; nothing of the buffer is kept.\n"                                                   //
+    "Calls `uform_model_load_ram_buffer`.\n"                                                     //
+    "\n"                                                                                         //
+    "Args:\n"                                                                                    //
+    "  buffer (buffer): The checkpoint itself, any contiguous bytes-like object.\n"              //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs to place the weights in.\n"       //
+    "  cpu_class (CPUClass, optional): The class to pack for and dispatch as.\n"                 //
+    "  executor (Executor, optional): The executor the load runs on.\n"                          //
+    "  quantization (Scalar, optional): The scalar the transformer blocks run in.\n"             //
+    "  progress (callable, optional): Called with (completed, total) tensors placed.\n"          //
     "  progress_steps (int, optional): Reports the load makes at most; 0 derives to ten.";
 
 static PyObject *Model_load_ram_buffer(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
@@ -175,8 +186,10 @@ static PyObject *Model_load_ram_buffer(PyTypeObject *type, PyObject *const *args
     Py_buffer buffer = {0};
     int32_t *memory_domains = NULL;
     size_t memory_domains_count = 0;
+    int cpu_class = 0;
     if (load_parse("load_ram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
-                   "memory_domains", &memory_domains_object, &options) != 0 ||
+                   "memory_domains", &memory_domains_object, "cpu_class", &uform_py_cpu_class, &cpu_class,
+                   &options) != 0 ||
         PyObject_GetBuffer(buffer_object, &buffer, PyBUF_C_CONTIGUOUS) != 0 ||
         uform_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
                                       &memory_domains_count) != 0)
@@ -188,7 +201,7 @@ static PyObject *Model_load_ram_buffer(PyTypeObject *type, PyObject *const *args
         .executor = options.executor,
         .outcome = &options.call.outcome,
         .buffer = {(uint8_t const *)buffer.buf, (size_t)buffer.len},
-        .ram = {memory_domains, memory_domains_count},
+        .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class},
         .quantization = options.quantization,
         .progress = uform_py_progress_registered(&options.progress, options.progress_steps),
     };
@@ -205,8 +218,8 @@ release:
 }
 
 static char const doc_Model_load_vram[] =                                                      //
-    "load_vram(path, /, *, devices=None, executor=None, quantization=Scalar.BF16,\n"           //
-    "    progress=None, progress_steps=0) -> Model\n"                                          //
+    "load_vram(path, /, *, devices=None, gpu_class=None, executor=None,\n"                     //
+    "    quantization=Scalar.BF16, progress=None, progress_steps=0) -> Model\n"                //
     "\n"                                                                                       //
     "Copies a safetensors checkpoint onto the named GPUs, replicated on each, and packs its\n" //
     "products there.\n"                                                                        //
@@ -214,8 +227,10 @@ static char const doc_Model_load_vram[] =                                       
     "\n"                                                                                       //
     "Args:\n"                                                                                  //
     "  path (str | bytes | os.PathLike): The checkpoint, read in full and closed.\n"           //
-    "  devices (Sequence[int], optional): CUDA ordinals to place the weights on; None\n"       //
-    "    derives one free device.\n"                                                           //
+    "  devices (Sequence[int], optional): Positions in `gpu_devices()` to place the weights\n" //
+    "    on; None derives one free device.\n"                                                  //
+    "  gpu_class (GPUClass, optional): The class every device dispatches as; None derives\n"   //
+    "    the devices' own, which must agree.\n"                                                //
     "  executor (Executor, optional): The executor the upload runs on, one stream per\n"       //
     "    device.\n"                                                                            //
     "  quantization (Scalar, optional): The scalar the transformer blocks run in.\n"           //
@@ -232,8 +247,9 @@ static PyObject *Model_load_vram(PyTypeObject *type, PyObject *const *args, Py_s
     uform_bytes_view_t path;
     int32_t *devices = NULL;
     size_t devices_count = 0;
+    int gpu_class = 0;
     if (load_parse("load_vram", args, positional_args_count, args_names_tuple, "path", &path_object, "devices",
-                   &devices_object, &options) != 0 ||
+                   &devices_object, "gpu_class", &uform_py_gpu_class, &gpu_class, &options) != 0 ||
         uform_py_path_from_object(path_object, "path", &path, &decoded) != 0 ||
         uform_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
         goto release;
@@ -244,7 +260,7 @@ static PyObject *Model_load_vram(PyTypeObject *type, PyObject *const *args, Py_s
         .executor = options.executor,
         .outcome = &options.call.outcome,
         .path = path,
-        .vram = {devices, devices_count},
+        .vram = {devices, devices_count, (uform_gpu_class_t)gpu_class},
         .quantization = options.quantization,
         .progress = uform_py_progress_registered(&options.progress, options.progress_steps),
     };
@@ -260,20 +276,21 @@ release:
     return result;
 }
 
-static char const doc_Model_load_vram_buffer[] =                                              //
-    "load_vram_buffer(buffer, /, *, devices=None, executor=None, quantization=Scalar.BF16,\n" //
-    "    progress=None, progress_steps=0) -> Model\n"                                         //
-    "\n"                                                                                      //
-    "Copies a safetensors checkpoint held in host memory onto the named GPUs, as\n"           //
-    "`load_vram` does from a path.\n"                                                         //
-    "Calls `uform_model_load_vram_buffer`.\n"                                                 //
-    "\n"                                                                                      //
-    "Args:\n"                                                                                 //
-    "  buffer (buffer): The checkpoint itself, any contiguous bytes-like object.\n"           //
-    "  devices (Sequence[int], optional): CUDA ordinals to place the weights on.\n"           //
-    "  executor (Executor, optional): The executor the upload runs on.\n"                     //
-    "  quantization (Scalar, optional): The scalar the transformer blocks run in.\n"          //
-    "  progress (callable, optional): Called with (completed, total) tensors placed.\n"       //
+static char const doc_Model_load_vram_buffer[] =                                          //
+    "load_vram_buffer(buffer, /, *, devices=None, gpu_class=None, executor=None,\n"       //
+    "    quantization=Scalar.BF16, progress=None, progress_steps=0) -> Model\n"           //
+    "\n"                                                                                  //
+    "Copies a safetensors checkpoint held in host memory onto the named GPUs, as\n"       //
+    "`load_vram` does from a path.\n"                                                     //
+    "Calls `uform_model_load_vram_buffer`.\n"                                             //
+    "\n"                                                                                  //
+    "Args:\n"                                                                             //
+    "  buffer (buffer): The checkpoint itself, any contiguous bytes-like object.\n"       //
+    "  devices (Sequence[int], optional): Positions in `gpu_devices()` to place it on.\n" //
+    "  gpu_class (GPUClass, optional): The class every device dispatches as.\n"           //
+    "  executor (Executor, optional): The executor the upload runs on.\n"                 //
+    "  quantization (Scalar, optional): The scalar the transformer blocks run in.\n"      //
+    "  progress (callable, optional): Called with (completed, total) tensors placed.\n"   //
     "  progress_steps (int, optional): Reports the load makes at most; 0 derives to ten.";
 
 static PyObject *Model_load_vram_buffer(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
@@ -283,8 +300,9 @@ static PyObject *Model_load_vram_buffer(PyTypeObject *type, PyObject *const *arg
     Py_buffer buffer = {0};
     int32_t *devices = NULL;
     size_t devices_count = 0;
+    int gpu_class = 0;
     if (load_parse("load_vram_buffer", args, positional_args_count, args_names_tuple, "buffer", &buffer_object,
-                   "devices", &devices_object, &options) != 0 ||
+                   "devices", &devices_object, "gpu_class", &uform_py_gpu_class, &gpu_class, &options) != 0 ||
         PyObject_GetBuffer(buffer_object, &buffer, PyBUF_C_CONTIGUOUS) != 0 ||
         uform_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
         goto release;
@@ -295,7 +313,7 @@ static PyObject *Model_load_vram_buffer(PyTypeObject *type, PyObject *const *arg
         .executor = options.executor,
         .outcome = &options.call.outcome,
         .buffer = {(uint8_t const *)buffer.buf, (size_t)buffer.len},
-        .vram = {devices, devices_count},
+        .vram = {devices, devices_count, (uform_gpu_class_t)gpu_class},
         .quantization = options.quantization,
         .progress = uform_py_progress_registered(&options.progress, options.progress_steps),
     };
@@ -348,12 +366,16 @@ static PyStructSequence_Field ModelDescription_fields[] = {
     {"quantization", "The `Scalar` the transformer blocks run in."},
     {"memory_usage", "Bytes the model holds; activations are the executor's."},
     {"capabilities", "The codename of the kernels the model dispatched to on this machine."},
+    {"cpu_class", "The `CPUClass` a RAM model was packed for, or None for a VRAM model."},
+    {"gpu_class", "The `GPUClass` every replica of a VRAM model runs as, or None for a RAM model."},
+    {"token_width", "Scalars per token vector; 0 when the checkpoint carries no token head."},
+    {"choice_temperature_groups", "Question types `text_choose` was calibrated over: 0 without the byte decoder."},
     {NULL, NULL},
 };
 
 PyStructSequence_Desc uform_py_model_description_desc = {
     "uform.ModelDescription", "What a loaded model reports about itself, as `uform_model_description_t` holds it.",
-    ModelDescription_fields, 5};
+    ModelDescription_fields, 9};
 
 PyTypeObject ModelDescriptionType;
 
@@ -379,13 +401,17 @@ static void describe_submit(void *call) { uform_model_describe(&((describe_call_
 
 static PyObject *describe_answer(void *erased) {
     uform_model_description_t const *const description = &((describe_call_t *)erased)->description;
-    PyObject *fields[5] = {NULL, NULL, NULL, NULL, NULL};
+    PyObject *fields[9] = {NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL};
     (void)((fields[0] = PyLong_FromSize_t(description->dimensions)) &&
            (fields[1] = PyLong_FromSize_t(description->context)) &&
            (fields[2] = uform_py_enum_to_object(&uform_py_scalar, (int)description->quantization)) &&
            (fields[3] = PyLong_FromSize_t(description->memory_usage)) &&
-           (fields[4] = PyUnicode_FromString(description->capabilities ? description->capabilities : "")));
-    return uform_py_struct_sequence_steal(&ModelDescriptionType, fields, 5);
+           (fields[4] = PyUnicode_FromString(description->capabilities ? description->capabilities : "")) &&
+           (fields[5] = uform_py_class_to_object(&uform_py_cpu_class, (int)description->cpu_class)) &&
+           (fields[6] = uform_py_class_to_object(&uform_py_gpu_class, (int)description->gpu_class)) &&
+           (fields[7] = PyLong_FromSize_t(description->token_width)) &&
+           (fields[8] = PyLong_FromSize_t(description->choice_temperature_groups)));
+    return uform_py_struct_sequence_steal(&ModelDescriptionType, fields, 9);
 }
 
 static uform_py_verb_t const describe_verb = {sizeof(describe_call_t), describe_submit, describe_answer,

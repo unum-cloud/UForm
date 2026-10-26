@@ -12,7 +12,7 @@
 
 #include <cuda.h> // `cuMemsetD8`, `cuEventRecord`, `cuStreamWaitEvent`
 
-#include "core/optimizer.hpp"
+#include "uform/core/optimizer.hpp"
 
 using namespace unum::uform::core;
 

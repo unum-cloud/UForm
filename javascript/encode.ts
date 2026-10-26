@@ -1,8 +1,9 @@
 /**
- * The forward passes: text, images, video and audio in, pooled embeddings and per-token states out, one verb per input
- * form, written once for every receiver.
+ * The forward passes: text, images, video and audio in, pooled embeddings, per-token states and token vectors out, one
+ * verb per input form, and the text choices, written once for every receiver.
  */
 import type {
+  CompiledChosen,
   CompiledEncoded,
   CompiledModel,
   CompiledRows,
@@ -13,8 +14,8 @@ import type {
 import { Answer, Arena, ArenaView, Executor, Scalar, Status, fail, scalarCode, submitAs } from "./types.js";
 
 /**
- * The surfaces an encode call keeps, combined with `|`. The C verb fills whichever of `embeddings` and `states` is
- * non-`NULL`, and these flags decide which it is handed.
+ * The surfaces an encode call keeps, combined with `|`. The C verb fills whichever of `embeddings`, `states` and
+ * `token_vectors` is non-`NULL`, and these flags decide which it is handed.
  * @enum {number}
  * @readonly
  */
@@ -23,6 +24,8 @@ export enum Outputs {
   Embeddings = 1,
   /** The final-norm states, one row per token kept after truncation. */
   States = 2,
+  /** The token head's unit vectors, one row per token kept, `tokenWidth` wide; `unsupported` without a token head. */
+  TokenVectors = 4,
 }
 
 /** Optional per-call settings of every encode verb. */
@@ -96,8 +99,8 @@ export class Rows extends ArenaView {
 }
 
 /**
- * The final-norm states a call landed in its arena: rows end to end, item `i` spanning rows `offsets[i]` up to
- * `offsets[i + 1]`. Mirrors `uform_rows_tape_view_t`.
+ * The final-norm states or the token vectors a call landed in its arena: rows end to end, item `i` spanning rows
+ * `offsets[i]` up to `offsets[i + 1]`. Mirrors `uform_rows_tape_view_t`.
  */
 export class States extends ArenaView {
   /** Every item's rows, end to end. */
@@ -134,6 +137,8 @@ export interface Encoded {
   embeddings?: Rows;
   /** The final-norm states of every item. */
   states?: States;
+  /** The token head's unit vectors of every item, sharing the states' offsets. */
+  tokenVectors?: States;
   /** Truncation and token counts. */
   stats: EncodeStats;
 }
@@ -143,8 +148,59 @@ function encodedOf(landed: CompiledEncoded): Encoded {
   return {
     embeddings: landed.embeddings && new Rows(landed.embeddings),
     states: landed.states && new States(landed.states),
+    tokenVectors: landed.tokenVectors && new States(landed.tokenVectors),
     stats: { truncated: landed.stats.truncated, tokens: landed.stats.tokens },
   };
+}
+
+/**
+ * One probability per choice a choose call landed in its arena, in the choices' order: item `i` spans
+ * `offsets[i]` up to `offsets[i + 1]`. Mirrors the `probabilities` output of `uform_text_choose_t`.
+ */
+export class Probabilities extends ArenaView {
+  readonly #data: Float32Array | null;
+  readonly #offsets: BigUint64Array | null;
+
+  /** Made by a verb, never directly. */
+  constructor(landed: CompiledChosen) {
+    super();
+    this.#data = landed.probabilities;
+    this.#offsets = landed.offsets;
+  }
+
+  /** Every item's probabilities, end to end. */
+  get data(): Float32Array {
+    return this.live(this.#data);
+  }
+
+  /** The `count + 1` offsets, the last of them the total. */
+  get offsets(): BigUint64Array {
+    return this.live(this.#offsets);
+  }
+
+  /** Borrows the probabilities of item `item` without copying. Binding-only. */
+  item(item: number): Float32Array {
+    const offsets = this.offsets;
+    if (!Number.isInteger(item) || item < 0 || item + 1 >= offsets.length)
+      throw fail(Status.InvalidArgument, `No item ${item} in a run of ${offsets.length - 1}.`);
+    return this.data.subarray(Number(offsets[item]), Number(offsets[item + 1]));
+  }
+}
+
+/** Optional per-call settings of `textChoose`. */
+export interface ChooseConfig {
+  /** The question type of each item, below the model's `choiceTemperatureGroups`; absent puts every item in group 0. */
+  temperatureGroups?: Uint32Array | number[];
+  /** Hears the items scored so far and may stop the call by answering `false`; only a model's own verbs take one. */
+  progress?: ProgressCallback;
+}
+
+/** What one choose call landed. */
+export interface Chosen {
+  /** One probability per choice, summing to one per item that offers any. */
+  probabilities: Probabilities;
+  /** Truncation and token counts. */
+  stats: EncodeStats;
 }
 
 /** A ragged batch as the C interface reads it: elements end to end, and one more offset than entries. */
@@ -281,6 +337,48 @@ export abstract class EncodeVerbs<Receiving extends "blocking" | "deferred"> {
       (completion, ...landing) => this.compiled.textEncode(executor, completion, tape.data, tape.offsets, ...landing),
       arena,
       config,
+    );
+  }
+
+  /**
+   * Scores each item's legal choices through one forward, a softmax over them alone at the item's group's calibrated
+   * inverse temperature; a model without the byte decoder reports `unsupported`. Calls `uform_text_choose`.
+   *
+   * @param {Array<string|Uint8Array>} texts - The states, each ending where its choice goes.
+   * @param {Array<string|Uint8Array>} choices - Each item's legal choices, one byte each, like "yn".
+   * @param {Arena} arena - The memory the probabilities land in, rewound by the call.
+   * @param {ChooseConfig} [config] - The question types and a progress handler.
+   * @return {Chosen} The probabilities, viewed inside `arena`.
+   */
+  textChoose(
+    texts: readonly (string | Uint8Array)[],
+    choices: readonly (string | Uint8Array)[],
+    arena: Arena,
+    config: ChooseConfig = {},
+  ): Answer<Receiving, Chosen> {
+    if (!(arena instanceof Arena)) throw fail(Status.InvalidArgument, "The 'arena' argument must be an Arena.");
+    const states = bytesTape(texts);
+    const legal = bytesTape(choices);
+    const groups = config.temperatureGroups;
+    const temperatureGroups = groups === undefined || groups instanceof Uint32Array ? groups : Uint32Array.from(groups);
+    const executor = this.executor?.compiled;
+    return this.submit(
+      (completion) =>
+        this.compiled.textChoose(
+          executor,
+          completion,
+          states.data,
+          states.offsets,
+          legal.data,
+          legal.offsets,
+          temperatureGroups,
+          arena.compiled,
+          config.progress,
+        ),
+      (landed: CompiledChosen) => ({
+        probabilities: new Probabilities(landed),
+        stats: { truncated: landed.stats.truncated, tokens: landed.stats.tokens },
+      }),
     );
   }
 

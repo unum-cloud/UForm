@@ -44,11 +44,12 @@
 #include <numkong/cast.h>              // `nk_bf16_to_f32_serial`, `nk_f32_to_bf16_serial`
 #include <smashtable/basic_vector.hpp> // `basic_vector` — every growable table here
 
-#include "uform/core/checkpoint.hpp"
-#include "uform/encoder/geometry.hpp"
 #include "uform/encode.h"
 #include "uform/model.h"
 #include "uform/types.h"
+
+#include "uform/core/checkpoint.hpp"
+#include "uform/encoder/geometry.hpp"
 
 namespace nk = ashvardanian::numkong;
 namespace st = ashvardanian::smashtable;

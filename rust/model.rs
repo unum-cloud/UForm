@@ -21,9 +21,10 @@ use std::path::Path;
 
 use crate::types::{
     check, fail, lower_progress, path_view, ram_options, static_string, uform_bytes_view_t,
-    uform_completion_blocking_k, uform_completion_t, uform_executor_t, uform_outcome_t, uform_progress_t,
-    uform_ram_options_t, uform_scalar_t, uform_vram_options_t, vram_options, Blocking, Callbacks, Calling, Completion,
-    Deferring, Executor, Handles, On, ProgressCallback, Result, Scalar, Status,
+    uform_completion_blocking_k, uform_completion_t, uform_cpu_class_t, uform_executor_t, uform_gpu_class_t,
+    uform_outcome_t, uform_progress_t, uform_ram_options_t, uform_scalar_t, uform_vram_options_t, vram_options,
+    Blocking, CPUClass, Callbacks, Calling, Completion, Deferring, Executor, GPUClass, Handles, On, ProgressCallback,
+    Result, Scalar, Status,
 };
 
 // region: Raw Declarations
@@ -85,6 +86,10 @@ pub struct uform_model_description_t {
     pub quantization: uform_scalar_t,
     pub memory_usage: usize,
     pub capabilities: *const c_char,
+    pub cpu_class: uform_cpu_class_t,
+    pub gpu_class: uform_gpu_class_t,
+    pub token_width: usize,
+    pub choice_temperature_groups: usize,
 }
 
 impl Default for uform_model_description_t {
@@ -95,6 +100,10 @@ impl Default for uform_model_description_t {
             quantization: 0,
             memory_usage: 0,
             capabilities: ptr::null(),
+            cpu_class: 0,
+            gpu_class: 0,
+            token_width: 0,
+            choice_temperature_groups: 0,
         }
     }
 }
@@ -138,6 +147,15 @@ pub struct ModelDescription {
     pub memory_usage: usize,
     /// The capability codename of the kernels the model dispatched to on this machine.
     pub capabilities: &'static str,
+    /// The class a RAM model's tower was packed for; `None` for a VRAM model.
+    pub cpu_class: Option<CPUClass>,
+    /// The class every replica of a VRAM model runs as; `None` for a RAM model.
+    pub gpu_class: Option<GPUClass>,
+    /// Scalars per token vector; zero when the checkpoint carries no token head.
+    pub token_width: usize,
+    /// Question types the choice temperatures were calibrated over: zero without the byte decoder,
+    /// one when uncalibrated.
+    pub choice_temperature_groups: usize,
 }
 
 /// A checkpoint path and how it is copied into a new model in host memory; see [`Model::load_ram`].
@@ -150,6 +168,9 @@ pub struct ModelLoadRamConfig<'config> {
     pub executor: Option<&'config Executor>,
     /// NUMA node IDs to place the weights in; empty derives every node the process may allocate on.
     pub memory_domains: &'config [i32],
+    /// The class to pack and dispatch as, admitting every rung whose features it holds; `None`
+    /// derives the CPU's own.
+    pub cpu_class: Option<CPUClass>,
     /// The scalar the transformer blocks run in: [`Scalar::BF16`] as the checkpoint stores it, or
     /// [`Scalar::E4M3`] quantized at load.
     pub quantization: Scalar,
@@ -165,6 +186,7 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for ModelL
             path: path.as_ref(),
             executor: None,
             memory_domains: &[],
+            cpu_class: None,
             quantization: Scalar::BF16,
             progress: None,
             progress_steps: 0,
@@ -180,8 +202,11 @@ pub struct ModelLoadVramConfig<'config> {
     pub path: &'config Path,
     /// The executor the upload runs on, one stream per device; `None` uploads on the calling thread.
     pub executor: Option<&'config Executor>,
-    /// CUDA device ordinals, each holding a replica; empty derives one free device.
+    /// Positions in what [`gpu_devices`](crate::gpu_devices) lists, each holding a replica; empty
+    /// derives one free device.
     pub devices: &'config [i32],
+    /// The class every device dispatches as; `None` derives the devices' own, which must agree.
+    pub gpu_class: Option<GPUClass>,
     /// The scalar the transformer blocks run in, as for [`ModelLoadRamConfig::quantization`].
     pub quantization: Scalar,
     /// Reports the tensors placed and stops wherever it says to; a stopped load creates no model.
@@ -196,6 +221,7 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for ModelL
             path: path.as_ref(),
             executor: None,
             devices: &[],
+            gpu_class: None,
             quantization: Scalar::BF16,
             progress: None,
             progress_steps: 0,
@@ -214,6 +240,8 @@ pub struct ModelLoadRamBufferConfig<'config> {
     pub executor: Option<&'config Executor>,
     /// NUMA node IDs to place the weights in; empty derives every node the process may allocate on.
     pub memory_domains: &'config [i32],
+    /// The class to pack and dispatch as, as for [`ModelLoadRamConfig::cpu_class`].
+    pub cpu_class: Option<CPUClass>,
     /// The scalar the transformer blocks run in, as for [`ModelLoadRamConfig::quantization`].
     pub quantization: Scalar,
     /// Reports the tensors placed and stops wherever it says to; a stopped load creates no model.
@@ -228,6 +256,7 @@ impl<'config> From<&'config [u8]> for ModelLoadRamBufferConfig<'config> {
             buffer,
             executor: None,
             memory_domains: &[],
+            cpu_class: None,
             quantization: Scalar::BF16,
             progress: None,
             progress_steps: 0,
@@ -247,8 +276,11 @@ pub struct ModelLoadVramBufferConfig<'config> {
     pub buffer: &'config [u8],
     /// The executor the upload runs on, one stream per device; `None` uploads on the calling thread.
     pub executor: Option<&'config Executor>,
-    /// CUDA device ordinals, each holding a replica; empty derives one free device.
+    /// Positions in what [`gpu_devices`](crate::gpu_devices) lists, each holding a replica; empty
+    /// derives one free device.
     pub devices: &'config [i32],
+    /// The class every device dispatches as, as for [`ModelLoadVramConfig::gpu_class`].
+    pub gpu_class: Option<GPUClass>,
     /// The scalar the transformer blocks run in, as for [`ModelLoadRamConfig::quantization`].
     pub quantization: Scalar,
     /// Reports the tensors placed and stops wherever it says to; a stopped load creates no model.
@@ -263,6 +295,7 @@ impl<'config> From<&'config [u8]> for ModelLoadVramBufferConfig<'config> {
             buffer,
             executor: None,
             devices: &[],
+            gpu_class: None,
             quantization: Scalar::BF16,
             progress: None,
             progress_steps: 0,
@@ -285,7 +318,7 @@ impl<'config, Bytes: Deref<Target = [u8]>> From<&'config Bytes> for ModelLoadVra
 /// use uform::*;
 ///
 /// let model = Model::load_ram("model.safetensors")?;
-/// let executor = Executor::for_ram(&[], 0, 0)?;
+/// let executor = Executor::for_ram(&[], None, 0, 0)?;
 /// let mut arena = Arena::new_in(&executor)?;
 /// let encoded = model.on(&executor).text_encode(&["a caption"], Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
 /// if let Some(embeddings) = encoded.embeddings {
@@ -337,7 +370,7 @@ impl Model {
     /// use uform::*;
     ///
     /// let model = Model::load_ram("model.safetensors")?;
-    /// let executor = Executor::for_ram(&[], 0, 0)?;
+    /// let executor = Executor::for_ram(&[], None, 0, 0)?;
     /// let mut arena = Arena::new_in(&executor)?;
     /// let texts = vec![String::from("a caption")];
     /// let call = model.deferred(&executor).text_encode(&texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
@@ -351,7 +384,7 @@ impl Model {
     /// use uform::*;
     ///
     /// let model = Model::load_ram("model.safetensors")?;
-    /// let executor = Executor::for_ram(&[], 0, 0)?;
+    /// let executor = Executor::for_ram(&[], None, 0, 0)?;
     /// let mut arena = Arena::new_in(&executor)?;
     /// let texts = vec![String::from("a caption")];
     /// let call = model.deferred(&executor).text_encode(texts, Outputs::EMBEDDINGS, Scalar::F32, &mut arena)?;
@@ -385,7 +418,7 @@ impl Model {
                 outcome: &mut outcome,
                 completion: uform_completion_blocking_k,
                 path: path_view(config.path)?,
-                ram: ram_options(config.memory_domains),
+                ram: ram_options(config.memory_domains, config.cpu_class),
                 quantization: config.quantization as uform_scalar_t,
                 progress,
             })
@@ -410,7 +443,7 @@ impl Model {
                 outcome: &mut outcome,
                 completion: uform_completion_blocking_k,
                 buffer: config.buffer.into(),
-                ram: ram_options(config.memory_domains),
+                ram: ram_options(config.memory_domains, config.cpu_class),
                 quantization: config.quantization as uform_scalar_t,
                 progress,
             })
@@ -435,7 +468,7 @@ impl Model {
                 outcome: &mut outcome,
                 completion: uform_completion_blocking_k,
                 path: path_view(config.path)?,
-                vram: vram_options(config.devices),
+                vram: vram_options(config.devices, config.gpu_class),
                 quantization: config.quantization as uform_scalar_t,
                 progress,
             })
@@ -460,7 +493,7 @@ impl Model {
                 outcome: &mut outcome,
                 completion: uform_completion_blocking_k,
                 buffer: config.buffer.into(),
-                vram: vram_options(config.devices),
+                vram: vram_options(config.devices, config.gpu_class),
                 quantization: config.quantization as uform_scalar_t,
                 progress,
             })
@@ -568,6 +601,10 @@ impl Calling for ModelDescribe {
             ))?,
             memory_usage: self.description.memory_usage,
             capabilities: unsafe { static_string(self.description.capabilities) },
+            cpu_class: CPUClass::from_raw(self.description.cpu_class),
+            gpu_class: GPUClass::from_raw(self.description.gpu_class),
+            token_width: self.description.token_width,
+            choice_temperature_groups: self.description.choice_temperature_groups,
         })
     }
 }
@@ -598,10 +635,37 @@ pub(crate) mod tests {
         assert_eq!(local.quantization, Scalar::BF16);
         assert!(local.dimensions != 0 && local.context != 0);
 
-        let executor = Executor::for_ram(&[], 1, 0)?;
+        let executor = Executor::for_ram(&[], None, 1, 0)?;
         assert_eq!(model.on(&executor).describe()?, local);
         assert_eq!(model.deferred(&executor).describe()?.wait()?, local);
         Ok(())
+    }
+
+    /// Every machine runs the serial class, so pinning it loads, and the description reports it.
+    #[test]
+    fn a_serial_pin_loads_and_describes_itself() -> Result<()> {
+        let checkpoint = checkpoint();
+        let config = ModelLoadRamBufferConfig {
+            cpu_class: Some(CPUClass::Serial),
+            ..ModelLoadRamBufferConfig::from(&checkpoint)
+        };
+        let description = Model::load_ram_buffer(config)?.describe()?;
+        assert_eq!((description.cpu_class, description.gpu_class), (Some(CPUClass::Serial), None));
+        Ok(())
+    }
+
+    #[test]
+    fn descriptions_lay_out_as_the_header_declares() {
+        use core::mem::{offset_of, size_of};
+
+        let word = size_of::<usize>();
+        let cpu_class = offset_of!(uform_model_description_t, cpu_class);
+        assert_eq!(cpu_class, 5 * word);
+        assert_eq!(offset_of!(uform_model_description_t, gpu_class), cpu_class + 4);
+        assert_eq!(offset_of!(uform_model_description_t, token_width), cpu_class + 8);
+        assert_eq!(size_of::<uform_model_description_t>(), cpu_class + 8 + 2 * word);
+        assert_eq!(offset_of!(uform_ram_options_t, cpu_class), 2 * word);
+        assert_eq!(offset_of!(uform_vram_options_t, gpu_class), 2 * word);
     }
 
     #[test]

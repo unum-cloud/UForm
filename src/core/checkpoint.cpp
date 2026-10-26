@@ -18,7 +18,7 @@
 
 #include <yyjson.h> // the safetensors JSON header — exceptions-free C
 
-#include "core/checkpoint.hpp"
+#include "uform/core/checkpoint.hpp"
 
 namespace uc = unum::uform::core;
 using namespace uc;

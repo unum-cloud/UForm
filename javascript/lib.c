@@ -30,6 +30,7 @@ NAPI_MODULE_INIT() {
         {"version", NULL, uform_js_version, NULL, NULL, NULL, napi_default, NULL},
         {"capabilitiesCompiled", NULL, uform_js_capabilities_compiled, NULL, NULL, NULL, napi_default, NULL},
         {"capabilitiesAvailable", NULL, uform_js_capabilities_available, NULL, NULL, NULL, napi_default, NULL},
+        {"gpuDevices", NULL, uform_js_gpu_devices, NULL, NULL, NULL, napi_default, NULL},
     };
 
     uform_js_addon_t *const addon = (uform_js_addon_t *)calloc(1, sizeof(uform_js_addon_t));

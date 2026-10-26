@@ -1,5 +1,5 @@
 /**
- *  @file src/core/contrastive_segments.cuh
+ *  @file include/uform/core/contrastive_segments.cuh
  *  @author Ash Vardanian
  *  @date July 2, 2026
  *  @brief Sharded sigmoid-pairwise (SigLIP-BCE) contrastive loss over pooled @b segment embeddings
@@ -107,11 +107,11 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "core/types.hpp"                  // `expected_t`, `status_t`, `warp_size_k`, `kernel_block_size_default_k`
-#include "core/schedule.cuh"               // `gpu_stream_t`, `launch_kernel`, the NumKong products
-#include "core/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 force surface
-#include "core/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_all_reduce/all_gather` — level-2
-#include "core/contrastive_relations.cuh"  // `contrastive_relations_view_t`, `contrastive_recipe_t`
+#include "uform/core/contrastive_relations.cuh"  // `contrastive_relations_view_t`, `contrastive_recipe_t`
+#include "uform/core/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_all_reduce/all_gather` — level-2
+#include "uform/core/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 force surface
+#include "uform/core/schedule.cuh"               // `gpu_stream_t`, `launch_kernel`, the NumKong products
+#include "uform/core/types.hpp" // `expected_t`, `status_t`, `warp_size_k`, `kernel_block_size_default_k`
 
 namespace unum::uform::core {
 

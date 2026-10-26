@@ -1,9 +1,9 @@
 /**
- *  @brief The Parquet audio loader: tied to a @b dataset, not a GPU — the same shape as
- *      @ref tokens_loader_parquet_t and @ref image_loader_parquet_t .
- *  @file src/loaders/audio_loader.cuh
+ *  @file include/uform/loaders/audio_loader.cuh
  *  @author Ash Vardanian
  *  @date July 5, 2026
+ *  @brief The Parquet audio loader: tied to a @b dataset, not a GPU — the same shape as
+ *      @ref tokens_loader_parquet_t and @ref image_loader_parquet_t .
  *
  *  @ref make reads only each shard's Parquet footer once, and every @ref fill takes the caller's stream,
  *  rank, and step, so one loader serves every GPU on every step. Each @ref fill opens @b as many randomly
@@ -38,12 +38,12 @@
 
 #include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the borrowed CPU-decode pool
 
-#include "core/types.hpp"             // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
-#include "core/gpu_allocators.hpp"    // `pinned_alloc` — the decode's host tapes
-#include "core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
-#include "core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t` — the decode target
-#include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
-#include "loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
+#include "uform/core/gpu_allocators.hpp"    // `pinned_alloc` — the decode's host tapes
+#include "uform/core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t` — the decode target
+#include "uform/core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
+#include "uform/core/types.hpp"             // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
+#include "uform/loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
+#include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
 
 namespace unum::uform::loaders {
 

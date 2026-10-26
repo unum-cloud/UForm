@@ -21,15 +21,16 @@
 
 #include <cuda.h> // `cuInit`, `cuDeviceGetCount`, `cuStreamSynchronize`
 
-#include "core/types.hpp"                  // `epoch_permutation`, `data_epoch_t`, `token_id_t`, `modality_t`
-#include "core/array.hpp"                  // `stack_array`
-#include "core/gpu_allocators.hpp"         // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`
-#include "core/schedule.cuh"               // `gpu_stream_t`, `switch_to_gpu_t`, `copy_host_to_device`
-#include "core/mesh.hpp"                   // `mesh_topology_t`, `host_domain_index_from_environment`
-#include "core/multimem_collectives.cuh"   // `multimem_domain_t`
-#include "core/infiniband_collectives.cuh" // `colocated_domain_t`
-#include "core/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t`, the shape, the mixer
-#include "harness.hpp"                     // `test_suite_t`
+#include "uform/core/array.hpp"                  // `stack_array`
+#include "uform/core/gpu_allocators.hpp"         // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`
+#include "uform/core/infiniband_collectives.cuh" // `colocated_domain_t`
+#include "uform/core/mesh.hpp"                   // `mesh_topology_t`, `host_domain_index_from_environment`
+#include "uform/core/multimem_collectives.cuh"   // `multimem_domain_t`
+#include "uform/core/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t`, the shape, the mixer
+#include "uform/core/schedule.cuh"               // `gpu_stream_t`, `switch_to_gpu_t`, `copy_host_to_device`
+#include "uform/core/types.hpp"                  // `epoch_permutation`, `data_epoch_t`, `token_id_t`, `modality_t`
+
+#include "harness.hpp" // `test_suite_t`
 
 using namespace unum::uform::core;
 using namespace unum::uform::test;

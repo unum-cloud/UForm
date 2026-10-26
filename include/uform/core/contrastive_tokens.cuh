@@ -1,5 +1,5 @@
 /**
- *  @file src/core/contrastive_tokens.cuh
+ *  @file include/uform/core/contrastive_tokens.cuh
  *  @author Ash Vardanian
  *  @date October 21, 2026
  *  @brief Late-interaction contrastive loss over per-token vectors: hard MaxSim scores between
@@ -47,12 +47,12 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "core/types.hpp"                  // `expected_t`, `status_t`, `late_interaction_side_t`
-#include "core/schedule.cuh"               // `gpu_stream_t`, `launch_kernel`, the NumKong products
-#include "core/multimodal_batch.hpp"       // `multimodal_batch_view_t`
-#include "core/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 surface
-#include "core/infiniband_collectives.cuh" // `colocated_domain_t`, the cross-domain gathers and reduces
-#include "core/contrastive_segments.cuh"   // `contrastive_pair_loss_t`, `contrastive_pair_loss_form_t`
+#include "uform/core/contrastive_segments.cuh"   // `contrastive_pair_loss_t`, `contrastive_pair_loss_form_t`
+#include "uform/core/infiniband_collectives.cuh" // `colocated_domain_t`, the cross-domain gathers and reduces
+#include "uform/core/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 surface
+#include "uform/core/multimodal_batch.hpp"       // `multimodal_batch_view_t`
+#include "uform/core/schedule.cuh"               // `gpu_stream_t`, `launch_kernel`, the NumKong products
+#include "uform/core/types.hpp"                  // `expected_t`, `status_t`, `late_interaction_side_t`
 
 namespace unum::uform::core {
 

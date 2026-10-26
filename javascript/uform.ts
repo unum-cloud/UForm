@@ -14,30 +14,38 @@ export {
   ArenaView,
   Deferred,
   Executor,
+  GpuVendor,
+  LateInteractionSide,
   Modality,
   Mood,
   MultimemTier,
   Negatives,
   Objective,
+  PairLossForm,
   Scalar,
   Status,
+  gpuDevices,
 } from "./types.js";
 export type {
   Answer,
   ExecutorForRamConfig,
   ExecutorForVramConfig,
   ExecutorOnPoolConfig,
+  GpuDevice,
   UFormError,
 } from "./types.js";
-export { EncodeVerbs, Outputs, Rows, States } from "./encode.js";
-export type { EncodeConfig, EncodeStats, Encoded, Pixels } from "./encode.js";
+export { EncodeVerbs, Outputs, Probabilities, Rows, States } from "./encode.js";
+export type { ChooseConfig, Chosen, EncodeConfig, EncodeStats, Encoded, Pixels } from "./encode.js";
 export { Model, ModelDeferredOn, ModelOn } from "./model.js";
 export type { ModelDescription, ModelLoadRamConfig, ModelLoadVramConfig } from "./model.js";
 export { Mesh, Trainer, TrainerDeferredOn } from "./train.js";
 export type {
   BatchShape,
+  Choices,
+  ChoicesView,
   Contrastive,
   Edges,
+  LateInteraction,
   Masking,
   MeshDescription,
   MeshOptions,

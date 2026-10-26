@@ -46,7 +46,7 @@ enum {
     uform_js_message_capacity_k = 256,
 
     /** Heap blocks one call may own, freed together once it is final: the offsets it widened to @c size_t. */
-    uform_js_owned_k = 4,
+    uform_js_owned_k = 5,
 };
 
 /** The surfaces an encode call keeps, as the @c outputs flags of the TypeScript side spell them. */
@@ -57,6 +57,9 @@ typedef enum uform_js_outputs_t {
 
     /** The final-norm states, one row per token kept. */
     uform_js_outputs_states_k = 2,
+
+    /** The token head's unit vectors, one row per token kept. */
+    uform_js_outputs_token_vectors_k = 4,
 } uform_js_outputs_t;
 
 /** Where an executor computes, which every arena it makes inherits; device memory is never viewed. */
@@ -179,8 +182,8 @@ typedef enum uform_js_slot_t {
     /** The first borrowed input, every later slot holding one more. */
     uform_js_slot_inputs_k,
 
-    /** Slots in every call: the three above and up to nine borrowed inputs. */
-    uform_js_slots_k = 12,
+    /** Slots in every call: the three above and up to thirteen borrowed inputs. */
+    uform_js_slots_k = 16,
 } uform_js_slot_t;
 
 /** Builds a verb's answer from a successful call's outputs; @c NULL with an exception pending. */
@@ -266,6 +269,15 @@ bool uform_js_scalar_from_value(napi_env env, napi_value value, char const *fiel
 /** Maps every scalar kind's canonical spelling to its code once, through the C name tables. */
 napi_value uform_js_scalars(napi_env env);
 
+/** Reads an @b optional CPU class pin through the C name tables; absent derives the CPU's own. */
+bool uform_js_cpu_class_from_value(napi_env env, napi_value value, uform_cpu_class_t *result);
+
+/** Reads an @b optional GPU class pin by its C name; absent derives the devices' own. */
+bool uform_js_gpu_class_from_value(napi_env env, napi_value value, uform_gpu_class_t *result);
+
+/** Wraps a class's canonical spelling, or answers @c null for the unknown class. */
+napi_value uform_js_class_name(napi_env env, char const *name);
+
 /** Maps every modality's canonical spelling to its code once, through the C name tables. */
 napi_value uform_js_modalities(napi_env env);
 napi_value uform_js_objectives(napi_env env);
@@ -275,7 +287,7 @@ napi_value uform_js_negatives(napi_env env);
 size_t uform_js_row_bytes(uform_scalar_t scalar, size_t columns);
 
 /**
- *  @brief Reads NUMA node IDs or CUDA ordinals from an array of numbers.
+ *  @brief Reads NUMA node IDs or device ordinals from an array of numbers.
  *  @param[out] ordinals Receives a @c free -able array; @c NULL when the value is absent or empty.
  *  @return @c true on success, @c false with an exception pending otherwise.
  */
@@ -313,6 +325,11 @@ bool uform_js_tape_from_value(napi_env env, napi_value data_value, napi_value of
  */
 bool uform_js_offsets_from_value(napi_env env, napi_value value, char const *field, uform_js_call_t *call,
                                  size_t const **offsets, size_t *count);
+
+/** Borrows an @b optional @c Uint32Array of exactly @p count entries, one per item; @c NULL when
+ *  absent. */
+bool uform_js_per_item_from_value(napi_env env, napi_value value, char const *field, size_t count,
+                                  uint32_t const **result);
 
 /**
  *  @brief Reads an @b optional progress handler, refused beside an executor, whose threads never own a
@@ -377,6 +394,10 @@ napi_value uform_js_arena_view(napi_env env, napi_value arena, napi_typedarray_t
 
 /** Views @p count rows a call landed inside @p arena as @c {data, rows, columns, stride, scalar}. */
 napi_value uform_js_rows_object(napi_env env, napi_value arena, uform_rows_view_t const *rows, size_t count);
+
+/** Views @p count + 1 @c size_t offsets a call landed inside @p arena, as a @c BigUint64Array on
+ *  64-bit hosts. */
+napi_value uform_js_offsets_view(napi_env env, napi_value arena, size_t const *offsets, size_t count);
 
 /** Defines the @c CompiledDeferred class; the module glue keeps the reference. */
 napi_value uform_js_deferred_define(napi_env env);
@@ -452,6 +473,9 @@ napi_value uform_js_capabilities_compiled(napi_env env, napi_callback_info info)
 
 /** Answers with the kernel families this machine can run, and dispatch picks from. */
 napi_value uform_js_capabilities_available(napi_env env, napi_callback_info info);
+
+/** Answers with every GPU this process can drive, in the order VRAM placements number them. */
+napi_value uform_js_gpu_devices(napi_env env, napi_callback_info info);
 
 #pragma endregion Classes and Calls
 

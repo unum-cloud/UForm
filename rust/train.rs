@@ -1,5 +1,5 @@
-//! Training steps: multimodal batches in, masked reconstruction and pairwise contrastive losses
-//! joined into one optimizer step, checkpoints out.
+//! Training steps: multimodal batches in, masked reconstruction, pairwise contrastive,
+//! late-interaction and calibrated-choice losses joined into one optimizer step, checkpoints out.
 //!
 //! A [`Mesh`] places this process among the processes of a run, made once by [`Mesh::bootstrap`]
 //! and borrowed by every [`Trainer`]. A trainer owns the tower replicas, gradients, optimizer
@@ -31,9 +31,13 @@ pub type uform_modality_t = c_int;
 pub type uform_objective_t = c_int;
 pub type uform_negatives_t = c_int;
 pub type uform_multimem_tier_t = c_int;
+pub type uform_pair_loss_form_t = c_int;
+pub type uform_late_interaction_side_t = c_int;
 
 pub type uform_batch_shape_t = BatchShape;
 pub type uform_masking_t = Masking;
+pub type uform_late_interaction_t = LateInteraction;
+pub type uform_choices_t = Choices;
 pub type uform_schedule_t = Schedule;
 pub type uform_trainer_step_stats_t = TrainerStepStats;
 
@@ -47,19 +51,7 @@ pub struct uform_contrastive_t {
     pub negatives: uform_negatives_t,
     pub ambient_repulsion_weight: f32,
     pub max_edges_per_device: usize,
-}
-
-#[repr(C)]
-#[derive(Default)]
-pub struct uform_late_interaction_t {
-    pub weight: f32,
-    pub width: usize,
-    pub inverse_temperature: f32,
-    pub bias: f32,
-    pub max_query_span: usize,
-    pub max_query_tokens_per_device: usize,
-    pub max_documents_per_device: usize,
-    pub max_document_tokens_per_device: usize,
+    pub pair_loss: uform_pair_loss_form_t,
 }
 
 #[repr(C)]
@@ -117,6 +109,7 @@ pub struct uform_trainer_init_vram_t {
     pub masking: uform_masking_t,
     pub contrastive: uform_contrastive_t,
     pub late_interaction: uform_late_interaction_t,
+    pub choices: uform_choices_t,
     pub schedule: uform_schedule_t,
     pub mesh: uform_mesh_t,
     pub seed: u64,
@@ -140,6 +133,14 @@ pub struct uform_relations_view_t {
 }
 
 #[repr(C)]
+#[derive(Clone, Copy)]
+pub struct uform_choices_view_t {
+    pub offsets: *const usize,
+    pub bytes: *const u8,
+    pub targets: *const f32,
+}
+
+#[repr(C)]
 pub struct uform_trainer_step_t {
     pub trainer: uform_trainer_t,
     pub executor: uform_executor_t,
@@ -150,6 +151,8 @@ pub struct uform_trainer_step_t {
     pub contents: uform_tape_view_t,
     pub bags: *const u32,
     pub temperature_groups: *const u32,
+    pub sides: *const uform_late_interaction_side_t,
+    pub choices: uform_choices_view_t,
     pub relations: uform_relations_view_t,
     pub embeddings: *mut uform_rows_view_t,
     pub arena: uform_arena_t,
@@ -354,6 +357,42 @@ impl fmt::Display for MultimemTier {
     }
 }
 
+/// How a contrastive term turns a row of scores into forces.
+///
+/// Mirrors `uform_pair_loss_form_t`.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+pub enum PairLossForm {
+    /// The term's own form: sigmoid for pooled vertices, ranked for token vectors.
+    #[default]
+    Derived = 0,
+    /// The sigmoid cross-entropy of every cell, its attract and repel halves normalized apart.
+    Balanced = 1,
+    /// The sigmoid cross-entropy of every positive's score over every negative's, where the bias
+    /// cancels.
+    Ranked = 2,
+    /// SigLIP's sigmoid cross-entropy of every cell, each repel weighed like an attract.
+    Sigmoid = 3,
+}
+
+/// Which side of a late-interaction score an item takes: a query's tokens score a document's, and a
+/// symmetric pair plays both.
+///
+/// Mirrors `uform_late_interaction_side_t`.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+pub enum LateInteractionSide {
+    /// The item takes no part in late interaction.
+    #[default]
+    None = 0,
+    /// The item's tokens score the documents it attracts and repels.
+    Query = 1,
+    /// The item's tokens are scored by the queries naming it.
+    Document = 2,
+    /// The item plays both sides.
+    QueryAndDocument = 3,
+}
+
 // endregion: Enums
 
 // region: Configs
@@ -413,6 +452,8 @@ pub struct BatchShape {
     pub max_columns_per_row: usize,
     /// Bags one device's step carries; zero keeps every item its own routing unit.
     pub max_bags_per_device: usize,
+    /// Legal bytes one item offers to choose from at most; zero makes no choices.
+    pub max_choices_per_item: usize,
     /// The image geometry.
     pub image: ImageShape,
     /// The video geometry.
@@ -463,9 +504,10 @@ pub struct Contrastive<'config> {
     pub matryoshka_dimensions: &'config [usize],
     /// Learnable inverse temperature and bias pairs, one per group a step's items select; one.
     pub temperature_groups: usize,
-    /// The starting inverse temperature of every group; 10, SigLIP's.
+    /// The starting inverse temperature of every group; 10 under the sigmoid form, SigLIP's,
+    /// else 1.
     pub inverse_temperature: f32,
-    /// The starting logit bias of every group; −10, SigLIP's.
+    /// The starting logit bias of every group; −10 under the sigmoid form, SigLIP's, else zero.
     pub bias: f32,
     /// Which pairs repel.
     pub negatives: Negatives,
@@ -473,6 +515,8 @@ pub struct Contrastive<'config> {
     pub ambient_repulsion_weight: f32,
     /// Edges one device's step names per edge set at most; `max_segments_per_device`.
     pub max_edges_per_device: usize,
+    /// The pair loss over each anchor's row; sigmoid.
+    pub pair_loss: PairLossForm,
 }
 
 impl Contrastive<'_> {
@@ -489,8 +533,50 @@ impl Contrastive<'_> {
             negatives: self.negatives as uform_negatives_t,
             ambient_repulsion_weight: self.ambient_repulsion_weight,
             max_edges_per_device: self.max_edges_per_device,
+            pair_loss: self.pair_loss as uform_pair_loss_form_t,
         }
     }
+}
+
+/// How the late-interaction loss scores the per-token vectors of query and document items; every
+/// zero derives the default the C header names.
+///
+/// Mirrors `uform_late_interaction_t`.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+#[repr(C)]
+pub struct LateInteraction {
+    /// The loss weight; zero trains no token head.
+    pub weight: f32,
+    /// The token vectors' width, a multiple of 8; 128.
+    pub width: usize,
+    /// The starting inverse temperature of every contrastive group; 1.
+    pub inverse_temperature: f32,
+    /// The starting logit bias of every contrastive group; zero is zero.
+    pub bias: f32,
+    /// Tokens one query item contributes at most, its first past the prefix; 64.
+    pub max_query_span: usize,
+    /// Query token rows one device's step holds at most; `max_query_span` of every item.
+    pub max_query_tokens_per_device: usize,
+    /// Document items one device's step holds at most; `max_segments_per_device`.
+    pub max_documents_per_device: usize,
+    /// Document token rows one device's step holds at most; the batch's tokens per device.
+    pub max_document_tokens_per_device: usize,
+    /// The pair loss over each query's row of hard MaxSim scores; ranked.
+    pub pair_loss: PairLossForm,
+}
+
+/// SearchJev's calibrated choices over the byte decoder: the masked head's byte logits read at a
+/// mask byte appended to a state, restricted to the item's legal bytes. Each choice item scores
+/// `−Σ t·log(p) + brier_weight·Σ (p − t)²`, with `p` that restricted softmax and `t` its targets.
+///
+/// Mirrors `uform_choices_t`.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+#[repr(C)]
+pub struct Choices {
+    /// The loss weight; zero trains no choices.
+    pub weight: f32,
+    /// The Brier term's weight beside the soft cross-entropy; 0.5.
+    pub brier_weight: f32,
 }
 
 /// The learning-rate schedule: a linear warmup to the peak, then a cosine decay to the floor.
@@ -580,6 +666,11 @@ pub struct TrainerInitVramConfig<'config, 'mesh> {
     pub masking: Masking,
     /// The contrastive loss's scoring, read unless the objective is masked alone.
     pub contrastive: Contrastive<'config>,
+    /// The late-interaction loss beside the pooled one, read when its weight is positive.
+    pub late_interaction: LateInteraction,
+    /// The calibrated choices beside every other term, read when its weight is positive, which
+    /// needs the batch's `max_choices_per_item`.
+    pub choices: Choices,
     /// The learning-rate schedule.
     pub schedule: Schedule,
     /// The mesh made over the same executor, borrowed until the trainer drops; `None` runs this
@@ -684,8 +775,60 @@ pub struct TrainerStepStats {
     pub masked_video_loss: f32,
     /// The audio reconstruction term, before its weight; zero when absent.
     pub masked_audio_loss: f32,
+    /// The late-interaction term, weighted; zero when absent.
+    pub late_interaction_loss: f32,
+    /// The choices term over the items that made a choice, before its weight; zero when absent.
+    pub choices_loss: f32,
     /// Items cut at a row's width.
     pub truncated: usize,
+}
+
+/// Each item's legal choices and their targets, as compressed sparse rows; empty offsets make no
+/// choices.
+///
+/// Mirrors `uform_choices_view_t`.
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub struct ChoicesView<'config> {
+    /// The step's count plus one non-decreasing offsets into `bytes` and `targets`; an item
+    /// offering no bytes makes no choice.
+    pub offsets: &'config [usize],
+    /// Item `i` offers the distinct bytes `bytes[offsets[i]..offsets[i + 1]]`.
+    pub bytes: &'config [u8],
+    /// The target probability of each byte, paired with `bytes`, summing to one per item.
+    pub targets: &'config [f32],
+}
+
+impl ChoicesView<'_> {
+    /// Lends the choices to a step over `count` items, refusing ones the library would read past.
+    fn lower(&self, count: usize) -> Result<uform_choices_view_t> {
+        if self.offsets.is_empty() {
+            return match self.bytes.is_empty() && self.targets.is_empty() {
+                true => Ok(uform_choices_view_t {
+                    offsets: ptr::null(),
+                    bytes: ptr::null(),
+                    targets: ptr::null(),
+                }),
+                false => Err(fail(Status::InvalidArgument, "choices without offsets name no items")),
+            };
+        }
+        if self.offsets.len() != count + 1 {
+            return Err(fail(
+                Status::ShapeMismatch,
+                "choices hold one more offset than the step's items",
+            ));
+        }
+        if self.offsets.windows(2).any(|pair| pair[1] < pair[0]) || self.offsets[count] > self.bytes.len() {
+            return Err(fail(Status::Malformed, "the choice offsets decrease or run past the bytes"));
+        }
+        if self.targets.len() != self.bytes.len() {
+            return Err(fail(Status::ShapeMismatch, "every choice needs one target"));
+        }
+        Ok(uform_choices_view_t {
+            offsets: self.offsets.as_ptr(),
+            bytes: self.bytes.as_ptr(),
+            targets: self.targets.as_ptr(),
+        })
+    }
 }
 
 /// The routing, targets and reports of [`TrainVerbs::step`].
@@ -698,6 +841,12 @@ pub struct TrainerStepConfig<'config, 'arena> {
     /// The temperature group of each item, each below the run's `temperature_groups`; empty puts
     /// every item in group zero.
     pub temperature_groups: &'config [u32],
+    /// The late-interaction side of each item; empty makes every item
+    /// [`LateInteractionSide::None`].
+    pub sides: &'config [LateInteractionSide],
+    /// The choices, read when the run trains them: a text item offering any is the state its answer
+    /// follows, and the call appends the mask byte, cutting a state longer than a row at its head.
+    pub choices: ChoicesView<'config>,
     /// The contrastive targets, read unless the objective is masked alone.
     pub relations: Relations<'config>,
     /// The arena the pooled embeddings land in, as the contrastive loss scored them before the
@@ -714,6 +863,8 @@ impl Default for TrainerStepConfig<'_, '_> {
         TrainerStepConfig {
             bags: &[],
             temperature_groups: &[],
+            sides: &[],
+            choices: ChoicesView::default(),
             relations: Relations::default(),
             arena: None,
             outputs_scalar: Scalar::F32,
@@ -845,7 +996,7 @@ impl Mesh {
 /// ```no_run
 /// use uform::*;
 ///
-/// let executor = unsafe { Executor::for_vram(&[0], &[], 0, 0)? };
+/// let executor = unsafe { Executor::for_vram(&[0], None, &[], 0, 0)? };
 /// let trainer = Trainer::init_vram(&executor, TrainerInitVramConfig {
 ///     depth: 12,
 ///     hidden: 512,
@@ -908,7 +1059,8 @@ impl<'mesh> Trainer<'mesh> {
                 objective: config.objective as uform_objective_t,
                 masking: config.masking,
                 contrastive: config.contrastive.lower(),
-                late_interaction: uform_late_interaction_t::default(),
+                late_interaction: config.late_interaction,
+                choices: config.choices,
                 schedule: config.schedule,
                 mesh: config.mesh.map_or(ptr::null_mut(), |mesh| mesh.handle),
                 seed: config.seed,
@@ -1050,12 +1202,13 @@ impl<'arena, Modalities: AsRef<[Modality]>, Contents: TapeView<u8>> Calling
         if modalities.len() != count {
             return Err(fail(Status::ShapeMismatch, "every item needs one modality"));
         }
-        if [config.bags, config.temperature_groups]
+        if [config.bags.len(), config.temperature_groups.len(), config.sides.len()]
             .iter()
-            .any(|list| !list.is_empty() && list.len() != count)
+            .any(|&length| length != 0 && length != count)
         {
-            return Err(fail(Status::ShapeMismatch, "pass no bags or groups, or one per item"));
+            return Err(fail(Status::ShapeMismatch, "pass no bags, groups or sides, or one per item"));
         }
+        let choices = config.choices.lower(count)?;
         let relations = uform_relations_view_t {
             attract: config.relations.attract.lower(count)?,
             repel: config.relations.repel.lower(count)?,
@@ -1077,6 +1230,12 @@ impl<'arena, Modalities: AsRef<[Modality]>, Contents: TapeView<u8>> Calling
             contents: batch.tape,
             bags: optional(config.bags),
             temperature_groups: optional(config.temperature_groups),
+            // `LateInteractionSide` is `repr(i32)`, the platform `int` the C enum lowers to.
+            sides: match config.sides.is_empty() {
+                true => ptr::null(),
+                false => config.sides.as_ptr().cast(),
+            },
+            choices,
             relations,
             embeddings: match config.arena {
                 Some(_) => ptr::from_mut(&mut self.embeddings.0),
@@ -1175,10 +1334,29 @@ mod tests {
         assert!("all".parse::<Negatives>().is_err());
     }
 
+    #[test]
+    fn training_structs_lay_out_as_the_header_declares() {
+        use core::mem::{offset_of, size_of};
+
+        let word = size_of::<usize>();
+        assert_eq!(offset_of!(BatchShape, max_choices_per_item), 4 * word);
+        assert_eq!(offset_of!(uform_contrastive_t, pair_loss), size_of::<uform_contrastive_t>() - word);
+        assert_eq!(offset_of!(LateInteraction, pair_loss), 7 * word);
+        assert_eq!(size_of::<Choices>(), 8);
+        assert_eq!(offset_of!(uform_trainer_step_t, choices), offset_of!(uform_trainer_step_t, sides) + word);
+        assert_eq!(
+            offset_of!(uform_trainer_step_t, relations),
+            offset_of!(uform_trainer_step_t, choices) + 3 * word
+        );
+        let late_interaction_loss = offset_of!(TrainerStepStats, late_interaction_loss);
+        assert_eq!(late_interaction_loss, offset_of!(TrainerStepStats, masked_audio_loss) + 4);
+        assert_eq!(offset_of!(TrainerStepStats, choices_loss), late_interaction_loss + 4);
+    }
+
     /// Training is GPU-only, so a build without GPUs refuses both constructors as the device's fault.
     #[test]
     fn a_build_without_gpus_refuses_to_train() -> Result<()> {
-        let executor = Executor::for_ram(&[], 1, 0)?;
+        let executor = Executor::for_ram(&[], None, 1, 0)?;
         let options = MeshOptions {
             directory: Path::new("/tmp"),
             job: "uform-rust",
@@ -1207,7 +1385,7 @@ mod tests {
     #[test]
     fn steps_check_their_lists_before_the_call() -> Result<()> {
         let trainer = null_trainer();
-        let executor = Executor::for_ram(&[], 1, 0)?;
+        let executor = Executor::for_ram(&[], None, 1, 0)?;
         let receiver = trainer.on(&executor);
         let modalities = [Modality::Text, Modality::Image];
         let contents = ["a caption".as_bytes(), b"\xff\xd8\xff".as_slice()];
@@ -1220,6 +1398,26 @@ mod tests {
         };
         assert_eq!(
             status_of(receiver.step(modalities, contents, bags)),
+            Some(Status::ShapeMismatch)
+        );
+        let sides = TrainerStepConfig {
+            sides: &[LateInteractionSide::Query],
+            ..TrainerStepConfig::default()
+        };
+        assert_eq!(
+            status_of(receiver.step(modalities, contents, sides)),
+            Some(Status::ShapeMismatch)
+        );
+        let untargeted = TrainerStepConfig {
+            choices: ChoicesView {
+                offsets: &[0, 2, 2],
+                bytes: b"yn",
+                targets: &[1.0],
+            },
+            ..TrainerStepConfig::default()
+        };
+        assert_eq!(
+            status_of(receiver.step(modalities, contents, untargeted)),
             Some(Status::ShapeMismatch)
         );
 

@@ -34,6 +34,7 @@
 #include "uform/core/checkpoint.hpp"
 #include "uform/core/multimodal_batch.hpp"
 #include "uform/encoder/geometry.hpp"
+
 #include "encoder_punned.hpp" // `encoder_verbs`, `encoder_class_tables`, `pick_gpu_variant`
 #include "harness.hpp"        // `test_suite_t`
 

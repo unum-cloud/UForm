@@ -1,8 +1,8 @@
 /**
- *  @brief The dataset-shard reader cell: the loader tier's GPU-native readers.
- *  @file src/loaders/dataset_shards.hpp
+ *  @file include/uform/loaders/dataset_shards.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
+ *  @brief The dataset-shard reader cell: the loader tier's GPU-native readers.
  *
  *  @ref parquet_file_t and @ref jsonl_file_t decode one shard — Parquet columns or a newline-delimited JSON
  *  field — straight into device memory over KvikIO / GPU Direct Storage, own the decoded columns for their
@@ -28,9 +28,9 @@
 #include <memory>    // `std::unique_ptr` — the pimpl owning the cuDF table
 #include <span>      // `std::span`
 
-#include "core/types.hpp"    // `expected`, `status_t`, the scalar aliases, `b8r1_view_t`, `sz::string_t`
-#include "core/schedule.cuh" // `gpu_stream_t`
-#include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t` — the reader's GDS precondition
+#include "uform/core/schedule.cuh"          // `gpu_stream_t`
+#include "uform/core/types.hpp"             // `expected`, `status_t`, the scalar aliases, `b8r1_view_t`, `sz::string_t`
+#include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t` — the reader's GDS precondition
 
 namespace unum::uform::loaders {
 

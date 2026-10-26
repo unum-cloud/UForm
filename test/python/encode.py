@@ -45,8 +45,8 @@ def wav(samples: int = 1600) -> bytes:
 def test_embeddings_alone_by_default(model: uform.Model, arena: uform.Arena):
     """Without `outputs`, a call keeps the pooled embeddings alone, one row of `dimensions` per item."""
     dimensions = model.describe().dimensions
-    embeddings, states = model.text_encode(TEXTS, arena)
-    assert states is None
+    embeddings, states, token_vectors = model.text_encode(TEXTS, arena)
+    assert states is None and token_vectors is None
     view = memoryview(embeddings)
     assert view.shape == (len(TEXTS), dimensions) and view.format == "f"
     assert len(embeddings) == len(TEXTS)
@@ -66,6 +66,46 @@ def test_both_outputs_from_one_forward(model: uform.Model, arena: uform.Arena):
     encoded = model.text_encode(TEXTS, arena, outputs=uform.Outputs.EMBEDDINGS | uform.Outputs.STATES)
     assert len(encoded.embeddings) == len(TEXTS)
     assert len(encoded.states) == sum(len(text) for text in TEXTS)
+
+
+def test_token_vectors_follow_the_token_head(model: uform.Model, arena: uform.Arena):
+    """Token vectors are unit rows of `token_width` on the states' offsets, and a model without the head refuses them."""
+    token_width = model.describe().token_width
+    outputs = uform.Outputs.STATES | uform.Outputs.TOKEN_VECTORS
+    if not token_width:
+        with pytest.raises(uform.UnsupportedError):
+            model.text_encode(TEXTS, arena, outputs=outputs)
+        return
+    encoded = model.text_encode(TEXTS, arena, outputs=outputs)
+    assert memoryview(encoded.token_vectors.offsets).tolist() == memoryview(encoded.states.offsets).tolist()
+    rows = memoryview(encoded.token_vectors).tolist()
+    assert len(rows) == len(encoded.states) and all(len(row) == token_width for row in rows)
+    assert all(abs(sum(value * value for value in row) - 1) < 0.02 for row in rows)
+
+
+def test_choices_sum_to_one_per_text(model: uform.Model, arena: uform.Arena):
+    """Each text's probabilities follow its choices and sum to one; a model without the byte decoder refuses."""
+    texts, choices = ["keep or drop? ", "pick a neighbour: ", "stop? "], ["yn", "ABC", "s"]
+    groups = model.describe().choice_temperature_groups
+    if not groups:
+        with pytest.raises(uform.UnsupportedError):
+            model.text_choose(texts, choices, arena)
+        return
+    stats = uform.TextEncodeStats()
+    probabilities = model.text_choose(texts, choices, arena, temperature_groups=[0, 0, 0], stats=stats)
+    offsets, values = memoryview(probabilities.offsets).tolist(), memoryview(probabilities).tolist()
+    assert offsets == [0, 2, 5, 6] and stats.truncated == 0
+    assert all(abs(sum(values[begin:end]) - 1) < 1e-3 for begin, end in zip(offsets, offsets[1:]))
+    with pytest.raises(uform.InvalidArgumentError):
+        model.text_choose(texts, choices, arena, temperature_groups=[0, groups, 0])
+
+
+def test_choices_need_one_entry_per_text(model: uform.Model, arena: uform.Arena):
+    """Choices and groups pair with the texts, so a count of either that differs is refused before the call."""
+    with pytest.raises(uform.ShapeMismatchError):
+        model.text_choose(["one", "two"], ["yn"], arena)
+    with pytest.raises(uform.ShapeMismatchError):
+        model.text_choose(["one"], ["yn"], arena, temperature_groups=[0, 0])
 
 
 def test_naming_no_output_is_refused(model: uform.Model, arena: uform.Arena):

@@ -9,8 +9,8 @@
  */
 #pragma once
 
-#include "uform/core/types.hpp"      // `expected`, the scalar aliases
 #include "uform/core/checkpoint.hpp" // `checkpoint_to_load_t`
+#include "uform/core/types.hpp"      // `expected`, the scalar aliases
 
 namespace unum::uform::encoder {
 

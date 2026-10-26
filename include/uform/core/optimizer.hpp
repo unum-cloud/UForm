@@ -1,5 +1,5 @@
 /**
- *  @file src/core/optimizer.hpp
+ *  @file include/uform/core/optimizer.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
  *  @brief Adafactor, the memory-frugal optimizer of the uniform towers: factored Float32 second
@@ -48,13 +48,13 @@
 
 #include <numkong/tensor.hpp> // `nk::tensor_view`, `nk::tensor_span`, `nk::tensor`
 
-#include "core/types.hpp"                  // `expected`, `expected_t`, `status_t`, the scalar aliases
-#include "core/checkpoint.hpp"             // `checkpoint_to_save_t`, `checkpoint_to_load_t` — the state a resume reads
-#include "core/schedule.cuh"               // `gpu_stream_t`, `launch_kernel`, `grid_size_for`
-#include "core/gpu_allocators.hpp"         // `gpu_arena_t`
-#include "core/introspect.cuh"             // `telemetry_ledger_t` — the borrowed signal-probe ledger
-#include "core/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 gradient surface
-#include "core/infiniband_collectives.cuh" // `infiniband_all_reduce` — the borrowed level-2 buffer
+#include "uform/core/checkpoint.hpp"     // `checkpoint_to_save_t`, `checkpoint_to_load_t` — the state a resume reads
+#include "uform/core/gpu_allocators.hpp" // `gpu_arena_t`
+#include "uform/core/infiniband_collectives.cuh" // `infiniband_all_reduce` — the borrowed level-2 buffer
+#include "uform/core/introspect.cuh"             // `telemetry_ledger_t` — the borrowed signal-probe ledger
+#include "uform/core/multimem_collectives.cuh"   // `multimem_domain_t` — the main-owned level-1 gradient surface
+#include "uform/core/schedule.cuh"               // `gpu_stream_t`, `launch_kernel`, `grid_size_for`
+#include "uform/core/types.hpp"                  // `expected`, `expected_t`, `status_t`, the scalar aliases
 
 namespace unum::uform::core {
 

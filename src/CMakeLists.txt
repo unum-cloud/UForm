@@ -1,6 +1,6 @@
 # `uform_host` → the verbs and handles every build carries, compiled once into objects that `c/` assembles into
 # `uform_static` and `uform_shared`. `src/`, `include/` and `c/` are its include roots, so sources include
-# `"core/schedule.cuh"`, `"uform/core/types.hpp"` and `"uform/types.h"`. Only `UFORM_EXPORT` symbols leave the shared
+# `"uform/core/schedule.cuh"`, `"uform/types.h"` and the flat `"lib.hpp"`. Only `UFORM_EXPORT` symbols leave the shared
 # library.
 add_library(
     uform_host OBJECT
@@ -255,7 +255,7 @@ if (UFORM_BUILD_CUDA)
     # `src/core` → `uform::core`: one static library for the whole core cell, compiled once, never per consumer.
     # Dependencies stay lean: NumKong, StringZilla, yyjson and the CUDA Driver API, with no NCCL or NVSHMEM; the runtime
     # arrives only through NumKong's kernel units. `src/` and `include/` are the include roots of all three libraries,
-    # so sources include `"core/schedule.cuh"` and `"uform/core/types.hpp"`.
+    # so sources include `"uform/core/schedule.cuh"` and `"uform/core/types.hpp"`.
     add_library(
         uform_core STATIC
         core/schedule.cu

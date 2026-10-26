@@ -1,5 +1,5 @@
 /**
- *  @file src/loaders/video_loader.cuh
+ *  @file include/uform/loaders/video_loader.cuh
  *  @author Ash Vardanian
  *  @date July 5, 2026
  *  @brief The Parquet video loader: tied to a @b dataset, not a GPU — the same shape as
@@ -63,13 +63,13 @@
 
 #include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the borrowed CPU demux / decode-drive pool
 
-#include "core/types.hpp"             // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
-#include "core/gpu_allocators.hpp"    // `pinned_alloc`
-#include "core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
-#include "core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`
-#include "media/video.hpp"            // `pixel_tubes_span_t`
-#include "loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
-#include "loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
+#include "uform/core/gpu_allocators.hpp"    // `pinned_alloc`
+#include "uform/core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`
+#include "uform/core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
+#include "uform/core/types.hpp"             // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
+#include "uform/loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
+#include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
+#include "uform/media/video.hpp"            // `pixel_tubes_span_t`
 
 /** The session's owned NVDEC engine state — forward-declared at global scope and defined in
  *  @c video_loader.cu (which reaches its namespace with using-directives, never a namespace block), so this

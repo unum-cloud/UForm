@@ -13,14 +13,16 @@
  *    ranked BCE.
  */
 #include <algorithm> // `std::min` — the bench's attract rows
+#include <chrono>    // `std::chrono::duration` — the CUDA-event windows
 
-#include <cuda.h> // `cuInit`, `cuMemcpyHtoD`
+#include <cuda.h> // `cuInit`, `cuMemcpyHtoD`, `cuEventRecord`, `cuEventElapsedTime`
 
-#include "core/types.hpp"                // `st::basic_vector`
-#include "core/contrastive_segments.cuh" // `contrastive_segments_t`, `contrastive_relations_t`
-#include "core/contrastive_tokens.cuh"   // `contrastive_tokens_t`
-#include "core/encoder_tower.hpp"        // `encoder_tower_bf16_t`
-#include "harness.hpp"                   // `loop_t`, `time_windows`, `run`
+#include "uform/core/contrastive_segments.cuh" // `contrastive_segments_t`, `contrastive_relations_t`
+#include "uform/core/contrastive_tokens.cuh"   // `contrastive_tokens_t`
+#include "uform/core/encoder_tower.hpp"        // `encoder_tower_bf16_t`
+#include "uform/core/types.hpp"                // `st::basic_vector`
+
+#include "harness.hpp" // `loop_t`, `run`
 
 using namespace unum::uform::core;
 using namespace unum::uform::bench;
@@ -49,6 +51,44 @@ inline constexpr u32_t segments_k = rows_k * segments_per_row_k;
     if (cuMemcpyHtoD(device_address(device), staging.data(), count * sizeof(bf16_t)) != CUDA_SUCCESS)
         return expected_t::fail(status_t::cuda_error_k, "uploading {} scalars failed", count);
     return {};
+}
+
+/**
+ *  @brief Times @p launch on @p stream until @p loop ends, in windows of back-to-back launches
+ *      between two CUDA events, doubling a window while it lasts under a millisecond.
+ *
+ *  @p launch enqueues one call and answers its @c expected_t ; the first refusal fails the loop.
+ */
+template <typename launch_type_>
+static void time_windows(loop_t &loop, CUstream stream, launch_type_ &&launch) noexcept {
+    CUevent start = nullptr, stop = nullptr;
+    if (cuEventCreate(&start, CU_EVENT_DEFAULT) != CUDA_SUCCESS ||
+        cuEventCreate(&stop, CU_EVENT_DEFAULT) != CUDA_SUCCESS)
+        return loop.fail("CUDA event creation failed");
+    std::size_t window = 1;
+    for ([[maybe_unused]] std::size_t call : loop) {
+        if (cuEventRecord(start, stream) != CUDA_SUCCESS) {
+            loop.fail("CUDA event record failed");
+            break;
+        }
+        for (std::size_t index = 0; index != window; ++index)
+            if (expected_t launched = launch(); !launched) {
+                loop.fail(launched.description_.view());
+                break;
+            }
+        if (loop.failed()) break;
+        f32_t milliseconds = 0;
+        if (cuEventRecord(stop, stream) != CUDA_SUCCESS || cuEventSynchronize(stop) != CUDA_SUCCESS ||
+            cuEventElapsedTime(&milliseconds, start, stop) != CUDA_SUCCESS) {
+            loop.fail("CUDA event timing failed");
+            break;
+        }
+        std::chrono::duration<f32_t, std::milli> const elapsed {milliseconds};
+        loop.add_window(elapsed, window);
+        if (elapsed < std::chrono::milliseconds(1)) window *= 2;
+    }
+    [[maybe_unused]] CUresult const start_destroyed = cuEventDestroy(start);
+    [[maybe_unused]] CUresult const stop_destroyed = cuEventDestroy(stop);
 }
 
 /** One text-only tower forward to the pooled vertices and its backward from a keyed force. */

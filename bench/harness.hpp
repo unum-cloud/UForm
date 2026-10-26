@@ -2,12 +2,12 @@
  *  @file bench/harness.hpp
  *  @author Ash Vardanian
  *  @date October 19, 2026
- *  @brief Shared timing for the GPU benchmarks: settings, the timed loop, CUDA-event windows, rows.
+ *  @brief Shared timing for the benchmarks: settings, the timed loop, its windows, rows.
  *
- *  A benchmark is a plain function over a @ref loop_t that sets up untimed, then times its launches
- *  through @ref time_windows , which brackets doubling windows of back-to-back launches between two
- *  CUDA events, so a row reports device time rather than the host's enqueue rate. @ref run prints
- *  one row per benchmark the filter selects.
+ *  A benchmark is a plain function over a @ref loop_t that sets up untimed, then times its calls
+ *  in windows it adds through @ref loop_t::add_window , so a row reports the time the benchmark
+ *  measured rather than the host's enqueue rate, and the median of its windows beside the rate.
+ *  @ref run prints one row per benchmark the filter selects.
  *
  *  @verbatim
  *  Variable          Default  Meaning
@@ -19,8 +19,11 @@
  */
 #pragma once
 
+#include <cstdint> // `std::uint64_t`, `std::uint8_t`
 #include <cstdlib> // `std::getenv`, `std::exit`
 
+#include <algorithm>   // `std::nth_element` — the median window
+#include <array>       // `std::array` — the windows the median reads
 #include <charconv>    // `std::from_chars`
 #include <chrono>      // `std::chrono::steady_clock`, `std::chrono::milliseconds`
 #include <random>      // `std::random_device`
@@ -28,32 +31,11 @@
 #include <string_view> // `std::string_view`
 #include <type_traits> // `std::type_identity_t`
 
-#include <cuda.h>       // `cuEventCreate`, `cuEventRecord`, `cuEventElapsedTime`
 #include <fmt/format.h> // `fmt::println`
 
 #include "uform/types.h" // `uform_version_name`, `uform_capabilities_compiled`, `uform_capabilities_available`
 
-#include "core/types.hpp" // `expected_t`, `sz`, the scalar aliases
-
-/** Prints a StringZilla view as the text it spans. */
-template <>
-struct fmt::formatter<ashvardanian::stringzilla::string_view_t> : fmt::formatter<std::string_view> {
-    auto format(std::string_view text, fmt::format_context &context) const {
-        return fmt::formatter<std::string_view>::format(text, context);
-    }
-};
-
-/** Prints an owning StringZilla string as the text it holds. */
-template <>
-struct fmt::formatter<ashvardanian::stringzilla::string_t> : fmt::formatter<std::string_view> {
-    auto format(std::string_view text, fmt::format_context &context) const {
-        return fmt::formatter<std::string_view>::format(text, context);
-    }
-};
-
 namespace unum::uform::bench {
-
-using namespace unum::uform::core;
 
 /** The text of the environment variable @p name , empty when it is unset. */
 [[nodiscard]] inline std::string_view environment_text(char const *name) noexcept {
@@ -73,7 +55,7 @@ using namespace unum::uform::core;
                                                                     std::chrono::milliseconds fallback) noexcept {
     std::string_view const text = environment_text(name);
     if (text.empty()) return fallback;
-    u64_t count = 0;
+    std::uint64_t count = 0;
     auto const [unit_begin, parse_status] = std::from_chars(text.data(), text.data() + text.size(), count);
     std::string_view const unit = text.substr(static_cast<std::size_t>(unit_begin - text.data()));
     if (parse_status == std::errc {} && unit == "ms") return std::chrono::milliseconds(count);
@@ -117,7 +99,7 @@ struct settings_t {
     filter_t filter {};
 
     /** Seed the synthetic inputs derive from. */
-    u64_t seed = 42;
+    std::uint64_t seed = 42;
 
     /** Untimed run per benchmark. */
     std::chrono::milliseconds warmup {1000};
@@ -159,24 +141,33 @@ inline void print(settings_t const &settings) noexcept {
  *
  *  Setup above the loop stays untimed, and the clock starts at @c begin . The loop runs untimed for
  *  the warm-up, then counts calls until the time limit, reading the clock again only once the calls
- *  so far have grown by a 64th, so a short call doesn't time the clock itself. Windows timed on the
- *  device through @ref add_window replace the loop's own calls and wall time.
+ *  so far have grown by a 64th, so a short call doesn't time the clock itself. Windows timed
+ *  through @ref add_window replace the loop's own calls and wall time, and the median of their
+ *  per-call times is the row's latency.
  */
 class loop_t {
     using steady_clock_t = std::chrono::steady_clock;
-    using seconds_t = std::chrono::duration<f64_t>;
+    using seconds_t = std::chrono::duration<double>;
 
     /** Where the loop is: untimed, timed, finished by the time limit, or failed. */
-    enum class phase_t : u8_t { warming_up_k, timed_k, done_k, failed_k };
+    enum class phase_t : std::uint8_t { warming_up_k, timed_k, done_k, failed_k };
 
     /** The calls so far, divided by this, run between two reads of the clock. */
     static constexpr std::size_t clock_stride_k = 64;
+
+    /** Windows the median reads; once they fill, every other one is dropped and the stride between
+     *  kept windows doubles, so the kept ones still span the whole timed run. */
+    static constexpr std::size_t median_windows_k = 1024;
 
     std::chrono::milliseconds warmup_, time_limit_;
     steady_clock_t::time_point start_ {};
     steady_clock_t::duration elapsed_ {};
     seconds_t window_elapsed_ {};
     std::size_t calls_ = 0, next_check_ = 0, window_calls_ = 0;
+    std::array<double, median_windows_k> window_latencies_ {};
+    std::size_t windows_ = 0, windows_kept_ = 0, windows_stride_ = 1;
+    std::size_t items_per_call_ = 1;
+    std::string_view items_unit_ = "calls";
     phase_t phase_ = phase_t::warming_up_k;
 
     bool keep_running() noexcept {
@@ -188,6 +179,7 @@ class loop_t {
             start_ = steady_clock_t::now();
             elapsed_ = {}, window_elapsed_ = {};
             calls_ = 0, window_calls_ = 0;
+            windows_ = 0, windows_kept_ = 0, windows_stride_ = 1;
         }
         else if (phase_ == phase_t::timed_k && elapsed_ >= time_limit_) {
             phase_ = phase_t::done_k;
@@ -213,7 +205,7 @@ class loop_t {
     end_t end() const noexcept { return {}; }
 
     /** Stops the loop, printing @p description to standard error, and reports the row failed. */
-    void fail(sz::string_view_t description) noexcept {
+    void fail(std::string_view description) noexcept {
         fmt::println(stderr, "  benchmark failed: {}", description);
         phase_ = phase_t::failed_k;
     }
@@ -221,60 +213,44 @@ class loop_t {
     /** Whether the benchmark failed, which fails the binary. */
     [[nodiscard]] bool failed() const noexcept { return phase_ == phase_t::failed_k; }
 
-    /** Adds @p calls the device ran back to back in @p elapsed . */
+    /** Rates the row in @p items of @p unit per call, like tokens, instead of in calls. */
+    void count_items(std::size_t items, std::string_view unit) noexcept {
+        items_per_call_ = items;
+        items_unit_ = unit;
+    }
+
+    /** Adds @p calls that ran back to back in @p elapsed . */
     void add_window(seconds_t elapsed, std::size_t calls) noexcept {
         window_elapsed_ += elapsed;
         window_calls_ += calls;
+        if (windows_++ % windows_stride_ != 0) return;
+        if (windows_kept_ == median_windows_k) {
+            for (std::size_t kept = 0; kept != median_windows_k / 2; ++kept)
+                window_latencies_[kept] = window_latencies_[kept * 2];
+            windows_kept_ = median_windows_k / 2;
+            windows_stride_ *= 2;
+        }
+        window_latencies_[windows_kept_++] = elapsed.count() / static_cast<double>(calls);
     }
 
     /** Prints the row of the finished benchmark under @p name . */
     void report(std::string_view name) const noexcept {
         if (phase_ == phase_t::failed_k) return fmt::println("{:<32} FAILED", name);
-        f64_t const seconds = window_calls_ ? window_elapsed_.count() : seconds_t(elapsed_).count();
+        double const seconds = window_calls_ ? window_elapsed_.count() : seconds_t(elapsed_).count();
         std::size_t const calls = window_calls_ ? window_calls_ : calls_;
         if (calls == 0) return fmt::println("{:<32} no timed calls", name);
-        fmt::println("{:<32} {:>10.3f} ms/call {:>10.1f} calls/s {:>8} calls", name, seconds * 1e3 / calls,
-                     calls / seconds, calls);
+        std::array<double, median_windows_k> latencies = window_latencies_;
+        double median = seconds / static_cast<double>(calls);
+        if (windows_kept_) {
+            std::nth_element(latencies.begin(), latencies.begin() + windows_kept_ / 2,
+                             latencies.begin() + windows_kept_);
+            median = latencies[windows_kept_ / 2];
+        }
+        double const items = static_cast<double>(calls) * static_cast<double>(items_per_call_);
+        fmt::println("{:<32} {:>10.3f} ms median {:>14.1f} {}/s {:>8} calls", name, median * 1e3, items / seconds,
+                     items_unit_, calls);
     }
 };
-
-/**
- *  @brief Times @p launch on @p stream until @p loop ends, in windows of back-to-back launches
- *      between two CUDA events, doubling a window while it lasts under a millisecond.
- *
- *  @p launch enqueues one call and answers its @c expected_t ; the first refusal fails the loop.
- */
-template <typename launch_type_>
-void time_windows(loop_t &loop, CUstream stream, launch_type_ &&launch) noexcept {
-    CUevent start = nullptr, stop = nullptr;
-    if (cuEventCreate(&start, CU_EVENT_DEFAULT) != CUDA_SUCCESS ||
-        cuEventCreate(&stop, CU_EVENT_DEFAULT) != CUDA_SUCCESS)
-        return loop.fail("CUDA event creation failed");
-    std::size_t window = 1;
-    for ([[maybe_unused]] std::size_t call : loop) {
-        if (cuEventRecord(start, stream) != CUDA_SUCCESS) {
-            loop.fail("CUDA event record failed");
-            break;
-        }
-        for (std::size_t index = 0; index != window; ++index)
-            if (expected_t launched = launch(); !launched) {
-                loop.fail(launched.description_.view());
-                break;
-            }
-        if (loop.failed()) break;
-        f32_t milliseconds = 0;
-        if (cuEventRecord(stop, stream) != CUDA_SUCCESS || cuEventSynchronize(stop) != CUDA_SUCCESS ||
-            cuEventElapsedTime(&milliseconds, start, stop) != CUDA_SUCCESS) {
-            loop.fail("CUDA event timing failed");
-            break;
-        }
-        std::chrono::duration<f32_t, std::milli> const elapsed {milliseconds};
-        loop.add_window(elapsed, window);
-        if (elapsed < std::chrono::milliseconds(1)) window *= 2;
-    }
-    [[maybe_unused]] CUresult const start_destroyed = cuEventDestroy(start);
-    [[maybe_unused]] CUresult const stop_destroyed = cuEventDestroy(stop);
-}
 
 /**
  *  @brief Runs @p bench_function on a fresh @ref loop_t and @p arguments when @p settings select

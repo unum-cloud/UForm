@@ -150,11 +150,35 @@ pub type uform_completion_t = c_int;
 pub const uform_completion_blocking_k: uform_completion_t = 0;
 pub const uform_completion_deferred_k: uform_completion_t = 1;
 
+pub type uform_cpu_class_t = c_int;
+pub type uform_gpu_class_t = c_int;
+pub type uform_gpu_vendor_t = c_int;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct uform_gpu_device_t {
+    pub vendor: uform_gpu_vendor_t,
+    pub vendor_ordinal: u32,
+    pub gpu_class: uform_gpu_class_t,
+    pub compute_units: u32,
+    pub memory_bytes: u64,
+    pub name: [c_char; 64],
+}
+
+#[repr(C)]
+pub struct uform_gpu_devices_t {
+    pub outcome: *mut uform_outcome_t,
+    pub devices: *mut uform_gpu_device_t,
+    pub devices_capacity: usize,
+    pub devices_count: *mut usize,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct uform_ram_options_t {
     pub memory_domains: *const i32,
     pub memory_domains_count: usize,
+    pub cpu_class: uform_cpu_class_t,
 }
 
 #[repr(C)]
@@ -162,6 +186,7 @@ pub struct uform_ram_options_t {
 pub struct uform_vram_options_t {
     pub devices: *const i32,
     pub devices_count: usize,
+    pub gpu_class: uform_gpu_class_t,
 }
 
 pub type uform_executor_t = *mut c_void;
@@ -230,6 +255,12 @@ extern "C" {
     pub fn uform_scalar_from_name(name: uform_bytes_view_t) -> uform_scalar_t;
     pub fn uform_mood_name(mood: uform_mood_t) -> *const c_char;
     pub fn uform_mood_from_name(name: uform_bytes_view_t) -> uform_mood_t;
+    pub fn uform_cpu_class_name(cpu_class: uform_cpu_class_t) -> *const c_char;
+    pub fn uform_cpu_class_from_name(name: uform_bytes_view_t) -> uform_cpu_class_t;
+    pub fn uform_gpu_class_name(gpu_class: uform_gpu_class_t) -> *const c_char;
+    pub fn uform_gpu_class_from_name(name: uform_bytes_view_t) -> uform_gpu_class_t;
+
+    pub fn uform_gpu_devices(arguments: *mut uform_gpu_devices_t);
 
     pub fn uform_version_name() -> *const c_char;
     pub fn uform_capabilities_compiled() -> *const c_char;
@@ -665,6 +696,248 @@ impl FromStr for Scalar {
 
 // endregion: Scalars
 
+// region: Classes
+
+/// The CPU families UForm ships tuned variants for: dispatch reports its pick in this vocabulary,
+/// and a RAM placement may pin one.
+///
+/// Mirrors `uform_cpu_class_t`.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
+pub enum CPUClass {
+    Serial = 1,
+    IntelHaswell = 2,
+    IntelSierra = 3,
+    IntelSkylake = 4,
+    IntelIcelake = 5,
+    AmdGenoa = 6,
+    IntelSapphire = 7,
+    IntelGranite = 8,
+    IntelDiamond = 9,
+    AwsG2 = 10,
+    AppleM2 = 11,
+    AppleM4 = 12,
+    AwsG5 = 13,
+    NvidiaVera = 14,
+    AlibabaC930 = 15,
+    Wasm32V128 = 16,
+    Wasm64Extended = 17,
+}
+
+impl CPUClass {
+    pub(crate) fn from_raw(value: uform_cpu_class_t) -> Option<Self> {
+        let cpu_class = match value {
+            1 => CPUClass::Serial,
+            2 => CPUClass::IntelHaswell,
+            3 => CPUClass::IntelSierra,
+            4 => CPUClass::IntelSkylake,
+            5 => CPUClass::IntelIcelake,
+            6 => CPUClass::AmdGenoa,
+            7 => CPUClass::IntelSapphire,
+            8 => CPUClass::IntelGranite,
+            9 => CPUClass::IntelDiamond,
+            10 => CPUClass::AwsG2,
+            11 => CPUClass::AppleM2,
+            12 => CPUClass::AppleM4,
+            13 => CPUClass::AwsG5,
+            14 => CPUClass::NvidiaVera,
+            15 => CPUClass::AlibabaC930,
+            16 => CPUClass::Wasm32V128,
+            17 => CPUClass::Wasm64Extended,
+            _ => return None,
+        };
+        Some(cpu_class)
+    }
+}
+
+impl fmt::Display for CPUClass {
+    /// Calls `uform_cpu_class_name`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(spelling(uform_cpu_class_name, *self as c_int))
+    }
+}
+
+impl FromStr for CPUClass {
+    type Err = Error;
+
+    /// Calls `uform_cpu_class_from_name`.
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(text, uform_cpu_class_from_name, uform_cpu_class_name, CPUClass::from_raw)
+    }
+}
+
+/// The GPU families UForm ships tuned variants for, the device twin of [`CPUClass`]: dispatch
+/// reports its pick in this vocabulary, and a VRAM placement may pin one.
+///
+/// Mirrors `uform_gpu_class_t`.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
+pub enum GPUClass {
+    NvidiaAmpere = 1,
+    NvidiaAda = 2,
+    NvidiaHopper = 3,
+    NvidiaBlackwell = 4,
+    NvidiaBlackwellRtx = 5,
+    NvidiaRubin = 6,
+    AmdCdna3 = 7,
+    AmdCdna4 = 8,
+    AmdCdna5 = 9,
+    AppleMetal7 = 10,
+    AppleMetal9 = 11,
+    AppleMetal10 = 12,
+}
+
+impl GPUClass {
+    pub(crate) fn from_raw(value: uform_gpu_class_t) -> Option<Self> {
+        let gpu_class = match value {
+            1 => GPUClass::NvidiaAmpere,
+            2 => GPUClass::NvidiaAda,
+            3 => GPUClass::NvidiaHopper,
+            4 => GPUClass::NvidiaBlackwell,
+            5 => GPUClass::NvidiaBlackwellRtx,
+            6 => GPUClass::NvidiaRubin,
+            7 => GPUClass::AmdCdna3,
+            8 => GPUClass::AmdCdna4,
+            9 => GPUClass::AmdCdna5,
+            10 => GPUClass::AppleMetal7,
+            11 => GPUClass::AppleMetal9,
+            12 => GPUClass::AppleMetal10,
+            _ => return None,
+        };
+        Some(gpu_class)
+    }
+}
+
+impl fmt::Display for GPUClass {
+    /// Calls `uform_gpu_class_name`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(spelling(uform_gpu_class_name, *self as c_int))
+    }
+}
+
+impl FromStr for GPUClass {
+    type Err = Error;
+
+    /// Calls `uform_gpu_class_from_name`.
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(text, uform_gpu_class_from_name, uform_gpu_class_name, GPUClass::from_raw)
+    }
+}
+
+/// The GPU vendors one binary drives at once.
+///
+/// Mirrors `uform_gpu_vendor_t`.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
+pub enum GPUVendor {
+    /// NVIDIA, through the CUDA driver.
+    Nvidia = 1,
+    /// AMD, through the HIP runtime.
+    Amd = 2,
+    /// Apple, through Metal.
+    Apple = 3,
+}
+
+impl GPUVendor {
+    fn from_raw(value: uform_gpu_vendor_t) -> Option<Self> {
+        match value {
+            1 => Some(GPUVendor::Nvidia),
+            2 => Some(GPUVendor::Amd),
+            3 => Some(GPUVendor::Apple),
+            _ => None,
+        }
+    }
+}
+
+/// One GPU as UForm numbers it: its position in what [`gpu_devices`] lists is the ordinal every
+/// VRAM placement names it by.
+///
+/// Mirrors `uform_gpu_device_t`.
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+pub struct GPUDevice(uform_gpu_device_t);
+
+impl Default for GPUDevice {
+    fn default() -> Self {
+        GPUDevice(uform_gpu_device_t {
+            vendor: 0,
+            vendor_ordinal: 0,
+            gpu_class: 0,
+            compute_units: 0,
+            memory_bytes: 0,
+            name: [0; 64],
+        })
+    }
+}
+
+impl GPUDevice {
+    /// The vendor whose runtime drives the device.
+    pub fn vendor(&self) -> Option<GPUVendor> { GPUVendor::from_raw(self.0.vendor) }
+
+    /// The device's ordinal in its vendor's runtime, as `nvidia-smi` or `rocm-smi` list it.
+    pub fn vendor_ordinal(&self) -> u32 { self.0.vendor_ordinal }
+
+    /// The class whose kernels run on it.
+    pub fn gpu_class(&self) -> Option<GPUClass> { GPUClass::from_raw(self.0.gpu_class) }
+
+    /// Streaming multiprocessors or compute units.
+    pub fn compute_units(&self) -> u32 { self.0.compute_units }
+
+    /// Device memory in bytes.
+    pub fn memory_bytes(&self) -> u64 { self.0.memory_bytes }
+
+    /// The vendor's own name for the device, cut before a character the truncation split.
+    pub fn name(&self) -> &str {
+        // Safety: `c_char` and `u8` share size and alignment, so the name reads as bytes in place.
+        let bytes = unsafe { core::slice::from_raw_parts(self.0.name.as_ptr().cast::<u8>(), self.0.name.len()) };
+        let name = &bytes[..bytes.iter().position(|&byte| byte == 0).unwrap_or(bytes.len())];
+        match core::str::from_utf8(name) {
+            Ok(name) => name,
+            Err(error) => unsafe { core::str::from_utf8_unchecked(&name[..error.valid_up_to()]) },
+        }
+    }
+}
+
+impl fmt::Debug for GPUDevice {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GPUDevice")
+            .field("vendor", &self.vendor())
+            .field("vendor_ordinal", &self.vendor_ordinal())
+            .field("gpu_class", &self.gpu_class())
+            .field("compute_units", &self.compute_units())
+            .field("memory_bytes", &self.memory_bytes())
+            .field("name", &self.name())
+            .finish()
+    }
+}
+
+/// Lists every GPU this process can drive into `devices`, NVIDIA devices first, then AMD, and
+/// answers how many there are, which may exceed what `devices` holds.
+///
+/// A vendor this build does not compile, or whose runtime is absent, lists no devices, so a machine
+/// without GPUs answers zero.
+///
+/// Calls `uform_gpu_devices`.
+pub fn gpu_devices(devices: &mut [GPUDevice]) -> Result<usize> {
+    let mut count = 0;
+    let mut outcome = uform_outcome_t::default();
+    unsafe {
+        uform_gpu_devices(&mut uform_gpu_devices_t {
+            outcome: &mut outcome,
+            devices: devices.as_mut_ptr().cast(),
+            devices_capacity: devices.len(),
+            devices_count: &mut count,
+        })
+    };
+    check(outcome).map(|()| count)
+}
+
+// endregion: Classes
+
 // region: Rows
 
 /// Borrows `length` values a finished call wrote into a host arena; a call that wrote none may
@@ -774,23 +1047,75 @@ impl<'arena> RowsTape<'arena> {
     }
 }
 
+/// Values a call wrote into the arena it borrows, a ragged run per item, end to end, with one more
+/// offset than items.
+///
+/// Mirrors `uform_tape_view_t`.
+pub struct Tape<'arena> {
+    pub(crate) arena: &'arena Arena,
+    pub(crate) view: Exported<uform_tape_view_t>,
+    pub(crate) count: usize,
+}
+
+impl<'arena> Tape<'arena> {
+    /// Items the call wrote.
+    pub fn count(&self) -> usize { self.count }
+
+    /// The scalar type the values are.
+    pub fn scalar(&self) -> Option<Scalar> { Scalar::from_raw(self.view.0.scalar) }
+
+    /// The call's count plus one non-decreasing offsets, in values, refused with [`Status::Device`]
+    /// over device memory.
+    pub fn offsets(&self) -> Result<&'arena [usize]> {
+        self.arena.host()?;
+        exported_slice(self.view.0.offsets, self.count + 1)
+    }
+
+    /// Every item's values end to end, refused with [`Status::InvalidArgument`] when the tape holds
+    /// another scalar type, and with [`Status::Device`] over device memory.
+    pub fn values<Value: Element>(&self) -> Result<&'arena [Value]> {
+        let length = self.offsets()?.last().copied().unwrap_or(0);
+        if self.scalar() != Some(Value::SCALAR) {
+            return Err(fail(Status::InvalidArgument, "the tape holds another scalar type"));
+        }
+        exported_slice(self.view.0.data.cast::<Value>(), length)
+    }
+
+    /// The values of one item, refused with [`Status::InvalidArgument`] when `item` is not below
+    /// [`Tape::count`] or the tape holds another scalar type, and with [`Status::Device`] over
+    /// device memory.
+    pub fn item<Value: Element>(&self, item: usize) -> Result<&'arena [Value]> {
+        let offsets = self.offsets()?;
+        let (Some(&start), Some(&end)) = (offsets.get(item), offsets.get(item + 1)) else {
+            return Err(fail(Status::InvalidArgument, "the item is not below the call's count"));
+        };
+        self.values()?
+            .get(start..end)
+            .ok_or(fail(Status::Internal, "the library exported offsets past its values"))
+    }
+}
+
 // endregion: Rows
 
 // region: Placements
 
-/// The memory domains a RAM placement or executor names.
-pub(crate) fn ram_options(memory_domains: &[i32]) -> uform_ram_options_t {
+/// The memory domains a RAM placement or executor names, and the class it pins; `None` derives the
+/// CPU's own.
+pub(crate) fn ram_options(memory_domains: &[i32], cpu_class: Option<CPUClass>) -> uform_ram_options_t {
     uform_ram_options_t {
         memory_domains: memory_domains.as_ptr(),
         memory_domains_count: memory_domains.len(),
+        cpu_class: cpu_class.map_or(0, |cpu_class| cpu_class as uform_cpu_class_t),
     }
 }
 
-/// The devices a VRAM placement or executor names.
-pub(crate) fn vram_options(devices: &[i32]) -> uform_vram_options_t {
+/// The devices a VRAM placement or executor names, and the class it pins; `None` derives the
+/// devices' own.
+pub(crate) fn vram_options(devices: &[i32], gpu_class: Option<GPUClass>) -> uform_vram_options_t {
     uform_vram_options_t {
         devices: devices.as_ptr(),
         devices_count: devices.len(),
+        gpu_class: gpu_class.map_or(0, |gpu_class| gpu_class as uform_gpu_class_t),
     }
 }
 
@@ -983,17 +1308,23 @@ impl Executor {
     /// Spawns host threads for RAM-resident models, interleaved across the compute domains local to
     /// `memory_domains`, which is the same list the models were loaded with.
     ///
-    /// Zero `threads` takes 7/8 of the cores those domains carry.
+    /// Zero `threads` takes 7/8 of the cores those domains carry, and `cpu_class` pins the class
+    /// its calls dispatch as, where `None` derives the CPU's own.
     ///
     /// Calls `uform_executor_for_ram`.
-    pub fn for_ram(memory_domains: &[i32], threads: usize, deferred_limit: usize) -> Result<Self> {
+    pub fn for_ram(
+        memory_domains: &[i32],
+        cpu_class: Option<CPUClass>,
+        threads: usize,
+        deferred_limit: usize,
+    ) -> Result<Self> {
         let mut handle = ptr::null_mut();
         let mut outcome = uform_outcome_t::default();
         unsafe {
             uform_executor_for_ram(&mut uform_executor_for_ram_t {
                 executor: &mut handle,
                 outcome: &mut outcome,
-                ram: ram_options(memory_domains),
+                ram: ram_options(memory_domains, cpu_class),
                 threads,
                 deferred_limit,
             })
@@ -1009,13 +1340,18 @@ impl Executor {
     ///
     /// # Safety
     /// `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
-    pub unsafe fn on_pool(memory_domains: &[i32], pool: *mut c_void, deferred_limit: usize) -> Result<Self> {
+    pub unsafe fn on_pool(
+        memory_domains: &[i32],
+        cpu_class: Option<CPUClass>,
+        pool: *mut c_void,
+        deferred_limit: usize,
+    ) -> Result<Self> {
         let mut handle = ptr::null_mut();
         let mut outcome = uform_outcome_t::default();
         uform_executor_on_pool(&mut uform_executor_on_pool_t {
             executor: &mut handle,
             outcome: &mut outcome,
-            ram: ram_options(memory_domains),
+            ram: ram_options(memory_domains, cpu_class),
             pool,
             deferred_limit,
         });
@@ -1026,8 +1362,10 @@ impl Executor {
     /// Opens one submission stream on every named device, or borrows the caller's, all of them
     /// driven by whichever host thread submits - which is why this takes no thread count.
     ///
-    /// `streams` is empty, or holds one CUDA stream per device in `devices` order. Zero
-    /// `scratch_limit` lets scratch grow as batches ask.
+    /// `devices` are positions in what [`gpu_devices`] lists, and `gpu_class` pins the class every
+    /// one of them dispatches as, where `None` derives theirs. `streams` is empty, or holds one
+    /// CUDA stream per device in `devices` order. Zero `scratch_limit` lets scratch grow as batches
+    /// ask.
     ///
     /// Calls `uform_executor_for_vram`.
     ///
@@ -1035,6 +1373,7 @@ impl Executor {
     /// Every stream must be a live CUDA stream on its device that outlives the executor.
     pub unsafe fn for_vram(
         devices: &[i32],
+        gpu_class: Option<GPUClass>,
         streams: &[*mut c_void],
         scratch_limit: usize,
         deferred_limit: usize,
@@ -1047,7 +1386,7 @@ impl Executor {
         uform_executor_for_vram(&mut uform_executor_for_vram_t {
             executor: &mut handle,
             outcome: &mut outcome,
-            vram: vram_options(devices),
+            vram: vram_options(devices, gpu_class),
             // The C side reads one stream per device from any non-null pointer.
             streams: match streams.is_empty() {
                 true => ptr::null(),
@@ -1507,7 +1846,7 @@ mod tests {
     fn arenas_live_where_their_executor_computes() -> Result<()> {
         assert!(Arena::new()?.host().is_ok());
 
-        let executor = Executor::for_ram(&[], 1, 0)?;
+        let executor = Executor::for_ram(&[], None, 1, 0)?;
         let placed = Arena::new_in(&executor)?;
         drop(executor);
         assert!(placed.host().is_ok(), "an arena outlives its executor");
@@ -1526,10 +1865,36 @@ mod tests {
 
     #[test]
     fn executors_report_what_this_build_lacks() {
-        let pooled = unsafe { Executor::on_pool(&[], ptr::null_mut(), 0) };
+        let pooled = unsafe { Executor::on_pool(&[], None, ptr::null_mut(), 0) };
         assert_eq!(pooled.unwrap_err().status, Status::Unsupported);
-        let mismatched = unsafe { Executor::for_vram(&[0, 1], &[ptr::null_mut()], 0, 0) };
+        let mismatched = unsafe { Executor::for_vram(&[0, 1], None, &[ptr::null_mut()], 0, 0) };
         assert_eq!(mismatched.unwrap_err().status, Status::ShapeMismatch);
+    }
+
+    #[test]
+    fn classes_round_trip_through_the_library() {
+        assert_eq!(CPUClass::IntelHaswell.to_string(), "intel-haswell");
+        assert_eq!("wasm64-extended".parse(), Ok(CPUClass::Wasm64Extended));
+        assert_eq!(GPUClass::NvidiaHopper.to_string(), "nvidia-hopper");
+        assert_eq!("apple-metal10".parse(), Ok(GPUClass::AppleMetal10));
+        assert!("unknown".parse::<CPUClass>().is_err());
+        assert!("intel".parse::<GPUClass>().is_err());
+        assert_eq!(CPUClass::from_raw(0), None);
+        assert_eq!(GPUClass::from_raw(13), None);
+    }
+
+    /// A machine without GPUs, or a build without their vendors, lists none and still succeeds.
+    #[test]
+    fn listed_devices_never_outnumber_their_count() -> Result<()> {
+        assert_eq!(core::mem::offset_of!(uform_gpu_device_t, name), 24);
+        assert_eq!(core::mem::size_of::<GPUDevice>(), 88);
+        let mut devices = [GPUDevice::default(); 4];
+        let count = gpu_devices(&mut devices)?;
+        assert_eq!(gpu_devices(&mut [])?, count);
+        for device in &devices[..count.min(devices.len())] {
+            assert!(device.vendor().is_some() && !device.name().is_empty(), "{device:?}");
+        }
+        Ok(())
     }
 
     #[test]
