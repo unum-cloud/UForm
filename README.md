@@ -265,7 +265,7 @@ Each load packs its weights for one CPU or GPU class, the hardware's own or one 
 
 ### Optimizing via Adafactor (the Sole Optimizer)
 
-UForm trains exclusively with a custom CUDA [Adafactor](https://arxiv.org/abs/1804.04235) implementation in [`optimizer.hpp`](include/uform/core/optimizer.hpp).
+UForm trains exclusively with a custom CUDA [Adafactor](https://arxiv.org/abs/1804.04235) implementation in [`optimizer.hpp`](include/uform/train/optimizer.hpp).
 Neither [Lion](https://arxiv.org/abs/2302.06675) nor [AdamW](https://arxiv.org/abs/1711.05101) ships in the stack; both appear below only as ablation baselines.
 Lion is hyperparameter-economical — two betas, no second-moment state — but its sign-only update $\mathrm{sign}(\mathrm{EMA}(g))$ discards gradient _magnitude_ and steps every parameter by the same amount.
 On a unit-RMSNorm encoder that is fatal: the variance-destroying low-rank direction costs the optimizer no more than an informative one, so the pooled embedding slides into rank collapse.
@@ -359,11 +359,11 @@ It prints each group's negative log-likelihood and the top-choice calibration er
 uform/
 ├── c/                the C ABI in uform/*.h, shared by every binding, and its test
 ├── include/uform/    the templates and models of every component, one folder per namespace
-│   ├── core/         device memory, batches, streams, mesh, transports, model cells, checkpoints
-│   ├── encoder/      the encoder towers and kits, their geometry and entries
+│   ├── utilities/    vocabulary, devices, schedules, mesh, collectives, checkpoints
+│   ├── encoder/      the encoder towers and kits, their geometry, entries, batches and tower kernels
 │   ├── media/        image, video and audio decoding on the host
 │   ├── loaders/      storage sessions, shard readers, and GPU image, video and audio decode
-│   └── train/        the composition of a training run
+│   └── train/        the training engine: cells, losses, optimizer and trainer
 ├── src/              the instantiations, the dispatch and the per-class units behind the C ABI
 │   ├── *.cpp         the verbs of each header: types, model, encode and train
 │   ├── encoder/      one unit per CPU and GPU class, and each vendor's kernels

@@ -5,9 +5,9 @@
  *  @brief Two members staging a multimem window, reading each other's after a domain barrier, and
  *      restaging it in the next step.
  *
- *  `multimem_domain_t` from `src/core/multimem_collectives.cuh` gives every consumer a window in
- *  each member's replica, and the consumers of `src/core/contrastive_segments.cu`,
- *  `src/core/multimodal_batch.cu` and `src/core/optimizer.cu` share one shape: stage into the own
+ *  `multimem_domain_t` from `include/uform/utilities/multimem_collectives.cuh` gives every consumer a window in
+ *  each member's replica, and the consumers of `src/train/contrastive_segments.cu`,
+ *  `src/encoder/multimodal_batch.cu` and `src/train/optimizer.cu` share one shape: stage into the own
  *  window, cross the domain barrier, read the peers' windows. The next step stages into the same
  *  window, so some barrier must separate a peer's reads from the restage. The barrier is the
  *  counting one of `multimem_barrier_peer_kernel_`: every arrival adds one to every member's flag,

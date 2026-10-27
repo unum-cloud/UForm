@@ -8,16 +8,16 @@
  *  `probe_footprint_` from `src/train/trainer.cu:157` builds a probe trainer, takes one step, waits
  *  for its own streams in `trainer_t::synchronize` at `:691`, and destroys the probe on return,
  *  three times over. Each generation's queue pair is wired by `infiniband_reach_t::make_` of
- *  `src/core/infiniband_collectives.cu`, which publishes its coordinates and awaits the partner's
+ *  `src/utilities/infiniband_collectives.cu`, which publishes its coordinates and awaits the partner's
  *  armed one at `:511`, so a first write always finds the partner's queue pair. Every post kernel
  *  writes the payload, then a signaled flag, and drains that one completion with
- *  `infiniband_drain_one` of `src/core/infiniband_collectives.cuh:979`; on a Reliable Connection
+ *  `infiniband_drain_one` of `include/uform/utilities/infiniband_collectives.cuh:979`; on a Reliable Connection
  *  the completion is the partner's acknowledgement, so the writer's synchronize returns only once
  *  its own writes are acknowledged. The partner's NIC sends that acknowledgement on its own time
  *  after the flag landed, and a responder that destroyed its queue pair first leaves the writer to
  *  retry into a queue pair that no longer exists.
  *
- *  The host barrier is `mesh_topology_t::barrier` of `src/core/mesh.hpp:553`, keyed per generation.
+ *  The host barrier is `mesh_topology_t::barrier` of `include/uform/utilities/mesh.hpp:553`, keyed per generation.
  *  `probe_footprint_` wires the mixer's all-gathers after its synchronize, and that publish and
  *  await of every partner's coordinates acts as the same barrier before the probe is destroyed.
  *

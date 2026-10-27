@@ -47,8 +47,8 @@
 
 #include "uform/types.h" // `uform_version_name`, `uform_capabilities_available`, `uform_gpu_devices`
 
-#include "uform/core/array.hpp" // `per_gpu_array` — the devices
-#include "uform/core/types.hpp" // `format_at_t`, `format_into_t`, `sz`, the scalar aliases
+#include "uform/utilities/array.hpp" // `per_gpu_array` — the devices
+#include "uform/utilities/types.hpp" // `format_at_t`, `format_into_t`, `sz`, the scalar aliases
 
 /** Prints a StringZilla view as the text it spans. */
 template <>
@@ -68,7 +68,7 @@ struct fmt::formatter<ashvardanian::stringzilla::string_t> : fmt::formatter<std:
 
 namespace unum::uform::test {
 
-using namespace unum::uform::core;
+using namespace unum::uform::utilities;
 
 /** The reason every case needing a GPU skips with on a machine that shows none. */
 inline constexpr char const *no_cuda_device_k = "no CUDA device detected";

@@ -31,12 +31,12 @@
 
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
-#include "uform/core/array.hpp"             // `stack_array` — the host-oracle and staging scratch
-#include "uform/core/gpu_allocators.hpp"    // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`, the tensor aliases
-#include "uform/core/mesh.hpp"              // `mesh_topology_t`, `host_domain_index_from_environment`
-#include "uform/core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, the shape, `fill_coords`, `modality_t`
-#include "uform/core/schedule.cuh"          // `gpu_stream_t`, `copy_host_to_device`, `copy_device_to_host`
-#include "uform/core/types.hpp"             // `splitmix64_hash_t`, `epoch_permutation`, `data_epoch_t`, `to_string`
+#include "uform/utilities/array.hpp"              // `stack_array` — the host-oracle and staging scratch
+#include "uform/utilities/vram_nvidia_device.hpp" // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`, the tensor aliases
+#include "uform/utilities/mesh.hpp"               // `mesh_topology_t`, `host_domain_index_from_environment`
+#include "uform/encoder/multimodal_batch.cuh"     // `multimodal_batch_on_gpu_t`, the shape, `fill_coords`, `modality_t`
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `copy_host_to_device`, `copy_device_to_host`
+#include "uform/utilities/types.hpp"        // `splitmix64_hash_t`, `epoch_permutation`, `data_epoch_t`, `to_string`
 #include "uform/loaders/audio_loader.cuh"   // `decode_audios`, `cpu_decode_pool_t`
 #include "uform/loaders/dataset_shards.hpp" // `column_view_t`
 #include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
@@ -48,7 +48,14 @@
 
 #include "harness.hpp" // `test_suite_t`
 
-using namespace unum::uform::core;
+namespace ue = unum::uform::encoder;
+using ue::audio_batch_shape_t;
+using ue::image_batch_shape_t;
+using ue::modality_t;
+using ue::multimodal_batch_on_gpu_t;
+using ue::multimodal_batch_shape_t;
+using ue::video_batch_shape_t;
+using namespace unum::uform::utilities;
 using namespace unum::uform::loaders;
 using namespace unum::uform::test;
 namespace um = unum::uform::media;

@@ -11,8 +11,9 @@
 #include "uform/media/planning.hpp"
 
 namespace um = unum::uform::media;
+namespace uu = unum::uform::utilities;
 using namespace um;
-using uc::divide_round_up;
+using uu::divide_round_up;
 
 patch_grid_t um::image_patch_grid(u32_t columns, image_extent_t native) noexcept {
     f64_t const aspect = static_cast<f64_t>(std::max<u32_t>(native.width, 1u)) /

@@ -21,18 +21,23 @@
 
 #include <cuda.h> // `cuInit`, `cuDeviceGetCount`, `cuStreamSynchronize`
 
-#include "uform/core/array.hpp"                  // `stack_array`
-#include "uform/core/gpu_allocators.hpp"         // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`
-#include "uform/core/infiniband_collectives.cuh" // `colocated_domain_t`
-#include "uform/core/mesh.hpp"                   // `mesh_topology_t`, `host_domain_index_from_environment`
-#include "uform/core/multimem_collectives.cuh"   // `multimem_domain_t`
-#include "uform/core/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t`, the shape, the mixer
-#include "uform/core/schedule.cuh"               // `gpu_stream_t`, `switch_to_gpu_t`, `copy_host_to_device`
-#include "uform/core/types.hpp"                  // `epoch_permutation`, `data_epoch_t`, `token_id_t`, `modality_t`
+#include "uform/utilities/array.hpp"                  // `stack_array`
+#include "uform/utilities/vram_nvidia_device.hpp"     // `gpu_arena_t`, `gpu_arena_alloc_t`, `pinned_alloc`
+#include "uform/utilities/infiniband_collectives.cuh" // `colocated_domain_t`
+#include "uform/utilities/mesh.hpp"                   // `mesh_topology_t`, `host_domain_index_from_environment`
+#include "uform/utilities/multimem_collectives.cuh"   // `multimem_domain_t`
+#include "uform/encoder/multimodal_batch.cuh"         // `multimodal_batch_on_gpu_t`, the shape, the mixer
+#include "uform/utilities/vram_nvidia_schedule.cuh"   // `gpu_stream_t`, `switch_to_gpu_t`, `copy_host_to_device`
+#include "uform/utilities/types.hpp"                  // `epoch_permutation`, `data_epoch_t`, `token_id_t`, `modality_t`
 
 #include "harness.hpp" // `test_suite_t`
 
-using namespace unum::uform::core;
+namespace ue = unum::uform::encoder;
+using ue::modality_t;
+using ue::multimodal_batch_mixer_t;
+using ue::multimodal_batch_on_gpu_t;
+using ue::multimodal_batch_shape_t;
+using namespace unum::uform::utilities;
 using namespace unum::uform::test;
 
 /** Segments per member — the routing axis; small, so the whole world permutation is easy to mirror. */

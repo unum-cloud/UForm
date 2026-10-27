@@ -20,9 +20,10 @@
 
 #include "uform/loaders/paired_loader.cuh"
 
-namespace uc = unum::uform::core;
+namespace ue = unum::uform::encoder;
 namespace ul = unum::uform::loaders;
-using namespace uc;
+using namespace ue;
+using namespace unum::uform::utilities;
 using namespace ul;
 
 /** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay

@@ -13,9 +13,10 @@
 #include "uform/encoder/entries.hpp" // `rope_angles_t`
 #include "uform/encoder/geometry.hpp"
 
+namespace uu = unum::uform::utilities;
 using namespace unum::uform::encoder;
-using uc::expected_t;
-using uc::status_t;
+using uu::expected_t;
+using uu::status_t;
 
 /** Parse @p text whole into @p value , integral or floating. */
 template <typename value_type_>
@@ -27,7 +28,7 @@ template <typename value_type_>
 
 /** Read the required metadata @p key into @p value . */
 template <typename value_type_>
-[[nodiscard]] static expected_t read_(uc::checkpoint_to_load_t const &checkpoint, sz::string_view_t key,
+[[nodiscard]] static expected_t read_(uu::checkpoint_to_load_t const &checkpoint, sz::string_view_t key,
                                       value_type_ &value) noexcept {
     sz::string_view_t const text = checkpoint.metadata(key);
     if (text.empty()) return expected_t::fail(status_t::invalid_input_k, "the checkpoint misses the {} key", key);
@@ -38,7 +39,7 @@ template <typename value_type_>
 
 /** Read the required comma-separated metadata @p key into exactly as many floats as @p values
  *  holds. */
-[[nodiscard]] static expected_t read_list_(uc::checkpoint_to_load_t const &checkpoint, sz::string_view_t key,
+[[nodiscard]] static expected_t read_list_(uu::checkpoint_to_load_t const &checkpoint, sz::string_view_t key,
                                            std::span<f32_t> values) noexcept {
     sz::string_view_t remaining = checkpoint.metadata(key);
     if (remaining.empty()) return expected_t::fail(status_t::invalid_input_k, "the checkpoint misses the {} key", key);
@@ -55,7 +56,7 @@ template <typename value_type_>
     return {};
 }
 
-expected<geometry_t> geometry_t::from(uc::checkpoint_to_load_t const &checkpoint) noexcept {
+expected<geometry_t> geometry_t::from(uu::checkpoint_to_load_t const &checkpoint) noexcept {
     using result_t = expected<geometry_t>;
     geometry_t geometry;
     expected_t read = read_(checkpoint, "depth", geometry.depth);
@@ -141,7 +142,7 @@ expected<rope_angles_t> rope_angles_t::make(u32_t positions, u32_t temporal, u32
         for (u32_t position = 0; position != positions; ++position)
             for (u32_t pair = 0; pair != angles.pairs_[axis]; ++pair)
                 angles.angles_[offset++] = static_cast<f32_t>(position) *
-                                           static_cast<f32_t>(std::pow(static_cast<uc::f64_t>(base),
+                                           static_cast<f32_t>(std::pow(static_cast<uu::f64_t>(base),
                                                                        -2.0 * pair / denominators[axis]));
     return result_t {std::move(angles)};
 }

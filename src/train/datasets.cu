@@ -16,7 +16,19 @@
 #include "uform/train/datasets.hpp"
 
 namespace fu = ashvardanian::forkunion;
-using namespace unum::uform::core;
+namespace ue = unum::uform::encoder;
+using ue::audio_batch_shape_t;
+using ue::byte_pad_k;
+using ue::image_batch_shape_t;
+using ue::late_interaction_side_t;
+using ue::modality_t;
+using ue::multimodal_batch_mixer_t;
+using ue::multimodal_batch_on_gpu_t;
+using ue::multimodal_batch_shape_t;
+using ue::pad_choices;
+using ue::segment_role_t;
+using ue::video_batch_shape_t;
+using namespace unum::uform::utilities;
 using namespace unum::uform::loaders;
 using namespace unum::uform::train;
 

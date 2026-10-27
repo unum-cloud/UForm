@@ -59,10 +59,10 @@ struct vram_nvidia_entries_kit_t {
     static nk_status_t describe(std::size_t vendor_ordinal, device_description_t &description) noexcept;
 
     /** @p source into @p target , as long, either side in host or device memory. */
-    static nk_status_t copy(uc::bytes_span_t target, uc::bytes_view_t source, nk_stream_t stream) noexcept;
+    static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, nk_stream_t stream) noexcept;
 
     /** Zeros into device memory at @p target . */
-    static nk_status_t zero(uc::bytes_span_t target, nk_stream_t stream) noexcept;
+    static nk_status_t zero(uu::bytes_span_t target, nk_stream_t stream) noexcept;
 
     /** Prefix sums of @p lengths into @p packed_offsets @b [segments+1] , and
      *  @c pool_offsets[s]=s over @b [segments+1] , the one query row per item the pool attends
@@ -95,8 +95,8 @@ struct vram_nvidia_entries_kit_t {
 struct vram_amd_entries_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
     static nk_status_t describe(std::size_t vendor_ordinal, device_description_t &description) noexcept;
-    static nk_status_t copy(uc::bytes_span_t target, uc::bytes_view_t source, nk_stream_t stream) noexcept;
-    static nk_status_t zero(uc::bytes_span_t target, nk_stream_t stream) noexcept;
+    static nk_status_t copy(uu::bytes_span_t target, uu::bytes_view_t source, nk_stream_t stream) noexcept;
+    static nk_status_t zero(uu::bytes_span_t target, nk_stream_t stream) noexcept;
     static nk_status_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets, u32r1_span_t pool_offsets,
                                    nk_stream_t stream) noexcept;
     static nk_status_t fill_coords(segment_layout_t layout, nk::tensor_view<u16_t, 2> image_shapes,

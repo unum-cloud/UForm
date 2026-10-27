@@ -58,12 +58,12 @@
 #include "uform/model.h"
 #include "uform/types.h"
 
-#include "uform/core/checkpoint.hpp" // `checkpoint_to_load_t`, `checkpoint_to_save_t` — the calibrated copy
-#include "uform/core/types.hpp"      // `divide_round_up`
+#include "uform/utilities/safetensors_format.hpp" // `checkpoint_to_load_t`, `checkpoint_to_save_t` — the calibrated copy
+#include "uform/utilities/types.hpp"              // `divide_round_up`
 
 namespace fu = ashvardanian::forkunion;
 namespace st = ashvardanian::smashtable;
-namespace uc = unum::uform::core;
+namespace uu = unum::uform::utilities;
 
 /** Append @p count trivially copyable @p items onto @p values , or report the refusal. */
 template <typename value_type_>
@@ -391,7 +391,7 @@ static constexpr std::size_t score_block_rows_k = 64;
                               items_count, capabilities, nullptr) != nk_success_k)
         return false;
     bool scored = true;
-    std::size_t const blocks_count = uc::divide_round_up(queries_count, score_block_rows_k);
+    std::size_t const blocks_count = uu::divide_round_up(queries_count, score_block_rows_k);
     pool.for_n_dynamic(blocks_count, [&](std::size_t block, fu::thread_in_domain_t at) noexcept {
         std::size_t const first = block * score_block_rows_k;
         std::size_t const count = std::min(score_block_rows_k, queries_count - first);
@@ -600,9 +600,9 @@ struct choices_t {
     std::size_t const items = held_out.states.count(), offered = held_out.targets.size();
     std::uint32_t groups = 1;
     for (std::uint32_t const group : held_out.groups) groups = std::max(groups, group + 1);
-    uc::expected<uc::checkpoint_to_load_t> source = uc::checkpoint_to_load_t::make(checkpoint_path);
+    uu::expected<uu::checkpoint_to_load_t> source = uu::checkpoint_to_load_t::make(checkpoint_path);
     if (!source) return fmt::println(stderr, "uform_eval: {}", std::string_view {source.description_}), false;
-    uc::f32r2_view_t const stored = source->float32("choices.inverse_temperatures");
+    uu::f32r2_view_t const stored = source->float32("choices.inverse_temperatures");
     double const scoring_beta = stored.empty() ? 1.0 : double(stored[0, 0]);
 
     st::basic_vector<double> logits, betas;
@@ -666,18 +666,18 @@ struct choices_t {
     if (st::failed(fitted.resize(st::assume_uninitialized, groups)))
         return fmt::println(stderr, "uform_eval: calibration staging failed"), false;
     for (std::uint32_t group = 0; group != groups; ++group) fitted[group] = float(betas[group]);
-    uc::checkpoint_to_save_t calibrated; // Float32 entries go first, packed ahead of the BFloat16 weights
-    uc::expected_t written = calibrated.insert("choices.inverse_temperatures",
-                                               uc::f32r2_view_t {fitted.data(), 1, groups});
-    for (uc::checkpoint_entry_t const &entry : source->entries())
-        if (written && entry.dtype == uc::checkpoint_dtype_t::f32_k &&
+    uu::checkpoint_to_save_t calibrated; // Float32 entries go first, packed ahead of the BFloat16 weights
+    uu::expected_t written = calibrated.insert("choices.inverse_temperatures",
+                                               uu::f32r2_view_t {fitted.data(), 1, groups});
+    for (uu::checkpoint_entry_t const &entry : source->entries())
+        if (written && entry.dtype == uu::checkpoint_dtype_t::f32_k &&
             entry.name.view() != "choices.inverse_temperatures")
             written = calibrated.insert(entry.name.view(), source->float32(entry.name.view()));
-    uc::checkpoint_to_load_t const &weights = *source;
-    for (uc::checkpoint_entry_t const &entry : weights.entries())
-        if (written && entry.dtype == uc::checkpoint_dtype_t::bf16_k)
+    uu::checkpoint_to_load_t const &weights = *source;
+    for (uu::checkpoint_entry_t const &entry : weights.entries())
+        if (written && entry.dtype == uu::checkpoint_dtype_t::bf16_k)
             written = calibrated.insert(entry.name.view(), weights[entry.name.view()]);
-    for (uc::checkpoint_metadata_t const &pair : weights.metadata())
+    for (uu::checkpoint_metadata_t const &pair : weights.metadata())
         if (written) written = calibrated.metadata(pair.key.view(), pair.value.view());
     if (written) written = calibrated.save(output_path);
     if (!written) return fmt::println(stderr, "uform_eval: {}", std::string_view {written.description_}), false;

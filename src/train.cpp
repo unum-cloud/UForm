@@ -23,10 +23,10 @@
 using namespace unum::uform;
 namespace ut = unum::uform::train;
 
-using core::bf16_t;
-using core::f32_t;
-using core::modality_t;
-using core::u32_t;
+using utilities::bf16_t;
+using utilities::f32_t;
+using encoder::modality_t;
+using utilities::u32_t;
 
 /** What @c uform_mesh_t owns: the bootstrapped mesh over its executor's devices, and how many trainers borrow it. */
 struct uform_mesh_handle_t {
@@ -50,12 +50,12 @@ struct uform_trainer_handle_t {
     /** One step's modalities and sides in the engine's spelling, and its embeddings before they
      *  land in the arena. */
     st::basic_vector<modality_t> modalities;
-    st::basic_vector<core::late_interaction_side_t> sides;
+    st::basic_vector<encoder::late_interaction_side_t> sides;
     st::basic_vector<b8_t> embeddings;
 };
 
 /** The C status a training failure crosses into: an objective or a modality the run left out is unsupported. */
-[[nodiscard]] static uform_status_t train_status_of(core::expected_t const &failure) noexcept {
+[[nodiscard]] static uform_status_t train_status_of(utilities::expected_t const &failure) noexcept {
     return status_of(failure.status_);
 }
 
@@ -83,15 +83,15 @@ struct uform_trainer_handle_t {
 }
 
 /** The static message an outcome carries for a fault a GPU recorded before it trapped. */
-[[nodiscard]] static char const *fault_message(core::gpu_fault_code_t code) noexcept {
+[[nodiscard]] static char const *fault_message(utilities::gpu_fault_code_t code) noexcept {
     switch (code) {
-    case core::gpu_fault_code_t::none_k: return nullptr;
-    case core::gpu_fault_code_t::barrier_deadline_k: return "A GPU waited past its deadline at a multimem barrier";
-    case core::gpu_fault_code_t::flag_deadline_k: return "A GPU waited past its deadline for an InfiniBand round";
-    case core::gpu_fault_code_t::completion_deadline_k:
+    case utilities::gpu_fault_code_t::none_k: return nullptr;
+    case utilities::gpu_fault_code_t::barrier_deadline_k: return "A GPU waited past its deadline at a multimem barrier";
+    case utilities::gpu_fault_code_t::flag_deadline_k: return "A GPU waited past its deadline for an InfiniBand round";
+    case utilities::gpu_fault_code_t::completion_deadline_k:
         return "A GPU waited past its deadline for an InfiniBand completion";
-    case core::gpu_fault_code_t::completion_error_k: return "An InfiniBand send completed with an error";
-    case core::gpu_fault_code_t::nonfinite_signal_k: return "A telemetry probe sampled a non-finite value";
+    case utilities::gpu_fault_code_t::completion_error_k: return "An InfiniBand send completed with an error";
+    case utilities::gpu_fault_code_t::nonfinite_signal_k: return "A telemetry probe sampled a non-finite value";
     }
     return nullptr;
 }
@@ -162,14 +162,14 @@ static constexpr failure_messages_t save_failures_k {
 };
 
 /** The message of @p messages naming @p failure 's status. */
-[[nodiscard]] static char const *message_of(core::expected_t const &failure,
+[[nodiscard]] static char const *message_of(utilities::expected_t const &failure,
                                             failure_messages_t const &messages) noexcept {
     switch (failure.status_) {
-    case core::status_t::bad_alloc_k: return messages.out_of_memory;
-    case core::status_t::invalid_input_k: return messages.invalid;
-    case core::status_t::shape_unsupported_k: return messages.unsupported;
-    case core::status_t::cuda_error_k: return messages.device;
-    case core::status_t::io_error_k: return messages.io;
+    case utilities::status_t::bad_alloc_k: return messages.out_of_memory;
+    case utilities::status_t::invalid_input_k: return messages.invalid;
+    case utilities::status_t::shape_unsupported_k: return messages.unsupported;
+    case utilities::status_t::cuda_error_k: return messages.device;
+    case utilities::status_t::io_error_k: return messages.io;
     default: return messages.other;
     }
 }
@@ -180,11 +180,11 @@ static constexpr failure_messages_t save_failures_k {
 /** Publish a training @p failure with the message of @p messages naming its status, or, when
  *  the device failed, with the first fault a GPU of @p mesh recorded before it trapped; a null
  *  @p mesh , one that dies with the call, has none. */
-static bool propagate_train_error(core::expected_t const &failure, uform_mesh_handle_t *mesh, uform_outcome_t *outcome,
-                                  failure_messages_t const &messages) noexcept {
+static bool propagate_train_error(utilities::expected_t const &failure, uform_mesh_handle_t *mesh,
+                                  uform_outcome_t *outcome, failure_messages_t const &messages) noexcept {
     char const *message = message_of(failure, messages);
-    if (failure.status_ == core::status_t::cuda_error_k && mesh)
-        for (core::gpu_fault_t const &fault : mesh->mesh->topology.faults())
+    if (failure.status_ == utilities::status_t::cuda_error_k && mesh)
+        for (utilities::gpu_fault_t const &fault : mesh->mesh->topology.faults())
             if (char const *const recorded = fault_message(fault.code)) {
                 message = recorded;
                 break;
@@ -214,9 +214,9 @@ static bool propagate_train_error(core::expected_t const &failure, uform_mesh_ha
     engine.job = text_of(options.job);
     engine.timeout_seconds = options.timeout_seconds > 0.0 ? options.timeout_seconds : 120.0;
     engine.capabilities = capabilities_of(executor);
-    if (core::expected_t const joined = ut::mesh_t::make(*handle->mesh, engine, devices); !joined) {
+    if (utilities::expected_t const joined = ut::mesh_t::make(*handle->mesh, engine, devices); !joined) {
         // The engine refuses a world its processes disagree on, as unsupported.
-        uform_status_t const status = joined.status_ == core::status_t::shape_unsupported_k
+        uform_status_t const status = joined.status_ == utilities::status_t::shape_unsupported_k
                                           ? uform_status_config_mismatch_k
                                           : train_status_of(joined);
         return propagate_error(status, outcome, message_of(joined, bootstrap_failures_k)), nullptr;
@@ -226,12 +226,12 @@ static bool propagate_train_error(core::expected_t const &failure, uform_mesh_ha
 }
 
 /** The engine's pair-loss form @p form names, or @p derived for its zero. */
-[[nodiscard]] static core::contrastive_pair_loss_form_t pair_loss_of(
-    uform_pair_loss_form_t form, core::contrastive_pair_loss_form_t derived) noexcept {
+[[nodiscard]] static ut::contrastive_pair_loss_form_t pair_loss_of(uform_pair_loss_form_t form,
+                                                                   ut::contrastive_pair_loss_form_t derived) noexcept {
     switch (form) {
-    case uform_pair_loss_form_balanced_k: return core::contrastive_pair_loss_form_t::balanced_k;
-    case uform_pair_loss_form_ranked_k: return core::contrastive_pair_loss_form_t::ranked_k;
-    case uform_pair_loss_form_sigmoid_k: return core::contrastive_pair_loss_form_t::sigmoid_k;
+    case uform_pair_loss_form_balanced_k: return ut::contrastive_pair_loss_form_t::balanced_k;
+    case uform_pair_loss_form_ranked_k: return ut::contrastive_pair_loss_form_t::ranked_k;
+    case uform_pair_loss_form_sigmoid_k: return ut::contrastive_pair_loss_form_t::sigmoid_k;
     default: return derived;
     }
 }
@@ -246,7 +246,7 @@ static bool propagate_train_error(core::expected_t const &failure, uform_mesh_ha
         return "The batch needs rows, segments and columns";
     if (!arguments.schedule.steps) return "The schedule needs steps";
     if (arguments.objective > uform_objective_joint_k) return "The objective is not one the engine trains";
-    if (arguments.contrastive.matryoshka_dimensions_count > core::max_matryoshka_prefixes_k ||
+    if (arguments.contrastive.matryoshka_dimensions_count > ut::max_matryoshka_prefixes_k ||
         (arguments.contrastive.matryoshka_dimensions_count && !arguments.contrastive.matryoshka_dimensions))
         return "The Matryoshka widths are at most eight, and present when counted";
     if (arguments.contrastive.pair_loss > uform_pair_loss_form_sigmoid_k ||
@@ -257,9 +257,9 @@ static bool propagate_train_error(core::expected_t const &failure, uform_mesh_ha
 
     config.depth = static_cast<u32_t>(arguments.depth);
     config.hidden = static_cast<u32_t>(arguments.hidden);
-    config.batch = core::multimodal_batch_shape_t {static_cast<u32_t>(batch.max_rows_per_device),
-                                                   static_cast<u32_t>(batch.max_segments_per_device),
-                                                   static_cast<u32_t>(batch.max_columns_per_row)};
+    config.batch = encoder::multimodal_batch_shape_t {static_cast<u32_t>(batch.max_rows_per_device),
+                                                      static_cast<u32_t>(batch.max_segments_per_device),
+                                                      static_cast<u32_t>(batch.max_columns_per_row)};
     config.batch.max_bags_per_gpu = static_cast<u32_t>(batch.max_bags_per_device);
     config.batch.max_choices_per_segment = static_cast<u32_t>(batch.max_choices_per_item);
     if (batch.image.patch_side)
@@ -296,9 +296,9 @@ static bool propagate_train_error(core::expected_t const &failure, uform_mesh_ha
     config.contrastive.temperature_groups = contrastive.temperature_groups
                                                 ? static_cast<u32_t>(contrastive.temperature_groups)
                                                 : 1u;
-    config.contrastive.pair_loss = pair_loss_of(contrastive.pair_loss, core::contrastive_pair_loss_form_t::sigmoid_k);
+    config.contrastive.pair_loss = pair_loss_of(contrastive.pair_loss, ut::contrastive_pair_loss_form_t::sigmoid_k);
     // Each form starts at its own logit scale: the sigmoid sum at SigLIP's β=10, b=−10.
-    bool const sigmoid = config.contrastive.pair_loss == core::contrastive_pair_loss_form_t::sigmoid_k;
+    bool const sigmoid = config.contrastive.pair_loss == ut::contrastive_pair_loss_form_t::sigmoid_k;
     config.contrastive.inverse_temperature = chosen(contrastive.inverse_temperature, sigmoid ? 10.0f : 1.0f);
     config.contrastive.bias = chosen(contrastive.bias, sigmoid ? -10.0f : 0.0f);
     config.contrastive.ambient_repulsion_weight = contrastive.negatives == uform_negatives_named_k
@@ -318,7 +318,7 @@ static bool propagate_train_error(core::expected_t const &failure, uform_mesh_ha
     config.late_interaction.max_document_tokens_per_gpu = static_cast<u32_t>(
         late_interaction.max_document_tokens_per_device);
     config.late_interaction.pair_loss = pair_loss_of(late_interaction.pair_loss,
-                                                     core::contrastive_pair_loss_form_t::ranked_k);
+                                                     ut::contrastive_pair_loss_form_t::ranked_k);
     config.choices.weight = arguments.choices.weight;
     config.choices.brier_weight = chosen(arguments.choices.brier_weight, 0.5f);
 
@@ -331,10 +331,10 @@ static bool propagate_train_error(core::expected_t const &failure, uform_mesh_ha
 }
 
 /** The C status a resume failure crosses into: a checkpoint of another geometry is a mismatch. */
-[[nodiscard]] static uform_status_t resume_status_of(core::expected_t const &failure) noexcept {
+[[nodiscard]] static uform_status_t resume_status_of(utilities::expected_t const &failure) noexcept {
     switch (failure.status_) {
-    case core::status_t::invalid_input_k:
-    case core::status_t::shape_unsupported_k: return uform_status_config_mismatch_k;
+    case utilities::status_t::invalid_input_k:
+    case utilities::status_t::shape_unsupported_k: return uform_status_config_mismatch_k;
     default: return status_of(failure.status_);
     }
 }
@@ -354,9 +354,9 @@ static bool propagate_train_error(core::expected_t const &failure, uform_mesh_ha
     std::size_t const bytes_per_value = scalar == uform_scalar_f32_k ? 4 : 2;
     if (scalar != uform_scalar_f32_k && scalar != uform_scalar_f16_k && scalar != uform_scalar_bf16_k)
         return propagate_error(uform_status_unsupported_layout_k, outcome, "Embeddings land as f32, f16 or bf16");
-    core::expected<core::bf16r2_view_t> pooled = handle.items->pooled(*handle.trainer);
+    utilities::expected<utilities::bf16r2_view_t> pooled = handle.items->pooled(*handle.trainer);
     if (!pooled) return propagate_error(status_of(pooled.status_), outcome, "The pooled vertices could not be read");
-    core::bf16r2_view_t const vertices = *pooled;
+    utilities::bf16r2_view_t const vertices = *pooled;
     std::size_t const hidden = vertices.extent(1), bytes = count * hidden * bytes_per_value;
     b8_t *const staging = handle.embeddings.data();
     for (std::size_t item = 0; item != count; ++item) {
@@ -372,8 +372,8 @@ static bool propagate_train_error(core::expected_t const &failure, uform_mesh_ha
     }
     void *const landed = memory.allocate(bytes ? bytes : 1);
     if (!landed) return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the embeddings");
-    core::switch_to_gpu_t gpu_scope {handle.trainer->streams[0]};
-    if (!gpu_scope.ok() || cuMemcpyHtoD(core::device_address(landed), staging, bytes) != CUDA_SUCCESS)
+    utilities::switch_to_gpu_t gpu_scope {handle.trainer->streams[0]};
+    if (!gpu_scope.ok() || cuMemcpyHtoD(utilities::device_address(landed), staging, bytes) != CUDA_SUCCESS)
         return propagate_error(uform_status_device_k, outcome, "The embeddings could not land in the arena");
     rows = {landed, hidden * bytes_per_value, hidden, scalar};
     return true;
@@ -399,12 +399,12 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t *arguments) {
         return propagate_error(uform_status_invalid_argument_k, outcome, "The mesh and the output are required"),
                void();
     finish_calls_using(arguments->mesh);
-    core::mesh_topology_t const &topology = arguments->mesh->mesh->topology;
-    core::mesh_shape_t const &shape = topology.shape;
+    utilities::mesh_topology_t const &topology = arguments->mesh->mesh->topology;
+    utilities::mesh_shape_t const &shape = topology.shape;
     st::basic_vector<i32_t> devices;
     if (!devices_of(arguments->mesh->executor, devices))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the devices"), void();
-    core::expected<core::multimem_tier_choice_t> tier = core::multimem_tier_choice_t::make(
+    utilities::expected<utilities::multimem_tier_choice_t> tier = utilities::multimem_tier_choice_t::make(
         shape.gpus_per_multimem_domain, devices);
     if (!tier)
         return propagate_error(status_of(tier.status_), outcome, "The multimem tier could not be probed"), void();
@@ -459,19 +459,19 @@ UFORM_EXPORT void uform_trainer_init_vram(uform_trainer_init_vram_t *arguments) 
     handle->items.reset(new (std::nothrow) ut::items_source_t {});
     if (!handle->trainer || !handle->items || !devices_of(executor, devices))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the trainer"), void();
-    if (core::expected_t const built = ut::trainer_t::make(*handle->trainer, *mesh_of(*handle).mesh, config, devices,
-                                                           ut::gpu_numerics_of(capabilities_of(executor)));
+    if (utilities::expected_t const built = ut::trainer_t::make(
+            *handle->trainer, *mesh_of(*handle).mesh, config, devices, ut::gpu_numerics_of(capabilities_of(executor)));
         !built)
         return propagate_train_error(built, arguments->mesh, outcome, build_failures_k), void();
     if (arguments->resume.length) {
-        if (core::expected_t const resumed = handle->trainer->resume(text_of(arguments->resume)); !resumed)
+        if (utilities::expected_t const resumed = handle->trainer->resume(text_of(arguments->resume)); !resumed)
             return propagate_error(resume_status_of(resumed), outcome, message_of(resumed, resume_failures_k)), void();
         std::size_t const tensors = handle->trainer->replicas[0].weights.size();
         progress_ticks_t ticks(arguments->progress, tensors);
         if (ticks(tensors) == continuation_t::cancel_k)
             return propagate_error(uform_status_cancelled_k, outcome, "The handler cancelled the resume"), void();
     }
-    if (core::expected_t const sourced = ut::items_source_t::make(*handle->items, *handle->trainer); !sourced)
+    if (utilities::expected_t const sourced = ut::items_source_t::make(*handle->items, *handle->trainer); !sourced)
         return propagate_train_error(sourced, arguments->mesh, outcome, source_failures_k), void();
     std::size_t const segments = devices.size() * config.batch.max_segments_per_gpu;
     if (st::failed(handle->modalities.resize(segments)) || st::failed(handle->sides.resize(segments)) ||
@@ -516,7 +516,7 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) {
     for (std::size_t item = 0; arguments->sides && item != count; ++item) {
         if (arguments->sides[item] > uform_late_interaction_side_query_and_document_k)
             return propagate_error(uform_status_invalid_argument_k, outcome, "An item's side is unrecognized"), void();
-        handle->sides[item] = static_cast<core::late_interaction_side_t>(arguments->sides[item]);
+        handle->sides[item] = static_cast<encoder::late_interaction_side_t>(arguments->sides[item]);
     }
     uform_tape_view_t const &choices = arguments->choices, &targets = arguments->choice_targets;
     if (choices.offsets && !config.chooses())
@@ -554,10 +554,11 @@ UFORM_EXPORT void uform_trainer_step(uform_trainer_step_t *arguments) {
                     edges_of(arguments->relations.repel, count),
                     edges_of(arguments->relations.ignore, count),
                     {handle->sides.data(), arguments->sides ? count : 0},
-                    {tape_of<core::u8_t const>(choices, count), tape_of<f32_t const>(targets, count)}};
-    core::optimizer_step_t const optimizer_step {trainer.completed_steps};
+                    {tape_of<utilities::u8_t const>(choices, count), tape_of<f32_t const>(targets, count)}};
+    utilities::optimizer_step_t const optimizer_step {trainer.completed_steps};
     ut::step_report_t report;
-    if (core::expected_t const stepped = trainer.step(ut::batch_source_of(source), optimizer_step, report); !stepped)
+    if (utilities::expected_t const stepped = trainer.step(ut::batch_source_of(source), optimizer_step, report);
+        !stepped)
         return propagate_train_error(stepped, &mesh_of(*handle), outcome, step_failures_k), void();
     if (arguments->stats) {
         ut::telemetry_t const telemetry = trainer.telemetry(optimizer_step);
@@ -591,7 +592,7 @@ UFORM_EXPORT void uform_trainer_save(uform_trainer_save_t *arguments) {
                void();
     if (holds_nul(arguments->path))
         return propagate_error(uform_status_invalid_argument_k, outcome, "The path holds a NUL byte"), void();
-    if (core::expected_t const saved = handle->trainer->save(text_of(arguments->path)); !saved)
+    if (utilities::expected_t const saved = handle->trainer->save(text_of(arguments->path)); !saved)
         return propagate_train_error(saved, &mesh_of(*handle), outcome, save_failures_k), void();
     std::size_t const tensors = handle->trainer->replicas[0].weights.size();
     progress_ticks_t ticks(arguments->progress, tensors);

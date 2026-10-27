@@ -22,42 +22,42 @@ Configuring CMake also arms the hooks in `.githooks/`; to arm them without a bui
 
 ## Layout and Namespaces
 
-| Path                     | Contents                                                      | Namespace              |
-| :----------------------- | :------------------------------------------------------------ | :--------------------- |
-| `c/uform/*.h`            | the C ABI, `uform.h` over the four headers beside it          | none                   |
-| `include/uform/core/`    | types, batches, device memory, cells, the mesh and transports | `unum::uform::core`    |
-| `include/uform/encoder/` | the encoder towers and kits, their geometry and entries       | `unum::uform::encoder` |
-| `include/uform/media/`   | image, video and audio decoding on the host                   | `unum::uform::media`   |
-| `include/uform/loaders/` | storage sessions, shard readers, GPU media decode             | `unum::uform::loaders` |
-| `include/uform/train/`   | the composition of a training run, `mesh_t` and `trainer_t`   | `unum::uform::train`   |
-| `src/*.cpp`              | the verbs of each header, over the cells below                | `unum::uform`          |
-| `src/encoder/`           | one unit per CPU and GPU class, and each vendor's kernels     | `unum::uform::encoder` |
-| `src/media/`             | the compiled bodies of `include/uform/media/`                 | `unum::uform::media`   |
-| `src/core/`              | the compiled bodies of `include/uform/core/`                  | `unum::uform::core`    |
-| `src/loaders/`           | the compiled bodies of `include/uform/loaders/`               | `unum::uform::loaders` |
-| `src/train/`             | the compiled bodies of `include/uform/train/`                 | `unum::uform::train`   |
-| `src_stub/`              | the stand-in, every verb over the C++ library and ForkUnion   | `unum::uform`          |
-| `tools/`                 | the `uform_base`, `uform_eval` and `uform_grow` binaries      | none                   |
-| `bench/`                 | the encoder and training-kernel benchmarks and their harness  | `unum::uform::bench`   |
-| `test/`                  | one conformance suite per cell, the harness, Python suites    | `unum::uform::test`    |
-| `verification/`          | Promela models of the mesh protocols and their Spin runner    | none                   |
-| `scripts/data/`          | acquisition, repack and mining scripts, and their tests       | none                   |
-| `scripts/mixtures/`      | the dataset mixture JSONs a run trains on                     | none                   |
-| `scripts/slurm/`         | the `.sbatch` runners and the cluster notes                   | none                   |
-| `python/`                | the CPython extension over the C ABI                          | none                   |
-| `rust/`                  | the Rust crate over the C ABI                                 | none                   |
-| `javascript/`            | the Node-API addon and the WebAssembly module over the C ABI  | none                   |
-| `swift/`                 | the Swift package over the C ABI                              | none                   |
-| `docs/`                  | the Sphinx site                                               | none                   |
+| Path                       | Contents                                                     | Namespace                |
+| :------------------------- | :----------------------------------------------------------- | :----------------------- |
+| `c/uform/*.h`              | the C ABI, `uform.h` over the four headers beside it         | none                     |
+| `include/uform/utilities/` | vocabulary, devices, schedules, the mesh and collectives     | `unum::uform::utilities` |
+| `include/uform/encoder/`   | towers, kits, geometry, entries, batches and tower kernels   | `unum::uform::encoder`   |
+| `include/uform/media/`     | image, video and audio decoding on the host                  | `unum::uform::media`     |
+| `include/uform/loaders/`   | storage sessions, shard readers, GPU media decode            | `unum::uform::loaders`   |
+| `include/uform/train/`     | the training engine: cells, losses, optimizer and trainer    | `unum::uform::train`     |
+| `src/*.cpp`                | the verbs of each header, over the cells below               | `unum::uform`            |
+| `src/encoder/`             | one unit per CPU and GPU class, and each vendor's kernels    | `unum::uform::encoder`   |
+| `src/media/`               | the compiled bodies of `include/uform/media/`                | `unum::uform::media`     |
+| `src/utilities/`           | the compiled bodies of `include/uform/utilities/`            | `unum::uform::utilities` |
+| `src/loaders/`             | the compiled bodies of `include/uform/loaders/`              | `unum::uform::loaders`   |
+| `src/train/`               | the compiled bodies of `include/uform/train/`                | `unum::uform::train`     |
+| `src_stub/`                | the stand-in, every verb over the C++ library and ForkUnion  | `unum::uform`            |
+| `tools/`                   | the `uform_base`, `uform_eval` and `uform_grow` binaries     | none                     |
+| `bench/`                   | the encoder and training-kernel benchmarks and their harness | `unum::uform::bench`     |
+| `test/`                    | one conformance suite per cell, the harness, Python suites   | `unum::uform::test`      |
+| `verification/`            | Promela models of the mesh protocols and their Spin runner   | none                     |
+| `scripts/data/`            | acquisition, repack and mining scripts, and their tests      | none                     |
+| `scripts/mixtures/`        | the dataset mixture JSONs a run trains on                    | none                     |
+| `scripts/slurm/`           | the `.sbatch` runners and the cluster notes                  | none                     |
+| `python/`                  | the CPython extension over the C ABI                         | none                     |
+| `rust/`                    | the Rust crate over the C ABI                                | none                     |
+| `javascript/`              | the Node-API addon and the WebAssembly module over the C ABI | none                     |
+| `swift/`                   | the Swift package over the C ABI                             | none                     |
+| `docs/`                    | the Sphinx site                                              | none                     |
 
 Namespaces mirror directories and nothing else: a directory adds a namespace component, and no namespace groups symbols by theme.
-`c/`, `include/` and `src/` are include roots that add no component, so `src/core/` and `include/uform/core/` both open `unum::uform::core`.
+`c/`, `include/` and `src/` are include roots that add no component, so `src/train/` and `include/uform/train/` both open `unum::uform::train`.
 Templates and model implementations live in `include/uform/<dir>/` and are always spelled `"uform/<dir>/..."`, while `src/` holds their instantiations, the dispatch and the per-class units, with only its flat `lib.hpp`, `encode.hpp` and encoder dispatch headers included as `"lib.hpp"`.
 Dependencies run one way:
 
 - `encoder` and `media` build on the host libraries alone and never include an NVIDIA header; each vendor's kernels sit in their own `vram_kernels_<vendor>` unit.
-- The mesh, the multimem collectives and InfiniBand live in `core` beside the losses that use them, and of the verbs only `src/train.cpp` reaches them.
-- `loaders` and `train` build on `core`, `tools` and `bench` build on `train`, `core` or the C ABI, and `test` may include any of them.
+- The mesh, the multimem collectives and InfiniBand live in `utilities` beneath the losses that use them, and of the verbs only `src/train.cpp` reaches them.
+- `loaders` and `train` build on `utilities`, `tools` and `bench` build on `train`, `utilities` or the C ABI, and `test` may include any of them.
 - `c/uform/` includes only itself and C headers, and every binding includes only `c/uform/`.
 
 The pre-commit hook refuses a namespace no directory backs and a nameless one.

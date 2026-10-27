@@ -22,10 +22,11 @@
 #include "uform/media/image.hpp"    // the triage probe and the CPU-fallback decode
 #include "uform/media/planning.hpp" // the budget, factor pair and center crop
 
-namespace uc = unum::uform::core;
+namespace ue = unum::uform::encoder;
 namespace ul = unum::uform::loaders;
 namespace um = unum::uform::media;
-using namespace uc;
+using namespace ue;
+using namespace unum::uform::utilities;
 using namespace ul;
 using um::image_channels_k;
 using um::image_extent_t;

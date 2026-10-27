@@ -32,10 +32,11 @@
 #include "uform/media/planning.hpp" // `video_tube_grid` — each segment's 3-D factorization
 #include "uform/media/video.hpp"    // `demux_video`, `demuxed_t`, `video_codec_t`
 
-namespace uc = unum::uform::core;
+namespace ue = unum::uform::encoder;
 namespace ul = unum::uform::loaders;
 namespace um = unum::uform::media;
-using namespace uc;
+using namespace ue;
+using namespace unum::uform::utilities;
 using namespace ul;
 using um::demuxed_t;
 using um::video_codec_count_k;

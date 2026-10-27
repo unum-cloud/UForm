@@ -8,7 +8,7 @@ add_executable(uform_eval eval.cpp)
 target_link_libraries(
     uform_eval
     PRIVATE uform::static
-            uform::core
+            uform::train
             numkong::static
             forkunion::header
             smashtable::header
@@ -16,7 +16,7 @@ target_link_libraries(
             fmt::fmt
 )
 add_executable(uform_grow grow.cpp)
-target_link_libraries(uform_grow PRIVATE uform::static uform::core fmt::fmt)
+target_link_libraries(uform_grow PRIVATE uform::static uform::train fmt::fmt)
 set(uform_bundled_files_
     ${uform_bundled_files_} $<TARGET_FILE:uform_base> $<TARGET_FILE:uform_eval> $<TARGET_FILE:uform_grow>
     PARENT_SCOPE

@@ -292,7 +292,7 @@ static bool open_device(per_gpu_array<vram_device_t> &devices, i32_t listed, nk_
                           std::move(stream.value),
                           device_arena_t {chunked_arena_t(policy, handle, scratch_limit)},
                           chunked_arena_t(pages, handle, 0)};
-    if (devices.push_back(std::move(opened)) != core::status_t::success_k)
+    if (devices.push_back(std::move(opened)) != utilities::status_t::success_k)
         return propagate_error(uform_status_invalid_argument_k, outcome, "More devices than one process drives");
     return true;
 }

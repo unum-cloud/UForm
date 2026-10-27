@@ -17,16 +17,23 @@
 
 #include <cuda.h> // `cuInit`, `cuMemcpyHtoD`, `cuEventRecord`, `cuEventElapsedTime`
 
-#include "uform/core/contrastive_segments.cuh" // `contrastive_segments_t`, `contrastive_relations_t`
-#include "uform/core/contrastive_tokens.cuh"   // `contrastive_tokens_t`
-#include "uform/core/encoder_tower.hpp"        // `encoder_tower_bf16_t`
-#include "uform/core/types.hpp"                // `st::basic_vector`
+#include "uform/train/contrastive_segments.cuh" // `contrastive_segments_t`, `contrastive_relations_t`
+#include "uform/train/contrastive_tokens.cuh"   // `contrastive_tokens_t`
+#include "uform/train/encoder_tower.hpp"        // `encoder_tower_bf16_t`
+#include "uform/utilities/types.hpp"            // `st::basic_vector`
 
 #include "train/numerics.hpp" // `gpu_numerics_of`
 
 #include "harness.hpp" // `loop_t`, `run`
 
-using namespace unum::uform::core;
+namespace ue = unum::uform::encoder;
+using ue::late_interaction_side_t;
+using ue::modality_t;
+using ue::multimodal_batch_on_gpu_t;
+using ue::multimodal_batch_shape_t;
+using ue::multimodal_batch_view_t;
+using namespace unum::uform::utilities;
+using namespace unum::uform::train;
 using namespace unum::uform::bench;
 namespace ut = unum::uform::train;
 

@@ -1,7 +1,7 @@
 # UForm — CUDA-first multimodal training stack.
 #
 # The core cell is a static library of `.cuh` interfaces + `.cu` kernel translation units; this file wires its source
-# dependencies and `src/CMakeLists.txt` exposes the `uform::core` / `uform::loaders` / `uform::train` targets every tool
+# dependencies and `src/CMakeLists.txt` exposes the `uform::loaders` / `uform::train` targets every tool
 # and test links.
 #
 # Prerequisites — native libraries (apt).

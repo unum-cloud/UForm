@@ -48,13 +48,13 @@
 #include "uform/model.h"
 #include "uform/types.h"
 
-#include "uform/core/checkpoint.hpp"
+#include "uform/utilities/safetensors_format.hpp"
 #include "uform/encoder/geometry.hpp"
 
 namespace nk = ashvardanian::numkong;
 namespace st = ashvardanian::smashtable;
 namespace sz = ashvardanian::stringzilla;
-namespace uc = unum::uform::core;
+namespace uu = unum::uform::utilities;
 namespace ue = unum::uform::encoder;
 
 /** The cosine every grown embedding's prefix must reach against the source's. */
@@ -119,7 +119,7 @@ static constexpr char const *kept_metadata_k[] = {
 
 /** Insert @p source as @p name , widened by @p row_bands and @p columns through @p staging ; zero
  *  bands and kept columns copy it as it is. */
-[[nodiscard]] static uc::expected_t insert_grown_(uc::checkpoint_to_save_t &grown, sz::string_view_t name,
+[[nodiscard]] static uu::expected_t insert_grown_(uu::checkpoint_to_save_t &grown, sz::string_view_t name,
                                                   nk::tensor_view<nk_bf16_t, 2> source, std::size_t row_bands,
                                                   columns_t columns, st::basic_vector<nk_bf16_t> &staging) noexcept {
     std::size_t const rows = source.extent(0), cols = source.extent(1);
@@ -127,7 +127,7 @@ static constexpr char const *kept_metadata_k[] = {
     std::size_t const grown_rows = row_bands ? 2 * rows : rows;
     std::size_t const grown_cols = columns == columns_t::kept_k ? cols : 2 * cols;
     if (st::failed(staging.resize(st::assume_uninitialized, grown_rows * grown_cols)))
-        return uc::expected_t::fail(uc::status_t::bad_alloc_k, "{} staging failed", name);
+        return uu::expected_t::fail(uu::status_t::bad_alloc_k, "{} staging failed", name);
     nk::tensor_span<nk_bf16_t, 2> const target {staging.data(), grown_rows, grown_cols};
     for (std::size_t row = 0; row != grown_rows; ++row) {
         std::size_t const source_row = row_bands ? row / (2 * band) * band + row % band : row;
@@ -146,26 +146,26 @@ static constexpr char const *kept_metadata_k[] = {
 }
 
 /** Insert the zero matrix shaped like @p source as @p name through @p staging . */
-[[nodiscard]] static uc::expected_t insert_zeros_(uc::checkpoint_to_save_t &grown, sz::string_view_t name,
+[[nodiscard]] static uu::expected_t insert_zeros_(uu::checkpoint_to_save_t &grown, sz::string_view_t name,
                                                   nk::tensor_view<nk_bf16_t, 2> source,
                                                   st::basic_vector<nk_bf16_t> &staging) noexcept {
     std::size_t const rows = source.extent(0), cols = source.extent(1);
     if (st::failed(staging.resize(st::assume_uninitialized, rows * cols)))
-        return uc::expected_t::fail(uc::status_t::bad_alloc_k, "{} staging failed", name);
+        return uu::expected_t::fail(uu::status_t::bad_alloc_k, "{} staging failed", name);
     std::memset(staging.data(), 0, rows * cols * sizeof(nk_bf16_t)); // BFloat16 +0 is all zero bits
     return grown.insert(name, nk::tensor_view<nk_bf16_t, 2> {staging.data(), rows, cols});
 }
 
 /** Fill @p grown with the weights and geometry of @p source taken one @p step up, refusing a source
  *  tensor this neither grows, carries nor leaves behind. */
-[[nodiscard]] static uc::expected_t grow_(uc::checkpoint_to_load_t const &source, ue::geometry_t const &geometry,
-                                          step_t step, uc::checkpoint_to_save_t &grown) noexcept {
-    using uc::expected_t, uc::status_t;
+[[nodiscard]] static uu::expected_t grow_(uu::checkpoint_to_load_t const &source, ue::geometry_t const &geometry,
+                                          step_t step, uu::checkpoint_to_save_t &grown) noexcept {
+    using uu::expected_t, uu::status_t;
     std::size_t accounted = 0;
     // The Float32 state goes first, as the payload packs it ahead of the BFloat16 weights.
     for (char const *carried : {"contrastive.inverse_temperatures", "contrastive.biases",
                                 "late_interaction.inverse_temperatures", "late_interaction.biases"}) {
-        uc::f32r2_view_t const values = source.float32(carried);
+        uu::f32r2_view_t const values = source.float32(carried);
         if (values.empty()) continue;
         ++accounted;
         if (expected_t inserted = grown.insert(carried, values); !inserted) return inserted;
@@ -178,12 +178,12 @@ static constexpr char const *kept_metadata_k[] = {
     auto find = [&]() noexcept {
         name.clear();
         nk::tensor_view<nk_bf16_t, 2> found {};
-        if (uc::format_into(name, "model.{}", suffix.view())) found = source[name.view()];
+        if (uu::format_into(name, "model.{}", suffix.view())) found = source[name.view()];
         if (found.empty()) return found;
         ++accounted;
         for (char const *part : {"row_moments", "column_moments", "master", "first_moment"}) {
             sz::string_t moment;
-            if (uc::format_into(moment, "optimizer.{}.{}", suffix.view(), part))
+            if (uu::format_into(moment, "optimizer.{}.{}", suffix.view(), part))
                 accounted += !source.float32(moment.view()).empty();
         }
         return found;
@@ -204,7 +204,7 @@ static constexpr char const *kept_metadata_k[] = {
     for (std::size_t block = 0; block != geometry.depth; ++block)
         for (growth_t const &growth : block_growths_k) {
             suffix.clear();
-            if (!uc::format_into(suffix, "blocks.{}.{}", block, growth.name))
+            if (!uu::format_into(suffix, "blocks.{}.{}", block, growth.name))
                 return expected_t::fail(status_t::bad_alloc_k, "name staging failed");
             nk::tensor_view<nk_bf16_t, 2> const weights = find();
             if (weights.empty())
@@ -218,7 +218,7 @@ static constexpr char const *kept_metadata_k[] = {
             }
             for (std::size_t instance = 0; instance != 2; ++instance) {
                 grown_name.clear();
-                if (!uc::format_into(grown_name, "model.blocks.{}.{}", 2 * block + instance, growth.name))
+                if (!uu::format_into(grown_name, "model.blocks.{}.{}", 2 * block + instance, growth.name))
                     return expected_t::fail(status_t::bad_alloc_k, "name staging failed");
                 expected_t inserted = instance != 0 && growth.copy == copy_t::zeroed_k
                                           ? insert_zeros_(grown, grown_name.view(), weights, staging)
@@ -235,8 +235,8 @@ static constexpr char const *kept_metadata_k[] = {
         if (sz::string_view_t const value = source.metadata(key); !value.empty())
             if (expected_t recorded = grown.metadata(key, value); !recorded) return recorded;
     sz::string_t depth, hidden;
-    if (!uc::format_into(depth, "{}", geometry.depth * (widened ? 1u : 2u)) ||
-        !uc::format_into(hidden, "{}", geometry.hidden * (widened ? 2u : 1u)))
+    if (!uu::format_into(depth, "{}", geometry.depth * (widened ? 1u : 2u)) ||
+        !uu::format_into(hidden, "{}", geometry.hidden * (widened ? 2u : 1u)))
         return expected_t::fail(status_t::bad_alloc_k, "metadata staging failed");
     expected_t recorded = grown.metadata("step", "0");
     if (recorded) recorded = grown.metadata("depth", depth.view());
@@ -452,12 +452,12 @@ int main(int argc, char **argv) {
 
     std::size_t hidden = 0, depth = 0;
     {
-        uc::expected<uc::checkpoint_to_load_t> source = uc::checkpoint_to_load_t::make(source_path);
-        uc::expected<ue::geometry_t> geometry = source ? ue::geometry_t::from(*source)
-                                                       : uc::expected<ue::geometry_t>::fail(std::move(source));
-        uc::checkpoint_to_save_t grown;
-        uc::expected_t written = geometry ? grow_(*source, *geometry, step, grown)
-                                          : uc::expected_t::fail(std::move(geometry));
+        uu::expected<uu::checkpoint_to_load_t> source = uu::checkpoint_to_load_t::make(source_path);
+        uu::expected<ue::geometry_t> geometry = source ? ue::geometry_t::from(*source)
+                                                       : uu::expected<ue::geometry_t>::fail(std::move(source));
+        uu::checkpoint_to_save_t grown;
+        uu::expected_t written = geometry ? grow_(*source, *geometry, step, grown)
+                                          : uu::expected_t::fail(std::move(geometry));
         if (written) written = grown.save(grown_path);
         if (!written) return fmt::println(stderr, "uform_grow: {}", std::string_view {written.description_}), 1;
         hidden = geometry->hidden, depth = geometry->depth;

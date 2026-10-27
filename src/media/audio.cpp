@@ -23,9 +23,10 @@ extern "C" {
 #include "uform/media/audio.hpp"
 
 namespace um = unum::uform::media;
+namespace uu = unum::uform::utilities;
 using namespace um;
-using uc::i64_t;
-using uc::u8_t;
+using uu::i64_t;
+using uu::u8_t;
 
 /** Working buffer size of the custom @c AVIOContext ; FFmpeg's own 32 KB default. */
 inline constexpr std::size_t audio_avio_buffer_bytes_k = 32u * 1024u;
@@ -34,7 +35,7 @@ inline constexpr std::size_t audio_avio_buffer_bytes_k = 32u * 1024u;
 struct audio_memory_reader_t {
 
     /** The clip's bytes — borrowed, not owned; their end is the seek's bound. */
-    uc::bytes_view_t bytes {};
+    uu::bytes_view_t bytes {};
 
     /** The read cursor, advanced by every read and moved by every seek. */
     std::size_t position = 0;

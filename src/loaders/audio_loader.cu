@@ -15,10 +15,11 @@
 #include "uform/loaders/audio_loader.cuh"
 #include "uform/media/audio.hpp" // `decode_audio` — the libav decode and resample to mono
 
-namespace uc = unum::uform::core;
+namespace ue = unum::uform::encoder;
 namespace ul = unum::uform::loaders;
 namespace um = unum::uform::media;
-using namespace uc;
+using namespace ue;
+using namespace unum::uform::utilities;
 using namespace ul;
 
 namespace fu = ashvardanian::forkunion;

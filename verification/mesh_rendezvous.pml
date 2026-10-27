@@ -5,7 +5,7 @@
  *  @brief Two processes wiring one phase twice over the shared exchange directory, as the probe
  *      trainers and the real one each make a multimem domain.
  *
- *  `mesh_topology_t` from `src/core/mesh.hpp` publishes a payload by an atomic rename, awaits a
+ *  `mesh_topology_t` from `include/uform/utilities/mesh.hpp` publishes a payload by an atomic rename, awaits a
  *  peer's by polling until its file exists, and crosses a barrier by arrive and release files.
  *  Files are never removed within a job, so a phase that runs twice reads whatever the first run
  *  left unless its keys differ. Every wiring phase claims a generation from the topology and keys

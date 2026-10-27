@@ -9,12 +9,12 @@
 
 #include <numkong/capabilities.h> // `nk_capability_t`
 
-#include "uform/core/schedule.cuh" // `gpu_numerics_t`
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_numerics_t`
 
 namespace unum::uform::train {
 
 /** The NumKong kernels a run over GPUs of @p capabilities calls: those of the newest GPU class
  *  the mask holds. */
-[[nodiscard]] core::gpu_numerics_t gpu_numerics_of(nk_capability_t capabilities) noexcept;
+[[nodiscard]] utilities::gpu_numerics_t gpu_numerics_of(nk_capability_t capabilities) noexcept;
 
 } // namespace unum::uform::train

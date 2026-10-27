@@ -44,7 +44,13 @@
 
 #include "harness.hpp" // `test_suite_t` — the cumulative pass/fail tally
 
-using namespace unum::uform::core;
+namespace ue = unum::uform::encoder;
+using ue::audio_batch_shape_t;
+using ue::image_batch_shape_t;
+using ue::modality_t;
+using ue::multimodal_batch_shape_t;
+using ue::video_batch_shape_t;
+using namespace unum::uform::utilities;
 using namespace unum::uform::train;
 using namespace unum::uform::test;
 

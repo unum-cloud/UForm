@@ -19,17 +19,18 @@
 
 #include <cuda.h> // `cuInit`, `cuCtxPushCurrent`, `cuMemcpyHtoD`, `cuMemsetD8` — the raw staging boundary
 
-#include "uform/core/contrastive_segments.cuh"
-#include "uform/core/contrastive_tokens.cuh"     // `contrastive_tokens_t`, `distributed_contrastive_tokens_t`
-#include "uform/core/encoder_tower.hpp"          // `encoder_tower_bf16_t` — the pool + head the FP64 parity case gates
-#include "uform/core/infiniband_collectives.cuh" // `infiniband_coordinates_t` — the corrupt-payload negative test
-#include "uform/train/trainer.hpp"               // `trainer_t`, `items_source_t` — the sides case's step
+#include "uform/train/contrastive_segments.cuh"
+#include "uform/train/contrastive_tokens.cuh" // `contrastive_tokens_t`, `distributed_contrastive_tokens_t`
+#include "uform/train/encoder_tower.hpp"      // `encoder_tower_bf16_t` — the pool + head the FP64 parity case gates
+#include "uform/utilities/infiniband_collectives.cuh" // `infiniband_coordinates_t` — the corrupt-payload negative test
+#include "uform/train/trainer.hpp"                    // `trainer_t`, `items_source_t` — the sides case's step
 
 #include "train/numerics.hpp" // `gpu_numerics_of`
 
 #include "harness.hpp" // `test_suite_t`
 
-using namespace unum::uform::core;
+using namespace unum::uform::train;
+using namespace unum::uform::utilities;
 using namespace unum::uform::test;
 namespace ut = unum::uform::train;
 

@@ -28,13 +28,13 @@
 #include <memory>    // `std::unique_ptr` — the pimpl owning the cuDF table
 #include <span>      // `std::span`
 
-#include "uform/core/schedule.cuh"          // `gpu_stream_t`
-#include "uform/core/types.hpp"             // `expected`, `status_t`, the scalar aliases, `b8r1_view_t`, `sz::string_t`
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`
+#include "uform/utilities/types.hpp"        // `expected`, `status_t`, the scalar aliases, `b8r1_view_t`, `sz::string_t`
 #include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t` — the reader's GDS precondition
 
 namespace unum::uform::loaders {
 
-using namespace unum::uform::core;
+using namespace unum::uform::utilities;
 
 /** A column of byte strings: every element's bytes back to back with @c elements+1 terminator-free
  *  @c u64_t offsets — element @c i is the full @c [offsets[i],offsets[i+1]) span. Both text ( @c string )

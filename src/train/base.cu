@@ -39,7 +39,23 @@
 
 #include "uform/train/base.cuh"
 
-using namespace unum::uform::core;
+namespace ue = unum::uform::encoder;
+using ue::audio_batch_shape_t;
+using ue::byte_vocabulary_k;
+using ue::image_batch_shape_t;
+using ue::image_shape_span_t;
+using ue::late_interaction_side_t;
+using ue::modality_span_t;
+using ue::modality_t;
+using ue::modality_view_t;
+using ue::multimodal_batch_on_gpu_t;
+using ue::multimodal_batch_shape_t;
+using ue::pad_choices;
+using ue::patch_scalars;
+using ue::tube_scalars;
+using ue::video_batch_shape_t;
+using ue::video_shape_span_t;
+using namespace unum::uform::utilities;
 using namespace unum::uform::train;
 namespace ut = unum::uform::train;
 

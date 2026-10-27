@@ -42,12 +42,12 @@
 
 #include <cuda.h> // `cuInit`, `cuDeviceGet`, `cuDeviceGetName`
 
-#include "uform/core/mesh.hpp"
-#include "uform/core/multimem_collectives.cuh"
+#include "uform/utilities/mesh.hpp"
+#include "uform/utilities/multimem_collectives.cuh"
 
 #include "harness.hpp"
 
-using namespace unum::uform::core;
+using namespace unum::uform::utilities;
 using namespace unum::uform::test;
 namespace fs = std::filesystem;
 

@@ -4,7 +4,7 @@
  *  @date October 19, 2026
  *  @brief Two members and two consumers sharing the one counting barrier of a multimem domain.
  *
- *  `multimem_barrier_peer_kernel_` from `src/core/multimem_collectives.cu` adds one to every
+ *  `multimem_barrier_peer_kernel_` from `src/utilities/multimem_collectives.cu` adds one to every
  *  member's arrival flag with a release reduction, spins on its own flag with acquire loads until
  *  it holds one more round of arrivals, and self-advances its round. The flag is anonymous: the
  *  mixer, the contrastive loss and the optimizer all cross it, so a barrier is labelled only by its

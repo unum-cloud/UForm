@@ -12,7 +12,7 @@
 #include <turbojpeg.h>   // vendor-boundary: JPEG decode with DCT scaling, reporting corrupt streams
 #include <webp/decode.h> // vendor-boundary: WebP decode
 
-#include "uform/core/types.hpp" // `st::basic_vector` — the decode scratch
+#include "uform/utilities/types.hpp" // `st::basic_vector` — the decode scratch
 #include "uform/media/image.hpp"
 
 namespace um = unum::uform::media;
@@ -114,7 +114,7 @@ expected<image_plan_t> um::plan_image(std::span<b8_t const> encoded, u32_t patch
     image_plan_t plan;
     plan.format = probed->format;
     plan.native = probed->extent;
-    plan.grid = image_patch_grid(uc::media_cells(uc::modality_t::image_k, columns), plan.native);
+    plan.grid = image_patch_grid(ue::media_cells(ue::modality_t::image_k, columns), plan.native);
     image_extent_t const target {u32_t(plan.grid.columns) * patch_side, u32_t(plan.grid.rows) * patch_side};
     plan.scale = plan.format == format_jpeg_k ? image_decode_scale(plan.native, target) : 0u;
     plan.decoded = image_decoded_extent(plan.native, plan.scale);

@@ -17,11 +17,11 @@
  */
 #pragma once
 
-#include "uform/core/types.hpp" // `expected`, `status_t`, the scalar aliases
+#include "uform/utilities/types.hpp" // `expected`, `status_t`, the scalar aliases
 
 namespace unum::uform::loaders {
 
-using namespace unum::uform::core;
+using namespace unum::uform::utilities;
 
 /** Which path KvikIO's environment selects for reads — informational, for start-up logs. */
 enum class storage_read_path_t : u8_t {

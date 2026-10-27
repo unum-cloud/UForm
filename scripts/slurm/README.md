@@ -8,7 +8,7 @@ The __data-acquisition__ job `acquire.sbatch` shares the directory but none of t
 
 ## Mesh Shape
 
-The world is a shape `{host_domain, multimem_domain, colocated_domain}` with 1 ≤ `host_domain` ≤ `multimem_domain` ≤ `colocated_domain` (see `include/uform/core/mesh.hpp`).
+The world is a shape `{host_domain, multimem_domain, colocated_domain}` with 1 ≤ `host_domain` ≤ `multimem_domain` ≤ `colocated_domain` (see `include/uform/utilities/mesh.hpp`).
 `host_domain` is the GPUs __one process__ drives; `multimem_domain` is the GPUs reachable by `multimem.*` over one NVLink/NVSwitch island (HGX = 8, NVL72 = 72); `colocated_domain` is the whole job.
 When `host_domain < multimem_domain`, __several processes compose one multicast domain__ — the interesting cross-process case (NVL72 is `{4, 72, 144}`: 18 processes per rack-wide multicast domain).
 
@@ -30,7 +30,7 @@ This is the handle type the `{4, 8, 16}` shape needs.
 - __Topology:__ GPUs 0-3 on NUMA0 (cores 0-63, NIC4-7), GPUs 4-7 on NUMA1 (cores 64-127, NIC0-3).
 
 __Takeaway:__ on standalone HGX, `FABRIC` handles are unavailable (they need a GB200-NVL72-class NVLink-network fabric); the same-node cross-process handle type is `POSIX_FILE_DESCRIPTOR`, and it works.
-`gpu_symmetric_arena_t` in `include/uform/core/multimem_collectives.cuh` shares a cross-process domain's slices as `FABRIC` handles where every local device exports them, as on NVL72/144 racks once `nvidia-imex` puts every node in one IMEX domain.
+`gpu_symmetric_arena_t` in `include/uform/utilities/multimem_collectives.cuh` shares a cross-process domain's slices as `FABRIC` handles where every local device exports them, as on NVL72/144 racks once `nvidia-imex` puts every node in one IMEX domain.
 On a fabric-less box it falls back to `POSIX_FILE_DESCRIPTOR`, whose Unix-socket handoff is not implemented yet, so such a domain refuses to export rather than run.
 
 ## Gang Scheduling
@@ -165,4 +165,4 @@ Bootstrap falls back to the environment only for the multicast extent, the excha
 
 ### New Variables
 
-New launcher-contract variables get a `*_from_environment` reader beside the two in `include/uform/core/mesh.hpp`, an entry here, and explicit pass-through into whatever they configure — no new component below the mains should call `getenv` itself.
+New launcher-contract variables get a `*_from_environment` reader beside the two in `include/uform/utilities/mesh.hpp`, an entry here, and explicit pass-through into whatever they configure — no new component below the mains should call `getenv` itself.

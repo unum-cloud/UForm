@@ -798,8 +798,8 @@ check_bare_member_docs() {
 
 # The full `unum::uform::` spelling belongs to three places: the alias and `using` lines, the lines
 # opening and closing a nested namespace, and the specializations of foreign templates -
-# `std::formatter<unum::uform::core::tensor_t>`, `fmt::formatter<...>` - which have to name the type from outside.
-# Everywhere else the name is already in scope - through the `uc::` / `ul::` aliases, the directive a translation
+# `std::formatter<unum::uform::utilities::tensor_t>`, `fmt::formatter<...>` - which have to name the type from outside.
+# Everywhere else the name is already in scope - through the `uu::` / `ue::` / `ut::` / `ul::` / `um::` aliases, the directive a translation
 # unit opened with, or the enclosing namespace itself.
 check_qualified_namespace() {
     local spelled
@@ -809,7 +809,7 @@ check_qualified_namespace() {
         grep -vE 'struct (std|fmt)::[A-Za-z_]+<unum::uform::' |
         grep -E 'unum::uform::' || true)
     [ -z "$spelled" ] || fail "$spelled" \
-        "$file spells unum::uform:: in full - the name is already in scope through the \`uc\` / \`ul\` aliases," \
+        "$file spells unum::uform:: in full - the name is already in scope through the \`uu\` / \`ue\` / \`ut\` / \`ul\` / \`um\` aliases," \
         "            a \`using\` directive, or the enclosing namespace; only a std::formatter<unum::uform::...> earns it:"
 }
 
@@ -847,10 +847,10 @@ top_level_namespaces() { # top_level_namespaces < source
 }
 
 # Namespaces mirror directories. A nameless `namespace {` hides helpers in a scope no path names, and a
-# namespace no directory backs, like `loaders` in `include/uform/core/types.hpp`, invents structure the tree does not have.
+# namespace no directory backs, like `loaders` in `include/uform/utilities/types.hpp`, invents structure the tree does not have.
 # Allowed names: `unum`, `uform`, the sibling libraries' roots, and a directory on the file's path. The `c/`,
-# `include/uform/` and `src/` include roots name none, so `src/core/` and `include/uform/core/` open
-# `unum::uform::core` and `test/` opens `unum::uform::test`. The whole staged file, since the namespace is context.
+# `include/uform/` and `src/` include roots name none, so `src/train/` and `include/uform/train/` open
+# `unum::uform::train` and `test/` opens `unum::uform::test`. The whole staged file, since the namespace is context.
 check_namespace_directories() {
     local directory=${file%/*} allowed name misplaced=""
     [ "$directory" = "$file" ] && directory=.
@@ -1083,13 +1083,13 @@ check_trailing_returns() {
 }
 
 # A hand-rolled ceiling division - `(value + divisor - 1) / divisor` - re-derives what the shared
-# vocabulary already names. Use `divide_round_up` from include/uform/core/types.hpp.
+# vocabulary already names. Use `divide_round_up` from include/uform/utilities/types.hpp.
 check_hand_ceils() {
     local ceils
     ceils=$(printf '%s\n' "$added" | grep -vE 'divide_round_up|round_up_to_multiple' |
         grep -E '\([^()]+\+[^()]+-[[:space:]]*1[[:space:]]*\)[[:space:]]*/' || true)
     [ -z "$ceils" ] || fail "$ceils" \
-        "$file hand-rolls a ceiling division - write divide_round_up(value, divisor) from uform/core/types.hpp:"
+        "$file hand-rolls a ceiling division - write divide_round_up(value, divisor) from uform/utilities/types.hpp:"
 }
 
 # C's limit macros - `INFINITY`, `NAN`, `SIZE_MAX`, `PTRDIFF_MAX`, `FLT_MAX` and kin - name what
@@ -1510,15 +1510,15 @@ check_residency_branches() {
 
 # Towers include their own vendor's files and shared ones only: a class unit or kernel file under `src/encoder/`
 # names its vendor after `vram_`, the towers and kits under `include/uform/encoder/` name none, and a `ram_` file
-# includes no `vram_` one.
+# includes no `vram_` one. The device substrate under `uform/utilities/` belongs to no tower.
 check_tower_isolation() {
-    local vendor crossing reached='vram_([a-z]+_)?(nvidia|amd|apple)[_.]'
+    local vendor crossing reached='vram_([a-z]+_)?(nvidia|amd|apple)[_.]' shared='"uform/utilities/'
     vendor=$(basename "$file" | sed -nE 's/^vram_([a-z]+_)?(nvidia|amd|apple)([_.].*)?$/\2/p')
     case "$(basename "$file")" in
-    ram_*) reached='vram_' ;;
+    ram_*) reached='vram_' shared='^$' ;;
     esac
     crossing=$(grep -nE "^[[:space:]]*#[[:space:]]*(include|embed)[[:space:]]*\"([^\"]*/)?${reached}" "$staged_blob" |
-        grep -vE "vram_([a-z]+_)?${vendor:-none}[_.]" || true)
+        grep -vE "vram_([a-z]+_)?${vendor:-none}[_.]|${shared}" || true)
     [ -z "$crossing" ] || fail "$crossing" \
         "$file reaches into another tower - towers include only their own vendor, shared headers none, and the" \
         "            host tower no device one:"
@@ -1533,17 +1533,17 @@ check_classes_out_of_engines() {
         "$file names a CPU or GPU class under include/ - an engine takes the kits src/ picks per class:"
 }
 
-# The mesh lifts out of UForm whole: `uform/core/mesh.hpp` and the multimem and InfiniBand collectives include
-# system headers, the host-only core types, the device allocators, the schedule and each other, never the encoder,
-# the trainer or the rest of the core.
+# The mesh lifts out of UForm whole: `uform/utilities/mesh.hpp` and the multimem and InfiniBand collectives include
+# system headers, the host-only utilities types, the device allocators, the schedule and each other, never the encoder,
+# the trainer or the rest of the utilities.
 check_mesh_isolation() {
     local reaching
     reaching=$(grep -nE '^[[:space:]]*#[[:space:]]*(include|embed)[[:space:]]*"' "$staged_blob" |
-        grep -vE '"uform/core/(types\.hpp|array\.hpp|checkpoint\.hpp|multimodal_batch\.hpp|gpu_allocators\.hpp|schedule\.cuh|mesh\.hpp|multimem_[^"]+|infiniband_[^"]+)"' ||
+        grep -vE '"uform/(utilities/(types\.hpp|array\.hpp|safetensors_format\.hpp|vram_nvidia_device\.hpp|vram_nvidia_schedule\.cuh|mesh\.hpp|multimem_[^"]+|infiniband_[^"]+))"' ||
         true)
     [ -z "$reaching" ] || fail "$reaching" \
-        "$file is part of the mesh, which includes only system headers, the host-only core types," \
-        "            uform/core/gpu_allocators.hpp, uform/core/schedule.cuh and the other mesh files:"
+        "$file is part of the mesh, which includes only system headers, the host-only utilities types," \
+        "            uform/utilities/vram_nvidia_device.hpp, uform/utilities/vram_nvidia_schedule.cuh and the other mesh files:"
 }
 
 # A const member that locks or writes hides a mutation behind its signature, and a `const_cast` launders a
@@ -2292,8 +2292,8 @@ judge_path() {
     include/uform/*)
         check_classes_out_of_engines
         ;;&
-    include/uform/core/mesh.hpp | include/uform/core/multimem_* | include/uform/core/infiniband_* | src/core/multimem_* | \
-        src/core/infiniband_*)
+    include/uform/utilities/mesh.hpp | include/uform/utilities/multimem_* | include/uform/utilities/infiniband_* | \
+        src/utilities/multimem_* | src/utilities/infiniband_*)
         check_mesh_isolation
         ;;&
     # The harnesses, then the suites' bodies, whose harness alone writes the result lines.

@@ -11,20 +11,21 @@
  */
 #pragma once
 
-#include "uform/core/multimodal_batch.hpp" // `video_batch_shape_t`
-#include "uform/core/types.hpp"            // the scalar aliases
+#include "uform/encoder/multimodal_batch.hpp" // `video_batch_shape_t`
+#include "uform/utilities/types.hpp"          // the scalar aliases
 
 namespace unum::uform::media {
 
-namespace uc = unum::uform::core;
+namespace ue = unum::uform::encoder;
+namespace uu = unum::uform::utilities;
 namespace nk = ashvardanian::numkong;
 namespace st = ashvardanian::smashtable;
 
-using uc::f64_t;
-using uc::u16_t;
-using uc::u32_t;
-using uc::u64_t;
-using uc::video_batch_shape_t;
+using uu::f64_t;
+using uu::u16_t;
+using uu::u32_t;
+using uu::u64_t;
+using ue::video_batch_shape_t;
 
 /** A picture's pixel dimensions — a size travels as one value, not two loose scalars. */
 struct image_extent_t {

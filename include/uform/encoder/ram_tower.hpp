@@ -58,7 +58,7 @@ struct ram_placer_t {
         target = placed_array<value_type_> {nk::allocator<value_type_> {allocator}};
         if (values.empty()) return {};
         if (st::failed(target.resize(st::assume_uninitialized, values.size())))
-            return expected_t::fail(uc::status_t::bad_alloc_k, "{} allocation failed ({} bytes)", what,
+            return expected_t::fail(uu::status_t::bad_alloc_k, "{} allocation failed ({} bytes)", what,
                                     values.size_bytes());
         std::memcpy(target.data(), values.data(), values.size_bytes());
         return {};
@@ -83,7 +83,7 @@ struct ram_steps {
 
     /** The tile that gives every thread one equal share of @p tasks . */
     [[nodiscard]] std::size_t share(std::size_t tasks) noexcept {
-        return std::max<std::size_t>(uc::divide_round_up(tasks, std::max<std::size_t>(pool.threads_count(), 1)), 1);
+        return std::max<std::size_t>(uu::divide_round_up(tasks, std::max<std::size_t>(pool.threads_count(), 1)), 1);
     }
 
     /** Run @p body once per task of @p tasks , each with its thread's row of
@@ -105,18 +105,18 @@ struct ram_steps {
     template <typename body_type_>
     [[nodiscard]] expected_t split(std::size_t tasks, std::size_t tile, sz::string_view_t what,
                                    body_type_ const &body) noexcept {
-        return each(uc::divide_round_up(tasks, tile), what, [&](std::size_t index, f32r1_span_t) noexcept {
+        return each(uu::divide_round_up(tasks, tile), what, [&](std::size_t index, f32r1_span_t) noexcept {
             std::size_t const first = index * tile;
             return body(first, std::min(tile, tasks - first));
         });
     }
 
-    [[nodiscard]] expected_t zero(uc::bytes_span_t target) noexcept {
+    [[nodiscard]] expected_t zero(uu::bytes_span_t target) noexcept {
         std::memset(target.data(), 0, target.size());
         return {};
     }
 
-    [[nodiscard]] expected_t copy(uc::bytes_span_t target, uc::bytes_view_t source) noexcept {
+    [[nodiscard]] expected_t copy(uu::bytes_span_t target, uu::bytes_view_t source) noexcept {
         std::memcpy(target.data(), source.data(), source.size());
         return {};
     }
@@ -199,7 +199,7 @@ struct ram_tower {
      *      the block products.
      *  @retval status_t::invalid_input_k A tensor is missing or misshapen.
      */
-    [[nodiscard]] static expected<ram_tower> make(uc::checkpoint_to_load_t const &checkpoint,
+    [[nodiscard]] static expected<ram_tower> make(uu::checkpoint_to_load_t const &checkpoint,
                                                   geometry_t const &geometry, precision_t precision) noexcept {
         nk_allocator_t policy {};
         if (nk_status_t const status = nk_allocator_init_heap(&policy, nk_default_alignment_k); status != nk_success_k)
@@ -226,12 +226,12 @@ struct ram_tower {
     }
 
     /** Encode @p batch in host memory on @p pool 's threads. */
-    [[nodiscard]] expected_t encode(uc::multimodal_batch_view_t batch, outputs_t outputs, std::span<b8_t> scratch,
+    [[nodiscard]] expected_t encode(multimodal_batch_view_t batch, outputs_t outputs, std::span<b8_t> scratch,
                                     fu::flat_pool_t &pool) const noexcept {
         scratch_cursor_t cursor {scratch};
         steps_t steps {pool, reserve_entries(cursor, weights_.geometry, pool.threads_count())};
         if (scratch.size() < cursor.used)
-            return expected_t::fail(uc::status_t::bad_alloc_k, "the scratch holds {} bytes, the entries need {}",
+            return expected_t::fail(uu::status_t::bad_alloc_k, "the scratch holds {} bytes, the entries need {}",
                                     scratch.size(), cursor.used);
         return encode_steps(steps, weights_, batch, outputs, scratch.subspan(cursor.used));
     }

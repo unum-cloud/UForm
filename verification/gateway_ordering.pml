@@ -7,11 +7,11 @@
  *
  *  `trainer_t::step` from `src/train/trainer.cu:555` runs the data source's mixer, then the
  *  contrastive loss, then the optimizer, every member on its own stream. The mixer of
- *  `src/core/multimodal_batch.cu:684` all-gathers each member's block with the same member of the
+ *  `src/encoder/multimodal_batch.cu:684` all-gathers each member's block with the same member of the
  *  other host over InfiniBand, straight into the payload with no parity, copies the payload out
  *  and crosses the domain barrier at `:692`. With contrasts, `distributed_contrastive_segments_t`
- *  of `src/core/contrastive_segments.cu` crosses its barriers around each member's own force
- *  all-reduce at `:996`. `distributed_adafactor_t::step` of `src/core/optimizer.cu` stages every
+ *  of `src/train/contrastive_segments.cu` crosses its barriers around each member's own force
+ *  all-reduce at `:996`. `distributed_adafactor_t::step` of `src/train/optimizer.cu` stages every
  *  peer's gradient into its window before the barrier at `:449`, while the gateway stages after it
  *  at `:450`, since its window still holds the last world mean. `world_gradient_step_` at `:494`
  *  has the gateway reduce the peers' windows, all-reduce with the other gateway at `:508`, and copy

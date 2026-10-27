@@ -15,11 +15,11 @@
 #include "uform/encoder/vram_kits.hpp" // `vram_amd_entries_kit_t`, `segment_layout_t`, `entries_block_threads_k`
 
 namespace ue = unum::uform::encoder;
-namespace uc = unum::uform::core;
+namespace uu = unum::uform::utilities;
 using namespace ue;
 
 /** The bundle's bytes, linked in by the assembler stub `uform_gpu_bundle` writes. */
-extern "C" uc::b8_t const uform_encoder_amd_bundle_start[], uform_encoder_amd_bundle_end[];
+extern "C" uu::b8_t const uform_encoder_amd_bundle_start[], uform_encoder_amd_bundle_end[];
 
 /** The bundle's kernels, in the order of @ref kernel_names_k . */
 enum class kernel_t : std::size_t {
@@ -45,7 +45,7 @@ static char const *const kernel_names_k[] = {
 static constexpr std::size_t grid_blocks_max_k = 1024;
 
 /** How far a device got loading the bundle; whichever thread leaves @c unloaded_k loads it. */
-enum class load_stage_t : uc::u8_t {
+enum class load_stage_t : uu::u8_t {
     unloaded_k,
     loading_k,
     loaded_k,
@@ -59,7 +59,7 @@ struct device_module_t {
     hipFunction_t functions[std::size_t(kernel_t::count_k)] = {};
 };
 
-static device_module_t device_modules_[uc::max_gpus_per_host_k];
+static device_module_t device_modules_[uu::max_gpus_per_host_k];
 
 [[nodiscard]] static hipStream_t native_(nk_stream_t stream) noexcept {
     return static_cast<hipStream_t>(static_cast<void *>(stream));
@@ -82,7 +82,7 @@ template <typename enqueue_type_>
 /** The function of @p kernel on @p device , the current one, loading the bundle there on first
  *  use. */
 [[nodiscard]] static hipError_t function_of_(kernel_t kernel, int device, hipFunction_t &function) noexcept {
-    if (device < 0 || std::size_t(device) >= uc::max_gpus_per_host_k) return hipErrorInvalidDevice;
+    if (device < 0 || std::size_t(device) >= uu::max_gpus_per_host_k) return hipErrorInvalidDevice;
     device_module_t &module = device_modules_[device];
     fu::standard_atomic_ref<load_stage_t> const stage_ref {module.stage};
     load_stage_t stage = load_stage_t::unloaded_k;
@@ -118,7 +118,7 @@ template <typename... argument_types_>
 
 /** Blocks for a grid-stride walk over @p total items. */
 [[nodiscard]] static unsigned stride_blocks_(std::size_t total) noexcept {
-    std::size_t const blocks = uc::divide_round_up(total, entries_block_threads_k);
+    std::size_t const blocks = uu::divide_round_up(total, entries_block_threads_k);
     return static_cast<unsigned>(blocks == 0 ? 1 : blocks < grid_blocks_max_k ? blocks : grid_blocks_max_k);
 }
 
@@ -136,14 +136,14 @@ nk_status_t ue::vram_amd_entries_kit_t::describe(std::size_t vendor_ordinal,
     return nk_success_k;
 }
 
-nk_status_t ue::vram_amd_entries_kit_t::copy(uc::bytes_span_t target, uc::bytes_view_t source,
+nk_status_t ue::vram_amd_entries_kit_t::copy(uu::bytes_span_t target, uu::bytes_view_t source,
                                              nk_stream_t stream) noexcept {
     return on_device_(stream, [&](hipStream_t native, int) {
         return hipMemcpyAsync(target.data(), source.data(), source.size(), hipMemcpyDefault, native);
     });
 }
 
-nk_status_t ue::vram_amd_entries_kit_t::zero(uc::bytes_span_t target, nk_stream_t stream) noexcept {
+nk_status_t ue::vram_amd_entries_kit_t::zero(uu::bytes_span_t target, nk_stream_t stream) noexcept {
     return on_device_(stream,
                       [&](hipStream_t native, int) { return hipMemsetAsync(target.data(), 0, target.size(), native); });
 }

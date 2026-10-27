@@ -50,15 +50,25 @@
 
 #include <numkong/reduce.hpp> // `nk::reduce_moments`
 
-#include "uform/core/optimizer.hpp"         // `adafactor_t`
-#include "uform/core/transformer_block.cuh" // `transformer_block_bf16_t`, `transformer_scratch_t`
+#include "uform/train/optimizer.hpp"         // `adafactor_t`
+#include "uform/train/transformer_block.cuh" // `transformer_block_bf16_t`, `transformer_scratch_t`
 #include "uform/train/base.cuh"             // `base_replica_t`, `trainer_config_t`, `seed_weights`
 
 #include "train/numerics.hpp" // `gpu_numerics_of`
 
 #include "harness.hpp" // `test_suite_t`, `dot`, `narrow_to_bf16`, `widen_from_bf16`
 
-using namespace unum::uform::core;
+namespace ue = unum::uform::encoder;
+using ue::audio_batch_shape_t;
+using ue::byte_pad_k;
+using ue::byte_vocabulary_k;
+using ue::image_batch_shape_t;
+using ue::late_interaction_side_t;
+using ue::modality_t;
+using ue::multimodal_batch_on_gpu_t;
+using ue::multimodal_batch_shape_t;
+using ue::video_batch_shape_t;
+using namespace unum::uform::utilities;
 using namespace unum::uform::train;
 using namespace unum::uform::test;
 

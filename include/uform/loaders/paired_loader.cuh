@@ -31,8 +31,8 @@
 
 #include <span> // `std::span`
 
-#include "uform/core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`
-#include "uform/core/types.hpp"             // `expected`, `status_t`, `epoch_permutation`
+#include "uform/encoder/multimodal_batch.cuh" // `multimodal_batch_on_gpu_t`, `multimodal_batch_shape_t`
+#include "uform/utilities/types.hpp"          // `expected`, `status_t`, `epoch_permutation`
 #include "uform/loaders/audio_loader.cuh"   // `decode_audios`
 #include "uform/loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
 #include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
@@ -41,6 +41,8 @@
 #include "uform/loaders/video_loader.cuh"   // `decode_videos`, `nvdec_session_t`
 
 namespace unum::uform::loaders {
+using namespace unum::uform::utilities;
+using namespace unum::uform::encoder;
 
 /** The late-interaction side each role of a bag plays, from the mixture entry's @c query key. */
 struct role_sides_t {

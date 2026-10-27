@@ -32,7 +32,7 @@ struct vram_placer {
         target = placed_array<value_type_> {nk::allocator<value_type_> {allocator}};
         if (values.empty()) return {};
         if (st::failed(target.resize(st::assume_uninitialized, values.size())))
-            return expected_t::fail(uc::status_t::bad_alloc_k, "{} allocation failed ({} bytes)", what,
+            return expected_t::fail(uu::status_t::bad_alloc_k, "{} allocation failed ({} bytes)", what,
                                     values.size_bytes());
         return checked(entries_kit_type_::copy(std::as_writable_bytes(std::span<value_type_> {target}),
                                                std::as_bytes(values), stream),
@@ -62,11 +62,11 @@ struct vram_steps {
         return checked(body(0, tasks), what);
     }
 
-    [[nodiscard]] expected_t zero(uc::bytes_span_t target) noexcept {
+    [[nodiscard]] expected_t zero(uu::bytes_span_t target) noexcept {
         return checked(entries_kit_t::zero(target, stream_handle), "zeroing");
     }
 
-    [[nodiscard]] expected_t copy(uc::bytes_span_t target, uc::bytes_view_t source) noexcept {
+    [[nodiscard]] expected_t copy(uu::bytes_span_t target, uu::bytes_view_t source) noexcept {
         return checked(entries_kit_t::copy(target, source, stream_handle), "copying");
     }
 
@@ -134,7 +134,7 @@ struct vram_tower {
      *      synchronizes @p stream before the first encode, and frees the tower on the same stream.
      *  @retval status_t::invalid_input_k A tensor is missing or misshapen.
      */
-    [[nodiscard]] static expected<vram_tower> make(uc::checkpoint_to_load_t const &checkpoint,
+    [[nodiscard]] static expected<vram_tower> make(uu::checkpoint_to_load_t const &checkpoint,
                                                    geometry_t const &geometry, precision_t precision,
                                                    nk_allocator_t policy, nk_stream_t stream) noexcept {
         vram_placer<entries_kit_type_> const placer {nk::allocator<b8_t> {policy, stream}, stream};
@@ -158,7 +158,7 @@ struct vram_tower {
      *  segment offsets, lengths and modalities in memory both the host and the device address, as
      *  the host sizes the call from them. The scratch and @p outputs are device memory.
      */
-    [[nodiscard]] expected_t encode(uc::multimodal_batch_view_t batch, outputs_t outputs, std::span<b8_t> scratch,
+    [[nodiscard]] expected_t encode(multimodal_batch_view_t batch, outputs_t outputs, std::span<b8_t> scratch,
                                     nk_stream_t stream) const noexcept {
         steps_t steps {stream};
         return encode_steps(steps, weights_, batch, outputs, scratch);

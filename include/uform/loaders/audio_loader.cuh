@@ -38,14 +38,16 @@
 
 #include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the borrowed CPU-decode pool
 
-#include "uform/core/gpu_allocators.hpp"    // `pinned_alloc` — the decode's host tapes
-#include "uform/core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t` — the decode target
-#include "uform/core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
-#include "uform/core/types.hpp"             // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
-#include "uform/loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
-#include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
+#include "uform/utilities/vram_nvidia_device.hpp"   // `pinned_alloc` — the decode's host tapes
+#include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t` — the decode target
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
+#include "uform/utilities/types.hpp"                // `expected`, `status_t`, `data_epoch_t`, `epoch_permutation`
+#include "uform/loaders/dataset_shards.hpp"         // `parquet_file_t`, `expand_glob`, `column_view_t`
+#include "uform/loaders/direct_storage.hpp"         // `gpu_direct_storage_session_t`
 
 namespace unum::uform::loaders {
+using namespace unum::uform::utilities;
+using namespace unum::uform::encoder;
 
 /** The host-side worker pool the media decoders fan their host-CPU work across — one per run, owned at
  *  the composition root (the @b only sanctioned host-thread pool), borrowed here. */

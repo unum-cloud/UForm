@@ -9,18 +9,18 @@
  */
 #pragma once
 
-#include "uform/core/checkpoint.hpp" // `checkpoint_to_load_t`
-#include "uform/core/types.hpp"      // `expected`, the scalar aliases
+#include "uform/utilities/safetensors_format.hpp" // `checkpoint_to_load_t`
+#include "uform/utilities/types.hpp"              // `expected`, the scalar aliases
 
 namespace unum::uform::encoder {
 
-namespace uc = unum::uform::core;
+namespace uu = unum::uform::utilities;
 namespace nk = ashvardanian::numkong;
 namespace sz = ashvardanian::stringzilla;
 
-using uc::expected;
-using uc::f32_t;
-using uc::u32_t;
+using uu::expected;
+using uu::f32_t;
+using uu::u32_t;
 
 /** Most channels a pixel carries, the extent of the per-channel statistics. */
 inline constexpr u32_t pixel_channels_max_k = 4;
@@ -78,7 +78,7 @@ struct geometry_t {
      *  @retval status_t::invalid_input_k A key is missing or unparsable, or a shape disagrees; the C layer
      *      reports it as @c uform_status_malformed_k .
      */
-    [[nodiscard]] static expected<geometry_t> from(uc::checkpoint_to_load_t const &checkpoint) noexcept;
+    [[nodiscard]] static expected<geometry_t> from(uu::checkpoint_to_load_t const &checkpoint) noexcept;
 };
 
 } // namespace unum::uform::encoder

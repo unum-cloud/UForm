@@ -13,18 +13,18 @@
 
 #include <span> // `std::span`
 
-#include "uform/core/types.hpp" // `expected_t`, `status_t`, the scalar aliases
+#include "uform/utilities/types.hpp" // `expected_t`, `status_t`, the scalar aliases
 
 namespace unum::uform::media {
 
-namespace uc = unum::uform::core;
+namespace uu = unum::uform::utilities;
 
-using uc::b8_t;
-using uc::expected_t;
-using uc::f32_t;
-using uc::f32r1_span_t;
-using uc::status_t;
-using uc::u32_t;
+using uu::b8_t;
+using uu::expected_t;
+using uu::f32_t;
+using uu::f32r1_span_t;
+using uu::status_t;
+using uu::u32_t;
 
 /**
  *  @brief Decode one encoded clip and resample it to mono Float32 at @p sample_rate , filling all of @p out .

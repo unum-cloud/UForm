@@ -18,18 +18,18 @@
 
 #include <span> // `std::span`
 
-#include "uform/core/multimodal_batch.hpp" // `video_batch_shape_t`
-#include "uform/core/types.hpp"            // `expected`, `status_t`, the scalar aliases, `st::basic_vector`
-#include "uform/media/planning.hpp"        // `image_extent_t`, `video_grid_t`
+#include "uform/encoder/multimodal_batch.hpp" // `video_batch_shape_t`
+#include "uform/utilities/types.hpp"          // `expected`, `status_t`, the scalar aliases, `st::basic_vector`
+#include "uform/media/planning.hpp"           // `image_extent_t`, `video_grid_t`
 
 namespace unum::uform::media {
 
-using uc::b8_t;
-using uc::expected;
-using uc::expected_t;
-using uc::pixel_t;
-using uc::status_t;
-using uc::u8_t;
+using uu::b8_t;
+using uu::expected;
+using uu::expected_t;
+using uu::pixel_t;
+using uu::status_t;
+using uu::u8_t;
 
 /** The channels every decoded video pixel carries — interleaved RGB. */
 inline constexpr u32_t video_channels_k = 3u;

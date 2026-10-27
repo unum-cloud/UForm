@@ -19,7 +19,8 @@
 
 #include "uform/loaders/choices_loader.cuh"
 
-using namespace unum::uform::core;
+using namespace unum::uform::encoder;
+using namespace unum::uform::utilities;
 using namespace unum::uform::loaders;
 
 /** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay

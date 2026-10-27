@@ -11,12 +11,13 @@
  *  that holds it, inside the world axis the loss reads, and the attract graph stays symmetric.
  *  Two more cases pin the role rules of one bag and the edge capacity those rules derive.
  */
-#include "uform/core/contrastive_relations.cuh" // `relate_roles`, `contrastive_edges`
-#include "uform/core/mesh.hpp"                  // `mesh_shape_t`, `mesh_topology_t`, `make_mesh_shape`
+#include "uform/train/contrastive_relations.cuh" // `relate_roles`, `contrastive_edges`
+#include "uform/utilities/mesh.hpp"              // `mesh_shape_t`, `mesh_topology_t`, `make_mesh_shape`
 
 #include "harness.hpp"
 
-using namespace unum::uform::core;
+using namespace unum::uform::train;
+using namespace unum::uform::utilities;
 using namespace unum::uform::test;
 
 /** Segments per GPU, and the most GPUs a simulated world spans. */

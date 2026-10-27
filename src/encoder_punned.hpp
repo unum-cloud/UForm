@@ -38,13 +38,14 @@ struct encoder_verbs {
      *  floor. */
     gpu_class_t gpu_class;
 
-    core::expected<void *> (*create)(core::checkpoint_to_load_t const &checkpoint, encoder::geometry_t const &geometry,
-                                     encoder::precision_t precision, nk_stream_t stream) noexcept;
+    utilities::expected<void *> (*create)(utilities::checkpoint_to_load_t const &checkpoint,
+                                          encoder::geometry_t const &geometry, encoder::precision_t precision,
+                                          nk_stream_t stream) noexcept;
     void (*destroy)(void *tower) noexcept;
-    core::expected<std::size_t> (*scratch_bytes)(void const *tower, std::size_t tokens, std::size_t segments,
-                                                 executor_t executor) noexcept;
-    core::expected_t (*encode)(void const *tower, core::multimodal_batch_view_t batch, encoder::outputs_t outputs,
-                               std::span<b8_t> scratch, executor_t executor) noexcept;
+    utilities::expected<std::size_t> (*scratch_bytes)(void const *tower, std::size_t tokens, std::size_t segments,
+                                                      executor_t executor) noexcept;
+    utilities::expected_t (*encode)(void const *tower, encoder::multimodal_batch_view_t batch,
+                                    encoder::outputs_t outputs, std::span<b8_t> scratch, executor_t executor) noexcept;
 };
 
 /** The variant one class unit compiles for one home: @c find answers its verb table, or null where

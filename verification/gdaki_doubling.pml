@@ -5,7 +5,7 @@
  *  @brief Two multimem domains running one recursive-doubling round over InfiniBand, step after
  *      step, with no other exchange between the steps.
  *
- *  `infiniband_reach_t` from `src/core/infiniband_collectives.cu` posts its block into the
+ *  `infiniband_reach_t` from `src/utilities/infiniband_collectives.cu` posts its block into the
  *  partner's heap, then the partner's arrival flag, on one queue pair, so the payload lands before
  *  the flag. The partner waits for the flag of this step and folds or copies out what landed. The
  *  all-reduce lands into one of two landings picked by the step's parity, so a partner one step

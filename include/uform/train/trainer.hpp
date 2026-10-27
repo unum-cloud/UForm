@@ -18,14 +18,19 @@
 
 #include <span> // `std::span` — devices and item columns as views
 
-#include "uform/core/contrastive_tokens.cuh"     // `distributed_contrastive_tokens_t`
-#include "uform/core/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_all_reduce`
-#include "uform/core/introspect.cuh"             // `telemetry_ledger_t`, `telemetry_probe_t`
-#include "uform/core/mesh.hpp"                   // `mesh_topology_t`
-#include "uform/core/optimizer.hpp"              // `distributed_adafactor_t`
-#include "uform/train/base.cuh"                  // `trainer_config_t`, `base_replica_t`
+#include "uform/train/contrastive_tokens.cuh"         // `distributed_contrastive_tokens_t`
+#include "uform/utilities/infiniband_collectives.cuh" // `colocated_domain_t`, `infiniband_all_reduce`
+#include "uform/train/introspect.cuh"                 // `telemetry_ledger_t`, `telemetry_probe_t`
+#include "uform/utilities/mesh.hpp"                   // `mesh_topology_t`
+#include "uform/train/optimizer.hpp"                  // `distributed_adafactor_t`
+#include "uform/train/base.cuh"                       // `trainer_config_t`, `base_replica_t`
 
 namespace unum::uform::train {
+using encoder::late_interaction_side_t;
+using encoder::modality_t;
+using encoder::multimodal_batch_mixer_t;
+using encoder::multimodal_batch_on_cpu_t;
+using encoder::multimodal_batch_on_gpu_t;
 
 /** Where this process sits among the processes of a run, and how they meet; every field explicit. */
 struct mesh_options_t {

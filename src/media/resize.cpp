@@ -10,13 +10,14 @@
 #include <algorithm> // `std::clamp`
 #include <numbers>   // `std::numbers::pi`
 
-#include "uform/core/types.hpp" // `st::basic_vector` — the resize scratch
+#include "uform/utilities/types.hpp" // `st::basic_vector` — the resize scratch
 #include "uform/media/image.hpp"
 
 namespace um = unum::uform::media;
+namespace uu = unum::uform::utilities;
 using namespace um;
-using uc::f32_t;
-using uc::i64_t;
+using uu::f32_t;
+using uu::i64_t;
 
 /** The lobes of the Lanczos window, and the taps one output pixel reads along an axis. */
 inline constexpr i64_t lanczos_lobes_k = 3;

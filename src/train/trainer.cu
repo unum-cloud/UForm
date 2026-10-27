@@ -36,7 +36,19 @@
 #include "lib.hpp"            // `gpu_class_t`, `gpu_class_of`, `numkong_capabilities_of`
 #include "train/numerics.hpp" // `gpu_numerics_of`
 
-using namespace unum::uform::core;
+namespace ue = unum::uform::encoder;
+using ue::as_rows;
+using ue::byte_mask_k;
+using ue::byte_pad_k;
+using ue::late_interaction_side_t;
+using ue::modality_t;
+using ue::multimodal_batch_mixer_t;
+using ue::multimodal_batch_on_cpu_t;
+using ue::multimodal_batch_on_gpu_t;
+using ue::multimodal_batch_shape_t;
+using ue::segment_role_t;
+using ue::video_batch_shape_t;
+using namespace unum::uform::utilities;
 using namespace unum::uform::train;
 namespace um = unum::uform::media;
 namespace ut = unum::uform::train;

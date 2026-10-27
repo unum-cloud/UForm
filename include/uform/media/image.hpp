@@ -17,17 +17,17 @@
 
 #include <span> // `std::span`
 
-#include "uform/core/types.hpp"     // `expected`, `status_t`, the scalar aliases
-#include "uform/media/planning.hpp" // `image_extent_t`, `patch_grid_t`, `crop_t`
+#include "uform/utilities/types.hpp" // `expected`, `status_t`, the scalar aliases
+#include "uform/media/planning.hpp"  // `image_extent_t`, `patch_grid_t`, `crop_t`
 
 namespace unum::uform::media {
 
-using uc::b8_t;
-using uc::expected;
-using uc::expected_t;
-using uc::pixel_t;
-using uc::status_t;
-using uc::u8_t;
+using uu::b8_t;
+using uu::expected;
+using uu::expected_t;
+using uu::pixel_t;
+using uu::status_t;
+using uu::u8_t;
 
 /** The channels every decoded pixel carries — interleaved RGBA. */
 inline constexpr u32_t image_channels_k = 4u;

@@ -28,33 +28,33 @@
 #include <numkong/capabilities.h> // `nk_capability_t`, `nk_stream_t`
 #include <numkong/types.h>        // `nk_bf16_t`, `nk_e4m3_t`
 
-#include "uform/core/multimodal_batch.hpp" // `modality_t`, the shape views
-#include "uform/core/types.hpp"            // the scalar aliases and the rank-tagged views, `st::basic_vector`
+#include "uform/encoder/multimodal_batch.hpp" // `modality_t`, the shape views
+#include "uform/encoder/tower_kernels.cuh"    // `e4m3_range_k`, `e4m3_descale_floor_k`
+#include "uform/utilities/types.hpp"          // the scalar aliases and the rank-tagged views, `st::basic_vector`
 
 namespace unum::uform::encoder {
 
-namespace uc = unum::uform::core;
+namespace uu = unum::uform::utilities;
 namespace nk = ashvardanian::numkong;
 namespace st = ashvardanian::smashtable;
 
-using uc::expected;
-using uc::f32_t;
-using uc::i16_t;
-using uc::modality_t;
-using uc::pixel_t;
-using uc::token_id_t;
-using uc::u16_t;
-using uc::u32_t;
-using uc::u64_t;
+using uu::expected;
+using uu::f32_t;
+using uu::i16_t;
+using uu::pixel_t;
+using uu::token_id_t;
+using uu::u16_t;
+using uu::u32_t;
+using uu::u64_t;
 
-using uc::f32r1_span_t;
-using uc::f32r1_view_t;
-using uc::f32r2_span_t;
-using uc::f32r2_view_t;
-using uc::i16r2_span_t;
-using uc::i16r2_view_t;
-using uc::u32r1_span_t;
-using uc::u32r1_view_t;
+using uu::f32r1_span_t;
+using uu::f32r1_view_t;
+using uu::f32r2_span_t;
+using uu::f32r2_view_t;
+using uu::i16r2_span_t;
+using uu::i16r2_view_t;
+using uu::u32r1_span_t;
+using uu::u32r1_view_t;
 
 /** BFloat16 and E4M3 borrows, in NumKong's vendor-neutral scalars. */
 using bf16r1_view_t = nk::tensor_view<nk_bf16_t, 1>;
@@ -64,12 +64,6 @@ using bf16r2_span_t = nk::tensor_span<nk_bf16_t, 2>;
 using e4m3r1_span_t = nk::tensor_span<nk_e4m3_t, 1>;
 using e4m3r2_view_t = nk::tensor_view<nk_e4m3_t, 2>;
 using e4m3r2_span_t = nk::tensor_span<nk_e4m3_t, 2>;
-
-/** E4M3's largest normal magnitude, which every quantized row's @c max_abs maps onto. */
-inline constexpr f32_t e4m3_range_k = 240.0f;
-
-/** The scale floor keeping an all-zero row representable. */
-inline constexpr f32_t e4m3_descale_floor_k = 1.0e-12f;
 
 /** Where every segment's live cells sit in the batch grid, and where they land in the packed rows. */
 struct segment_layout_t {

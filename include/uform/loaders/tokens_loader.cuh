@@ -30,14 +30,16 @@
 
 #include <span> // `std::span`
 
-#include "uform/core/gpu_allocators.hpp"    // `gpu_alloc` — the per-fill scratch allocator
-#include "uform/core/multimodal_batch.cuh"  // `multimodal_batch_on_gpu_t` — the packing target
-#include "uform/core/schedule.cuh"          // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`, `grid_size_for`
-#include "uform/core/types.hpp"             // `expected`, `status_t`, `token_id_t`, `data_epoch_t`, `epoch_permutation`
+#include "uform/utilities/vram_nvidia_device.hpp"   // `gpu_alloc` — the per-fill scratch allocator
+#include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t` — the packing target
+#include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`, `grid_size_for`
+#include "uform/utilities/types.hpp"        // `expected`, `status_t`, `token_id_t`, `data_epoch_t`, `epoch_permutation`
 #include "uform/loaders/dataset_shards.hpp" // `parquet_file_t`, `jsonl_file_t`, `expand_glob`, `column_view_t`
 #include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
 
 namespace unum::uform::loaders {
+using namespace unum::uform::utilities;
+using namespace unum::uform::encoder;
 
 /** A batch's @b [rows,columns] token rectangle; its extents are the shape. */
 using tokens_matrix_span_t = nk::tensor_span<token_id_t, 2>;

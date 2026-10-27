@@ -12,7 +12,8 @@
 
 #include "uform/loaders/tokens_loader.cuh"
 
-using namespace unum::uform::core;
+using namespace unum::uform::encoder;
+using namespace unum::uform::utilities;
 using namespace unum::uform::loaders;
 namespace ul = unum::uform::loaders;
 

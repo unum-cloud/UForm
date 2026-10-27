@@ -37,9 +37,9 @@
 
 #include "uform/uform.h" // every argument structure
 
-#include "uform/core/array.hpp"    // `per_gpu_array`
-#include "uform/core/types.hpp"    // `status_t`, the integer aliases, `sz::string_view_t`, `st::basic_vector`
-#include "uform/encoder/tower.hpp" // `geometry_t`, `precision_t`, `outputs_t` - what a model's towers take
+#include "uform/utilities/array.hpp" // `per_gpu_array`
+#include "uform/utilities/types.hpp" // `status_t`, the integer aliases, `sz::string_view_t`, `st::basic_vector`
+#include "uform/encoder/tower.hpp"   // `geometry_t`, `precision_t`, `outputs_t` - what a model's towers take
 
 namespace unum::uform {
 
@@ -48,14 +48,14 @@ namespace nk = ashvardanian::numkong;
 namespace sz = ashvardanian::stringzilla;
 namespace st = ashvardanian::smashtable;
 
-using core::b8_t;
-using core::bytes_span_t;
-using core::bytes_view_t;
-using core::i32_t;
-using core::per_gpu_array;
-using core::u32_t;
-using core::u64_t;
-using core::u8_t;
+using utilities::b8_t;
+using utilities::bytes_span_t;
+using utilities::bytes_view_t;
+using utilities::i32_t;
+using utilities::per_gpu_array;
+using utilities::u32_t;
+using utilities::u64_t;
+using utilities::u8_t;
 
 /** Reports a progress handler hears at most when its call names zero steps. */
 inline constexpr std::size_t default_progress_steps_k = 10;
@@ -77,7 +77,7 @@ inline constexpr u64_t every_ticket_k = std::numeric_limits<u64_t>::max();
 /** The @p count entries of a C tape as the engine's typed tape, whose elements reach the last
  *  offset; null offsets make an empty tape, and null data no elements. */
 template <typename element_type_>
-[[nodiscard]] core::tape_view<element_type_> tape_of(uform_tape_view_t tape, std::size_t count) noexcept {
+[[nodiscard]] utilities::tape_view<element_type_> tape_of(uform_tape_view_t tape, std::size_t count) noexcept {
     if (!tape.offsets) return {};
     return {{static_cast<element_type_ *>(tape.data), tape.data ? tape.offsets[count] : 0}, {tape.offsets, count + 1}};
 }
@@ -646,15 +646,15 @@ host_verbs_t const *pick_host_verbs(cpu_ladder<classes_...>, cpu_class_t cpu_cla
 #pragma region Outcomes
 
 /** The C status a failure of the engine's own vocabulary crosses into. */
-[[nodiscard]] inline uform_status_t status_of(core::status_t status) noexcept {
+[[nodiscard]] inline uform_status_t status_of(utilities::status_t status) noexcept {
     switch (status) {
-    case core::status_t::success_k: return uform_status_success_k;
-    case core::status_t::bad_alloc_k: return uform_status_out_of_memory_k;
-    case core::status_t::invalid_input_k: return uform_status_invalid_argument_k;
-    case core::status_t::shape_unsupported_k: return uform_status_unsupported_k;
-    case core::status_t::cuda_error_k: return uform_status_device_k;
-    case core::status_t::io_error_k: return uform_status_io_k;
-    case core::status_t::other_k: return uform_status_internal_k;
+    case utilities::status_t::success_k: return uform_status_success_k;
+    case utilities::status_t::bad_alloc_k: return uform_status_out_of_memory_k;
+    case utilities::status_t::invalid_input_k: return uform_status_invalid_argument_k;
+    case utilities::status_t::shape_unsupported_k: return uform_status_unsupported_k;
+    case utilities::status_t::cuda_error_k: return uform_status_device_k;
+    case utilities::status_t::io_error_k: return uform_status_io_k;
+    case utilities::status_t::other_k: return uform_status_internal_k;
     }
     return uform_status_internal_k;
 }
@@ -731,7 +731,7 @@ class progress_ticks_t {
 
       private:
         [[nodiscard]] std::size_t boundary_(std::size_t index) const noexcept {
-            return core::divide_round_up(index * total_, slices_);
+            return utilities::divide_round_up(index * total_, slices_);
         }
 
         std::size_t index_;
@@ -818,7 +818,7 @@ class chunked_arena_t {
     /** Hands out @p bytes aligned for any kernel, growing by a chunk as large as everything held so far when full,
      *  or null when the policy or the limit refuses. */
     [[nodiscard]] void *allocate(std::size_t bytes) noexcept {
-        std::size_t const aligned = core::divide_round_up(bytes, nk_default_alignment_k) * nk_default_alignment_k;
+        std::size_t const aligned = utilities::divide_round_up(bytes, nk_default_alignment_k) * nk_default_alignment_k;
         for (; current_ != chunks_.size(); ++current_, used_ = 0)
             if (chunks_[current_].size() - used_ >= aligned) {
                 b8_t *const landed = chunks_[current_].data() + used_;
@@ -1159,7 +1159,7 @@ struct uform_model_handle_t {
 
     /** Each question type's calibrated inverse temperature, in host memory where a choice's softmax
      *  runs; empty without the byte decoder. */
-    uf::core::st::basic_vector<uf::core::f32_t> choice_inverse_temperatures;
+    uf::utilities::st::basic_vector<uf::utilities::f32_t> choice_inverse_temperatures;
 
     /** The variant picked once at load: its home's verb table, which alone casts each tower
      *  back. */

@@ -21,7 +21,7 @@ There are a few important constraints that shape everything:
 - To amortize the cost of opening 2+ shards per call and the cost of the dynamic memory allocations, models must pre-populate multiple batches at once.
   Those are later peeled off for several steps, and the process repeats.
 
-The loaders declared in `include/uform/loaders/`, with bodies in `src/loaders/`, are not designed in a vacuum: they must stay compatible with `include/uform/core/`.
+The loaders declared in `include/uform/loaders/`, with bodies in `src/loaders/`, are not designed in a vacuum: they must stay compatible with `include/uform/encoder/`.
 Most importantly, remember that:
 
 - Our models are compatible with different text lengths and dynamically pack short and long strings into segments of individual input rows.
@@ -57,7 +57,7 @@ mixed    GPU 0 ▣▤▥▦   GPU 1 ▦▣▤▥   GPU 2 ▥▦▣▤   GPU 3 �
   `dataset_source_t::phases_` holds the phases.
 - __Diversity from the world.__
   The mixer routes every bag to any GPU of the colocated domain, so a post-mix batch holds segments from as many datasets as there are GPUs.
-  `multimodal_batch_mixer_t` in `src/core/multimodal_batch.cu` routes them.
+  `multimodal_batch_mixer_t` in `src/encoder/multimodal_batch.cu` routes them.
 - __Capacity is latched, content varies.__
   Rows, segments and bags are fixed capacities of the batch, while how many items fill them is content.
   Whatever cannot fit drops whole and loudly, never split: a bag that cannot land on its destination drops in the mixer.
@@ -65,7 +65,7 @@ mixed    GPU 0 ▣▤▥▦   GPU 1 ▦▣▤▥   GPU 2 ▥▦▣▤   GPU 3 �
   A segment never crosses a row, and several share one row back to back, so short texts and small images pack many per row.
 - __Anchors trail.__
   The loader and the mixer both lay every other role out first and the anchors after them, so short captions pack together instead of each stranding a row beside full-row media.
-  `route_destination_` in `src/core/multimodal_batch.cu` lands each bag as one run per band.
+  `route_destination_` in `src/encoder/multimodal_batch.cu` lands each bag as one run per band.
 - __The post-mix batch sets the budgets.__
   The model trains on what the mixer delivers, so every capacity must hold at the destination, not only where a fill packed it.
 - __Keyed and reproducible.__

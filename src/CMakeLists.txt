@@ -1,13 +1,13 @@
 # `uform_host` → the verbs and handles every build carries, compiled once into objects that `c/` assembles into
 # `uform_static` and `uform_shared`. `src/`, `include/` and `c/` are its include roots, so sources include
-# `"uform/core/schedule.cuh"`, `"uform/types.h"` and the flat `"lib.hpp"`. Only `UFORM_EXPORT` symbols leave the shared
+# `"uform/utilities/vram_nvidia_schedule.cuh"`, `"uform/types.h"` and the flat `"lib.hpp"`. Only `UFORM_EXPORT` symbols leave the shared
 # library.
 add_library(
     uform_host OBJECT
     types.cpp
     model.cpp
     encode.cpp
-    core/checkpoint.cpp
+    utilities/safetensors_format.cpp
     encoder/geometry.cpp
     media/planning.cpp
     media/resize.cpp
@@ -433,46 +433,45 @@ if (UFORM_BUILD_CUDA)
         set(uform_multicast_codes_ 90a-real 100f-real)
     endif ()
 
-    # `src/core` → `uform::core`: one static library for the whole core cell, compiled once, never per consumer.
+    # `src/train` → `uform::train`: the training stack compiled once, never per consumer, linked by the `uform_base`
+    # tool and the conformance suites alike.
     # Dependencies stay lean: NumKong, StringZilla, yyjson and the CUDA Driver API, with no NCCL or NVSHMEM; the runtime
     # arrives only through NumKong's kernel units. `src/` and `include/` are the include roots of all three libraries,
-    # so sources include `"uform/core/schedule.cuh"` and `"uform/core/types.hpp"`.
+    # so sources include `"uform/utilities/vram_nvidia_schedule.cuh"` and `"uform/utilities/types.hpp"`.
     add_library(
-        uform_core STATIC
-        core/schedule.cu
-        core/introspect.cu
-        core/multimem_collectives.cu
-        core/infiniband_collectives.cu
-        core/multimodal_masking.cu
-        core/checkpoint.cpp
-        core/multimodal_batch.cu
-        core/contrastive_segments.cu
-        core/contrastive_tokens.cu
-        core/optimizer.cu
-        core/transformer_block.cu
-        core/encoder_tower.cu
+        uform_train STATIC
+        utilities/vram_nvidia_schedule.cu
+        train/introspect.cu
+        utilities/multimem_collectives.cu
+        utilities/infiniband_collectives.cu
+        train/multimodal_masking.cu
+        utilities/safetensors_format.cpp
+        encoder/multimodal_batch.cu
+        train/contrastive_segments.cu
+        train/contrastive_tokens.cu
+        train/optimizer.cu
+        train/transformer_block.cu
+        train/encoder_tower.cu
+        train/base.cu
+        train/trainer.cu
     )
-    add_library(uform::core ALIAS uform_core)
-    target_include_directories(uform_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include")
+    add_library(uform::train ALIAS uform_train)
+    target_include_directories(uform_train PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include")
     target_link_libraries(
-        uform_core PUBLIC numkong::static stringzilla::static smashtable::header yyjson CUDA::cuda_driver
+        uform_train PUBLIC numkong::static stringzilla::static smashtable::header yyjson CUDA::cuda_driver
     )
-    target_compile_features(uform_core PUBLIC cxx_std_23)
+    target_compile_features(uform_train PUBLIC cxx_std_23)
     # NumKong accessors are `constexpr` for device-callability; `nvcc` needs the (long-stable) flag to allow it.
-    target_compile_options(uform_core PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+    target_compile_options(uform_train PUBLIC $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     if (uform_infiniband_enabled_)
-        target_compile_definitions(uform_core PUBLIC UFORM_WITH_INFINIBAND=1)
-        target_include_directories(uform_core PUBLIC "${UFORM_IBVERBS_INCLUDE_DIR}")
-        target_link_libraries(uform_core PUBLIC "${UFORM_IBVERBS_LIBRARY}" "${UFORM_MLX5_LIBRARY}")
+        target_compile_definitions(uform_train PUBLIC UFORM_WITH_INFINIBAND=1)
+        target_include_directories(uform_train PUBLIC "${UFORM_IBVERBS_INCLUDE_DIR}")
+        target_link_libraries(uform_train PUBLIC "${UFORM_IBVERBS_LIBRARY}" "${UFORM_MLX5_LIBRARY}")
     endif ()
     # The `multimem` kernels compile for the multicast-capable codes alone, and a domain loads them by name.
-    uform_gpu_bundle(uform_core nvidia uform_multimem_switch core/multimem_switch.cu CODES ${uform_multicast_codes_})
-
-    # `src/train` → `uform::train`: the training stack compiled once, linked by the `uform_base` tool and the
-    # conformance suites alike.
-    add_library(uform_train STATIC train/base.cu train/trainer.cu)
-    add_library(uform::train ALIAS uform_train)
-    target_link_libraries(uform_train PUBLIC uform::core)
+    uform_gpu_bundle(
+        uform_train nvidia uform_multimem_switch utilities/multimem_switch.cu CODES ${uform_multicast_codes_}
+    )
     # The envelope probe reads this process's device bytes from NVML, which ships with the driver like libcuda.
     target_link_libraries(uform_train PRIVATE CUDA::nvml)
     # `gpu_numerics_of` fills each GPU class's table from the rungs NumKong compiled.
@@ -503,7 +502,7 @@ if (UFORM_BUILD_CUDA)
         loaders/choices_loader.cu
     )
     add_library(uform::loaders ALIAS uform_loaders)
-    target_link_libraries(uform_loaders PUBLIC uform::core)
+    target_link_libraries(uform_loaders PUBLIC uform::train)
     # The loaders call the host decoders, so the archive takes the objects `uform_host` compiled rather than its own,
     # with the encoder's variants they name.
     target_link_libraries(uform_loaders PRIVATE uform_host ${uform_encoder_variants_})

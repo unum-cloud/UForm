@@ -40,6 +40,11 @@
 #include "uform/train/trainer.hpp"          // `batch_source_t`, `trainer_t`
 
 namespace unum::uform::train {
+using encoder::modality_t;
+using encoder::multimodal_batch_mixer_t;
+using encoder::multimodal_batch_on_gpu_t;
+using encoder::multimodal_batch_shape_t;
+using encoder::segment_role_t;
 
 /** One dataset of a mixture, as its JSON entry names it. */
 struct mixture_entry_t {

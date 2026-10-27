@@ -33,13 +33,12 @@
 #include <rmm/cuda_stream_view.hpp>
 #include <rmm/device_buffer.hpp> // `rmm::device_buffer` — the gathered tar members
 
-#include "uform/core/gpu_allocators.hpp" // `device_address` — the tar gather's copy endpoints
-#include "uform/core/types.hpp"          // `st::basic_vector` — the owned per-column table
+#include "uform/utilities/vram_nvidia_device.hpp" // `device_address` — the tar gather's copy endpoints
+#include "uform/utilities/types.hpp"              // `st::basic_vector` — the owned per-column table
 #include "uform/loaders/dataset_shards.hpp"
 
-namespace uc = unum::uform::core;
 namespace ul = unum::uform::loaders;
-using namespace uc;
+using namespace unum::uform::utilities;
 using namespace ul;
 
 /** One decoded column's device-resident spans and the cuDF columns that back them — everything
