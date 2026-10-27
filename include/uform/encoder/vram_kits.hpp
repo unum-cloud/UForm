@@ -70,7 +70,7 @@ struct vram_nvidia_entries_kit_t {
     static nk_status_t fill_layout(u32r1_view_t lengths, u32r1_span_t packed_offsets, u32r1_span_t pool_offsets,
                                    nk_stream_t stream) noexcept;
 
-    /** Coordinates clamp below @p positions , so @ref mrope reads no grid out of range. */
+    /** Coordinates clamp below @p positions , so @c mrope reads no grid out of range. */
     static nk_status_t fill_coords(segment_layout_t layout, nk::tensor_view<u16_t, 2> image_shapes,
                                    nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames, u32_t frame_stride,
                                    u32_t positions, i16r2_span_t coords, nk_stream_t stream) noexcept;

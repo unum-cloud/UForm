@@ -308,7 +308,7 @@ struct waiter_for_cpu_class<cpu_class_t::nvidia_vera_k> {
     using type = fu::arm64_wfet_t;
 };
 #endif
-#if FORKUNION_TARGET_RISC5_WRS
+#if FORKUNION_TARGET_RISCV64_WRS
 template <>
 struct waiter_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     using type = fu::risc5_wrs_t;
@@ -394,7 +394,7 @@ struct atomic_ref_for_cpu_class<cpu_class_t::nvidia_vera_k> {
     using type = fu::arm64_lse_atomic_ref<value_type_>;
 };
 #endif
-#if FORKUNION_TARGET_RISC5_ZACAS
+#if FORKUNION_TARGET_RISCV64_ZACAS
 template <>
 struct atomic_ref_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     template <typename value_type_>

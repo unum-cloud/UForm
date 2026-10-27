@@ -33,7 +33,7 @@ struct geometry_t {
     u32_t head_width = 0;
     f32_t rms_epsilon = 0;
 
-    /** Channels of each head the three rotary axes take, summing to @ref head_width . */
+    /** Channels of each head the three rotary axes take, summing to @c head_width . */
     u32_t rope_temporal = 0, rope_height = 0, rope_width = 0;
     f32_t rope_base = 0;
 
@@ -76,8 +76,10 @@ struct geometry_t {
     /**
      *  @brief Read the geometry from @p checkpoint 's metadata and cross-check it against its
      *      tensor shapes.
-     *  @retval status_t::invalid_argument_k A key is missing or unparsable, or a shape disagrees;
-     *      the C layer reports it as @c uform_status_malformed_k .
+     *
+     *  @par Statuses:
+     *  - @c status_t::invalid_argument_k A key is missing or unparsable, or a shape disagrees;
+     *    the C layer reports it as @c uform_status_malformed_k .
      */
     [[nodiscard]] static expected<geometry_t> from(uu::checkpoint_to_load_t const &checkpoint) noexcept;
 };

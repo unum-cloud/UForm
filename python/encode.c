@@ -410,8 +410,8 @@ static encode_verb_t const audio_encode_samples_verb = {
     {sizeof(encode_call_t), audio_encode_samples_submit, encode_answer, encode_release, encode_traverse}};
 
 static char const doc_Model_text_encode[] =                                                             //
-    "text_encode(texts, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32,\n"          //
-    "    progress=None, progress_steps=0, stats=None) -> Encoded\n"                                     //
+    "text_encode(texts, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32, "           //
+    "progress=None, progress_steps=0, stats=None) -> Encoded\n"                                         //
     "\n"                                                                                                //
     "Encodes UTF-8 texts through one forward, keeping the surfaces `outputs` names. Models are\n"       //
     "tokenizer-free, so every byte is a token, and a text longer than the context is cut.\n"            //
@@ -470,8 +470,8 @@ static PyObject *Model_text_encode(PyObject *self, PyObject *const *args, Py_ssi
 }
 
 static char const doc_Model_image_encode[] =                                                     //
-    "image_encode(files, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32,\n"  //
-    "    progress=None, progress_steps=0, stats=None) -> Encoded\n"                              //
+    "image_encode(files, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32, "   //
+    "progress=None, progress_steps=0, stats=None) -> Encoded\n"                                  //
     "\n"                                                                                         //
     "Decodes and encodes JPEG, PNG or WebP files; an undecodable one raises `MalformedError`.\n" //
     "Calls `uform_image_encode`.\n"                                                              //
@@ -511,18 +511,18 @@ static PyObject *Model_image_encode(PyObject *self, PyObject *const *args, Py_ss
     return uform_py_call_run(&receiver, &image_encode_verb.verb, call);
 }
 
-static char const doc_Model_image_encode_pixels[] =                                                     //
-    "image_encode_pixels(pixels, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32,\n" //
-    "    progress=None, progress_steps=0, stats=None) -> Encoded\n"                                     //
-    "\n"                                                                                                //
-    "Encodes decoded images, resizing on the executor's side.\n"                                        //
-    "Calls `uform_image_encode_pixels`.\n"                                                              //
-    "\n"                                                                                                //
-    "Args:\n"                                                                                           //
-    "  pixels (Sequence[buffer]): C-contiguous [height, width, 3] buffers of uint8 RGB, gathered\n"     //
-    "    into one tape with their heights and widths.\n"                                                //
-    "  arena (Arena): Where the outputs land, rewound by the call.\n"                                   //
-    "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"                      //
+static char const doc_Model_image_encode_pixels[] =                                                    //
+    "image_encode_pixels(pixels, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32, " //
+    "progress=None, progress_steps=0, stats=None) -> Encoded\n"                                        //
+    "\n"                                                                                               //
+    "Encodes decoded images, resizing on the executor's side.\n"                                       //
+    "Calls `uform_image_encode_pixels`.\n"                                                             //
+    "\n"                                                                                               //
+    "Args:\n"                                                                                          //
+    "  pixels (Sequence[buffer]): C-contiguous [height, width, 3] buffers of uint8 RGB, gathered\n"    //
+    "    into one tape with their heights and widths.\n"                                               //
+    "  arena (Arena): Where the outputs land, rewound by the call.\n"                                  //
+    "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"                     //
     "  stats (ImageEncodeStats, optional): Overwritten with this call's report.";
 
 static PyObject *Model_image_encode_pixels(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
@@ -557,18 +557,18 @@ static PyObject *Model_image_encode_pixels(PyObject *self, PyObject *const *args
     return uform_py_call_run(&receiver, &image_encode_pixels_verb.verb, call);
 }
 
-static char const doc_Model_video_encode[] =                                                    //
-    "video_encode(files, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32,\n" //
-    "    progress=None, progress_steps=0, stats=None) -> Encoded\n"                             //
-    "\n"                                                                                        //
-    "Decodes and encodes MP4 or WebM clips.\n"                                                  //
-    "Calls `uform_video_encode`.\n"                                                             //
-    "\n"                                                                                        //
-    "Args:\n"                                                                                   //
-    "  files (Sequence[bytes-like] | tuple[buffer, buffer]): The encoded clips, or a (data,\n"  //
-    "    offsets) pair lent as is.\n"                                                           //
-    "  arena (Arena): Where the outputs land, rewound by the call.\n"                           //
-    "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"              //
+static char const doc_Model_video_encode[] =                                                   //
+    "video_encode(files, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32, " //
+    "progress=None, progress_steps=0, stats=None) -> Encoded\n"                                //
+    "\n"                                                                                       //
+    "Decodes and encodes MP4 or WebM clips.\n"                                                 //
+    "Calls `uform_video_encode`.\n"                                                            //
+    "\n"                                                                                       //
+    "Args:\n"                                                                                  //
+    "  files (Sequence[bytes-like] | tuple[buffer, buffer]): The encoded clips, or a (data,\n" //
+    "    offsets) pair lent as is.\n"                                                          //
+    "  arena (Arena): Where the outputs land, rewound by the call.\n"                          //
+    "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"             //
     "  stats (VideoEncodeStats, optional): Overwritten with this call's report.";
 
 static PyObject *Model_video_encode(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
@@ -599,18 +599,18 @@ static PyObject *Model_video_encode(PyObject *self, PyObject *const *args, Py_ss
     return uform_py_call_run(&receiver, &video_encode_verb.verb, call);
 }
 
-static char const doc_Model_audio_encode[] =                                                    //
-    "audio_encode(files, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32,\n" //
-    "    progress=None, progress_steps=0, stats=None) -> Encoded\n"                             //
-    "\n"                                                                                        //
-    "Decodes, resamples to mono and encodes WAV, FLAC, MP3 or Opus recordings.\n"               //
-    "Calls `uform_audio_encode`.\n"                                                             //
-    "\n"                                                                                        //
-    "Args:\n"                                                                                   //
-    "  files (Sequence[bytes-like] | tuple[buffer, buffer]): The encoded recordings, or a\n"    //
-    "    (data, offsets) pair lent as is.\n"                                                    //
-    "  arena (Arena): Where the outputs land, rewound by the call.\n"                           //
-    "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"              //
+static char const doc_Model_audio_encode[] =                                                   //
+    "audio_encode(files, arena, /, *, outputs=Outputs.EMBEDDINGS, outputs_scalar=Scalar.F32, " //
+    "progress=None, progress_steps=0, stats=None) -> Encoded\n"                                //
+    "\n"                                                                                       //
+    "Decodes, resamples to mono and encodes WAV, FLAC, MP3 or Opus recordings.\n"              //
+    "Calls `uform_audio_encode`.\n"                                                            //
+    "\n"                                                                                       //
+    "Args:\n"                                                                                  //
+    "  files (Sequence[bytes-like] | tuple[buffer, buffer]): The encoded recordings, or a\n"   //
+    "    (data, offsets) pair lent as is.\n"                                                   //
+    "  arena (Arena): Where the outputs land, rewound by the call.\n"                          //
+    "  outputs, outputs_scalar, progress, progress_steps: As for `text_encode`.\n"             //
     "  stats (AudioEncodeStats, optional): Overwritten with this call's report.";
 
 static PyObject *Model_audio_encode(PyObject *self, PyObject *const *args, Py_ssize_t positional_args_count,
@@ -642,8 +642,8 @@ static PyObject *Model_audio_encode(PyObject *self, PyObject *const *args, Py_ss
 }
 
 static char const doc_Model_audio_encode_samples[] =                                                 //
-    "audio_encode_samples(samples, sample_rate, arena, /, *, outputs=Outputs.EMBEDDINGS,\n"          //
-    "    outputs_scalar=Scalar.F32, progress=None, progress_steps=0, stats=None) -> Encoded\n"       //
+    "audio_encode_samples(samples, sample_rate, arena, /, *, outputs=Outputs.EMBEDDINGS, "           //
+    "outputs_scalar=Scalar.F32, progress=None, progress_steps=0, stats=None) -> Encoded\n"           //
     "\n"                                                                                             //
     "Encodes decoded mono recordings, resampled to the model's rate where `sample_rate` differs.\n"  //
     "Calls `uform_audio_encode_samples`.\n"                                                          //
@@ -753,8 +753,8 @@ static uform_py_verb_t const text_choose_verb = {sizeof(choose_call_t), text_cho
                                                  choose_release, choose_traverse};
 
 static char const doc_Model_text_choose[] =                                                        //
-    "text_choose(texts, choices, arena, /, *, temperature_groups=None, progress=None,\n"           //
-    "    progress_steps=0, stats=None) -> RowsTape\n"                                              //
+    "text_choose(texts, choices, arena, /, *, temperature_groups=None, progress=None, "            //
+    "progress_steps=0, stats=None) -> RowsTape\n"                                                  //
     "\n"                                                                                           //
     "Scores each text's legal choices through one forward, a softmax over them alone at the\n"     //
     "calibrated inverse temperature of the text's question type. A model without the byte\n"       //

@@ -3,56 +3,65 @@
  *  @author Ash Vardanian
  *  @date July 5, 2026
  *  @brief The Parquet video loader: tied to a @b dataset, not a GPU — the same shape as
- *      @ref tokens_loader_parquet_t , @ref image_loader_parquet_t and
- *      @ref audio_loader_parquet_t .
+ *      @ref unum::uform::loaders::tokens_loader_parquet_t ,
+ *      @ref unum::uform::loaders::image_loader_parquet_t and
+ *      @ref unum::uform::loaders::audio_loader_parquet_t .
  *
- *  @ref make reads each shard's Parquet footer once; every @ref fill takes the caller's stream,
- *  rank, and step, pools randomly chosen shards' clip column into one device reservoir over GDS,
- *  draws rows by a keyed bijection, and decodes the drawn clips into the batches' @c videos tube
- *  grid with @ref decode_videos .
+ *  @ref unum::uform::loaders::video_loader_parquet_t::make reads each shard's Parquet footer once;
+ *  every @ref unum::uform::loaders::video_loader_parquet_t::fill takes the caller's stream, rank,
+ *  and step, pools randomly chosen shards' clip column into one device reservoir over GDS, draws
+ *  rows by a keyed bijection, and decodes the drawn clips into the batches' @c videos tube grid
+ *  with @ref unum::uform::loaders::decode_videos .
  *
  *  @section video_host_hop The one host hop, and why
  *
  *  A container ( @c mp4 / @c webm ) can only be parsed on the host — libavformat walks its box /
  *  EBML structure and rewrites the elementary stream to Annex-B — so the drawn clips' compressed
  *  bytes make one device-to-pinned hop before demux. Demux is the one place STYLE sanctions a
- *  worker pool ( @ref decode_videos borrows the run's @ref pool_view_t ): container parsing is
- *  host-bound and embarrassingly parallel across clips. Everything after demux stays on device.
+ *  worker pool ( @ref unum::uform::loaders::decode_videos borrows the run's
+ *  @ref unum::uform::utilities::pool_view_t ): container parsing is host-bound and embarrassingly
+ *  parallel across clips. Everything after demux stays on device.
  *
  *  @section video_multi_engine Saturating the physical decode units — GPU-driven
  *
- *  A GPU carries several physical NVDEC engines. @ref nvdec_session_t holds @c engine_count independent decode
- *  @b engines — each with its own per-codec NVDEC parser plus a decoder rebuilt from every clip's sequence header —
- *  and @ref nvdec_session_t::decode_into feeds the drawn clips across them in small @b interleaved chunks from a
- *  @b single host thread, so decode work stays submitted to every engine at once. The GPU is the master: decode is
- *  hardware-asynchronous, so the parallelism is in the silicon, not in CPU threads — measured at ~6x on a 7-engine
- *  H100, beating a thread-per-engine pool. (A whole-clip-per-call feed, by contrast, uses only one engine.) The
- *  engines own no streams — the whole GPU tail rides the caller's one stream. The CPU pool stays a @b slave: it does
- *  only the host-bound demux, never the GPU.
+ *  A GPU carries several physical NVDEC engines. @ref unum::uform::loaders::nvdec_session_t holds
+ *  @c engine_count independent decode @b engines — each with its own per-codec NVDEC parser plus a
+ *  decoder rebuilt from every clip's sequence header — and
+ *  @ref unum::uform::loaders::nvdec_session_t::decode_into feeds the drawn clips across them in
+ *  small @b interleaved chunks from a @b single host thread, so decode work stays submitted to
+ *  every engine at once. The GPU is the master: decode is hardware-asynchronous, so the parallelism
+ *  is in the silicon, not in CPU threads — measured at ~6x on a 7-engine H100, beating a
+ *  thread-per-engine pool. (A whole-clip-per-call feed, by contrast, uses only one engine.) The
+ *  engines own no streams — the whole GPU tail rides the caller's one stream. The CPU pool stays a
+ *  @b slave: it does only the host-bound demux, never the GPU.
  *
  *  @section video_jobs Jobs, the clips×representations cross-product
  *
  *  A @b job is one @c (clip,representation) pair; a fill's jobs are the full @b cross-product of the drawn clips and
- *  the configured representations (each a flat @ref video_batch_shape_t ). Each job emits exactly @b one segment
- *  packed onto the @c [rows,columns] grid — the @b segment / column axis, not a tensor rank — whose footprint is
- *  derived from the clip's decoded native resolution ( @ref derive_triple_ ), never a fixed budget. The common
- *  single-representation (Omni) config is one decode per clip. Representations of one clip differ only in
- *  @c frame_stride and (almost always) share their spatial target, so the drive decodes each clip @b once per
- *  distinct spatial target — keeping every frame in a shared buffer — and each representation
- *  temporally subsamples those frames by its own @c frame_stride when the tile kernel gathers its tubes. A
- *  multi-representation config therefore pays one decode per distinct @c (patch_rows,patch_cols) , not one per job.
+ *  the configured representations (each a flat @ref unum::uform::encoder::video_batch_shape_t ).
+ *  Each job emits exactly @b one segment packed onto the @c [rows,columns] grid — the @b segment /
+ *  column axis, not a tensor rank — whose footprint is derived from the clip's decoded native
+ *  resolution ( @c derive_triple_ ), never a fixed budget. The common single-representation (Omni)
+ *  config is one decode per clip. Representations of one clip differ only in @c frame_stride and
+ *  (almost always) share their spatial target, so the drive decodes each clip @b once per distinct
+ *  spatial target — keeping every frame in a shared buffer — and each representation temporally
+ *  subsamples those frames by its own @c frame_stride when the tile kernel gathers its tubes. A
+ *  multi-representation config therefore pays one decode per distinct @c (patch_rows,patch_cols) ,
+ *  not one per job.
  *
  *  @section video_shape The patch-arranged contract
  *
- *  @ref multimodal_batch_on_gpu_t::videos is @b [rows,columns,tube_frames,patch_side,patch_side,channels] UInt8.
- *  Each drawn clip emits one @b segment per representation, its @c (temporal_groups,patch_rows,patch_cols) derived
- *  from the clip's decoded native @c (frames,width,height) — @c patch_rows and @c patch_cols tile the native frame at
- *  @c patch_side and @c temporal_groups packs the @c frame_stride -sampled frames into @c tube_frames -deep tubes,
- *  exactly like an image with a temporal axis — then clamped to one row so an oversized clip downscales to fit
- *  rather than dropping. NVDEC's post-processor scales each sampled frame straight to the
- *  segment's @c (patch_cols·P,patch_rows·P) grid target, @c tile_tubes_kernel_ scatters the tubes into the segment's
- *  @c [column_begin,column_begin+len) cells of its row, and the loader records each segment's factorization into
- *  @c video_shapes . No learnable transform (projection, M-RoPE) is applied here — that lives in the differentiated
+ *  @c multimodal_batch_on_gpu_t::videos is
+ *  @b [rows,columns,tube_frames,patch_side,patch_side,channels] UInt8. Each drawn clip emits one
+ *  @b segment per representation, its @c (temporal_groups,patch_rows,patch_cols) derived from the
+ *  clip's decoded native @c (frames,width,height) — @c patch_rows and @c patch_cols tile the native
+ *  frame at @c patch_side and @c temporal_groups packs the @c frame_stride -sampled frames into
+ *  @c tube_frames -deep tubes, exactly like an image with a temporal axis — then clamped to one row
+ *  so an oversized clip downscales to fit rather than dropping. NVDEC's post-processor scales each
+ *  sampled frame straight to the segment's @c (patch_cols·P,patch_rows·P) grid target,
+ *  @c tile_tubes_kernel_ scatters the tubes into the segment's @c [column_begin,column_begin+len)
+ *  cells of its row, and the loader records each segment's factorization into @c video_shapes . No
+ *  learnable transform (projection, M-RoPE) is applied here — that lives in the differentiated
  *  step.
  */
 #pragma once
@@ -85,7 +94,8 @@ using namespace unum::uform::encoder;
  *  scatters its @c temporal_groups·patch_rows·patch_columns tubes into a column sub-range of one row. */
 using media::pixel_tubes_span_t;
 
-/** The baked knobs of the @ref nvdec_session_t — the engine budget and each decoder's surface ceiling. */
+/** The baked knobs of the @ref unum::uform::loaders::nvdec_session_t — the engine budget and each
+ *  decoder's surface ceiling. */
 struct nvdec_config_t {
 
     /** Concurrent decode engines to stand up — @b required (0 is rejected). Each engine owns a per-codec
@@ -128,16 +138,18 @@ struct nvdec_session_t {
      *  at each segment's @c [column_begin,column_begin+len) placement; write each segment's factorization into
      *  @p video_shapes . All GPU work rides @p stream .
      *
-     *  @param[inout] pool The run's CPU pool, borrowed for the host-bound demux only — it never drives the decode.
+     *  @param[in,out] pool The run's CPU pool, borrowed for the host-bound demux only — it never
+     *      drives the decode.
      *  @param[in] clips The drawn clips' container bytes as a host-pinned tape; @c [0,clips.size()) clips.
-     *  @param[in] representations The flat @ref video_batch_shape_t representations; each clip emits one segment per
-     *      representation. Must be non-empty (the loader defaults it to one at @c frame_stride 1).
+     *  @param[in] representations The flat @ref unum::uform::encoder::video_batch_shape_t
+     *      representations; each clip emits one segment per representation. Must be non-empty (the
+     *      loader defaults it to one at @c frame_stride 1).
      *  @param[out] videos @b [rows,columns,tube_frames,P,P,C] destination grid; segments scatter across its rows.
      *  @param[out] video_shapes @b [max_segments,3] per-segment factorization.
      *  @param[out] segment_offsets @b [max_segments+1] , @param[out] segment_lengths / @param[out] segment_modality
      *      @b [max_segments] — the token cursor this fill writes: @c clips.size()·representations.size() live video
      *      segments packed row-safe, the rest PAD.
-     *  @param[inout] stream The one stream every decode, conversion, and tile enqueues on.
+     *  @param[in,out] stream The one stream every decode, conversion, and tile enqueues on.
      */
     [[nodiscard]] expected_t decode_into(pool_view_t pool, column_view_t clips,
                                          std::span<video_batch_shape_t const> representations,
@@ -153,18 +165,20 @@ struct nvdec_session_t {
 /**
  *  @brief Decode a batch's drawn clip rows into its @c videos tube grid — the video decode every video loader
  *      shares (Parquet today, tarball next). Hops each drawn clip's container bytes off the device @p tape to a
- *      pinned tape, then hands them to @p nvdec 's multi-engine @ref nvdec_session_t::decode_into .
+ *      pinned tape, then hands them to @p nvdec 's multi-engine
+ *      @ref unum::uform::loaders::nvdec_session_t::decode_into .
  *
- *  @param[inout] nvdec The multi-engine NVDEC context doing the demux + decode + tile.
- *  @param[inout] pool The run's CPU pool, forwarded for the parallel demux and engine drive.
+ *  @param[in,out] nvdec The multi-engine NVDEC context doing the demux + decode + tile.
+ *  @param[in,out] pool The run's CPU pool, forwarded for the parallel demux and engine drive.
  *  @param[in] tape The pooled clip column with its offsets on host — device bytes, host-indexable via @c tape[row] .
  *  @param[in] drawn_rows The tape rows to decode, one clip each; each clip emits one segment per representation.
- *  @param[in] representations The flat @ref video_batch_shape_t representations; must be non-empty.
+ *  @param[in] representations The flat @ref unum::uform::encoder::video_batch_shape_t
+ *      representations; must be non-empty.
  *  @param[out] videos The @b [rows,columns,tube_frames,P,P,C] tube grid to fill; segments scatter across its rows.
  *  @param[out] video_shapes The @b [max_segments,3] per-segment factorization to fill.
  *  @param[out] segment_offsets / @param[out] segment_lengths / @param[out] segment_modality The batch's token
  *      cursor this fill writes for its video segments.
- *  @param[inout] stream The stream the staging and tiling enqueue on.
+ *  @param[in,out] stream The stream the staging and tiling enqueue on.
  */
 [[nodiscard]] expected_t decode_videos(nvdec_session_t &nvdec, pool_view_t pool, column_view_t tape,
                                        u64r1_view_t drawn_rows, std::span<video_batch_shape_t const> representations,
@@ -182,18 +196,21 @@ struct video_loader_parquet_config_t {
 };
 
 /** The loader object: dataset-scoped, rank-agnostic, GPU-accelerated — the video sibling of
- *  @ref image_loader_parquet_t . Holds one dataset's shard footers; keep one per input dataset. @ref fill
- *  allocates its scratch on demand and is safe to call concurrently for different GPU ranks on different streams
- *  (each @ref fill borrows its own engines through the @p decoder it is handed). */
+ *  @ref unum::uform::loaders::image_loader_parquet_t . Holds one dataset's shard footers; keep one
+ *  per input dataset. @ref unum::uform::loaders::video_loader_parquet_t::fill allocates its scratch
+ *  on demand and is safe to call concurrently for different GPU ranks on different streams (each
+ *  @ref unum::uform::loaders::video_loader_parquet_t::fill borrows its own engines through the
+ *  @p decoder it is handed). */
 struct video_loader_parquet_t {
 
     /**
      *  @brief Failure-safe exception-free constructor that indexes all the shards' footers (host, once).
      *
-     *  @param[inout] session GPU Direct Storage session for IO.
+     *  @param[in,out] session GPU Direct Storage session for IO.
      *  @param[in] path_or_glob Dataset's Parquet paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
-     *  @param[inout] pool The run's CPU-decode worker pool, owned at the composition root and borrowed here.
+     *  @param[in,out] pool The run's CPU-decode worker pool, owned at the composition root and
+     *      borrowed here.
      *  @param[in] video The video modality's own geometry slice ( @c tube_frames , @c patch_side , @c frame_stride )
      *      — the single source of a step's video geometry; it never sees the sibling modalities' shapes.
      */
@@ -206,8 +223,9 @@ struct video_loader_parquet_t {
      *      (one per representation of the loader's @c video_batch_shape_t ) into the shared @c [rows,columns] cursor.
      *  @sa multimodal_batch_mixer_t for the subsequent cross-GPU mixing.
      *
-     *  @param[inout] gpu_stream The GPU-specific stream the staging, decode, and segmenting run on.
-     *  @param[inout] decoder The multi-engine NVDEC context to decode through.
+     *  @param[in,out] gpu_stream The GPU-specific stream the staging, decode, and segmenting run
+     *      on.
+     *  @param[in,out] decoder The multi-engine NVDEC context to decode through.
      *  @param[in] config Which Parquet column holds the clips.
      *  @param[in] gpu_rank Ensures different GPUs draw different rows from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
@@ -235,8 +253,9 @@ struct video_loader_parquet_t {
      *  the dataset's total rows. Read once per dataset; shared across every GPU the loader serves. */
     st::basic_vector<std::size_t> row_prefix_ {};
 
-    /** The video modality's geometry ( @c tube_frames , @c patch_side , @c frame_stride ) every @ref fill
-     *  sources its one representation from — fixed at @ref make . */
+    /** The video modality's geometry ( @c tube_frames , @c patch_side , @c frame_stride ) every
+     *  @ref unum::uform::loaders::video_loader_parquet_t::fill sources its one representation from
+     *  — fixed at @ref unum::uform::loaders::video_loader_parquet_t::make . */
     video_batch_shape_t video_ {};
 };
 

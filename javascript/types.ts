@@ -1,16 +1,20 @@
 /**
- * The vocabulary every verb shares: closed-set names, the backend the classes run on, the executor whose threads a
- * verb runs on, the arena every scaling output lands in, and the deferred call a deferred receiver answers.
+ *  @file javascript/types.ts
+ *  @author Ash Vardanian
+ *  @date October 18, 2026
+ *  @brief The vocabulary every verb shares: closed-set names, the backend the classes run on, the executor whose
+ *      threads a verb runs on, the arena every scaling output lands in, and the deferred call a deferred receiver
+ *      answers.
  */
 import type { Compiled, CompiledArena, CompiledDeferred, CompiledExecutor } from "./library.js";
 
 /**
- * What went wrong, one member per `uform_status_*_k` of the C interface and spelled as its canonical name. Every error
- * the library or this binding throws carries one as its `code`, so a caller branches on the identity of the fault
- * rather than on which side of the boundary saw it. A {@link Deferred} also reports `Success`, and `Deferred` until its
- * call is final.
- * @enum {string}
- * @readonly
+ *  What went wrong, one member per `uform_status_*_k` of the C interface and spelled as its canonical name. Every error
+ *  the library or this binding throws carries one as its `code`, so a caller branches on the identity of the fault
+ *  rather than on which side of the boundary saw it. A {@link Deferred} also reports `Success`, and `Deferred` until its
+ *  call is final.
+ *  @enum {string}
+ *  @readonly
  */
 export enum Status {
   Success = "success",
@@ -41,9 +45,9 @@ export function fail(status: Status, message: string): UFormError {
 }
 
 /**
- * What an executor does with its threads or streams once it goes idle.
- * @enum {string}
- * @readonly
+ *  What an executor does with its threads or streams once it goes idle.
+ *  @enum {string}
+ *  @readonly
  */
 export enum Mood {
   /** Idle threads sleep; the next call pays a wake-up. */
@@ -53,9 +57,9 @@ export enum Mood {
 }
 
 /**
- * The scalar kinds a model computes in and its outputs land as, numbered as USearch numbers them.
- * @enum {string}
- * @readonly
+ *  The scalar kinds a model computes in and its outputs land as, numbered as USearch numbers them.
+ *  @enum {string}
+ *  @readonly
  */
 export enum Scalar {
   F64 = "f64",
@@ -75,9 +79,9 @@ export enum Scalar {
 }
 
 /**
- * What the bytes of one training item hold.
- * @enum {string}
- * @readonly
+ *  What the bytes of one training item hold.
+ *  @enum {string}
+ *  @readonly
  */
 export enum Modality {
   Text = "text",
@@ -87,9 +91,9 @@ export enum Modality {
 }
 
 /**
- * Which losses a training step relaxes.
- * @enum {string}
- * @readonly
+ *  Which losses a training step relaxes.
+ *  @enum {string}
+ *  @readonly
  */
 export enum Objective {
   /** Masked reconstruction alone. */
@@ -101,9 +105,9 @@ export enum Objective {
 }
 
 /**
- * Which pairs the contrastive loss pushes apart.
- * @enum {string}
- * @readonly
+ *  Which pairs the contrastive loss pushes apart.
+ *  @enum {string}
+ *  @readonly
  */
 export enum Negatives {
   /** Repel edges, and every pair no edge names. */
@@ -113,9 +117,9 @@ export enum Negatives {
 }
 
 /**
- * How a mesh's NVLink domains reduce.
- * @enum {string}
- * @readonly
+ *  How a mesh's NVLink domains reduce.
+ *  @enum {string}
+ *  @readonly
  */
 export enum MultimemTier {
   SwitchReduced = "switch-reduced",
@@ -123,9 +127,9 @@ export enum MultimemTier {
 }
 
 /**
- * How a contrastive term turns a row of scores into forces, numbered as `uform_pair_loss_form_t` numbers them.
- * @enum {number}
- * @readonly
+ *  How a contrastive term turns a row of scores into forces, numbered as `uform_pair_loss_form_t` numbers them.
+ *  @enum {number}
+ *  @readonly
  */
 export enum PairLossForm {
   /** The term's own form: sigmoid for pooled embeddings, ranked for token vectors. */
@@ -139,9 +143,9 @@ export enum PairLossForm {
 }
 
 /**
- * Which side of a late-interaction score an item takes, numbered as `uform_late_interaction_side_t` numbers them.
- * @enum {number}
- * @readonly
+ *  Which side of a late-interaction score an item takes, numbered as `uform_late_interaction_side_t` numbers them.
+ *  @enum {number}
+ *  @readonly
  */
 export enum LateInteractionSide {
   /** The item takes no part in late interaction. */
@@ -155,9 +159,9 @@ export enum LateInteractionSide {
 }
 
 /**
- * The runtime that drives a GPU, numbered as `uform_gpu_vendor_t` numbers them.
- * @enum {number}
- * @readonly
+ *  The runtime that drives a GPU, numbered as `uform_gpu_vendor_t` numbers them.
+ *  @enum {number}
+ *  @readonly
  */
 export enum GpuVendor {
   Unknown = 0,
@@ -228,8 +232,8 @@ export function negativesCode(negatives: Negatives): number {
 }
 
 /**
- * Lists every GPU this process can drive, NVIDIA devices first, then AMD, so a device's position is the ordinal VRAM
- * placements name it by; a machine without GPUs lists none. Calls `uform_gpu_devices`.
+ *  Lists every GPU this process can drive, NVIDIA devices first, then AMD, so a device's position is the ordinal VRAM
+ *  placements name it by; a machine without GPUs lists none. Calls `uform_gpu_devices`.
  */
 export function gpuDevices(): GpuDevice[] {
   return backend().gpuDevices() as GpuDevice[];
@@ -275,12 +279,12 @@ export interface ExecutorForVramConfig {
 const executorSeal = Symbol("Executor");
 
 /**
- * The threads or streams a verb runs on, shared across models.
+ *  The threads or streams a verb runs on, shared across models.
  *
- * An executor owns host threads or device streams and the activation scratch; a model owns weights. Keeping them apart
- * is what lets one executor serve several models, and what makes the cost of spawning visible at the line that spawns
- * it. The WebAssembly backend computes on the calling thread alone, so its executors only order calls. The collector
- * frees it eventually; `free` joins the threads now.
+ *  An executor owns host threads or device streams and the activation scratch; a model owns weights. Keeping them apart
+ *  is what lets one executor serve several models, and what makes the cost of spawning visible at the line that spawns
+ *  it. The WebAssembly backend computes on the calling thread alone, so its executors only order calls. The collector
+ *  frees it eventually; `free` joins the threads now.
  */
 export class Executor implements Disposable {
   /** The backend handle every verb is handed. */
@@ -309,8 +313,8 @@ export class Executor implements Disposable {
   }
 
   /**
-   * Waits for every call submitted to this executor so far, then idles in `mood`. Calls `uform_executor_drain`.
-   * @param {Mood} [mood=Mood.Parked] - What the threads or streams do once they go idle.
+   *  Waits for every call submitted to this executor so far, then idles in `mood`. Calls `uform_executor_drain`.
+   *  @param [mood=Mood.Parked] - What the threads or streams do once they go idle.
    */
   drain(mood: Mood = Mood.Parked): void {
     this.compiled.drain(mood);
@@ -327,13 +331,13 @@ export class Executor implements Disposable {
 }
 
 /**
- * Memory the library writes every output whose length scales with a call into, reused across calls.
+ *  Memory the library writes every output whose length scales with a call into, reused across calls.
  *
- * Every verb with such an output takes one and answers a view into it rather than a copy, so a steady loop allocates
- * once. Each call rewinds the arena it is handed and detaches every buffer over the previous call's outputs: a view
- * refuses its reads with {@link Status.InvalidArgument} from then on. To keep one result past the next call, give that
- * call another arena. A deferred call holds it until final: another call naming it before then finishes
- * {@link Status.Contended} and leaves the first call's outputs alone, and `free` waits for it.
+ *  Every verb with such an output takes one and answers a view into it rather than a copy, so a steady loop allocates
+ *  once. Each call rewinds the arena it is handed and detaches every buffer over the previous call's outputs: a view
+ *  refuses its reads with {@link Status.InvalidArgument} from then on. To keep one result past the next call, give that
+ *  call another arena. A deferred call holds it until final: another call naming it before then finishes
+ *  {@link Status.Contended} and leaves the first call's outputs alone, and `free` waits for it.
  */
 export class Arena implements Disposable {
   /** The backend handle every verb is handed. */
@@ -360,10 +364,10 @@ export class Arena implements Disposable {
 }
 
 /**
- * Outputs a call wrote into an arena, readable until the arena's next call rewinds it.
+ *  Outputs a call wrote into an arena, readable until the arena's next call rewinds it.
  *
- * The rewind detaches the buffer under every array, so each accessor refuses once the arena moved on, and refuses
- * device memory with {@link Status.Device}, so a view never reads memory its call did not write.
+ *  The rewind detaches the buffer under every array, so each accessor refuses once the arena moved on, and refuses
+ *  device memory with {@link Status.Device}, so a view never reads memory its call did not write.
  */
 export abstract class ArenaView {
   /** Answers `view` while its buffer still holds this call's outputs in host memory, and refuses otherwise. */
@@ -381,16 +385,16 @@ const unfinished = new FinalizationRegistry<CompiledDeferred>((call) => {
 });
 
 /**
- * A call submitted by a deferred receiver, final once its executor finishes it.
+ *  A call submitted by a deferred receiver, final once its executor finishes it.
  *
- * It keeps everything the library reads or writes alive until then - the outcome, the inputs, the outputs and every
- * handle it names - so none of them is collected under the call. `status` polls without blocking, `wait` blocks and
- * answers, and `await` runs that wait on the libuv pool; both answer the same cached result, or throw the same
- * failure, however often they are asked. On the WebAssembly backend the call is final once submitted.
+ *  It keeps everything the library reads or writes alive until then - the outcome, the inputs, the outputs and every
+ *  handle it names - so none of them is collected under the call. `status` polls without blocking, `wait` blocks and
+ *  answers, and `await` runs that wait on the libuv pool; both answer the same cached result, or throw the same
+ *  failure, however often they are asked. On the WebAssembly backend the call is final once submitted.
  *
- * ```js
- * const encoded = await call; // or: call.wait()
- * ```
+ *  ```js
+ *  const encoded = await call; // or: call.wait()
+ *  ```
  */
 export class Deferred<T> implements PromiseLike<T>, Disposable {
   readonly #call: CompiledDeferred;

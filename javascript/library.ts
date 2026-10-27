@@ -1,11 +1,15 @@
 /**
- * The boundary both backends satisfy: the shapes the Node addon and the WebAssembly module publish, and the search that
- * locates the prebuilt addon.
+ *  @file javascript/library.ts
+ *  @author Ash Vardanian
+ *  @date October 18, 2026
+ *  @brief The boundary both backends satisfy: the shapes the Node addon and the WebAssembly module publish, and the
+ *      search that locates the prebuilt addon.
  *
- * Every signature here is positional and takes no defaults, so the wrapper classes decide what an omitted argument
- * means rather than a backend guessing. Every instance verb opens with the executor and the C `completion`, and answers
- * its result when blocking or a `CompiledDeferred` when deferred. Only the Node entry imports this module at runtime;
- * the browser entry imports its types alone, so no bundle pulls `node-gyp-build` into a page.
+ *      Every signature here is positional and takes no defaults, so the wrapper classes decide what an omitted
+ *      argument means rather than a backend guessing. Every instance verb opens with the executor and the C
+ *      `completion`, and answers its result when blocking or a `CompiledDeferred` when deferred. Only the Node entry
+ *      imports this module at runtime; the browser entry imports its types alone, so no bundle pulls
+ *      `node-gyp-build` into a page.
  */
 import build from "node-gyp-build";
 import * as path from "path";
@@ -19,8 +23,8 @@ export type Completion = 0 | 1;
 export type ProgressCallback = (completed: number, total: number) => boolean | void;
 
 /**
- * The `count + 1` offsets of a tape: a `BigUint64Array`, which the Node addon lends as `size_t` without a copy, or a
- * `Uint32Array`, which it widens and the WebAssembly module, whose `size_t` is 32 bits wide, lends as it is.
+ *  The `count + 1` offsets of a tape: a `BigUint64Array`, which the Node addon lends as `size_t` without a copy, or a
+ *  `Uint32Array`, which it widens and the WebAssembly module, whose `size_t` is 32 bits wide, lends as it is.
  */
 export type Offsets = BigUint64Array | Uint32Array;
 

@@ -22,6 +22,7 @@ foreach (target_ uform_shared_stub uform_static_stub)
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
     )
     target_link_libraries(${target_} PRIVATE Threads::Threads forkunion::header)
+    target_compile_features(${target_} PRIVATE cxx_std_23)
     target_compile_definitions(${target_} PRIVATE UFORM_EXPORTING)
     set_target_properties(
         ${target_}
@@ -48,13 +49,15 @@ set_target_properties(uform_static_stub PROPERTIES OUTPUT_NAME "uform_static")
 
 # The C suite the engine's library runs too, linked against the static stand-in. It is written in C, but the library
 # it links is C++, so the C++ driver links it and brings the standard library along.
-add_executable(uform_test_c_stub ${PROJECT_SOURCE_DIR}/c/test.c)
-target_link_libraries(uform_test_c_stub PRIVATE uform_static_stub forkunion::static)
-set_target_properties(
-    uform_test_c_stub
-    PROPERTIES C_STANDARD 99
-               C_STANDARD_REQUIRED ON
-               LINKER_LANGUAGE CXX
-               RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/stub"
-)
-add_test(NAME uform_test_c_stub COMMAND uform_test_c_stub)
+if (UFORM_BUILD_TEST)
+    add_executable(uform_test_c_stub ${PROJECT_SOURCE_DIR}/c/test.c)
+    target_link_libraries(uform_test_c_stub PRIVATE uform_static_stub forkunion::static)
+    set_target_properties(
+        uform_test_c_stub
+        PROPERTIES C_STANDARD 99
+                   C_STANDARD_REQUIRED ON
+                   LINKER_LANGUAGE CXX
+                   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/stub"
+    )
+    add_test(NAME uform_test_c_stub COMMAND uform_test_c_stub)
+endif ()

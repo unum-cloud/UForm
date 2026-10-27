@@ -31,10 +31,10 @@ static void expect(bool must_be_true, char const* message) {
     exit(-1);
 }
 
-/** A substring of the tests to run, from `UFORM_FILTER`; `NULL` runs every test. */
+/** A substring of the tests to run, from @c UFORM_FILTER; @c NULL runs every test. */
 static char const* test_filter = NULL;
 
-/** Whether the test @p name passes `UFORM_FILTER`. */
+/** Whether the test @p name passes @c UFORM_FILTER. */
 static bool selected(char const* name) { return !test_filter || strstr(name, test_filter) != NULL; }
 
 /** The checkpoint every test loads. */
@@ -135,11 +135,6 @@ static void check_states(uform_rows_tape_view_t const* states, size_t count, ufo
 /** The library-wide probes, which take no handle and cannot fail, and every name table read back. */
 static void test_library_probes(void) {
     printf("Test: Library Probes\n");
-    int major = -1, minor = -1, patch = -1;
-    uform_version(&major, &minor, &patch);
-    expect(major == UFORM_VERSION_MAJOR, "The linked major version must match the header's");
-    expect(minor >= 0 && patch >= 0, "The version must be reported");
-    expect(uform_version_name() != NULL, "The version must be reported");
     expect(uform_capabilities_compiled() != NULL, "The compiled capabilities must be reported");
     expect(uform_capabilities_available() != NULL, "The available capabilities must be reported");
 
@@ -183,11 +178,11 @@ static void test_library_probes(void) {
                uform_multimem_tier_from_name(view_of("ring")) == uform_multimem_tier_switch_reduced_k,
            "A multimem tier reads back from its name, and an unrecognized one as switch-reduced");
 
-    for (int code = uform_cpu_class_serial_k; code <= uform_cpu_class_wasm64_extended_k; ++code)
-        expect(uform_cpu_class_from_name(view_of(uform_cpu_class_name((uform_cpu_class_t)code))) == code,
+    for (uform_cpu_class_t code = uform_cpu_class_serial_k; code <= uform_cpu_class_wasm64_extended_k; ++code)
+        expect(uform_cpu_class_from_name(view_of(uform_cpu_class_name(code))) == code,
                "Every CPU class reads back from its name");
-    for (int code = uform_gpu_class_nvidia_ampere_k; code <= uform_gpu_class_apple_metal10_k; ++code)
-        expect(uform_gpu_class_from_name(view_of(uform_gpu_class_name((uform_gpu_class_t)code))) == code,
+    for (uform_gpu_class_t code = uform_gpu_class_nvidia_ampere_k; code <= uform_gpu_class_apple_metal10_k; ++code)
+        expect(uform_gpu_class_from_name(view_of(uform_gpu_class_name(code))) == code,
                "Every GPU class reads back from its name");
     expect(strcmp(uform_cpu_class_name(uform_cpu_class_intel_haswell_k), "intel-haswell") == 0,
            "A CPU class spells its name as USearch does");

@@ -42,7 +42,7 @@ inline constexpr std::size_t probe_tail_bytes_k = 3ull * 1024 * 1024;
 /**
  *  @brief Register one GPU's registrable arena range through the endpoint the collectives build,
  *      on the NIC the transport picks for that GPU, and report the outcome.
- *  @param[inout] suite The probe suite the checks report into.
+ *  @param[in,out] suite The probe suite the checks report into.
  *  @param[in] device The GPU ordinal.
  */
 static void probe_gpu_registration_(test_suite_t &suite, int device) noexcept {
@@ -84,7 +84,7 @@ static void probe_gpudirect_(test_suite_t &suite, int) noexcept { suite.skip("bu
 /**
  *  @brief When the mesh contract names an exchange directory, prove it is writable from this node by
  *      creating and removing a probe file.
- *  @param[inout] suite The probe suite the check reports into.
+ *  @param[in,out] suite The probe suite the check reports into.
  */
 static void probe_exchange_directory_(test_suite_t &suite) noexcept {
     char const *const exchange_directory = std::getenv("UFORM_EXCHANGE_DIR");

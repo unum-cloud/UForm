@@ -1,6 +1,10 @@
 /**
- * Training: the mesh a run's processes join, and the trainer whose steps join masked reconstruction and the pairwise
- * contrastive loss into one optimizer step. GPU-only, so the WebAssembly backend reports `unsupported`.
+ *  @file javascript/train.ts
+ *  @author Ash Vardanian
+ *  @date October 18, 2026
+ *  @brief Training: the mesh a run's processes join, and the trainer whose steps join masked reconstruction and the
+ *      pairwise contrastive loss into one optimizer step. GPU-only, so the WebAssembly backend reports
+ *      `unsupported`.
  */
 import type { CompiledMesh, CompiledMeshDescription, CompiledStepped, CompiledTrainer, Completion } from "./library.js";
 import { Rows, type Tape, bytesTape, samplesTape } from "./encode.js";
@@ -62,9 +66,9 @@ export class Mesh implements Disposable {
   }
 
   /**
-   * Joins this process to the run's mesh, once every process has joined. Calls `uform_mesh_bootstrap`.
-   * @param {Executor} executor - A VRAM executor whose devices are this process's members of the mesh.
-   * @param {MeshOptions} [options] - Where this process sits and how the processes meet.
+   *  Joins this process to the run's mesh, once every process has joined. Calls `uform_mesh_bootstrap`.
+   *  @param executor - A VRAM executor whose devices are this process's members of the mesh.
+   *  @param options - Where this process sits and how the processes meet.
    */
   static bootstrap(executor: Executor, options: MeshOptions = {}): Mesh {
     return new Mesh(meshSeal, backend().CompiledMesh.bootstrap(executor.compiled, options));
@@ -203,8 +207,8 @@ export interface TrainerBatch {
   /** The late-interaction side of each item; absent makes every item `LateInteractionSide.None`. */
   sides?: readonly LateInteractionSide[];
   /**
-   * Each item's legal choices, one byte each, as `textChoose` takes them; an item offering none makes no choice. Read
-   * when the run trains choices; the call appends the mask byte to each choosing text.
+   *  Each item's legal choices, one byte each, as `textChoose` takes them; an item offering none makes no choice. Read
+   *  when the run trains choices; the call appends the mask byte to each choosing text.
    */
   choices?: readonly (string | Uint8Array)[] | Tape<Uint8Array>;
   /** The target probability of each choice, an entry per item as long as its choices and summing to one, as
@@ -245,9 +249,9 @@ abstract class TrainerVerbs<Receiving extends "blocking" | "deferred"> {
   ) {}
 
   /**
-   * Applies one optimizer step over this process's items and every peer's. Calls `uform_trainer_step`.
-   * @param {TrainerBatch} batch - This process's items, their modalities, bags and relations.
-   * @param {TrainerStepConfig} [config] - Where the scored embeddings land.
+   *  Applies one optimizer step over this process's items and every peer's. Calls `uform_trainer_step`.
+   *  @param batch - This process's items, their modalities, bags and relations.
+   *  @param config - Where the scored embeddings land.
    */
   step(batch: TrainerBatch, config: TrainerStepConfig = {}): Answer<Receiving, Stepped> {
     const contents = bytesTape(batch.contents);
@@ -294,8 +298,8 @@ abstract class TrainerVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   * Writes the weights and the step as a safetensors checkpoint; only process zero writes. Calls `uform_trainer_save`.
-   * @param {string} path - The destination, written whole and renamed into place.
+   *  Writes the weights and the step as a safetensors checkpoint; only process zero writes. Calls `uform_trainer_save`.
+   *  @param path - The destination, written whole and renamed into place.
    */
   save(path: string): Answer<Receiving, void> {
     return submitAs(
@@ -318,8 +322,8 @@ export class TrainerDeferredOn extends TrainerVerbs<"deferred"> {
 const trainerSeal = Symbol("Trainer");
 
 /**
- * A training run on a VRAM executor's devices, every verb blocking on that executor; `deferred()` submits them there
- * instead.
+ *  A training run on a VRAM executor's devices, every verb blocking on that executor; `deferred()` submits them there
+ *  instead.
  */
 export class Trainer extends TrainerVerbs<"blocking"> implements Disposable {
   /** Reached through `Trainer.initVram`. */
@@ -329,10 +333,10 @@ export class Trainer extends TrainerVerbs<"blocking"> implements Disposable {
   }
 
   /**
-   * Builds one replica per device and starts or resumes the run. Calls `uform_trainer_init_vram`.
-   * @param {Executor} executor - A VRAM executor, every device of which holds one replica.
-   * @param {TrainerConfig} config - The geometry, objectives and schedule.
-   * @param {Mesh} [mesh] - The mesh to borrow until the trainer is freed; absent runs this process alone.
+   *  Builds one replica per device and starts or resumes the run. Calls `uform_trainer_init_vram`.
+   *  @param executor - A VRAM executor, every device of which holds one replica.
+   *  @param config - The geometry, objectives and schedule.
+   *  @param mesh - The mesh to borrow until the trainer is freed; absent runs this process alone.
    */
   static initVram(executor: Executor, config: TrainerConfig, mesh?: Mesh): Trainer {
     const coded = {

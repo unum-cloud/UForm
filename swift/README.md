@@ -1,6 +1,6 @@
 # UForm for Swift
 
-The Swift package binds the C ABI in `c/uform/` through `UFormC`, a target exposing its headers, and links the `libuform_static` engine CMake builds.
+The Swift package binds the C ABI in `c/uform/` through `UFormC`, the `libuform_static` engine CMake builds, packed with those headers.
 It requires Swift 6.2 or newer, on macOS 15, iOS 18, tvOS 18, watchOS 11, visionOS 2, or Linux.
 Models are tokenizer-free, so the package has no dependencies beyond the C library: text crosses as UTF-8 bytes, media as encoded files or decoded samples.
 
@@ -13,20 +13,21 @@ dependencies: [
 ```
 
 The package compiles the Swift surface only.
-The engine itself is `libuform_static`, built by CMake and linked by the package, so point the linker at the build directory or install the library system-wide.
+SwiftPM downloads the engine prebuilt, as the release's `UFormC` XCFramework on Apple platforms and as its artifact bundle on Linux, and the engine links the system codecs, libjpeg-turbo, libpng, libwebp and FFmpeg, which the application provides.
+A checkout builds its own with CMake and points `UFORM_SWIFT_ARTIFACT` at it, relative to the package root:
 
 ```sh
-cmake --preset cpu_library
-cmake --build --preset cpu_library --target uform_static
-swift build -Xlinker -Lbuild_cpu_library
+cmake --preset swift
+cmake --build --preset swift
+UFORM_SWIFT_ARTIFACT=build_swift/UFormC.xcframework swift build # UFormC.artifactbundle off Apple platforms
 ```
 
 The test suite runs in seconds against the stub library, which answers every verb with deterministic rows of the right shape:
 
 ```sh
-cmake --preset stub_library
-cmake --build --preset stub_library --target uform_static_stub
-swift test -Xlinker -Lbuild_stub_library/stub
+cmake --preset swift -D UFORM_BUILD_STUB=ON
+cmake --build --preset swift
+UFORM_SWIFT_ARTIFACT=build_swift/UFormC.xcframework swift test # UFormC.artifactbundle off Apple platforms
 ```
 
 ## Quickstart

@@ -63,7 +63,7 @@ struct masking_recipe_t {
  *  correlating: each purpose re-keys the hash so the span-open coin, the span-continue coin, the
  *  token-action coin, the random byte, the patch-mask coin, the audio-frame-mask coin, and the
  *  anchor of the span an otherwise unmasked row gets are statistically distinct streams. The
- *  @ref masked_frames_t frame path keys @c frame_mask_k rather than reusing the 2-D @c patch_mask_k
+ *  @c masked_frames_t frame path keys @c frame_mask_k rather than reusing the 2-D @c patch_mask_k
  *  salt. */
 enum class masking_draw_purpose_t : u32_t {
     span_open_k = 0,
@@ -75,9 +75,10 @@ enum class masking_draw_purpose_t : u32_t {
     span_anchor_k = 6,
 };
 
-/** One counter-based draw in @b [0,1) , keyed through the one @ref splitmix64_hash_t — pure,
- *  stateless, device-callable, bit-reproducible on every rank. @p purpose is a
- *  @ref masking_draw_purpose_t salt cast to @c u32_t . */
+/** One counter-based draw in @b [0,1) , keyed through the one
+ *  @ref unum::uform::utilities::splitmix64_hash_t — pure, stateless, device-callable,
+ *  bit-reproducible on every rank. @p purpose is a @ref unum::uform::train::masking_draw_purpose_t
+ *  salt cast to @c u32_t . */
 [[nodiscard]] constexpr f32_t masking_draw(u64_t seed, data_epoch_t data_epoch, u32_t sample_index, u32_t position,
                                            u32_t purpose) noexcept {
     u64_t const mixed = splitmix64_hash_t {}(seed, data_epoch.ordinal, purpose, sample_index, position);
@@ -100,7 +101,7 @@ struct masked_tokens_config_t {
     /** λ — the objective's weight inside the composite loss, folded into the gradient scale. */
     f32_t weight = 1.0f;
 
-    /** Most segments one call carries, the answer rows @ref masked_tokens_t::choose gathers; zero
+    /** Most segments one call carries, the answer rows @c masked_tokens_t::choose gathers; zero
      *  allocates none and makes no choice. */
     u32_t max_segments = 0;
 };
@@ -119,9 +120,9 @@ struct choices_config_t {
  *  @brief The baked geometry and weight of one masked-patch (MAE) head — a different config is a
  *      different object. Image and video share this shape; they differ only in @c patch_pixels , the mask
  *      ratio, and whether the mask is tubed across time.
- *  @note Audio no longer rides this 2-D patch head: it is raw 1-D frames on the sibling @ref masked_frames_t ,
- *      which masks whole Float32 frames and scores their raw samples with the same normalized MSE rather
- *      than this patch objective.
+ *  @note Audio no longer rides this 2-D patch head: it is raw 1-D frames on the sibling
+ *      @c masked_frames_t , which masks whole Float32 frames and scores their raw samples with the
+ *      same normalized MSE rather than this patch objective.
  */
 struct masked_patches_config_t {
 
@@ -229,7 +230,7 @@ struct masked_tokens_t {
      *  @param[in] normalized The tower's final-norm token states @b [tokens,hidden] .
      *  @param[in] clean_targets The clean bytes @b [tokens] the cross-entropy scores against.
      *  @param[in] loss_weights @b [tokens] from @ref corrupt — a zero weight skips the position entirely.
-     *  @param[inout] loss_summands @b [2] Float32 the call adds @c {λ·Σ CE, live count} onto, so
+     *  @param[in,out] loss_summands @b [2] Float32 the call adds @c {λ·Σ CE, live count} onto, so
      *      the pair runs over every step since the caller zeroed it — the global mean is
      *      @c Σ_ranks summand / Σ_ranks count ; the gradient uses this step's rank-local mean.
      *  @param[out] normalized_grad @b [tokens,hidden] @c d(normalized) — the tower's backward ADDS it.
@@ -252,9 +253,9 @@ struct masked_tokens_t {
      *  @param[in] normalized The tower's final-norm token states @b [tokens,hidden] .
      *  @param[in] batch The step's segment geometry, choices and targets.
      *  @param[in] config The weights @c λ and @c λ_B .
-     *  @param[inout] loss_summands @b [2] Float32 the call adds @c {λ·Σ summand, live count} onto.
-     *  @param[inout] normalized_grad @b [tokens,hidden] @c d(normalized) , added onto at the answer
-     *      rows.
+     *  @param[in,out] loss_summands @b [2] Float32 the call adds @c {λ·Σ summand, live count} onto.
+     *  @param[in,out] normalized_grad @b [tokens,hidden] @c d(normalized) , added onto at the
+     *      answer rows.
      */
     [[nodiscard]] expected_t choose(bf16r2_view_t normalized, multimodal_batch_view_t const &batch,
                                     choices_config_t config, f32r1_span_t loss_summands, bf16r2_span_t normalized_grad,
@@ -357,8 +358,8 @@ struct masked_patches_t {
      *      entry is one and leaves the visible rows untouched, so the tower re-patchifies the corrupted
      *      pixels. Call after @ref sample_mask , on the live batch media the tower reads.
      *
-     *  @param[inout] raw_patches The batch's image / video patches @b [patches,patch_scalars] of raw
-     *      @ref pixel_t — @c batch.images / @c batch.videos flattened to one row per patch.
+     *  @param[in,out] raw_patches The batch's image / video patches @b [patches,patch_scalars] of
+     *      raw @ref pixel_t — @c batch.images / @c batch.videos flattened to one row per patch.
      */
     [[nodiscard]] expected_t corrupt_raw(nk::tensor_span<pixel_t, 2> raw_patches, gpu_stream_t &stream) noexcept;
 
@@ -367,7 +368,7 @@ struct masked_patches_t {
      *
      *  @param[in] normalized The tower's final-norm patch states @b [patches,hidden] .
      *  @param[in] clean_patches The reconstruction target @b [patches,patch_pixels] .
-     *  @param[inout] loss_summands @b [2] Float32 the call adds @c {λ·Σ per-patch normalized-MSE,
+     *  @param[in,out] loss_summands @b [2] Float32 the call adds @c {λ·Σ per-patch normalized-MSE,
      *      masked count} onto.
      *  @param[out] normalized_grad @b [patches,hidden] @c d(normalized) — the tower's backward ADDS
      *      it.
@@ -460,8 +461,8 @@ struct masked_frames_t {
      *      @c mask_ entry is one and leaves the visible frames untouched, so the tower re-projects the
      *      corrupted samples. Call after @ref sample_mask , on the live batch audio the tower reads.
      *
-     *  @param[inout] raw_frames The batch's audio frames @b [frames,chunk_samples] Float32 — @c audio_samples
-     *      flattened to one row per frame.
+     *  @param[in,out] raw_frames The batch's audio frames @b [frames,chunk_samples] Float32 —
+     *      @c audio_samples flattened to one row per frame.
      */
     [[nodiscard]] expected_t corrupt_raw(f32r2_span_t raw_frames, gpu_stream_t &stream) noexcept;
 
@@ -470,7 +471,7 @@ struct masked_frames_t {
      *
      *  @param[in] normalized The tower's final-norm frame states @b [frames,hidden] .
      *  @param[in] clean_frames The reconstruction target @b [frames,chunk_samples] Float32.
-     *  @param[inout] loss_summands @b [2] Float32 the call adds @c {λ·Σ per-frame normalized-MSE,
+     *  @param[in,out] loss_summands @b [2] Float32 the call adds @c {λ·Σ per-frame normalized-MSE,
      *      masked count} onto.
      *  @param[out] normalized_grad @b [frames,hidden] @c d(normalized) — the tower's backward ADDS
      *      it.

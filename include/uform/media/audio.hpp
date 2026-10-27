@@ -37,24 +37,26 @@ using uu::u32_t;
  *  @param[in] encoded The clip's container bytes.
  *  @param[in] sample_rate The mono rate to resample to.
  *  @param[out] out The clip's samples, exactly @c out.extent(0) of them.
- *  @retval status_t::invalid_argument_k An empty clip or one without an audio stream.
- *  @retval status_t::unsupported_k No decoder for the stream's codec.
- *  @retval status_t::io_k The container, decoder or resampler failed.
+ *
+ *  @par Statuses:
+ *  - @c status_t::invalid_argument_k An empty clip or one without an audio stream.
+ *  - @c status_t::unsupported_k No decoder for the stream's codec.
  */
 [[nodiscard]] expected_t decode_audio(bytes_view_t encoded, u32_t sample_rate, f32r1_span_t out) noexcept;
 
 /**
  *  @brief Resample an already decoded mono signal from @p from_rate to @p to_rate , filling all of @p out .
  *
- *  The same libswresample conversion @ref decode_audio ends with, for callers that decoded elsewhere, like a
- *  browser's WebAudio.
+ *  The same libswresample conversion @ref unum::uform::media::decode_audio ends with, for callers
+ *  that decoded elsewhere, like a browser's WebAudio.
  *
  *  @param[in] samples The mono signal.
  *  @param[in] from_rate The signal's rate.
  *  @param[in] to_rate The rate to resample to.
  *  @param[out] out The resampled samples, exactly @c out.extent(0) of them.
- *  @retval status_t::invalid_argument_k A zero rate.
- *  @retval status_t::io_k The resampler failed.
+ *
+ *  @par Statuses:
+ *  - @c status_t::invalid_argument_k A zero rate.
  */
 [[nodiscard]] expected_t resample_mono(std::span<f32_t const> samples, u32_t from_rate, u32_t to_rate,
                                        f32r1_span_t out) noexcept;

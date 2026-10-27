@@ -138,6 +138,17 @@ typedef struct uform_bytes_view_t {
  *
  *  Values USearch spends on index states UForm has no counterpart for - a read-only handle, an exhausted ID
  *  space, an uninitialized reservation - stay unused here rather than renumbered.
+ *
+ *  Statuses fall into five categories. Resources: @c uform_status_out_of_memory_k,
+ *  @c uform_status_io_k and @c uform_status_device_k. Input: @c uform_status_shape_mismatch_k,
+ *  @c uform_status_unsupported_layout_k, @c uform_status_unknown_kind_k,
+ *  @c uform_status_malformed_k and @c uform_status_invalid_argument_k. State:
+ *  @c uform_status_config_mismatch_k, @c uform_status_contended_k and
+ *  @c uform_status_unsupported_k. Interruptions: @c uform_status_cancelled_k and
+ *  @c uform_status_deferred_k. Defects: @c uform_status_internal_k. Any verb that allocates, binds
+ *  a device or touches a file may also return a Resources status; any verb taking a progress
+ *  callback may return @c uform_status_cancelled_k. A verb's own block lists only what its contract
+ *  adds.
  */
 typedef enum uform_status_t {
 
@@ -764,7 +775,7 @@ UFORM_EXPORT void uform_arena_init(uform_arena_init_t* arguments);
 
 /**
  *  @brief Frees the arena and every output in it; @c NULL is safe, and it cannot fail, so takes no outcome.
- *  @param[inout] arena The arena to be freed; invalid afterwards.
+ *  @param[in,out] arena The arena to be freed; invalid afterwards.
  *
  *  Waits until every deferred call naming the handle is final.
  */

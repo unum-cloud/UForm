@@ -7,18 +7,15 @@
  *
  *  `infiniband_reach_t` from `src/utilities/infiniband_collectives.cu` posts its block into the
  *  partner's heap, then the partner's arrival flag, on one queue pair, so the payload lands before
- *  the flag. The partner waits for the flag of this step and folds or copies out what landed. The
- *  all-reduce lands into one of two landings picked by the step's parity, so a partner one step
- *  ahead writes the other landing; the all-gather lands straight into the payload it gathers, with
- *  no parity, so its caller must not let a partner post the next step before this one is copied
- *  out. The trainer meets that through its later exchanges: the contrastive force all-reduce and
- *  the gateway's gradient all-reduce, each ordered after the copy on its own stream.
+ *  the flag. The all-reduce lands into one of two landings picked by the step's parity; the
+ *  all-gather lands straight into the payload it gathers, with no parity, so its caller must not
+ *  let a partner post the next step before this one is copied out.
  *
  *  @verify pass sc
- *  @verify fail sc parity=false: the all-reduce lands into the landing of its step's parity; one
- *      landing lets a partner a step ahead overwrite a block before it is folded
- *  @verify fail sc gather=true: the all-gather lands into its payload with no parity, so two
- *      all-gathers back to back let the faster domain overwrite a block before it is copied out
+ *  @verify fail sc parity=false: one landing lets a partner a step ahead overwrite a block before
+ *      it is folded
+ *  @verify fail sc gather=true: two all-gathers back to back let the faster domain overwrite a
+ *      block before it is copied out
  *  @verify pass sc gather=true consumer_sync=true: an exchange after the copy-out, like the
  *      trainer's force and gradient all-reduces, keeps a partner from posting the next all-gather
  *      early

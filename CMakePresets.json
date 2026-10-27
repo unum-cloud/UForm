@@ -2,7 +2,7 @@
   "version": 6,
   "cmakeMinimumRequired": {
     "major": 3,
-    "minor": 27,
+    "minor": 28,
     "patch": 0
   },
   "configurePresets": [
@@ -26,20 +26,27 @@
       "description": "Unoptimized host code with full DWARF, every library, tool and suite.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "UFORM_BUILD_CUDA": "ON"
+        "UFORM_BUILD_CUDA": "ON",
+        "UFORM_BUILD_SHARED": "ON",
+        "UFORM_BUILD_TEST": "ON",
+        "UFORM_BUILD_TOOLS": "ON"
       }
     },
     {
       "name": "check",
       "inherits": "base",
       "displayName": "Check - fastest compile cycle",
-      "description": "Does it still compile, nothing more: -O0 without debug information on the host and in ptxas.",
+      "description": "Does it still compile, nothing more: -O0 without debug information on the host and in ptxas, with warnings as errors.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
         "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O0 -Xptxas -O0 -DNDEBUG",
-        "UFORM_BUILD_CUDA": "ON"
+        "UFORM_BUILD_CUDA": "ON",
+        "UFORM_BUILD_SHARED": "ON",
+        "UFORM_BUILD_TEST": "ON",
+        "UFORM_BUILD_TOOLS": "ON",
+        "UFORM_WERROR": "ON"
       }
     },
     {
@@ -50,7 +57,10 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O2 -g -lineinfo -DNDEBUG",
-        "UFORM_BUILD_CUDA": "ON"
+        "UFORM_BUILD_CUDA": "ON",
+        "UFORM_BUILD_SHARED": "ON",
+        "UFORM_BUILD_TEST": "ON",
+        "UFORM_BUILD_TOOLS": "ON"
       }
     },
     {
@@ -60,66 +70,59 @@
       "description": "Libraries, the trainer and the conformance suites, fully optimized.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "UFORM_BUILD_CUDA": "ON"
+        "UFORM_BUILD_CUDA": "ON",
+        "UFORM_BUILD_SHARED": "ON",
+        "UFORM_BUILD_TEST": "ON",
+        "UFORM_BUILD_TOOLS": "ON"
       }
     },
     {
       "name": "library",
-      "hidden": true,
+      "inherits": "base",
+      "displayName": "Library - the C library for the host alone",
       "description": "The C library alone, fully optimized, without the trainer or the conformance suites.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "UFORM_BUILD_CUDA": "OFF",
-        "UFORM_BUILD_ROCM": "OFF",
-        "UFORM_BUILD_LIB_C": "ON",
-        "UFORM_BUILD_TEST": "OFF",
-        "UFORM_BUILD_TOOLS": "OFF"
+        "UFORM_BUILD_SHARED": "ON"
       }
-    },
-    {
-      "name": "cpu_library",
-      "inherits": [
-        "base",
-        "library"
-      ],
-      "displayName": "CPU Library - the C library for the host alone"
     },
     {
       "name": "stub_library",
-      "inherits": [
-        "base",
-        "library"
-      ],
+      "inherits": "library",
       "displayName": "Stub Library - the C headers over a library that reports every verb unsupported",
       "cacheVariables": {
-        "UFORM_BUILD_LIB_C": "OFF",
-        "UFORM_BUILD_LIB_C_STUB": "ON"
+        "UFORM_BUILD_SHARED": "OFF",
+        "UFORM_BUILD_STUB": "ON"
       }
     },
     {
-      "name": "nvidia_amd_library",
-      "inherits": [
-        "base",
-        "library"
-      ],
-      "displayName": "NVIDIA and AMD Library - the C library with both GPU residencies",
+      "name": "swift",
+      "inherits": "base",
+      "displayName": "Swift - the XCFramework or artifact bundle SwiftPM links",
+      "description": "The CPU library packed for SwiftPM, or with UFORM_BUILD_STUB the stand-in the Swift suite runs against. An Apple slice names its SDK and architecture, here or with -D, and any other target its Swift triples in UFORM_SWIFT_TRIPLES.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "UFORM_BUILD_SWIFT": "ON",
+        "UFORM_SWIFT_SDK": "macosx",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "15.0"
+      }
+    },
+    {
+      "name": "cuda_rocm_library",
+      "inherits": "library",
+      "displayName": "CUDA and ROCm Library - the C library with both GPU residencies",
       "description": "Clang compiles the host code of both vendors: NVCC hosts on it, and ROCm's own Clang compiles the HIP units.",
       "cacheVariables": {
-        "CMAKE_C_COMPILER": "clang",
-        "CMAKE_CXX_COMPILER": "clang++",
-        "CMAKE_CUDA_HOST_COMPILER": "clang++",
         "CMAKE_HIP_COMPILER": "/opt/rocm/llvm/bin/clang++",
         "UFORM_BUILD_CUDA": "ON",
         "UFORM_BUILD_ROCM": "ON"
       }
     },
     {
-      "name": "wasm32_emscripten_release",
-      "inherits": [
-        "base",
-        "library"
-      ],
-      "displayName": "WebAssembly Emscripten Release - the C library for browsers and Node",
+      "name": "wasm32_emscripten",
+      "inherits": "library",
+      "displayName": "WebAssembly Emscripten - the C library for browsers and Node",
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-emscripten.cmake",
       "cacheVariables": {
         "CMAKE_C_COMPILER": null,
@@ -131,12 +134,9 @@
       }
     },
     {
-      "name": "wasm32_wasi_release",
-      "inherits": [
-        "base",
-        "library"
-      ],
-      "displayName": "WebAssembly WASI Release - the C library for standalone runtimes",
+      "name": "wasm32_wasi",
+      "inherits": "library",
+      "displayName": "WebAssembly WASI - the C library for standalone runtimes",
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-wasi.cmake",
       "cacheVariables": {
         "CMAKE_C_COMPILER": null,
@@ -165,24 +165,28 @@
       "configurePreset": "release"
     },
     {
-      "name": "cpu_library",
-      "configurePreset": "cpu_library"
+      "name": "library",
+      "configurePreset": "library"
     },
     {
       "name": "stub_library",
       "configurePreset": "stub_library"
     },
     {
-      "name": "nvidia_amd_library",
-      "configurePreset": "nvidia_amd_library"
+      "name": "swift",
+      "configurePreset": "swift"
     },
     {
-      "name": "wasm32_emscripten_release",
-      "configurePreset": "wasm32_emscripten_release"
+      "name": "cuda_rocm_library",
+      "configurePreset": "cuda_rocm_library"
     },
     {
-      "name": "wasm32_wasi_release",
-      "configurePreset": "wasm32_wasi_release"
+      "name": "wasm32_emscripten",
+      "configurePreset": "wasm32_emscripten"
+    },
+    {
+      "name": "wasm32_wasi",
+      "configurePreset": "wasm32_wasi"
     }
   ],
   "testPresets": [

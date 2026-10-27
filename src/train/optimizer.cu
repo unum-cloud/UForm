@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date July 4, 2026
  *  @brief Device kernels and heavy method bodies of the Adafactor optimizer declared in
- *      @ref optimizer.hpp — the translation unit compiled into the `uform_train` static library
+ *      @ref optimizer.hpp — the translation unit compiled into the @c uform_train static library
  *      beside @ref multimodal_batch.cu and @ref contrastive_segments.cu .
  */
 #include <cmath> // `sqrtf`, `rsqrtf`, `expf`, `std::pow` — the decay schedule

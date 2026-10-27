@@ -6,12 +6,15 @@
  *      center crop into the batch's patch layout.
  *
  *  JPEG decodes through libjpeg-turbo's TurboJPEG, PNG through libpng and WebP through libwebp, all to interleaved RGBA, JPEG
- *  with a constant @c 255 alpha. The RAM and AMD executors run the whole @ref decode_image ; the NVIDIA loader takes
- *  only @ref probe_image and @ref decode_image_rgba for the blobs nvJPEG cannot, and resizes on the device with NPP.
+ *  with a constant @c 255 alpha. The RAM and AMD executors run the whole
+ *  @ref unum::uform::media::decode_image ; the NVIDIA loader takes only
+ *  @ref unum::uform::media::probe_image and @ref unum::uform::media::decode_image_rgba for the
+ *  blobs nvJPEG cannot, and resizes on the device with NPP.
  *
- *  Both resizes are Lanczos-3 over the same @ref image_center_crop to the same extent. The host filter keeps the
- *  6-tap support at every scale, as NPP's @c NPPI_INTER_LANCZOS does, and replicates the crop's edge pixels; the two
- *  agree to rounding where NPP's border and fixed-point details match, which its documentation does not pin.
+ *  Both resizes are Lanczos-3 over the same @ref unum::uform::media::image_center_crop to the same
+ *  extent. The host filter keeps the 6-tap support at every scale, as NPP's @c NPPI_INTER_LANCZOS
+ *  does, and replicates the crop's edge pixels; the two agree to rounding where NPP's border and
+ *  fixed-point details match, which its documentation does not pin.
  */
 #pragma once
 
@@ -33,7 +36,8 @@ using uu::u8_t;
 /** The channels every decoded pixel carries — interleaved RGBA. */
 inline constexpr u32_t image_channels_k = 4u;
 
-/** A writable @b [height,width,4] RGBA picture, the destination of @ref decode_image_rgba . */
+/** A writable @b [height,width,4] RGBA picture, the destination of
+ *  @ref unum::uform::media::decode_image_rgba . */
 using pixel_image_span_t = nk::tensor_span<pixel_t, 3>;
 
 /** A read-only @b [height,width,4] RGBA picture, the source of @ref resize_image . */
@@ -84,11 +88,12 @@ struct image_plan_t {
  *
  *  A window of the blob suffices. The PNG IHDR and the WebP VP8 header sit in the first bytes,
  *  while EXIF and ICC segments can push a JPEG's start-of-frame hundreds of KB in: when it lies
- *  past the window, the probe returns a zero extent and the @ref image_probe_t::resume_offset of
- *  the next marker, and a probe of the window starting there with that @p window_offset continues
- *  the walk.
+ *  past the window, the probe returns a zero extent and the
+ *  @ref unum::uform::media::image_probe_t::resume_offset of the next marker, and a probe of the
+ *  window starting there with that @p window_offset continues the walk.
  *
- *  @retval status_t::invalid_argument_k Unrecognized magic, a truncated header or a zero extent.
+ *  @par Statuses:
+ *  - @c status_t::invalid_argument_k Unrecognized magic, a truncated header or a zero extent.
  */
 [[nodiscard]] expected<image_probe_t> probe_image(bytes_view_t encoded, std::size_t window_offset = 0) noexcept;
 
@@ -109,9 +114,11 @@ struct image_plan_t {
  *  whose output matches it, so a plan's @c decoded extent fits.
  *
  *  @param[in] encoded The whole compressed blob.
- *  @param[in] format The blob's format, from @ref probe_image .
+ *  @param[in] format The blob's format, from @ref unum::uform::media::probe_image .
  *  @param[out] out The @b [height,width,4] destination.
- *  @retval status_t::invalid_argument_k A corrupt bitstream or an extent no scale reaches.
+ *
+ *  @par Statuses:
+ *  - @c status_t::invalid_argument_k A corrupt bitstream or an extent no scale reaches.
  */
 [[nodiscard]] expected_t decode_image_rgba(bytes_view_t encoded, image_format_t format,
                                            pixel_image_span_t out) noexcept;
@@ -122,8 +129,9 @@ struct image_plan_t {
  *
  *  @param[in] source The decoded @b [height,width,4] picture.
  *  @param[out] out The image's @b [rows,columns,P,P,4] cells.
- *  @retval status_t::unsupported_k Channel counts other than 4, or an empty grid or source.
- *  @retval status_t::bad_alloc_k The intermediate row buffer could not be allocated.
+ *
+ *  @par Statuses:
+ *  - @c status_t::unsupported_k Channel counts other than 4, or an empty grid or source.
  */
 [[nodiscard]] expected_t resize_image(pixel_image_view_t source, pixel_patches_span_t out) noexcept;
 
@@ -131,7 +139,7 @@ struct image_plan_t {
  *  @brief Decode, crop, resize and tile one image into its cells — the whole host path.
  *
  *  @param[in] encoded The whole compressed blob.
- *  @param[in] plan The plan from @ref plan_image .
+ *  @param[in] plan The plan from @ref unum::uform::media::plan_image .
  *  @param[out] out The image's @b [plan.grid.rows,plan.grid.columns,P,P,4] cells.
  */
 [[nodiscard]] expected_t decode_image(bytes_view_t encoded, image_plan_t const &plan,

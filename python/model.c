@@ -104,8 +104,8 @@ static int load_parse(char const *verb, PyObject *const *args, Py_ssize_t positi
 }
 
 static char const doc_Model_load_ram[] =                                                           //
-    "load_ram(path, /, *, memory_domains=None, cpu_class=None, executor=None,\n"                   //
-    "    quantization=Scalar.BF16, progress=None, progress_steps=0) -> Model\n"                    //
+    "load_ram(path, /, *, memory_domains=None, cpu_class=None, executor=None, "                    //
+    "quantization=Scalar.BF16, progress=None, progress_steps=0) -> Model\n"                        //
     "\n"                                                                                           //
     "Copies a safetensors checkpoint into host memory and packs its products for the CPU; the\n"   //
     "checkpoint carries the model's geometry.\n"                                                   //
@@ -163,8 +163,8 @@ release:
 }
 
 static char const doc_Model_load_ram_buffer[] =                                                  //
-    "load_ram_buffer(buffer, /, *, memory_domains=None, cpu_class=None, executor=None,\n"        //
-    "    quantization=Scalar.BF16, progress=None, progress_steps=0) -> Model\n"                  //
+    "load_ram_buffer(buffer, /, *, memory_domains=None, cpu_class=None, executor=None, "         //
+    "quantization=Scalar.BF16, progress=None, progress_steps=0) -> Model\n"                      //
     "\n"                                                                                         //
     "Copies a safetensors checkpoint held in memory into host memory, as `load_ram` does from\n" //
     "a path; nothing of the buffer is kept.\n"                                                   //
@@ -218,8 +218,8 @@ release:
 }
 
 static char const doc_Model_load_vram[] =                                                      //
-    "load_vram(path, /, *, devices=None, gpu_class=None, executor=None,\n"                     //
-    "    quantization=Scalar.BF16, progress=None, progress_steps=0) -> Model\n"                //
+    "load_vram(path, /, *, devices=None, gpu_class=None, executor=None, "                      //
+    "quantization=Scalar.BF16, progress=None, progress_steps=0) -> Model\n"                    //
     "\n"                                                                                       //
     "Copies a safetensors checkpoint onto the named GPUs, replicated on each, and packs its\n" //
     "products there.\n"                                                                        //
@@ -277,8 +277,8 @@ release:
 }
 
 static char const doc_Model_load_vram_buffer[] =                                          //
-    "load_vram_buffer(buffer, /, *, devices=None, gpu_class=None, executor=None,\n"       //
-    "    quantization=Scalar.BF16, progress=None, progress_steps=0) -> Model\n"           //
+    "load_vram_buffer(buffer, /, *, devices=None, gpu_class=None, executor=None, "        //
+    "quantization=Scalar.BF16, progress=None, progress_steps=0) -> Model\n"               //
     "\n"                                                                                  //
     "Copies a safetensors checkpoint held in host memory onto the named GPUs, as\n"       //
     "`load_vram` does from a path.\n"                                                     //

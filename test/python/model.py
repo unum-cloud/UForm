@@ -17,9 +17,8 @@ import uform
 FAILING_STATUSES = [status for status in uform.Status if status not in (uform.Status.SUCCESS, uform.Status.DEFERRED)]
 
 
-def test_version_and_capabilities_are_reported():
-    """The version is the package's, and both capability lists are non-empty strings."""
-    assert uform.version() == uform.__version__
+def test_capabilities_are_reported():
+    """Both capability lists are non-empty strings."""
     assert uform.capabilities_compiled()
     assert uform.capabilities_available()
 

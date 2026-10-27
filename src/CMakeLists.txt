@@ -112,9 +112,9 @@ function (uform_cpu_class class_ target_macro_)
             math(EXPR macro_index_ "${index_} + 1")
             list(GET arg_UNPARSED_ARGUMENTS ${index_} capability_)
             list(GET arg_UNPARSED_ARGUMENTS ${macro_index_} capability_macro_)
-            if (nk_target_${capability_}_compiles OR uform_target_${capability_}_compiles_)
+            if (numkong_target_${capability_}_compiles OR uform_target_${capability_}_compiles_)
                 set(advances_ TRUE)
-                list(APPEND flags_ ${nk_target_${capability_}_flags})
+                list(APPEND flags_ ${numkong_target_${capability_}_flags})
                 list(APPEND definitions_ NUMKONG_TARGET_${capability_macro_}=1)
             endif ()
         endforeach ()
@@ -422,7 +422,9 @@ if (UFORM_BUILD_CUDA)
     # The configured codes that run `multimem`: those NumKong's cached Hopper and datacenter-Blackwell capabilities list,
     # with or without CMake's "-real" or "-virtual", each compiled for its own code alone; "native" takes both families.
     set(uform_multicast_codes_)
-    foreach (multicast_architecture_ IN LISTS nk_target_hopper_architectures nk_target_blackwell_architectures)
+    foreach (multicast_architecture_ IN LISTS numkong_target_hopper_architectures
+                                              numkong_target_blackwell_architectures
+    )
         foreach (architecture_ IN LISTS UFORM_CUDA_ARCHITECTURES)
             if (architecture_ MATCHES "^${multicast_architecture_}(-real|-virtual)?$"
                 AND NOT "${multicast_architecture_}-real" IN_LIST uform_multicast_codes_

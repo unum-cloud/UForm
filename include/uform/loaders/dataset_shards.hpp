@@ -4,17 +4,18 @@
  *  @date July 3, 2026
  *  @brief The dataset-shard reader cell: the loader tier's GPU-native readers.
  *
- *  @ref parquet_file_t and @ref jsonl_file_t decode one shard — Parquet columns or a newline-delimited JSON
- *  field — straight into device memory over KvikIO / GPU Direct Storage, own the decoded columns for their
- *  lifetime, and hand out @b zero-copy @ref column_view_t borrows. No host bounce, no Apache Arrow, no bespoke
- *  tape — cuDF is a required dependency, and its owned columns are the tape.
+ *  @ref unum::uform::loaders::parquet_file_t and @ref unum::uform::loaders::jsonl_file_t decode one
+ *  shard — Parquet columns or a newline-delimited JSON field — straight into device memory over
+ *  KvikIO / GPU Direct Storage, own the decoded columns for their lifetime, and hand out
+ *  @b zero-copy @ref unum::uform::loaders::column_view_t borrows. No host bounce, no Apache Arrow,
+ *  no bespoke tape — cuDF is a required dependency, and its owned columns are the tape.
  *
  *  A file's payload — the concatenated bytes of every row of a column — is borrowed in place from the
  *  owned cuDF table, never copied out. cuDF emits 32- or 64-bit @b signed offsets; the reader casts them
- *  once to unsigned @c u64_t and keeps that column alive alongside the table, so every @ref column view
- *  carries 64-bit unsigned offsets and nothing downstream meets a 32-bit or a signedness boundary.
- *  @c string and @c list<uint8> columns both flatten to the same @c (bytes, offsets) shape, so text
- *  documents and media blobs come back through one interface.
+ *  once to unsigned @c u64_t and keeps that column alive alongside the table, so every @c column
+ *  view carries 64-bit unsigned offsets and nothing downstream meets a 32-bit or a signedness
+ *  boundary. @c string and @c list<uint8> columns both flatten to the same @c (bytes, offsets)
+ *  shape, so text documents and media blobs come back through one interface.
  *
  *  cuDF and RMM throw and allocate freely; that is confined to @c dataset_shards.cpp behind an exception
  *  firewall, and the cuDF types never cross this header — they live behind a @c std::unique_ptr pimpl,
@@ -135,13 +136,13 @@ struct row_group_draw_t {
     /** Every drawable shard's path, in glob order. */
     st::basic_vector<sz::string_t> paths_ {};
 
-    /** @b [shards+1] offsets into @ref drawable_groups_ , one entry per shard. */
+    /** @b [shards+1] offsets into @c drawable_groups_ , one entry per shard. */
     st::basic_vector<std::size_t> shard_offsets_ {};
 
     /** Each shard's drawable row groups by their index within the shard, shard by shard. */
     st::basic_vector<u32_t> drawable_groups_ {};
 
-    /** @b [groups+1] cumulative complete rows over @ref drawable_groups_ , the weighted search
+    /** @b [groups+1] cumulative complete rows over @c drawable_groups_ , the weighted search
      *  table. */
     st::basic_vector<std::size_t> group_prefix_ {};
 
@@ -156,7 +157,7 @@ struct row_group_draw_t {
 
 /** One Parquet shard's requested columns, decoded and owned on device. Move-only; the cuDF
  *  table (and any widened-offset columns) it owns free through RAII when the file is destroyed, so
- *  a file outlives the @ref make call that produced it for as long as its @ref column views are
+ *  a file outlives the @ref make call that produced it for as long as its @c column views are
  *  read. A default-constructed / moved-from file is empty ( @c columns()==0 ). */
 struct parquet_file_t {
 
@@ -172,7 +173,10 @@ struct parquet_file_t {
      *      reads only those columns' chunks over KvikIO / GDS and decodes on the GPU. @p storage is the
      *      configured storage session, proof the GDS path is set up.
      *
-     *  @param[in] columns Column names to decode, in the order @ref column indexes them.
+     *  @param[in] storage The configured storage session.
+     *  @param[in] path The Parquet shard to read.
+     *  @param[in] columns Column names to decode, in the order @c column indexes them.
+     *  @param[in,out] stream The stream the decode is enqueued on.
      */
     [[nodiscard]] static expected<parquet_file_t> make(gpu_direct_storage_session_t const &storage,
                                                        sz::string_view_t path, sz::strings_view_t columns,
@@ -223,10 +227,11 @@ struct parquet_file_t {
 };
 
 /** One newline-delimited JSON shard's chosen field, decoded and owned on device — the JSONL
- *  sibling of @ref parquet_file_t , a @b separate type (no format punning). cuDF's line-JSON reader
- *  decodes each line's @p field into the same device @ref column_view_t shape, so a consumer reads
- *  it exactly like a Parquet column; only the decode entry and the @b absent footer differ. Holds
- *  a single field, not a column set. Move-only, RAII; a default / moved-from file is empty. */
+ *  sibling of @ref unum::uform::loaders::parquet_file_t , a @b separate type (no format punning).
+ *  cuDF's line-JSON reader decodes each line's @p field into the same device
+ *  @ref unum::uform::loaders::column_view_t shape, so a consumer reads it exactly like a Parquet
+ *  column; only the decode entry and the @b absent footer differ. Holds a single field, not a
+ *  column set. Move-only, RAII; a default / moved-from file is empty. */
 struct jsonl_file_t {
 
     jsonl_file_t() noexcept;
@@ -251,8 +256,9 @@ struct jsonl_file_t {
     /** Rows decoded — one per JSON line. */
     [[nodiscard]] std::size_t rows() const noexcept;
 
-    /** The chosen field's leaf bytes and offsets — the same shape @ref parquet_file_t::column
-     *  hands out, so the pack kernels are identical. */
+    /** The chosen field's leaf bytes and offsets — the same shape
+     *  @ref unum::uform::loaders::parquet_file_t::column hands out, so the pack kernels are
+     *  identical. */
     [[nodiscard]] column_view_t column() const noexcept;
 
     /** Row → element grouping when @p field is a JSON array of strings; empty for a scalar
@@ -269,10 +275,11 @@ struct jsonl_file_t {
 enum class csv_header_t : bool { positional_k, named_k };
 
 /** One CSV shard's chosen column, decoded and owned on device — the CSV sibling of
- *  @ref parquet_file_t and @ref jsonl_file_t , a @b separate type (no format punning). cuDF's CSV
- *  reader decodes @p column into the same device @ref column_view_t shape, so a consumer reads it
- *  exactly like a Parquet column; only the decode entry (delimiter, header) and the @b absent footer
- *  differ. Holds a single column. Move-only, RAII; a default / moved-from file is empty. */
+ *  @ref unum::uform::loaders::parquet_file_t and @ref unum::uform::loaders::jsonl_file_t , a
+ *  @b separate type (no format punning). cuDF's CSV reader decodes @p column into the same device
+ *  @ref unum::uform::loaders::column_view_t shape, so a consumer reads it exactly like a Parquet
+ *  column; only the decode entry (delimiter, header) and the @b absent footer differ. Holds a
+ *  single column. Move-only, RAII; a default / moved-from file is empty. */
 struct csv_file_t {
 
     csv_file_t() noexcept;
@@ -297,8 +304,9 @@ struct csv_file_t {
     /** Rows decoded — one per CSV record. */
     [[nodiscard]] std::size_t rows() const noexcept;
 
-    /** The chosen column's leaf bytes and offsets — the same shape @ref parquet_file_t::column
-     *  hands out, so the pack kernels are identical. */
+    /** The chosen column's leaf bytes and offsets — the same shape
+     *  @ref unum::uform::loaders::parquet_file_t::column hands out, so the pack kernels are
+     *  identical. */
     [[nodiscard]] column_view_t column() const noexcept;
 
     /** Empty — a CSV column is a flat string, so row @c r @b is element @c r . */

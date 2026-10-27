@@ -28,7 +28,7 @@ using uu::divide_round_up;
 using uu::max_gpus_per_host_k;
 using uu::u8_t;
 
-/** The bundle's bytes, linked in by the assembler stub `uform_gpu_bundle` writes. */
+/** The bundle's bytes, linked in by the assembler stub @c uform_gpu_bundle writes. */
 extern "C" b8_t const uform_encoder_amd_bundle_start[], uform_encoder_amd_bundle_end[];
 
 /** The bundle's kernels, in the order of @ref kernel_names_k . */

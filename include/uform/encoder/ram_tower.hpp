@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 25, 2026
  *  @brief The encoder tower in host memory: weights packed by the products kit it is handed, every
- *      step of @ref encode_steps split across a thread pool.
+ *      step of @c encode_steps split across a thread pool.
  *
  *  Products run in 64-row tiles, attention in equal task windows, element-wise steps in row
  *  slices, and the host entries of @ref ram_kits.hpp one row or one segment per task, each in its
@@ -30,7 +30,7 @@ struct entries_rows_t {
     /** @b [threads,width] each thread's row, as wide as the widest row an entry widens. */
     f32r2_span_t workers {};
 
-    /** @b [2·patch_scalars] the gain and bias rows of @ref fill_patch_affine , refilled per staged
+    /** @b [2·patch_scalars] the gain and bias rows of @c fill_patch_affine , refilled per staged
      *  modality. */
     f32r1_span_t affine {};
 };
@@ -64,10 +64,10 @@ struct ram_placer_t {
     }
 };
 
-/** The steps of @ref encode_steps over host memory, split across a pool's threads, through the
- *  kits a CPU class picked; a step's first failure latches through @p atomic_ref_template_ . The
- *  host entries are @c inline @c static templates over the element-wise kit, so no two class units
- *  share a copy. */
+/** The steps of @c encode_steps over host memory, split across a pool's threads, through the kits a
+ *  CPU class picked; a step's first failure latches through @p atomic_ref_template_ . The host
+ *  entries are @c inline @c static templates over the element-wise kit, so no two class units share
+ *  a copy. */
 template <typename products_kit_type_, typename attention_kit_type_, typename elementwise_kit_type_,
           template <typename> class atomic_ref_template_>
 struct ram_steps {
@@ -133,7 +133,7 @@ struct ram_steps {
         return {};
     }
 
-    /** The host @ref encoder::mrope clamps each coordinate itself, so @p positions goes unused. */
+    /** The host @c mrope clamps each coordinate itself, so @p positions goes unused. */
     [[nodiscard]] expected_t fill_coords(segment_layout_t const &layout, nk::tensor_view<u16_t, 2> image_shapes,
                                          nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames, u32_t frame_stride,
                                          u32_t, i16r2_span_t coords) noexcept {
@@ -203,7 +203,9 @@ struct ram_tower {
     /**
      *  @brief Pack every weight of @p checkpoint into NumKong's aligned heap, in @p precision for
      *      the block products.
-     *  @retval status_t::invalid_argument_k A tensor is missing or misshapen.
+     *
+     *  @par Statuses:
+     *  - @c status_t::invalid_argument_k A tensor is missing or misshapen.
      */
     [[nodiscard]] static expected<ram_tower> make(uu::checkpoint_to_load_t const &checkpoint,
                                                   geometry_t const &geometry, precision_t precision) noexcept {

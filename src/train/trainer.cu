@@ -414,7 +414,9 @@ struct device_budget_t {
  *  probe, and the margin is the footprint outside the arena at the larger probe — the decoders'
  *  workspaces, graphs, the symmetric heap — held free once more. The reservation is the arena's
  *  curve one row past the envelope.
- *  @retval status_t::bad_alloc_k The configured rows do not fit, with the measured numbers.
+ *
+ *  @par Statuses:
+ *  - @c status_t::bad_alloc_k The configured rows do not fit, with the measured numbers.
  */
 [[nodiscard]] static expected<envelope_t> measure_envelope_(mesh_t &mesh, trainer_config_t const &config,
                                                             std::span<i32_t const> devices,

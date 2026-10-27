@@ -1,4 +1,4 @@
-# Probe the InfiniBand transport — the one native dependency absent on the consumer / workstation cards
+# Find the InfiniBand transport — the one native dependency absent on the consumer / workstation cards
 # (RTX 3090, RTX PRO Blackwell) the stack must still build on. Every other dependency is available
 # everywhere and hard-required, so this one alone gets a tri-state gate via `UFORM_WITH_INFINIBAND`:
 #
@@ -12,7 +12,7 @@
 #
 # Naming: `UFORM_*` are public cache variables, `uform_*_` are internal, and parameters and locals end in `_`.
 
-function (uform_probe_infiniband output_)
+function (uform_find_infiniband output_)
     if (UFORM_WITH_INFINIBAND STREQUAL "OFF")
         set(${output_}
             OFF

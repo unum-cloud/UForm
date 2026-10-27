@@ -1,12 +1,9 @@
 # The CPython boundary lives in `python/*.c` and links the C interface as an archive, so the wheel carries one shared
 # object. `scikit-build-core` drives this from `pyproject.toml`.
 
-if (TARGET uform_static)
-    set(uform_python_library_ uform_static)
-elseif (TARGET uform_static_stub)
+set(uform_python_library_ uform_static)
+if (UFORM_BUILD_STUB)
     set(uform_python_library_ uform_static_stub)
-else ()
-    message(FATAL_ERROR "The Python SDK links the C interface; configure with `-DUFORM_BUILD_LIB_C=ON`.")
 endif ()
 
 find_package(Python 3.12 REQUIRED COMPONENTS Interpreter Development.Module)

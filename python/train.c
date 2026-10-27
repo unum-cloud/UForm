@@ -145,9 +145,9 @@ static uform_py_field_t const BatchShape_fields[] = {
 
 uform_py_fields_t BatchShapeType = {
     {PyVarObject_HEAD_INIT(NULL, 0).tp_name = "uform.BatchShape",
-     .tp_doc = "BatchShape(*, max_rows_per_device=0, max_segments_per_device=0, max_columns_per_row=0,\n"   //
-               "    max_bags_per_device=0, max_choices_per_item=0, image=None, video=None, audio=None)\n\n" //
-               "What one device's step carries at most, whatever the modality mix, fixed at creation.\n"    //
+     .tp_doc = "BatchShape(*, max_rows_per_device=0, max_segments_per_device=0, max_columns_per_row=0, " //
+               "max_bags_per_device=0, max_choices_per_item=0, image=None, video=None, audio=None)\n\n"  //
+               "What one device's step carries at most, whatever the modality mix, fixed at creation.\n" //
                "A nested shape takes its own structure or a tuple of its fields in order."},
     BatchShape_fields,
     sizeof(BatchShape_fields) / sizeof(*BatchShape_fields),
@@ -210,9 +210,9 @@ static uform_py_field_t const Contrastive_fields[] = {
 
 uform_py_fields_t ContrastiveType = {
     {PyVarObject_HEAD_INIT(NULL, 0).tp_name = "uform.Contrastive",
-     .tp_doc = "Contrastive(*, matryoshka_dimensions=None, temperature_groups=0, inverse_temperature=0.0,\n"        //
-               "    bias=0.0, negatives=Negatives.AMBIENT, ambient_repulsion_weight=0.0, max_edges_per_device=0,\n" //
-               "    pair_loss=PairLossForm.DERIVED)\n\n"                                                            //
+     .tp_doc = "Contrastive(*, matryoshka_dimensions=None, temperature_groups=0, inverse_temperature=0.0, "    //
+               "bias=0.0, negatives=Negatives.AMBIENT, ambient_repulsion_weight=0.0, max_edges_per_device=0, " //
+               "pair_loss=PairLossForm.DERIVED)\n\n"                                                           //
                "How the contrastive loss scores the pooled embeddings; every zero derives."},
     Contrastive_fields,
     sizeof(Contrastive_fields) / sizeof(*Contrastive_fields),
@@ -243,10 +243,10 @@ static uform_py_field_t const LateInteraction_fields[] = {
 
 uform_py_fields_t LateInteractionType = {
     {PyVarObject_HEAD_INIT(NULL, 0).tp_name = "uform.LateInteraction",
-     .tp_doc = "LateInteraction(*, weight=0.0, width=0, inverse_temperature=0.0, bias=0.0, max_query_span=0,\n" //
-               "    max_query_tokens_per_device=0, max_documents_per_device=0,\n"                               //
-               "    max_document_tokens_per_device=0, pair_loss=PairLossForm.DERIVED)\n\n"                      //
-               "How the late-interaction loss scores the token vectors of query and document items, read\n"     //
+     .tp_doc = "LateInteraction(*, weight=0.0, width=0, inverse_temperature=0.0, bias=0.0, max_query_span=0, " //
+               "max_query_tokens_per_device=0, max_documents_per_device=0, "                                   //
+               "max_document_tokens_per_device=0, pair_loss=PairLossForm.DERIVED)\n\n"                         //
+               "How the late-interaction loss scores the token vectors of query and document items, read\n"    //
                "when its weight is positive; every zero derives."},
     LateInteraction_fields,
     sizeof(LateInteraction_fields) / sizeof(*LateInteraction_fields),
@@ -307,8 +307,8 @@ static uform_py_field_t const MeshOptions_fields[] = {
 
 uform_py_fields_t MeshOptionsType = {
     {PyVarObject_HEAD_INIT(NULL, 0).tp_name = "uform.MeshOptions",
-     .tp_doc = "MeshOptions(*, host_domain_index=0, host_domain_count=0, gpus_per_multimem_domain=0,\n" //
-               "    directory=None, job=None, timeout_seconds=0.0)\n\n"                                 //
+     .tp_doc = "MeshOptions(*, host_domain_index=0, host_domain_count=0, gpus_per_multimem_domain=0, " //
+               "directory=None, job=None, timeout_seconds=0.0)\n\n"                                    //
                "Where this process sits among the processes training one model, and how they meet."},
     MeshOptions_fields,
     sizeof(MeshOptions_fields) / sizeof(*MeshOptions_fields),
@@ -321,7 +321,7 @@ static uform_py_field_t const Edges_fields[] = {
     {"offsets", uform_py_field_object_k, 0, NULL,
      "The step's count + 1 non-decreasing size_t offsets into `ids`; None names no edges."},
     {"ids", uform_py_field_object_k, 0, NULL,
-     "A uint32 buffer: item `i` links to items `ids[offsets[i]:offsets[i + 1]]`, ascending within each run."},
+     "A uint32 buffer: item `i` links to items ``ids[offsets[i]:offsets[i + 1]]``, ascending within each run."},
     {"weights", uform_py_field_object_k, 0, NULL, "The float32 weight of each edge; None weighs every edge one."},
 };
 
@@ -587,9 +587,9 @@ static int widths_from_object(PyObject *object, char const *field, size_t **widt
 }
 
 static char const doc_Trainer_init_vram[] =                                                          //
-    "init_vram(executor, /, *, mesh=None, resume=None, depth=0, hidden=0, batch=None,\n"             //
-    "    objective=Objective.MASKED, masking=None, contrastive=None, late_interaction=None,\n"       //
-    "    choices=None, schedule=None, seed=0, progress=None, progress_steps=0) -> Trainer\n"         //
+    "init_vram(executor, /, *, mesh=None, resume=None, depth=0, hidden=0, batch=None, "              //
+    "objective=Objective.MASKED, masking=None, contrastive=None, late_interaction=None, "            //
+    "choices=None, schedule=None, seed=0, progress=None, progress_steps=0) -> Trainer\n"             //
     "\n"                                                                                             //
     "Builds one replica per device of `executor` and starts or resumes the run; every process\n"     //
     "of the run calls it with the same geometry, objective and seed.\n"                              //
@@ -982,10 +982,10 @@ static int sides_from_object(PyObject *object, size_t count, uform_late_interact
 }
 
 static char const doc_Trainer_step[] =                                                            //
-    "step(modalities, contents, /, *, bags=None, temperature_groups=None, sides=None,\n"          //
-    "    choices=None, choice_targets=None, relations=None, arena=None,\n"                        //
-    "    outputs_scalar=Scalar.F32, stats=None)\n"                                                //
-    "    -> ArenaBuffer | None\n"                                                                 //
+    "step(modalities, contents, /, *, bags=None, temperature_groups=None, sides=None, "           //
+    "choices=None, choice_targets=None, relations=None, arena=None, "                             //
+    "outputs_scalar=Scalar.F32, stats=None) "                                                     //
+    "-> ArenaBuffer | None\n"                                                                     //
     "\n"                                                                                          //
     "Applies one optimizer step over this process's items and every peer's: forward, losses,\n"   //
     "backward, the world gradient reduction and the update. Every process calls it once per\n"    //

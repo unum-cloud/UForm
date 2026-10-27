@@ -1,5 +1,9 @@
 /**
- * The model lifecycle: loads into RAM or VRAM, the description, and the receivers every encode verb runs through.
+ *  @file javascript/model.ts
+ *  @author Ash Vardanian
+ *  @date October 18, 2026
+ *  @brief The model lifecycle: loads into RAM or VRAM, the description, and the receivers every encode verb runs
+ *      through.
  */
 import type { CompiledDescription, CompiledModel } from "./library.js";
 import { EncodeVerbs } from "./encode.js";
@@ -62,8 +66,8 @@ abstract class ModelVerbs<Receiving extends "blocking" | "deferred"> extends Enc
 }
 
 /**
- * The verbs of one model, blocking on one executor: `model.on(executor)`. Every call starts after every earlier
- * submission to that executor, and returns with its outputs written.
+ *  The verbs of one model, blocking on one executor: `model.on(executor)`. Every call starts after every earlier
+ *  submission to that executor, and returns with its outputs written.
  */
 export class ModelOn extends ModelVerbs<"blocking"> {
   /** Made by `model.on(executor)`, never directly. */
@@ -73,8 +77,8 @@ export class ModelOn extends ModelVerbs<"blocking"> {
 }
 
 /**
- * The verbs of one model, submitted to one executor and answered as {@link Deferred} calls: `model.deferred(executor)`.
- * A verb borrows its arena until final, and waits into the same views a blocking call answers.
+ *  The verbs of one model, submitted to one executor and answered as {@link Deferred} calls: `model.deferred(executor)`.
+ *  A verb borrows its arena until final, and waits into the same views a blocking call answers.
  */
 export class ModelDeferredOn extends ModelVerbs<"deferred"> {
   /** Made by `model.deferred(executor)`, never directly. */
@@ -94,8 +98,8 @@ function bufferOf(buffer: ArrayBuffer | ArrayBufferView): ArrayBufferView {
 }
 
 /**
- * A loaded encoder, running every verb on the calling thread. `on(executor)` and `deferred(executor)` reach the same
- * verbs on an executor. One model serves every modality it was trained on.
+ *  A loaded encoder, running every verb on the calling thread. `on(executor)` and `deferred(executor)` reach the same
+ *  verbs on an executor. One model serves every modality it was trained on.
  */
 export class Model extends ModelOn implements Disposable {
   /** Reached through the loads. */
@@ -106,16 +110,16 @@ export class Model extends ModelOn implements Disposable {
   }
 
   /**
-   * The same verbs, each blocking on `executor`, after every earlier submission to it. Binding-only.
-   * @param {Executor} executor - The threads or streams to run on; its residency must match the model's.
+   *  The same verbs, each blocking on `executor`, after every earlier submission to it. Binding-only.
+   *  @param executor - The threads or streams to run on; its residency must match the model's.
    */
   on(executor: Executor): ModelOn {
     return new ModelOn(this.compiled, executor);
   }
 
   /**
-   * The same verbs, each submitted to `executor` and answered as a {@link Deferred}. Binding-only.
-   * @param {Executor} executor - The threads or streams to run on; its residency must match the model's.
+   *  The same verbs, each submitted to `executor` and answered as a {@link Deferred}. Binding-only.
+   *  @param executor - The threads or streams to run on; its residency must match the model's.
    */
   deferred(executor: Executor): ModelDeferredOn {
     if (!(executor instanceof Executor)) throw fail(Status.InvalidArgument, "A deferred receiver needs an Executor.");
@@ -132,9 +136,9 @@ export class Model extends ModelOn implements Disposable {
   }
 
   /**
-   * Copies a safetensors checkpoint file into host memory and packs it for the CPU. Calls `uform_model_load_ram`.
-   * @param {string} path - The checkpoint, read in full and closed before the load completes.
-   * @param {ModelLoadRamConfig} [config] - The executor, the NUMA nodes, and the block scalar.
+   *  Copies a safetensors checkpoint file into host memory and packs it for the CPU. Calls `uform_model_load_ram`.
+   *  @param path - The checkpoint, read in full and closed before the load completes.
+   *  @param config - The executor, the NUMA nodes, and the block scalar.
    */
   static loadRam(path: string, config: ModelLoadRamConfig = {}): Model {
     return new Model(
@@ -150,9 +154,9 @@ export class Model extends ModelOn implements Disposable {
   }
 
   /**
-   * Copies a checkpoint held in memory into host memory, which is how a page loads one it fetched. Calls `uform_model_load_ram_buffer`.
-   * @param {ArrayBuffer|ArrayBufferView} buffer - The checkpoint bytes, copied before the load completes.
-   * @param {ModelLoadRamConfig} [config] - The executor, the NUMA nodes, and the block scalar.
+   *  Copies a checkpoint held in memory into host memory, which is how a page loads one it fetched. Calls `uform_model_load_ram_buffer`.
+   *  @param buffer - The checkpoint bytes, copied before the load completes.
+   *  @param config - The executor, the NUMA nodes, and the block scalar.
    */
   static loadRamBuffer(buffer: ArrayBuffer | ArrayBufferView, config: ModelLoadRamConfig = {}): Model {
     return new Model(
@@ -168,9 +172,9 @@ export class Model extends ModelOn implements Disposable {
   }
 
   /**
-   * Copies a checkpoint file onto the named GPUs and packs it there. Calls `uform_model_load_vram`.
-   * @param {string} path - The checkpoint, read in full and closed before the load completes.
-   * @param {ModelLoadVramConfig} [config] - The executor, the devices, and the block scalar.
+   *  Copies a checkpoint file onto the named GPUs and packs it there. Calls `uform_model_load_vram`.
+   *  @param path - The checkpoint, read in full and closed before the load completes.
+   *  @param config - The executor, the devices, and the block scalar.
    */
   static loadVram(path: string, config: ModelLoadVramConfig = {}): Model {
     return new Model(
@@ -186,9 +190,9 @@ export class Model extends ModelOn implements Disposable {
   }
 
   /**
-   * Copies a checkpoint held in memory onto the named GPUs. Calls `uform_model_load_vram_buffer`.
-   * @param {ArrayBuffer|ArrayBufferView} buffer - The checkpoint bytes, copied before the load completes.
-   * @param {ModelLoadVramConfig} [config] - The executor, the devices, and the block scalar.
+   *  Copies a checkpoint held in memory onto the named GPUs. Calls `uform_model_load_vram_buffer`.
+   *  @param buffer - The checkpoint bytes, copied before the load completes.
+   *  @param config - The executor, the devices, and the block scalar.
    */
   static loadVramBuffer(buffer: ArrayBuffer | ArrayBufferView, config: ModelLoadVramConfig = {}): Model {
     return new Model(

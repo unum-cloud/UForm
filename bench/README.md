@@ -12,7 +12,7 @@ cmake --preset release -D UFORM_BUILD_BENCH=ON
 cmake --build build_release --target uform_bench_encoder uform_bench_core
 ```
 
-`uform_bench_encoder` builds on every tree, the CPU-only `cpu_library` preset included, while `uform_bench_core` needs `-D UFORM_BUILD_CUDA=ON`.
+`uform_bench_encoder` builds on every tree, the CPU-only `library` preset included, while `uform_bench_core` needs `-D UFORM_BUILD_CUDA=ON`.
 
 ## Encoder Throughput
 

@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date July 5, 2026
  *  @brief Device kernels and heavy setup/collective bodies of the InfiniBand tier declared in
- *      @ref infiniband_collectives.cuh — the translation unit compiled into the `uform_train`
+ *      @ref infiniband_collectives.cuh — the translation unit compiled into the @c uform_train
  *      static library beside @ref multimem_collectives.cu and @ref optimizer.cu .
  */
 #include <climits> // `PATH_MAX`

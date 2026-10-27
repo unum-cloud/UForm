@@ -105,8 +105,9 @@ struct fabricated_tape_t {
     /**
      *  @brief Pack @p blobs into a fresh device tape on @p arena , staging the host accumulator through
      *      @ref copy_host_to_device and synchronizing so the pageable accumulator is safe to drop.
-     *  @param[inout] arena The device arena the concatenated bytes are allocated from.
-     *  @param[inout] stream The stream the staging copy enqueues on; synchronized before returning.
+     *  @param[in,out] arena The device arena the concatenated bytes are allocated from.
+     *  @param[in,out] stream The stream the staging copy enqueues on; synchronized before
+     *      returning.
      *  @param[in] blobs The blobs to pack back to back, one Arrow element each.
      */
     [[nodiscard]] static expected<fabricated_tape_t> make(gpu_arena_t &arena, gpu_stream_t &stream,
@@ -492,9 +493,9 @@ static void media_fill_their_rows(test_suite_t &suite) {
  *  Text / audio walk the 1-D position axis, image is 2-D spatial, video is 3-D absolute-frame.
  *  Needs no external media.
  *
- *  @param[inout] suite The running tally.
- *  @param[inout] arena The device arena the batch and coordinate scratch are allocated from.
- *  @param[inout] stream The stream every stage enqueues on.
+ *  @param[in,out] suite The running tally.
+ *  @param[in,out] arena The device arena the batch and coordinate scratch are allocated from.
+ *  @param[in,out] stream The stream every stage enqueues on.
  */
 static void fill_coords_routes_every_modality(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream) {
     u32_t const columns = 32u, max_segments = 8u, tube_frames = 2u, frame_stride = 3u;
@@ -638,12 +639,12 @@ static void pack_tokens_starts_with_prefix(test_suite_t &suite, gpu_arena_t &are
 /**
  *  @brief Decode @p clip into a one-row audio batch and assert the raw-frame contract: one @c audio_k segment
  *      filling the row, finite samples, and a PAD @c text_k remainder.
- *  @param[inout] suite The running tally.
+ *  @param[in,out] suite The running tally.
  *  @param[in] label The case label the diagnostics carry.
  *  @param[in] clip The encoded clip bytes; an empty clip skips the case.
- *  @param[inout] arena The device arena.
- *  @param[inout] stream The stream every stage enqueues on.
- *  @param[inout] pool The CPU-decode worker pool.
+ *  @param[in,out] arena The device arena.
+ *  @param[in,out] stream The stream every stage enqueues on.
+ *  @param[in,out] pool The CPU-decode worker pool.
  */
 static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, st::basic_vector<b8_t> const &clip,
                              gpu_arena_t &arena, gpu_stream_t &stream, pool_view_t pool) {
@@ -707,10 +708,10 @@ static void run_audio_decode(test_suite_t &suite, sz::string_view_t label, st::b
  *  @brief A real env audio clip and an in-test garbage blob decode into one two-row batch: mark-and-continue
  *      keeps the batch coherent — the garbage row fault-isolates to silence while both segments stay @c audio_k
  *      and the decode as a whole still succeeds.
- *  @param[inout] suite The running tally.
- *  @param[inout] arena The device arena.
- *  @param[inout] stream The stream every stage enqueues on.
- *  @param[inout] pool The CPU-decode worker pool.
+ *  @param[in,out] suite The running tally.
+ *  @param[in,out] arena The device arena.
+ *  @param[in,out] stream The stream every stage enqueues on.
+ *  @param[in,out] pool The CPU-decode worker pool.
  *  @param[in] clip The real env audio clip; an empty clip skips the case.
  */
 static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_stream_t &stream, pool_view_t pool,
@@ -770,13 +771,13 @@ static void audio_fault_isolation(test_suite_t &suite, gpu_arena_t &arena, gpu_s
 /**
  *  @brief Decode @p blob into a one-row RGBA image batch and assert: one @c image_k segment, its
  *      @c (patch_rows,patch_cols) factoring its length, sub-row placement, and a valid alpha byte.
- *  @param[inout] suite The running tally.
+ *  @param[in,out] suite The running tally.
  *  @param[in] label The case label the diagnostics carry.
  *  @param[in] blob The encoded image bytes; an empty blob skips the case.
- *  @param[inout] arena The device arena.
- *  @param[inout] stream The stream every stage enqueues on.
- *  @param[inout] pool The CPU-decode worker pool.
- *  @param[inout] jpeg This GPU's nvJPEG session.
+ *  @param[in,out] arena The device arena.
+ *  @param[in,out] stream The stream every stage enqueues on.
+ *  @param[in,out] pool The CPU-decode worker pool.
+ *  @param[in,out] jpeg This GPU's nvJPEG session.
  */
 static void run_image_decode(test_suite_t &suite, sz::string_view_t label, st::basic_vector<b8_t> const &blob,
                              gpu_arena_t &arena, gpu_stream_t &stream, pool_view_t pool, nvjpeg_session_t &jpeg) {
@@ -928,14 +929,14 @@ static void image_batch_matches_single(test_suite_t &suite, std::span<st::basic_
  *  Distinct strides yield distinct temporal factorizations. The footprint is derived from the
  *  fixture's native resolution and clamped to a row, so a fixture of any size downscales to fit.
  *
- *  @param[inout] suite The running tally.
+ *  @param[in,out] suite The running tally.
  *  @param[in] label The case label the diagnostics carry.
  *  @param[in] clip The encoded clip bytes; an empty clip skips the case.
  *  @param[in] frame_strides One temporal stride per representation.
- *  @param[inout] arena The device arena.
- *  @param[inout] stream The stream every stage enqueues on.
- *  @param[inout] pool The CPU demux pool.
- *  @param[inout] nvdec The multi-engine NVDEC session.
+ *  @param[in,out] arena The device arena.
+ *  @param[in,out] stream The stream every stage enqueues on.
+ *  @param[in,out] pool The CPU demux pool.
+ *  @param[in,out] nvdec The multi-engine NVDEC session.
  */
 static void run_video_decode(test_suite_t &suite, sz::string_view_t label, st::basic_vector<b8_t> const &clip,
                              std::span<u32_t const> frame_strides, gpu_arena_t &arena, gpu_stream_t &stream,
@@ -1007,11 +1008,11 @@ static void run_video_decode(test_suite_t &suite, sz::string_view_t label, st::b
  *  A single loader owns the whole segment table at fill, so a mixed row is assembled here the way the
  *  cross-rank mixer produces it, over genuinely decoded geometry.
  *
- *  @param[inout] suite The running tally.
- *  @param[inout] arena The device arena.
- *  @param[inout] stream The stream every stage enqueues on.
- *  @param[inout] pool The CPU-decode worker pool.
- *  @param[inout] jpeg This GPU's nvJPEG session.
+ *  @param[in,out] suite The running tally.
+ *  @param[in,out] arena The device arena.
+ *  @param[in,out] stream The stream every stage enqueues on.
+ *  @param[in,out] pool The CPU-decode worker pool.
+ *  @param[in,out] jpeg This GPU's nvJPEG session.
  *  @param[in] audio_clip The real env audio clip; empty skips the case.
  *  @param[in] image_blob The real env image blob; empty skips the case.
  */

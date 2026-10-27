@@ -1,8 +1,11 @@
 /**
- * Pocket-Sized Multimodal AI for Content Understanding and Generation, for Node.
+ *  @file javascript/uform.ts
+ *  @author Ash Vardanian
+ *  @date October 18, 2026
+ *  @brief Pocket-Sized Multimodal AI for Content Understanding and Generation, for Node.
  *
- * The package entry point: it binds the Node addon, and re-exports one module per C header underneath, so a caller
- * imports `@unum-cloud/uform` and nothing deeper. Browsers import `@unum-cloud/uform/wasm` instead.
+ *      The package entry point: it binds the Node addon, and re-exports one module per C header underneath, so a
+ *      caller imports `@unum-cloud/uform` and nothing deeper. Browsers import `@unum-cloud/uform/wasm` instead.
  */
 import { loadAddon } from "./library.js";
 import { backend, bind } from "./types.js";

@@ -14,8 +14,9 @@
  *      3. @ref mesh_topology_t — the bootstrapped world: the shape, this host_domain's identity, every
  *         peer host_domain's published facts, and the once-per-job exchange primitives later wiring
  *         phases reuse.
- *      4. @ref make_mesh_shape / @ref discover_mesh_shape / @ref mesh_topology_t::bootstrap — the
- *         validated construction paths.
+ *      4. @ref make_mesh_shape / @ref discover_mesh_shape /
+ *         @ref unum::uform::utilities::mesh_topology_t::bootstrap — the validated construction
+ *         paths.
  *
  *  @section mesh_purpose Purpose — why a bootstrap exchange exists at all
  *
@@ -32,12 +33,12 @@
  *         siblings before the domain-wide bind.
  *
  *  Secondary roles, in descending importance: @b phase @b ordering (arenas allocated → MRs registered → QPs
- *  connected → training starts; @ref mesh_topology_t::barrier keeps any host_domain from running ahead),
- *  @b agreement @b validation (GPU model, count and class, world size, multimem extent, schema and
- *  job identity), and @b boot @b verification (a bounded await turns a wedged host_domain into a
- *  named failure, never a hang). The exchange runs once per job, before step 0; the moment the
- *  transport is wired, all synchronization moves onto NVLink / InfiniBand and the directory is
- *  never touched again.
+ *  connected → training starts; @ref unum::uform::utilities::mesh_topology_t::barrier keeps any
+ *  host_domain from running ahead), @b agreement @b validation (GPU model, count and class, world
+ *  size, multimem extent, schema and job identity), and @b boot @b verification (a bounded await
+ *  turns a wedged host_domain into a named failure, never a hang). The exchange runs once per job,
+ *  before step 0; the moment the transport is wired, all synchronization moves onto NVLink /
+ *  InfiniBand and the directory is never touched again.
  *
  *  @section mesh_worlds Three concrete worlds
  *
@@ -223,13 +224,15 @@ struct mesh_location_t {
 /**
  *  @brief Discover the single-host_domain shape: all three domains span the visible devices.
  *
- *  Neither multicast nor P2P is required here: a @ref multimem_domain_t without multicast runs its
- *  peer-read tier, and only a domain asks @ref peers_reach_each_other of its own members.
+ *  Neither multicast nor P2P is required here: a @ref unum::uform::utilities::multimem_domain_t
+ *  without multicast runs its peer-read tier, and only a domain asks
+ *  @ref unum::uform::utilities::peers_reach_each_other of its own members.
  *
  *  Covers the common one-box world (an HGX box driven by one process); the multi-host_domain world builds
- *  on it through @ref mesh_topology_t::bootstrap . The probe sees @b only this process's devices — a wider
- *  fabric extent (NVL72 / NVL144) is explicit configuration, cross-checked during the exchange and proven
- *  when the multicast object binds. Requires @c cuInit to have run; needs no CUDA context.
+ *  on it through @ref unum::uform::utilities::mesh_topology_t::bootstrap . The probe sees @b only
+ *  this process's devices — a wider fabric extent (NVL72 / NVL144) is explicit configuration,
+ *  cross-checked during the exchange and proven when the multicast object binds. Requires @c cuInit
+ *  to have run; needs no CUDA context.
  */
 [[nodiscard]] inline expected<mesh_shape_t> discover_mesh_shape() noexcept {
     int device_count = 0;
@@ -294,7 +297,8 @@ struct mesh_host_domain_t {
     char device_name[device_name_capacity_k] = {};
 };
 
-/** Why a kernel trapped — the meaning of a @ref gpu_fault_t 's three operands. */
+/** Why a kernel trapped — the meaning of a @ref unum::uform::utilities::gpu_fault_t 's three
+ *  operands. */
 enum class gpu_fault_code_t : u32_t {
     none_k = 0,
 
@@ -444,7 +448,8 @@ struct mesh_topology_t {
     /** Every host_domain's published facts, indexed by host_domain index. */
     st::basic_vector<mesh_host_domain_t> host_domains {};
 
-    /** The resolved @c <directory>/<job_id> exchange root; empty in a single-host_domain world. */
+    /** The resolved exchange root, a folder named by the job ID inside the exchange directory;
+     *  empty in a single-host_domain world. */
     sz::string_t exchange_directory {};
 
     /** The wait between two reads of @ref exchange_directory while a peer's payload is missing. */
@@ -652,10 +657,10 @@ struct mesh_topology_t {
     }
 
     /** A filesystem barrier across every host_domain, named by @p tag , in O(host_domain_count)
-     *  file operations: a follower drops its @c <tag>.arrive marker and waits for the lead's
-     *  @c <tag>.release ; the lead collects every arrival, then publishes the release. Distinct tags
-     *  give independent barriers within one job ( @c "mesh" , @c "connected" , @c "heap" ). A
-     *  single-host_domain world returns immediately. */
+     *  file operations: a follower drops its arrive marker, named after the tag, and waits for the
+     *  lead's release marker ; the lead collects every arrival, then publishes the release.
+     *  Distinct tags give independent barriers within one job ( @c "mesh" , @c "connected" ,
+     *  @c "heap" ). A single-host_domain world returns immediately. */
     [[nodiscard]] expected_t barrier(sz::string_view_t tag, f64_t timeout_seconds) const noexcept {
         if (host_domain_count() <= 1) return {};
         sz::string_t arrive_key, release_key;
@@ -702,7 +707,7 @@ struct mesh_topology_t {
 
     /** The local hardware probe: this host_domain's published facts plus the CUDA UUIDs of its
      *  visible GPUs — kept @b probe-local (the world table stores identity, not per-GPU uuids), fed to
-     *  @ref build_facts_ on publish and to @ref collect_world_as_lead_ for the uniqueness proof. */
+     *  @c build_facts_ on publish and to @c collect_world_as_lead_ for the uniqueness proof. */
     struct local_probe_t {
         mesh_host_domain_t facts {};
         per_gpu_array<CUuuid> uuids {};
@@ -777,7 +782,7 @@ struct mesh_topology_t {
         return probe;
     }
 
-    /** Assemble the line-oriented facts payload — the exact inverse of @ref parse_facts_ .
+    /** Assemble the line-oriented facts payload — the exact inverse of @c parse_facts_ .
      *  @c false only on allocation failure. */
     [[nodiscard]] static bool build_facts_(sz::string_t &text, mesh_host_domain_t const &self,
                                            mesh_shape_t const &shape, sz::string_view_t job, u32_t gpu_class,
@@ -800,9 +805,9 @@ struct mesh_topology_t {
         return built;
     }
 
-    /** Parse a line-oriented @c <key> @c <value> facts payload with the partition API — SIMD
-     *  scans, zero allocations, zero exceptions. @c false when any field is missing or malformed;
-     *  field-level agreement stays with the caller, which owns the diagnostics. */
+    /** Parse a line-oriented key and value facts payload with the partition API — SIMD scans, zero
+     *  allocations, zero exceptions. @c false when any field is missing or malformed; field-level
+     *  agreement stays with the caller, which owns the diagnostics. */
     [[nodiscard]] static bool parse_facts_(sz::string_view_t payload, facts_t &facts) noexcept {
         sz::byteset_t const whitespaces = sz::whitespaces_set();
         bool index_parsed = false, count_parsed = false, multimem_parsed = false, devices_parsed = false,
@@ -827,7 +832,7 @@ struct mesh_topology_t {
     }
 
     /** Assemble the manifest payload from a complete table — the exact inverse of
-     *  @ref parse_manifest_ . @c false only on allocation failure. */
+     *  @c parse_manifest_ . @c false only on allocation failure. */
     [[nodiscard]] static bool build_manifest_(sz::string_t &text, st::basic_vector<mesh_host_domain_t> const &table,
                                               mesh_shape_t const &shape, sz::string_view_t job) noexcept {
         bool built = format_into(text, "schema {}\njob {}\nmultimem {}\n", mesh_schema_k, job,
@@ -840,9 +845,10 @@ struct mesh_topology_t {
     }
 
     /** Parse and validate a whole manifest into @p table : the schema, job, and multimem header
-     *  lines must match, every row @c host_domain @c <i> @c hostname @c <h> @c devices @c <d>
-     *  @c device_name @c <m> must be well-formed and in range, and exactly @c table.size() rows must
-     *  be present. Emits no diagnostics — the caller owns the message, with the whole payload in it. */
+     *  lines must match, every row naming a @c host_domain index, its @c hostname, its @c devices
+     *  count and its @c device_name must be well-formed and in range, and exactly @c table.size()
+     *  rows must be present. Emits no diagnostics — the caller owns the message, with the whole
+     *  payload in it. */
     [[nodiscard]] static bool parse_manifest_(sz::string_view_t payload, sz::string_view_t job,
                                               u32_t gpus_per_multimem_domain,
                                               st::basic_vector<mesh_host_domain_t> &table) noexcept {
@@ -1000,7 +1006,8 @@ struct mesh_topology_t {
         return {};
     }
 
-    /** The @c <exchange_directory>/host_domain<N>.<key> path of one host_domain's payload. */
+    /** The path of one host_domain's payload, named by its index and key inside the exchange
+     *  directory. */
     [[nodiscard]] expected<sz::string_t> host_domain_file_path_(u32_t host_domain,
                                                                 sz::string_view_t key) const noexcept {
         sz::string_t path;
@@ -1071,7 +1078,7 @@ struct mesh_topology_t {
     /** The generation the next wiring phase keys its payloads and barriers with. */
     u32_t next_collective_id_ = 0;
 
-    /** Device 0's primary context, retained while @ref faults_ lives in it. */
+    /** Device 0's primary context, retained while @c faults_ lives in it. */
     CUcontext fault_context_ = nullptr;
 
     /** The pinned @ref faults table; null for a topology @ref bootstrap did not make. */
@@ -1082,8 +1089,8 @@ struct mesh_topology_t {
  *  @c $UFORM_HOST_DOMAIN_INDEX , then Slurm's @c $SLURM_NODEID , then Open MPI's
  *  @c $OMPI_COMM_WORLD_RANK ; 0 if none is set. Reading the launcher's environment costs nothing and
  *  links nothing — no MPI library enters the build. Identity only: it selects @b which host_domain,
- *  never a count — the counts are explicit @ref mesh_topology_t::bootstrap arguments, so a
- *  misconfigured launcher cannot change the math. */
+ *  never a count — the counts are explicit @ref unum::uform::utilities::mesh_topology_t::bootstrap
+ *  arguments, so a misconfigured launcher cannot change the math. */
 [[nodiscard]] inline u32_t host_domain_index_from_environment() noexcept {
     // `std::getenv` speaks C strings; the names never escape this loop.
     char const *const variables[] = {"UFORM_HOST_DOMAIN_INDEX", "SLURM_NODEID", // vendor-boundary
@@ -1096,9 +1103,10 @@ struct mesh_topology_t {
 
 /** The world's host_domain count, read at the @b launcher boundary — @c $UFORM_HOST_DOMAIN_COUNT ,
  *  then Slurm's @c $SLURM_JOB_NUM_NODES , then Open MPI's @c $OMPI_COMM_WORLD_SIZE ; 1 if none is
- *  set. For the mains alone, which pass the count on as @ref mesh_topology_t::bootstrap 's explicit
- *  argument — bootstrap itself never reads it, so a misconfigured launcher cannot change the math
- *  behind an already-constructed world. The whole contract is tabled in @c scripts/slurm/README.md . */
+ *  set. For the mains alone, which pass the count on as
+ *  @ref unum::uform::utilities::mesh_topology_t::bootstrap 's explicit argument — bootstrap itself
+ *  never reads it, so a misconfigured launcher cannot change the math behind an already-constructed
+ *  world. The whole contract is tabled in @c scripts/slurm/README.md . */
 [[nodiscard]] inline u32_t host_domain_count_from_environment() noexcept {
     // `std::getenv` speaks C strings; the names never escape this loop.
     char const *const variables[] = {"UFORM_HOST_DOMAIN_COUNT", "SLURM_JOB_NUM_NODES", // vendor-boundary

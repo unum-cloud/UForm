@@ -4,7 +4,7 @@
  *  @date July 3, 2026
  *  @brief The batch's implementation: the single segment-driven coordinate adapter (
  *      @ref fill_coords ) and the batch mixer's routing bijection and two exchange kernels —
- *      compiled once into the `uform_train` library.
+ *      compiled once into the @c uform_train library.
  *
  *  Everything stays on the GPU: peer addresses travel as kernel arguments, and every kernel re-derives its
  *  routes in-register from the keyed bijection, so the mixer owns no memory at all; the coordinate adapter

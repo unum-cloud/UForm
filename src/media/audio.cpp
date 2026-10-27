@@ -203,11 +203,11 @@ struct resample_cursor_t {
  *  @brief Resample one step into the fixed-length clip and advance @p cursor : real input emits its samples, a
  *      null @p input pumps the resampler's delay line, so conversion and drain share this one call.
  *
- *  @param[inout] resampler The libswresample context to convert through.
+ *  @param[in,out] resampler The libswresample context to convert through.
  *  @param[in] input The input planes, or @c nullptr to drain the resampler.
  *  @param[in] input_samples The samples per input plane.
  *  @param[out] out The fixed-length clip, already silent.
- *  @param[inout] cursor The write position and outcome, advanced in place.
+ *  @param[in,out] cursor The write position and outcome, advanced in place.
  *  @return Whether the resampler may still yield output: always for real input, and for a drain only while it
  *      emitted samples.
  */

@@ -18,7 +18,7 @@ The wheels carry the CPU library.
 A build from source compiles the C library and the extension through `scikit-build-core`, and the suites run against the stub library alone:
 
 ```sh
-pip install . -C cmake.define.UFORM_BUILD_LIB_C=OFF -C cmake.define.UFORM_BUILD_LIB_C_STUB=ON
+pip install . -C cmake.define.UFORM_BUILD_STUB=ON
 uv run pytest test/python
 ```
 

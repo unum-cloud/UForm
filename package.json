@@ -35,9 +35,9 @@
   },
   "scripts": {
     "build-js": "tsc -p javascript/tsconfig-esm.json && tsc -p javascript/tsconfig-cjs.json && cp javascript/dist-package-esm.json javascript/dist/esm/package.json && cp javascript/dist-package-cjs.json javascript/dist/cjs/package.json",
-    "build-native": "cmake-js compile --out build_node --CDUFORM_BUILD_LIB_C=ON --CDUFORM_BUILD_LIB_NODE=ON --CDUFORM_BUILD_TEST=OFF --CDUFORM_BUILD_TOOLS=OFF --target uform_node",
-    "build-native-stub": "cmake-js compile --out build_node_stub --CDUFORM_BUILD_LIB_C=OFF --CDUFORM_BUILD_LIB_C_STUB=ON --CDUFORM_BUILD_LIB_NODE=ON --CDUFORM_BUILD_TEST=OFF --CDUFORM_BUILD_TOOLS=OFF --target uform_node && node javascript/stage-prebuild.js build_node_stub",
-    "build-wasm": "cmake --preset wasm32_emscripten_release -DUFORM_BUILD_LIB_NODE=ON && cmake --build --preset wasm32_emscripten_release --target uform_wasm && mkdir -p javascript/dist/wasm && cp build_wasm32_emscripten_release/javascript/uform.mjs build_wasm32_emscripten_release/javascript/uform.wasm javascript/dist/wasm/",
+    "build-native": "cmake-js compile --out build_node --CDUFORM_BUILD_NODE=ON --target uform_node",
+    "build-native-stub": "cmake-js compile --out build_node_stub --CDUFORM_BUILD_STUB=ON --CDUFORM_BUILD_NODE=ON --target uform_node && node javascript/stage-prebuild.js build_node_stub",
+    "build-wasm": "cmake --preset wasm32_emscripten -DUFORM_BUILD_NODE=ON && cmake --build --preset wasm32_emscripten --target uform_wasm && mkdir -p javascript/dist/wasm && cp build_wasm32_emscripten/javascript/uform.mjs build_wasm32_emscripten/javascript/uform.wasm javascript/dist/wasm/",
     "prebuild": "npm run build-native && node javascript/stage-prebuild.js build_node",
     "test": "node --test ./javascript/uform.test.js"
   },

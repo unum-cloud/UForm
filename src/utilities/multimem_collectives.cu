@@ -4,7 +4,7 @@
  *  @date July 3, 2026
  *  @brief The multimem collectives' implementation: the peer-read barrier / reduce-scatter kernels,
  *      the switch bundle's loader, and the heavy construction bodies — compiled once into the
- *      `uform_train` library, never per consumer.
+ *      @c uform_train library, never per consumer.
  */
 #include <charconv> // `std::from_chars` — fabric-handle hex parsing
 
@@ -12,8 +12,8 @@
 
 using namespace unum::uform::utilities;
 
-/** The fatbin of `multimem_switch.cu` the build embeds, empty when it lists no multicast-capable
- *  code. */
+/** The fatbin of <tt>multimem_switch.cu</tt> the build embeds, empty when it lists no
+ *  multicast-capable code. */
 extern "C" b8_t const uform_multimem_switch_bundle_start[], uform_multimem_switch_bundle_end[];
 
 /** A fabric handle is 64 opaque bytes; the mesh rendezvous carries text, so it travels 128-hex. */

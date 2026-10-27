@@ -4,15 +4,15 @@
  *  @date July 2, 2026
  *  @brief Device-initiated InfiniBand collectives across multimem_domains — the vertex all-gather and
  *      the force / gradient all-reduce-sum, each an argument-free method of one member's wired
- *      @ref infiniband_reach_t .
+ *      @ref unum::uform::utilities::infiniband_reach_t .
  *
  *  The doorbell path is the one NVIDIA documents as GDAKI, GPUDirect Async Kernel-Initiated.
  *
  *  Both collectives walk the same @b recursive-doubling schedule over @c D = multimem_domain_count()
- *  domains: @c ceil(log2 D) rounds, one @ref infiniband_link_t per round, partner
- *  @c this_domain^(1<<round) . Every kernel is a capture-safe graph node — the posts and waits are
- *  device-initiated ( @ref infiniband_post_write / @ref infiniband_load_acquire_u32 ), and per-step variability
- *  reaches replays only through device memory:
+ *  domains: @c ceil(log2 D) rounds, one @ref unum::uform::utilities::infiniband_link_t per round,
+ *  partner @c this_domain^(1<<round) . Every kernel is a capture-safe graph node — the posts and
+ *  waits are device-initiated ( @c infiniband_post_write / @c infiniband_load_acquire_u32 ), and
+ *  per-step variability reaches replays only through device memory:
  *
  *      - @b all-gather — each round posts the contiguous run of domain blocks this domain already holds
  *        into the partner's symmetric buffer at the @b identical byte offset, so blocks land domain-major
@@ -30,27 +30,29 @@
  *  Reliable-Connection delivery is in-order, so the flag's arrival proves the payload landed. Flags are
  *  @b monotonic never-reset counters — a waiter spins with @c >= against the absolute target
  *  @c *round+round+1 , so replays of a captured step need no flag reset (a reset would be a host
- *  write inside the replay loop). Each @ref infiniband_reach_t owns its round scalar and
- *  @c advance() s it once per step by its round count — distinct members' flags can never alias, because
- *  they live in distinct heaps.
+ *  write inside the replay loop). Each @ref unum::uform::utilities::infiniband_reach_t owns its
+ *  round scalar and @c advance() s it once per step by its round count — distinct members' flags
+ *  can never alias, because they live in distinct heaps.
  *
  *  @section infiniband_layers The transport underneath, smallest dependency surface first
  *
  *      1. Wire PODs — @ref infiniband_coordinates_t (what two queue pairs exchange to connect),
  *         @ref infiniband_queue_handles_t / @ref infiniband_completion_handles_t (what a kernel needs
- *         to post and drain), and @ref infiniband_link_t (how one GPU reaches one remote
- *         multimem_domain). These are ibverbs-free and always compiled.
- *      2. @ref infiniband_endpoint_t — one (GPU, NIC) Reliable-Connection queue pair with its memory
+ *         to post and drain), and @ref unum::uform::utilities::infiniband_link_t (how one GPU
+ *         reaches one remote multimem_domain). These are ibverbs-free and always compiled.
+ *      2. @c infiniband_endpoint_t — one (GPU, NIC) Reliable-Connection queue pair with its memory
  *         region registered over GPU VRAM: dmabuf-first ( @c cuMemGetHandleForAddressRange +
  *         @c ibv_reg_dmabuf_mr ), @c nvidia_peermem @c ibv_reg_mr fallback. Host-posted writes and
  *         completion polling stay as the bring-up / smoke-test path.
- *      3. @ref infiniband_queue_mapping_t / @ref infiniband_completion_mapping_t — the device-initiated
- *         layer NVIDIA documents as GDAKI: @c mlx5dv_init_obj exposes the raw send queue, doorbell
- *         record, and BlueFlame register, and the mapping registers them into the GPU's address space
- *         so @ref infiniband_post_write builds one MLX5 work-queue entry and rings the doorbell
- *         entirely from device code — capture-safe graph nodes, no @c ibv_post_send .
- *      4. @ref infiniband_reach_t — one member's wired reach into the other domains, owning the
- *         registered symmetric heap and running the two collectives above as methods.
+ *      3. @c infiniband_queue_mapping_t / @ref infiniband_completion_mapping_t — the
+ *         device-initiated layer NVIDIA documents as GDAKI: @c mlx5dv_init_obj exposes the raw send
+ *         queue, doorbell record, and BlueFlame register, and the mapping registers them into the
+ *         GPU's address space so @c infiniband_post_write builds one MLX5 work-queue entry and
+ *         rings the doorbell entirely from device code — capture-safe graph nodes, no
+ *         @c ibv_post_send .
+ *      4. @ref unum::uform::utilities::infiniband_reach_t — one member's wired reach into the other
+ *         domains, owning the registered symmetric heap and running the two collectives above as
+ *         methods.
  *
  *  @section infiniband_platform Platform contract
  *
@@ -58,7 +60,7 @@
  *  cluster this project targets. The BlueFlame register lives in NIC BAR / MMIO space: mapping it for
  *  the GPU needs @c CU_MEMHOSTREGISTER_IOMEMORY , and a platform whose IOMMU / ACS configuration
  *  refuses that registration cannot run the device-initiated path —
- *  @ref infiniband_queue_mapping_t::make names that failure explicitly. CQE compression must be off
+ *  @c infiniband_queue_mapping_t::make names that failure explicitly. CQE compression must be off
  *  (validated at mapping time). Everything below layer 1 builds only under @c UFORM_WITH_INFINIBAND ;
  *  without it the wire PODs remain and every factory fails loudly naming the gate.
  */
@@ -192,8 +194,8 @@ struct infiniband_coordinates_t {
 }
 
 /** The pointer-and-scalar handles a kernel needs to post one work-queue entry and ring the
- *  doorbell — a trivially-copyable POD passed by value; the owning @ref infiniband_queue_mapping_t fills
- *  it. All pointers are in the GPU's address space. */
+ *  doorbell — a trivially-copyable POD passed by value; the owning @c infiniband_queue_mapping_t
+ *  fills it. All pointers are in the GPU's address space. */
 struct infiniband_queue_handles_t {
 
     /** The send work-queue entry storage (host DMA memory the NIC fetches from), spanning
@@ -264,7 +266,7 @@ struct infiniband_completion_handles_t {
  *
  *  Symmetric heaps lay identical offsets on every rank, so any tensor's remote target is
  *  @c remote_heap_base+offset with the @b local offset — no per-tensor lookup. Built once at wiring time,
- *  outside capture, from an @ref infiniband_endpoint_t + the GDAKI mappings + exchanged coordinates.
+ *  outside capture, from an @c infiniband_endpoint_t + the GDAKI mappings + exchanged coordinates.
  */
 struct infiniband_link_t {
 
@@ -639,7 +641,7 @@ struct infiniband_endpoint_t {
 
     /** Host-post one signaled RDMA write of @p length bytes from @c gpu_buffer+local_offset into
      *  the peer's @c buffer_address+remote_offset — the bring-up / smoke-test path; production posts
-     *  ride @ref infiniband_post_write . */
+     *  ride @c infiniband_post_write . */
     [[nodiscard]] expected_t post_write(std::size_t local_offset, std::size_t remote_offset, std::size_t length,
                                         infiniband_signal_t signal = infiniband_signal_t::plain_signaled_k) noexcept {
         if (length == 0 || local_offset + length > gpu_buffer_.extent(0))
@@ -745,9 +747,9 @@ struct infiniband_endpoint_t {
  *  @brief The GPU-reachable send path of one queue pair: the work-queue buffer, the doorbell record, and
  *      the BlueFlame register mapped into GPU address space, plus a device producer-index counter.
  *
- *  Layers onto a built, connected @ref infiniband_endpoint_t 's queue pair (borrowed, never owned) — build it
- *  once after Ready-To-Send, @b outside any capture. The BlueFlame registration
- *  ( @c CU_MEMHOSTREGISTER_IOMEMORY over NIC BAR space) is @b the platform gate for device-initiated
+ *  Layers onto a built, connected @c infiniband_endpoint_t 's queue pair (borrowed, never owned) —
+ *  build it once after Ready-To-Send, @b outside any capture. The BlueFlame registration (
+ *  @c CU_MEMHOSTREGISTER_IOMEMORY over NIC BAR space) is @b the platform gate for device-initiated
  *  GDAKI; its failure is reported by name.
  */
 struct infiniband_queue_mapping_t {
@@ -780,7 +782,7 @@ struct infiniband_queue_mapping_t {
     [[nodiscard]] static expected<infiniband_queue_mapping_t> make(ibv_qp *queue_pair, gpu_arena_t &arena,
                                                                    host_page_registry_t &registry) noexcept;
 
-    /** A by-value snapshot for kernels and @ref infiniband_post_write . */
+    /** A by-value snapshot for kernels and @c infiniband_post_write . */
     [[nodiscard]] infiniband_queue_handles_t device_handles() const noexcept { return handles_; }
 
   private:
@@ -1019,16 +1021,18 @@ __device__ inline void infiniband_drain_one(infiniband_completion_handles_t comp
 #endif // defined(UFORM_WITH_INFINIBAND)
 
 /** Rank-1 device view of the per-round link table, shaped @b [ceil(log2(D))] — one
- *  @ref infiniband_link_t per recursive-doubling round, indexed by round. */
+ *  @ref unum::uform::utilities::infiniband_link_t per recursive-doubling round, indexed by
+ *  round. */
 using infiniband_links_view_t = nk::tensor_view<infiniband_link_t, 1>;
 
 /** Rank-1 device view of the flag-round scalar, shaped @b [1] — the monotonic base every
  *  flag target keys on; the owning member advances it once per step. */
 using infiniband_round_view_t = nk::tensor_view<infiniband_round_t, 1>;
 
-/** The static description of one all-gather invocation — the two scalars its kernels need
- *  beyond the links and the round. Internal to @ref infiniband_reach_t 's dispatch: the member
- *  bakes both at wiring time and builds this by value at enqueue; consumers never construct one. */
+/** The static description of one all-gather invocation — the two scalars its kernels need beyond
+ *  the links and the round. Internal to @ref unum::uform::utilities::infiniband_reach_t 's
+ *  dispatch: the member bakes both at wiring time and builds this by value at enqueue; consumers
+ *  never construct one. */
 struct infiniband_allgather_plan_t {
 
     /** Bytes per domain block; the gathered payload spans @b [D·block_bytes] at heap offset 0. */
@@ -1040,8 +1044,8 @@ struct infiniband_allgather_plan_t {
 
 /** The static description of one all-to-all invocation — this domain's per-peer send blocks live at
  *  @b [D·block_bytes] ( block @c p is what this domain sends domain @c p ; block @c self stays local ), and
- *  each round's landing receives that round's partner's block. Internal to @ref infiniband_reach_t 's
- *  dispatch; consumers never construct one. */
+ *  each round's landing receives that round's partner's block. Internal to
+ *  @ref unum::uform::utilities::infiniband_reach_t 's dispatch; consumers never construct one. */
 struct infiniband_alltoall_plan_t {
 
     /** Bytes this domain sends to (and receives from) any one peer — the per-pair block size. */
@@ -1291,9 +1295,9 @@ struct colocated_domain_t {
      *  @param[in] member_index This GPU's index inside its multimem_domain; the partner domain's same-index
      *      GPU pairs with it, wherever its process sits. A member another process drives still mints its id
      *      but comes back unwired: no heap, the rounds kept for @c multimem_domain_count() , never enqueued.
-     *  @param[inout] arena The member's arena; the heap, the link table, and the mapping counters
+     *  @param[in,out] arena The member's arena; the heap, the link table, and the mapping counters
      *      allocate from it (its chunks are GPUDirect-RDMA-capable by construction).
-     *  @param[inout] stream The member's lead stream; the round scalar is seeded on it at setup.
+     *  @param[in,out] stream The member's lead stream; the round scalar is seeded on it at setup.
      *  @param[in] layout The handle's heap shape — payload and landing bytes; the rounds are derived here.
      *  @param[in] timeout_seconds Deadline on the coordinate and armed-peer rendezvous, and on
      *      every device-side flag wait and completion drain of the wired rounds.

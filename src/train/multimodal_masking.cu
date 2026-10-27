@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date July 3, 2026
  *  @brief The multimodal masked-modeling objective's implementation: the corruption and
- *      reconstruction kernels and the construction bodies — compiled once into the `uform_train`
+ *      reconstruction kernels and the construction bodies — compiled once into the @c uform_train
  *      library.
  */
 #include <cmath> // `std::fmax` — the row maxima and the floored counts

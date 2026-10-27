@@ -3,12 +3,9 @@
 # Node-API addon `uform.node`, which `cmake-js` drives from `package.json`. Both link the archive, so the engine or the
 # stand-in travels inside them.
 
-if (TARGET uform_static)
-    set(uform_javascript_library_ uform_static)
-elseif (TARGET uform_static_stub)
+set(uform_javascript_library_ uform_static)
+if (UFORM_BUILD_STUB)
     set(uform_javascript_library_ uform_static_stub)
-else ()
-    message(FATAL_ERROR "The JavaScript SDK links the C interface; configure with `-DUFORM_BUILD_LIB_C=1`.")
 endif ()
 
 if (EMSCRIPTEN)

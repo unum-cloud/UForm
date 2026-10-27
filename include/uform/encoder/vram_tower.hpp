@@ -3,12 +3,13 @@
  *  @author Ash Vardanian
  *  @date October 25, 2026
  *  @brief The encoder tower in one GPU's memory, shared by NVIDIA and AMD: weights packed by the
- *      products kit it is handed, every step of @ref encode_steps queued once on a stream.
+ *      products kit it is handed, every step of @c encode_steps queued once on a stream.
  *
  *  The steps NumKong has no kernel for, and the copies weights move with, come from the vendor's
- *  entries kit, @ref vram_nvidia_entries_kit_t or @ref vram_amd_entries_kit_t ; nothing here names
- *  a vendor or a class. Every call returns once its steps are queued, and the caller synchronizes
- *  the stream before reading the outputs.
+ *  entries kit, @ref unum::uform::encoder::vram_nvidia_entries_kit_t or
+ *  @ref unum::uform::encoder::vram_amd_entries_kit_t ; nothing here names a vendor or a class.
+ *  Every call returns once its steps are queued, and the caller synchronizes the stream before
+ *  reading the outputs.
  */
 #pragma once
 
@@ -40,7 +41,7 @@ struct vram_placer {
     }
 };
 
-/** The steps of @ref encode_steps over one device's memory, each queued once on its stream through
+/** The steps of @c encode_steps over one device's memory, each queued once on its stream through
  *  the kits a GPU class picked and its vendor's entries kit. */
 template <typename products_kit_type_, typename attention_kit_type_, typename elementwise_kit_type_,
           typename entries_kit_type_>
@@ -132,7 +133,9 @@ struct vram_tower {
      *  @brief Pack every weight of @p checkpoint on @p stream into memory @p policy allocates, in
      *      @p precision for the block products, and return once the packs are queued; the caller
      *      synchronizes @p stream before the first encode, and frees the tower on the same stream.
-     *  @retval status_t::invalid_argument_k A tensor is missing or misshapen.
+     *
+     *  @par Statuses:
+     *  - @c status_t::invalid_argument_k A tensor is missing or misshapen.
      */
     [[nodiscard]] static expected<vram_tower> make(uu::checkpoint_to_load_t const &checkpoint,
                                                    geometry_t const &geometry, precision_t precision,

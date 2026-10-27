@@ -1,21 +1,24 @@
 /**
- * The WebAssembly backend and the browser entry point: the same API as the Node addon, over the Emscripten build of the
- * C library that `uform.mjs` and `uform.wasm` carry.
+ *  @file javascript/wasm.ts
+ *  @author Ash Vardanian
+ *  @date October 18, 2026
+ *  @brief The WebAssembly backend and the browser entry point: the same API as the Node addon, over the Emscripten
+ *      build of the C library that `uform.mjs` and `uform.wasm` carry.
  *
- * Calls run blocking on the calling thread with a `NULL` executor, which is all one single-threaded module offers, so
- * executors only order calls and a deferred receiver answers a call that is final once submitted. Argument structures
- * are laid into the module's heap at offsets computed once from the C headers' field order, as wasm32 lays them out:
- * pointers, `size_t` and enumerations are four bytes. Outputs are copied out of the arena before the call returns,
- * since a later heap growth would invalidate any view into it, and the copies are detached when the arena next
- * rewinds, as the addon's views are. Encoded media need host decoders this build does not carry, so those verbs, the
- * VRAM residency, the mesh and the trainer report `unsupported`; decode in the page and use the pixels and samples
- * verbs instead.
+ *      Calls run blocking on the calling thread with a `NULL` executor, which is all one single-threaded module
+ *      offers, so executors only order calls and a deferred receiver answers a call that is final once submitted.
+ *      Argument structures are laid into the module's heap at offsets computed once from the C headers' field order,
+ *      as wasm32 lays them out: pointers, `size_t` and enumerations are four bytes. Outputs are copied out of the
+ *      arena before the call returns, since a later heap growth would invalidate any view into it, and the copies are
+ *      detached when the arena next rewinds, as the addon's views are. Encoded media need host decoders this build
+ *      does not carry, so those verbs, the VRAM residency, the mesh and the trainer report `unsupported`; decode in
+ *      the page and use the pixels and samples verbs instead.
  *
- * ```js
- * import { initialize, Arena, Model } from "@unum-cloud/uform/wasm";
- * await initialize();
- * const model = Model.loadRamBuffer(await (await fetch(url)).arrayBuffer());
- * ```
+ *      ```js
+ *      import { initialize, Arena, Model } from "@unum-cloud/uform/wasm";
+ *      await initialize();
+ *      const model = Model.loadRamBuffer(await (await fetch(url)).arrayBuffer());
+ *      ```
  */
 import type {
   Compiled,
@@ -729,10 +732,10 @@ function wasmBackend(module: WasmModule): Compiled {
 }
 
 /**
- * Instantiates the WebAssembly module and binds it, so every class made afterwards runs on it. Binding-only.
+ *  Instantiates the WebAssembly module and binds it, so every class made afterwards runs on it. Binding-only.
  *
- * @param {WasmFactory|string} [factory] - The `uform.mjs` factory, or the URL to import it from; absent imports the
- *     copy the package ships beside this module.
+ *  @param factory - The `uform.mjs` factory, or the URL to import it from; absent imports the
+ *      copy the package ships beside this module.
  */
 export async function initialize(factory?: WasmFactory | string): Promise<void> {
   let create = factory;

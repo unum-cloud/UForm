@@ -5,9 +5,10 @@
  *  @brief Host video ingest: demux a container to its elementary stream, and decode it in software
  *      into a segment's tube cells.
  *
- *  @ref demux_video serves every residency: the NVIDIA loader feeds its Annex-B bytes to NVDEC, while the RAM and
- *  AMD executors hand the same @ref demuxed_t to @ref decode_video_frames , a libavcodec decode that scales each
- *  kept frame to the planned grid with libswscale.
+ *  @ref unum::uform::media::demux_video serves every residency: the NVIDIA loader feeds its Annex-B
+ *  bytes to NVDEC, while the RAM and AMD executors hand the same @ref unum::uform::media::demuxed_t
+ *  to @ref unum::uform::media::decode_video_frames , a libavcodec decode that scales each kept
+ *  frame to the planned grid with libswscale.
  *
  *  Both paths convert BT.601 limited-range YCbCr to full-range RGB, whatever the stream signals. They differ in
  *  the details: NVDEC's scaler resizes NV12 and the conversion kernel reads one chroma sample per 2×2 block, while
@@ -74,9 +75,10 @@ struct demuxed_t {
  *  A raw Annex-B input passes through as one packet with its codec sniffed from the first NAL header.
  *
  *  @param[in] container The clip's container or raw elementary-stream bytes.
- *  @retval status_t::invalid_argument_k No video stream, an unsupported codec, or a stream that
- *      yielded no bytes.
- *  @retval status_t::bad_alloc_k A libav or stream buffer allocation failed.
+ *
+ *  @par Statuses:
+ *  - @c status_t::invalid_argument_k No video stream, an unsupported codec, or a stream that
+ *    yielded no bytes.
  */
 [[nodiscard]] expected<demuxed_t> demux_video(bytes_view_t container) noexcept;
 
@@ -88,11 +90,13 @@ struct demuxed_t {
  *  clip lacks stay zero.
  *
  *  @param[in] clip The demuxed clip.
- *  @param[in] grid The segment's factorization, from @ref video_tube_grid .
+ *  @param[in] grid The segment's factorization, from @ref unum::uform::media::video_tube_grid .
  *  @param[in] shape The video modality's geometry: patch side, tube depth and frame stride.
- *  @param[out] out The segment's cells, shaped as @ref pixel_tubes_span_t says.
- *  @retval status_t::unsupported_k @p out disagrees with @p grid and @p shape .
- *  @retval status_t::invalid_argument_k The stream does not decode, or decodes no frame.
+ *  @param[out] out The segment's cells, shaped as @ref unum::uform::media::pixel_tubes_span_t says.
+ *
+ *  @par Statuses:
+ *  - @c status_t::unsupported_k @p out disagrees with @p grid and @p shape .
+ *  - @c status_t::invalid_argument_k The stream does not decode, or decodes no frame.
  */
 [[nodiscard]] expected_t decode_video_frames(demuxed_t const &clip, video_grid_t grid, video_batch_shape_t const &shape,
                                              pixel_tubes_span_t out) noexcept;

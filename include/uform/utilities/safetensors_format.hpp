@@ -9,14 +9,15 @@
  *  @section checkpoint_containers Two containers, two directions
  *
  *  The checkpoint types are the containers — no caller-side table of views to materialize. Both are
- *  host-only: a device-resident model downloads into @ref checkpoint_to_save_t and uploads out of
- *  @ref checkpoint_to_load_t with its own copies. @ref checkpoint_to_save_t snapshots each inserted
- *  tensor into its payload immediately, so training may keep mutating the source;
- *  @ref checkpoint_to_save_t::save is then pure host I/O. @ref checkpoint_to_load_t maps a whole
- *  file once and hands out zero-copy by-name views into the mapping — the caller copies what it
- *  wants and decides what a missing name means, which is the whole warm-start policy: a
- *  masked-pretraining checkpoint fills the shared encoder, the objective heads come back empty, and
- *  the caller re-seeds them.
+ *  host-only: a device-resident model downloads into
+ *  @ref unum::uform::utilities::checkpoint_to_save_t and uploads out of
+ *  @ref unum::uform::utilities::checkpoint_to_load_t with its own copies.
+ *  @ref unum::uform::utilities::checkpoint_to_save_t snapshots each inserted tensor into its
+ *  payload immediately, so training may keep mutating the source; @c checkpoint_to_save_t::save is
+ *  then pure host I/O. @ref unum::uform::utilities::checkpoint_to_load_t maps a whole file once and
+ *  hands out zero-copy by-name views into the mapping — the caller copies what it wants and decides
+ *  what a missing name means, which is the whole warm-start policy: a masked-pretraining checkpoint
+ *  fills the shared encoder, the objective heads come back empty, and the caller re-seeds them.
  *
  *  Each cell's @c fill spells its own weights' names — the tower its structure ( @c embedding ,
  *  @c blocks.{i}.qkv , … ), each objective head its instance name — and the composition root adds
@@ -131,20 +132,20 @@ struct checkpoint_to_save_t {
     [[nodiscard]] expected_t insert_(sz::string_view_t name, checkpoint_dtype_t dtype, bytes_view_t data,
                                      std::size_t rows, std::size_t cols) noexcept;
 
-    /** Every inserted tensor's bytes back-to-back in insertion order — `save` streams them to disk
+    /** Every inserted tensor's bytes back-to-back in insertion order — @c save streams them to disk
      *  in a single write. */
     st::basic_vector<b8_t> payload_ {};
 
     /** The name / shape / offset record per inserted tensor. */
     st::basic_vector<checkpoint_entry_t> entries_ {};
 
-    /** Each entry's position in @ref entries_ by its name's hash, for the duplicate check. */
+    /** Each entry's position in @c entries_ by its name's hash, for the duplicate check. */
     st::hash_map<u64_t, u32_t> index_ {};
 
     /** The metadata pairs, in insertion order. */
     st::basic_vector<checkpoint_metadata_t> metadata_ {};
 
-    /** The yyjson pool `save` serializes the header in — grown lazily, settled after the
+    /** The yyjson pool @c save serializes the header in — grown lazily, settled after the
      *  first save. */
     st::basic_vector<char> scratch_ {};
 };
@@ -225,7 +226,7 @@ struct checkpoint_to_load_t {
     /** The name / dtype / shape / offset record per indexed tensor. */
     st::basic_vector<checkpoint_entry_t> entries_ {};
 
-    /** Each entry's position in @ref entries_ by its name's hash, for @ref find_ . */
+    /** Each entry's position in @c entries_ by its name's hash, for @c find_ . */
     st::hash_map<u64_t, u32_t> index_ {};
 
     /** The entry named @p name in @p dtype , or null. */

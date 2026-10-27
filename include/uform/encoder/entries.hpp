@@ -18,8 +18,9 @@
  *      rescale_tokens        transformer_token_rescale_kernel_
  *
  *  The batch grid keeps an item's cells at its segment offset; the tower runs on @b packed rows instead, every
- *  segment's live cells back to back, so the zero cells of short items cost nothing. @ref segment_layout_t maps one
- *  onto the other, and each step reads the grid and writes the packed rows.
+ *  segment's live cells back to back, so the zero cells of short items cost nothing.
+ *  @ref unum::uform::encoder::segment_layout_t maps one onto the other, and each step reads the
+ *  grid and writes the packed rows.
  */
 #pragma once
 

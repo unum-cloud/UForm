@@ -7,6 +7,10 @@
 //! constructor is [`Trainer::init_vram`]. Its verbs come from [`TrainVerbs`], which run on the
 //! executor the trainer was made on: `trainer.on(&executor)` blocks, and `trainer.deferred(&executor)`
 //! answers a [`Deferred`](crate::Deferred) from the same verbs given owned arguments.
+//!
+//! File: rust/train.rs
+//! Author: Ash Vardanian
+//! Date: October 18, 2026
 
 // The C mirror keeps the C spelling of every name.
 #![allow(non_camel_case_types)]

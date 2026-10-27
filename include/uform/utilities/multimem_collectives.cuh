@@ -6,14 +6,15 @@
  *      through @c multimem PTX over one shared multicast object — the level-1 transport of the
  *      two-level contrastive step and the distributed optimizer.
  *
- *  The domain's replicas live in one @ref gpu_symmetric_arena_t : a single contiguous VA range whose
- *  per-member slices are physically resident on each member's device, so a peer's address is
- *  @c base+member·stride — plain arithmetic, no pointer tables anywhere. Every member additionally binds
- *  its slice into one multicast object, and one multicast address reaches all replicas at once. That
- *  turns the collective the loss and optimizer steps need — the @b reduce-scatter — into a single
- *  instruction per element: a member issues @c multimem.ld_reduce.add.f32 over its shard of the
- *  multicast range, and the NVSwitch returns the @b sum across every member's replica in one load,
- *  deterministic by construction (one fused reduction, no ordering to fix).
+ *  The domain's replicas live in one @ref unum::uform::utilities::gpu_symmetric_arena_t : a single
+ *  contiguous VA range whose per-member slices are physically resident on each member's device, so
+ *  a peer's address is @c base+member·stride — plain arithmetic, no pointer tables anywhere. Every
+ *  member additionally binds its slice into one multicast object, and one multicast address reaches
+ *  all replicas at once. That turns the collective the loss and optimizer steps need — the
+ *  @b reduce-scatter — into a single instruction per element: a member issues
+ *  @c multimem.ld_reduce.add.f32 over its shard of the multicast range, and the NVSwitch returns
+ *  the @b sum across every member's replica in one load, deterministic by construction (one fused
+ *  reduction, no ordering to fix).
  *
  *  Synchronization is the same monotonic-round discipline the InfiniBand collectives use: an arrival
  *  flag lives inside every replica, a member @b adds 1 through the multicast address (so every replica's
@@ -27,7 +28,7 @@
  *  multicast-capable codes of the build and embedded as a bundle the domain loads by name when it
  *  picks the switch tier. When the platform lacks multicast (
  *  @c CU_DEVICE_ATTRIBUTE_MULTICAST_SUPPORTED off — pre-Hopper or fabric-disabled boxes), or the
- *  bundle carries no code the device runs, @ref multimem_domain_t::make still succeeds in the
+ *  bundle carries no code the device runs, @c multimem_domain_t::make still succeeds in the
  *  @b peer-read tier: the symmetric range is device-visible everywhere, and the reduce walks the
  *  members serially — the same fixed fold order on every member, bit-identical across ranks, just
  *  without the switch reduction.
@@ -57,11 +58,11 @@ namespace unum::uform::utilities {
  *  @ref multimem_domain_t , not with the single-GPU allocators.
  *
  *  A multimem_domain may span @b more @b than @b one @b process — on an NVL72 the 72-GPU island is
- *  18 tray processes, and even a `{4,8,16}` HGX box runs two 4-GPU processes over one 8-GPU island.
- *  So the arena is @b per @b process: it reserves the whole @c member_count·stride VA, but each
- *  process @ref make -s only its @b local slices (physically resident on the GPUs it drives) and
- *  @ref adopt_peer -s every remote member's slice from the fabric handle its owner published. The
- *  slices' physical handles are created shareable only when the domain spans processes:
+ *  18 tray processes, and even a <tt>{4,8,16}</tt> HGX box runs two 4-GPU processes over one 8-GPU
+ *  island. So the arena is @b per @b process: it reserves the whole @c member_count·stride VA, but
+ *  each process @ref make -s only its @b local slices (physically resident on the GPUs it drives)
+ *  and @ref adopt_peer -s every remote member's slice from the fabric handle its owner published.
+ *  The slices' physical handles are created shareable only when the domain spans processes:
  *  @c CU_MEM_HANDLE_TYPE_FABRIC where every local device exports it, exported through
  *  @ref export_fabric_handle , and POSIX file descriptors on a fabric-less box, whose handoff to
  *  another process needs a Unix-socket exchange not implemented yet, so their export refuses. A
@@ -150,7 +151,7 @@ struct gpu_symmetric_arena_t {
   private:
 
     /** Slice-creation properties: device-resident, pinned, RDMA-capable wherever the device
-     *  registers VMM memory with an adapter, and shareable as @ref handle_type_ . */
+     *  registers VMM memory with an adapter, and shareable as @c handle_type_ . */
     [[nodiscard]] CUmemAllocationProp allocation_properties_(int device) const noexcept {
         int rdma_supported = 0;
         cuDeviceGetAttribute(&rdma_supported, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED, device);
@@ -281,7 +282,8 @@ struct multimem_tier_choice_t {
 
     multimem_tier_t tier = multimem_tier_t::peer_read_k;
 
-    /** Why the domain runs @ref tier , naming the device and the failure when it fell back. */
+    /** Why the domain runs @ref unum::uform::utilities::multimem_domain_t::tier , naming the device
+     *  and the failure when it fell back. */
     sz::string_t reason {};
 
     /** One loaded bundle per local device, in local order, on the switch tier; empty otherwise. */
@@ -303,7 +305,7 @@ struct multimem_tier_choice_t {
  */
 struct multimem_member_t {
 
-    /** Multicast base of the Float32 payload — `multimem` loads and stores fan out here. */
+    /** Multicast base of the Float32 payload — @c multimem loads and stores fan out here. */
     f32_t *multimem_payload = nullptr; // device-boundary
 
     /** Multicast address of the arrival counter. */
@@ -373,8 +375,8 @@ struct multimem_window_t {
 
 /**
  *  @brief One multimem_domain's collective surface: every member's same-sized Float32 replica inside one
- *      @ref gpu_symmetric_arena_t , bound into one multicast object — the replicas @b are whatever force
- *      or gradient surface the consumers reduce over.
+ *      @ref unum::uform::utilities::gpu_symmetric_arena_t , bound into one multicast object — the
+ *      replicas @b are whatever force or gradient surface the consumers reduce over.
  *
  *  Created @b once in main, sized for every consumer's window (each exposes a
  *  @c payload_scalars_needed helper), and threaded by reference — multicast objects are a scarce
@@ -389,9 +391,10 @@ struct multimem_window_t {
  *  domain's timeout, never a silent corruption.
  *
  *  Falls back to the peer-read tier when multicast is unsupported or the switch kernels do not load
- *  — same API, same determinism, the reduce just walks members serially. @ref tier() names which
- *  one is live and @ref description says why. Every local pair of members must reach each other
- *  over P2P, or @ref make refuses.
+ *  — same API, same determinism, the reduce just walks members serially.
+ *  @ref unum::uform::utilities::multimem_domain_t::tier() names which one is live and
+ *  @ref description says why. Every local pair of members must reach each other over P2P, or
+ *  @ref make refuses.
  */
 struct multimem_domain_t {
 
@@ -418,13 +421,14 @@ struct multimem_domain_t {
      *  over the mesh. The domain lead creates the multicast object, and every process imports it and
      *  binds its local slices into it.
      *
-     *  The multimem_domain may span processes ( @c gpus_per_multimem_domain > the local device count on a
-     *  `{4,8,16}` box or an NVL72), so the world @p topology — not the length of @p local_devices — sets
-     *  the member count, this process's member offset, and the rendezvous the fabric handles ride. Each
-     *  member's barrier round is a scalar inside its @b own replica, zeroed here beside the arrival flag
-     *  and self-advanced by its barrier kernels — consumers never allocate or upload rounds themselves.
+     *  The multimem_domain may span processes ( @c gpus_per_multimem_domain > the local device
+     *  count on a <tt>{4,8,16}</tt> box or an NVL72), so the world @p topology — not the length of
+     *  @p local_devices — sets the member count, this process's member offset, and the rendezvous
+     *  the fabric handles ride. Each member's barrier round is a scalar inside its @b own replica,
+     *  zeroed here beside the arrival flag and self-advanced by its barrier kernels — consumers
+     *  never allocate or upload rounds themselves.
      *
-     *  @param[inout] topology The bootstrapped world (see @ref mesh_topology_t ); one wiring
+     *  @param[in,out] topology The bootstrapped world (see @ref mesh_topology_t ); one wiring
      *      generation is claimed from it, so a domain made twice in one job meets under fresh keys.
      *  @param[in] local_devices The device ordinals this process drives — the slices it creates and binds.
      *  @param[in] payload_scalars Float32 payload scalars per replica, sized for every consumer's window.
@@ -440,8 +444,8 @@ struct multimem_domain_t {
     /** The reduction tier this domain runs — see @ref multimem_tier_t . */
     [[nodiscard]] multimem_tier_t tier() const noexcept { return tier_.tier; }
 
-    /** Why the domain runs its @ref tier , naming the failed check when it fell back to reading
-     *  peers. */
+    /** Why the domain runs its @ref unum::uform::utilities::multimem_domain_t::tier , naming the
+     *  failed check when it fell back to reading peers. */
     [[nodiscard]] sz::string_view_t description() const noexcept { return tier_.reason.view(); }
 
     /** Member @p member_index 's switch kernels, in its device's primary context; switch tier
@@ -532,7 +536,8 @@ struct multimem_domain_t {
   private:
 
     /** Byte offset of the arrival counter inside every replica — pure layout arithmetic over
-     *  @ref payload_scalars_ , never stored; each member's round scalar sits one word above its flag. */
+     *  @c payload_scalars_ , never stored; each member's round scalar sits one word above its
+     *  flag. */
     [[nodiscard]] std::size_t flag_offset_() const noexcept {
         return round_up_to_multiple(payload_scalars_ * sizeof(f32_t), cache_line_bytes_k);
     }

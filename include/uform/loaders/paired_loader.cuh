@@ -6,14 +6,16 @@
  *      or another text read from the same rows, each pair one bag, so a single fill carries both
  *      halves and the relation between them, and optionally a hard negative per pair.
  *
- *  Tied to a @b dataset like the single-modality loaders: @ref make reads only the shard footers,
- *  and every @ref fill takes the caller's stream, rank and step. A fill opens at least two shards
- *  unless the dataset is one file, decodes the anchor, positive and negative columns of the same
- *  rows into one reservoir, and draws rows by a keyed bijection over the pool. A row whose anchor
- *  or text positive is a list contributes one of its elements, drawn by a key of its own, so every
- *  element of a row recurs across steps. A row's negatives are a list too: strings for a text
- *  positive, and shard-local row indices into the positive column for media, whose row passes over
- *  when the fill drew no row group holding its negative.
+ *  Tied to a @b dataset like the single-modality loaders:
+ *  @ref unum::uform::loaders::paired_loader_parquet_t::make reads only the shard footers, and every
+ *  @ref unum::uform::loaders::paired_loader_parquet_t::fill takes the caller's stream, rank and
+ *  step. A fill opens at least two shards unless the dataset is one file, decodes the anchor,
+ *  positive and negative columns of the same rows into one reservoir, and draws rows by a keyed
+ *  bijection over the pool. A row whose anchor or text positive is a list contributes one of its
+ *  elements, drawn by a key of its own, so every element of a row recurs across steps. A row's
+ *  negatives are a list too: strings for a text positive, and shard-local row indices into the
+ *  positive column for media, whose row passes over when the fill drew no row group holding its
+ *  negative.
  *
  *  @section paired_layout One bag per pair or triplet
  *
@@ -24,7 +26,8 @@
  *  segments past the admitted pairs PAD. Every segment spans at most one row. Inside the loaded
  *  batch the positives take the leading rows, the negatives the next, and the anchors the trailing
  *  rows they need, each through the decode its modality already has:
- *  @ref decode_images , @ref decode_audios or @ref decode_videos , and @ref pack_tokens for text.
+ *  @ref unum::uform::loaders::decode_images , @ref unum::uform::loaders::decode_audios or
+ *  @ref unum::uform::loaders::decode_videos , and @ref unum::uform::loaders::pack_tokens for text.
  */
 #pragma once
 
@@ -76,17 +79,18 @@ struct paired_loader_parquet_config_t {
 /**
  *  @brief The loader object: dataset-scoped, rank-agnostic, one media modality per dataset.
  *
- *  @warning Holds one dataset's shard footers; keep one per input dataset. @ref fill draws into the
- *      loader's own pick storage, so one GPU rank fills at a time.
+ *  @warning Holds one dataset's shard footers; keep one per input dataset.
+ *      @ref unum::uform::loaders::paired_loader_parquet_t::fill draws into the loader's own pick
+ *      storage, so one GPU rank fills at a time.
  */
 struct paired_loader_parquet_t {
 
     /**
      *  @brief Index the shards' footers and resolve the media column to its blob leaf.
-     *  @param[inout] session GPU Direct Storage session for IO.
+     *  @param[in,out] session GPU Direct Storage session for IO.
      *  @param[in] path_or_glob Dataset's Parquet paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
-     *  @param[inout] pool The run's CPU-decode worker pool, borrowed for the host decodes.
+     *  @param[in,out] pool The run's CPU-decode worker pool, borrowed for the host decodes.
      *  @param[in] config The anchor, positive and negative columns and the text prefixes.
      *  @param[in] modality The positive's modality: @c image_k , @c audio_k , @c video_k or
      *      @c text_k .
@@ -100,36 +104,42 @@ struct paired_loader_parquet_t {
 
     /**
      *  @brief Fill @p batches with caption-image pairs on one GPU rank.
-     *  @param[inout] gpu_stream The stream the decode, the packing and the pairing run on.
-     *  @param[inout] decoder This GPU's nvJPEG session.
+     *  @param[in,out] gpu_stream The stream the decode, the packing and the pairing run on.
+     *  @param[in,out] decoder This GPU's nvJPEG session.
      *  @param[in] gpu_rank Ensures different GPUs draw different rows from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
      *  @param[out] batches The batches whose segment table, bags, tokens and images get populated.
-     *  @retval status_t::invalid_argument_k The loader's media are not images.
+     *
+     *  @par Statuses:
+     *  - @c status_t::invalid_argument_k The loader's media are not images.
      */
     [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, nvjpeg_session_t &decoder, u32_t gpu_rank,
                                   u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
     /**
      *  @brief Fill @p batches with caption-clip pairs on one GPU rank.
-     *  @param[inout] gpu_stream The stream the decode, the packing and the pairing run on.
-     *  @param[inout] decoder This GPU's NVDEC session.
+     *  @param[in,out] gpu_stream The stream the decode, the packing and the pairing run on.
+     *  @param[in,out] decoder This GPU's NVDEC session.
      *  @param[in] gpu_rank Ensures different GPUs draw different rows from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
      *  @param[out] batches The batches whose segment table, bags, tokens and videos get populated.
-     *  @retval status_t::invalid_argument_k The loader's media are not videos.
+     *
+     *  @par Statuses:
+     *  - @c status_t::invalid_argument_k The loader's media are not videos.
      */
     [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, nvdec_session_t &decoder, u32_t gpu_rank,
                                   u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
 
     /**
      *  @brief Fill @p batches with caption-recording or text-text pairs on one GPU rank.
-     *  @param[inout] gpu_stream The stream the decode, the packing and the pairing run on.
+     *  @param[in,out] gpu_stream The stream the decode, the packing and the pairing run on.
      *  @param[in] gpu_rank Ensures different GPUs draw different rows from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
      *  @param[out] batches The batches whose segment table, bags, tokens and audio samples get
      *      populated.
-     *  @retval status_t::invalid_argument_k The loader's positives are images or videos.
+     *
+     *  @par Statuses:
+     *  - @c status_t::invalid_argument_k The loader's positives are images or videos.
      */
     [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, u32_t gpu_rank, u32_t training_step,
                                   std::span<multimodal_batch_on_gpu_t> batches) noexcept;
@@ -190,7 +200,7 @@ struct paired_loader_parquet_t {
      *  place a drawn group's rows and a media negative's row. */
     st::basic_vector<std::size_t> group_starts_ {};
 
-    /** @b [shards+1] each drawable shard's first entry in @ref group_starts_ . */
+    /** @b [shards+1] each drawable shard's first entry in @c group_starts_ . */
     st::basic_vector<std::size_t> shard_starts_ {};
 
     /** @b [shards] each drawable shard path's hash, which a row's sample key folds with its
@@ -203,7 +213,7 @@ struct paired_loader_parquet_t {
     /** The modality of the positive column. */
     modality_t modality_ = modality_t::image_k;
 
-    /** The run's batch geometry, read for the slice of @ref modality_ . */
+    /** The run's batch geometry, read for the slice of @c modality_ . */
     multimodal_batch_shape_t shape_ {};
 };
 

@@ -22,9 +22,9 @@ permissions:
   id-token: write
 
 jobs:
-  versioning:
-    name: Update Version
-    # Every other job needs this one, so a private fork never tags, releases or publishes.
+  # The files the release commit bumps that land in the Swift artifacts: the library's version string and the bundle's.
+  bump_swift_version:
+    name: Bump Swift Artifacts Version
     if: github.repository == 'unum-cloud/UForm'
     runs-on: ubuntu-26.04
     steps:
@@ -33,6 +33,178 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Bump Version
+        uses: ashvardanian/tinysemver@v3
+        with:
+          version-file: "VERSION"
+          update-version-in: |
+            src/types.cpp:return "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
+            CMakeLists.txt:VERSION (\d+\.\d+\.\d+(?:-rc\.\d+)?)
+          dry-run: "false"
+      - name: Upload Bumped Files
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-version
+          path: |
+            VERSION
+            CMakeLists.txt
+            src/types.cpp
+          if-no-files-found: error
+          retention-days: 1
+
+  # Each build adds its slice, and `lipo` joins the architectures of one SDK. The simulators' runtimes and the 32-bit
+  # watchOS one lack the `__sme_memset` routine streaming SME code calls, so those go without NumKong's SME kernels.
+  build_swift_xcframework:
+    name: Build Swift XCFramework
+    needs: bump_swift_version
+    runs-on: macos-26
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Codecs
+        run: brew install $MACOS_CODECS
+      - name: Take the Release Version
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-version
+          path: .
+      - name: Build Every Apple Slice
+        run: |
+          set -euo pipefail
+          no_sme="-D NUMKONG_TARGET_SME=0 -D NUMKONG_TARGET_SMEF64=0 -D NUMKONG_TARGET_SMEBI32=0"
+          slice() {
+            local name=$1
+            shift
+            cmake -S . -B "build_$name" --preset swift -D UFORM_SWIFT_DIRECTORY="$PWD/build_swift" "$@"
+            cmake --build "build_$name"
+          }
+          for arch in arm64 x86_64; do
+            slice "macos_$arch" -D CMAKE_OSX_ARCHITECTURES=$arch
+            slice "catalyst_$arch" -D UFORM_SWIFT_SDK=maccatalyst -D CMAKE_OSX_ARCHITECTURES=$arch \
+              -D "CMAKE_C_FLAGS=-target $arch-apple-ios18.0-macabi" -D "CMAKE_CXX_FLAGS=-target $arch-apple-ios18.0-macabi"
+            slice "iossim_$arch" -D CMAKE_SYSTEM_NAME=iOS -D CMAKE_OSX_SYSROOT=iphonesimulator \
+              -D UFORM_SWIFT_SDK=iphonesimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0 $no_sme
+            slice "tvossim_$arch" -D CMAKE_SYSTEM_NAME=tvOS -D CMAKE_OSX_SYSROOT=appletvsimulator \
+              -D UFORM_SWIFT_SDK=appletvsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0 $no_sme
+            slice "watchsim_$arch" -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchsimulator \
+              -D UFORM_SWIFT_SDK=watchsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0 $no_sme
+            slice "xrsim_$arch" -D CMAKE_SYSTEM_NAME=visionOS -D CMAKE_OSX_SYSROOT=xrsimulator \
+              -D UFORM_SWIFT_SDK=xrsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=2.0 $no_sme
+          done
+          slice watchos_arm64_32 -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchos -D UFORM_SWIFT_SDK=watchos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64_32 -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0 $no_sme
+          slice watchos_arm64 -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchos -D UFORM_SWIFT_SDK=watchos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          slice ios -D CMAKE_SYSTEM_NAME=iOS -D CMAKE_OSX_SYSROOT=iphoneos -D UFORM_SWIFT_SDK=iphoneos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0
+          slice tvos -D CMAKE_SYSTEM_NAME=tvOS -D CMAKE_OSX_SYSROOT=appletvos -D UFORM_SWIFT_SDK=appletvos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0
+          slice xros -D CMAKE_SYSTEM_NAME=visionOS -D CMAKE_OSX_SYSROOT=xros -D UFORM_SWIFT_SDK=xros \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=2.0
+          (cd build_swift && zip -qry ../UFormC.xcframework.zip UFormC.xcframework)
+      - name: Upload XCFramework
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-xcframework
+          path: UFormC.xcframework.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  build_swift_linux:
+    name: Build Swift Artifact Bundle for Linux ${{ matrix.arch }}
+    needs: bump_swift_version
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Codecs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build $UBUNTU_CODECS
+      - name: Take the Release Version
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-version
+          path: .
+      - name: Build Artifact Bundle
+        run: |
+          cmake --preset swift
+          cmake --build --preset swift
+      - name: Upload Artifact Bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-part-linux-${{ matrix.arch }}
+          path: build_swift/UFormC.artifactbundle
+          if-no-files-found: error
+          retention-days: 1
+
+  # Each part's variants go through the same CMake script that wrote them, into one bundle.
+  merge_swift_artifact_bundle:
+    name: Merge Swift Artifact Bundle
+    needs: build_swift_linux
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Download Artifact Bundle Parts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: swift-part-*
+          path: parts
+      - name: Merge Artifact Bundle Parts
+        run: |
+          set -euo pipefail
+          for part in parts/*; do
+            version=$(jq -r '.artifacts.UFormC.version' "$part/info.json")
+            jq -r '.artifacts.UFormC.variants[] | [.path, (.supportedTriples | join(","))] | @tsv' "$part/info.json" |
+              while IFS=$'\t' read -r path triples; do
+                cmake -D NUMKONG_SWIFT_MODULE=UFormC -D NUMKONG_SWIFT_ARCHIVE="$part/$path" \
+                  -D NUMKONG_SWIFT_HEADERS="$part/include" -D NUMKONG_SWIFT_DIRECTORY="$PWD/merged" \
+                  -D NUMKONG_SWIFT_TRIPLES="$triples" -D NUMKONG_SWIFT_VERSION="$version" \
+                  -P numkong/cmake/numkong_swift_artifact.cmake
+              done
+          done
+          (cd merged && zip -qry ../UFormC.artifactbundle.zip UFormC.artifactbundle)
+      - name: Upload Artifact Bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-artifactbundle
+          path: UFormC.artifactbundle.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  # `Package.swift` names the Swift artifacts by URL and checksum, so the release commit carries both and the
+  # artifacts join the release it creates.
+  versioning:
+    name: Update Version
+    # Every other job needs this one, so a private fork never tags, releases or publishes.
+    if: github.repository == 'unum-cloud/UForm'
+    needs: [build_swift_xcframework, merge_swift_artifact_bundle]
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download Swift Artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: swift-{xcframework,artifactbundle}
+          path: ${{ runner.temp }}/swift
+          merge-multiple: true
+      - name: Write Swift Checksums
+        run: |
+          apple=$(sha256sum "$RUNNER_TEMP"/swift/*.xcframework.zip | cut -c -64)
+          portable=$(sha256sum "$RUNNER_TEMP"/swift/*.artifactbundle.zip | cut -c -64)
+          sed -i "s/^let appleChecksum = .*/let appleChecksum = \"$apple\"/" Package.swift
+          sed -i "s/^let portableChecksum = .*/let portableChecksum = \"$portable\"/" Package.swift
       # `pyproject.toml` reads the version from `VERSION`, so it carries no copy to rewrite.
       - name: Run TinySemVer
         uses: ashvardanian/tinysemver@v3
@@ -47,10 +219,13 @@ jobs:
             src_stub/types.cpp:return "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
             src/types.cpp:return "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
             CMakeLists.txt:VERSION (\d+\.\d+\.\d+(?:-rc\.\d+)?)
+            Package.swift:releases/download/v(\d+\.\d+\.\d+(?:-rc\.\d+)?)
           dry-run: "false"
           push: "true"
           create-release: "true"
           github-token: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
+      - name: Upload Swift Artifacts
+        run: git diff --quiet HEAD~1 HEAD -- VERSION || gh release upload "v$(cat VERSION)" "$RUNNER_TEMP"/swift/*.zip
 
   rebase:
     name: Rebase Dev Branch
@@ -208,9 +383,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
       - name: Build and Test C
         run: |
-          cmake --preset wasm32_emscripten_release -D UFORM_BUILD_TEST=ON
-          cmake --build --preset wasm32_emscripten_release
-          ctest --test-dir build_wasm32_emscripten_release --output-on-failure
+          cmake --preset wasm32_emscripten -D UFORM_BUILD_TEST=ON
+          cmake --build --preset wasm32_emscripten
+          ctest --test-dir build_wasm32_emscripten --output-on-failure
       - name: Build the Module
         run: npm run build-wasm
       - name: Package the Module
@@ -273,7 +448,8 @@ jobs:
 
   # No crate job: `Cargo.toml` says `publish = false` until the crate is ready for crates.io.
 
-  # SwiftPM resolves the package from the tag `versioning` pushes, so publishing is proving that tag builds.
+  # SwiftPM resolves the package from the tag `versioning` pushes, downloading the artifacts that release carries, so
+  # publishing is proving that tag builds. The suite runs against the stub, in the pre-release checks.
   publish_swift:
     name: Publish Swift
     needs: versioning
@@ -283,40 +459,65 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: "main"
-      - name: Build the Stub Library
-        run: |
-          cmake --preset stub_library
-          cmake --build --preset stub_library --target uform_static_stub
-      - name: Test Swift
-        run: swift test -Xlinker -L${{ github.workspace }}/build_stub_library/stub
+      - name: Build Swift
+        run: swift build
 
-  # Returns with the bindings it documents.
-  deploy_docs:
-    name: Deploy Docs
-    if: ${{ false }}
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  build_docs:
+    name: Build Docs
     runs-on: ubuntu-26.04
-    needs: versioning
+    needs: publish_python
+    permissions:
+      contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
         with:
           ref: "main"
-      - name: Install Dependencies
+      - name: Set Up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install Doxygen
         run: |
-          pip install sphinx furo m2r2 sphinxcontrib-googleanalytics sphinxcontrib-jquery
+          curl -sSfL https://www.doxygen.nl/files/doxygen-1.18.0.linux.bin.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/doxygen-1.18.0/bin" >> "$GITHUB_PATH"
+      - name: Install Sphinx
+        run: pip install -r docs/requirements.txt
+      - name: Install the Released UForm
+        run: pip install "uform==$(cat VERSION)"
+      - name: Build Docs
+        run: cd docs && doxygen conf.dox && sphinx-build -M html . ../build/docs -W
+      - name: Compress Docs
+        run: tar -czvf docs.tar.gz build/docs/html/
+      - name: Upload Docs to Release
+        uses: xresloader/upload-to-github-release@v1.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          file: docs.tar.gz
+          update_latest_release: true
+
+  deploy_docs_pages:
+    name: Deploy GitHub Pages
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-26.04
+    needs: build_docs
+    steps:
+      - name: Download Release Assets
+        uses: robinraju/release-downloader@v1.13
+        with:
+          latest: true
+          fileName: docs.tar.gz
+      - name: Unpack Docs
+        run: tar -xf ./docs.tar.gz
       - name: Set Up GitHub Pages
         uses: actions/configure-pages@v6
-      - name: Install UForm from PyPI
-        run: pip install uform
-      - name: Build Documentation
-        run: cd docs && make html
       - name: Upload Artifacts
         uses: actions/upload-pages-artifact@v5
         with:
-          path: "./build/docs/html/"
+          path: ./build/docs/html
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5

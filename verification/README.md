@@ -1,30 +1,22 @@
 # Verification
 
-Model checking for the mesh protocols: the shared-filesystem rendezvous, the multimem domain's counting barrier, the windows its consumers stage and read, the InfiniBand recursive doubling, the trainer's step across two hosts, and the probes' queue-pair teardown.
-[Spin](https://spinroot.com) checks each protocol as a Promela model.
+Model checking for the mesh protocols, each a Promela model checked with [Spin](https://spinroot.com).
 These protocols are GPU flags, RDMA writes and files rather than C++ atomics, so no GenMC client reads the code itself.
 
-- `weak_memory.pml` is the C++ memory model as views, for Promela, under the models chosen by `-Dmemory=`: `sc`, one copy of every word; `rc11`, the default, RC11's release-acquire-relaxed fragment; and `far`, which posts a relaxed no-return add the way RAO-INT does.
-- `check.sh` is the runner.
+- `mesh_rendezvous.pml`: two processes wiring one phase twice over the shared exchange directory.
+- `multimem_barrier.pml`: two members and two consumers sharing the one counting barrier of a multimem domain.
+- `window_reuse.pml`: two members staging a multimem window, reading each other's after a domain barrier, and restaging it in the next step.
+- `gdaki_doubling.pml`: two multimem domains running one recursive-doubling round over InfiniBand, step after step.
+- `gateway_ordering.pml`: two hosts of a gateway and a peer each, running the trainer's step three times.
+- `probe_teardown.pml`: two hosts wiring a queue pair per probe generation and destroying it before the next generation wires its own.
 
-## Writing a Model
+## Running
 
-A model is one mechanism of the code under test, a flat `<name>.pml` that defines its shape, includes the memory model when its words are atomics, and starts its roles from one `init { atomic { run <role>(<index>); … } }`.
-There is no conditional compilation: a knob is a choice the code makes, defaulted under `#ifndef` and read as the guard of a plain `if` with an `else` branch.
-
-Every expected verdict is a `@verify` line in the docblock of the file it checks:
-
-```text
-@verify <pass|fail|stuck> <memory>[,<memory>...] [<knob>=<value> ...][: <finding>]
-```
-
-`pass` is a search that completed with no error, `fail` a violated assertion, and `stuck` an invalid end state; a search cut short or a knob defined twice is `broken`.
-Every model has a `pass` line, every knob appears on some line, and adding a model, a knob or a finding never edits `check.sh`.
-Run every line with `verification/check.sh`, or one model with `verification/check.sh window_reuse.pml`.
+`verification/check.sh` runs every `@verify` line through ForkUnion's runner, from the `forkunion` submodule or from the checkout `FORKUNION_SOURCE` names.
+Run one model with `verification/check.sh window_reuse.pml`.
+[ForkUnion's verification README](../forkunion/verification/README.md) documents the runner, the `@verify` grammar and the memory budgets.
 
 ## Model Findings
-
-Each finding is the `@verify` line that replays it, where the full counterexample is written out.
 
 - Every wiring phase keys its payloads and barriers with a generation the topology hands out, or the second multimem domain of a run reads the first one's slice handles and passes its stale release: [`mesh_rendezvous.pml`](mesh_rendezvous.pml).
 - The distributed contrastive loss crosses a barrier after its reduce reads its peers' windows, or a loss run twice with no optimizer step between restages a window a peer still reads; the mixer has no such barrier and relies on the optimizer's: [`window_reuse.pml`](window_reuse.pml).

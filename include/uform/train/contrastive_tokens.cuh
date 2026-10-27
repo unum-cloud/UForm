@@ -9,9 +9,9 @@
  *  The score of query segment @c q against document segment @c d is the mean over the query's
  *  tokens of the largest cosine against the document's tokens, @c S(q,d)=(1/|q|)·Σ_t max_s
  *  ⟨q_t,d_s⟩ , over the unit vectors the tower's token head emits, prefixes excluded. The logit is
- *  @c β·S+b with the query's temperature group, and @ref contrastive_pair_loss_t turns a whole
- *  query row into @c d(logit) over the relation graph, balanced or ranked, exactly as it does for
- *  the pooled cosines.
+ *  @c β·S+b with the query's temperature group, and @c contrastive_pair_loss_t turns a whole query
+ *  row into @c d(logit) over the relation graph, balanced or ranked, exactly as it does for the
+ *  pooled cosines.
  *
  *  @section tokens_bands Banded products
  *
@@ -136,7 +136,7 @@ struct contrastive_tokens_t {
      *  @param[out] loss_out @b [1] the mean over the live queries. Overwritten.
      *  @param[out] token_vectors_grad @b [head_tokens_per_gpu,width] the gradient of
      *      @p token_vectors .
-     *  @param[inout] stream The stream every launch enqueues on.
+     *  @param[in,out] stream The stream every launch enqueues on.
      *  @param[out] log_inverse_temperature_grad Optional @b [temperature_groups] summands.
      *  @param[out] bias_grad Optional @b [temperature_groups] summands.
      */
@@ -325,8 +325,8 @@ struct distributed_contrastive_tokens_t {
     /**
      *  @brief Build every local GPU's share, reserve the window, validate the arenas' visibility
      *      and wire every member's cross-domain gathers and reduces.
-     *  @param[inout] domain The main-owned level-1 surface, one window reserved from it.
-     *  @param[inout] colocated The main-owned level-2 surface; identities in a one-domain world.
+     *  @param[in,out] domain The main-owned level-1 surface, one window reserved from it.
+     *  @param[in,out] colocated The main-owned level-2 surface; identities in a one-domain world.
      *  @param[in] arenas @b [gpus] per-GPU arenas, every one visible to every local device.
      *  @param[in] streams @b [gpus] per-GPU streams scoping each per-device setup.
      *  @param[in] config The per-GPU geometry; @c gpu_subgraphs_per_step must equal the world's

@@ -12,8 +12,9 @@
  *
  *  KvikIO chooses its read path from the environment ( @c KVIKIO_COMPAT_MODE — unset or @c ON forces
  *  POSIX, @c OFF enables GDS) and the target filesystem, per read. The session records which path the
- *  environment selected for diagnostics ( @ref read_path ); it never branches on it — that decision
- *  lives inside cuDF, one level below this boundary.
+ *  environment selected for diagnostics (
+ *  @ref unum::uform::loaders::gpu_direct_storage_session_t::read_path ); it never branches on it —
+ *  that decision lives inside cuDF, one level below this boundary.
  */
 #pragma once
 

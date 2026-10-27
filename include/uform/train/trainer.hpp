@@ -2,8 +2,9 @@
  *  @file include/uform/train/trainer.hpp
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief A training run: @ref mesh_t , the transport every trainer of a process borrows, and
- *      @ref trainer_t , what one run owns, stepped from a @ref batch_source_t .
+ *  @brief A training run: @ref unum::uform::train::mesh_t , the transport every trainer of a
+ *      process borrows, and @ref unum::uform::train::trainer_t , what one run owns, stepped from a
+ *      @ref unum::uform::train::batch_source_t .
  *
  *  The mesh owns the bootstrapped topology and the InfiniBand domain joining the NVLink domains.
  *  The trainer owns the multimem domain, sized by the sum of its consumers'
@@ -12,7 +13,7 @@
  *
  *  Every process builds its collectives and issues its barriers in one order, since rendezvous
  *  IDs and multimem flags count them. The trainer declares its members in that order, so
- *  @ref trainer_t::make reads top to bottom and teardown runs in reverse.
+ *  @ref unum::uform::train::trainer_t::make reads top to bottom and teardown runs in reverse.
  */
 #pragma once
 
@@ -178,7 +179,7 @@ struct retrieval_t {
     /** The mean cosine of attract cells minus that of ambient cells. */
     f64_t cosine_gap = 0.0;
 
-    /** Repel cells scored above their row's best positive, as a share of the @ref hards scored. */
+    /** Repel cells scored above their row's best positive, as a share of the @c hards scored. */
     f64_t hard_above = 0.0, hards = 0.0;
 
     /** The participation ratio of the vertices' double-centred cosine Gram matrix: one when they
@@ -397,7 +398,9 @@ struct trainer_t {
      *  every process; configured rows are honoured or refused, never shrunk. The arenas reserve the
      *  fitted high-water mark, see @ref envelope_t .
      *  Every component calls the kernels of @p numerics .
-     *  @retval status_t::bad_alloc_k The envelope does not fit, with the measured numbers.
+     *
+     *  @par Statuses:
+     *  - @c status_t::bad_alloc_k The envelope does not fit, with the measured numbers.
      */
     [[nodiscard]] static expected_t make(trainer_t &placed, mesh_t &mesh, trainer_config_t const &requested,
                                          std::span<i32_t const> devices, gpu_numerics_t const &numerics) noexcept;
@@ -406,12 +409,15 @@ struct trainer_t {
      *  @brief Load every replica from the checkpoint at @p path and continue from its saved step,
      *      with the optimizer's moments and masters and the contrastive temperatures it holds; the
      *      state it misses restarts, the masters re-seeded from the loaded weights.
-     *  @retval status_t::invalid_argument_k A matrix the checkpoint misses.
-     *  @retval status_t::unsupported_k A matrix or a state of another shape.
+     *
+     *  @par Statuses:
+     *  - @c status_t::invalid_argument_k A matrix the checkpoint misses.
+     *  - @c status_t::unsupported_k A matrix or a state of another shape.
      */
     [[nodiscard]] expected_t resume(sz::string_view_t path) noexcept;
 
-    /** Capture each replica's forward and backward regions into @ref forward_graphs and @ref backward_graphs . */
+    /** Capture each replica's forward and backward regions into @ref forward_graphs and
+     *  @c backward_graphs . */
     [[nodiscard]] expected_t capture() noexcept;
 
     /** One optimizer step: @p source fills the batches, then per replica the preamble and the forward region, the

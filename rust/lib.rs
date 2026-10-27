@@ -16,6 +16,12 @@
 //! }
 //! # Ok::<(), uform::Error>(())
 //! ```
+//!
+//! File: rust/lib.rs
+//! Author: Ash Vardanian
+//! Date: October 18, 2026
+
+#![warn(missing_docs)]
 
 mod encode;
 mod model;

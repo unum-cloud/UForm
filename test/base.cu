@@ -149,8 +149,8 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
 /**
  *  @brief Probe @p health before a case: report the first poisoned-context or unresponsive-peer detection
  *      once, and tell every later case to return immediately.
- *  @param[inout] suite The suite the one abort line reports into.
- *  @param[inout] health The world's health record, cleared at the first detection.
+ *  @param[in,out] suite The suite the one abort line reports into.
+ *  @param[in,out] health The world's health record, cleared at the first detection.
  */
 [[nodiscard]] static bool world_still_healthy_(test_suite_t &suite, world_health_t &health) noexcept {
     if (!health.alive) return false;

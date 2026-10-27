@@ -9,25 +9,27 @@
  *  API (the multi-device symmetric memory of a multimem_domain lives with the multimem collectives,
  *  beside its one consumer):
  *
- *    - @ref gpu_arena_t — a virtual-memory (VMM) bump arena for @b homogeneous fixed-shape workloads, where
- *      every call allocates the same sequence of sizes — model training and inference steps. It owns the
- *      weights, activations, and step scratch: reserves a large VA range once, maps physical chunks in on
- *      demand, and hands out aligned allocations as pure pointer arithmetic — no deallocation, only cursor
- *      resets, so an allocation sequence is deterministic across captured-graph replays and legal inside
- *      capture. Growth ( @c cuMemMap ) is a host-immediate init-time operation, never a step-path one.
- *    - @ref gpu_alloc — a stream-ordered allocator ( @c cuMemAllocAsync / @c cuMemFreeAsync ) for exactly
- *      the opposite: @b heterogeneous shape-varying workloads, where every call differs — the data loaders'
- *      variable-length blobs and decode scratch, living outside captured graphs. Satisfies
- *      @c std::alloc_traits , so it plugs into NumKong's owning
- *      @c nk::tensor<value_type,gpu_alloc<value_type>,rank> directly.
- *    - @ref gpu_arena_alloc — the same @c std::alloc_traits facade over a borrowed arena, so model code
- *      instantiates owning tensors whose storage is arena allocations (deallocation is a no-op; reclamation
- *      is the arena's cursor rewind).
+ *    - @ref unum::uform::utilities::gpu_arena_t — a virtual-memory (VMM) bump arena for
+ *      @b homogeneous fixed-shape workloads, where every call allocates the same sequence of sizes
+ *      — model training and inference steps. It owns the weights, activations, and step scratch:
+ *      reserves a large VA range once, maps physical chunks in on demand, and hands out aligned
+ *      allocations as pure pointer arithmetic — no deallocation, only cursor resets, so an
+ *      allocation sequence is deterministic across captured-graph replays and legal inside capture.
+ *      Growth ( @c cuMemMap ) is a host-immediate init-time operation, never a step-path one.
+ *    - @ref unum::uform::utilities::gpu_alloc — a stream-ordered allocator ( @c cuMemAllocAsync /
+ *      @c cuMemFreeAsync ) for exactly the opposite: @b heterogeneous shape-varying workloads,
+ *      where every call differs — the data loaders' variable-length blobs and decode scratch,
+ *      living outside captured graphs. Satisfies @c std::alloc_traits , so it plugs into NumKong's
+ *      owning @c nk::tensor<value_type,gpu_alloc<value_type>,rank> directly.
+ *    - @ref unum::uform::utilities::gpu_arena_alloc — the same @c std::alloc_traits facade over a
+ *      borrowed arena, so model code instantiates owning tensors whose storage is arena allocations
+ *      (deallocation is a no-op; reclamation is the arena's cursor rewind).
  *
  *  There is no in-house memory ledger: the driver already keeps the truth — @c cuMemGetInfo for a
  *  device's totals, the default pool's attributes for the stream-ordered tier's usage and high-water
- *  marks — and @ref gpu_memory_report reads it on demand. Per-owner attribution is each owner's own
- *  accessors ( @ref gpu_arena_t::used / @ref gpu_arena_t::mapped ).
+ *  marks — and @ref unum::uform::utilities::gpu_memory_report reads it on demand. Per-owner
+ *  attribution is each owner's own accessors ( @ref unum::uform::utilities::gpu_arena_t::used /
+ *  @ref unum::uform::utilities::gpu_arena_t::mapped ).
  *
  *  The arena's physical chunks are created @c gpuDirectRDMACapable wherever the device supports it, so the same
  *  chunks can later be registered as InfiniBand MRs or bound to a multicast object — symmetric / multimem backing is a property
@@ -106,7 +108,8 @@ inline constexpr std::size_t cache_line_bytes_k = 128u;
     return (bytes + granularity - 1u) / granularity * granularity;
 }
 
-/** One device's memory picture, straight from the driver — see @ref gpu_memory_report . */
+/** One device's memory picture, straight from the driver — see
+ *  @ref unum::uform::utilities::gpu_memory_report . */
 struct gpu_memory_report_t {
 
     /** HBM not yet allocated by anyone in any process, per @c cuMemGetInfo . */
@@ -148,8 +151,8 @@ struct gpu_memory_report_t {
  *
  *  Built for @b homogeneous fixed-shape workloads — model training and inference, where the batch shape is
  *  frozen at step construction and every step allocates the identical sequence of sizes. A workload whose
- *  shapes vary call to call belongs on @ref gpu_alloc instead; a bump cursor has no free list, so shape
- *  variance here only accretes.
+ *  shapes vary call to call belongs on @ref unum::uform::utilities::gpu_alloc instead; a bump
+ *  cursor has no free list, so shape variance here only accretes.
  *
  *  A large VA range is reserved once at @ref make ; physical memory arrives lazily in granularity-rounded
  *  chunks as @ref allocate_bytes outgrows the mapped prefix, so an over-generous reservation costs address
@@ -307,7 +310,7 @@ struct gpu_arena_t {
     }
 
     /** Allocate @p count elements of @c value_type_ off the bump cursor — the typed sibling of
-     *  @ref allocate_bytes , mirroring `std::pmr::polymorphic_allocator::allocate_object` . */
+     *  @ref allocate_bytes , mirroring @c std::pmr::polymorphic_allocator::allocate_object . */
     template <typename value_type_>
     [[nodiscard]] value_type_ *allocate_object(std::size_t count = 1,
                                                std::size_t alignment = arena_alignment_k) noexcept {
@@ -351,8 +354,8 @@ struct gpu_arena_t {
     void rewind(snapshot_t snapshot) noexcept { used_bytes_ = snapshot.bytes; }
 
     /** Rewind the cursor to zero, reclaiming every allocation at once — the
-     *  `std::pmr::monotonic_buffer_resource::release` semantic, strengthened: the physical backing stays
-     *  mapped for reuse. */
+     *  @c std::pmr::monotonic_buffer_resource::release semantic, strengthened: the physical backing
+     *  stays mapped for reuse. */
     void release() noexcept { used_bytes_ = 0; }
 
   private:
@@ -427,16 +430,17 @@ struct gpu_arena_t {
 };
 
 /**
- *  @brief Standard-allocator facade over a borrowed @ref gpu_arena_t , so owning containers size
- *      arena allocations without the bespoke allocation spelling.
+ *  @brief Standard-allocator facade over a borrowed @ref unum::uform::utilities::gpu_arena_t , so
+ *      owning containers size arena allocations without the bespoke allocation spelling.
  *
  *  @c nk::tensor<f32_t,gpu_arena_alloc<f32_t>,2>::uninitialized({rows,cols},gpu_arena_alloc<f32_t>{arena})
  *  allocates — and grows the arena — automatically; @c st::basic_vector composes the same way.
  *
- *  Deallocation is deliberately a no-op: a bump arena reclaims through @ref gpu_arena_t::rewind /
- *  @ref gpu_arena_t::release , never per buffer — so a container backed by this allocator must not outlive
- *  its arena, nor a rewind past its allocation. The handle is trivially copyable, rebinds freely, and never
- *  owns the arena.
+ *  Deallocation is deliberately a no-op: a bump arena reclaims through
+ *  @ref unum::uform::utilities::gpu_arena_t::rewind /
+ *  @ref unum::uform::utilities::gpu_arena_t::release , never per buffer — so a container backed by
+ *  this allocator must not outlive its arena, nor a rewind past its allocation. The handle is
+ *  trivially copyable, rebinds freely, and never owns the arena.
  */
 template <typename value_type_ = std::byte>
 struct gpu_arena_alloc {
@@ -466,7 +470,8 @@ struct gpu_arena_alloc {
         return arena_ != nullptr ? arena_->allocate_object<value_type>(count) : nullptr;
     }
 
-    /** A no-op: bump-arena memory is reclaimed by @ref gpu_arena_t::rewind , never per buffer. */
+    /** A no-op: bump-arena memory is reclaimed by
+     *  @ref unum::uform::utilities::gpu_arena_t::rewind , never per buffer. */
     void deallocate(value_type *, std::size_t) noexcept {}
 
     [[nodiscard]] constexpr bool operator==(gpu_arena_alloc const &other) const noexcept {
@@ -478,14 +483,15 @@ struct gpu_arena_alloc {
 using gpu_arena_alloc_t = gpu_arena_alloc<b8_t>;
 
 /**
- *  @brief The RDMA-registrable sibling of @ref gpu_arena_alloc : every allocation lies within one
- *      physical chunk of the arena — the precondition @c nvidia_peermem places on @c ibv_reg_mr — via
- *      @ref gpu_arena_t::allocate_registrable_bytes .
+ *  @brief The RDMA-registrable sibling of @ref unum::uform::utilities::gpu_arena_alloc : every
+ *      allocation lies within one physical chunk of the arena — the precondition @c nvidia_peermem
+ *      places on @c ibv_reg_mr — via @c gpu_arena_t::allocate_registrable_bytes .
  *
  *  For the symmetric heaps the InfiniBand collectives register with their NICs; everything else stays
  *  on the ordinary arena allocator.
  *
- *  Same contract as @ref gpu_arena_alloc otherwise: borrowed arena, no-op deallocate, free rebind.
+ *  Same contract as @ref unum::uform::utilities::gpu_arena_alloc otherwise: borrowed arena, no-op
+ *  deallocate, free rebind.
  */
 template <typename value_type_ = std::byte>
 struct gpu_registrable_alloc {
@@ -515,7 +521,8 @@ struct gpu_registrable_alloc {
         return arena_ != nullptr ? arena_->allocate_registrable_object<value_type>(count) : nullptr;
     }
 
-    /** A no-op: bump-arena memory is reclaimed by @ref gpu_arena_t::rewind , never per buffer. */
+    /** A no-op: bump-arena memory is reclaimed by
+     *  @ref unum::uform::utilities::gpu_arena_t::rewind , never per buffer. */
     void deallocate(value_type *, std::size_t) noexcept {}
 
     [[nodiscard]] constexpr bool operator==(gpu_registrable_alloc const &other) const noexcept {
@@ -571,8 +578,8 @@ using pinned_alloc_t = pinned_alloc<b8_t>;
 
 /**
  *  @brief Stream-ordered device allocator for @b heterogeneous shape-varying workloads — the exact opposite
- *      of @ref gpu_arena_t : every call may bring a different size, so buffers are individually allocated
- *      and freed.
+ *      of @ref unum::uform::utilities::gpu_arena_t : every call may bring a different size, so
+ *      buffers are individually allocated and freed.
  *
  *  The data loaders' tier — variable-length blobs and decode scratch that live @b outside captured
  *  graphs, where @c cuMemAllocAsync is legal.
@@ -609,7 +616,7 @@ struct gpu_alloc {
 
     /** Stream-ordered allocation from the device's default memory pool; @c nullptr on failure —
      *  matching NumKong's non-throwing allocator contract. The pool's own attributes carry the
-     *  usage and high-water marks (see @ref gpu_memory_report ). */
+     *  usage and high-water marks (see @ref unum::uform::utilities::gpu_memory_report ). */
     [[nodiscard]] value_type *allocate(std::size_t count) noexcept {
         CUdeviceptr pointer = 0;
         if (cuMemAllocAsync(&pointer, count * sizeof(value_type), stream) != CUDA_SUCCESS) return nullptr;
@@ -628,8 +635,9 @@ struct gpu_alloc {
 using gpu_alloc_t = gpu_alloc<b8_t>;
 
 /** The rank-tagged owning-tensor vocabulary — @c *_tensor_arena_t owns device memory off a
- *  @ref gpu_arena_t , @c *_tensor_pinned_t owns page-locked host memory; the borrowing @c *_view_t /
- *  @c *_span_t counterparts live in @c types.hpp , the BFloat16 / E4M3 ones above. */
+ *  @ref unum::uform::utilities::gpu_arena_t , @c *_tensor_pinned_t owns page-locked host memory;
+ *  the borrowing @c *_view_t / @c *_span_t counterparts live in @c types.hpp , the BFloat16 / E4M3
+ *  ones above. */
 using b8r1_tensor_arena_t = nk::tensor<b8_t, gpu_arena_alloc<b8_t>, 1>;
 using b8r1_tensor_registrable_t = nk::tensor<b8_t, gpu_registrable_alloc<b8_t>, 1>;
 using i16r2_tensor_arena_t = nk::tensor<i16_t, gpu_arena_alloc<i16_t>, 2>;

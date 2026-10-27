@@ -1,10 +1,10 @@
-//
-//  Types.swift
-//  UForm
-//
-//  Shared vocabulary of the UForm Swift SDK, mirroring `c/uform/types.h`: statuses, scalars, moods, progress,
-//  deferred calls, executors, arenas, and the rows calls write into arenas.
-//
+/**
+ *  @file swift/Types.swift
+ *  @author Ash Vardanian
+ *  @date October 18, 2026
+ *  @brief Shared vocabulary of the UForm Swift SDK, mirroring `c/uform/types.h`: statuses, scalars, moods, progress,
+ *      deferred calls, executors, arenas, and the rows calls write into arenas.
+ */
 
 import Dispatch
 import UFormC

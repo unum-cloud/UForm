@@ -5,8 +5,9 @@
  *  @brief The NVIDIA half of the multimodal batch: its device and pinned residencies, the
  *      coordinate fill, and the mixer that shuffles batches across GPUs.
  *
- *  The batch contract itself — shapes, the allocator-parameterized @ref multimodal_batch , and its views — lives
- *  in @c multimodal_batch.hpp and compiles without CUDA. See its file comment for the layout and the flow.
+ *  The batch contract itself — shapes, the allocator-parameterized
+ *  @ref unum::uform::encoder::multimodal_batch , and its views — lives in @c multimodal_batch.hpp
+ *  and compiles without CUDA. See its file comment for the layout and the flow.
  */
 #pragma once
 
@@ -41,8 +42,15 @@ using multimodal_batch_on_cpu_t = multimodal_batch<pinned_alloc_t>;
  *  so the temporal coordinate is the absolute source frame a tube starts at. PAD segments ( @c length==0 ) write
  *  nothing, so the caller must pre-zero @p coords .
  *
+ *  @param[in] segment_offsets Each segment's first token.
+ *  @param[in] segment_lengths Each segment's live token count, 0 for PAD.
+ *  @param[in] segment_modality Each segment's modality.
+ *  @param[in] image_shapes The shape descriptor of each image segment.
+ *  @param[in] video_shapes The shape descriptor of each video segment.
  *  @param[in] tube_frames The video tube depth — the batch's fixed value.
  *  @param[in] frame_stride The source frames between two sampled ones — the batch's fixed value, 0 read as 1.
+ *  @param[in,out] coords The coordinates to write, which the caller has pre-zeroed.
+ *  @param[in,out] stream The stream the kernel is enqueued on.
  */
 [[nodiscard]] expected_t fill_coords(u32r1_view_t segment_offsets, u32r1_view_t segment_lengths,
                                      modality_view_t segment_modality, image_shape_view_t image_shapes,
@@ -83,7 +91,11 @@ struct multimodal_batch_mixer_t {
      *  from that member's window, block @c domain , resolved arithmetically, so the world is unbounded. Every
      *  arena must be visible to every local member (validated, never granted here).
      *
+     *  @param[in,out] multimem The multimem domain this process's members belong to.
+     *  @param[in,out] colocated The domain the world's colocated members share.
      *  @param[in] arenas One per member this process drives, @c [multimem.member_offset(),+arenas.size()) .
+     *  @param[in] shape The batch shape every member loads.
+     *  @param[in] seed The seed the routing key is baked from.
      *  @param[in] streams Each local member's stream — the all-gather wiring seeds its round scalar there.
      *  @param[in] timeout_seconds The coordinate-exchange deadline handed to each all-gather wiring.
      */

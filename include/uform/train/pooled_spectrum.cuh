@@ -96,8 +96,8 @@ struct distributed_pooled_spectrum_t {
      *  @brief One construction absorbs the whole world: every rank's scratch, this consumer's
      *      window of the shared @p domain , and the gateway's all-reduces through @p colocated .
      *
-     *  @param[inout] domain The main-owned level-1 surface; one window is reserved from it.
-     *  @param[inout] colocated The main-owned level-2 surface; the Gram and energy all-reduces
+     *  @param[in,out] domain The main-owned level-1 surface; one window is reserved from it.
+     *  @param[in,out] colocated The main-owned level-2 surface; the Gram and energy all-reduces
      *      are wired on member 0 in every process, unwired where another process drives it.
      *  @param[in] arenas @b [gpus] per-rank arenas, one per member this process drives.
      *  @param[in] streams @b [gpus] per-rank streams; their contexts scope every device's setup.
@@ -119,8 +119,8 @@ struct distributed_pooled_spectrum_t {
      *      and the Lipschitz penalty of @p pooled , their force added into @p pooled_grad .
      *  @param[in] rank The local rank, enqueued in order within a step.
      *  @param[in] pooled @b [rows_per_gpu,hidden] the raw pooled rows, normalized here.
-     *  @param[inout] pooled_grad @b [rows_per_gpu,hidden] their gradient, added onto.
-     *  @param[inout] stream The rank's stream.
+     *  @param[in,out] pooled_grad @b [rows_per_gpu,hidden] their gradient, added onto.
+     *  @param[in,out] stream The rank's stream.
      */
     [[nodiscard]] expected_t operator()(std::size_t rank, bf16r2_view_t pooled, bf16r2_span_t pooled_grad,
                                         gpu_stream_t &stream) noexcept;
@@ -139,7 +139,9 @@ struct distributed_pooled_spectrum_t {
      *
      *  Every process reads the same summed bits, so every process takes the same decision with
      *  no further exchange. Drains @p stream , so never call it inside a capture.
-     *  @retval status_t::internal_k The step's gradient spiked; the optimizer must not apply it.
+     *
+     *  @par Statuses:
+     *  - @c status_t::internal_k The step's gradient spiked; the optimizer must not apply it.
      */
     [[nodiscard]] expected_t admit_gradients(gpu_stream_t &stream) noexcept;
 

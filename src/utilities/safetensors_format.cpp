@@ -51,7 +51,7 @@ struct checkpoint_file_t {
     }
 
     /** Open @p path with the POSIX @p flags , creating it @c 0644 when they ask to; a path
-     *  holding a NUL, which `open` would cut short there, is refused. */
+     *  holding a NUL, which @c open would cut short there, is refused. */
     [[nodiscard]] static expected<checkpoint_file_t> make(sz::string_view_t path, int flags) noexcept {
         if (path.contains('\0'))
             return expected<checkpoint_file_t>::fail(status_t::invalid_argument_k, "the path holds a NUL byte");
@@ -70,7 +70,7 @@ struct checkpoint_file_t {
     int descriptor_ = -1;
 };
 
-/** Write @p bytes at @p offset , whole or fail — looped, because one `pwrite` moves at
+/** Write @p bytes at @p offset , whole or fail — looped, because one @c pwrite moves at
  *  most ~2 GB on Linux and may stop short before that. */
 [[nodiscard]] static expected_t write_at_(checkpoint_file_t const &file, std::size_t offset,
                                           bytes_view_t bytes) noexcept {
@@ -86,10 +86,12 @@ struct checkpoint_file_t {
 }
 
 /**
- *  @brief Serialize the safetensors header for @p entries inside @p pool : the metadata first, then a
- *      `name: {dtype, shape, data_offsets}` record per tensor, offsets as byte prefix sums in insertion order.
- *      The returned view points into the pool's backing.
- *  @retval status_t::bad_alloc_k The pool ran dry — the caller grows it and retries.
+ *  @brief Serialize the safetensors header for @p entries inside @p pool : the metadata first, then
+ *      a <tt>name: {dtype, shape, data_offsets}</tt> record per tensor, offsets as byte prefix sums
+ *      in insertion order. The returned view points into the pool's backing.
+ *
+ *  @par Statuses:
+ *  - @c status_t::bad_alloc_k The pool ran dry — the caller grows it and retries.
  */
 [[nodiscard]] static expected<sz::string_view_t> write_header_(std::span<checkpoint_entry_t const> entries,
                                                                std::span<checkpoint_metadata_t const> pairs,

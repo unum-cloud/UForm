@@ -142,8 +142,7 @@ struct VocabularyTests {
         #expect(!error.message.isEmpty && error.description == "uform: io: \(error.message)")
     }
 
-    @Test func theLibraryNamesItselfAndItsCapabilities() {
-        #expect(version().hasPrefix("4."))
+    @Test func theLibraryNamesItsCapabilities() {
         #expect(!capabilitiesCompiled().isEmpty)
         #expect(!capabilitiesAvailable().isEmpty)
     }

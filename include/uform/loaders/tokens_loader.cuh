@@ -2,14 +2,14 @@
  *  @file include/uform/loaders/tokens_loader.cuh
  *  @author Ash Vardanian
  *  @date July 4, 2026
- *  @brief The byte-level Parquet tokens loader: tied to a @b dataset, not a GPU. @ref make reads only
+ *  @brief The byte-level Parquet tokens loader: tied to a @b dataset, not a GPU. @c make reads only
  *      each shard's Parquet footer (host, once per dataset), so the shard metadata is never replicated
  *      per GPU.
  *
- *  Every @ref fill takes the caller's stream and rank, so the @b same loader serves a different GPU on a
- *  different step.
+ *  Every @c fill takes the caller's stream and rank, so the @b same loader serves a different GPU
+ *  on a different step.
  *
- *  Each @ref fill opens @b as many randomly chosen files as it takes to pool at least as many rows as
+ *  Each @c fill opens @b as many randomly chosen files as it takes to pool at least as many rows as
  *  every batch's segments combined — at least two (unless the whole dataset is one file), so a batch is
  *  never drawn from a single homogeneous shard. The files are drawn by a seeded hash keyed by
  *  @c (seed, step, rank) with probability @b proportional to each file's row count, so a bigger file is
@@ -22,7 +22,7 @@
  *  open is host arithmetic over the footer row counts. The reservoir and index scratch are re-allocated
  *  per fill and reclaimed once the batches are packed — never hoisted, since shard sizes vary wildly.
  *  The loader fills only this call's batches; the shuffle across batches and across the multimem /
- *  colocated domains is @ref multimodal_batch_mixer_t 's job, downstream.
+ *  colocated domains is @ref unum::uform::encoder::multimodal_batch_mixer_t 's job, downstream.
  */
 #pragma once
 
@@ -60,9 +60,9 @@ using tokens_matrix_span_t = nk::tensor_span<token_id_t, 2>;
  *      the back.
  *  @param[out] segment_lengths @b [segments] the bytes each segment kept, its prefix included.
  *  @param[out] segment_modality @b [segments] @c text_k throughout.
- *  @param[inout] dropped @b [1] the batch's drop count, which every segment overflowing @p tokens
+ *  @param[in,out] dropped @b [1] the batch's drop count, which every segment overflowing @p tokens
  *      adds one to.
- *  @param[inout] gpu_stream The stream the geometry and the gather run on.
+ *  @param[in,out] gpu_stream The stream the geometry and the gather run on.
  */
 [[nodiscard]] expected_t pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view_t prefix,
                                      tokens_matrix_span_t tokens, u32r1_span_t segment_offsets,
@@ -91,7 +91,7 @@ struct tokens_loader_parquet_t {
      *
      *  @param[in] path_or_glob Dataset's Parquet paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
-     *  @param[inout] session GPU Direct Storage session for IO.
+     *  @param[in,out] session GPU Direct Storage session for IO.
      */
     [[nodiscard]] static expected<tokens_loader_parquet_t> make( //
         gpu_direct_storage_session_t &session, sz::string_view_t path_or_glob, u64_t seed) noexcept;
@@ -105,7 +105,8 @@ struct tokens_loader_parquet_t {
      *  single shard, it takes ≥2 shards to ensure we don't samplehighly uniform data from the same shard.
      *
      *  @param[in] config Describes which columns we need to take from Parquet tables.
-     *  @param[inout] gpu_stream The GPU-specific stream on which the staging and packing should happen.
+     *  @param[in,out] gpu_stream The GPU-specific stream on which the staging and packing should
+     *      happen.
      *  @param[in] gpu_rank Ensures different GPUs won't take the same rows when sampling the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
      *  @param[out] batches Output matrices to be populated with token segments, but not the media modalities.
@@ -119,8 +120,9 @@ struct tokens_loader_parquet_t {
      *      pure over the loader's footer table (no IO), exposed for observability and cross-rank sampling
      *      conformance.
      *
-     *  @p target_segments is the pool target ( @c unroll·segments_per_batch ) a @ref fill would cover; the
-     *  returned views borrow the loader's owned paths and pick storage, valid until the next draw.
+     *  @p target_segments is the pool target ( @c unroll·segments_per_batch ) a @c fill would
+     *  cover; the returned views borrow the loader's owned paths and pick storage, valid until the
+     *  next draw.
      *
      *  @param[in] gpu_rank The GPU rank the draw is keyed by — different ranks draw different shard sets.
      *  @param[in] training_step The step the draw is keyed by.
@@ -163,18 +165,18 @@ struct tokens_base_loader_jsonl_config_t {
  *  @brief The JSONL sibling of @ref tokens_loader_parquet_t — a @b separate class (no format punning),
  *      same dataset-scoped, rank-agnostic shape.
  *
- *  The one difference is footerless: JSONL carries no row count, so @ref make weighs files by @b byte size
- *  and @ref fill decodes files one at a time until the reservoir covers the batch, rather than counting
- *  rows from a footer up front.
+ *  The one difference is footerless: JSONL carries no row count, so @c make weighs files by @b byte
+ *  size and @c fill decodes files one at a time until the reservoir covers the batch, rather than
+ *  counting rows from a footer up front.
  *
- *  @warning Holds one dataset's shard sizes; keep one per input dataset. @ref fill allocates on demand
- *      and is safe to call concurrently for different GPU ranks on different streams.
+ *  @warning Holds one dataset's shard sizes; keep one per input dataset. @c fill allocates on
+ *      demand and is safe to call concurrently for different GPU ranks on different streams.
  */
 struct tokens_loader_jsonl_t {
 
     /**
      *  @brief Index all the shards' byte sizes (POSIX @c stat , host, once — no decode).
-     *  @param[inout] session GPU Direct Storage session for IO.
+     *  @param[in,out] session GPU Direct Storage session for IO.
      *  @param[in] path_or_glob Dataset's JSONL paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
      */
@@ -189,7 +191,7 @@ struct tokens_loader_jsonl_t {
      *  rows cover @p batches (≥2 files unless the dataset is one), then packs many documents per row.
      *
      *  @param[in] config Which JSON field to take.
-     *  @param[inout] gpu_stream The GPU-specific stream the decode and packing run on.
+     *  @param[in,out] gpu_stream The GPU-specific stream the decode and packing run on.
      *  @param[in] gpu_rank Ensures different GPUs draw different files from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
      *  @param[out] batches Output matrices populated with token segments.
@@ -203,7 +205,7 @@ struct tokens_loader_jsonl_t {
     /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
     gpu_direct_storage_session_t *storage_ = nullptr;
 
-    /** The dataset's JSONL shard paths — owned, expanded from the glob at @ref make . */
+    /** The dataset's JSONL shard paths — owned, expanded from the glob at @c make . */
     st::basic_vector<sz::string_t> absolute_paths_ {};
 
     /** The run seed keying the random file and row draws. */
@@ -240,17 +242,17 @@ struct tokens_base_loader_csv_config_t {
  *  @brief The CSV sibling of @ref tokens_loader_parquet_t and @ref tokens_loader_jsonl_t — a @b separate
  *      class (no format punning), same dataset-scoped, rank-agnostic shape.
  *
- *  Footerless like JSONL: @ref make weighs files by @b byte size and @ref fill decodes files one at a time
- *  until the reservoir covers the batch.
+ *  Footerless like JSONL: @c make weighs files by @b byte size and @c fill decodes files one at a
+ *  time until the reservoir covers the batch.
  *
- *  @warning Holds one dataset's shard sizes; keep one per input dataset. @ref fill allocates on demand
- *      and is safe to call concurrently for different GPU ranks on different streams.
+ *  @warning Holds one dataset's shard sizes; keep one per input dataset. @c fill allocates on
+ *      demand and is safe to call concurrently for different GPU ranks on different streams.
  */
 struct tokens_loader_csv_t {
 
     /**
      *  @brief Index all the shards' byte sizes (POSIX @c stat , host, once — no decode).
-     *  @param[inout] session GPU Direct Storage session for IO.
+     *  @param[in,out] session GPU Direct Storage session for IO.
      *  @param[in] path_or_glob Dataset's CSV paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
      */
@@ -265,7 +267,7 @@ struct tokens_loader_csv_t {
      *  rows cover @p batches (≥2 files unless the dataset is one), then packs many documents per row.
      *
      *  @param[in] config Which CSV column to take, its delimiter, and whether it has a header.
-     *  @param[inout] gpu_stream The GPU-specific stream the decode and packing run on.
+     *  @param[in,out] gpu_stream The GPU-specific stream the decode and packing run on.
      *  @param[in] gpu_rank Ensures different GPUs draw different files from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
      *  @param[out] batches Output matrices populated with token segments.
@@ -279,7 +281,7 @@ struct tokens_loader_csv_t {
     /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
     gpu_direct_storage_session_t *storage_ = nullptr;
 
-    /** The dataset's CSV shard paths — owned, expanded from the glob at @ref make . */
+    /** The dataset's CSV shard paths — owned, expanded from the glob at @c make . */
     st::basic_vector<sz::string_t> absolute_paths_ {};
 
     /** The run seed keying the random file and row draws. */

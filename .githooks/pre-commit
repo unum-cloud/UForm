@@ -13,7 +13,7 @@ export LC_ALL=C # Byte-wise regexes, immune to the committer's locale
 rejection_count=0
 project_include_prefix="uform"
 sibling_projects='numkong|stringzilla|forkunion|smashtable|usearch|ucall|ustore'
-cmake_published_variables="UFORM_IS_MAIN_PROJECT"
+cmake_published_variables=""
 cmake_third_party_variables="EMSCRIPTEN_SYSTEM_PROCESSOR WASI_SDK_PATH WASI_SDK_PREFIX YYJSON_INSTALL"
 
 # Prints the reason and the first offending lines, and counts the rejection.
@@ -534,15 +534,15 @@ check_continuation_hanging_indent() {
         "            numbered-item continuation aligns under the item text:"
 }
 
-# Every @param declares its direction - [in]/[out]/[inout] - so a reader knows whether the callee
-# reads, writes, or mutates the argument. A bare @param and the comma form @param[in,out] are both
-# rejected; the one spelling for a mutated argument is @param[inout].
+# Every @param declares its direction - [in]/[out]/[in,out] - so a reader knows whether the callee
+# reads, writes, or mutates the argument. A bare @param and the [inout] spelling are both
+# rejected; the one spelling for a mutated argument is @param[in,out].
 check_param_directions() {
     local bare
-    bare=$(printf '%s\n' "$added" | grep -E '@param' | grep -vE '@param\[(in|out|inout)\]' || true)
+    bare=$(printf '%s\n' "$added" | grep -E '@param' | grep -vE '@param\[(in|out|in,out)\]' || true)
     [ -z "$bare" ] || fail "$bare" \
-        "$file has a @param without an [in]/[out]/[inout] direction - never a bare @param" \
-        "            nor the comma form @param[in,out] (write @param[inout]):"
+        "$file has a @param without an [in], [out] or [in,out] direction, or writes [inout]," \
+        "            which Clang rejects:"
 }
 
 # Doxygen renders @b / @c, not Markdown: `__bold__` / `**bold**` in a `/** */` or `//` comment print
@@ -570,6 +570,20 @@ check_doxygen_glued() {
         "            never \`(@c foo)\`; a highlighter only sees a command that follows whitespace:"
 }
 
+# Clang hovers print the backticks of a docblock literally, so a docblock names code with @c, @p or <tt>
+# by token class; backticks stay in `//` comments, and code samples inside @code are exempt.
+check_docblock_code_spans_not_backticked() {
+    local spans
+    spans=$(printf '%s\n' "$added" | awk '
+        /@endcode/ { code = 0; next }
+        /@code/ { code = 1; next }
+        code { next }
+        /^\+[[:space:]]*(\/\*\*|\*|\/\/\/)/ && /`/ { print }')
+    [ -z "$spans" ] || fail "$spans" \
+        "$file has a backtick span in a docblock - write @c name, @p parameter or <tt>punctuated token</tt>;" \
+        "            backticks stay in // comments:"
+}
+
 # Doxygen never parses a `//` comment, so a command there - `@p count`, `@c select_diverse` - prints literally and
 # reads as noise. Plain comments name code in backticks, or in prose; the commands belong in `/** */` docblocks.
 check_doxygen_in_line_comments() {
@@ -593,7 +607,7 @@ check_doxygen_trailers() {
 # above and below must be empty (`*` alone). Spacing is context, not a line, so this reads the
 # whole staged file and reports only the headings the commit itself added.
 check_section_spacing() {
-    grep -q '@section' "$staged_blob" || return 0
+    grep -qE '@(section|par)' "$staged_blob" || return 0
     local cramped
     cramped=$(awk '
         NR == FNR { added[$1 + 0]; next }
@@ -603,6 +617,11 @@ check_section_spacing() {
                 if (lines[i] ~ /@section/ && (i in added)) {
                     if (lines[i - 1] !~ /^[[:space:]]*\*[[:space:]]*$/) printf "line %d: no empty comment line above the @section\n", i
                     if (lines[i + 1] !~ /^[[:space:]]*\*[[:space:]]*$/) printf "line %d: no empty comment line below the @section\n", i
+                }
+                else if (lines[i] ~ /^[[:space:]]*\*[[:space:]]*@par([^a-z]|$)/ && (i in added)) {
+                    if (lines[i - 1] !~ /^[[:space:]]*\*[[:space:]]*$/) printf "line %d: no empty comment line above the @par\n", i
+                    for (j = i + 1; j <= last && lines[j] ~ /^[[:space:]]*\*[[:space:]]+[^[:space:]\/]/ && lines[j] !~ /^[[:space:]]*\*[[:space:]]*@[a-z]/; ++j);
+                    if (j <= last && lines[j] !~ /^[[:space:]]*\*[[:space:]]*$/ && lines[j] !~ /^[[:space:]]*\*\//) printf "line %d: no empty comment line below the @par section\n", i
                 }
         }' "$staged_lines_path" "$staged_blob")
     [ -z "$cramped" ] || fail "$cramped" \
@@ -644,7 +663,7 @@ check_lone_brief() {
                 for (j = i; j <= last; ++j) {
                     if (j in added) touched = 1
                     if (lines[j] ~ /@brief/) brief = 1
-                    if (lines[j] ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(param|tparam|return|retval|sa|see|note|file|author|date|section|code)([^a-z]|$)/) section = 1
+                    if (lines[j] ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(param|tparam|return|retval|par|sa|see|note|file|author|date|section|code)([^a-z]|$)/) section = 1
                     if (lines[j] ~ /^[[:space:]]*\*[[:space:]]*$/) blank = 1
                     if (lines[j] ~ /\*\//) break
                 }
@@ -671,7 +690,7 @@ check_brief_length() {
                 span = 1
                 for (j = i + 1; j <= last; ++j) {
                     if (lines[j] !~ /^[[:space:]]*\*[[:space:]]{5,}[^[:space:]]/) break
-                    if (lines[j] ~ /^[[:space:]]*\*[[:space:]]*@(param|tparam|return|retval|sa|see|note|file|author|date|section|code)([^a-z]|$)/) break
+                    if (lines[j] ~ /^[[:space:]]*\*[[:space:]]*@(param|tparam|return|retval|par|sa|see|note|file|author|date|section|code)([^a-z]|$)/) break
                     ++span
                 }
                 if (span > 3 && (i in added)) printf "line %d: @brief runs %d lines\n", i, span
@@ -730,7 +749,7 @@ check_docblock_brackets() {
                 tagged = 0; touched = 0; single = (lines[i] ~ /\*\//)
                 for (j = i; j <= last; ++j) {
                     if (j in added) touched = 1
-                    if (lines[j] ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(brief|param|tparam|return|retval|sa|see|note|file|author|date|section|code)([^a-z]|$)/) tagged = 1
+                    if (lines[j] ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(brief|param|tparam|return|retval|par|sa|see|note|file|author|date|section|code)([^a-z]|$)/) tagged = 1
                     if (lines[j] ~ /\*\//) break
                 }
                 bare_open = (lines[i] ~ /^[[:space:]]*\/\*\*[[:space:]]*$/)
@@ -1380,7 +1399,8 @@ check_iterator_laundering() {
 # C ABI terminates the caller's process. A `throw` or a `noexcept(false)` here would break that.
 check_in_house_never_throws() {
     local throwing
-    throwing=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns | sed -E 's/"([^"\\]|\\.)*"//g' |
+    throwing=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(//|/\*|\*( |/|$))' |
+        blank_c_comments_preserving_columns | sed -E 's/"([^"\\]|\\.)*"//g' |
         grep -E '\bthrow\b|noexcept[[:space:]]*\([[:space:]]*false[[:space:]]*\)' || true)
     [ -z "$throwing" ] || fail "$throwing" \
         "$file throws in library code - answer a status_t or an expected, since every C verb above it is noexcept:"
@@ -2332,6 +2352,7 @@ judge_path() {
         check_param_directions
         check_markdown_doxygen
         check_doxygen_glued
+        check_docblock_code_spans_not_backticked
         check_doxygen_in_line_comments
         check_doxygen_trailers
         check_section_spacing

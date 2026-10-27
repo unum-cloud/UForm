@@ -84,7 +84,6 @@ function assertReproduces(row, expected) {
 }
 
 test("names come from the C tables", () => {
-  assert.match(uform.version(), /^4\./);
   assert.strictEqual(typeof uform.capabilitiesCompiled(), "string");
   assert.strictEqual(Scalar.BF16, "bf16");
   assert.strictEqual(uform.Modality.Video, "video");
@@ -335,7 +334,6 @@ const wasmSkip = fs.existsSync(wasmModule) ? false : "run `npm run build-wasm` f
 test("wasm: text reproduces the addon's embeddings through heap-laid structures", { skip: wasmSkip }, async () => {
   const wasm = require("./dist/cjs/wasm.js");
   await wasm.initialize();
-  assert.strictEqual(wasm.version(), uform.version());
   const model = wasm.Model.loadRamBuffer(fs.readFileSync(checkpointPath));
   assert.strictEqual(model.describe().dimensions, dimensions);
   const arena = new wasm.Arena();

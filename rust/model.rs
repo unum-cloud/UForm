@@ -9,6 +9,10 @@
 //! the receiver: a [`Model`] runs on the calling thread, `model.on(&executor)` blocks on an
 //! executor, and `model.deferred(&executor)` answers a [`Deferred`](crate::Deferred) from the same
 //! verbs given owned arguments.
+//!
+//! File: rust/model.rs
+//! Author: Ash Vardanian
+//! Date: October 18, 2026
 
 // The C mirror keeps the C spelling of every name.
 #![allow(non_camel_case_types)]

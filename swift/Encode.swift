@@ -1,11 +1,11 @@
-//
-//  Encode.swift
-//  UForm
-//
-//  The forward passes, mirroring `c/uform/encode.h`: text, images, video and audio in, pooled embeddings,
-//  per-token states and token vectors out, one verb per input form, plus calibrated choices over text, each on the
-//  model and on both of its receivers.
-//
+/**
+ *  @file swift/Encode.swift
+ *  @author Ash Vardanian
+ *  @date October 18, 2026
+ *  @brief The forward passes, mirroring `c/uform/encode.h`: text, images, video and audio in, pooled embeddings,
+ *      per-token states and token vectors out, one verb per input form, plus calibrated choices over text, each on
+ *      the model and on both of its receivers.
+ */
 
 import UFormC
 

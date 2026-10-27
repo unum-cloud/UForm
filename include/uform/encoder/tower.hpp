@@ -19,12 +19,12 @@
  *  bidirectional band, each item one segment, on packed rows that skip the zero cells of short
  *  items.
  *
- *  The towers of @ref ram_tower.hpp and @ref vram_tower.hpp each own one @ref tower_weights_t and
- *  run @ref encode_steps through steps of their own: the host splits a step across a thread pool,
- *  a device queues it once on a stream. Every NumKong call goes through the kits a steps type
- *  names, and a load stages through the host element-wise kit it is handed, so nothing here picks
- *  a capability. Every function is @c static , so each class unit keeps the copy its own flags
- *  compiled.
+ *  The towers of @ref ram_tower.hpp and @ref vram_tower.hpp each own one
+ *  @ref unum::uform::encoder::tower_weights_t and run @c encode_steps through steps of their own:
+ *  the host splits a step across a thread pool, a device queues it once on a stream. Every NumKong
+ *  call goes through the kits a steps type names, and a load stages through the host element-wise
+ *  kit it is handed, so nothing here picks a capability. Every function is @c static , so each
+ *  class unit keeps the copy its own flags compiled.
  */
 #pragma once
 
@@ -417,8 +417,10 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
  *  @brief Pack every weight of @p checkpoint for @p products_kit_type_ into memory @p placer
  *      places, in @p precision for the block products — E4M3 quantizes each with its own
  *      @c max_abs/240 descale — widening and quantizing on the host through @p staging_kit_type_ .
- *  @retval status_t::invalid_argument_k A tensor is missing or misshapen.
- *  @retval status_t::unsupported_k E4M3 asked of a products kit without E4M3 kernels.
+ *
+ *  @par Statuses:
+ *  - @c status_t::invalid_argument_k A tensor is missing or misshapen.
+ *  - @c status_t::unsupported_k E4M3 asked of a products kit without E4M3 kernels.
  */
 template <typename products_kit_type_, typename staging_kit_type_, typename placer_type_>
 [[nodiscard]] static expected<tower_weights_t> pack_weights(uu::checkpoint_to_load_t const &checkpoint,

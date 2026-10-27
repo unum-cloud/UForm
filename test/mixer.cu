@@ -63,10 +63,10 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
  *  @brief Fabricate member @p member 's loaded batch: @ref segments_per_member_k text segments, each
  *      @ref tokens_per_segment_k columns, packed contiguously into row 0, tokens carrying @ref signature_token_ .
  *      Staged host → device through the pinned + @ref copy_host_to_device path, synchronized before returning.
- *  @param[inout] batch The member's loaded batch, its geometry and tokens overwritten.
+ *  @param[in,out] batch The member's loaded batch, its geometry and tokens overwritten.
  *  @param[in] member This member's world coordinate ( @c gpu_index_in_colocated_domain ), folded into every
  *      token signature.
- *  @param[inout] stream The member's stream the staging enqueues on.
+ *  @param[in,out] stream The member's stream the staging enqueues on.
  */
 [[nodiscard]] static expected_t fabricate_loaded_(multimodal_batch_on_gpu_t &batch, u32_t member,
                                                   gpu_stream_t &stream) noexcept {
@@ -111,14 +111,14 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
  *  @brief Read member @p member 's mixed batch back and assert every segment equals its @ref epoch_permutation
  *      source: destination @c member·S+s pulls world source @c src , whose member is @c src/S and segment
  *      @c src%S ; the mixed segment must carry that source's length, its @c text_k modality, and its tokens.
- *  @param[inout] suite The conformance suite the checks report into.
- *  @param[inout] mixed The member's mixed batch to read back.
+ *  @param[in,out] suite The conformance suite the checks report into.
+ *  @param[in,out] mixed The member's mixed batch to read back.
  *  @param[in] member This member's world coordinate ( @c gpu_index_in_colocated_domain ) — its destination
  *      range's base.
  *  @param[in] member_count The world's member count — the permutation's segment span is @c S·member_count .
  *  @param[in] seed The routing seed the mixer was built with.
  *  @param[in] epoch The data epoch the mix ran at.
- *  @param[inout] stream The member's stream the readback enqueues on.
+ *  @param[in,out] stream The member's stream the readback enqueues on.
  */
 [[nodiscard]] static expected_t verify_mixed_(test_suite_t &suite, multimodal_batch_on_gpu_t &mixed, u32_t member,
                                               u32_t member_count, u64_t seed, data_epoch_t epoch,
@@ -210,9 +210,9 @@ inline constexpr u32_t pad_bag_k = bags_per_member_k;
  *  @brief Fabricate member @p member 's bagged loaded batch: @ref bags_per_member_k bags of
  *      @ref bag_degree_ segments packed contiguously in bag order, each @ref tokens_per_segment_k columns
  *      of @ref signature_token_ , the tail PAD (zero length). Mirrors @ref fabricate_loaded_ 's staging.
- *  @param[inout] batch The member's loaded batch, its geometry, bags, and tokens overwritten.
+ *  @param[in,out] batch The member's loaded batch, its geometry, bags, and tokens overwritten.
  *  @param[in] member This member's world coordinate, folded into every token signature.
- *  @param[inout] stream The member's stream the staging enqueues on.
+ *  @param[in,out] stream The member's stream the staging enqueues on.
  */
 [[nodiscard]] static expected_t fabricate_bagged_(multimodal_batch_on_gpu_t &batch, u32_t member,
                                                   gpu_stream_t &stream) noexcept {
@@ -351,14 +351,14 @@ using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_
  *  in ascending order (cohesion); and a zero-length, no-bag tail — so a dropped bag is provably dropped
  *  @b whole and a surviving one provably intact.
  *
- *  @param[inout] suite The conformance suite the checks report into.
- *  @param[inout] mixed The member's mixed batch to read back.
+ *  @param[in,out] suite The conformance suite the checks report into.
+ *  @param[in,out] mixed The member's mixed batch to read back.
  *  @param[in] member This member's world coordinate — its destination range's base.
  *  @param[in] world_member_count The world's member count — the bag permutation spans
  *      @c bags_per_member_k·world_member_count .
  *  @param[in] seed The routing seed the mixer was built with.
  *  @param[in] epoch The data epoch the mix ran at.
- *  @param[inout] stream The member's stream the readback enqueues on.
+ *  @param[in,out] stream The member's stream the readback enqueues on.
  */
 [[nodiscard]] static expected_t verify_bagged_(test_suite_t &suite, multimodal_batch_on_gpu_t &mixed, u32_t member,
                                                u32_t world_member_count, u64_t seed, data_epoch_t epoch,

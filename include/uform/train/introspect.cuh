@@ -2,18 +2,19 @@
  *  @file include/uform/train/introspect.cuh
  *  @author Ash Vardanian
  *  @date July 7, 2026
- *  @brief The run's one telemetry and introspection surface: @ref telemetry_ledger_t — a root-owned,
- *      always-real, runtime-disarmed ledger every consumer accepts by reference and feeds from its own
- *      boundaries.
+ *  @brief The run's one telemetry and introspection surface:
+ *      @ref unum::uform::train::telemetry_ledger_t — a root-owned, always-real, runtime-disarmed
+ *      ledger every consumer accepts by reference and feeds from its own boundaries.
  *
  *  The ledger unifies the trainer's loss telemetry with the debug-grade signal, round, and timing probes.
  *
  *  The design contract, in order of importance:
  *
  *      - @b Always-real: consumers take @c telemetry_ledger_t& unconditionally — no nullable pointers,
- *        no compile-time twins. A disarmed ledger (the @ref telemetry_ledger_t::disarmed factory, or a
- *        channel the @ref telemetry_ledger_t::make mask left dark) makes every call an inert branch:
- *        no device memory, no kernels, no registered rows.
+ *        no compile-time twins. A disarmed ledger (the
+ *        @ref unum::uform::train::telemetry_ledger_t::disarmed factory, or a channel the
+ *        @c telemetry_ledger_t::make mask left dark) makes every call an inert branch: no device
+ *        memory, no kernels, no registered rows.
  *      - @b Root-owned, borrowed: @c main (or a suite's @c main ) constructs the one ledger and threads
  *        it by reference like the arenas and the domains (§8); the library never reads environment
  *        variables — arming is the launcher boundary's decision, mapped in the binaries' entry points.
@@ -40,7 +41,7 @@
 namespace unum::uform::train {
 using namespace unum::uform::utilities;
 
-/** The ledger's runtime channels — a bitmask baked at @ref telemetry_ledger_t::make , never
+/** The ledger's runtime channels — a bitmask baked at @c telemetry_ledger_t::make , never
  *  toggled afterwards, so armed and unarmed enqueues can never mix inside one capture. */
 enum telemetry_channel_t : u32_t {
 

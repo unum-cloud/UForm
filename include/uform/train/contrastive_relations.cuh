@@ -13,8 +13,8 @@
  *
  *  @section relations_semantics Per-cell contract
  *
- *  For local vertex @c i and @b global vertex @c j , resolved by @ref contrastive_pair_relation in this
- *  exact precedence order (first match wins):
+ *  For local vertex @c i and @b global vertex @c j , resolved by @c contrastive_pair_relation in
+ *  this exact precedence order (first match wins):
  *
  *      1. Either side is PAD (effective length 0) — weight 0, the cell does not exist.
  *      2. @c j is in @c ignore_ids[i] — weight 0: a known false negative to skip.
@@ -39,15 +39,16 @@
  *  Ids index the @b global (post-all-gather) vertex axis and are staged global — no rank-local rebasing
  *  scratch downstream. Within each vertex's run the ids are @b sorted ascending: the in-kernel
  *  membership test is a per-row binary search, so an unsorted run silently mis-scores — which is exactly
- *  why @ref contrastive_relations_t::upload validates every invariant host-side, where the data still is,
- *  and fails @b loudly (capacity overflow included: an overflowing graph is an error, never a silent
- *  fallback to the self-edge default).
+ *  why @ref unum::uform::train::contrastive_relations_t::upload validates every invariant
+ *  host-side, where the data still is, and fails @b loudly (capacity overflow included: an
+ *  overflowing graph is an error, never a silent fallback to the self-edge default).
  *
- *  The device columns are NumKong rank-1 tensors owning memory through @ref gpu_arena_alloc — allocated
- *  @b once at fixed capacity, so device addresses never change; only per-step @b contents are
- *  re-uploaded, and a captured graph replays against fresh edges. One loud exception: the view a kernel
- *  took @b by value at capture bakes in the explicit-vs-self-edge mode — flipping between them requires a
- *  @b recapture; contents-only changes never do.
+ *  The device columns are NumKong rank-1 tensors owning memory through
+ *  @ref unum::uform::utilities::gpu_arena_alloc — allocated @b once at fixed capacity, so device
+ *  addresses never change; only per-step @b contents are re-uploaded, and a captured graph replays
+ *  against fresh edges. One loud exception: the view a kernel took @b by value at capture bakes in
+ *  the explicit-vs-self-edge mode — flipping between them requires a @b recapture; contents-only
+ *  changes never do.
  */
 #pragma once
 
@@ -76,7 +77,8 @@ namespace nk = ashvardanian::numkong;
 
 /** A per-anchor temperature-group id — a runtime category selecting one learnable (β, bias) entry
  *  from the recipe's device tables. Open by design: the group set is counted at runtime through
- *  @ref contrastive_recipe_t::temperature_group_count , never a fixed compile-time enumeration. */
+ *  @ref unum::uform::train::contrastive_recipe_t::temperature_group_count , never a fixed
+ *  compile-time enumeration. */
 enum class temperature_group_t : u32_t {};
 
 /**
@@ -215,7 +217,7 @@ struct contrastive_relations_view_t {
 
 /** Membership search inside one sorted CSR run — CUB's thread-level lower bound plus the equality
  *  check; the position of @p id , or @p end when absent. Vendor boundary: CUB takes a raw pointer
- *  and a count, not a view, into the CSR `ids` run. */
+ *  and a count, not a view, into the CSR @c ids run. */
 [[nodiscard]] __device__ inline u32_t contrastive_run_find_(u32r1_view_t ids, u32_t begin, u32_t end,
                                                             u32_t id) noexcept {
     u32_t const position = begin + cub::LowerBound(ids.data() + begin, end - begin, id);
@@ -406,8 +408,10 @@ using contrastive_edges_pinned_t = contrastive_edges<pinned_alloc_t>;
  *  @param[in] vertex_base The global vertex of the GPU's segment 0, its world coordinate times the
  *      segments.
  *  @param[out] edges The three sets, refilled over the @b [segments] rows.
- *  @retval status_t::invalid_argument_k Columns of other extents, bags descending more than once,
- *      or more edges than a set holds.
+ *
+ *  @par Statuses:
+ *  - @c status_t::invalid_argument_k Columns of other extents, bags descending more than once,
+ *    or more edges than a set holds.
  */
 template <typename alloc_type_>
 [[nodiscard]] expected_t relate_roles(u32r1_view_t bags, nk::tensor_view<segment_role_t, 1> roles, u32r1_view_t lengths,
@@ -488,8 +492,9 @@ template <typename alloc_type_>
 
 /**
  *  @brief The host owner of the relation graph — one memory-owning NumKong tensor per column, allocated
- *      through @ref gpu_arena_alloc at fixed capacity, re-uploaded per step, and viewed by kernels
- *      through @ref contrastive_relations_view_t windows over the live extents.
+ *      through @ref unum::uform::utilities::gpu_arena_alloc at fixed capacity, re-uploaded per
+ *      step, and viewed by kernels through @ref contrastive_relations_view_t windows over the live
+ *      extents.
  *
  *  Eight columns: three offset rows @b [max_vertices+1] , three id runs @b [max_edges] , two score runs
  *  @b [max_edges] . Addresses never change after @ref make — the capture-stability contract — so a
@@ -507,6 +512,7 @@ struct contrastive_relations_t {
      *  @brief Allocate the eight columns off @p arena at their worst-case capacity; every upload
      *      @c resize s them to the step's live extents without moving an address — the columns' own
      *      shapes are the single source of the live counts.
+     *  @param[in,out] arena The arena the columns are allocated from.
      *  @param[in] max_vertices Most local vertex rows any step will carry.
      *  @param[in] max_edges Most explicit edges any step will carry, per edge set.
      */
@@ -556,9 +562,19 @@ struct contrastive_relations_t {
      *      resolver reads: @b [from_vertices_per_gpu] and @b [to_vertices_per_mesh] (by global id) device
      *      views, 0 marking PAD, empty meaning all-live. @b Borrowed, never copied — the batch pipeline owns
      *      them and keeps the addresses capture-stable.
+     *  @param[in] to_vertex_effective_length The to-side PAD column over global vertex IDs,
+     *      borrowed like @p from_vertex_effective_length .
      *  @param[in] from_vertex_key / @p to_vertex_key The per-step key columns,
      *      @b [from_vertices_per_gpu] and @b [to_vertices_per_mesh] device views borrowed like the
      *      lengths, zero naming no key; both empty attract no key.
+     *  @param[in] to_vertex_key The to-side key column over global vertex IDs, borrowed like
+     *      @p from_vertex_key .
+     *  @param[in] to_vertices_per_mesh How many global vertices the to-side columns span.
+     *  @param[in] self_edge_base Global ID of local vertex 0's own copy, the base of the implicit
+     *      self-edges.
+     *  @param[in] ambient_repulsion_weight Weight of every unnamed cell; 0 removes in-batch
+     *      negatives.
+     *  @param[in] stream The stream the host CSR is staged on.
      */
     [[nodiscard]] expected_t upload(contrastive_edges_view_t attract, contrastive_edges_view_t repel,
                                     contrastive_edges_view_t ignore, u32r1_view_t from_vertex_effective_length,
@@ -723,8 +739,9 @@ struct contrastive_relations_t {
         return {};
     }
 
-    /** The owned CSR columns, allocated once at their worst-case capacity and resized per upload: each
-     *  tensor's own shape IS the live extent, and its `capacity()` the staging ceiling — no shadow counts. */
+    /** The owned CSR columns, allocated once at their worst-case capacity and resized per upload:
+     *  each tensor's own shape IS the live extent, and its <tt>capacity()</tt> the staging ceiling
+     *  — no shadow counts. */
     u32r1_tensor_arena_t attract_offsets_ {}, repel_offsets_ {}, ignore_offsets_ {};
     u32r1_tensor_arena_t attract_ids_ {}, repel_ids_ {}, ignore_ids_ {};
     f32r1_tensor_arena_t attract_scores_ {}, repel_scores_ {};

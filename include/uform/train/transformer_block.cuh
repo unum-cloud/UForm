@@ -2,15 +2,15 @@
  *  @file include/uform/train/transformer_block.cuh
  *  @author Ash Vardanian
  *  @date July 3, 2026
- *  @brief The pre-norm transformer block: @ref transformer_block_bf16_t trains forward and
- *      backward, and @ref transformer_block_e4m3_t is its forward-only inference twin, made
- *      only by @ref transformer_block_bf16_t::quantize_weights .
+ *  @brief The pre-norm transformer block: @c transformer_block_bf16_t trains forward and
+ *      backward, and @c transformer_block_e4m3_t is its forward-only inference twin, made
+ *      only by @c transformer_block_bf16_t::quantize_weights .
  *
  *      x → RMSNorm → fused QKV → unit QK-norm → M-RoPE → attention → out → +x
  *        → RMSNorm → fused gate/up → SiLU(gate)·up → down → +residual
  *
  *  Every product and every attention is NumKong's: BFloat16 operands into Float32 on the
- *  training block, E4M3 on the twin. @ref transformer_block_bf16_t::pack_weights packs each
+ *  training block, E4M3 on the twin. @c transformer_block_bf16_t::pack_weights packs each
  *  weight once per optimizer step, as @c W for the forward and as @c Wᵀ for the data
  *  gradient. The backwards of the norms, the QK-norm, SwiGLU and the rotation are
  *  deterministic house kernels.
@@ -26,9 +26,9 @@
  *  keeps its Float32 output and log-sum-exp for the backward. Inference scales each weight by
  *  @c max_abs/240 into its E4M3 shadow, and each activation token by a scale of its own.
  *
- *  Rotary angles are model state in @ref rope_angles_t , and the per-token @b (t,h,w)
- *  coordinates come from the tower. Pairing is NeoX split-half, pair @c k coupling channels
- *  @b (k,k+64) with the temporal pairs first, so a text token @b (position,0,0) leaves the
+ *  Rotary angles are model state in @ref unum::uform::train::rope_angles_t , and the per-token
+ *  @b (t,h,w) coordinates come from the tower. Pairing is NeoX split-half, pair @c k coupling
+ *  channels @b (k,k+64) with the temporal pairs first, so a text token @b (position,0,0) leaves the
  *  spatial pairs untouched.
  */
 #pragma once
@@ -229,8 +229,9 @@ __global__ void rmscast_backward_kernel(f32r2_view_t input, bf16r1_view_t scale,
 __global__ void dropout_kernel(bf16r1_span_t values, u32r1_view_t data_epoch, u32_t salt, f32_t drop_probability);
 
 /** The transients every block of a stack shares: blocks run one after another on one stream and no
- *  transient outlives the block that wrote it, so a stack's footprint is one scratch plus the per-block
- *  stashes, weights and packs. Owned by the stack, borrowed by each @ref transformer_block_bf16_t . */
+ *  transient outlives the block that wrote it, so a stack's footprint is one scratch plus the
+ *  per-block stashes, weights and packs. Owned by the stack, borrowed by each
+ *  @c transformer_block_bf16_t . */
 struct transformer_scratch_t {
 
     /** Allocate every transient off @p arena for @p config 's capacities, wide enough for the
@@ -417,7 +418,7 @@ struct transformer_block_bf16_t {
 /** The quantized forward-only inference twin: E4M3 weights packed once for NumKong's products,
  *  per-token activation scales, and NumKong's E4M3 attention — @b no gradients, @b no stashes,
  *  roughly a quarter of the training block's memory. Constructed only through
- *  @ref transformer_block_bf16_t::quantize_weights , so an instance is always fully quantized. */
+ *  @c transformer_block_bf16_t::quantize_weights , so an instance is always fully quantized. */
 struct transformer_block_e4m3_t {
 
     /** One quantized block forward — pure enqueue over the packed multi-segment layout. Norms and
@@ -444,7 +445,7 @@ struct transformer_block_e4m3_t {
      *  @param[in] token_scales @b [tokens] per-token scales, or empty when the operand carries none.
      *  @param[in] residual @b [tokens,out] added after the scales, or empty.
      *  @param[out] values @b [tokens,out] the BFloat16 result.
-     *  @param[inout] stream The stream every launch enqueues on.
+     *  @param[in,out] stream The stream every launch enqueues on.
      */
     [[nodiscard]] expected_t project_(std::size_t product, e4m3r2_view_t activations, f32r1_view_t token_scales,
                                       bf16r2_view_t residual, bf16r2_span_t values, gpu_stream_t &stream) noexcept;

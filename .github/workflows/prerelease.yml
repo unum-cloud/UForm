@@ -110,21 +110,23 @@ jobs:
       - name: Test Data Scripts
         run: python -X faulthandler -m pytest -x scripts/data
 
-  verify_protocols:
-    name: Verify protocol models with Spin
+  verify_models:
+    name: Check Promela Models
     runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+      - name: Pull the ForkUnion Submodule
+        run: git submodule update --init forkunion
       - name: Install Spin
         run: |
           sudo apt-get update
           sudo apt-get install -y spin
-      - name: Verify every model
+      - name: Verify Every Model
         run: verification/check.sh
 
   test_ubuntu_cpu:
-    name: Test C and Python on Ubuntu with the CPU library
+    name: Test C and Python on Ubuntu with the CPU Library
     runs-on: ubuntu-26.04
     steps:
       - name: Checkout
@@ -137,10 +139,10 @@ jobs:
       # The suites write the tiny checkpoint as a fixture, which the C test and the inference parity test load.
       - name: Build C
         run: |
-          cmake --preset cpu_library -D UFORM_BUILD_TEST=ON
-          cmake --build --preset cpu_library
+          cmake --preset library -D UFORM_BUILD_TEST=ON
+          cmake --build --preset library
       - name: Test C
-        run: ctest --test-dir build_cpu_library --output-on-failure
+        run: ctest --test-dir build_library --output-on-failure
 
       - name: Set Up Python
         uses: actions/setup-python@v7
@@ -155,7 +157,7 @@ jobs:
           python -m pip install --group test .
       - name: Test Python
         env:
-          UFORM_TEST_CHECKPOINT: ${{ github.workspace }}/build_cpu_library/tiny.safetensors
+          UFORM_TEST_CHECKPOINT: ${{ github.workspace }}/build_library/tiny.safetensors
         run: python -X faulthandler -m pytest -x test/python
 
   test_rust:
@@ -207,31 +209,36 @@ jobs:
       - name: Test JavaScript
         run: npm test
 
+  # The suite links the stub packed as the release packs the engine, for the host's slice alone.
   test_swift_macos:
     name: Test Swift on macOS
     runs-on: macos-26
+    env:
+      UFORM_SWIFT_ARTIFACT: build_swift/UFormC.xcframework
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-      - name: Build the Stub Library
+      - name: Build the Stub XCFramework
         run: |
-          cmake --preset stub_library
-          cmake --build --preset stub_library --target uform_static_stub
+          cmake --preset swift -D UFORM_BUILD_STUB=ON
+          cmake --build --preset swift
       - name: Test Swift
-        run: swift test -Xlinker -L${{ github.workspace }}/build_stub_library/stub
+        run: swift test
 
   test_swift_ubuntu:
     name: Test Swift on Ubuntu
     runs-on: ubuntu-26.04
+    env:
+      UFORM_SWIFT_ARTIFACT: build_swift/UFormC.artifactbundle
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-      - name: Build the Stub Library
+      - name: Build the Stub Artifact Bundle
         run: |
-          cmake --preset stub_library
-          cmake --build --preset stub_library --target uform_static_stub
+          cmake --preset swift -D UFORM_BUILD_STUB=ON
+          cmake --build --preset swift
       - name: Test Swift
-        run: swift test -Xlinker -L${{ github.workspace }}/build_stub_library/stub
+        run: swift test
 
   test_c_macos:
     name: Test C on macOS
@@ -243,11 +250,11 @@ jobs:
         run: brew install ninja $MACOS_CODECS
       - name: Build C
         run: |
-          cmake --preset cpu_library -D UFORM_BUILD_TEST=ON \
+          cmake --preset library -D UFORM_BUILD_TEST=ON \
             -D CMAKE_PREFIX_PATH="$(brew --prefix);$(brew --prefix jpeg-turbo)"
-          cmake --build --preset cpu_library
+          cmake --build --preset library
       - name: Test C
-        run: ctest --test-dir build_cpu_library --output-on-failure
+        run: ctest --test-dir build_library --output-on-failure
 
   test_wasm_node:
     name: Test WASM under Node
@@ -267,15 +274,15 @@ jobs:
       # The preset runs every test under Node, the C test over the tiny checkpoint the suites write.
       - name: Build and Test C
         run: |
-          cmake --preset wasm32_emscripten_release -D UFORM_BUILD_TEST=ON
-          cmake --build --preset wasm32_emscripten_release
-          ctest --test-dir build_wasm32_emscripten_release --output-on-failure
+          cmake --preset wasm32_emscripten -D UFORM_BUILD_TEST=ON
+          cmake --build --preset wasm32_emscripten
+          ctest --test-dir build_wasm32_emscripten --output-on-failure
 
       # The JavaScript suite asserts the stub's geometry, so its module and its addon both link the stub.
       - name: Build the WASM Module over the Stub
         run: |
-          cmake --preset wasm32_emscripten_release -B build_wasm32_emscripten_stub \
-            -D UFORM_BUILD_LIB_C=OFF -D UFORM_BUILD_LIB_C_STUB=ON -D UFORM_BUILD_LIB_NODE=ON
+          cmake --preset wasm32_emscripten -B build_wasm32_emscripten_stub \
+            -D UFORM_BUILD_SHARED=OFF -D UFORM_BUILD_STUB=ON -D UFORM_BUILD_NODE=ON
           cmake --build build_wasm32_emscripten_stub --target uform_wasm
       - name: Build JavaScript
         run: |
@@ -303,13 +310,13 @@ jobs:
           echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
       - name: Build and Test C
         run: |
-          cmake --preset wasm32_wasi_release -D UFORM_BUILD_TEST=ON
-          cmake --build --preset wasm32_wasi_release
-          ctest --test-dir build_wasm32_wasi_release --output-on-failure
+          cmake --preset wasm32_wasi -D UFORM_BUILD_TEST=ON
+          cmake --build --preset wasm32_wasi
+          ctest --test-dir build_wasm32_wasi --output-on-failure
 
   # Compile-only: no hosted runner carries a GPU, so this proves both residencies, the trainer and the mesh build.
   build_gpu_libraries:
-    name: Build NVIDIA and AMD libraries
+    name: Build NVIDIA and AMD Libraries
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -341,6 +348,34 @@ jobs:
           .venv/bin/pip install --extra-index-url https://pypi.nvidia.com libcudf-cu13
       - name: Build Libraries and the Trainer
         run: |
-          cmake --preset nvidia_amd_library -D UFORM_BUILD_TOOLS=ON -D CMAKE_HIP_ARCHITECTURES=gfx942 \
+          cmake --preset cuda_rocm_library -D UFORM_BUILD_TOOLS=ON -D CMAKE_HIP_ARCHITECTURES=gfx942 \
             -D CMAKE_PREFIX_PATH=/opt/rocm
-          cmake --build --preset nvidia_amd_library
+          cmake --build --preset cuda_rocm_library
+
+  build_docs:
+    name: Build Docs
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Install Codecs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build $UBUNTU_CODECS
+      - name: Set Up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - name: Install Doxygen
+        run: |
+          curl -sSfL https://www.doxygen.nl/files/doxygen-1.18.0.linux.bin.tar.gz | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/doxygen-1.18.0/bin" >> "$GITHUB_PATH"
+      - name: Install Sphinx
+        run: pip install -r docs/requirements.txt
+      - name: Install UForm from the Checkout
+        env:
+          CC: clang
+          CXX: clang++
+        run: pip install .
+      - name: Build Docs
+        run: cd docs && doxygen conf.dox && sphinx-build -M html . ../build/docs -W

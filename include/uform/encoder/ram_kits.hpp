@@ -15,8 +15,8 @@
  *
  *  Every kit carries BFloat16 products, and E4M3 ones where its capability has them: precision is a
  *  runtime value of the tower, never a type, so a class whose products kit has no E4M3 kernel
- *  refuses an E4M3 load, as @ref e4m3_products tells. Where a whole ISA family lacks a kernel, its
- *  kits compose the operation from the family's own kernels, as @ref mrope rotates without
+ *  refuses an E4M3 load, as @c e4m3_products tells. Where a whole ISA family lacks a kernel, its
+ *  kits compose the operation from the family's own kernels, as @c mrope rotates without
  *  @c rope_bf16 , or, with nothing to compose from, borrow the serial kit's row, the only place a
  *  @c _serial kernel is named.
  *
@@ -63,7 +63,7 @@ struct highest_kit<caps_, floor_, head_, tail_...> {
 template <typename products_kit_type_>
 concept e4m3_products = requires { products_kit_type_::multiply_e4m3; };
 
-/** Whether an element-wise kit carries NumKong's rotation; @ref mrope composes one without it. */
+/** Whether an element-wise kit carries NumKong's rotation; @c mrope composes one without it. */
 template <typename elementwise_kit_type_>
 concept rope_rotations = requires { elementwise_kit_type_::rope_bf16; };
 
@@ -821,7 +821,7 @@ struct composed_swiglu {
 
 #if NUMKONG_TARGET_RVV
 
-/** RISC-V vectors' casts, arithmetic, reductions and trigonometry, which also rotate as @ref mrope
+/** RISC-V vectors' casts, arithmetic, reductions and trigonometry, which also rotate as @c mrope
  *  composes them, with the norms and gates composed from them, since NumKong has no RISC-V kernel
  *  for those. */
 struct rvv_elementwise_kit_t {
@@ -880,7 +880,7 @@ struct v128_elementwise_kit_t {
 
 #if NUMKONG_TARGET_V128 && NUMKONG_TARGET_V128RELAXED
 
-/** Relaxed SIMD's casts, arithmetic, reductions and trigonometry, which also rotate as @ref mrope
+/** Relaxed SIMD's casts, arithmetic, reductions and trigonometry, which also rotate as @c mrope
  *  composes them, over the fixed-width sums, with the norms and gates composed from them, since
  *  NumKong has no WebAssembly kernel for those. */
 struct v128relaxed_elementwise_kit_t {
@@ -951,7 +951,7 @@ inline static void fill_patch_affine(f32r1_view_t mean, f32r1_view_t inverse_std
 
 /** Segment @p segment 's pixel cells @b [cells,spatial,channels] , when it is @p target , into
  *  patch rows @b [rows,spatial·channels] : each cell widens into @p wide , takes the gain and bias
- *  of @ref fill_patch_affine , and narrows into its row. */
+ *  of @c fill_patch_affine , and narrows into its row. */
 template <typename elementwise_kit_type_>
 [[nodiscard]] inline static nk_status_t stage_patches(segment_layout_t const &layout, std::size_t segment,
                                                       modality_t target, nk::tensor_view<pixel_t, 3> grid_pixels,

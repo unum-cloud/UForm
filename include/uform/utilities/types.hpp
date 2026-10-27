@@ -28,7 +28,7 @@
 
 #include "uform/types.h" // `uform_status_t`, whose values `status_t` takes
 
-/** `std::format` support for StringZilla slices, so diagnostics interpolate them directly —
+/** @c std::format support for StringZilla slices, so diagnostics interpolate them directly —
  *  no conversion shims at call sites. */
 template <>
 struct std::formatter<ashvardanian::stringzilla::string_view_t> : std::formatter<std::string_view> {
@@ -37,7 +37,7 @@ struct std::formatter<ashvardanian::stringzilla::string_view_t> : std::formatter
     }
 };
 
-/** `std::format` support for owning StringZilla strings — same bridge, by reference. */
+/** @c std::format support for owning StringZilla strings — same bridge, by reference. */
 template <>
 struct std::formatter<ashvardanian::stringzilla::string_t> : std::formatter<std::string_view> {
     auto format(ashvardanian::stringzilla::string_t const &text, std::format_context &context) const noexcept {
@@ -66,11 +66,11 @@ using i64_t = std::int64_t;
 using f32_t = float;
 using f64_t = double;
 
-/** The rank-tagged borrow vocabulary over the scalar dtypes — @c <dtype><rank>_view_t reads,
- *      @c <dtype><rank>_span_t writes, each a borrow into memory owned elsewhere. The owning
- *      @c *_tensor_arena_t / @c *_tensor_pinned_t counterparts live in @c gpu_allocators.hpp , beside the
- *      allocator they bind, as do the CUDA-scalar @c bf16_t / @c e4m3_t borrows. Concept-named views (a token
- *      rectangle, a pixel image) stay with their cell. */
+/** The rank-tagged borrow vocabulary over the scalar dtypes — the view type of a dtype and rank
+ *  reads, the span type writes, each a borrow into memory owned elsewhere. The owning
+ *  @c *_tensor_arena_t / @c *_tensor_pinned_t counterparts live in @c gpu_allocators.hpp , beside
+ *  the allocator they bind, as do the CUDA-scalar @c bf16_t / @c e4m3_t borrows. Concept-named
+ *  views (a token rectangle, a pixel image) stay with their cell. */
 using b8r1_view_t = nk::tensor_view<b8_t, 1>;
 using b8r1_span_t = nk::tensor_span<b8_t, 1>;
 using i16r2_view_t = nk::tensor_view<i16_t, 2>;
@@ -164,7 +164,7 @@ inline constexpr unsigned kernel_block_size_default_k = 256u;
 /**
  *  @brief The typical upper bound on the number of GPUs attached to the same host process
  *      within the same "multimem" domain.
- *  @sa Defines the upper bound for @ref mesh_shape_t::gpus_per_host_domain.
+ *  @sa Defines the upper bound for @ref unum::uform::utilities::mesh_shape_t::gpus_per_host_domain.
  */
 inline constexpr unsigned max_gpus_per_host_k = 32u;
 
@@ -241,10 +241,10 @@ struct splitmix64_hash_t {
 };
 
 /** The keyed bijection over @c [0,count) : a 4-round Feistel — its round the one
- *  @ref splitmix64_hash_t — over the smallest even-bit domain covering @p count , cycle-walked back
- *  into range. Identical on every host and GPU for the same @c (seed,data_epoch) , so no shuffle ever
- *  needs an exchange, and @b without replacement (a bijection) — the guarantee the hasher's draws,
- *  which collide, cannot give. */
+ *  @ref unum::uform::utilities::splitmix64_hash_t — over the smallest even-bit domain covering
+ *  @p count , cycle-walked back into range. Identical on every host and GPU for the same
+ *  @c (seed,data_epoch) , so no shuffle ever needs an exchange, and @b without replacement (a
+ *  bijection) — the guarantee the hasher's draws, which collide, cannot give. */
 [[nodiscard]] constexpr std::size_t epoch_permutation(u64_t seed, data_epoch_t data_epoch, std::size_t index,
                                                       std::size_t count) noexcept {
     splitmix64_hash_t const hash {};
@@ -267,7 +267,13 @@ struct splitmix64_hash_t {
 }
 
 /** Outcome of any fallible operation. Every enumerator takes its value from @c uform_status_t , so
- *  crossing the C ABI is a cast. */
+ *  crossing the C ABI is a cast.
+ *
+ *  Statuses fall into the categories of @c uform_status_t . Resources: @c bad_alloc_k,
+ *  @c device_error_k and @c io_k. Input: @c invalid_argument_k. State: @c unsupported_k and
+ *  @c contended_k. Defects: @c internal_k. Any verb that allocates, binds a device or touches a
+ *  file may also return a Resources status. A verb's own block lists only what its contract
+ *  adds. */
 enum class status_t : i32_t {
 
     /** The operation completed; outputs are valid. */
@@ -329,7 +335,7 @@ struct format_into_t {
     }
 };
 
-/** `std::format` straight into an exception-free StringZilla string, appending — the one spelling
+/** @c std::format straight into an exception-free StringZilla string, appending — the one spelling
  *  for every payload and path assembly. @c false only on allocation failure (the text is then
  *  truncated); the format string is compile-time checked. */
 template <typename... arg_types_>
@@ -403,12 +409,12 @@ struct expected {
         if (status_ == status_t::success_k) value_.~value_type_();
     }
 
-    /** @c true iff the operation succeeded and @ref value_ is readable. */
+    /** @c true iff the operation succeeded and the value is readable. */
     [[nodiscard]] explicit operator bool() const noexcept { return status_ == status_t::success_k; }
 
     /** Reach the held value on the success path, so a consumer writes @c result->field or @c *result
      *  instead of @c result.value_ . Reading it on a failed @ref expected is a logic error, gated by
-     *  @ref operator bool . */
+     *  its @c bool conversion . */
     [[nodiscard]] value_type_ *operator->() noexcept { return &value_; }
     [[nodiscard]] value_type_ const *operator->() const noexcept { return &value_; }
     [[nodiscard]] value_type_ &operator*() noexcept { return value_; }
@@ -439,8 +445,8 @@ struct expected {
   private:
     struct failure_t {};
 
-    /** Failure ctor: sets a non-success @p status and leaves the union @ref value_ unconstructed,
-     *  so the @c status_==success_k ⇔ value_ live invariant the destructor relies on holds at once. */
+    /** Failure ctor: sets a non-success @p status and leaves the union @c value_ unconstructed, so
+     *  the @c status_==success_k ⇔ value_ live invariant the destructor relies on holds at once. */
     expected(failure_t, status_t status) noexcept : status_(status) {}
 };
 
@@ -492,7 +498,7 @@ using expected_t = expected<void>;
 
 } // namespace unum::uform::utilities
 
-/** `std::format` support for statuses, printing the name @c to_string gives. */
+/** @c std::format support for statuses, printing the name @c to_string gives. */
 template <>
 struct std::formatter<unum::uform::utilities::status_t> : std::formatter<std::string_view> {
     auto format(auto status, std::format_context &context) const noexcept {

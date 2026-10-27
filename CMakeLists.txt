@@ -30,10 +30,6 @@
 #   cmake --build --preset release
 #   ctest --preset release
 #
-# Local dependency checkouts (optional).
-#
-#   cmake --preset release -DFETCHCONTENT_SOURCE_DIR_NUMKONG="$PWD/../NumKong"   # likewise any other dependency
-#
 # Feature gates.
 #
 # `-DUFORM_BUILD_CUDA=ON` adds the NVIDIA residency, the trainer, the mesh and the loaders, which every training preset
@@ -41,9 +37,9 @@
 # needed, and on WebAssembly not even the codecs. Every native dependency above is required and fails the configure
 # loudly if absent — each is available on every target, including consumer / workstation GPUs. InfiniBand is the sole
 # optional path (absent on those cards): `-DUFORM_WITH_INFINIBAND=AUTO|ON|OFF` (default `AUTO` — probe and enable when
-# present). `-DUFORM_BUILD_TEST=OFF` and `-DUFORM_BUILD_TOOLS=OFF` skip `test/` and `tools/`, which only a top-level
-# build compiles by default, and `-DUFORM_BUILD_BENCH=ON` adds the benchmarks in `bench/`.
-cmake_minimum_required(VERSION 3.27)
+# present). `-DUFORM_BUILD_TEST=ON`, `-DUFORM_BUILD_TOOLS=ON` and `-DUFORM_BUILD_BENCH=ON` add the suites in `test/`, the
+# trainer in `tools/` and the benchmarks in `bench/`, which every build leaves out unless asked.
+cmake_minimum_required(VERSION 3.28)
 
 # Every CUDA unit compiles one cubin per generation, as USearch's do: sm_86 runs Ampere's and B300 runs "100f", and PTX
 # would double every object for GPUs no build meets. Iterate on one card with its own code, like "89-real". Only the
@@ -70,16 +66,10 @@ project(
     HOMEPAGE_URL "https://github.com/unum-cloud/UForm"
 )
 
-# Determine if UForm is built as a subproject (using `add_subdirectory`) or if it is the main project
-set(UFORM_IS_MAIN_PROJECT OFF)
-if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
-    set(UFORM_IS_MAIN_PROJECT ON)
-endif ()
-
 # Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any
 # cloned repo execute code), so point `core.hooksPath` at `.githooks` here — configuring the build arms
 # the `pre-commit` / `commit-msg` checks. Skipped when there is no `.git` (tarball / export builds).
-if (UFORM_IS_MAIN_PROJECT AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+if (PROJECT_IS_TOP_LEVEL AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     execute_process(
         COMMAND git config core.hooksPath .githooks
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
@@ -91,16 +81,18 @@ if (UFORM_IS_MAIN_PROJECT AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     endif ()
 endif ()
 
-option(UFORM_INSTALL "Install the C headers, libraries and CMake package" ${UFORM_IS_MAIN_PROJECT})
+option(UFORM_INSTALL "Install the C headers, libraries and CMake package" ${PROJECT_IS_TOP_LEVEL})
 option(UFORM_BUILD_CUDA "Add the NVIDIA residency, the trainer, the mesh and the loaders" OFF)
 option(UFORM_BUILD_ROCM "Add the AMD residency" OFF)
-option(UFORM_BUILD_LIB_C "Build uform_static and uform_shared" ${UFORM_IS_MAIN_PROJECT})
-option(UFORM_BUILD_LIB_C_STUB "Build uform_static_stub and uform_shared_stub" OFF)
-option(UFORM_BUILD_LIB_PYTHON "Build the CPython extension, set by scikit-build" OFF)
-option(UFORM_BUILD_LIB_NODE "Build the Node addon, set by cmake-js" OFF)
-option(UFORM_BUILD_TEST "Compile the conformance suites in test/" ${UFORM_IS_MAIN_PROJECT})
-option(UFORM_BUILD_TOOLS "Compile the trainer in tools/" ${UFORM_IS_MAIN_PROJECT})
+option(UFORM_BUILD_SHARED "Compile uform_static and uform_shared in the default build and install them" OFF)
+option(UFORM_BUILD_STUB "Build uform_static_stub and uform_shared_stub" OFF)
+option(UFORM_BUILD_PYTHON "Build the CPython extension, set by scikit-build" OFF)
+option(UFORM_BUILD_NODE "Build the Node addon, set by cmake-js" OFF)
+option(UFORM_BUILD_SWIFT "Package the static library for SwiftPM, as an XCFramework or an artifact bundle" OFF)
+option(UFORM_BUILD_TEST "Compile the conformance suites in test/" OFF)
+option(UFORM_BUILD_TOOLS "Compile the trainer in tools/" OFF)
 option(UFORM_BUILD_BENCH "Compile the benchmarks in bench/" OFF)
+option(UFORM_WERROR "Treat compiler warnings as errors" OFF)
 
 if (UFORM_BUILD_CUDA)
     enable_language(CUDA)
@@ -113,18 +105,35 @@ if (UFORM_BUILD_ROCM)
 endif ()
 
 # C++23: the multidimensional subscript `tensor[row, column]` is the project's indexing default — device code included,
-# which needs `nvcc` >= 13.1 (`-std=c++23` first shipped there; 13.0 rejects it). CMake's own `nvcc` dialect table still
-# stops at 20 (`Modules/Compiler/NVIDIA.cmake` as of CMake 4.3), so the flag mapping is declared here until upstream
-# catches up.
-set(CMAKE_CXX_STANDARD 23)
+# which needs `nvcc` >= 13.1 (`-std=c++23` first shipped there; 13.0 rejects it). Host targets declare `cxx_std_23`
+# themselves, while CMake's own `nvcc` dialect table still stops at 20 (`Modules/Compiler/NVIDIA.cmake` as of CMake 4.3),
+# so no CUDA target can declare `cuda_std_23`, and the dialect and its flag mapping stay here until upstream catches up.
 set(CMAKE_CUDA_STANDARD 23)
 if (CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.1 AND NOT CMAKE_CUDA23_STANDARD_COMPILE_OPTION)
     set(CMAKE_CUDA23_STANDARD_COMPILE_OPTION "-std=c++23")
     set(CMAKE_CUDA23_EXTENSION_COMPILE_OPTION "-std=c++23")
 endif ()
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
+# Warnings apply to UForm's own targets only, so dependencies build with their own flags, and CUDA units with nvcc's.
+add_library(uform_warnings INTERFACE)
+if (MSVC)
+    target_compile_options(uform_warnings INTERFACE /W4 /permissive- /Zc:__cplusplus)
+    if (UFORM_WERROR)
+        target_compile_options(uform_warnings INTERFACE /WX)
+    endif ()
+else ()
+    target_compile_options(
+        uform_warnings
+        INTERFACE
+            "$<$<COMPILE_LANGUAGE:C,CXX>:-Wall;-Wextra;-Wpedantic;-Wno-unknown-pragmas;-Wno-missing-field-initializers>"
+            "$<$<AND:$<COMPILE_LANGUAGE:C,CXX>,$<CXX_COMPILER_ID:Clang,AppleClang>>:-Wdocumentation>"
+    )
+    if (UFORM_WERROR)
+        target_compile_options(uform_warnings INTERFACE "$<$<COMPILE_LANGUAGE:C,CXX>:-Werror>")
+    endif ()
+endif ()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -140,13 +149,14 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/find_library.cmake")
 # clone builds them in place, any other clone fetches the pins below, which match the submodule commits. `FETCHCONTENT_SOURCE_DIR_<NAME>` points any of them at a local checkout.
 function (uform_sibling name_ repository_ tag_)
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${name_}/CMakeLists.txt")
-        add_subdirectory(${name_})
+        add_subdirectory(${name_} SYSTEM)
     else ()
         message(STATUS "uform: ${name_} submodule absent, fetching ${tag_}")
         FetchContent_Declare(
             ${name_}
             GIT_REPOSITORY ${repository_}
             GIT_TAG ${tag_}
+            SYSTEM
         )
         FetchContent_MakeAvailable(${name_})
     endif ()
@@ -157,23 +167,19 @@ endfunction ()
 set(NUMKONG_BUILD_CUDA ${UFORM_BUILD_CUDA})
 set(NUMKONG_BUILD_ROCM ${UFORM_BUILD_ROCM})
 set(NUMKONG_CUDA_ARCHITECTURES "${UFORM_CUDA_ARCHITECTURES}")
-set(NUMKONG_BUILD_TEST OFF)
-set(NUMKONG_BUILD_BENCH OFF)
-uform_sibling(numkong https://github.com/ashvardanian/NumKong 0e09f8a36b94c6096add933abf0e0720823b8134)
-uform_sibling(stringzilla https://github.com/ashvardanian/StringZilla 139f496cb0226e0aff73e095412c33349aadbc49)
-uform_sibling(forkunion https://github.com/ashvardanian/ForkUnion 10d306f27d908e440a269ed74277bd767f08ec6a)
+uform_sibling(numkong https://github.com/ashvardanian/NumKong 49b5140981945527e0ffca4d8037285022b98ad3)
+uform_sibling(stringzilla https://github.com/ashvardanian/StringZilla e169620f92db7c5df3a71baf2e035bc43ecf6a39)
+uform_sibling(forkunion https://github.com/ashvardanian/ForkUnion 0c87b0bb539ccf6d945711a12e73b731530c9fa8)
 
 # SmashTable's containers, header-only
-set(SMASHTABLE_BUILD_TEST OFF)
-set(SMASHTABLE_BUILD_CUDA OFF)
-set(SMASHTABLE_INSTALL OFF)
-uform_sibling(smashtable https://github.com/ashvardanian/SmashTable f67526deab5b708cf50baa64d40240875af40f3f)
+uform_sibling(smashtable https://github.com/ashvardanian/SmashTable 07a8cb3800de52a4c0f90e80014b3937b39121dc)
 
 set(YYJSON_INSTALL OFF)
 FetchContent_Declare(
     yyjson
     GIT_REPOSITORY https://github.com/ibireme/yyjson.git
     GIT_TAG 0.12.0
+    SYSTEM
 )
 FetchContent_MakeAvailable(yyjson)
 if (UFORM_BUILD_TEST
@@ -213,8 +219,8 @@ set(UFORM_WITH_INFINIBAND
 set_property(CACHE UFORM_WITH_INFINIBAND PROPERTY STRINGS ON OFF AUTO)
 
 if (UFORM_BUILD_CUDA)
-    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/probe_infiniband.cmake")
-    uform_probe_infiniband(uform_infiniband_enabled_)
+    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/infiniband.cmake")
+    uform_find_infiniband(uform_infiniband_enabled_)
 
     # The loaders' vendor dependencies below are available on every NVIDIA target and are hard-required, discovered
     # through the layered `uform_find_library` search (the RAPIDS / NVIDIA cu13 Python wheels, then system paths). A
@@ -280,8 +286,8 @@ if (UFORM_BUILD_CUDA)
 endif ()
 
 # `ctest` reads the tests from the build root, so testing is enabled here for every subdirectory that adds some: the
-# conformance suites, and the C test beside the C libraries.
-if (UFORM_BUILD_TEST OR UFORM_BUILD_LIB_C)
+# conformance suites, and the C tests beside the C libraries and the stand-in.
+if (UFORM_BUILD_TEST)
     enable_testing()
 endif ()
 
@@ -291,8 +297,9 @@ set_property(GLOBAL APPEND PROPERTY JOB_POOLS uform_cuda_units=3)
 
 # The suites precede `c/`, whose C tests load the checkpoint fixture `test/` writes.
 set(uform_bundled_files_)
+link_libraries($<BUILD_INTERFACE:uform_warnings>)
 add_subdirectory(src)
-if (UFORM_BUILD_TEST AND UFORM_BUILD_LIB_C)
+if (UFORM_BUILD_TEST)
     add_subdirectory(test)
 endif ()
 if (UFORM_BUILD_TOOLS AND UFORM_BUILD_CUDA)
@@ -313,15 +320,60 @@ if (uform_bundled_files_)
         VERBATIM
     )
 endif ()
-if (UFORM_BUILD_LIB_C_STUB AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src_stub/CMakeLists.txt")
+if (UFORM_BUILD_STUB)
     add_subdirectory(src_stub)
 endif ()
-if (UFORM_BUILD_LIB_C AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/c/CMakeLists.txt")
-    add_subdirectory(c)
+add_subdirectory(c)
+# The C library as SwiftPM links it: an XCFramework on Apple platforms and an SE-0482 artifact bundle elsewhere, packed
+# by NumKong's script beside the C headers and a module map over their umbrella. Each build adds its target to the
+# artifact in UFORM_SWIFT_DIRECTORY, so a release fills one artifact from a build per target. With UFORM_BUILD_STUB the
+# artifact packs the stand-in, which the Swift suite runs against.
+if (UFORM_BUILD_SWIFT)
+    set(UFORM_SWIFT_DIRECTORY
+        "${PROJECT_BINARY_DIR}"
+        CACHE PATH "Where the Swift artifact lands"
+    )
+    set(UFORM_SWIFT_SDK
+        ""
+        CACHE STRING "The Apple SDK the archive targets, like `macosx` or `iphonesimulator`"
+    )
+    set(UFORM_SWIFT_TRIPLES
+        "${CMAKE_SYSTEM_PROCESSOR}-unknown-linux-gnu"
+        CACHE STRING "Swift target triples the artifact bundle serves"
+    )
+    if (APPLE)
+        set(uform_swift_target_ -D "NUMKONG_SWIFT_SDK=${UFORM_SWIFT_SDK}" -D
+                                "NUMKONG_SWIFT_ARCHITECTURE=${CMAKE_OSX_ARCHITECTURES}"
+        )
+    else ()
+        set(uform_swift_target_ -D "NUMKONG_SWIFT_TRIPLES=$<JOIN:${UFORM_SWIFT_TRIPLES},,>" -D
+                                "NUMKONG_SWIFT_VERSION=${PROJECT_VERSION}"
+        )
+    endif ()
+    if (UFORM_BUILD_STUB)
+        set(uform_swift_archive_ uform_static_stub)
+    else ()
+        set(uform_swift_archive_ uform_static)
+    endif ()
+    set(uform_swift_headers_ "${PROJECT_BINARY_DIR}/swift_headers")
+    file(WRITE "${uform_swift_headers_}/module.modulemap"
+         "module UFormC {\n    header \"uform/uform.h\"\n    export *\n}\n"
+    )
+    add_custom_target(
+        uform_swift ALL
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory "${PROJECT_SOURCE_DIR}/c/uform" "${uform_swift_headers_}/uform"
+        COMMAND
+            "${CMAKE_COMMAND}" -D NUMKONG_SWIFT_MODULE=UFormC -D
+            "NUMKONG_SWIFT_ARCHIVE=$<TARGET_FILE:${uform_swift_archive_}>" -D
+            "NUMKONG_SWIFT_HEADERS=${uform_swift_headers_}" -D "NUMKONG_SWIFT_DIRECTORY=${UFORM_SWIFT_DIRECTORY}"
+            ${uform_swift_target_} -P "${numkong_SOURCE_DIR}/cmake/numkong_swift_artifact.cmake"
+        DEPENDS ${uform_swift_archive_}
+        VERBATIM
+    )
 endif ()
-if (UFORM_BUILD_LIB_PYTHON AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/python/CMakeLists.txt")
+if (UFORM_BUILD_PYTHON)
     add_subdirectory(python)
 endif ()
-if (UFORM_BUILD_LIB_NODE AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/javascript/CMakeLists.txt")
+if (UFORM_BUILD_NODE)
     add_subdirectory(javascript)
 endif ()

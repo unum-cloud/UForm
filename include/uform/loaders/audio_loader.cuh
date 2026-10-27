@@ -3,14 +3,17 @@
  *  @author Ash Vardanian
  *  @date July 5, 2026
  *  @brief The Parquet audio loader: tied to a @b dataset, not a GPU — the same shape as
- *      @ref tokens_loader_parquet_t and @ref image_loader_parquet_t .
+ *      @ref unum::uform::loaders::tokens_loader_parquet_t and
+ *      @ref unum::uform::loaders::image_loader_parquet_t .
  *
- *  @ref make reads only each shard's Parquet footer once, and every @ref fill takes the caller's stream,
- *  rank, and step, so one loader serves every GPU on every step. Each @ref fill opens @b as many randomly
- *  chosen shards as it takes to pool the clips it needs — at least two unless the dataset is one file —
- *  decodes their blob column into one device reservoir over GDS, draws rows by a keyed bijection over the
+ *  @ref unum::uform::loaders::audio_loader_parquet_t::make reads only each shard's Parquet footer
+ *  once, and every @ref unum::uform::loaders::audio_loader_parquet_t::fill takes the caller's
+ *  stream, rank, and step, so one loader serves every GPU on every step. Each
+ *  @ref unum::uform::loaders::audio_loader_parquet_t::fill opens @b as many randomly chosen shards
+ *  as it takes to pool the clips it needs — at least two unless the dataset is one file — decodes
+ *  their blob column into one device reservoir over GDS, draws rows by a keyed bijection over the
  *  whole pool, and decodes the drawn clips into the batch's @c audio_samples frame grid with
- *  @ref decode_audios .
+ *  @ref unum::uform::loaders::decode_audios .
  *
  *  @section audio_raw The loader delivers raw waveform frames — the spectral frontend is learned
  *
@@ -25,10 +28,11 @@
  *  @section audio_host_hop The host hop, and why
  *
  *  No GPU audio codec exists, so decode is host-side libav — the one place STYLE sanctions a thread pool,
- *  since decoding independent clips is embarrassingly parallel. @ref decode_audios hops the drawn clips'
- *  encoded bytes device-to-pinned (cuDF keeps the reservoir device-resident), fans them across the borrowed
- *  pool to decode + resample to mono Float32 at @c audio_batch_shape_t::sample_rate , and only then climbs
- *  back onto the GPU to stage the frames into the grid.
+ *  since decoding independent clips is embarrassingly parallel.
+ *  @ref unum::uform::loaders::decode_audios hops the drawn clips' encoded bytes device-to-pinned
+ *  (cuDF keeps the reservoir device-resident), fans them across the borrowed pool to decode +
+ *  resample to mono Float32 at @c audio_batch_shape_t::sample_rate , and only then climbs back onto
+ *  the GPU to stage the frames into the grid.
  */
 #pragma once
 
@@ -60,19 +64,20 @@ using namespace unum::uform::encoder;
  *  ( @p segment_offsets / @p segment_lengths ) and @p segment_modality — @c audio_k , 1-D, so no shape
  *  descriptor.
  *
- *  @param[inout] pool The run's CPU-decode worker pool, borrowed for the per-clip libav decode.
+ *  @param[in,out] pool The run's CPU-decode worker pool, borrowed for the per-clip libav decode.
  *  @param[in] tape The pooled clip column with its offsets on host — device bytes, host-indexable via
  *      @c tape[row] .
  *  @param[in] drawn_rows The tape rows to decode, one clip each; each clip emits one segment per representation.
- *  @param[in] representations The flat @ref audio_batch_shape_t representations ( @c chunk_samples , @c sample_rate );
- *      the shape is the single source of geometry. Must be non-empty (the loader defaults it to one).
+ *  @param[in] representations The flat @ref unum::uform::encoder::audio_batch_shape_t
+ *      representations ( @c chunk_samples , @c sample_rate ); the shape is the single source of
+ *      geometry. Must be non-empty (the loader defaults it to one).
  *  @param[out] audio_samples The @b [rows,columns,chunk_samples] frame grid to chunk each clip's waveform into.
  *  @param[out] segment_offsets The @b [max_segments+1] segment START positions (serial cursor, terminal entry).
  *  @param[out] segment_lengths The @b [max_segments] live frame counts (one clip fills @c columns ; PAD 0).
  *  @param[out] segment_modality The @b [max_segments] per-segment tag — @c audio_k live, @c text_k on PAD.
- *  @param[inout] dropped @b [1] the batch's drop count, which every clip overflowing
+ *  @param[in,out] dropped @b [1] the batch's drop count, which every clip overflowing
  *      @p audio_samples adds one to.
- *  @param[inout] stream The stream the staging, the copy, and every kernel enqueue on.
+ *  @param[in,out] stream The stream the staging, the copy, and every kernel enqueue on.
  */
 [[nodiscard]] expected_t decode_audios(pool_view_t pool, column_view_t tape, u64r1_view_t drawn_rows,
                                        std::span<audio_batch_shape_t const> representations,
@@ -92,20 +97,22 @@ struct audio_loader_parquet_config_t {
 
 /**
  *  @brief The loader object: dataset-scoped, rank-agnostic, GPU-accelerated — the audio sibling of
- *      @ref tokens_loader_parquet_t and @ref image_loader_parquet_t .
+ *      @ref unum::uform::loaders::tokens_loader_parquet_t and
+ *      @ref unum::uform::loaders::image_loader_parquet_t .
  *
- *  @warning Holds one dataset's shard footers; keep one per input dataset. @ref fill allocates its scratch on
- *      demand and is safe to call concurrently for different GPU ranks on different streams.
+ *  @warning Holds one dataset's shard footers; keep one per input dataset.
+ *      @ref unum::uform::loaders::audio_loader_parquet_t::fill allocates its scratch on demand and
+ *      is safe to call concurrently for different GPU ranks on different streams.
  */
 struct audio_loader_parquet_t {
 
     /**
      *  @brief Failure-safe exception-free constructor that indexes all the shards' footers (host, once).
-     *  @param[inout] session GPU Direct Storage session for IO.
+     *  @param[in,out] session GPU Direct Storage session for IO.
      *  @param[in] path_or_glob Dataset's Parquet paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
-     *  @param[inout] pool The run's CPU-decode worker pool, owned at the composition root and borrowed here;
-     *      the loader never spawns threads of its own.
+     *  @param[in,out] pool The run's CPU-decode worker pool, owned at the composition root and
+     *      borrowed here; the loader never spawns threads of its own.
      *  @param[in] audio The audio modality's own geometry slice ( @c chunk_samples , @c sample_rate ) — the
      *      single source, and all this loader needs; it never sees the sibling modalities' shapes.
      */
@@ -122,7 +129,7 @@ struct audio_loader_parquet_t {
      *  each clip one sub-row segment of @c columns raw-sample frames — writing the segment geometry and
      *  @c segment_modality .
      *
-     *  @param[inout] gpu_stream The GPU-specific stream the staging, decode, and chunking run on.
+     *  @param[in,out] gpu_stream The GPU-specific stream the staging, decode, and chunking run on.
      *  @param[in] config Which Parquet column holds the clips.
      *  @param[in] gpu_rank Ensures different GPUs draw different rows from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
@@ -151,8 +158,9 @@ struct audio_loader_parquet_t {
      *  rows. Read once per dataset; shared across every GPU the loader serves. */
     st::basic_vector<std::size_t> row_prefix_ {};
 
-    /** The audio modality's geometry ( @c chunk_samples , @c sample_rate ) every @ref fill hands the
-     *  decode — fixed at @ref make . */
+    /** The audio modality's geometry ( @c chunk_samples , @c sample_rate ) every
+     *  @ref unum::uform::loaders::audio_loader_parquet_t::fill hands the decode — fixed at
+     *  @ref unum::uform::loaders::audio_loader_parquet_t::make . */
     audio_batch_shape_t audio_ {};
 };
 

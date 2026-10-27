@@ -2,9 +2,9 @@
  *  @file include/uform/train/datasets.hpp
  *  @author Ash Vardanian
  *  @date October 18, 2026
- *  @brief Real data for a run: @ref mixture_t , the weighted datasets a mixture JSON in
- *      @c scripts/mixtures names, and @ref dataset_source_t , the batch source that loads them
- *      through the loaders and the mixer.
+ *  @brief Real data for a run: @ref unum::uform::train::mixture_t , the weighted datasets a mixture
+ *      JSON in @c scripts/mixtures names, and @ref unum::uform::train::dataset_source_t , the batch
+ *      source that loads them through the loaders and the mixer.
  *
  *  Linked into the @c uform_base binary alone, since the C library links neither the loaders nor
  *  cuDF.
@@ -19,9 +19,9 @@
  *  @c positive_prefix . Each GPU draws one entry by weight per fill and packs its next
  *  @c batches_per_fill batches from it, refilling on its own phase of that period, so the mixer's
  *  world-wide shuffle sees datasets rotate a few GPUs at a time. An entry over Parquet shards may
- *  cap its draws at @c epochs passes over its rows, after which @ref mixture_sampler_t retires it.
- *  Pairs route as bags, so one mixture never mixes them with plain text, whose segments route
- *  alone.
+ *  cap its draws at @c epochs passes over its rows, after which
+ *  @ref unum::uform::train::mixture_sampler_t retires it. Pairs route as bags, so one mixture never
+ *  mixes them with plain text, whose segments route alone.
  *
  *  A choices entry names its columns in a @c choices object: the text @c state an answer follows,
  *  the legal @c choices bytes, their @c targets probabilities, and the @c group of each question,
@@ -82,7 +82,7 @@ struct mixture_entry_t {
      *  or @c "both" queries and the bag's other roles are documents; none without the key. */
     loaders::role_sides_t sides {};
 
-    /** The modality of @ref media , told by its name; @c text_k for a text entry or a text pair. */
+    /** The modality of @c media , told by its name; @c text_k for a text entry or a text pair. */
     modality_t modality = modality_t::text_k;
 };
 
@@ -97,9 +97,10 @@ struct mixture_t {
 
     /**
      *  @brief Parse the mixture JSON at @p path .
-     *  @retval status_t::io_k The file does not open.
-     *  @retval status_t::invalid_argument_k Malformed JSON, an unknown key, a missing field, or a
-     *      media column whose name tells no modality.
+     *
+     *  @par Statuses:
+     *  - @c status_t::invalid_argument_k Malformed JSON, an unknown key, a missing field, or a
+     *    media column whose name tells no modality.
      */
     [[nodiscard]] static expected<mixture_t> read(sz::string_view_t path) noexcept;
 
@@ -133,8 +134,10 @@ struct mixture_sampler_t {
      *  @brief Size the counters for @p entries , borrowed, whose shards hold @p rows rows each,
      *      for @p world_gpus GPUs packing @p batches_per_fill batches of @p segments segments per
      *      fill.
-     *  @retval status_t::invalid_argument_k An entry caps its passes over shards that count no
-     *      rows.
+     *
+     *  @par Statuses:
+     *  - @c status_t::invalid_argument_k An entry caps its passes over shards that count no
+     *    rows.
      */
     [[nodiscard]] static expected<mixture_sampler_t> make(std::span<mixture_entry_t const> entries,
                                                           std::span<std::size_t const> rows, std::size_t world_gpus,
@@ -151,10 +154,10 @@ struct mixture_sampler_t {
     /** Whether @p entry is uncapped or has passes left. */
     [[nodiscard]] bool live_(std::size_t entry) const noexcept;
 
-    /** The entry world GPU @p gpu_index draws at @p epoch over @ref weight_prefix_ . */
+    /** The entry world GPU @p gpu_index draws at @p epoch over @c weight_prefix_ . */
     [[nodiscard]] std::size_t search_(u64_t seed, u32_t epoch, u32_t gpu_index) const noexcept;
 
-    /** Rebuild @ref weight_prefix_ over the live entries after a retirement at @p epoch , or over
+    /** Rebuild @c weight_prefix_ over the live entries after a retirement at @p epoch , or over
      *  the mixture's weights once none is live, noting that through @p report unless null. */
     void reweigh_(u32_t epoch, void (*report)(sz::string_view_t) noexcept) noexcept;
 
@@ -235,7 +238,7 @@ struct dataset_source_t {
     /** Every GPU's @c batches_per_fill filled batches, which one fill packs from one shard read. */
     per_gpu_array<st::basic_vector<multimodal_batch_on_gpu_t>> filled_ {};
 
-    /** Every GPU's batch of this step, swapped in from @ref filled_ for the mixer and out after. */
+    /** Every GPU's batch of this step, swapped in from @c filled_ for the mixer and out after. */
     per_gpu_array<multimodal_batch_on_gpu_t> loaded_ {};
 
     /** Every GPU's phase in the fill period, its world coordinate's share of it, so the GPUs refill

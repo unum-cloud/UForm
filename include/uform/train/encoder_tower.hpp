@@ -2,13 +2,13 @@
  *  @file include/uform/train/encoder_tower.hpp
  *  @author Ash Vardanian
  *  @date July 3, 2026
- *  @brief The encoder tower: everything between a @ref multimodal_batch and the pooled contrastive
+ *  @brief The encoder tower: everything between a @c multimodal_batch and the pooled contrastive
  *      vertices — the per-modality entry (token embedding or image / video / audio patch projection),
  *      the transformer block stack, the final norm, the attention pool, and the projection head.
  *
- *  Two function objects: @ref encoder_tower_bf16_t (training, forward + backward) and its quantized
- *  forward-only twin @ref encoder_tower_e4m3_t , constructed only through
- *  @ref encoder_tower_bf16_t::quantize_weights .
+ *  Two function objects: @c encoder_tower_bf16_t (training, forward + backward) and its quantized
+ *  forward-only twin @c encoder_tower_e4m3_t , constructed only through
+ *  @c encoder_tower_bf16_t::quantize_weights .
  *
  *  The op sequence, one packed batch end to end:
  *
@@ -20,23 +20,24 @@
  *  The tower serves both training objectives, selected by which spans the caller populates — never a
  *  mode flag. A @b contrastive step passes a @b [segments,hidden] @c vertices span: the full sequence
  *  runs and the loss scores the pooled vertices. A @b masked step passes an empty @c vertices span:
- *  the tower stops after the final norm and exposes the per-token states through @ref normalized , which
- *  the masked head reads. @ref backward mirrors this: @c vertices_grad drives the contrastive path,
- *  @c hidden_grad the masked path, and when both are present the masked force is added onto the pooled
- *  force at the final-norm states so a co-trained step carries @c dL_pooled + dL_tokens exactly.
+ *  the tower stops after the final norm and exposes the per-token states through @c normalized ,
+ *  which the masked head reads. @c backward mirrors this: @c vertices_grad drives the contrastive
+ *  path, @c hidden_grad the masked path, and when both are present the masked force is added onto
+ *  the pooled force at the final-norm states so a co-trained step carries @c dL_pooled + dL_tokens
+ *  exactly.
  *
  *  @section tower_entry Per-segment entry over the packed grid
  *
  *  Rows mix modalities and pack several items, so the entry walks the live segments instead of slicing
- *  modality bands: @ref fill_coords writes every cell's @b (t,h,w) in one pass, then the packed
- *  @b [rows·columns,hidden] state is zeroed and built modality by modality. Text segments gather the
- *  embedding table into their cells; each media modality memsets its patch scratch, a segment-driven
- *  kernel normalises only that modality's cells in place (a cell's content lives at the same flat grid
- *  position as its state, so no gather offset is needed — image / video pixels by per-modality mean / std,
- *  audio raw waveform frames as-is), and one NumKong projection @b adds its Float32 product into the widened
- *  state — its zero non-modality rows leave every other cell untouched, so the four writes compose with no
- *  scatter and no atomics. The step processes the full @c max_tokens capacity; PAD and inter-segment gap
- *  cells stay zero.
+ *  modality bands: @ref unum::uform::encoder::fill_coords writes every cell's @b (t,h,w) in one
+ *  pass, then the packed @b [rows·columns,hidden] state is zeroed and built modality by modality.
+ *  Text segments gather the embedding table into their cells; each media modality memsets its patch
+ *  scratch, a segment-driven kernel normalises only that modality's cells in place (a cell's
+ *  content lives at the same flat grid position as its state, so no gather offset is needed — image
+ *  / video pixels by per-modality mean / std, audio raw waveform frames as-is), and one NumKong
+ *  projection @b adds its Float32 product into the widened state — its zero non-modality rows leave
+ *  every other cell untouched, so the four writes compose with no scatter and no atomics. The step
+ *  processes the full @c max_tokens capacity; PAD and inter-segment gap cells stay zero.
  *
  *  @section tower_determinism Determinism, including the embedding scatter
  *
@@ -46,7 +47,7 @@
  *
  *  @section tower_precision The quantized twin's precision split
  *
- *  @ref encoder_tower_e4m3_t runs the block stack in E4M3 (the dominant cost) while the tiny entries,
+ *  @c encoder_tower_e4m3_t runs the block stack in E4M3 (the dominant cost) while the tiny entries,
  *  attention pool, and head stay BFloat16 — the standard mixed-precision inference split, chosen, not
  *  postponed: those tiers are a fraction of a percent of the FLOPs and the head feeds the cosine geometry
  *  directly.
@@ -82,7 +83,7 @@ struct encoder_tower_config_t {
     /** Transformer blocks stacked. */
     u32_t depth = 1;
 
-    /** The block geometry every layer shares (fed from the batch shape at @ref make ). */
+    /** The block geometry every layer shares (fed from the batch shape at @c make ). */
     transformer_block_config_t block {};
 
     /** Image patch extents in pixels; either 0 ⇒ no image entry. */
@@ -151,7 +152,7 @@ struct tower_pool_t {
      *  @param[in] segment_offsets @b [segments+1] flat segment starts.
      *  @param[in] segment_lengths @b [segments] live token counts, zero for PAD, which pools to zeros.
      *  @param[out] pooled @b [segments,hidden] the pooled rows.
-     *  @param[inout] stream The stream every launch enqueues on.
+     *  @param[in,out] stream The stream every launch enqueues on.
      */
     [[nodiscard]] expected_t forward(bf16r1_view_t query, bf16r2_view_t states, u32r1_view_t segment_offsets,
                                      u32r1_view_t segment_lengths, bf16r2_span_t pooled, gpu_stream_t &stream) noexcept;
@@ -165,7 +166,7 @@ struct tower_pool_t {
      *  @param[out] key_grad @b [tokens,hidden] the Float32 gradient of the states, zero on rows no segment covers.
      *  @param[out] value_grad @b [tokens,hidden] Float32 scratch, overwritten.
      *  @param[out] query_grad @b [hidden] the gradient of @p query .
-     *  @param[inout] stream The stream every launch enqueues on.
+     *  @param[in,out] stream The stream every launch enqueues on.
      */
     [[nodiscard]] expected_t backward(bf16r1_view_t query, bf16r2_view_t pooled_grad, f32r2_span_t key_grad,
                                       f32r2_span_t value_grad, bf16r1_span_t query_grad, gpu_stream_t &stream) noexcept;
@@ -213,7 +214,7 @@ struct tower_token_head_t {
      *      spans, gather, normalize, project and L2-normalize into @ref token_vectors .
      *  @param[in] states @b [tokens,hidden] the final-norm states.
      *  @param[in] batch The step's segment geometry, sides and prefix lengths.
-     *  @param[inout] stream The stream every launch enqueues on.
+     *  @param[in,out] stream The stream every launch enqueues on.
      */
     [[nodiscard]] expected_t forward(bf16r2_view_t states, multimodal_batch_view_t const &batch,
                                      gpu_stream_t &stream) noexcept;
@@ -224,11 +225,11 @@ struct tower_token_head_t {
      *  @param[in] vectors_grad @b [tokens,width] the gradient of @ref token_vectors , zero past the
      *      live rows.
      *  @param[in] batch The geometry the forward read.
-     *  @param[inout] states_grad @b [tokens,hidden] the Float32 gradient of the final-norm states,
+     *  @param[in,out] states_grad @b [tokens,hidden] the Float32 gradient of the final-norm states,
      *      added onto.
-     *  @param[inout] scratch The tower's shared transients, borrowed for the weight-gradient
+     *  @param[in,out] scratch The tower's shared transients, borrowed for the weight-gradient
      *      products.
-     *  @param[inout] stream The stream every launch enqueues on.
+     *  @param[in,out] stream The stream every launch enqueues on.
      */
     [[nodiscard]] expected_t backward(bf16r2_view_t vectors_grad, multimodal_batch_view_t const &batch,
                                       f32r2_span_t states_grad, transformer_scratch_t &scratch,
@@ -291,7 +292,8 @@ struct tower_token_head_t {
 };
 
 /** The training tower: entry + block stack + final norm + attention pool + head, every weight,
- *  gradient, stash, and pack owned — @ref forward stashes, @ref backward consumes, both pure enqueues. */
+ *  gradient, stash, and pack owned — @ref forward stashes, @c backward consumes, both pure
+ *  enqueues. */
 struct encoder_tower_bf16_t {
 
     /** Allocate and plan the whole tower off @p arena — token / media entries, @c depth blocks,
@@ -304,7 +306,7 @@ struct encoder_tower_bf16_t {
     /** One tower forward over @p batch — pure enqueue; every stash the backward reads is written
      *  along the way, including the per-token rotary @b (t,h,w) coordinates @ref coords_ derives fresh
      *  from @p batch 's own geometry. Empty @p vertices ⇒ masked path (stops after the final norm;
-     *  @ref normalized exposed). @b [segments,hidden] @p vertices ⇒ contrastive path (attention pool
+     *  @c normalized exposed). @b [segments,hidden] @p vertices ⇒ contrastive path (attention pool
      *  → head). */
     [[nodiscard]] expected_t forward(multimodal_batch_on_gpu_t const &batch, bf16r2_span_t vertices,
                                      gpu_stream_t &stream) noexcept;
@@ -436,7 +438,7 @@ struct encoder_tower_bf16_t {
 
     /** This step's owned per-token @b [tokens,3] rotary @b (t,h,w) coordinates — derived fresh
      *  every @ref forward from @c batch 's own geometry, resized to the live extent, and reused by
-     *  the paired @ref backward (the caller must not run another forward in between). */
+     *  the paired @c backward (the caller must not run another forward in between). */
     i16r2_tensor_arena_t coords_ {};
 
     /** Forward stashes the backward reads, all @b [rows,hidden] : the entry output, the per-token
@@ -475,7 +477,7 @@ struct encoder_tower_bf16_t {
 };
 
 /** The quantized forward-only inference twin: an E4M3 block stack with BFloat16 entries, attention
- *  pool, and head. Constructed only through @ref encoder_tower_bf16_t::quantize_weights . */
+ *  pool, and head. Constructed only through @c encoder_tower_bf16_t::quantize_weights . */
 struct encoder_tower_e4m3_t {
 
     /** One quantized tower forward over @p batch — same dual-mode contract as the training twin,

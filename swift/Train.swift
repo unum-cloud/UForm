@@ -1,11 +1,11 @@
-//
-//  Train.swift
-//  UForm
-//
-//  Training steps, mirroring `c/uform/train.h`: the mesh joining a run's processes, the trainer owning its
-//  replicas and optimizer, and the closed sets that configure them. Training is GPU-only, so every constructor
-//  here takes a VRAM executor.
-//
+/**
+ *  @file swift/Train.swift
+ *  @author Ash Vardanian
+ *  @date October 18, 2026
+ *  @brief Training steps, mirroring `c/uform/train.h`: the mesh joining a run's processes, the trainer owning its
+ *      replicas and optimizer, and the closed sets that configure them. Training is GPU-only, so every constructor
+ *      here takes a VRAM executor.
+ */
 
 import UFormC
 

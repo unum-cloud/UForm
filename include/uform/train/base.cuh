@@ -2,9 +2,9 @@
  *  @file include/uform/train/base.cuh
  *  @author Ash Vardanian
  *  @date July 6, 2026
- *  @brief The Base pre-training library: one @ref trainer_config_t run description and one
- *      @ref base_replica_t model copy per GPU, composed by @c trainer_t in
- *      @c include/uform/train/trainer.hpp .
+ *  @brief The Base pre-training library: one @ref unum::uform::train::trainer_config_t run
+ *      description and one @ref unum::uform::train::base_replica_t model copy per GPU, composed by
+ *      @c trainer_t in @c include/uform/train/trainer.hpp .
  *
  *  Declared here, defined in @c src/train/base.cu , and consumed by the composition in @c src/train/trainer.cu ,
  *  which the training binary ( @c tools/base.cu ), the conformance test ( @c test/base.cu ) and the C verbs
@@ -13,12 +13,13 @@
  *  @section base_mixture Modality mixtures, not per-modality caps
  *
  *  Every batch is a modality mixture: any number of token / image / video / audio rows, constrained only by the
- *  aggregate row and segment budgets @ref multimodal_batch_shape_t carries — the same envelope the loaders fill
- *  and @c multimodal_batch_mixer_t shuffles in real training. A modality participates iff its nested shape slice
- *  is live (a nonzero @c patch_side / @c chunk_samples ), so presence is read off the shape everywhere. The
- *  synthetic corpus draws a keyed per-step partition of the row budget across the live modalities and orders the
- *  rows tokens → image → video → audio (the @ref modality_t order), each row modality-uniform with one segment,
- *  so projections tile contiguous row runs.
+ *  aggregate row and segment budgets @ref unum::uform::train::multimodal_batch_shape_t carries —
+ *  the same envelope the loaders fill and @c multimodal_batch_mixer_t shuffles in real training. A
+ *  modality participates iff its nested shape slice is live (a nonzero @c patch_side /
+ *  @c chunk_samples ), so presence is read off the shape everywhere. The synthetic corpus draws a
+ *  keyed per-step partition of the row budget across the live modalities and orders the rows tokens
+ *  → image → video → audio (the @ref unum::uform::train::modality_t order), each row
+ *  modality-uniform with one segment, so projections tile contiguous row runs.
  *
  *  @section base_regions The step's regions
  *
@@ -220,7 +221,7 @@ struct trainer_config_t {
     /** The run's base seed; the masking recipe and every synthetic draw key derive from it. */
     u64_t seed = 42;
 
-    /** The run's model-region mode — @ref replayed_k in production, @ref eager_k under @c --eager ; the
+    /** The run's model-region mode — @c replayed_k in production, @c eager_k under @c --eager ; the
      *  parity test drives both over identical seeds. */
     capture_t capture = replayed_k;
 
@@ -275,8 +276,10 @@ struct trainer_config_t {
      *  @c --mixture takes a @c .json path, or the synthetic @c tokens|omni preset, where omni fills
      *  the media slices of @ref batch with 8-pixel RGB image patches, 2-frame video tubes and
      *  256-sample audio frames.
-     *  @retval status_t::invalid_argument_k An unknown flag, a flag without its value, or a value
-     *      it does not take.
+     *
+     *  @par Statuses:
+     *  - @c status_t::invalid_argument_k An unknown flag, a flag without its value, or a value
+     *    it does not take.
      */
     [[nodiscard]] static expected<trainer_config_t> parse(int argc, char **argv) noexcept;
 
@@ -428,7 +431,8 @@ struct base_replica_t {
 
   private:
 
-    /** The four summand pairs in @ref modality_t order, then the choices', absent ones empty. */
+    /** The four summand pairs in @ref unum::uform::train::modality_t order, then the choices',
+     *  absent ones empty. */
     [[nodiscard]] std::array<f32r1_tensor_arena_t *, 5> summand_pairs_() noexcept {
         return {&tokens_summands, &image_summands, &video_summands, &audio_summands, &choices_summands};
     }
@@ -451,9 +455,11 @@ struct base_replica_t {
  *      drains before the checkpoint is released.
  *
  *  A @c masked_tokens decoder or a @c token_head.* matrix the checkpoint misses is re-seeded as
- *  @ref seed_weights seeds it, so a run adds the head its base never trained.
- *  @retval status_t::invalid_argument_k A matrix the checkpoint misses.
- *  @retval status_t::unsupported_k A matrix of another shape.
+ *  @ref unum::uform::train::seed_weights seeds it, so a run adds the head its base never trained.
+ *
+ *  @par Statuses:
+ *  - @c status_t::invalid_argument_k A matrix the checkpoint misses.
+ *  - @c status_t::unsupported_k A matrix of another shape.
  */
 [[nodiscard]] expected_t load_weights(checkpoint_to_load_t const &checkpoint,
                                       st::basic_vector<differentiable_weights_t> const &weights,

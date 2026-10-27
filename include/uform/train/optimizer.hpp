@@ -6,8 +6,8 @@
  *      moments (one row and one column vector per matrix instead of a full moment), RMS-clipped
  *      updates, and an optional bias-corrected first moment of the clipped update.
  *
- *  The sibling @ref distributed_adafactor_t reduces the gradients over the same two-level mesh transports
- *  the loss uses and keeps every rank's weight replica bitwise identical.
+ *  The sibling @ref unum::uform::train::distributed_adafactor_t reduces the gradients over the same
+ *  two-level mesh transports the loss uses and keeps every rank's weight replica bitwise identical.
  *
  *  Per weight matrix @c W[rows,cols] with gradient @c G at step @c t counted from one:
  *
@@ -137,13 +137,15 @@ struct adafactor_t {
      *      which the caller loads first. The step count continues from the checkpoint's step.
      *
      *  The caller drains @p stream before releasing @p checkpoint .
-     *  @retval status_t::unsupported_k A saved state of another shape.
+     *
+     *  @par Statuses:
+     *  - @c status_t::unsupported_k A saved state of another shape.
      */
     [[nodiscard]] expected_t load(checkpoint_to_load_t const &checkpoint, gpu_stream_t &stream) noexcept;
 
   private:
 
-    /** The distributed sibling reads @ref gradient_scalars over the shared states. */
+    /** The distributed sibling reads @c gradient_scalars over the shared states. */
     friend struct distributed_adafactor_t;
 
     /** Total gradient scalars across the states — the distributed reduce's surface size, summed
@@ -219,12 +221,20 @@ struct distributed_adafactor_t {
      *  the buffer is wired once at the composition root and borrowed here, exactly like the domain —
      *  so many optimizers (the conformance suite's case matrix) share one set of queue pairs.
      *
-     *  @param[inout] domain The main-owned level-1 surface; one gradient window is reserved from it.
-     *  @param[inout] world_reduce The main-owned cross-domain all-reduce buffer wired on member 0 — a zero-round
-     *      identity in single-domain worlds, unwired in processes not holding member 0. On the gateway its payload
-     *      must span at least this optimizer's gradient scalars; the unread tail beyond them is harmless.
+     *  @param[in,out] domain The main-owned level-1 surface; one gradient window is reserved from
+     *      it.
+     *  @param[in,out] world_reduce The main-owned cross-domain all-reduce buffer wired on
+     *      member 0 — a zero-round identity in single-domain worlds, unwired in processes not
+     *      holding member 0. On the gateway its payload must span at least this optimizer's
+     *      gradient scalars; the unread tail beyond them is harmless.
+     *  @param[in] arenas One per rank this process drives, which the rank's optimizer state is
+     *      allocated from.
      *  @param[in] weights Rank-major @b [ranks·weights_per_rank] weights table.
+     *  @param[in] weights_per_rank How many weights each rank's tower holds.
+     *  @param[in] config The Adafactor hyperparameters every rank shares.
      *  @param[in] numerics The NumKong kernels every rank's casts call.
+     *  @param[in] streams Each local rank's stream.
+     *  @param[in,out] ledger The run's telemetry ledger, borrowed.
      */
     [[nodiscard]] static expected<distributed_adafactor_t> make(
         multimem_domain_t &domain, infiniband_all_reduce<f32_t> &world_reduce, std::span<gpu_arena_t> arenas,
@@ -273,11 +283,11 @@ struct distributed_adafactor_t {
     /** This consumer's disjoint gradient window of the domain payload, reserved at @ref make . */
     multimem_window_t window_ {};
 
-    /** The main-owned cross-domain all-reduce buffer — borrowed, like @ref domain_ ; its typed
+    /** The main-owned cross-domain all-reduce buffer — borrowed, like @c domain_ ; its typed
      *  payload is the world gradient, and its @c identity() marks single-domain worlds. */
     infiniband_all_reduce<f32_t> *world_reduce_ = nullptr;
 
-    /** The run's telemetry ledger — borrowed, like @ref domain_ ; the per-rank probes above feed
+    /** The run's telemetry ledger — borrowed, like @c domain_ ; the per-rank probes above feed
      *  it at the gradient boundaries, inert whenever the signals channel is dark. */
     telemetry_ledger_t *ledger_ = nullptr;
 };
@@ -312,7 +322,9 @@ struct adafactor_temperatures_t {
     /**
      *  @brief Upload the second moment @p checkpoint holds on @p stream ; a file without one
      *      restarts it at zero.
-     *  @retval status_t::unsupported_k A saved moment of another group count.
+     *
+     *  @par Statuses:
+     *  - @c status_t::unsupported_k A saved moment of another group count.
      */
     [[nodiscard]] expected_t load(checkpoint_to_load_t const &checkpoint, gpu_stream_t &stream) noexcept;
 
@@ -322,7 +334,7 @@ struct adafactor_temperatures_t {
     /** @b [2·groups] second moments, the log-β ones first. */
     f32r1_tensor_arena_t moments_ {};
 
-    /** The checkpoint key of @ref moments_ , the loss's prefix then @c .temperature_moments . */
+    /** The checkpoint key of @c moments_ , the loss's prefix then @c .temperature_moments . */
     sz::string_t key_ {};
 };
 

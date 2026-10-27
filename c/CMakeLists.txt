@@ -7,7 +7,11 @@
 # referenced, which is the entire C interface. For the same reason the archive carries its dependencies' objects, so
 # no consumer hunts yyjson, NumKong or StringZilla archives out of the dependency tree to link one of ours.
 include(GNUInstallDirs)
-add_library(uform_shared SHARED)
+# Without `UFORM_BUILD_SHARED`, the libraries build only for the targets that link them
+if (NOT UFORM_BUILD_SHARED)
+    set(uform_library_exclusion_ EXCLUDE_FROM_ALL)
+endif ()
+add_library(uform_shared SHARED ${uform_library_exclusion_})
 add_library(uform::shared ALIAS uform_shared)
 # The encoder's variants follow `uform_host`, so the baseline's copy of an inline function they share comes first.
 target_link_libraries(uform_shared PRIVATE uform_host ${uform_encoder_variants_})
@@ -21,8 +25,13 @@ foreach (library_ IN LISTS uform_encoder_variants_)
 endforeach ()
 add_library(
     uform_static STATIC
-    $<TARGET_OBJECTS:uform_host> ${uform_variant_objects_} $<TARGET_OBJECTS:yyjson> $<TARGET_OBJECTS:numkong_static>
-    $<TARGET_OBJECTS:stringzilla_static> $<TARGET_OBJECTS:forkunion_static>
+    ${uform_library_exclusion_}
+    $<TARGET_OBJECTS:uform_host>
+    ${uform_variant_objects_}
+    $<TARGET_OBJECTS:yyjson>
+    $<TARGET_OBJECTS:numkong_static>
+    $<TARGET_OBJECTS:stringzilla_static>
+    $<TARGET_OBJECTS:forkunion_static>
 )
 add_library(uform::static ALIAS uform_static)
 add_library(uform_header INTERFACE)
@@ -89,7 +98,7 @@ set_target_properties(
 )
 
 # The test is C, so it reaches the C++ runtime and the host's thread library through the archive's link language.
-if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/test.c")
+if (UFORM_BUILD_TEST)
     add_executable(uform_test_c test.c)
     target_link_libraries(uform_test_c PRIVATE uform_static forkunion::header)
     set_target_properties(uform_test_c PROPERTIES LINKER_LANGUAGE CXX)
@@ -115,7 +124,7 @@ if (TARGET uform_encoder_vram_nvidia_variants AND TARGET uform_tiny_checkpoint)
 endif ()
 
 # Both libraries install with a CMake package: `find_package(uform)` names them `uform::static` and `uform::shared`.
-if (UFORM_INSTALL)
+if (UFORM_INSTALL AND UFORM_BUILD_SHARED)
     include(CMakePackageConfigHelpers)
     set(uform_config_install_dir_ "${CMAKE_INSTALL_LIBDIR}/cmake/uform")
     install(

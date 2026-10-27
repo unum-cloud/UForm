@@ -27,14 +27,14 @@ The prerequisites are listed at the top of `CMakeLists.txt`.
 Every preset in `CMakePresets.json` builds into `build_<preset>`, with Clang compiling the host code and hosting `nvcc`:
 
 ```sh
-cmake --preset cpu_library -D UFORM_BUILD_TEST=ON   # the C library for the host, and its suites
-cmake --build --preset cpu_library
-ctest --test-dir build_cpu_library
+cmake --preset library -D UFORM_BUILD_TEST=ON   # the C library for the host, and its suites
+cmake --build --preset library
+ctest --test-dir build_library
 ```
 
-- `cpu_library` builds the engine for the host alone, and `stub_library` the stand-in in `src_stub/`.
-- `nvidia_amd_library` adds both GPU residencies, while `debug`, `check`, `relwithdebinfo` and `release` also build the trainer and its suites.
-- `wasm32_emscripten_release` and `wasm32_wasi_release` build for WebAssembly, with Node or Wasmtime running the tests.
+- `library` builds the engine for the host alone, and `stub_library` the stand-in in `src_stub/`.
+- `cuda_rocm_library` adds both GPU residencies, while `debug`, `check`, `relwithdebinfo` and `release` also build the trainer and its suites, `check` with warnings as errors.
+- `wasm32_emscripten` and `wasm32_wasi` build for WebAssembly, with Node or Wasmtime running the tests.
 - `-D UFORM_BUILD_BENCH=ON` adds the benchmarks [`bench/README.md`](bench/README.md) describes.
 
 Configuring CMake also arms the hooks in `.githooks/`; to arm them without a build, run `git config core.hooksPath .githooks`.
@@ -169,7 +169,8 @@ Engines receive these as template parameters and never spell a class, an instruc
 - Declarations are documented with `/** */`, never with a bare `//` line above them, and every docblock has an empty line above it.
 - A block with no tag is prose that opens on the `/**` line and closes on its last; a block with a tag gets `/**` and `*/` lines of its own.
 - A `@brief` separates a summary from what follows, so a block with nothing after the summary carries no tag, and a summary runs three lines at most.
-- Every `@param` states its direction: `@param[in]`, `@param[out]` or `@param[inout]`.
+- Every `@param` states its direction: `@param[in]`, `@param[out]` or `@param[in,out]`.
+- A closing `@par Statuses:` block lists only the statuses a verb's contract adds, while resource failures, cancellation, deferral and defects are covered once by the categories in the `uform_status_t` docblock.
 - Docblocks mark code with `@c`, `@p`, `@b` and `@ref`, never Markdown emphasis, and a `//` comment names code in backticks, never through a Doxygen command.
 - Comment prose stops at 100 columns while code runs to 120, and a paragraph is refilled when an edit leaves room on a line.
 - Comments state what the code cannot, never narrate history, and never justify a design by another project's.
@@ -222,7 +223,7 @@ CTest labels sort the suites by what they need: `host` runs anywhere, `cuda` wan
 `uform_tiny_checkpoint` writes `tiny.safetensors` into the build tree once per run, the fixture `uform_test_inference` and the C tests `uform_test_c` and `uform_test_vram` load.
 
 ```sh
-ctest --test-dir build_cpu_library -L host
+ctest --test-dir build_library -L host
 UFORM_SEED=random ctest --test-dir build_release -L cuda --output-on-failure
 ```
 
@@ -231,17 +232,18 @@ The benchmarks in `bench/` share `bench/harness.hpp`: `uform_bench_encoder` buil
 
 ## Flags and Constants
 
-Every CMake option carries the `UFORM_` prefix:
+Every CMake option carries the `UFORM_` prefix, and every `UFORM_BUILD_*` switch is off by default, so a build names only what it wants:
 
-- `UFORM_BUILD_LIB_C`: `uform_static` and `uform_shared`, on in a top-level build.
-- `UFORM_BUILD_LIB_C_STUB`: `uform_static_stub` and `uform_shared_stub` from `src_stub/`, off by default.
-- `UFORM_BUILD_CUDA`: the NVIDIA residency, the trainer, the mesh and the loaders, off by default.
-- `UFORM_BUILD_ROCM`: the AMD residency, off by default.
-- `UFORM_BUILD_TEST`: the suites in `test/`, on in a top-level build.
-- `UFORM_BUILD_TOOLS`: the trainer in `tools/`, on in a top-level build that also builds CUDA.
-- `UFORM_BUILD_BENCH`: the benchmarks in `bench/`, off by default.
-- `UFORM_BUILD_LIB_PYTHON` and `UFORM_BUILD_LIB_NODE`: the CPython extension and the Node addon, which scikit-build-core and cmake-js set.
-- `UFORM_INSTALL`: the C headers, `uform_static`, `uform_shared` and a CMake package under `lib/cmake/uform`, which `find_package(uform)` reads as `uform::static`, `uform::shared` and `uform::header`, on in a top-level build.
+- `UFORM_BUILD_SHARED`: `uform_static` and `uform_shared` in the default build and the install; without it they build only for the targets that link them.
+- `UFORM_BUILD_STUB`: `uform_static_stub` and `uform_shared_stub` from `src_stub/`, which the bindings then link instead.
+- `UFORM_BUILD_CUDA`: the NVIDIA residency, the trainer, the mesh and the loaders.
+- `UFORM_BUILD_ROCM`: the AMD residency.
+- `UFORM_BUILD_TEST`: the suites in `test/` and the C tests.
+- `UFORM_BUILD_TOOLS`: the trainer in `tools/`, with CUDA.
+- `UFORM_BUILD_BENCH`: the benchmarks in `bench/`.
+- `UFORM_BUILD_PYTHON` and `UFORM_BUILD_NODE`: the CPython extension and the Node addon, which scikit-build-core and cmake-js set.
+- `UFORM_WERROR`: warnings as errors, which the `check` preset sets.
+- `UFORM_INSTALL`: with `UFORM_BUILD_SHARED`, the C headers, `uform_static`, `uform_shared` and a CMake package under `lib/cmake/uform`, which `find_package(uform)` reads as `uform::static`, `uform::shared` and `uform::header`, on in a top-level build.
 - `UFORM_WITH_INFINIBAND`: `AUTO` probes for InfiniBand and enables it when present, `ON` requires it and `OFF` leaves it out.
 - `UFORM_CUDA_ARCHITECTURES`: the GPU codes every CUDA unit compiles for, `80-real;89-real;90a-real;100f-real;120f-real` by default.
 - `UFORM_SITE_PACKAGES` and `UFORM_CUDF_ROOT`: the directory the libcudf wheel discovery searches, or the prefix holding the libraries themselves.
@@ -269,11 +271,11 @@ Each binding links either the engine or the stand-in, and its suite loads the ti
 The CI runs them the same way:
 
 ```sh
-pip install --group test . && UFORM_TEST_CHECKPOINT=build_cpu_library/tiny.safetensors pytest -x test/python
+pip install --group test . && UFORM_TEST_CHECKPOINT=build_library/tiny.safetensors pytest -x test/python
 cargo test --features stub
 npm install --ignore-scripts && npm run build-native-stub && npm run build-js && npm test
-cmake --preset stub_library && cmake --build --preset stub_library --target uform_static_stub
-swift test -Xlinker -Lbuild_stub_library/stub
+cmake --preset swift -D UFORM_BUILD_STUB=ON && cmake --build --preset swift
+UFORM_SWIFT_ARTIFACT=build_swift/UFormC.artifactbundle swift test
 ```
 
 `npm run build-wasm` adds the WebAssembly module, whose tests then run in the same `npm test`.
@@ -319,9 +321,9 @@ Enums cross through the C `_name` and `_from_name` functions rather than tables 
 
 Each binding reaches the C ABI through a CMake build and compiles nothing of `src/` itself:
 
-- `python/`: `pyproject.toml` builds the CPython extension through scikit-build-core, which sets `UFORM_BUILD_LIB_PYTHON`.
+- `python/`: `pyproject.toml` builds the CPython extension through scikit-build-core, which sets `UFORM_BUILD_PYTHON`.
 - `rust/`: `build.rs` configures CMake with the switches its enabled features name, and links what that build produced.
-- `javascript/`: cmake-js builds the Node-API addon under `UFORM_BUILD_LIB_NODE`, and `npm run build-wasm` the WebAssembly module.
-- `swift/`: SwiftPM compiles only the headers, through `swift/shim.c`, and links the `uform_static` archive a CMake build produced.
+- `javascript/`: cmake-js builds the Node-API addon under `UFORM_BUILD_NODE`, and `npm run build-wasm` the WebAssembly module.
+- `swift/`: SwiftPM compiles no C, and links the `uform_static` archive the `swift` preset packs as an XCFramework or an artifact bundle.
 
 The Design sections of [`python/README.md`](python/README.md), [`rust/README.md`](rust/README.md), [`javascript/README.md`](javascript/README.md) and [`swift/README.md`](swift/README.md) spell these rules out in each language.

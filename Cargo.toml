@@ -18,6 +18,7 @@ license = "Apache-2.0"
 name = "uform"
 publish = false
 repository = "https://github.com/unum-cloud/UForm"
+documentation = "https://docs.rs/uform"
 version = "4.0.0-rc.1"
 
 [lib]

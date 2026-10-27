@@ -5,12 +5,13 @@
  *  @brief The Parquet choices loader: a text state, the single-byte labels legal after it, and each
  *      label's target probability, read from the same rows, one choice segment per row.
  *
- *  Tied to a @b dataset like the paired loader: @ref make reads only the shard footers, and every
- *  @ref fill takes the caller's stream, rank and step. A fill opens at least two shards unless the
- *  dataset is one file, decodes the state, choices and targets columns of the same rows into one
- *  reservoir, lands the choices and targets on the host, and draws rows by a keyed bijection over
- *  the pool, passing over a row with no choice, more choices than a segment holds, a byte offered
- *  twice, or targets of another count.
+ *  Tied to a @b dataset like the paired loader:
+ *  @ref unum::uform::loaders::choices_loader_parquet_t::make reads only the shard footers, and
+ *  every @ref unum::uform::loaders::choices_loader_parquet_t::fill takes the caller's stream, rank
+ *  and step. A fill opens at least two shards unless the dataset is one file, decodes the state,
+ *  choices and targets columns of the same rows into one reservoir, lands the choices and targets
+ *  on the host, and draws rows by a keyed bijection over the pool, passing over a row with no
+ *  choice, more choices than a segment holds, a byte offered twice, or targets of another count.
  *
  *  @section choices_layout One segment per choice
  *
@@ -57,18 +58,21 @@ struct choices_loader_parquet_config_t {
 /**
  *  @brief The loader object: dataset-scoped and rank-agnostic.
  *
- *  @warning Holds one dataset's shard footers; keep one per input dataset. @ref fill draws into the
- *      loader's own pick storage, so one GPU rank fills at a time.
+ *  @warning Holds one dataset's shard footers; keep one per input dataset.
+ *      @ref unum::uform::loaders::choices_loader_parquet_t::fill draws into the loader's own pick
+ *      storage, so one GPU rank fills at a time.
  */
 struct choices_loader_parquet_t {
 
     /**
      *  @brief Index the shards' footers.
-     *  @param[inout] session GPU Direct Storage session for IO.
+     *  @param[in,out] session GPU Direct Storage session for IO.
      *  @param[in] path_or_glob Dataset's Parquet paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
      *  @param[in] config The state, choices and targets columns.
-     *  @retval status_t::invalid_argument_k A shard is empty, or no row holds all three columns.
+     *
+     *  @par Statuses:
+     *  - @c status_t::invalid_argument_k A shard is empty, or no row holds all three columns.
      */
     [[nodiscard]] static expected<choices_loader_parquet_t> make(gpu_direct_storage_session_t &session,
                                                                  sz::string_view_t path_or_glob, u64_t seed,
@@ -76,13 +80,15 @@ struct choices_loader_parquet_t {
 
     /**
      *  @brief Fill @p batches with choice segments on one GPU rank.
-     *  @param[inout] gpu_stream The stream the decode and the packing run on.
+     *  @param[in,out] gpu_stream The stream the decode and the packing run on.
      *  @param[in] gpu_rank Ensures different GPUs draw different rows from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
      *  @param[out] batches The batches whose segment table, tokens, choices and targets get
      *      populated.
-     *  @retval status_t::unsupported_k The batches carry no choice columns, or the pool holds
-     *      no well-formed row.
+     *
+     *  @par Statuses:
+     *  - @c status_t::unsupported_k The batches carry no choice columns, or the pool holds
+     *    no well-formed row.
      */
     [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, u32_t gpu_rank, u32_t training_step,
                                   std::span<multimodal_batch_on_gpu_t> batches) noexcept;

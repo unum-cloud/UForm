@@ -31,7 +31,7 @@
  *  accumulation, the cosine self-coefficient folds, the finalise, and the casts. Determinism holds
  *  through the products: NumKong has no split-K, so every run and every replay sums in the same
  *  order; the packs and transposes are owned arena tensors, so no allocation hides inside a call —
- *  the capture guard of @ref gpu_replay_graph_t::make would name it if it did.
+ *  the capture guard of @c gpu_replay_graph_t::make would name it if it did.
  *
  *  @section gpu_subgraphs The force grid as a per-GPU subgraph loop
  *
@@ -49,20 +49,20 @@
  *
  *  @section labels Edges come from the relation graph
  *
- *  Every pair's target and weight resolve through @ref contrastive_pair_relation against the
- *  @ref contrastive_relations_view_t taken by value at launch: PAD > ignore > self > key > attract
- *  > repel > ambient repulsion, with the self-edge default when no explicit edges or keys are
- *  staged.
+ *  Every pair's target and weight resolve through @c contrastive_pair_relation against the
+ *  @ref unum::uform::train::contrastive_relations_view_t taken by value at launch: PAD > ignore >
+ *  self > key > attract > repel > ambient repulsion, with the self-edge default when no explicit
+ *  edges or keys are staged.
  *
  *  @section balanced Score, loss and force passes
  *
  *  A call scores every subgraph into a @b [prefixes,subgraphs,rows,neighbors] stash of scaled
- *  cosines, hands the whole rows to @ref contrastive_pair_loss_t , which rewrites them into logit
+ *  cosines, hands the whole rows to @c contrastive_pair_loss_t , which rewrites them into logit
  *  gradients, and then turns each subgraph's gradients into forces. Under the balanced form,
  *  attractive and repulsive contributions are normalised @b separately by their own per-vertex
  *  weight totals @c Σw⁺(i) / @c Σw⁻(i) and averaged over the @b live global vertex count, PAD
  *  excluded: @c loss = Σ_i (pos_i/Σw⁺(i) + neg_i/Σw⁻(i)) / live_vertices_per_mesh . The ranked form
- *  couples each row's positives with its negatives instead, as @ref contrastive_pair_loss_t states.
+ *  couples each row's positives with its negatives instead, as @c contrastive_pair_loss_t states.
  *
  *  @section distributed Distributed contract — rank-local object, collectives at the boundaries
  *
@@ -70,8 +70,8 @@
  *  summand (one all-reduce-sum yields the global mean), @c from_vertices_grad is the full force on the
  *  rank-owned vertices, and each subgraph's @c to_vertices_grad is this rank's Float32 force contribution
  *  to that subgraph's vertices (reduce-scatter-summed across ranks by the caller —
- *  @ref infiniband_all_reduce across domains — then cast). Ordering is the caller's; no
- *  rank writes memory another rank reads during the loss.
+ *  @ref unum::uform::utilities::infiniband_all_reduce across domains — then cast). Ordering is the
+ *  caller's; no rank writes memory another rank reads during the loss.
  *
  *  @section traffic What the distributed case actually moves
  *
@@ -90,10 +90,11 @@
  *
  *  @section ownership Owned scratch, baked shapes
  *
- *  @ref contrastive_segments_t owns every scratch tensor (arena-backed NumKong tensors, like
- *  @ref contrastive_relations_t owns its columns) and every product's packing buffer. Construction is the
- *  validation and the sizing; a call is a pure enqueue. A different shape is a different object — exactly the
- *  capture contract of @ref multimodal_batch_shape_t .
+ *  @c contrastive_segments_t owns every scratch tensor (arena-backed NumKong tensors, like
+ *  @ref unum::uform::train::contrastive_relations_t owns its columns) and every product's packing
+ *  buffer. Construction is the validation and the sizing; a call is a pure enqueue. A different
+ *  shape is a different object — exactly the capture contract of
+ *  @ref unum::uform::train::multimodal_batch_shape_t .
  */
 #pragma once
 
@@ -276,7 +277,7 @@ struct contrastive_pair_loss_t {
      *  @brief Rewrite @p logits from scaled scores into @c d(loss)/d(logit) and write the loss and
      *      the temperature summands, enqueue-only and capture-safe.
      *
-     *  @param[inout] logits @b [prefixes,subgraphs,rows,per_subgraph] Float32: @c β·score without
+     *  @param[in,out] logits @b [prefixes,subgraphs,rows,per_subgraph] Float32: @c β·score without
      *      the bias in, the logit gradient out.
      *  @param[in] relations The relation graph over the rows and the global candidates.
      *  @param[in] recipe β and bias, host scalars or per-temperature-group device entries.
@@ -308,7 +309,8 @@ struct contrastive_pair_loss_t {
 };
 
 /** The baked geometry of one segments loss — every capacity a call may not exceed; a different
- *  config is a different object, exactly the capture contract of @ref multimodal_batch_shape_t . */
+ *  config is a different object, exactly the capture contract of
+ *  @ref unum::uform::train::multimodal_batch_shape_t . */
 struct contrastive_segments_config_t {
 
     /** Owned (pooled) from-vertex rows this rank scores — the force grid's row count. */
@@ -447,7 +449,7 @@ struct contrastive_segments_t {
 };
 
 /**
- *  @brief The distributed sibling of @ref contrastive_segments_t : one object owning a whole world's
+ *  @brief The distributed sibling of @c contrastive_segments_t : one object owning a whole world's
  *      force evaluation.
  *
  *  It holds the per-rank loss objects, a reserved window of the main-owned @ref multimem_domain_t whose
@@ -484,10 +486,10 @@ struct distributed_contrastive_segments_t {
      *
      *  The caller (main) owns the infrastructure, this object only borrows it.
      *
-     *  @param[inout] domain The main-owned level-1 surface; one force window is reserved from it, and the world
-     *      tower window when this process does not hold the whole world.
-     *  @param[inout] colocated The main-owned level-2 surface; reduce members are wired per rank and
-     *      one gather member on the gateway — zero-round identities in single-domain worlds.
+     *  @param[in,out] domain The main-owned level-1 surface; one force window is reserved from it,
+     *      and the world tower window when this process does not hold the whole world.
+     *  @param[in,out] colocated The main-owned level-2 surface; reduce members are wired per rank
+     *      and one gather member on the gateway — zero-round identities in single-domain worlds.
      *  @param[in] arenas @b [gpus] per-rank arenas, one per member this process drives
      *      ( @c [domain.member_offset(),+gpus) ); loss scratch and member heaps allocate from each rank's own.
      *  @param[in] streams @b [gpus] per-rank streams; their contexts scope every per-device setup.

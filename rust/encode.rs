@@ -9,6 +9,10 @@
 //! Models are tokenizer-free: text arrives as UTF-8 bytes and every byte is a token. Separate items
 //! are gathered into one tape before the call, while a `(data, offsets)` pair reaches the library
 //! as it is.
+//!
+//! File: rust/encode.rs
+//! Author: Ash Vardanian
+//! Date: October 18, 2026
 
 // The C mirror keeps the C spelling of every name.
 #![allow(non_camel_case_types)]

@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date July 7, 2026
  *  @brief Device probe kernels and host method bodies of @ref telemetry_ledger_t declared in
- *      @ref introspect.cuh — the translation unit compiled into the `uform_train` static library
+ *      @ref introspect.cuh — the translation unit compiled into the @c uform_train static library
  *      beside @ref optimizer.cu and @ref multimem_collectives.cu .
  */
 #include <cmath> // `std::sqrt` — a sample window's L2

@@ -9,9 +9,10 @@
  *      1. @ref gpu_stream_t — a move-only owning wrapper over a real (non-null) @c CUstream , holding the
  *         device's primary context retained, so ordering is explicit and capture is legal (stream capture
  *         rejects the legacy null stream).
- *      2. @ref gpu_replay_graph_t — the capture-once / replay-forever contract: @ref make captures a
- *         body of kernel launches into a @c CUgraph , instantiates it, uploads the executable, and keeps
- *         only that; every later step is one @c cuGraphLaunch with @b zero host-side re-derivation.
+ *      2. @ref unum::uform::utilities::gpu_replay_graph_t — the capture-once / replay-forever
+ *         contract: @c make captures a body of kernel launches into a @c CUgraph , instantiates it,
+ *         uploads the executable, and keeps only that; every later step is one @c cuGraphLaunch
+ *         with @b zero host-side re-derivation.
  *
  *  @section schedule_contract The capture contract
  *
@@ -23,25 +24,26 @@
  *  deadlocks device-local multi-GPU worlds at first launch, and there is no correct fallback.
  *
  *  Construction absorbs the whole setup pipeline — capture, instantiate, guard, @b upload — so a
- *  @ref gpu_replay_graph_t that exists is always launchable, with device staging already done. Uploading
- *  eagerly matters: lazily staged MMIO nodes are a measured first-launch deadlock on device-initiated
- *  transports.
+ *  @ref unum::uform::utilities::gpu_replay_graph_t that exists is always launchable, with device
+ *  staging already done. Uploading eagerly matters: lazily staged MMIO nodes are a measured
+ *  first-launch deadlock on device-initiated transports.
  *
  *  @section schedule_regions The captured region is model math only
  *
  *  A captured graph holds @b model math only — entry / embedding, the block stack, the final RMSNorm, the
  *  @b local loss, and backward. The distributed work — cross-GPU loss exchange, the gradient reduce, the
- *  @ref barrier_round_t barriers, and the optimizer's world step — is @b never fused into it; it is
- *  its own region the parent scope sequences after the model region. UForm is a distributed-loss training
- *  stack, so a monolithic all-in-one graph welds the pure math to world state, and the round, the
- *  reduce, and the loss exchange can no longer be reasoned about — or replayed — independently. Forward and
- *  backward stay together (one contiguous, shape-stable computation); the only boundary is model-vs-collective.
+ *  @ref unum::uform::utilities::barrier_round_t barriers, and the optimizer's world step — is
+ *  @b never fused into it; it is its own region the parent scope sequences after the model region.
+ *  UForm is a distributed-loss training stack, so a monolithic all-in-one graph welds the pure math
+ *  to world state, and the round, the reduce, and the loss exchange can no longer be reasoned about
+ *  — or replayed — independently. Forward and backward stay together (one contiguous, shape-stable
+ *  computation); the only boundary is model-vs-collective.
  *
  *  @section schedule_fork Multi-GPU capture — fork / join
  *
  *  Launching one graph per GPU serializes at the driver when the bodies touch shared resources, and
  *  serialized launches deadlock the moment rank 0 parks at a cross-rank barrier its peers never reach.
- *  The multi-stream @ref make therefore records @b one graph across all ranks: the trunk stream
+ *  The multi-stream @c make therefore records @b one graph across all ranks: the trunk stream
  *  records a fork event, every branch stream waits only on the fork (never on a sibling, so branch
  *  kernels stay mutually independent and co-resident at replay), and the trunk joins on every branch
  *  before ending the capture. One @c cuGraphLaunch then makes every rank's work resident together.
@@ -193,9 +195,9 @@ struct gpu_stream_t {
 /** Enqueue a host → device copy of a rank-1 view into a same-typed device span on @p stream — the
  *  typed spelling of @c cuMemcpyHtoDAsync , with the arguments in the order the name reads: host
  *  source, device destination. Extents and element sizes travel with the views, never as
- *  hand-multiplied @c sizeof operands. The device side names the scalar type, so a host `std::span`
- *  converts. An empty @p host_source is a no-op; a source longer than the destination is a loud
- *  failure. */
+ *  hand-multiplied @c sizeof operands. The device side names the scalar type, so a host
+ *  @c std::span converts. An empty @p host_source is a no-op; a source longer than the destination
+ *  is a loud failure. */
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_host_to_device(std::type_identity_t<nk::tensor_view<value_type_, 1>> host_source,
                                                     nk::tensor_span<value_type_, 1> device_destination,
@@ -212,11 +214,12 @@ template <typename value_type_>
     return {};
 }
 
-/** The mirror of @ref copy_host_to_device : enqueue a device → host copy of a rank-1 view into a
- *  same-typed host span on @p stream — the typed spelling of @c cuMemcpyDtoHAsync , device source
- *  first, host destination second, which converts from a `std::span` as the source names the type.
- *  An empty @p device_source is a no-op; a source longer than the destination is a loud failure.
- *  The host span must stay alive until the stream reaches the copy. */
+/** The mirror of @ref unum::uform::utilities::copy_host_to_device : enqueue a device → host copy of
+ *  a rank-1 view into a same-typed host span on @p stream — the typed spelling of
+ *  @c cuMemcpyDtoHAsync , device source first, host destination second, which converts from a
+ *  @c std::span as the source names the type. An empty @p device_source is a no-op; a source longer
+ *  than the destination is a loud failure. The host span must stay alive until the stream reaches
+ *  the copy. */
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_device_to_host(
     nk::tensor_view<value_type_, 1> device_source,
@@ -233,9 +236,10 @@ template <typename value_type_>
     return {};
 }
 
-/** The device-only sibling of @ref copy_host_to_device : enqueue a device → device copy of a rank-1 view
- *  into a same-typed device span on @p stream , which names the type, so a span source converts. An
- *  empty @p source is a no-op; a source longer than the destination is a loud failure. */
+/** The device-only sibling of @ref unum::uform::utilities::copy_host_to_device : enqueue a device →
+ *  device copy of a rank-1 view into a same-typed device span on @p stream , which names the type,
+ *  so a span source converts. An empty @p source is a no-op; a source longer than the destination
+ *  is a loud failure. */
 template <typename value_type_>
 [[nodiscard]] inline expected_t copy_device_to_device(std::type_identity_t<nk::tensor_view<value_type_, 1>> source,
                                                       nk::tensor_span<value_type_, 1> destination,
@@ -536,7 +540,7 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
  *  @param[in] product At least @c outputs·inputs Float32 scalars of scratch.
  *  @param[in] workspace At least @ref weight_gradient_workspace_bytes_bf16 , or empty for the
  *      unsplit product.
- *  @param[inout] stream The stream every launch enqueues on.
+ *  @param[in,out] stream The stream every launch enqueues on.
  */
 [[nodiscard]] expected_t weight_gradient_bf16(bf16r2_view_t output_grad, bf16r2_view_t input, bf16r2_span_t weight_grad,
                                               bf16r1_span_t transposed_grad, bf16r1_span_t transposed_input,
@@ -591,9 +595,10 @@ template <unsigned block_size_>
 
 #endif // defined(__CUDACC__)
 
-/** How a §10 model region runs: captured once into a @ref gpu_replay_graph_t and replayed every step
- *  (the production default), or re-enqueued eagerly each step — the bring-up / debugging path, and the
- *  other half of every capture-vs-eager parity test. A trainer carries it as a run knob; the two modes must
+/** How a §10 model region runs: captured once into a
+ *  @ref unum::uform::utilities::gpu_replay_graph_t and replayed every step (the production
+ *  default), or re-enqueued eagerly each step — the bring-up / debugging path, and the other half
+ *  of every capture-vs-eager parity test. A trainer carries it as a run knob; the two modes must
  *  land on bitwise-identical weights over identical seeds. */
 enum capture_t : u32_t {
     replayed_k = 0,
@@ -601,7 +606,7 @@ enum capture_t : u32_t {
 };
 
 /**
- *  @brief The capture-once / replay-forever graph: @ref make turns a body of enqueues into one
+ *  @brief The capture-once / replay-forever graph: @c make turns a body of enqueues into one
  *      uploaded @c CUgraphExec , and every later step is a single @c cuGraphLaunch .
  *
  *  Move-only, and @b always launchable when it exists: construction captures, enforces the no-allocation
@@ -727,7 +732,7 @@ struct gpu_replay_graph_t {
     }
 
     /** Replay the executable on @p stream : one @c cuGraphLaunch — staging already happened at
-     *  @ref make . */
+     *  @c make . */
     [[nodiscard]] expected_t launch(CUstream stream) const noexcept {
         if (exec_ == nullptr)
             return expected_t::fail(status_t::invalid_argument_k, "launching an empty (default or moved-from) graph");
@@ -855,8 +860,8 @@ struct gpu_event_t {
  *  @c __threadfence_system() , once per step on the surface's lead stream before any barrier.
  *  Because the bump lives on the device, a captured collective region self-advances the round
  *  on every @c cuGraphLaunch replay with no host intervention. The scalar is seeded @c 0u-increment
- *  at @ref make so the first advance yields round 0. Counts never reset; a replayed barrier's
- *  target only grows.
+ *  at @c make so the first advance yields round 0. Counts never reset; a replayed barrier's target
+ *  only grows.
  */
 struct barrier_round_t {
 

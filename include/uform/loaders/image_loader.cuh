@@ -3,13 +3,16 @@
  *  @author Ash Vardanian
  *  @date July 4, 2026
  *  @brief The Parquet image loader: tied to a @b dataset, not a GPU — the same shape as
- *      @ref tokens_loader_parquet_t .
+ *      @ref unum::uform::loaders::tokens_loader_parquet_t .
  *
- *  @ref make reads only each shard's Parquet footer once, and every @ref fill takes the caller's stream, rank,
- *  and step, so one loader serves every GPU on every step. Each @ref fill opens @b as many randomly chosen
- *  shards as it takes to pool the images it needs — at least two unless the dataset is one file — decodes
- *  their blob column into one device reservoir over GDS, draws rows by a keyed bijection over the whole pool,
- *  and decodes the drawn compressed blobs into the batch's shared patch grid with @ref nvjpeg_session_t .
+ *  @ref unum::uform::loaders::image_loader_parquet_t::make reads only each shard's Parquet footer
+ *  once, and every @ref unum::uform::loaders::image_loader_parquet_t::fill takes the caller's
+ *  stream, rank, and step, so one loader serves every GPU on every step. Each
+ *  @ref unum::uform::loaders::image_loader_parquet_t::fill opens @b as many randomly chosen shards
+ *  as it takes to pool the images it needs — at least two unless the dataset is one file — decodes
+ *  their blob column into one device reservoir over GDS, draws rows by a keyed bijection over the
+ *  whole pool, and decodes the drawn compressed blobs into the batch's shared patch grid with
+ *  @ref unum::uform::loaders::nvjpeg_session_t .
  *
  *  @section image_decode_split JPEG on the GPU, the rest on the CPU pool
  *
@@ -61,8 +64,8 @@ using media::pixel_patches_span_t;
 /** One JPEG batch entry: the compressed bitstream and length, the plan it maps back to (for
  *  fallback marking and RGBA expansion), its byte offset into the packed-RGB scratch, and the
  *  interleaved-RGB destination wired once that scratch is allocated. It is the session's decode
- *  input item: @ref nvjpeg_session_t::decode_jpeg_batch fills nvJPEG's parallel arrays straight
- *  from an owning table of these. */
+ *  input item: @ref unum::uform::loaders::nvjpeg_session_t::decode_jpeg_batch fills nvJPEG's
+ *  parallel arrays straight from an owning table of these. */
 struct jpeg_entry_t {
 
     /** Device bitstream view into the reservoir tape. */
@@ -107,7 +110,7 @@ struct nvjpeg_session_t {
      *
      *  @param[in] entries The batch's decode entries, each a bitstream, length and destination;
      *      the method fills nvJPEG's parallel arrays straight from them at the vendor boundary.
-     *  @param[inout] stream The stream the decode enqueues on.
+     *  @param[in,out] stream The stream the decode enqueues on.
      */
     [[nodiscard]] expected_t decode_jpeg_batch(std::span<jpeg_entry_t const> entries, gpu_stream_t &stream) noexcept;
 
@@ -132,14 +135,16 @@ struct nvjpeg_session_t {
  *  factor-pair aspect and resizes it into the grid. Pure enqueue on @p stream but for the triage and
  *  CPU-fallback host hops.
  *
- *  @param[inout] jpeg This GPU's nvJPEG session, borrowed for the JPEG rows.
- *  @param[inout] pool The run's CPU-decode worker pool, borrowed for the non-JPEG / rejected-JPEG rows.
+ *  @param[in,out] jpeg This GPU's nvJPEG session, borrowed for the JPEG rows.
+ *  @param[in,out] pool The run's CPU-decode worker pool, borrowed for the non-JPEG / rejected-JPEG
+ *      rows.
  *  @param[in] tape The pooled blob column with its offsets landed on host — device bytes, host-indexable, so
  *      @c tape[row] is a device slice computed on the host.
  *  @param[in] drawn_rows The tape rows to decode; each becomes one live image segment, in draw order.
- *  @param[in] representations The flat @ref image_batch_shape_t representations ( @c patch_side , @c channels ); the
- *      shape is the single source of geometry, validated against the grid. Image carries no per-representation
- *      variation yet, so it consumes one (must be non-empty).
+ *  @param[in] representations The flat @ref unum::uform::encoder::image_batch_shape_t
+ *      representations ( @c patch_side , @c channels ); the shape is the single source of geometry,
+ *      validated against the grid. Image carries no per-representation variation yet, so it
+ *      consumes one (must be non-empty).
  *  @param[out] pixels The patch-arranged @b [rows,columns,P,P,C] grid to fill; its extents give the row width
  *      (columns), the square patch side (extent 2), and the RGBA channel count (extent 4).
  *  @param[out] shapes Each segment's @c (patch_rows,patch_cols) factorization of its column budget, shaped
@@ -147,9 +152,9 @@ struct nvjpeg_session_t {
  *  @param[out] segment_offsets @b [max_segments+1] flat start positions (the cursor's terminal at the back).
  *  @param[out] segment_lengths @b [max_segments] each segment's column budget (0 for PAD or overflow-dropped).
  *  @param[out] segment_modality @b [max_segments] @c image_k for a live image, @c text_k for a PAD segment.
- *  @param[inout] dropped @b [1] the batch's drop count, which every image overflowing @p pixels
+ *  @param[in,out] dropped @b [1] the batch's drop count, which every image overflowing @p pixels
  *      adds one to.
- *  @param[inout] stream The stream the staging, decode, resize, and copies run on.
+ *  @param[in,out] stream The stream the staging, decode, resize, and copies run on.
  */
 [[nodiscard]] expected_t decode_images(nvjpeg_session_t &jpeg, pool_view_t pool, column_view_t tape,
                                        u64r1_view_t drawn_rows, std::span<image_batch_shape_t const> representations,
@@ -167,20 +172,22 @@ struct image_loader_parquet_config_t {
 
 /**
  *  @brief The loader object: dataset-scoped, rank-agnostic, GPU-accelerated — the image sibling of
- *      @ref tokens_loader_parquet_t .
+ *      @ref unum::uform::loaders::tokens_loader_parquet_t .
  *
- *  @warning Holds one dataset's shard footers; keep one per input dataset. @ref fill allocates its scratch
- *      on demand and is safe to call concurrently for different GPU ranks on different streams.
+ *  @warning Holds one dataset's shard footers; keep one per input dataset.
+ *      @ref unum::uform::loaders::image_loader_parquet_t::fill allocates its scratch on demand and
+ *      is safe to call concurrently for different GPU ranks on different streams.
  */
 struct image_loader_parquet_t {
 
     /**
      *  @brief Failure-safe exception-free constructor that indexes all the shards' footers (host, once).
-     *  @param[inout] session GPU Direct Storage session for IO.
+     *  @param[in,out] session GPU Direct Storage session for IO.
      *  @param[in] path_or_glob Dataset's Parquet paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
-     *  @param[inout] pool The run's CPU-decode worker pool, owned at the composition root and borrowed here
-     *      for the PNG / WebP / progressive-JPEG fallback; the loader never spawns threads of its own.
+     *  @param[in,out] pool The run's CPU-decode worker pool, owned at the composition root and
+     *      borrowed here for the PNG / WebP / progressive-JPEG fallback; the loader never spawns
+     *      threads of its own.
      *  @param[in] image The image modality's own geometry slice ( @c patch_side , @c channels ) — the single source
      *      of a step's image geometry; it never sees the sibling modalities' shapes.
      */
@@ -196,10 +203,11 @@ struct image_loader_parquet_t {
      *  reservoir, draws up to @c max_segments_per_gpu rows across it, and decodes each batch's drawn blobs
      *  into its patch grid — each resized to its own factor pair of a native-resolution-derived column budget
      *  and packed row-safe into a column sub-range — writing @c image_shapes , @c segment_offsets/lengths ,
-     *  and @c segment_modality @c=image_k per live image.
+     *  and @c segment_modality set to @c image_k per live image.
      *
-     *  @param[inout] gpu_stream The GPU-specific stream the staging, decode, resize, and segmenting run on.
-     *  @param[inout] decoder This GPU's nvJPEG session, borrowed for the decode.
+     *  @param[in,out] gpu_stream The GPU-specific stream the staging, decode, resize, and
+     *      segmenting run on.
+     *  @param[in,out] decoder This GPU's nvJPEG session, borrowed for the decode.
      *  @param[in] config Which Parquet column holds the image blobs.
      *  @param[in] gpu_rank Ensures different GPUs draw different rows from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
@@ -230,8 +238,9 @@ struct image_loader_parquet_t {
      *  total rows. Read once per dataset; shared across every GPU the loader serves. */
     st::basic_vector<std::size_t> row_prefix_ {};
 
-    /** The image modality's geometry ( @c patch_side , @c channels ) every @ref fill hands the decode as its
-     *  one representation — fixed at @ref make . */
+    /** The image modality's geometry ( @c patch_side , @c channels ) every
+     *  @ref unum::uform::loaders::image_loader_parquet_t::fill hands the decode as its one
+     *  representation — fixed at @ref unum::uform::loaders::image_loader_parquet_t::make . */
     image_batch_shape_t image_ {};
 };
 

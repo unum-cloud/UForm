@@ -9,23 +9,18 @@
 //! directory it lands in; all of them answer the same verbs, and the engine and the stand-in even
 //! carry the same archive name, so choosing between them is a search path rather than a different
 //! link line.
+//!
+//! File: build.rs
+//! Author: Ash Vardanian
+//! Date: October 18, 2026
 
 use std::env;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-/// Every CMake option this crate sets, so an implementation is the subset it switches on and
-/// nothing is left to whatever CMake would otherwise derive for a top-level build.
-const KNOWN_OPTIONS: &[&str] = &[
-    "UFORM_BUILD_LIB_C",
-    "UFORM_BUILD_LIB_C_STUB",
-    "UFORM_BUILD_CUDA",
-    "UFORM_BUILD_ROCM",
-    "UFORM_BUILD_LIB_PYTHON",
-    "UFORM_BUILD_LIB_NODE",
-    "UFORM_BUILD_TEST",
-    "UFORM_BUILD_TOOLS",
-];
+/// Every CMake option an implementation can switch on, so a reconfigured tree never keeps an
+/// earlier choice.
+const KNOWN_OPTIONS: &[&str] = &["UFORM_BUILD_STUB", "UFORM_BUILD_CUDA", "UFORM_BUILD_ROCM"];
 
 /// One implementation of the C interface, and what CMake must be told to produce it.
 #[derive(Clone, Copy)]
@@ -49,7 +44,7 @@ struct Implementation {
 /// The engine for the host alone, an archive carrying its NumKong, StringZilla and yyjson objects.
 const ENGINE: Implementation = Implementation {
     feature: "static",
-    options: &["UFORM_BUILD_LIB_C"],
+    options: &[],
     target: "uform_static",
     directory: "c",
     library: "uform_static",
@@ -69,28 +64,28 @@ const ENGINE: Implementation = Implementation {
 /// The engine with the NVIDIA residency, the trainer and the mesh.
 const ENGINE_CUDA: Implementation = Implementation {
     feature: "cuda",
-    options: &["UFORM_BUILD_LIB_C", "UFORM_BUILD_CUDA"],
+    options: &["UFORM_BUILD_CUDA"],
     ..ENGINE
 };
 
 /// The engine with the AMD residency.
 const ENGINE_ROCM: Implementation = Implementation {
     feature: "rocm",
-    options: &["UFORM_BUILD_LIB_C", "UFORM_BUILD_ROCM"],
+    options: &["UFORM_BUILD_ROCM"],
     ..ENGINE
 };
 
 /// The engine with both GPU residencies, driven by one binary.
 const ENGINE_CUDA_ROCM: Implementation = Implementation {
     feature: "cuda and rocm",
-    options: &["UFORM_BUILD_LIB_C", "UFORM_BUILD_CUDA", "UFORM_BUILD_ROCM"],
+    options: &["UFORM_BUILD_CUDA", "UFORM_BUILD_ROCM"],
     ..ENGINE
 };
 
 /// The stand-in, which answers the same verbs over the C++ standard library alone.
 const STUB: Implementation = Implementation {
     feature: "stub",
-    options: &["UFORM_BUILD_LIB_C_STUB"],
+    options: &["UFORM_BUILD_STUB"],
     target: "uform_static_stub",
     directory: "stub",
     library: "uform_static",
@@ -140,6 +135,9 @@ fn watch(directory: &Path) {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    if env::var_os("DOCS_RS").is_some() {
+        return Ok(());
+    }
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let chosen = selected()?;
 

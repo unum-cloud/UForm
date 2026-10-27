@@ -5,19 +5,17 @@
  *  @brief Two processes wiring one phase twice over the shared exchange directory, as the probe
  *      trainers and the real one each make a multimem domain.
  *
- *  `mesh_topology_t` from `include/uform/utilities/mesh.hpp` publishes a payload by an atomic rename, awaits a
- *  peer's by polling until its file exists, and crosses a barrier by arrive and release files.
- *  Files are never removed within a job, so a phase that runs twice reads whatever the first run
- *  left unless its keys differ. Every wiring phase claims a generation from the topology and keys
- *  its payloads and barriers with it, so each round reads its own files. A file here holds the
- *  generation that wrote it, plus one, and zero while absent.
+ *  `mesh_topology_t` from `include/uform/utilities/mesh.hpp` publishes a payload by an atomic
+ *  rename, awaits a peer's by polling until its file exists, and crosses a barrier by arrive and
+ *  release files. Files are never removed within a job, so a phase that runs twice reads whatever
+ *  the first run left unless its keys differ. Every wiring phase claims a generation from the
+ *  topology and keys its payloads and barriers with it, so each round reads its own files.
  *
- *  Each process publishes its payload, awaits the peer's and checks it names this round, then
- *  crosses the barrier, after which the lead must have reached this round too.
+ *  - Each process awaits the peer's payload and checks it names this round.
+ *  - After the barrier, the lead must have reached this round too.
  *
  *  @verify pass sc
- *  @verify fail sc generation_keys=false: the multimem slice, multicast and barrier keys carry
- *      the topology's generation; with fixed keys the second round reads the first round's
+ *  @verify fail sc generation_keys=false: with fixed keys the second round reads the first round's
  *      payload and passes the first round's release
  */
 

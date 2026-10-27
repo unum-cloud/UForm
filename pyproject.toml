@@ -106,10 +106,7 @@ wheel.packages = ["python/uform"]
 [tool.scikit-build.cmake.define]
 CMAKE_C_COMPILER = "clang-22"
 CMAKE_CXX_COMPILER = "clang++-22"
-UFORM_BUILD_LIB_C = "ON"
-UFORM_BUILD_LIB_PYTHON = "ON"
-UFORM_BUILD_TEST = "OFF"
-UFORM_BUILD_TOOLS = "OFF"
+UFORM_BUILD_PYTHON = "ON"
 
 # `VERSION` is what every other SDK reads, so the wheel takes its version from the same file rather than from a second
 # copy that drifts.

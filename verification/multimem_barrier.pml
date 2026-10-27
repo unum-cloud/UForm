@@ -6,24 +6,21 @@
  *
  *  `multimem_barrier_peer_kernel_` from `src/utilities/multimem_collectives.cu` adds one to every
  *  member's arrival flag with a release reduction, spins on its own flag with acquire loads until
- *  it holds one more round of arrivals, and self-advances its round. The flag is anonymous: the
- *  mixer, the contrastive loss and the optimizer all cross it, so a barrier is labelled only by its
- *  position in the step, and every member must cross the same barriers in the same order. Each
- *  consumer here stages its word, crosses the barrier and reads its peer's word: first the mixer's,
- *  then the contrastive loss's.
+ *  it holds one more round of arrivals, and self-advances its round. The flag is anonymous, so a
+ *  barrier is labelled only by its position in the step, and every member must cross the same
+ *  barriers in the same order. Each consumer here stages its word, crosses the barrier and reads
+ *  its peer's word: first the mixer's, then the contrastive loss's.
  *
  *  @verify pass sc,rc11
- *  @verify fail sc drop_barrier=true: every member crosses every consumer's barrier; when one
- *      member skips the loss's barrier, the other's loss barrier pairs with nothing new, and the
- *      member that skipped reads its peer's loss word before the peer staged it
- *  @verify fail rc11 arrival_order=order_relaxed: the arrival is a release reduction and the spin
- *      an acquire load, so a peer's staged word is visible once its arrival is; a relaxed arrival
- *      lets the reader see the arrival and an unstaged word
+ *  @verify fail sc drop_barrier=true: the member that skipped reads its peer's loss word before the
+ *      peer staged it
+ *  @verify fail rc11 arrival_order=order_relaxed: a relaxed arrival lets the reader see the arrival
+ *      and an unstaged word
  */
 #define thread_count 2
 #define location_count 6
 #define history_depth 5
-#include "weak_memory.pml"
+#include <weak_memory.pml>
 
 // The knobs: the arrival's order, and a member skipping the second consumer's barrier.
 #ifndef arrival_order

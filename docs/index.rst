@@ -1,27 +1,18 @@
-=====
-UForm
-=====
-.. mdinclude:: ../README.md
+UForm Reference
+===============
+
+Every public symbol, generated from the documentation comments in the sources.
+Guides for each language live at `unum.cloud/docs/uform <https://unum.cloud/docs/uform>`_.
+Rust and Swift symbols are on `docs.rs <https://docs.rs/uform>`_ and the `Swift Package Index <https://swiftpackageindex.com/unum-cloud/UForm>`_.
 
 .. toctree::
-   :hidden:
-   :caption: Languages
+   :caption: C
+   :maxdepth: 1
 
-   c/index
-   python/index
-   rust/index
-   javascript/index
-   swift/index
+   c/reference
 
 .. toctree::
-   :hidden:
-   :caption: Project
+   :caption: Python
+   :maxdepth: 1
 
-   contributing
-   benchmarks
-
-.. toctree::
-   :hidden:
-   :caption: Index
-
-   genindex
+   python/reference

@@ -1,10 +1,10 @@
-//
-//  Model.swift
-//  UForm
-//
-//  The model lifecycle, mirroring `c/uform/model.h`: load an encoder into RAM or VRAM, describe it, and the
-//  receivers that choose where its verbs run.
-//
+/**
+ *  @file swift/Model.swift
+ *  @author Ash Vardanian
+ *  @date October 18, 2026
+ *  @brief The model lifecycle, mirroring `c/uform/model.h`: load an encoder into RAM or VRAM, describe it, and the
+ *      receivers that choose where its verbs run.
+ */
 
 import UFormC
 
