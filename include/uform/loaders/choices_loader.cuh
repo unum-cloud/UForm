@@ -69,7 +69,7 @@ struct choices_loader_parquet_t {
      *  @param[in] path_or_glob Dataset's Parquet paths or a GLOB pattern for all the files.
      *  @param[in] seed The training-run specific order-affecting seed.
      *  @param[in] config The state, choices and targets columns.
-     *  @retval status_t::invalid_input_k A shard is empty, or no row holds all three columns.
+     *  @retval status_t::invalid_argument_k A shard is empty, or no row holds all three columns.
      */
     [[nodiscard]] static expected<choices_loader_parquet_t> make(gpu_direct_storage_session_t &session,
                                                                  sz::string_view_t path_or_glob, u64_t seed,
@@ -82,7 +82,7 @@ struct choices_loader_parquet_t {
      *  @param[in] training_step Ensures subsequent steps sample different data.
      *  @param[out] batches The batches whose segment table, tokens, choices and targets get
      *      populated.
-     *  @retval status_t::shape_unsupported_k The batches carry no choice columns, or the pool holds
+     *  @retval status_t::unsupported_k The batches carry no choice columns, or the pool holds
      *      no well-formed row.
      */
     [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, u32_t gpu_rank, u32_t training_step,

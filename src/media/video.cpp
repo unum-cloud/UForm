@@ -21,6 +21,7 @@ extern "C" {
 namespace um = unum::uform::media;
 namespace uu = unum::uform::utilities;
 using namespace um;
+using uu::bytes_view_t;
 using uu::i64_t;
 
 /** Working buffer size of the custom @c AVIOContext ; FFmpeg's own 32 KB default. */
@@ -30,7 +31,7 @@ inline constexpr std::size_t video_avio_buffer_bytes_k = 32u * 1024u;
 struct video_memory_reader_t {
 
     /** The clip's container bytes — borrowed, not owned; their end is the seek's bound. */
-    uu::bytes_view_t bytes {};
+    bytes_view_t bytes {};
 
     /** The read cursor, advanced by every read and moved by every seek. */
     std::size_t position = 0;
@@ -67,7 +68,7 @@ static i64_t video_memory_seek_(void *opaque, i64_t offset, int whence) noexcept
 }
 
 /** Whether @p bytes opens with a 3- or 4-byte Annex-B NAL start code. */
-[[nodiscard]] static bool looks_like_annex_b_(std::span<b8_t const> bytes) noexcept {
+[[nodiscard]] static bool looks_like_annex_b_(bytes_view_t bytes) noexcept {
     if (bytes.size() < 4u) return false;
     auto byte_at = [&](std::size_t index) { return std::to_integer<u8_t>(bytes[index]); };
     if (byte_at(0) == 0u && byte_at(1) == 0u && byte_at(2) == 0u && byte_at(3) == 1u) return true;
@@ -75,7 +76,7 @@ static i64_t video_memory_seek_(void *opaque, i64_t offset, int whence) noexcept
 }
 
 /** Best-effort H.264 vs H.265 sniff from the first Annex-B NAL header. */
-[[nodiscard]] static video_codec_t sniff_annex_b_codec_(std::span<b8_t const> bytes) noexcept {
+[[nodiscard]] static video_codec_t sniff_annex_b_codec_(bytes_view_t bytes) noexcept {
     std::size_t index = 0;
     while (index + 3u < bytes.size()) {
         auto byte_at = [&](std::size_t offset) { return std::to_integer<u8_t>(bytes[index + offset]); };
@@ -95,7 +96,7 @@ static i64_t video_memory_seek_(void *opaque, i64_t offset, int whence) noexcept
 }
 
 /** Append @p packet to @p clip 's stream and record where the next one starts. */
-[[nodiscard]] static status_t append_packet_(demuxed_t &clip, std::span<b8_t const> packet) noexcept {
+[[nodiscard]] static status_t append_packet_(demuxed_t &clip, bytes_view_t packet) noexcept {
     std::size_t const previous = clip.annex_b.size();
     if (st::failed(clip.annex_b.resize(st::assume_uninitialized, previous + packet.size())))
         return status_t::bad_alloc_k;
@@ -105,7 +106,7 @@ static i64_t video_memory_seek_(void *opaque, i64_t offset, int whence) noexcept
 }
 
 /** The payload bytes of the libav @p packet . */
-[[nodiscard]] static std::span<b8_t const> packet_bytes_(AVPacket const *packet) noexcept {
+[[nodiscard]] static bytes_view_t packet_bytes_(AVPacket const *packet) noexcept {
     return std::as_bytes(std::span<u8_t const> {packet->data, static_cast<std::size_t>(packet->size)});
 }
 
@@ -146,10 +147,10 @@ static i64_t video_memory_seek_(void *opaque, i64_t offset, int whence) noexcept
     return nullptr;
 }
 
-expected<demuxed_t> um::demux_video(std::span<b8_t const> container) noexcept {
+expected<demuxed_t> um::demux_video(bytes_view_t container) noexcept {
     using result_t = expected<demuxed_t>;
     demuxed_t clip;
-    if (container.empty()) return result_t::fail(status_t::invalid_input_k, "empty video container");
+    if (container.empty()) return result_t::fail(status_t::invalid_argument_k, "empty video container");
     if (st::failed(clip.packet_offsets.push_back(0u)))
         return result_t::fail(status_t::bad_alloc_k, "packet table allocation failed");
     if (looks_like_annex_b_(container)) {
@@ -193,19 +194,19 @@ expected<demuxed_t> um::demux_video(std::span<b8_t const> container) noexcept {
     format->pb = avio;
     format->flags |= AVFMT_FLAG_CUSTOM_IO;
     if (avformat_open_input(&format, nullptr, nullptr, nullptr) < 0)
-        return fail(status_t::invalid_input_k, "unrecognized container");
+        return fail(status_t::invalid_argument_k, "unrecognized container");
     if (avformat_find_stream_info(format, nullptr) < 0)
-        return fail(status_t::invalid_input_k, "unreadable stream info");
+        return fail(status_t::invalid_argument_k, "unreadable stream info");
     int video_stream_index = -1;
     for (unsigned stream_index = 0; stream_index != format->nb_streams; ++stream_index)
         if (format->streams[stream_index]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
             video_stream_index = static_cast<int>(stream_index);
             break;
         }
-    if (video_stream_index < 0) return fail(status_t::invalid_input_k, "no video stream");
+    if (video_stream_index < 0) return fail(status_t::invalid_argument_k, "no video stream");
     AVStream *video_stream = format->streams[video_stream_index];
     if (!from_av_codec_(video_stream->codecpar->codec_id, clip.codec))
-        return fail(status_t::invalid_input_k, "unsupported video codec");
+        return fail(status_t::invalid_argument_k, "unsupported video codec");
     clip.extent.width = static_cast<u32_t>(std::max(video_stream->codecpar->width, 0));
     clip.extent.height = static_cast<u32_t>(std::max(video_stream->codecpar->height, 0));
     // Many mp4 / webm containers carry no frame index (`nb_frames == 0`); estimate the count from duration × average
@@ -224,7 +225,7 @@ expected<demuxed_t> um::demux_video(std::span<b8_t const> container) noexcept {
             avcodec_parameters_copy(bitstream_filter->par_in, video_stream->codecpar) < 0)
             return fail(status_t::bad_alloc_k, "Annex-B filter setup failed");
         bitstream_filter->time_base_in = video_stream->time_base;
-        if (av_bsf_init(bitstream_filter) < 0) return fail(status_t::invalid_input_k, "Annex-B filter rejected");
+        if (av_bsf_init(bitstream_filter) < 0) return fail(status_t::invalid_argument_k, "Annex-B filter rejected");
     }
 
     raw_packet = av_packet_alloc();
@@ -242,7 +243,7 @@ expected<demuxed_t> um::demux_video(std::span<b8_t const> container) noexcept {
             continue;
         }
         if (bitstream_filter == nullptr) status = append_packet_(clip, packet_bytes_(raw_packet));
-        else if (av_bsf_send_packet(bitstream_filter, raw_packet) < 0) status = status_t::invalid_input_k;
+        else if (av_bsf_send_packet(bitstream_filter, raw_packet) < 0) status = status_t::invalid_argument_k;
         else drain_filter();
         av_packet_unref(raw_packet);
     }
@@ -251,7 +252,7 @@ expected<demuxed_t> um::demux_video(std::span<b8_t const> container) noexcept {
         drain_filter();
     }
     if (status != status_t::success_k) return fail(status, "packet extraction failed");
-    if (clip.annex_b.empty()) return fail(status_t::invalid_input_k, "the video stream holds no packets");
+    if (clip.annex_b.empty()) return fail(status_t::invalid_argument_k, "the video stream holds no packets");
     release_libav();
     return clip;
 }
@@ -320,7 +321,7 @@ static void keep_frame_(video_decoder_ &decoder, frame_sampler_ &sampler, AVFram
         static_cast<int>(sampler.width), static_cast<int>(sampler.height), AV_PIX_FMT_RGB24,
         SWS_BILINEAR | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT, nullptr, nullptr, nullptr);
     if (scaler == nullptr) {
-        sampler.status = status_t::invalid_input_k;
+        sampler.status = status_t::invalid_argument_k;
         return;
     }
     decoder.scaler = scaler;
@@ -330,7 +331,7 @@ static void keep_frame_(video_decoder_ &decoder, frame_sampler_ &sampler, AVFram
     int const strides[4] = {static_cast<int>(sampler.width * video_channels_k), 0, 0, 0};
     if (sws_scale(scaler, frame->data, frame->linesize, 0, frame->height, planes, strides) !=
         static_cast<int>(sampler.height)) {
-        sampler.status = status_t::invalid_input_k;
+        sampler.status = status_t::invalid_argument_k;
         return;
     }
     std::size_t const tube_frames = out.extent(2), patch_side = out.extent(3);
@@ -356,7 +357,7 @@ static void receive_frames_(video_decoder_ &decoder, frame_sampler_ &sampler, pi
         int const received = avcodec_receive_frame(decoder.context, decoder.frame);
         if (received == AVERROR(EAGAIN) || received == AVERROR_EOF) return;
         if (received < 0) {
-            sampler.status = status_t::invalid_input_k;
+            sampler.status = status_t::invalid_argument_k;
             return;
         }
         if (sampler.displayed++ % sampler.stride == 0) keep_frame_(decoder, sampler, decoder.frame, out);
@@ -368,7 +369,7 @@ static void receive_frames_(video_decoder_ &decoder, frame_sampler_ &sampler, pi
 static void submit_packet_(video_decoder_ &decoder, frame_sampler_ &sampler, AVPacket *packet,
                            pixel_tubes_span_t out) noexcept {
     int const sent = avcodec_send_packet(decoder.context, packet);
-    if (sent < 0 && sent != AVERROR(EAGAIN) && sent != AVERROR_EOF) sampler.status = status_t::invalid_input_k;
+    if (sent < 0 && sent != AVERROR(EAGAIN) && sent != AVERROR_EOF) sampler.status = status_t::invalid_argument_k;
     receive_frames_(decoder, sampler, out);
 }
 
@@ -378,12 +379,12 @@ expected_t um::decode_video_frames(demuxed_t const &clip, video_grid_t grid, vid
     if (out.extent(0) != grid.temporal_groups || out.extent(1) != cells || out.extent(2) != shape.tube_frames ||
         out.extent(3) != shape.patch_side || out.extent(4) != shape.patch_side || out.extent(5) != video_channels_k ||
         shape.tube_frames == 0 || shape.patch_side == 0)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "tube cells [{},{},{},{},{},{}] disagree with the grid ({},{},{}) and the shape", //
                                 out.extent(0), out.extent(1), out.extent(2), out.extent(3), out.extent(4),
                                 out.extent(5), grid.temporal_groups, grid.patch_rows, grid.patch_columns);
     if (clip.annex_b.empty() || clip.packet_offsets.size() < 2u)
-        return expected_t::fail(status_t::invalid_input_k, "the clip holds no packets");
+        return expected_t::fail(status_t::invalid_argument_k, "the clip holds no packets");
     std::size_t const elements = out.extent(0) * cells * out.extent(2) * out.extent(3) * out.extent(4) * out.extent(5);
     pixel_t *const cells_begin = out.data();
     std::fill(cells_begin, cells_begin + elements, pixel_t {0});
@@ -401,7 +402,7 @@ expected_t um::decode_video_frames(demuxed_t const &clip, video_grid_t grid, vid
     AVCodecID const codec_id = to_av_codec_(clip.codec);
     AVCodec const *const codec = avcodec_find_decoder(codec_id);
     if (codec == nullptr)
-        return expected_t::fail(status_t::shape_unsupported_k, "no software decoder for codec {}",
+        return expected_t::fail(status_t::unsupported_k, "no software decoder for codec {}",
                                 static_cast<int>(clip.codec));
     video_decoder_ decoder;
     decoder.context = avcodec_alloc_context3(codec);
@@ -414,7 +415,7 @@ expected_t um::decode_video_frames(demuxed_t const &clip, video_grid_t grid, vid
                                 static_cast<int>(clip.codec));
     decoder.context->thread_count = 1;
     if (avcodec_open2(decoder.context, codec, nullptr) < 0)
-        return expected_t::fail(status_t::invalid_input_k, "video decoder open failed (codec {})",
+        return expected_t::fail(status_t::invalid_argument_k, "video decoder open failed (codec {})",
                                 static_cast<int>(clip.codec));
 
     std::size_t const packets = clip.packet_offsets.size() - 1u;
@@ -426,7 +427,7 @@ expected_t um::decode_video_frames(demuxed_t const &clip, video_grid_t grid, vid
                                               &decoder.packet->size, data, remaining, AV_NOPTS_VALUE, AV_NOPTS_VALUE,
                                               0);
             if (used < 0) {
-                sampler.status = status_t::invalid_input_k;
+                sampler.status = status_t::invalid_argument_k;
                 break;
             }
             data += used, remaining -= used; // raw Annex-B splits into access units, container packets pass whole
@@ -441,6 +442,6 @@ expected_t um::decode_video_frames(demuxed_t const &clip, video_grid_t grid, vid
     }
     if (sampler.status != status_t::success_k)
         return expected_t::fail(sampler.status, "video decode failed after {} frames", sampler.kept);
-    if (sampler.kept == 0) return expected_t::fail(status_t::invalid_input_k, "the clip decoded no frames");
+    if (sampler.kept == 0) return expected_t::fail(status_t::invalid_argument_k, "the clip decoded no frames");
     return {};
 }

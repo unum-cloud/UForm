@@ -10,6 +10,11 @@ add_executable(uform_test_inference inference.cpp)
 target_link_libraries(uform_test_inference PRIVATE uform_host ${uform_encoder_variants_} fmt::fmt)
 add_test(NAME uform_test_inference COMMAND uform_test_inference "${PROJECT_BINARY_DIR}/tiny.safetensors")
 set_tests_properties(uform_test_inference PROPERTIES FIXTURES_REQUIRED uform_tiny_checkpoint LABELS host)
+# Under Emscripten the suites run in Node, reading and writing the build tree's real files.
+if (EMSCRIPTEN)
+    target_link_options(uform_tiny_checkpoint PRIVATE "-sNODERAWFS")
+    target_link_options(uform_test_inference PRIVATE "-sNODERAWFS")
+endif ()
 
 # The conformance binaries, one per cell, which `uform_bundle` ships with their runtime closure. Each sits at the build
 # root, where the sbatch scripts and the launch configurations look for it, and resolves shared libraries beside itself

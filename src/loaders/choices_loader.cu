@@ -80,7 +80,7 @@ expected<choices_loader_parquet_t> choices_loader_parquet_t::make(gpu_direct_sto
             session, loader.absolute_paths_[index], columns);
         if (!metadata) return result_t::fail(std::move(metadata));
         if (metadata->rows == 0)
-            return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
+            return result_t::fail(status_t::invalid_argument_k, "shard {} is empty", loader.absolute_paths_[index]);
         std::size_t const groups_before = loader.group_shard_.size();
         for (std::size_t group = 0; group != metadata->group_rows.size(); ++group) {
             if (metadata->group_complete_rows[group] == 0) continue;
@@ -94,7 +94,7 @@ expected<choices_loader_parquet_t> choices_loader_parquet_t::make(gpu_direct_sto
         loader.reservoir_.charge_groups(*metadata);
     }
     if (loader.rows() == 0)
-        return result_t::fail(status_t::invalid_input_k, "{} holds no row with a state, choices and targets",
+        return result_t::fail(status_t::invalid_argument_k, "{} holds no row with a state, choices and targets",
                               path_or_glob);
     return result_t {std::move(loader)};
 }
@@ -106,7 +106,7 @@ expected_t choices_loader_parquet_t::fill(gpu_stream_t &gpu_stream, u32_t gpu_ra
     std::size_t const rows = batches[0].tokens.extent(0), columns = batches[0].tokens.extent(1);
     std::size_t const segments = batches[0].segment_lengths.extent(0);
     std::size_t const width = batches[0].segment_choices.extent(1), total_segments = unroll * segments;
-    if (width == 0) return expected_t::fail(status_t::shape_unsupported_k, "the batches carry no choice columns");
+    if (width == 0) return expected_t::fail(status_t::unsupported_k, "the batches carry no choice columns");
 
     // Row groups drawn by a keyed position over the complete rows, as the other loaders draw them:
     // distinct groups accumulate until they cover the segments, then only a new shard meets the
@@ -151,7 +151,8 @@ expected_t choices_loader_parquet_t::fill(gpu_stream_t &gpu_stream, u32_t gpu_ra
     column_view_t const states = reservoir.column(0);
 
     switch_to_gpu_t gpu_scope {gpu_stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
+    if (!gpu_scope.ok())
+        return expected_t::fail(status_t::device_error_k, "context entry failed for the loader stream");
     st::basic_vector<u64_t> state_offsets, choice_offsets, target_offsets;
     st::basic_vector<u8_t> choice_bytes, target_bytes;
     expected_t landed = land_offsets_(states.offsets, state_offsets, gpu_stream);
@@ -192,7 +193,7 @@ expected_t choices_loader_parquet_t::fill(gpu_stream_t &gpu_stream, u32_t gpu_ra
         if (well_formed(row)) drawn[found++] = row;
     }
     if (found != total_segments)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "{} pooled rows across {} files hold no choice of at most {} distinct bytes with " //
                                 "a target each",
                                 pooled_rows, picked_paths.size(), width);
@@ -217,7 +218,7 @@ expected_t choices_loader_parquet_t::fill(gpu_stream_t &gpu_stream, u32_t gpu_ra
         multimodal_batch_on_gpu_t &loaded = batches[batch];
         if (loaded.tokens.extent(0) != rows || loaded.segment_lengths.extent(0) != segments ||
             loaded.segment_choices.extent(1) != width)
-            return expected_t::fail(status_t::shape_unsupported_k, "batch {} differs from the first", batch);
+            return expected_t::fail(status_t::unsupported_k, "batch {} differs from the first", batch);
 
         // A state keeps its tail and the mask byte at the row width, never crossing a row; the
         // segments past the rows' room PAD.

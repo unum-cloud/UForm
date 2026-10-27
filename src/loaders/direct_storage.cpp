@@ -22,10 +22,10 @@ expected<gpu_direct_storage_session_t> gpu_direct_storage_session_t::make() noex
         cudf::io::kvikio_integration::set_up_kvikio();
     }
     catch (std::exception const &error) {
-        return result_t::fail(status_t::io_error_k, "KvikIO setup failed at the firewall: {}", error.what());
+        return result_t::fail(status_t::io_k, "KvikIO setup failed at the firewall: {}", error.what());
     }
     catch (...) {
-        return result_t::fail(status_t::io_error_k, "KvikIO setup raised a non-standard exception");
+        return result_t::fail(status_t::io_k, "KvikIO setup raised a non-standard exception");
     }
     gpu_direct_storage_session_t session;
     // GDS engages only when compat mode is explicitly off; unset or "ON" means POSIX. Read for the

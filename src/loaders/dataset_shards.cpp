@@ -53,7 +53,7 @@ struct column_span_t {
     std::unique_ptr<cudf::column> widened_groups;
 
     /** The column's leaf bytes, back to back — borrowed from the owning table / column. */
-    std::span<b8_t const> payload;
+    bytes_view_t payload;
 
     /** @b [elements+1] leaf offsets — owned by @ref widened_offsets . */
     std::span<u64_t const> offsets;
@@ -98,7 +98,7 @@ std::span<u64_t const> parquet_file_t::groups(std::size_t index) const noexcept 
 struct flat_column_t {
 
     /** The column's leaf bytes, back to back. */
-    std::span<b8_t const> payload;
+    bytes_view_t payload;
 
     /** The leaf offsets child — @c elements+1 entries, 32- or 64-bit. */
     cudf::column_view offsets;
@@ -109,14 +109,14 @@ struct flat_column_t {
 };
 
 /** The character bytes of the cuDF strings column @p strings — where cuDF's @c char tape becomes bytes. */
-[[nodiscard]] static std::span<b8_t const> chars_of_(cudf::strings_column_view const &strings,
-                                                     rmm::cuda_stream_view stream) noexcept {
+[[nodiscard]] static bytes_view_t chars_of_(cudf::strings_column_view const &strings,
+                                            rmm::cuda_stream_view stream) noexcept {
     return std::as_bytes(
         std::span<char const> {strings.chars_begin(stream), static_cast<std::size_t>(strings.chars_size(stream))});
 }
 
 /** Flatten the @p name column @p decoded to its payload and offset levels, or a
- *  @c shape_unsupported_k failure naming it when it is not one of @c string , @c list<uint8> , or
+ *  @c unsupported_k failure naming it when it is not one of @c string , @c list<uint8> , or
  *  @c list<string> . */
 [[nodiscard]] static expected<flat_column_t> flatten_column_(cudf::column_view const &decoded, sz::string_view_t name,
                                                              rmm::cuda_stream_view stream) noexcept {
@@ -152,8 +152,8 @@ struct flat_column_t {
     // requested child — unwrap and flatten the child itself.
     if (decoded.type().id() == cudf::type_id::STRUCT && decoded.num_children() == 1)
         return flatten_column_(decoded.child(0), name, stream);
-    return result_t::fail(status_t::shape_unsupported_k,
-                          "column {} is not string, list<uint8>, list<int32>, or list<string>", name);
+    return result_t::fail(status_t::unsupported_k, "column {} is not string, list<uint8>, list<int32>, or list<string>",
+                          name);
 }
 
 /** Own a @c u64_t copy of @p offsets — cuDF decodes 32- or 64-bit @b signed offsets, and byte
@@ -220,7 +220,7 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
         cuMemcpyDtoHAsync(lengths.data(), device_address(byte_lengths.data<i64_t>()), rows * sizeof(i64_t),
                           stream.value()) != CUDA_SUCCESS ||
         cuStreamSynchronize(stream.value()) != CUDA_SUCCESS)
-        return result_t::fail(status_t::cuda_error_k, "tar index landing failed ({} rows)", rows);
+        return result_t::fail(status_t::device_error_k, "tar index landing failed ({} rows)", rows);
 
     // The members land back to back in row order, so each one starts at the running sum of lengths.
     bounds[0] = 0;
@@ -238,7 +238,7 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
             return result_t::fail(status_t::bad_alloc_k, "tar path allocation failed for {}", paths[shard]);
         auto source = cudf::io::datasource::create(std::string {tar.c_str()}); // vendor-boundary
         if (!source->supports_device_read())
-            return result_t::fail(status_t::io_error_k, "the tar beside {} cannot be read to the device", paths[shard]);
+            return result_t::fail(status_t::io_k, "the tar beside {} cannot be read to the device", paths[shard]);
         // Members are named `<key>.<column>`, as in WebDataset; a tar of other members means the
         // shard simply lacks the column, which must fail rather than read image bytes as text.
         std::uint8_t member_name[100] = {}; // the USTAR header's name field
@@ -247,7 +247,7 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
         std::size_t const name_bytes = static_cast<std::size_t>(name_end - member_name);
         if (name_bytes <= extension.size() || member_name[name_bytes - extension.size() - 1] != '.' ||
             !std::equal(extension.begin(), extension.end(), name_end - extension.size()))
-            return result_t::fail(status_t::invalid_input_k, "{} has no column {}, nor tar members named for it",
+            return result_t::fail(status_t::invalid_argument_k, "{} has no column {}, nor tar members named for it",
                                   paths[shard], extension);
         // Members stage in runs of the tar, and a run ends where the gap to the next member exceeds
         // the member bytes it holds, so staging stays under twice the members gathered.
@@ -258,7 +258,7 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
         for (std::size_t row = row_begin; row != row_end; ++row) {
             if (offsets[row] < 0 || lengths[row] <= 0 ||
                 static_cast<std::size_t>(offsets[row] + lengths[row]) > source->size())
-                return result_t::fail(status_t::invalid_input_k, "row {} of {} names no member of its {}-byte tar",
+                return result_t::fail(status_t::invalid_argument_k, "row {} of {} names no member of its {}-byte tar",
                                       row - row_begin, paths[shard], source->size());
             std::size_t const member_begin = static_cast<std::size_t>(offsets[row]);
             std::size_t const member_end = member_begin + static_cast<std::size_t>(lengths[row]);
@@ -297,7 +297,7 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
                                                         sizes.data() + row_begin, row_end - row_begin, &attributes,
                                                         &attribute_index, 1, stream.value()) != CUDA_SUCCESS) ||
             cuStreamSynchronize(stream.value()) != CUDA_SUCCESS)
-            return result_t::fail(status_t::cuda_error_k, "tar member gather failed for {}", paths[shard]);
+            return result_t::fail(status_t::device_error_k, "tar member gather failed for {}", paths[shard]);
         row_begin = row_end;
     }
 
@@ -330,12 +330,12 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
                                               gpu_stream_t &stream) noexcept {
     using result_t = expected<parquet_file_t>;
     if (paths.empty() || columns.empty())
-        return result_t::fail(status_t::invalid_input_k, "a read needs at least one shard path and one column");
+        return result_t::fail(status_t::invalid_argument_k, "a read needs at least one shard path and one column");
     if (!row_groups.empty() && row_groups.size() != paths.size())
-        return result_t::fail(status_t::invalid_input_k, "{} row-group lists for {} shards", row_groups.size(),
+        return result_t::fail(status_t::invalid_argument_k, "{} row-group lists for {} shards", row_groups.size(),
                               paths.size());
     for (sz::string_view_t path : paths)
-        if (path.contains('\0')) return result_t::fail(status_t::invalid_input_k, "a shard path holds a NUL byte");
+        if (path.contains('\0')) return result_t::fail(status_t::invalid_argument_k, "a shard path holds a NUL byte");
     try {
         std::vector<std::string> path_texts; // vendor-boundary: cuDF's source_info takes std::strings
         std::vector<std::string> names;      // vendor-boundary: cuDF's column selector takes std::strings
@@ -344,7 +344,7 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
         for (sz::string_view_t path : paths) path_texts.emplace_back(path.data(), path.size());
         for (sz::string_view_t column : columns) names.emplace_back(column.data(), column.size());
         switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
-        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed for the read");
+        if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed for the read");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
 
         // A column the sidecar lacks is each row's member of its sibling tar, read through the byte
@@ -380,7 +380,7 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
             }
             auto loaded = cudf::io::read_parquet(options, cudf_stream);
             if (loaded.tbl == nullptr || static_cast<std::size_t>(loaded.tbl->num_columns()) != names.size())
-                return result_t::fail(status_t::invalid_input_k, "read of {} returned {} of {} requested columns",
+                return result_t::fail(status_t::invalid_argument_k, "read of {} returned {} of {} requested columns",
                                       paths[path], loaded.tbl == nullptr ? 0 : loaded.tbl->num_columns(), names.size());
             rows_per_shard.push_back(static_cast<std::size_t>(loaded.tbl->num_rows()));
             part_views.push_back(loaded.tbl->view());
@@ -411,10 +411,10 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
         return result_t {parquet_file_t {std::move(state)}};
     }
     catch (std::exception const &error) {
-        return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
+        return result_t::fail(status_t::internal_k, "cuDF raised at the firewall: {}", error.what());
     }
     catch (...) {
-        return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
+        return result_t::fail(status_t::internal_k, "cuDF raised a non-standard exception at the firewall");
     }
 }
 
@@ -491,10 +491,10 @@ expected<parquet_length_metadata_t> parquet_file_t::table_metadata(
         return result_t {std::move(length)};
     }
     catch (std::exception const &error) {
-        return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
+        return result_t::fail(status_t::internal_k, "cuDF raised at the firewall: {}", error.what());
     }
     catch (...) {
-        return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
+        return result_t::fail(status_t::internal_k, "cuDF raised a non-standard exception at the firewall");
     }
 }
 
@@ -510,16 +510,16 @@ expected<parquet_length_metadata_t> parquet_file_t::column_metadata(gpu_direct_s
         auto const &sizes = meta.columnchunk_metadata();
         auto const found = sizes.find(name);
         if (found == sizes.end())
-            return result_t::fail(status_t::invalid_input_k, "no column named {} in {}", column, path);
+            return result_t::fail(status_t::invalid_argument_k, "no column named {} in {}", column, path);
         std::size_t bytes = 0;
         for (auto const chunk_bytes : found->second) bytes += static_cast<std::size_t>(chunk_bytes);
         return result_t {parquet_length_metadata_t {static_cast<std::size_t>(meta.num_rows()), bytes}};
     }
     catch (std::exception const &error) {
-        return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
+        return result_t::fail(status_t::internal_k, "cuDF raised at the firewall: {}", error.what());
     }
     catch (...) {
-        return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
+        return result_t::fail(status_t::internal_k, "cuDF raised a non-standard exception at the firewall");
     }
 }
 
@@ -551,7 +551,7 @@ expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, 
     using result_t = expected<jsonl_file_t>;
     try {
         switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
-        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed for the read");
+        if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed for the read");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
         // One JSON object per line; KvikIO / GDS streams the bytes, cuDF decodes on the GPU.
         auto options = cudf::io::json_reader_options::builder(
@@ -559,7 +559,7 @@ expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, 
                            .lines(true)
                            .build();
         cudf::io::table_with_metadata loaded = cudf::io::read_json(options, cudf_stream);
-        if (loaded.tbl == nullptr) return result_t::fail(status_t::io_error_k, "empty JSONL read of {}", path);
+        if (loaded.tbl == nullptr) return result_t::fail(status_t::io_k, "empty JSONL read of {}", path);
 
         // Select `field` among the decoded top-level columns by name.
         std::string const wanted {field}; // vendor-boundary
@@ -571,7 +571,7 @@ expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, 
                 break;
             }
         if (field_index == column_count)
-            return result_t::fail(status_t::invalid_input_k, "no field {} in JSONL {}", field, path);
+            return result_t::fail(status_t::invalid_argument_k, "no field {} in JSONL {}", field, path);
 
         // Own just that field's column and drop the rest of the decoded table.
         std::vector<std::unique_ptr<cudf::column>> released = loaded.tbl->release(); // vendor-boundary
@@ -583,19 +583,19 @@ expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, 
         return result_t {jsonl_file_t {std::move(state)}};
     }
     catch (std::exception const &error) {
-        return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
+        return result_t::fail(status_t::internal_k, "cuDF raised at the firewall: {}", error.what());
     }
     catch (...) {
-        return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
+        return result_t::fail(status_t::internal_k, "cuDF raised a non-standard exception at the firewall");
     }
 }
 
 expected<jsonl_file_t> jsonl_file_t::concat(std::span<jsonl_file_t const> parts, gpu_stream_t &stream) noexcept {
     using result_t = expected<jsonl_file_t>;
-    if (parts.empty()) return result_t::fail(status_t::invalid_input_k, "JSONL concat needs at least one shard");
+    if (parts.empty()) return result_t::fail(status_t::invalid_argument_k, "JSONL concat needs at least one shard");
     try {
         switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
-        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed for the read");
+        if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed for the read");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
         std::vector<cudf::column_view> fields; // vendor-boundary: cudf::concatenate takes a column-view list
         fields.reserve(parts.size());
@@ -609,10 +609,10 @@ expected<jsonl_file_t> jsonl_file_t::concat(std::span<jsonl_file_t const> parts,
         return result_t {jsonl_file_t {std::move(state)}};
     }
     catch (std::exception const &error) {
-        return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
+        return result_t::fail(status_t::internal_k, "cuDF raised at the firewall: {}", error.what());
     }
     catch (...) {
-        return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
+        return result_t::fail(status_t::internal_k, "cuDF raised a non-standard exception at the firewall");
     }
 }
 
@@ -642,7 +642,7 @@ expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::
     using result_t = expected<csv_file_t>;
     try {
         switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
-        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed for the read");
+        if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed for the read");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
         std::string const name {column}; // vendor-boundary
         // Read only the wanted column, forced to string so type inference cannot surprise us; KvikIO /
@@ -656,7 +656,7 @@ expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::
                 .build();
         cudf::io::table_with_metadata loaded = cudf::io::read_csv(options, cudf_stream);
         if (loaded.tbl == nullptr || loaded.tbl->num_columns() == 0)
-            return result_t::fail(status_t::invalid_input_k, "no column {} in CSV {}", column, path);
+            return result_t::fail(status_t::invalid_argument_k, "no column {} in CSV {}", column, path);
 
         // Own the one decoded column and drop the rest of the table.
         std::vector<std::unique_ptr<cudf::column>> released = loaded.tbl->release(); // vendor-boundary
@@ -668,19 +668,19 @@ expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::
         return result_t {csv_file_t {std::move(state)}};
     }
     catch (std::exception const &error) {
-        return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
+        return result_t::fail(status_t::internal_k, "cuDF raised at the firewall: {}", error.what());
     }
     catch (...) {
-        return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
+        return result_t::fail(status_t::internal_k, "cuDF raised a non-standard exception at the firewall");
     }
 }
 
 expected<csv_file_t> csv_file_t::concat(std::span<csv_file_t const> parts, gpu_stream_t &stream) noexcept {
     using result_t = expected<csv_file_t>;
-    if (parts.empty()) return result_t::fail(status_t::invalid_input_k, "CSV concat needs at least one shard");
+    if (parts.empty()) return result_t::fail(status_t::invalid_argument_k, "CSV concat needs at least one shard");
     try {
         switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
-        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed for the read");
+        if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed for the read");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
         std::vector<cudf::column_view> columns; // vendor-boundary: cudf::concatenate takes a column-view list
         columns.reserve(parts.size());
@@ -694,10 +694,10 @@ expected<csv_file_t> csv_file_t::concat(std::span<csv_file_t const> parts, gpu_s
         return result_t {csv_file_t {std::move(state)}};
     }
     catch (std::exception const &error) {
-        return result_t::fail(status_t::other_k, "cuDF raised at the firewall: {}", error.what());
+        return result_t::fail(status_t::internal_k, "cuDF raised at the firewall: {}", error.what());
     }
     catch (...) {
-        return result_t::fail(status_t::other_k, "cuDF raised a non-standard exception at the firewall");
+        return result_t::fail(status_t::internal_k, "cuDF raised a non-standard exception at the firewall");
     }
 }
 
@@ -706,7 +706,7 @@ expected<std::size_t> ul::file_size_bytes(sz::string_view_t path) noexcept {
     sz::string_t text; // null-terminated for the C stat call
     if (sz::failed(text.assign(path))) return result_t::fail(status_t::bad_alloc_k, "path allocation failed");
     struct ::stat info {}; // vendor-boundary: POSIX stat
-    if (::stat(text.c_str(), &info) != 0) return result_t::fail(status_t::io_error_k, "stat failed for {}", path);
+    if (::stat(text.c_str(), &info) != 0) return result_t::fail(status_t::io_k, "stat failed for {}", path);
     return result_t {static_cast<std::size_t>(info.st_size)};
 }
 
@@ -727,7 +727,7 @@ expected<st::basic_vector<sz::string_t>> ul::expand_glob(sz::string_view_t path_
     for (sz::string_view_t component : path_or_glob.split(sz::byteset_t {"/", 1}))
         if (!component.empty() && st::failed(components.push_back(std::move(component))))
             return result_t::fail(status_t::bad_alloc_k, "glob component table allocation failed");
-    if (components.size() == 0) return result_t::fail(status_t::invalid_input_k, "no files match {}", path_or_glob);
+    if (components.size() == 0) return result_t::fail(status_t::invalid_argument_k, "no files match {}", path_or_glob);
 
     bool const absolute = path_or_glob.starts_with(sz::string_view_t {"/", 1});
     st::basic_vector<sz::string_t> prefixes;
@@ -746,7 +746,7 @@ expected<st::basic_vector<sz::string_t>> ul::expand_glob(sz::string_view_t path_
         bool const patterned = component.find_first_of(wildcards) != sz::string_view_t::npos;
         bool const recursive = component == sz::string_view_t {"**", 2};
         if (recursive && last)
-            return result_t::fail(status_t::invalid_input_k, "{} ends in **, not in a file pattern", path_or_glob);
+            return result_t::fail(status_t::invalid_argument_k, "{} ends in **, not in a file pattern", path_or_glob);
 
         // A literal directory component descends every prefix without touching the filesystem — the
         // next level's opendir discovers a missing branch and drops it.
@@ -791,7 +791,7 @@ expected<st::basic_vector<sz::string_t>> ul::expand_glob(sz::string_view_t path_
         }
         if (!last) prefixes = std::move(next_prefixes);
     }
-    if (paths.empty()) return result_t::fail(status_t::invalid_input_k, "no files match {}", path_or_glob);
+    if (paths.empty()) return result_t::fail(status_t::invalid_argument_k, "no files match {}", path_or_glob);
 
     // readdir order is filesystem-dependent; sort so the shard order is deterministic across every rank.
     std::sort(paths.begin(), paths.end());

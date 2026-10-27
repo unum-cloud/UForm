@@ -25,6 +25,7 @@
 namespace unum::uform::media {
 
 using uu::b8_t;
+using uu::bytes_view_t;
 using uu::expected;
 using uu::expected_t;
 using uu::pixel_t;
@@ -73,10 +74,11 @@ struct demuxed_t {
  *  A raw Annex-B input passes through as one packet with its codec sniffed from the first NAL header.
  *
  *  @param[in] container The clip's container or raw elementary-stream bytes.
- *  @retval status_t::invalid_input_k No video stream, an unsupported codec, or a stream that yielded no bytes.
+ *  @retval status_t::invalid_argument_k No video stream, an unsupported codec, or a stream that
+ *      yielded no bytes.
  *  @retval status_t::bad_alloc_k A libav or stream buffer allocation failed.
  */
-[[nodiscard]] expected<demuxed_t> demux_video(std::span<b8_t const> container) noexcept;
+[[nodiscard]] expected<demuxed_t> demux_video(bytes_view_t container) noexcept;
 
 /**
  *  @brief Decode @p clip in software and scatter its sampled frames into a segment's tube cells.
@@ -89,8 +91,8 @@ struct demuxed_t {
  *  @param[in] grid The segment's factorization, from @ref video_tube_grid .
  *  @param[in] shape The video modality's geometry: patch side, tube depth and frame stride.
  *  @param[out] out The segment's cells, shaped as @ref pixel_tubes_span_t says.
- *  @retval status_t::shape_unsupported_k @p out disagrees with @p grid and @p shape .
- *  @retval status_t::invalid_input_k The stream does not decode, or decodes no frame.
+ *  @retval status_t::unsupported_k @p out disagrees with @p grid and @p shape .
+ *  @retval status_t::invalid_argument_k The stream does not decode, or decodes no frame.
  */
 [[nodiscard]] expected_t decode_video_frames(demuxed_t const &clip, video_grid_t grid, video_batch_shape_t const &shape,
                                              pixel_tubes_span_t out) noexcept;

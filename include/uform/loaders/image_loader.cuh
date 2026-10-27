@@ -40,8 +40,7 @@
 
 #include <nvjpeg.h> // vendor-boundary: `nvjpegHandle_t` / `nvjpegJpegState_t` — the session's device state
 
-#include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the borrowed CPU-decode pool
-
+#include "uform/utilities/ram_device.hpp"           // `pool_view_t` — the borrowed CPU-decode pool
 #include "uform/utilities/vram_nvidia_device.hpp"   // `pinned_alloc` — the non-JPEG fallback's host tapes
 #include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t` — the decode target
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
@@ -58,10 +57,6 @@ using namespace unum::uform::encoder;
  *  decode's destination. Each drawn image scatters its patches into a column sub-range of one row, several
  *  images sharing a row. */
 using media::pixel_patches_span_t;
-
-/** The host-side worker pool the CPU fallback fans PNG / WebP / progressive-JPEG decodes across —
- *  one per run, owned at the composition root (the @b only sanctioned host-thread pool), borrowed here. */
-using cpu_decode_pool_t = ashvardanian::forkunion::flat_pool_t;
 
 /** One JPEG batch entry: the compressed bitstream and length, the plan it maps back to (for
  *  fallback marking and RGBA expansion), its byte offset into the packed-RGB scratch, and the
@@ -159,7 +154,7 @@ struct nvjpeg_session_t {
  *      adds one to.
  *  @param[inout] stream The stream the staging, decode, resize, and copies run on.
  */
-[[nodiscard]] expected_t decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, column_view_t tape,
+[[nodiscard]] expected_t decode_images(nvjpeg_session_t &jpeg, pool_view_t pool, column_view_t tape,
                                        u64r1_view_t drawn_rows, std::span<image_batch_shape_t const> representations,
                                        pixel_patches_span_t pixels, image_shape_span_t shapes,
                                        u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
@@ -194,8 +189,7 @@ struct image_loader_parquet_t {
      */
     [[nodiscard]] static expected<image_loader_parquet_t> make(gpu_direct_storage_session_t &session,
                                                                sz::string_view_t path_or_glob, u64_t seed,
-                                                               cpu_decode_pool_t &pool,
-                                                               image_batch_shape_t image) noexcept;
+                                                               pool_view_t pool, image_batch_shape_t image) noexcept;
 
     /**
      *  @brief Fill the next few @p batches ' @c images grid on one GPU rank, each image one sub-row segment.
@@ -226,7 +220,7 @@ struct image_loader_parquet_t {
 
     /** The run's CPU-decode worker pool — borrowed from the composition root, handed to the decode's
      *  PNG / WebP / progressive-JPEG fallback; never owned, never spawned here. */
-    cpu_decode_pool_t *pool_ = nullptr;
+    pool_view_t pool_ {nullptr};
 
     /** The dataset's Parquet shard paths, sorted by the glob — owned. */
     st::basic_vector<sz::string_t> absolute_paths_ {};

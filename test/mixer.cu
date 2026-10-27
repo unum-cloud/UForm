@@ -75,7 +75,8 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
     u32_t const columns = static_cast<u32_t>(batch.tokens.extent(1));
 
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for member {}", member);
+    if (!gpu_scope.ok())
+        return expected_t::fail(status_t::device_error_k, "context entry failed for member {}", member);
 
     auto offsets = pinned1_t<u32_t>::zeros({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {}).value;
     auto lengths = pinned1_t<u32_t>::zeros({S}, pinned_alloc<u32_t> {}).value;
@@ -127,7 +128,8 @@ using pinned1_t = nk::tensor<value_type_, pinned_alloc<value_type_>, 1>;
     u32_t const columns = static_cast<u32_t>(mixed.tokens.extent(1));
 
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for member {}", member);
+    if (!gpu_scope.ok())
+        return expected_t::fail(status_t::device_error_k, "context entry failed for member {}", member);
 
     auto offsets = pinned1_t<u32_t>::zeros({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {}).value;
     auto lengths = pinned1_t<u32_t>::zeros({S}, pinned_alloc<u32_t> {}).value;
@@ -217,7 +219,8 @@ inline constexpr u32_t pad_bag_k = bags_per_member_k;
     u32_t const S = segments_per_member_k, L = tokens_per_segment_k;
 
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for member {}", member);
+    if (!gpu_scope.ok())
+        return expected_t::fail(status_t::device_error_k, "context entry failed for member {}", member);
 
     auto offsets = pinned1_t<u32_t>::zeros({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {}).value;
     auto lengths = pinned1_t<u32_t>::zeros({S}, pinned_alloc<u32_t> {}).value;
@@ -365,7 +368,8 @@ using mirrored_geometry_t = stack_array<mirrored_segment_t, segments_per_member_
     u32_t const columns = static_cast<u32_t>(mixed.tokens.extent(1));
 
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for member {}", member);
+    if (!gpu_scope.ok())
+        return expected_t::fail(status_t::device_error_k, "context entry failed for member {}", member);
 
     auto offsets = pinned1_t<u32_t>::uninitialized({static_cast<std::size_t>(S) + 1u}, pinned_alloc<u32_t> {}).value;
     auto lengths = pinned1_t<u32_t>::uninitialized({S}, pinned_alloc<u32_t> {}).value;

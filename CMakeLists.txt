@@ -62,21 +62,6 @@ if (UFORM_CCACHE_PROGRAM)
     set(CMAKE_CUDA_COMPILER_LAUNCHER "${UFORM_CCACHE_PROGRAM}")
 endif ()
 
-# Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any
-# cloned repo execute code), so point `core.hooksPath` at `.githooks` here — configuring the build arms
-# the `pre-commit` / `commit-msg` checks. Skipped when there is no `.git` (tarball / export builds).
-if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
-    execute_process(
-        COMMAND git config core.hooksPath .githooks
-        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-        RESULT_VARIABLE uform_hooks_status_
-        OUTPUT_QUIET ERROR_QUIET
-    )
-    if (uform_hooks_status_ EQUAL 0)
-        message(STATUS "uform: Git hooks enabled (core.hooksPath -> .githooks)")
-    endif ()
-endif ()
-
 project(
     uform
     VERSION 4.0.0
@@ -91,6 +76,22 @@ if (CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
     set(UFORM_IS_MAIN_PROJECT ON)
 endif ()
 
+# Enable the in-repo Git hooks. Git will not auto-run hooks shipped inside a clone (that would let any
+# cloned repo execute code), so point `core.hooksPath` at `.githooks` here — configuring the build arms
+# the `pre-commit` / `commit-msg` checks. Skipped when there is no `.git` (tarball / export builds).
+if (UFORM_IS_MAIN_PROJECT AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
+    execute_process(
+        COMMAND git config core.hooksPath .githooks
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        RESULT_VARIABLE uform_hooks_status_
+        OUTPUT_QUIET ERROR_QUIET
+    )
+    if (uform_hooks_status_ EQUAL 0)
+        message(STATUS "uform: Git hooks enabled (core.hooksPath -> .githooks)")
+    endif ()
+endif ()
+
+option(UFORM_INSTALL "Install the C headers, libraries and CMake package" ${UFORM_IS_MAIN_PROJECT})
 option(UFORM_BUILD_CUDA "Add the NVIDIA residency, the trainer, the mesh and the loaders" OFF)
 option(UFORM_BUILD_ROCM "Add the AMD residency" OFF)
 option(UFORM_BUILD_LIB_C "Build uform_static and uform_shared" ${UFORM_IS_MAIN_PROJECT})
@@ -168,6 +169,7 @@ set(SMASHTABLE_BUILD_CUDA OFF)
 set(SMASHTABLE_INSTALL OFF)
 uform_sibling(smashtable https://github.com/ashvardanian/SmashTable f67526deab5b708cf50baa64d40240875af40f3f)
 
+set(YYJSON_INSTALL OFF)
 FetchContent_Declare(
     yyjson
     GIT_REPOSITORY https://github.com/ibireme/yyjson.git

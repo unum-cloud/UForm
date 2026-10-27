@@ -370,7 +370,9 @@ target_compile_definitions(uform_host PUBLIC ${uform_cpu_gates_} ${uform_gpu_gat
 if (NOT UFORM_BUILD_CUDA)
     target_sources(uform_host PRIVATE train_absent.cpp)
 endif ()
-target_link_libraries(uform_host PUBLIC numkong::static forkunion::header stringzilla::static smashtable::header yyjson)
+target_link_libraries(
+    uform_host PUBLIC numkong::static forkunion::header forkunion::static stringzilla::static smashtable::header yyjson
+)
 # Every unit naming a class's waiter or atomic reference reads ForkUnion's probe verdicts rather than its own flags, so
 # the class units and the dispatch unit name the same rungs, and the dispatch unit admits them at run time.
 target_link_libraries(uform_host PUBLIC $<BUILD_INTERFACE:forkunion::cpu_capabilities_compiled>)
@@ -456,7 +458,9 @@ if (UFORM_BUILD_CUDA)
         train/trainer.cu
     )
     add_library(uform::train ALIAS uform_train)
-    target_include_directories(uform_train PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include")
+    target_include_directories(
+        uform_train PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/include" "${PROJECT_SOURCE_DIR}/c"
+    )
     target_link_libraries(
         uform_train PUBLIC numkong::static stringzilla::static smashtable::header yyjson CUDA::cuda_driver
     )
@@ -538,8 +542,8 @@ if (UFORM_BUILD_CUDA)
     # demux targets already linked above for video; adds the resampler, and the scaler the host video decode uses.
     target_link_libraries(uform_loaders PRIVATE "${UFORM_SWRESAMPLE_LIBRARY}" "${UFORM_SWSCALE_LIBRARY}")
 
-    # The host-side media demux and decode thread pool, public because the loader headers expose `cpu_decode_pool_t`.
-    target_link_libraries(uform_loaders PUBLIC forkunion::header)
+    # The host-side media demux and decode run on ForkUnion pools, public because the loader headers take `pool_view_t`.
+    target_link_libraries(uform_loaders PUBLIC forkunion::header forkunion::static)
 
     # `train/datasets.cu` → `uform::datasets`: the mixtures and the batch source over the loaders, kept out of
     # `uform::train`, which the C library links without the loaders or cuDF.

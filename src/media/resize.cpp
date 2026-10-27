@@ -70,15 +70,15 @@ expected_t um::resize_image(pixel_image_view_t source, pixel_patches_span_t out)
     u32_t const rows = static_cast<u32_t>(out.extent(0)), columns = static_cast<u32_t>(out.extent(1));
     u32_t const patch_side = static_cast<u32_t>(out.extent(2));
     if (source.extent(2) != image_channels_k || out.extent(4) != image_channels_k || out.extent(3) != patch_side)
-        return expected_t::fail(status_t::shape_unsupported_k, "resize takes RGBA into square RGBA patches");
+        return expected_t::fail(status_t::unsupported_k, "resize takes RGBA into square RGBA patches");
     if (width == 0 || height == 0 || rows == 0 || columns == 0 || patch_side == 0)
-        return expected_t::fail(status_t::shape_unsupported_k, "resize from {}x{} into {}x{} patches of {}", width,
-                                height, columns, rows, patch_side);
+        return expected_t::fail(status_t::unsupported_k, "resize from {}x{} into {}x{} patches of {}", width, height,
+                                columns, rows, patch_side);
     image_extent_t const target {columns * patch_side, rows * patch_side};
     crop_t const crop = image_center_crop(image_extent_t {width, height}, target);
     if (crop.width == 0 || crop.height == 0)
-        return expected_t::fail(status_t::shape_unsupported_k, "a {}x{} image has no {}x{} crop", width, height,
-                                target.width, target.height);
+        return expected_t::fail(status_t::unsupported_k, "a {}x{} image has no {}x{} crop", width, height, target.width,
+                                target.height);
 
     st::basic_vector<lanczos_tap_t> horizontal, vertical;
     st::basic_vector<f32_t> staged; // the crop's rows resampled to the target width, before the vertical pass

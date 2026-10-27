@@ -106,7 +106,7 @@ expected<std::size_t> uu::pack_bytes_bf16(std::size_t columns, std::size_t depth
                                           gpu_numerics_t const &numerics) noexcept {
     nk_size_t bytes = 0;
     if (nk_status_t const status = numerics.pack_size_bf16(columns, depth, &bytes); status != nk_success_k)
-        return expected<std::size_t>::fail(status_t::cuda_error_k, "pack sizing [{}x{}] failed: {}", columns, depth,
+        return expected<std::size_t>::fail(status_t::device_error_k, "pack sizing [{}x{}] failed: {}", columns, depth,
                                            nk_status_name(status));
     return expected<std::size_t> {static_cast<std::size_t>(bytes)};
 }
@@ -135,8 +135,8 @@ expected_t uu::pack_bf16(bf16r2_view_t b, b8r1_span_t packed, gpu_numerics_t con
 expected_t uu::multiply_bf16(bf16r2_view_t a, b8r1_view_t packed_b, f32r2_span_t c, gpu_numerics_t const &numerics,
                              gpu_stream_t &stream) noexcept {
     if (c.extent(0) != a.extent(0))
-        return expected_t::fail(status_t::shape_unsupported_k, "[{}x{}]·Bᵀ cannot fill [{}x{}]", a.extent(0),
-                                a.extent(1), c.extent(0), c.extent(1));
+        return expected_t::fail(status_t::unsupported_k, "[{}x{}]·Bᵀ cannot fill [{}x{}]", a.extent(0), a.extent(1),
+                                c.extent(0), c.extent(1));
     return numkong_result(
         numerics.multiply_bf16(numkong_scalars(a.data()), packed_b.data(), c.data(), a.extent(0), c.extent(1),
                                a.extent(1), a.stride_bytes(0), c.stride_bytes(0), NUMKONG_NULL, 0, stream.numkong()),
@@ -161,7 +161,7 @@ expected<std::size_t> uu::weight_gradient_workspace_bytes_bf16(std::size_t outpu
     nk_size_t bytes = 0;
     if (nk_status_t const status = numerics.multiply_workspace_size_bf16(outputs, inputs, tokens, &bytes);
         status != nk_success_k)
-        return expected<std::size_t>::fail(status_t::cuda_error_k,
+        return expected<std::size_t>::fail(status_t::device_error_k,
                                            "weight gradient workspace sizing [{}x{}x{}] failed: {}", outputs, inputs,
                                            tokens, nk_status_name(status));
     return expected<std::size_t> {static_cast<std::size_t>(bytes)};

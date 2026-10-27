@@ -6,17 +6,18 @@
  *      @ref tokens_loader_parquet_t , @ref image_loader_parquet_t and
  *      @ref audio_loader_parquet_t .
  *
- *  @ref make reads each shard's Parquet footer once; every @ref fill takes the caller's stream, rank, and step,
- *  pools randomly chosen shards' clip column into one device reservoir over GDS, draws rows by a keyed bijection,
- *  and decodes the drawn clips into the batches' @c videos tube grid with @ref decode_videos .
+ *  @ref make reads each shard's Parquet footer once; every @ref fill takes the caller's stream,
+ *  rank, and step, pools randomly chosen shards' clip column into one device reservoir over GDS,
+ *  draws rows by a keyed bijection, and decodes the drawn clips into the batches' @c videos tube
+ *  grid with @ref decode_videos .
  *
  *  @section video_host_hop The one host hop, and why
  *
- *  A container ( @c mp4 / @c webm ) can only be parsed on the host — libavformat walks its box / EBML structure
- *  and rewrites the elementary stream to Annex-B — so the drawn clips' compressed bytes make one device-to-pinned
- *  hop before demux. Demux is the one place STYLE sanctions a worker pool ( @ref decode_videos borrows the run's
- *  @ref cpu_decode_pool_t ): container parsing is host-bound and embarrassingly parallel across clips. Everything
- *  after demux stays on device.
+ *  A container ( @c mp4 / @c webm ) can only be parsed on the host — libavformat walks its box /
+ *  EBML structure and rewrites the elementary stream to Annex-B — so the drawn clips' compressed
+ *  bytes make one device-to-pinned hop before demux. Demux is the one place STYLE sanctions a
+ *  worker pool ( @ref decode_videos borrows the run's @ref pool_view_t ): container parsing is
+ *  host-bound and embarrassingly parallel across clips. Everything after demux stays on device.
  *
  *  @section video_multi_engine Saturating the physical decode units — GPU-driven
  *
@@ -61,8 +62,7 @@
 #include <memory> // `std::unique_ptr` — the pimpl owning the NVDEC engine state
 #include <span>   // `std::span`
 
-#include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the borrowed CPU demux / decode-drive pool
-
+#include "uform/utilities/ram_device.hpp"           // `pool_view_t` — the borrowed CPU demux / decode-drive pool
 #include "uform/utilities/vram_nvidia_device.hpp"   // `pinned_alloc`
 #include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t`
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
@@ -79,10 +79,6 @@ struct nvdec_state_t;
 namespace unum::uform::loaders {
 using namespace unum::uform::utilities;
 using namespace unum::uform::encoder;
-
-/** The host-side worker pool the media decoders fan their host-CPU work across — one per run, owned at the
- *  composition root (the @b only sanctioned host-thread pool), borrowed here. */
-using cpu_decode_pool_t = ashvardanian::forkunion::flat_pool_t;
 
 /** The writable @b [rows,columns,tube_frames,patch_side,patch_side,channels] tube grid of one batch's video
  *  rows — the decode's destination. Each drawn clip emits one segment @b per representation, and every segment
@@ -143,7 +139,7 @@ struct nvdec_session_t {
      *      segments packed row-safe, the rest PAD.
      *  @param[inout] stream The one stream every decode, conversion, and tile enqueues on.
      */
-    [[nodiscard]] expected_t decode_into(cpu_decode_pool_t &pool, column_view_t clips,
+    [[nodiscard]] expected_t decode_into(pool_view_t pool, column_view_t clips,
                                          std::span<video_batch_shape_t const> representations,
                                          pixel_tubes_span_t videos, video_shape_span_t video_shapes,
                                          u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
@@ -170,7 +166,7 @@ struct nvdec_session_t {
  *      cursor this fill writes for its video segments.
  *  @param[inout] stream The stream the staging and tiling enqueue on.
  */
-[[nodiscard]] expected_t decode_videos(nvdec_session_t &nvdec, cpu_decode_pool_t &pool, column_view_t tape,
+[[nodiscard]] expected_t decode_videos(nvdec_session_t &nvdec, pool_view_t pool, column_view_t tape,
                                        u64r1_view_t drawn_rows, std::span<video_batch_shape_t const> representations,
                                        pixel_tubes_span_t videos, video_shape_span_t video_shapes,
                                        u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
@@ -203,8 +199,7 @@ struct video_loader_parquet_t {
      */
     [[nodiscard]] static expected<video_loader_parquet_t> make(gpu_direct_storage_session_t &session,
                                                                sz::string_view_t path_or_glob, u64_t seed,
-                                                               cpu_decode_pool_t &pool,
-                                                               video_batch_shape_t video) noexcept;
+                                                               pool_view_t pool, video_batch_shape_t video) noexcept;
 
     /**
      *  @brief Fill the next few @p batches ' @c videos tube grid on one GPU rank, packing each drawn clip's segment
@@ -228,7 +223,7 @@ struct video_loader_parquet_t {
     gpu_direct_storage_session_t *storage_ = nullptr;
 
     /** The run's CPU-decode worker pool — borrowed from the composition root, forwarded to the decode. */
-    cpu_decode_pool_t *pool_ = nullptr;
+    pool_view_t pool_ {nullptr};
 
     /** The dataset's Parquet shard paths, sorted by the glob — owned. */
     st::basic_vector<sz::string_t> absolute_paths_ {};

@@ -67,11 +67,11 @@ using e4m3r2_span_t = nk::tensor_span<e4m3_t, 2>;
 using e4m3r3_view_t = nk::tensor_view<e4m3_t, 3>;
 using e4m3r3_span_t = nk::tensor_span<e4m3_t, 3>;
 
-/** Failure carrying a CUDA Driver error: @ref expected::fail tagged @c cuda_error_k , with the driver's
- *  own error string appended to the description and @p cu_error kept in @c cu_error_ . */
+/** Failure carrying a CUDA Driver error: @ref expected::fail tagged @c device_error_k , with the
+ *  driver's own error string appended to the description and @p cu_error kept in @c cu_error_ . */
 template <typename value_type_ = void, typename... arg_types_>
 [[nodiscard]] expected<value_type_> cuda_failure(CUresult cu_error, format_at_t format, arg_types_ &&...args) noexcept {
-    expected<value_type_> result = expected<value_type_>::fail(status_t::cuda_error_k, format,
+    expected<value_type_> result = expected<value_type_>::fail(status_t::device_error_k, format,
                                                                std::forward<arg_types_>(args)...);
     result.cu_error_ = static_cast<i32_t>(cu_error);
     char const *cu_error_string = nullptr;
@@ -260,9 +260,8 @@ struct gpu_arena_t {
                 return cuda_failure<gpu_arena_t>(result, "P2P capability query failed (device={} peer={})", device,
                                                  peer);
             if (can_access == 0)
-                return expected<gpu_arena_t>::fail(status_t::shape_unsupported_k,
-                                                   "device {} cannot read the arena of device {}: no P2P path", peer,
-                                                   device);
+                return expected<gpu_arena_t>::fail(
+                    status_t::unsupported_k, "device {} cannot read the arena of device {}: no P2P path", peer, device);
             if (st::failed(arena.visible_to_.push_back(i32_t {peer})))
                 return expected<gpu_arena_t>::fail(status_t::bad_alloc_k, "peer table allocation failed");
         }

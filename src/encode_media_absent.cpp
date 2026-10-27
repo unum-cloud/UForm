@@ -22,7 +22,7 @@ static void refuse_files(arguments_type_ &arguments, call_outcome_t &outcome) no
 }
 
 um::expected_t um::resample_mono(std::span<f32_t const>, u32_t, u32_t, f32r1_span_t) noexcept {
-    return expected_t::fail(status_t::shape_unsupported_k, "this build has no resampler");
+    return expected_t::fail(status_t::unsupported_k, "this build has no resampler");
 }
 
 extern "C" {

@@ -202,7 +202,7 @@ template <typename value_type_>
                                                     gpu_stream_t &stream) noexcept {
     if (host_source.empty()) return {};
     if (device_destination.extent(0) < host_source.extent(0))
-        return expected_t::fail(status_t::invalid_input_k,
+        return expected_t::fail(status_t::invalid_argument_k,
                                 "device destination ({} scalars) is smaller than the host source ({})",
                                 device_destination.extent(0), host_source.extent(0));
     if (CUresult result = cuMemcpyHtoDAsync(device_address(device_destination.data()), host_source.data(),
@@ -223,7 +223,7 @@ template <typename value_type_>
     std::type_identity_t<nk::tensor_span<value_type_, 1>> host_destination, gpu_stream_t &stream) noexcept {
     if (device_source.empty()) return {};
     if (host_destination.extent(0) < device_source.extent(0))
-        return expected_t::fail(status_t::invalid_input_k,
+        return expected_t::fail(status_t::invalid_argument_k,
                                 "host destination ({} scalars) is smaller than the device source ({})",
                                 host_destination.extent(0), device_source.extent(0));
     if (CUresult result = cuMemcpyDtoHAsync(host_destination.data(), device_address(device_source.data()),
@@ -242,7 +242,7 @@ template <typename value_type_>
                                                       gpu_stream_t &stream) noexcept {
     if (source.empty()) return {};
     if (destination.extent(0) < source.extent(0))
-        return expected_t::fail(status_t::invalid_input_k,
+        return expected_t::fail(status_t::invalid_argument_k,
                                 "device destination ({} scalars) is smaller than the source ({})",
                                 destination.extent(0), source.extent(0));
     if (CUresult result = cuMemcpyDtoDAsync(device_address(destination.data()), device_address(source.data()),
@@ -259,7 +259,7 @@ template <typename value_type_, std::size_t rank_>
                                            gpu_stream_t &stream) noexcept {
     if (destination.empty()) return {};
     if (!destination.is_contiguous())
-        return expected_t::fail(status_t::invalid_input_k, "cannot zero a strided device span");
+        return expected_t::fail(status_t::invalid_argument_k, "cannot zero a strided device span");
     if (CUresult result = cuMemsetD8Async(device_address(destination.data()), 0,
                                           destination.numel() * sizeof(value_type_), stream.get());
         result != CUDA_SUCCESS)
@@ -404,7 +404,7 @@ template <typename... arg_types_>
                                                 gpu_stream_t &stream, arg_types_... args) noexcept {
     static_assert(sizeof...(arg_types_) != 0, "a kernel without arguments has nothing to compute");
     static_assert((std::is_trivially_copyable_v<arg_types_> && ...), "kernels take their arguments by bytes");
-    if (function == nullptr) return expected_t::fail(status_t::invalid_input_k, "no kernel to launch");
+    if (function == nullptr) return expected_t::fail(status_t::invalid_argument_k, "no kernel to launch");
     void *argument_addresses[] = {&args...};
     if (CUresult result = cuLaunchKernel(function, grid_size.x, grid_size.y, grid_size.z, block_size.x, block_size.y,
                                          block_size.z, 0, stream.get(), argument_addresses, nullptr);
@@ -437,7 +437,7 @@ template <typename... arg_types_>
                                               gpu_stream_t &stream, arg_types_ const &...args) noexcept {
     CUfunction function = nullptr;
     if (int result = static_cast<int>(cudaGetFuncBySymbol(&function, kernel_symbol)); result != 0)
-        return expected_t::fail(status_t::cuda_error_k, "kernel symbol resolution failed (code={})", result);
+        return expected_t::fail(status_t::device_error_k, "kernel symbol resolution failed (code={})", result);
     return launch_function(function, grid_size, block_size, stream, args...);
 }
 
@@ -468,7 +468,7 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
 [[nodiscard]] inline expected_t transpose_bf16(bf16r2_view_t source, bf16r2_span_t destination,
                                                gpu_stream_t &stream) noexcept {
     if (destination.extent(0) != source.extent(1) || destination.extent(1) != source.extent(0))
-        return expected_t::fail(status_t::shape_unsupported_k, "[{}x{}] cannot hold the transposed [{}x{}]",
+        return expected_t::fail(status_t::unsupported_k, "[{}x{}] cannot hold the transposed [{}x{}]",
                                 destination.extent(0), destination.extent(1), source.extent(0), source.extent(1));
     if (source.extent(0) == 0 || source.extent(1) == 0) return {};
     dim3 const grid {static_cast<u32_t>(divide_round_up(source.extent(1), std::size_t {64})),
@@ -479,7 +479,7 @@ __global__ void transpose_bf16_kernel(bf16r2_view_t source, bf16r2_span_t destin
 /** Lift a NumKong status into the cell's diagnostics, naming the @p step that returned it. */
 [[nodiscard]] inline expected_t numkong_result(nk_status_t status, sz::string_view_t step) noexcept {
     if (status == nk_success_k) return {};
-    return expected_t::fail(status_t::cuda_error_k, "{} failed: {}", step, nk_status_name(status));
+    return expected_t::fail(status_t::device_error_k, "{} failed: {}", step, nk_status_name(status));
 }
 
 /** The bytes the pack of a @b [columns,depth] BFloat16 B operand takes under @p numerics . */
@@ -631,7 +631,7 @@ struct gpu_replay_graph_t {
     template <typename body_type_>
     [[nodiscard]] static expected<gpu_replay_graph_t> make(CUstream stream, body_type_ &&body) noexcept {
         if (stream == nullptr)
-            return expected<gpu_replay_graph_t>::fail(status_t::invalid_input_k,
+            return expected<gpu_replay_graph_t>::fail(status_t::invalid_argument_k,
                                                       "capture needs a real stream, not the null stream");
         if (CUresult result = cuStreamBeginCapture(stream, CU_STREAM_CAPTURE_MODE_RELAXED); result != CUDA_SUCCESS)
             return cuda_failure<gpu_replay_graph_t>(result, "stream capture begin failed");
@@ -663,10 +663,11 @@ struct gpu_replay_graph_t {
     [[nodiscard]] static expected<gpu_replay_graph_t> make(std::span<CUstream const> streams,
                                                            body_type_ &&body) noexcept {
         if (streams.empty())
-            return expected<gpu_replay_graph_t>::fail(status_t::invalid_input_k, "capture needs at least one stream");
+            return expected<gpu_replay_graph_t>::fail(status_t::invalid_argument_k,
+                                                      "capture needs at least one stream");
         for (std::size_t rank = 0; rank != streams.size(); ++rank)
             if (streams[rank] == nullptr)
-                return expected<gpu_replay_graph_t>::fail(status_t::invalid_input_k,
+                return expected<gpu_replay_graph_t>::fail(status_t::invalid_argument_k,
                                                           "capture needs real streams (rank {} is null)", rank);
         if (streams.size() == 1) return make(streams.front(), [&body]() noexcept { return body(std::size_t {0}); });
 
@@ -724,7 +725,7 @@ struct gpu_replay_graph_t {
      *  @ref make . */
     [[nodiscard]] expected_t launch(CUstream stream) const noexcept {
         if (exec_ == nullptr)
-            return expected_t::fail(status_t::invalid_input_k, "launching an empty (default or moved-from) graph");
+            return expected_t::fail(status_t::invalid_argument_k, "launching an empty (default or moved-from) graph");
         if (CUresult result = cuGraphLaunch(exec_, stream); result != CUDA_SUCCESS)
             return cuda_failure(result, "graph launch failed");
         return {};
@@ -773,7 +774,7 @@ struct gpu_replay_graph_t {
         }
         if (allocation_nodes != 0)
             return expected_t::fail(                                                                          //
-                status_t::invalid_input_k,                                                                    //
+                status_t::invalid_argument_k,                                                                 //
                 "the captured body allocates: {} alloc/free nodes among {} — an allocating body escapes the " //
                 "arena budget and deadlocks device-local multi-GPU first launch; stage buffers before capture",
                 allocation_nodes, node_count);

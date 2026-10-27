@@ -21,6 +21,8 @@
 #include <stdlib.h>  // `exit`, `getenv`
 #include <string.h>  // `memcmp`, `memset`, `strcmp`, `strlen`, `strstr`
 
+#include <forkunion.h> // `fu_pool_new`, `fu_topology_new` - the pool a lender spawns
+
 #include "uform/uform.h"
 
 static void expect(bool must_be_true, char const* message) {
@@ -216,11 +218,6 @@ static void test_executors(void) {
     uform_executor_drain(&(uform_executor_drain_t) {.executor = executor, .outcome = &outcome});
     expect(outcome.status == uform_status_success_k && outcome.message == NULL, "An idle drain succeeds clean");
 
-    uform_executor_t borrowed = NULL;
-    uform_executor_on_pool(&(uform_executor_on_pool_t) {.executor = &borrowed, .outcome = &outcome});
-    expect(outcome.status == uform_status_unsupported_k, "Borrowed pools are not wired yet");
-    expect(borrowed == NULL, "A refused executor is never created");
-
     uform_executor_t gpu = NULL;
     uform_executor_for_vram(&(uform_executor_for_vram_t) {.executor = &gpu, .outcome = &outcome});
     expect(outcome.status == uform_status_success_k || outcome.status == uform_status_device_k,
@@ -286,18 +283,29 @@ static void test_model_load(void) {
 
     uform_outcome_t outcome = {0};
     uform_model_t buffered = NULL;
+    uform_scalar_t quantization = uform_scalar_e4m3_k;
     uform_model_load_ram_buffer(&(uform_model_load_ram_buffer_t) {.model = &buffered,
                                                                   .executor = executor,
                                                                   .outcome = &outcome,
                                                                   .buffer = {buffer, (size_t)length},
-                                                                  .quantization = uform_scalar_e4m3_k});
+                                                                  .quantization = quantization});
+    // A class without E4M3 products refuses E4M3, so the buffer path is then checked in BFloat16.
+    if (outcome.status == uform_status_unsupported_k) {
+        expect(buffered == NULL, "A refused load leaves no model");
+        quantization = uform_scalar_bf16_k;
+        uform_model_load_ram_buffer(&(uform_model_load_ram_buffer_t) {.model = &buffered,
+                                                                      .executor = executor,
+                                                                      .outcome = &outcome,
+                                                                      .buffer = {buffer, (size_t)length},
+                                                                      .quantization = quantization});
+    }
     expect(!outcome.message, outcome.message);
     free(buffer);
     uform_model_description_t buffered_description = {0};
     uform_model_describe(&(uform_model_describe_t) {
         .model = buffered, .executor = executor, .outcome = &outcome, .description = &buffered_description});
     expect(!outcome.message, outcome.message);
-    expect(buffered_description.quantization == uform_scalar_e4m3_k, "A buffer loads in the quantization asked for");
+    expect(buffered_description.quantization == quantization, "A buffer loads in the quantization asked for");
     expect(buffered_description.dimensions == description.dimensions, "A buffer loads the geometry a path does");
 
     uform_model_t refused = NULL;
@@ -587,8 +595,13 @@ static void test_media_shapes(void) {
                                                 .outputs_scalar = uform_scalar_f32_k,
                                                 .stats = &image_stats});
     outputs.truncated = image_stats.truncated, outputs.tokens = image_stats.tokens;
-    check_media(&outputs, 2, &model);
-    expect(outputs.states.offsets[1] * 2 == outputs.states.offsets[2], "Equal images span equal tokens");
+    // A build without host decoders refuses every encoded file, leaving the decoded paths to check.
+    bool const decodes_files = outputs.outcome.status != uform_status_unsupported_k;
+    if (decodes_files) {
+        check_media(&outputs, 2, &model);
+        expect(outputs.states.offsets[1] * 2 == outputs.states.offsets[2], "Equal images span equal tokens");
+    }
+    else expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A refused call leaves outputs NULL");
 
     /* A JPEG cut after its frame header plans from the header, then fails whole as malformed, and the process lives. */
     uint8_t const cut_jpeg[] = {0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x10, 0x00, 0x10,
@@ -606,7 +619,7 @@ static void test_media_shapes(void) {
                                                 .outputs_scalar = uform_scalar_f32_k,
                                                 .stats = &image_stats});
     outputs.truncated = image_stats.truncated, outputs.tokens = image_stats.tokens;
-    if (outputs.outcome.status == uform_status_malformed_k)
+    if (!decodes_files || outputs.outcome.status == uform_status_malformed_k)
         expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A failed call leaves outputs NULL");
     else check_media(&outputs, 1, &model);
 
@@ -653,7 +666,7 @@ static void test_media_shapes(void) {
                                                 .outputs_scalar = uform_scalar_f32_k,
                                                 .stats = &video_stats});
     outputs.truncated = video_stats.truncated, outputs.tokens = video_stats.tokens;
-    if (outputs.outcome.status == uform_status_malformed_k)
+    if (!decodes_files || outputs.outcome.status == uform_status_malformed_k)
         expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A failed call leaves outputs NULL");
     else check_media(&outputs, 1, &model);
 
@@ -672,7 +685,8 @@ static void test_media_shapes(void) {
                                                 .outputs_scalar = uform_scalar_f32_k,
                                                 .stats = &audio_stats});
     outputs.truncated = audio_stats.truncated, outputs.tokens = audio_stats.tokens;
-    check_media(&outputs, 1, &model);
+    if (decodes_files) check_media(&outputs, 1, &model);
+    else expect(outputs.embeddings.data == NULL && outputs.states.offsets == NULL, "A refused call leaves outputs NULL");
 
     enum { samples_count = 1000 + 300 };
     float samples[samples_count];
@@ -788,6 +802,55 @@ static void test_blocking_and_deferred(void) {
     uform_arena_free(blocking.arena);
     uform_model_free(model);
     printf("Test: Blocking and Deferred - PASSED\n");
+}
+
+/** An executor over a pool its lender spawned encodes what an owned one does, and a null pool is
+ *  refused. */
+static void test_executor_on_pool(void) {
+    printf("Test: Executor On Pool\n");
+    fu_topology_t topology = NULL;
+    fu_pool_t pool = NULL;
+    expect(fu_topology_new(&topology) == fu_success_k, "A topology must be harvested");
+    expect(fu_pool_new("uform_test", fu_capabilities_all_k, &pool) == fu_success_k, "A pool must be created");
+    size_t const threads = (fu_comptime_capabilities() & fu_capability_os_threads_k) ? 2 : 1;
+    expect(fu_pool_spawn(topology, pool, threads, fu_caller_inclusive_k) == fu_success_k, "A pool must spawn");
+
+    uform_outcome_t outcome = {0};
+    uform_executor_t lent = NULL;
+    uform_executor_on_pool(&(uform_executor_on_pool_t) {.executor = &lent, .outcome = &outcome, .pool = pool});
+    expect(!outcome.message, outcome.message);
+    expect(lent != NULL, "An executor over a lent pool must be created");
+
+    uform_executor_t const owned = create_executor(0);
+    uform_model_description_t description = {0};
+    uform_model_t const model = load_model(owned, &description);
+    size_t const lengths[] = {3, 40, 17, 1};
+    texts_t texts;
+    fill_texts(&texts, 4, lengths);
+    text_outputs_t on_owned = {.arena = create_arena(owned)};
+    text_outputs_t on_lent = {.arena = create_arena(lent)};
+    uform_progress_t const silent = {0};
+
+    encode_texts(model, owned, uform_completion_blocking_k, &texts, &on_owned, silent);
+    expect(!on_owned.outcome.message, on_owned.outcome.message);
+    encode_texts(model, lent, uform_completion_blocking_k, &texts, &on_lent, silent);
+    expect(!on_lent.outcome.message, on_lent.outcome.message);
+    expect(same_outputs(&on_owned, &on_lent, texts.count), "A lent pool lands what an owned one does");
+
+    uform_arena_free(on_lent.arena);
+    uform_arena_free(on_owned.arena);
+    uform_model_free(model);
+    uform_executor_free(owned);
+    uform_executor_free(lent);
+    fu_pool_delete(pool);
+    fu_topology_delete(topology);
+
+    uform_outcome_t refused = {0};
+    uform_executor_t none = NULL;
+    uform_executor_on_pool(&(uform_executor_on_pool_t) {.executor = &none, .outcome = &refused, .pool = NULL});
+    expect(refused.status != uform_status_success_k, "A null pool is refused");
+    expect(none == NULL, "A refused pool leaves no executor");
+    printf("Test: Executor On Pool - PASSED\n");
 }
 
 /** A submission past the deferred limit is refused at once and lets go of its arena, and a drain makes room. */
@@ -1060,6 +1123,7 @@ int main(int argc, char* argv[]) {
     if (selected("heads")) test_heads();
     if (selected("media_shapes")) test_media_shapes();
     if (selected("blocking_and_deferred")) test_blocking_and_deferred();
+    if (selected("executor_on_pool")) test_executor_on_pool();
     if (selected("deferred_limit")) test_deferred_limit();
     if (selected("arenas")) test_arenas();
     if (selected("progress")) test_progress();

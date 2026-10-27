@@ -177,41 +177,37 @@ static std::size_t derived_threads(std::size_t cores) noexcept {
     return threads ? threads : 1;
 }
 
-/** The NUMA node of @p topology at position @p index. */
-static fu::memory_domain_t const &node_at(fu::machine_topology_t const &topology, std::size_t index) noexcept {
-    return topology.memory_domain_at(static_cast<fu::memory_domain_index_t>(index));
-}
-
-/** The NUMA node of @p topology the OS numbers @p id, or null. */
-static fu::memory_domain_t const *node_of(fu::machine_topology_t const &topology, i32_t id) noexcept {
+/** Whether the OS numbers a NUMA node of @p topology @p id. */
+static bool has_memory_domain(topology_t const &topology, i32_t id) noexcept {
     for (std::size_t index = 0; index != topology.memory_domains_count(); ++index)
-        if (node_at(topology, index).memory_domain_id == id) return &node_at(topology, index);
-    return nullptr;
+        if (topology.memory_domain(index) == id) return true;
+    return false;
 }
 
 /** Copies the NUMA nodes @p ram names into @p domains, every node of @p topology when it names none. False once
  *  @p outcome records why not. */
 static bool adopt_memory_domains(st::basic_vector<i32_t> &domains, uform_ram_options_t const &ram,
-                                 fu::machine_topology_t const &topology, uform_outcome_t *outcome) noexcept {
+                                 topology_t const &topology, uform_outcome_t *outcome) noexcept {
     if (ram.memory_domains_count && !ram.memory_domains)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The memory domains must not be null");
     std::size_t const count = ram.memory_domains_count ? ram.memory_domains_count : topology.memory_domains_count();
     if (st::failed(domains.resize(count)))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the memory domains");
     for (std::size_t index = 0; index != count; ++index) {
-        domains[index] = ram.memory_domains_count ? ram.memory_domains[index]
-                                                  : node_at(topology, index).memory_domain_id;
-        if (!node_of(topology, domains[index]))
+        domains[index] = ram.memory_domains_count ? ram.memory_domains[index] : topology.memory_domain(index);
+        if (!has_memory_domain(topology, domains[index]))
             return propagate_error(uform_status_invalid_argument_k, outcome,
                                    "A memory domain names no NUMA node of this machine");
     }
     return true;
 }
 
-/** Cores the NUMA nodes in @p domains carry, every one of them a node of @p topology. */
-static std::size_t cores_of(fu::machine_topology_t const &topology, st::basic_vector<i32_t> const &domains) noexcept {
+/** Cores of the compute domains local to the NUMA nodes in @p domains . */
+static std::size_t cores_of(topology_t const &topology, st::basic_vector<i32_t> const &domains) noexcept {
     std::size_t cores = 0;
-    for (i32_t const domain : domains) cores += node_of(topology, domain)->core_ids.size();
+    for (std::size_t compute = 0; compute != topology.compute_domains_count(); ++compute)
+        for (i32_t const domain : domains)
+            if (topology.memory_domain_near(compute) == domain) cores += topology.cores_in(compute);
     return cores;
 }
 
@@ -292,7 +288,7 @@ static bool open_device(per_gpu_array<vram_device_t> &devices, i32_t listed, nk_
                           std::move(stream.value),
                           device_arena_t {chunked_arena_t(policy, handle, scratch_limit)},
                           chunked_arena_t(pages, handle, 0)};
-    if (devices.push_back(std::move(opened)) != utilities::status_t::success_k)
+    if (devices.push_back(std::move(opened)) != status_t::success_k)
         return propagate_error(uform_status_invalid_argument_k, outcome, "More devices than one process drives");
     return true;
 }
@@ -351,35 +347,52 @@ UFORM_EXPORT void uform_gpu_devices(uform_gpu_devices_t *arguments) {
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
+/** Picks the CPU class @p ram pins or the best one this machine admits, then hands out
+ *  @p executor , whose pool and memory domains are set. */
+static void hand_out_ram_executor(std::unique_ptr<uform_executor_handle_t> executor, uform_ram_options_t const &ram,
+                                  std::size_t limit, uform_executor_t *output, uform_outcome_t *outcome) noexcept {
+    nk_capability_t available = 0;
+    if (nk_cpu_capabilities_enabled(&available) != nk_success_k)
+        return propagate_error(uform_status_device_k, outcome, "The CPU capabilities could not be read"), void();
+    if (!cpu_pin_admitted(ram.cpu_class, available))
+        return propagate_error(uform_status_unsupported_k, outcome, "The CPU does not admit the pinned class"), void();
+    cpu_class_t const cpu_class = pick_cpu_class(cpu_ladder_t {}, ram.cpu_class, available);
+    std::get<ram_executor_t>(executor->executor).capabilities = numkong_capabilities_of(cpu_class);
+    hand_out_executor(std::move(executor), cpu_class, limit, output, outcome);
+}
+
 UFORM_EXPORT void uform_executor_for_ram(uform_executor_for_ram_t *arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
-    fu::machine_topology_t topology;
-    if (fu::failed(topology.harvest()))
-        return propagate_error(uform_status_device_k, outcome, "Topology discovery failed"), void();
+    expected<topology_t> topology = topology_t::make();
+    if (!topology) return propagate_error(status_of(topology.status_), outcome, "Topology discovery failed"), void();
     std::unique_ptr<uform_executor_handle_t> executor {new (std::nothrow) uform_executor_handle_t {}};
     if (!executor)
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
     ram_executor_t &ram = std::get<ram_executor_t>(executor->executor);
-    if (!adopt_memory_domains(ram.memory_domains, arguments->ram, topology, outcome)) return;
+    if (!adopt_memory_domains(ram.memory_domains, arguments->ram, *topology, outcome)) return;
     std::size_t const threads = arguments->threads ? arguments->threads
-                                                   : derived_threads(cores_of(topology, ram.memory_domains));
-    if (fu::failed(ram.pool.spawn(threads)))
-        return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to spawn the threads"), void();
-    nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k)
-        return propagate_error(uform_status_device_k, outcome, "The CPU capabilities could not be read"), void();
-    if (!cpu_pin_admitted(arguments->ram.cpu_class, available))
-        return propagate_error(uform_status_unsupported_k, outcome, "The CPU does not admit the pinned class"), void();
-    cpu_class_t const cpu_class = pick_cpu_class(cpu_ladder_t {}, arguments->ram.cpu_class, available);
-    ram.capabilities = numkong_capabilities_of(cpu_class);
-    hand_out_executor(std::move(executor), cpu_class, arguments->deferred_limit, arguments->executor, outcome);
+                                                   : derived_threads(cores_of(*topology, ram.memory_domains));
+    expected<executor_t> pool = executor_t::make(*topology, threads, caller_exclusivity_t::caller_inclusive_k);
+    if (!pool) return propagate_error(status_of(pool.status_), outcome, "Failed to spawn the threads"), void();
+    ram.pool = std::move(*pool);
+    hand_out_ram_executor(std::move(executor), arguments->ram, arguments->deferred_limit, arguments->executor, outcome);
 }
 
 UFORM_EXPORT void uform_executor_on_pool(uform_executor_on_pool_t *arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
-    propagate_error(uform_status_unsupported_k, outcome, "Borrowed pools are not wired yet");
+    expected<lent_pool_t> pool = lent_pool_t::borrow(static_cast<fu_pool_t>(arguments->pool));
+    if (!pool) return propagate_error(status_of(pool.status_), outcome, "The lent pool holds no threads"), void();
+    expected<topology_t> topology = topology_t::make();
+    if (!topology) return propagate_error(status_of(topology.status_), outcome, "Topology discovery failed"), void();
+    std::unique_ptr<uform_executor_handle_t> executor {new (std::nothrow) uform_executor_handle_t {}};
+    if (!executor)
+        return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
+    ram_executor_t &ram = std::get<ram_executor_t>(executor->executor);
+    if (!adopt_memory_domains(ram.memory_domains, arguments->ram, *topology, outcome)) return;
+    ram.pool = std::move(*pool);
+    hand_out_ram_executor(std::move(executor), arguments->ram, arguments->deferred_limit, arguments->executor, outcome);
 }
 
 UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t *arguments) {
@@ -395,9 +408,8 @@ UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t *arguments) 
     if (nk_rocm_count_devices(&rocm_devices) != nk_success_k) rocm_devices = 0;
     if (!cuda_devices && !rocm_devices)
         return propagate_error(uform_status_device_k, outcome, "No GPU this build drives answers"), void();
-    fu::machine_topology_t topology;
-    if (fu::failed(topology.harvest()))
-        return propagate_error(uform_status_device_k, outcome, "Topology discovery failed"), void();
+    expected<topology_t> topology = topology_t::make();
+    if (!topology) return propagate_error(status_of(topology.status_), outcome, "Topology discovery failed"), void();
     std::unique_ptr<uform_executor_handle_t> executor {new (std::nothrow) uform_executor_handle_t {}};
     if (!executor)
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
@@ -412,8 +424,10 @@ UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t *arguments) 
     for (vram_device_t const &device : devices.devices)
         if (gpu_class_of(device.capabilities) != gpu_class_of(devices.devices[0].capabilities))
             return propagate_error(uform_status_config_mismatch_k, outcome, "The devices differ in class"), void();
-    if (fu::failed(devices.decoders.spawn(derived_threads(topology.logical_cores_count()))))
-        return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to spawn the decoders"), void();
+    expected<executor_t> decoders = executor_t::make(*topology, derived_threads(topology->logical_cores_count()),
+                                                     caller_exclusivity_t::caller_inclusive_k);
+    if (!decoders) return propagate_error(status_of(decoders.status_), outcome, "Failed to spawn the decoders"), void();
+    devices.decoders = std::move(*decoders);
     nk_capability_t available = 0;
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k)
         return propagate_error(uform_status_device_k, outcome, "The CPU capabilities could not be read"), void();

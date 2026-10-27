@@ -132,7 +132,7 @@ struct vram_tower {
      *  @brief Pack every weight of @p checkpoint on @p stream into memory @p policy allocates, in
      *      @p precision for the block products, and return once the packs are queued; the caller
      *      synchronizes @p stream before the first encode, and frees the tower on the same stream.
-     *  @retval status_t::invalid_input_k A tensor is missing or misshapen.
+     *  @retval status_t::invalid_argument_k A tensor is missing or misshapen.
      */
     [[nodiscard]] static expected<vram_tower> make(uu::checkpoint_to_load_t const &checkpoint,
                                                    geometry_t const &geometry, precision_t precision,
@@ -158,7 +158,7 @@ struct vram_tower {
      *  segment offsets, lengths and modalities in memory both the host and the device address, as
      *  the host sizes the call from them. The scratch and @p outputs are device memory.
      */
-    [[nodiscard]] expected_t encode(multimodal_batch_view_t batch, outputs_t outputs, std::span<b8_t> scratch,
+    [[nodiscard]] expected_t encode(multimodal_batch_view_t batch, outputs_t outputs, bytes_span_t scratch,
                                     nk_stream_t stream) const noexcept {
         steps_t steps {stream};
         return encode_steps(steps, weights_, batch, outputs, scratch);

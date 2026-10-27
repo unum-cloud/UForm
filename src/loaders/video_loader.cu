@@ -26,8 +26,6 @@
 #include <ffnvcodec/dynlink_nvcuvid.h> // vendor-boundary: NVDEC parser / decoder structs + typedefs
 #include <ffnvcodec/dynlink_loader.h>  // vendor-boundary: `CuvidFunctions`, `cuvid_load_functions`
 
-#include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the host demux / decode-drive pool
-
 #include "uform/loaders/video_loader.cuh"
 #include "uform/media/planning.hpp" // `video_tube_grid` — each segment's 3-D factorization
 #include "uform/media/video.hpp"    // `demux_video`, `demuxed_t`, `video_codec_t`
@@ -42,8 +40,6 @@ using um::demuxed_t;
 using um::video_codec_count_k;
 using um::video_codec_t;
 using um::video_grid_t;
-
-namespace fu = ashvardanian::forkunion;
 
 /** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
  *  decorrelated under one @c (seed,step,rank) — the same salts the tokens / image / audio loaders use. */
@@ -337,7 +333,7 @@ extern "C" int CUDAAPI on_video_sequence(void *user_data, CUVIDEOFORMAT *format)
     video_decode_context_t *context = engine->current;
     if (format->bit_depth_luma_minus8 != 0 || format->bit_depth_chroma_minus8 != 0 ||
         format->chroma_format != cudaVideoChromaFormat_420) {
-        context->status = status_t::shape_unsupported_k;
+        context->status = status_t::unsupported_k;
         return 0;
     }
     codec_entry_t &entry = engine->entries[static_cast<std::size_t>(context->codec)];
@@ -359,7 +355,7 @@ extern "C" int CUDAAPI on_video_sequence(void *user_data, CUVIDEOFORMAT *format)
     caps.nBitDepthMinus8 = format->bit_depth_luma_minus8;
     if (engine->cuvid->cuvidGetDecoderCaps(&caps) != CUDA_SUCCESS || !caps.bIsSupported ||
         format->coded_width > caps.nMaxWidth || format->coded_height > caps.nMaxHeight) {
-        context->status = status_t::shape_unsupported_k;
+        context->status = status_t::unsupported_k;
         return 0;
     }
     decoder_max_width = std::min<unsigned long>(decoder_max_width, caps.nMaxWidth);
@@ -377,7 +373,7 @@ extern "C" int CUDAAPI on_video_sequence(void *user_data, CUVIDEOFORMAT *format)
     create_info.ulNumDecodeSurfaces = static_cast<unsigned long>(decode_surfaces);
     if (engine->cuvid->cuvidCreateDecoder(&entry.decoder, &create_info) != CUDA_SUCCESS) {
         entry.decoder = nullptr;
-        context->status = status_t::cuda_error_k;
+        context->status = status_t::device_error_k;
         return 0;
     }
     return decode_surfaces;
@@ -390,7 +386,7 @@ extern "C" int CUDAAPI on_picture_decode(void *user_data, CUVIDPICPARAMS *params
     codec_entry_t &entry = engine->entries[static_cast<std::size_t>(engine->current->codec)];
     if (entry.decoder == nullptr) return 0;
     if (engine->cuvid->cuvidDecodePicture(entry.decoder, params) != CUDA_SUCCESS) {
-        engine->current->status = status_t::cuda_error_k;
+        engine->current->status = status_t::device_error_k;
         return 0;
     }
     return 1;
@@ -417,7 +413,7 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
     unsigned int nv12_pitch = 0;
     if (engine->cuvid->cuvidMapVideoFrame(entry.decoder, display_info->picture_index, &nv12_pointer, &nv12_pitch,
                                           &proc_params) != CUDA_SUCCESS) {
-        context->status = status_t::cuda_error_k;
+        context->status = status_t::device_error_k;
         return 0;
     }
     pixel_t const *nv12_luma = device_pointer<pixel_t const>(nv12_pointer);
@@ -448,7 +444,7 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
 /** Feed an AV1 low-overhead OBU stream to the parser one temporal unit at a time — submitting the whole
  *  clip at once faults inside libnvcuvid after the first frame. */
 [[nodiscard]] static CUresult feed_av1_temporal_units(CuvidFunctions *cuvid, CUvideoparser parser,
-                                                      std::span<b8_t const> stream) noexcept {
+                                                      bytes_view_t stream) noexcept {
     auto feed_unit = [&](std::size_t begin, std::size_t end, unsigned long flags) -> CUresult {
         if (end <= begin) return CUDA_SUCCESS;
         CUVIDSOURCEDATAPACKET packet {};
@@ -506,7 +502,7 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
     parser_params.pfnDisplayPicture = &on_picture_display;
     if (engine.cuvid->cuvidCreateVideoParser(&entry.parser, &parser_params) != CUDA_SUCCESS) {
         entry.parser = nullptr;
-        return expected_t::fail(status_t::cuda_error_k, "NVDEC parser creation failed (codec {})",
+        return expected_t::fail(status_t::device_error_k, "NVDEC parser creation failed (codec {})",
                                 static_cast<int>(codec));
     }
     return {};
@@ -526,12 +522,12 @@ nvdec_session_t::~nvdec_session_t() noexcept = default;
 
 expected<nvdec_session_t> nvdec_session_t::make(nvdec_config_t config) noexcept {
     using result_t = expected<nvdec_session_t>;
-    if (config.max_side == 0) return result_t::fail(status_t::invalid_input_k, "need max_side>0");
+    if (config.max_side == 0) return result_t::fail(status_t::invalid_argument_k, "need max_side>0");
     // There is no runtime query for a GPU's NVDEC engine count (NVML exposes only decoder utilization), so the
     // caller — which knows the deployment GPU — states how many concurrent decode engines to run. Each engine holds a
     // real decoder with a surface pool, so this is not free to over-provision; it is not defaulted.
     if (config.engine_count == 0)
-        return result_t::fail(status_t::invalid_input_k,
+        return result_t::fail(status_t::invalid_argument_k,
                               "need engine_count>0 — the concurrent decode-engine count; set it to the target GPU's " //
                               "NVDEC engine count (no runtime query for it exists)");
     u32_t const engine_count = config.engine_count;
@@ -540,11 +536,11 @@ expected<nvdec_session_t> nvdec_session_t::make(nvdec_config_t config) noexcept 
     if (state == nullptr) return result_t::fail(status_t::bad_alloc_k, "NVDEC session state allocation failed");
 
     if (cuCtxGetCurrent(&state->context) != CUDA_SUCCESS || state->context == nullptr)
-        return result_t::fail(status_t::invalid_input_k, "no current CUDA context for the NVDEC session");
+        return result_t::fail(status_t::invalid_argument_k, "no current CUDA context for the NVDEC session");
     if (cuvid_load_functions(&state->cuvid, nullptr) != 0 || state->cuvid == nullptr)
-        return result_t::fail(status_t::cuda_error_k, "libnvcuvid dynamic load failed");
+        return result_t::fail(status_t::device_error_k, "libnvcuvid dynamic load failed");
     if (state->cuvid->cuvidCtxLockCreate(&state->context_lock, state->context) != CUDA_SUCCESS)
-        return result_t::fail(status_t::cuda_error_k, "NVDEC context lock creation failed");
+        return result_t::fail(status_t::device_error_k, "NVDEC context lock creation failed");
     if (st::failed(state->engines.resize(engine_count)))
         return result_t::fail(status_t::bad_alloc_k, "NVDEC engine table allocation failed ({} engines)", engine_count);
     // Alias the shared handles into each engine so the parser callbacks reach them without a back-pointer; the engines
@@ -586,11 +582,10 @@ struct video_grid_geometry_t {
     using result_t = expected<video_grid_geometry_t>;
     u32_t const channels = static_cast<u32_t>(videos.extent(5));
     if (channels != 3u)
-        return result_t::fail(status_t::shape_unsupported_k,
+        return result_t::fail(status_t::unsupported_k,
                               "the NV12 → RGB conversion emits 3 channels, but videos wants {}", channels);
     u32_t const tube_frames = static_cast<u32_t>(videos.extent(2));
-    if (tube_frames == 0)
-        return result_t::fail(status_t::shape_unsupported_k, "the video grid needs a nonzero tube depth");
+    if (tube_frames == 0) return result_t::fail(status_t::unsupported_k, "the video grid needs a nonzero tube depth");
     u32_t const patch_size = static_cast<u32_t>(videos.extent(3));
     video_grid_geometry_t geometry;
     geometry.rows = static_cast<u32_t>(videos.extent(0));
@@ -867,7 +862,7 @@ struct clip_feed_t {
     feed_state_ state = feed_state_::drained;
 
     /** The opened group's Annex-B tail to chunk-feed; nonempty only when @c state==opened . */
-    std::span<b8_t const> pending {};
+    bytes_view_t pending {};
 };
 
 /** One engine's live position in the interleaved feed: the decode group it is on and that group's
@@ -879,7 +874,7 @@ struct engine_cursor_t {
     std::size_t group_index = 0;
 
     /** The current group's Annex-B bytes still to submit; empty once the engine is drained. */
-    std::span<b8_t const> pending {};
+    bytes_view_t pending {};
 };
 
 /** Advance engine @p e to its next feedable group at/after @p group (skipping demux-failed, empty, and
@@ -899,7 +894,7 @@ struct engine_cursor_t {
         demuxed_t const &decoded = drive.demuxed[unit.clip];
         if (decoded.annex_b.empty() || unit.frames_to_decode == 0u) continue;
         if (!ensure_parser(engine, decoded.codec)) {
-            drive.contexts[group].status = status_t::cuda_error_k;
+            drive.contexts[group].status = status_t::device_error_k;
             continue;
         }
         video_decode_context_t &context = drive.contexts[group];
@@ -910,12 +905,12 @@ struct engine_cursor_t {
         context.codec = decoded.codec;
         context.stream = drive.stream;
         engine.current = &context;
-        std::span<b8_t const> const bytes = decoded.annex_b;
+        bytes_view_t const bytes = decoded.annex_b;
         if (decoded.codec != video_codec_t::av1_k) return clip_feed_t {feed_state_::opened, bytes}; // chunk-fed
         CUvideoparser const parser = engine.entries[static_cast<std::size_t>(decoded.codec)].parser;
         if (feed_av1_temporal_units(engine.cuvid, parser, bytes) != CUDA_SUCCESS &&
             context.status == status_t::success_k)
-            context.status = status_t::cuda_error_k;
+            context.status = status_t::device_error_k;
         engine.current = nullptr; // retire the AV1 group — the caller advances and re-opens this engine
         return clip_feed_t {feed_state_::av1_done, {}};
     }
@@ -925,8 +920,7 @@ struct engine_cursor_t {
 /** Drive engine @p e forward until it opens a chunk-fed group or drains, retrying past every AV1 group it
  *  decodes inline. Returns the Annex-B tail to feed — empty exactly once the engine's @c {e,e+N,…} stripe is
  *  spent. */
-[[nodiscard]] static std::span<b8_t const> advance_engine_(decode_jobs_t &drive, std::size_t e,
-                                                           std::size_t &group) noexcept {
+[[nodiscard]] static bytes_view_t advance_engine_(decode_jobs_t &drive, std::size_t e, std::size_t &group) noexcept {
     for (;;) {
         clip_feed_t const feed = open_clip_(drive, e, group);
         if (feed.state == feed_state_::opened) return feed.pending;
@@ -1005,7 +999,7 @@ struct engine_cursor_t {
             if (contexts[group].status != status_t::success_k) ++hard_failures;
         }
     if (attempted != 0 && produced == 0)
-        return expected_t::fail(status_t::cuda_error_k,
+        return expected_t::fail(status_t::device_error_k,
                                 "every one of {} decodable clips produced no frames ({} hard decode errors)", attempted,
                                 hard_failures);
     return {};
@@ -1040,16 +1034,16 @@ struct engine_cursor_t {
             !tiled)
             return tiled;
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "tube tile synchronization failed");
+        return expected_t::fail(status_t::device_error_k, "tube tile synchronization failed");
     return {};
 }
 
-expected_t nvdec_session_t::decode_into(cpu_decode_pool_t &pool, column_view_t clips,
+expected_t nvdec_session_t::decode_into(pool_view_t pool, column_view_t clips,
                                         std::span<video_batch_shape_t const> representations, pixel_tubes_span_t videos,
                                         video_shape_span_t video_shapes, u32r1_span_t segment_offsets,
                                         u32r1_span_t segment_lengths, modality_span_t segment_modality,
                                         gpu_stream_t &stream) noexcept {
-    if (state_ == nullptr) return expected_t::fail(status_t::invalid_input_k, "moved-from NVDEC session");
+    if (state_ == nullptr) return expected_t::fail(status_t::invalid_argument_k, "moved-from NVDEC session");
     std::size_t const clip_count = clips.size();
     if (clip_count == 0) return {};
 
@@ -1062,14 +1056,14 @@ expected_t nvdec_session_t::decode_into(cpu_decode_pool_t &pool, column_view_t c
     // The loader's `fill` always hands a non-empty representations span (defaulting to one at frame_stride 1). An empty
     // span here is therefore a contract breach — fail loudly rather than silently produce zero jobs.
     if (representations.empty())
-        return expected_t::fail(status_t::invalid_input_k,
+        return expected_t::fail(status_t::invalid_argument_k,
                                 "decode_into requires a non-empty representations span from fill");
     // The shape is the single source of geometry; every representation must match the grid's patch geometry (they
     // vary only in frame_stride, the temporal sampling this decode reads off each representation).
     for (video_batch_shape_t const &representation : representations)
         if (representation.patch_side != geometry.patch_size || representation.tube_frames != geometry.tube_frames ||
             representation.channels != geometry.channels)
-            return expected_t::fail(status_t::shape_unsupported_k,
+            return expected_t::fail(status_t::unsupported_k,
                                     "representation ({},{},{}) must match the video grid ({},{},{})",
                                     representation.patch_side, representation.tube_frames, representation.channels,
                                     geometry.patch_size, geometry.tube_frames, geometry.channels);
@@ -1078,7 +1072,7 @@ expected_t nvdec_session_t::decode_into(cpu_decode_pool_t &pool, column_view_t c
     std::size_t const max_segments = segment_lengths.extent(0);
     if (job_count > max_segments || segment_offsets.extent(0) < max_segments + 1u ||
         segment_modality.extent(0) < max_segments || video_shapes.extent(0) < job_count)
-        return expected_t::fail(status_t::shape_unsupported_k, "batch cannot hold {} segments (cap {})", job_count,
+        return expected_t::fail(status_t::unsupported_k, "batch cannot hold {} segments (cap {})", job_count,
                                 max_segments);
 
     // Stage 1: parallel host demux over the borrowed pool — the one host-bound, embarrassingly parallel step. A clip
@@ -1088,14 +1082,13 @@ expected_t nvdec_session_t::decode_into(cpu_decode_pool_t &pool, column_view_t c
         return expected_t::fail(status_t::bad_alloc_k, "demux result table allocation failed ({} clips)", clip_count);
     demuxed_t *const demuxed_data = demuxed.data();
     column_view_t const clips_tape = clips;
-    {
-        auto join = pool.for_n(clip_count,
-                               [demuxed_data, clips_tape](std::size_t clip_index, fu::thread_in_domain_t) noexcept {
-                                   expected<demuxed_t> clip = um::demux_video(clips_tape[clip_index]);
-                                   if (clip) demuxed_data[clip_index] = std::move(clip.value_);
-                               });
-        (void)join; // The join's destructor blocks until every worker finishes.
-    }
+    status_t const dispatched = pool.for_n(clip_count,
+                                           [demuxed_data, clips_tape](std::size_t clip_index, std::size_t) noexcept {
+                                               expected<demuxed_t> clip = um::demux_video(clips_tape[clip_index]);
+                                               if (clip) demuxed_data[clip_index] = std::move(clip.value_);
+                                           });
+    if (dispatched != status_t::success_k)
+        return expected_t::fail(dispatched, "the decode pool refused {} clip demuxes", clip_count);
     std::span<demuxed_t const> const demuxed_view = std::span<demuxed_t const> {demuxed}.first(clip_count);
 
     // Stage 2: the token cursor — the serial repack scan writing the segment geometry plus the per-job tile
@@ -1105,7 +1098,8 @@ expected_t nvdec_session_t::decode_into(cpu_decode_pool_t &pool, column_view_t c
     cursor_plan_t plan = std::move(cursor_built.value_);
 
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
+    if (!gpu_scope.ok())
+        return expected_t::fail(status_t::device_error_k, "context entry failed for the loader stream");
 
     if (expected_t staged = upload_geometry_(plan, videos, video_shapes, segment_offsets, segment_lengths,
                                              segment_modality, job_count, max_segments, stream);
@@ -1143,9 +1137,9 @@ expected_t nvdec_session_t::decode_into(cpu_decode_pool_t &pool, column_view_t c
 
 #pragma region Decode Orchestrator and Dataset Loader
 
-expected_t ul::decode_videos(nvdec_session_t &nvdec, cpu_decode_pool_t &pool, column_view_t tape,
-                             u64r1_view_t drawn_rows, std::span<video_batch_shape_t const> representations,
-                             pixel_tubes_span_t videos, video_shape_span_t video_shapes, u32r1_span_t segment_offsets,
+expected_t ul::decode_videos(nvdec_session_t &nvdec, pool_view_t pool, column_view_t tape, u64r1_view_t drawn_rows,
+                             std::span<video_batch_shape_t const> representations, pixel_tubes_span_t videos,
+                             video_shape_span_t video_shapes, u32r1_span_t segment_offsets,
                              u32r1_span_t segment_lengths, modality_span_t segment_modality,
                              gpu_stream_t &stream) noexcept {
     std::size_t const clips = drawn_rows.size();
@@ -1165,31 +1159,30 @@ expected_t ul::decode_videos(nvdec_session_t &nvdec, cpu_decode_pool_t &pool, co
     for (std::size_t index = 0; index != clips; ++index) {
         auto const blob = tape[drawn_rows[index]];
         if (expected_t hopped = copy_device_to_host(b8r1_view_t {blob},
-                                                    std::span<b8_t> {encoded}.subspan(cursor, blob.size()), stream);
+                                                    bytes_span_t {encoded}.subspan(cursor, blob.size()), stream);
             !hopped)
             return hopped;
         cursor += blob.size();
         offsets[index + 1] = static_cast<u64_t>(cursor);
     }
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "clip byte staging synchronization failed");
+        return expected_t::fail(status_t::device_error_k, "clip byte staging synchronization failed");
 
-    column_view_t const pinned {std::span<b8_t const> {encoded}, std::span<u64_t const> {offsets}};
+    column_view_t const pinned {bytes_view_t {encoded}, std::span<u64_t const> {offsets}};
     return nvdec.decode_into(pool, pinned, representations, videos, video_shapes, segment_offsets, segment_lengths,
                              segment_modality, stream);
 }
 
 expected<video_loader_parquet_t> video_loader_parquet_t::make(gpu_direct_storage_session_t &session,
                                                               sz::string_view_t path_or_glob, u64_t seed,
-                                                              cpu_decode_pool_t &pool,
-                                                              video_batch_shape_t video) noexcept {
+                                                              pool_view_t pool, video_batch_shape_t video) noexcept {
     using result_t = expected<video_loader_parquet_t>;
     auto paths = expand_glob(path_or_glob);
     if (!paths) return result_t::fail(std::move(paths));
 
     video_loader_parquet_t loader;
     loader.storage_ = &session;
-    loader.pool_ = &pool;
+    loader.pool_ = pool;
     loader.absolute_paths_ = std::move(paths.value_);
     loader.seed_ = seed;
     loader.video_ = video;
@@ -1202,7 +1195,7 @@ expected<video_loader_parquet_t> video_loader_parquet_t::make(gpu_direct_storage
         auto metadata = parquet_file_t::table_metadata(session, loader.absolute_paths_[index]);
         if (!metadata) return result_t::fail(std::move(metadata));
         if (metadata->rows == 0)
-            return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
+            return result_t::fail(status_t::invalid_argument_k, "shard {} is empty", loader.absolute_paths_[index]);
         loader.row_prefix_[index + 1] = loader.row_prefix_[index] + metadata->rows;
     }
     return result_t {std::move(loader)};
@@ -1216,8 +1209,7 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
     std::size_t const rows = batches[0].videos.extent(0);
     std::size_t const columns_per_row = batches[0].videos.extent(1);
     std::size_t const max_segments = batches[0].segment_lengths.extent(0);
-    if (rows == 0 || columns_per_row == 0)
-        return expected_t::fail(status_t::shape_unsupported_k, "batch carries no video");
+    if (rows == 0 || columns_per_row == 0) return expected_t::fail(status_t::unsupported_k, "batch carries no video");
 
     // The loader's single flat `video_batch_shape_t` is the one representation (the shape is the single source of a
     // step's geometry) — a size-1 span today, cross-product-ready for a future multi-representation config. Each drawn
@@ -1229,7 +1221,7 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
     std::size_t const clips_per_batch = std::min(max_segments / representations.size(),
                                                  (rows * columns_per_row) / per_clip_estimate);
     if (clips_per_batch == 0)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "the batch's {} segments / {} cells cannot hold one clip's {} representations",
                                 max_segments, rows * columns_per_row, representations.size());
     std::size_t const total_clips = unroll * clips_per_batch;
@@ -1260,12 +1252,13 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();
     if (pooled_rows < total_clips)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "{} pooled rows across {} files cover fewer than the {} clips this fill needs",
                                 pooled_rows, picked_shards.size(), total_clips);
 
     switch_to_gpu_t gpu_scope {gpu_stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
+    if (!gpu_scope.ok())
+        return expected_t::fail(status_t::device_error_k, "context entry failed for the loader stream");
 
     column_view_t const column = reservoir.column(0);
     std::size_t const offsets_count = column.size() + 1u;
@@ -1276,7 +1269,7 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
         !landed)
         return landed;
     if (cuStreamSynchronize(gpu_stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "reservoir offsets readback failed");
+        return expected_t::fail(status_t::device_error_k, "reservoir offsets readback failed");
 
     u64_t const row_key = hash(seed_, gpu_rank, row_draw_salt_k);
     st::basic_vector<u64_t> record_indices;
@@ -1291,10 +1284,9 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
         multimodal_batch_on_gpu_t &loaded = batches[batch];
         if (loaded.videos.extent(0) != rows || loaded.videos.extent(1) != columns_per_row ||
             loaded.segment_lengths.extent(0) != max_segments || loaded.video_shapes.extent(0) != max_segments)
-            return expected_t::fail(status_t::shape_unsupported_k, "batch {} does not match the lead batch geometry",
-                                    batch);
+            return expected_t::fail(status_t::unsupported_k, "batch {} does not match the lead batch geometry", batch);
         // The whole [rows,columns,…] grid is the scatter target now — segments land across its rows, not one per row.
-        if (expected_t decoded = decode_videos(decoder, *pool_, tape, batch_records[batch, nk::slice], representations,
+        if (expected_t decoded = decode_videos(decoder, pool_, tape, batch_records[batch, nk::slice], representations,
                                                loaded.videos.span(), loaded.video_shapes.span(),
                                                loaded.segment_offsets.span(), loaded.segment_lengths.span(),
                                                loaded.segment_modality.span(), gpu_stream);

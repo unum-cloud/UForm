@@ -36,8 +36,7 @@
 
 #include <span> // `std::span`
 
-#include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t` — the borrowed CPU-decode pool
-
+#include "uform/utilities/ram_device.hpp"           // `pool_view_t` — the borrowed CPU-decode pool
 #include "uform/utilities/vram_nvidia_device.hpp"   // `pinned_alloc` — the decode's host tapes
 #include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t` — the decode target
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
@@ -48,10 +47,6 @@
 namespace unum::uform::loaders {
 using namespace unum::uform::utilities;
 using namespace unum::uform::encoder;
-
-/** The host-side worker pool the media decoders fan their host-CPU work across — one per run, owned at
- *  the composition root (the @b only sanctioned host-thread pool), borrowed here. */
-using cpu_decode_pool_t = ashvardanian::forkunion::flat_pool_t;
 
 /**
  *  @brief Decode a batch's drawn clip rows into its @c audio_samples frame grid — the audio decode every audio
@@ -79,7 +74,7 @@ using cpu_decode_pool_t = ashvardanian::forkunion::flat_pool_t;
  *      @p audio_samples adds one to.
  *  @param[inout] stream The stream the staging, the copy, and every kernel enqueue on.
  */
-[[nodiscard]] expected_t decode_audios(cpu_decode_pool_t &pool, column_view_t tape, u64r1_view_t drawn_rows,
+[[nodiscard]] expected_t decode_audios(pool_view_t pool, column_view_t tape, u64r1_view_t drawn_rows,
                                        std::span<audio_batch_shape_t const> representations,
                                        audio_samples_span_t audio_samples, u32r1_span_t segment_offsets,
                                        u32r1_span_t segment_lengths, modality_span_t segment_modality,
@@ -116,8 +111,7 @@ struct audio_loader_parquet_t {
      */
     [[nodiscard]] static expected<audio_loader_parquet_t> make(gpu_direct_storage_session_t &session,
                                                                sz::string_view_t path_or_glob, u64_t seed,
-                                                               cpu_decode_pool_t &pool,
-                                                               audio_batch_shape_t audio) noexcept;
+                                                               pool_view_t pool, audio_batch_shape_t audio) noexcept;
 
     /**
      *  @brief Fill the next few @p batches ' @c audio_samples grid on one GPU rank, one decoded clip per segment.
@@ -144,7 +138,7 @@ struct audio_loader_parquet_t {
 
     /** The run's CPU-decode worker pool — borrowed from the composition root, handed to the decode;
      *  never owned, never spawned here. */
-    cpu_decode_pool_t *pool_ = nullptr;
+    pool_view_t pool_ {nullptr};
 
     /** The dataset's Parquet shard paths, sorted by the glob — owned. */
     st::basic_vector<sz::string_t> absolute_paths_ {};

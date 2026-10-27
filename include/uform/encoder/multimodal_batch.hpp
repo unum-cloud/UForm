@@ -451,11 +451,11 @@ struct multimodal_batch {
                                                          multimodal_batch_shape_t shape) noexcept {
         using result_t = expected<multimodal_batch>;
         if (shape.max_rows_per_gpu == 0 || shape.max_segments_per_gpu == 0 || shape.max_columns_per_row == 0)
-            return result_t::fail(status_t::invalid_input_k,
+            return result_t::fail(status_t::invalid_argument_k,
                                   "a batch needs all three capacities (rows={} segments={} columns={})",
                                   shape.max_rows_per_gpu, shape.max_segments_per_gpu, shape.max_columns_per_row);
         if (shape.max_bags_per_gpu > shape.max_segments_per_gpu)
-            return result_t::fail(status_t::invalid_input_k,
+            return result_t::fail(status_t::invalid_argument_k,
                                   "bag budget exceeds segment budget (bags={} segments={}) — each bag needs a segment",
                                   shape.max_bags_per_gpu, shape.max_segments_per_gpu);
         multimodal_batch batch;

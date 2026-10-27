@@ -100,7 +100,7 @@ static expected_t grant_local_access_(CUdeviceptr slice, std::size_t bytes, std:
 expected<multimem_switch_module_t> multimem_switch_module_t::load(i32_t device) noexcept {
     using result_t = expected<multimem_switch_module_t>;
     if (uform_multimem_switch_bundle_end - uform_multimem_switch_bundle_start == 0)
-        return result_t::fail(status_t::shape_unsupported_k, "this build compiled no switch kernels");
+        return result_t::fail(status_t::unsupported_k, "this build compiled no switch kernels");
     multimem_switch_module_t bundle;
     CUdevice device_handle = 0;
     if (CUresult result = cuDeviceGet(&device_handle, device); result != CUDA_SUCCESS)
@@ -201,7 +201,7 @@ expected<gpu_symmetric_arena_t> gpu_symmetric_arena_t::make(std::span<i32_t cons
     using result_t = expected<gpu_symmetric_arena_t>;
     if (local_devices.empty() || bytes_per_member == 0 || member_count == 0 ||
         member_offset + local_devices.size() > member_count)
-        return result_t::fail(status_t::invalid_input_k,
+        return result_t::fail(status_t::invalid_argument_k,
                               "the local slices must lie inside the domain (local={} offset={} count={} bytes={})",
                               local_devices.size(), member_offset, member_count, bytes_per_member);
     expected<CUmemAllocationHandleType> handle_type = shareable_handle_type(local_devices, member_count);
@@ -257,7 +257,7 @@ expected<gpu_symmetric_arena_t> gpu_symmetric_arena_t::make(std::span<i32_t cons
 expected<CUmemFabricHandle> gpu_symmetric_arena_t::export_fabric_handle(std::size_t member) const noexcept {
     using result_t = expected<CUmemFabricHandle>;
     if (handle_type_ != CU_MEM_HANDLE_TYPE_FABRIC)
-        return result_t::fail(status_t::shape_unsupported_k,
+        return result_t::fail(status_t::unsupported_k,
                               "member {}'s slice has no fabric handle: a domain spanning processes on devices " //
                               "without fabric handles needs a POSIX file-descriptor handoff, not implemented yet",
                               member);
@@ -288,10 +288,10 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, s
                                                     f64_t timeout_seconds) noexcept {
     using result_t = expected<multimem_domain_t>;
     std::size_t const local_count = local_devices.size();
-    if (local_count == 0) return result_t::fail(status_t::invalid_input_k, "a domain needs local devices");
+    if (local_count == 0) return result_t::fail(status_t::invalid_argument_k, "a domain needs local devices");
     if (local_streams.size() != local_count)
-        return result_t::fail(status_t::invalid_input_k, "every local device needs its stream ({} vs {})", local_count,
-                              local_streams.size());
+        return result_t::fail(status_t::invalid_argument_k, "every local device needs its stream ({} vs {})",
+                              local_count, local_streams.size());
 
     // The island's geometry comes from the world, not the local span: it may cross processes. The domain's
     // host_domains are the contiguous run [domain_first_host, +host_domains_per_domain); this process's
@@ -315,7 +315,7 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, s
     // retained: the domain outlives its bring-up streams by design.
     switch_to_gpu_t gpu_scope {local_streams[0]};
     if (!gpu_scope.ok())
-        return result_t::fail(status_t::cuda_error_k, "context entry failed (device={})", local_devices[0]);
+        return result_t::fail(status_t::device_error_k, "context entry failed (device={})", local_devices[0]);
 
     multimem_domain_t domain;
     domain.payload_scalars_ = payload_scalars;
@@ -380,19 +380,17 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, s
             for (sz::string_view_t token : peer_text.view().split(sz::whitespaces_set())) {
                 if (token.empty()) continue;
                 if (adopted_count >= gpus_per_host)
-                    return result_t::fail(status_t::io_error_k, "host_domain {} published too many slice handles",
-                                          peer_host);
+                    return result_t::fail(status_t::io_k, "host_domain {} published too many slice handles", peer_host);
                 CUmemFabricHandle handle {};
                 if (!parse_fabric_handle_(token, handle))
-                    return result_t::fail(status_t::io_error_k, "malformed slice handle from host_domain {}",
-                                          peer_host);
+                    return result_t::fail(status_t::io_k, "malformed slice handle from host_domain {}", peer_host);
                 if (expected_t adopted = domain.replicas_.adopt_peer(peer_member_base + adopted_count, handle);
                     !adopted)
                     return result_t::fail(std::move(adopted));
                 ++adopted_count;
             }
             if (adopted_count != gpus_per_host)
-                return result_t::fail(status_t::io_error_k, "host_domain {} published {} slice handles, expected {}",
+                return result_t::fail(status_t::io_k, "host_domain {} published {} slice handles, expected {}",
                                       peer_host, adopted_count, gpus_per_host);
         }
     }
@@ -434,7 +432,7 @@ expected<multimem_domain_t> multimem_domain_t::make(mesh_topology_t &topology, s
                 break;
             }
             if (!parsed)
-                return result_t::fail(status_t::io_error_k, "malformed multicast handle from host_domain {}",
+                return result_t::fail(status_t::io_k, "malformed multicast handle from host_domain {}",
                                       domain_first_host);
             if (CUresult result = cuMemImportFromShareableHandle(&domain.multimem_handle_, &fabric,
                                                                  CU_MEM_HANDLE_TYPE_FABRIC);
@@ -497,14 +495,14 @@ expected_t multimem_domain_t::barrier(std::size_t member_index, gpu_stream_t &st
     case multimem_tier_t::peer_read_k:
         return launch_kernel(&multimem_barrier_peer_kernel_, one, warp, stream, member(member_index));
     }
-    return expected_t::fail(status_t::invalid_input_k, "unknown multimem tier {}", static_cast<u32_t>(tier()));
+    return expected_t::fail(status_t::invalid_argument_k, "unknown multimem tier {}", static_cast<u32_t>(tier()));
 }
 
 expected_t multimem_domain_t::reduce_scatter(std::size_t member_index, f32r1_span_t destination,
                                              std::size_t shard_begin, gpu_stream_t &stream) noexcept {
     std::size_t const shard_scalars = destination.extent(0);
     if (shard_begin + shard_scalars > payload_scalars_)
-        return expected_t::fail(status_t::shape_unsupported_k, "shard [{},{}) exceeds the domain payload of {} scalars",
+        return expected_t::fail(status_t::unsupported_k, "shard [{},{}) exceeds the domain payload of {} scalars",
                                 shard_begin, shard_begin + shard_scalars, payload_scalars_);
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const grid_shape {grid_size_for(shard_scalars), 1u, 1u};
@@ -516,5 +514,5 @@ expected_t multimem_domain_t::reduce_scatter(std::size_t member_index, f32r1_spa
         return launch_kernel(&multimem_reduce_scatter_peer_kernel_, grid_shape, block_shape, stream,
                              member(member_index), destination, shard_begin);
     }
-    return expected_t::fail(status_t::invalid_input_k, "unknown multimem tier {}", static_cast<u32_t>(tier()));
+    return expected_t::fail(status_t::invalid_argument_k, "unknown multimem tier {}", static_cast<u32_t>(tier()));
 }

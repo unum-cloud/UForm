@@ -74,9 +74,10 @@ struct geometry_t {
     }
 
     /**
-     *  @brief Read the geometry from @p checkpoint 's metadata and cross-check it against its tensor shapes.
-     *  @retval status_t::invalid_input_k A key is missing or unparsable, or a shape disagrees; the C layer
-     *      reports it as @c uform_status_malformed_k .
+     *  @brief Read the geometry from @p checkpoint 's metadata and cross-check it against its
+     *      tensor shapes.
+     *  @retval status_t::invalid_argument_k A key is missing or unparsable, or a shape disagrees;
+     *      the C layer reports it as @c uform_status_malformed_k .
      */
     [[nodiscard]] static expected<geometry_t> from(uu::checkpoint_to_load_t const &checkpoint) noexcept;
 };

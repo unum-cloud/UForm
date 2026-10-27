@@ -148,18 +148,21 @@ struct elements_t {
     return {groups[row], groups[row + 1] - groups[row]};
 }
 
-expected<paired_loader_parquet_t> paired_loader_parquet_t::make(
-    gpu_direct_storage_session_t &session, sz::string_view_t path_or_glob, u64_t seed, cpu_decode_pool_t &pool,
-    paired_loader_parquet_config_t config, modality_t modality, multimodal_batch_shape_t const &shape) noexcept {
+expected<paired_loader_parquet_t> paired_loader_parquet_t::make(gpu_direct_storage_session_t &session,
+                                                                sz::string_view_t path_or_glob, u64_t seed,
+                                                                pool_view_t pool, paired_loader_parquet_config_t config,
+                                                                modality_t modality,
+                                                                multimodal_batch_shape_t const &shape) noexcept {
     using result_t = expected<paired_loader_parquet_t>;
     if (modality != modality_t::text_k && !shape.contains(modality))
-        return result_t::fail(status_t::invalid_input_k, "the run carries no slice for the media of {}", path_or_glob);
+        return result_t::fail(status_t::invalid_argument_k, "the run carries no slice for the media of {}",
+                              path_or_glob);
     auto paths = expand_glob(path_or_glob);
     if (!paths) return result_t::fail(std::move(paths));
 
     paired_loader_parquet_t loader;
     loader.storage_ = &session;
-    loader.pool_ = &pool;
+    loader.pool_ = pool;
     loader.absolute_paths_ = std::move(paths.value_);
     loader.seed_ = seed;
     loader.modality_ = modality;
@@ -186,7 +189,7 @@ expected<paired_loader_parquet_t> paired_loader_parquet_t::make(
         auto metadata = parquet_file_t::table_metadata(session, loader.absolute_paths_[index], roles);
         if (!metadata) return result_t::fail(std::move(metadata));
         if (metadata->rows == 0)
-            return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
+            return result_t::fail(status_t::invalid_argument_k, "shard {} is empty", loader.absolute_paths_[index]);
         std::size_t first_row = 0;
         for (std::size_t group = 0; group != metadata->group_rows.size(); ++group) {
             if (st::failed(loader.group_prefix_.push_back(loader.group_prefix_[loader.group_shard_.size()] +
@@ -205,7 +208,7 @@ expected<paired_loader_parquet_t> paired_loader_parquet_t::make(
     }
     loader.shard_first_group_[shards] = loader.group_shard_.size();
     if (loader.group_prefix_[loader.group_shard_.size()] == 0)
-        return result_t::fail(status_t::invalid_input_k,
+        return result_t::fail(status_t::invalid_argument_k,
                               "{} holds no row with every role column: anchor {}, negative {}", path_or_glob,
                               config.anchor, config.negative.empty() ? sz::string_view_t {"none"} : config.negative);
     if (parquet_file_t::column_metadata(session, loader.absolute_paths_[0], sample_key_column_k) &&
@@ -244,7 +247,7 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
     std::size_t const row_pairs = static_cast<std::size_t>(
         std::ceil(static_cast<f64_t>(rows) * pairs_per_row(columns)));
     std::size_t const pairs = std::min(segments / roles, row_pairs), total_pairs = unroll * pairs;
-    if (pairs == 0) return expected_t::fail(status_t::shape_unsupported_k, "{} segments hold no pair", segments);
+    if (pairs == 0) return expected_t::fail(status_t::unsupported_k, "{} segments hold no pair", segments);
 
     // Row groups drawn by a keyed position over the complete rows, as the text loader draws them:
     // distinct groups accumulate until they cover the pairs, then only a new shard's group meets
@@ -312,13 +315,14 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();
     if (pooled_rows != reservoir_rows)
-        return expected_t::fail(status_t::invalid_input_k, "the read decoded {} rows of {} footer rows", pooled_rows,
+        return expected_t::fail(status_t::invalid_argument_k, "the read decoded {} rows of {} footer rows", pooled_rows,
                                 reservoir_rows);
     column_view_t const anchors = reservoir.column(0), positives = reservoir.column(1);
     column_view_t const listed_negatives = negatives ? reservoir.column(2) : column_view_t {};
 
     switch_to_gpu_t gpu_scope {gpu_stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
+    if (!gpu_scope.ok())
+        return expected_t::fail(status_t::device_error_k, "context entry failed for the loader stream");
     // Text negatives are strings grouped per row; media negatives are rows grouped by list offsets.
     st::basic_vector<u64_t> anchor_offsets, anchor_groups, positive_offsets, positive_groups, negative_offsets,
         negative_groups;
@@ -392,7 +396,7 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
                 std::size_t const shard_rows = row_prefix_[shard + 1] - row_prefix_[shard];
                 i32_t const local = negative_rows[negative];
                 if (local < 0 || static_cast<std::size_t>(local) >= shard_rows)
-                    return expected_t::fail(status_t::invalid_input_k, "{} names negative row {} of a {}-row shard",
+                    return expected_t::fail(status_t::invalid_argument_k, "{} names negative row {} of a {}-row shard",
                                             picked_paths[pick], local, shard_rows);
                 // The whole shard was read, so one of the pick's groups holds the row.
                 std::size_t resident = pick_reads[pick];
@@ -415,7 +419,7 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
         ++found;
     }
     if (found != total_pairs)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "{} pooled rows across {} files hold {} complete pairs, fewer than the {} needed",
                                 pooled_rows, picked_paths.size(), found, total_pairs);
     st::basic_vector<u64_t, gpu_alloc<u64_t>> drawn_on_gpu {gpu_alloc<u64_t> {gpu_stream.get()}},
@@ -467,7 +471,7 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t &loaded = batches[batch];
         if (loaded.tokens.extent(0) != rows || loaded.segment_lengths.extent(0) != segments)
-            return expected_t::fail(status_t::shape_unsupported_k, "batch {} differs from the first", batch);
+            return expected_t::fail(status_t::unsupported_k, "batch {} differs from the first", batch);
 
         // One text past a role's cursor, packed the way the kernel packs it: cut at the row width,
         // never crossing a row.
@@ -499,8 +503,7 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
             anchor_cells = anchor, positive_cells = positive, negative_cells = negative;
         }
         if (admitted == 0)
-            return expected_t::fail(status_t::shape_unsupported_k, "batch {} of {} rows fits no whole pair", batch,
-                                    rows);
+            return expected_t::fail(status_t::unsupported_k, "batch {} of {} rows fits no whole pair", batch, rows);
         std::size_t const anchor_rows = divide_round_up(anchor_cells, columns);
         std::size_t positive_rows = rows - anchor_rows, negative_rows_count = 0;
         if (media && negatives) negative_rows_count = positive_rows - positive_rows / 2, positive_rows /= 2;
@@ -576,13 +579,13 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
 expected_t paired_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session_t &decoder, u32_t gpu_rank,
                                          u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (modality_ != modality_t::image_k)
-        return expected_t::fail(status_t::invalid_input_k, "the {} column holds no images", positive_.view());
+        return expected_t::fail(status_t::invalid_argument_k, "the {} column holds no images", positive_.view());
     return fill_(gpu_stream, gpu_rank, training_step, batches,
                  [&](multimodal_batch_on_gpu_t &loaded, std::size_t row_begin, std::size_t row_end, column_view_t tape,
                      u64r1_view_t drawn, segment_shapes_span_t shapes, u32r1_span_t offsets, u32r1_span_t lengths,
                      modality_span_t modalities) noexcept {
                      pixel_patches_span_t const pixels = loaded.images[nk::range(row_begin, row_end), nk::slice];
-                     return decode_images(decoder, *pool_, tape, drawn, {&shape_.image, 1}, pixels, shapes, offsets,
+                     return decode_images(decoder, pool_, tape, drawn, {&shape_.image, 1}, pixels, shapes, offsets,
                                           lengths, modalities, loaded.dropped.span(), gpu_stream);
                  });
 }
@@ -590,7 +593,7 @@ expected_t paired_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_sessio
 expected_t paired_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_t &decoder, u32_t gpu_rank,
                                          u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (modality_ != modality_t::video_k)
-        return expected_t::fail(status_t::invalid_input_k, "the {} column holds no videos", positive_.view());
+        return expected_t::fail(status_t::invalid_argument_k, "the {} column holds no videos", positive_.view());
     video_batch_shape_t video = shape_.video;
     video.frame_stride = std::max(video.frame_stride, 1u);
     return fill_(gpu_stream, gpu_rank, training_step, batches,
@@ -598,7 +601,7 @@ expected_t paired_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session
                      u64r1_view_t drawn, segment_shapes_span_t shapes, u32r1_span_t offsets, u32r1_span_t lengths,
                      modality_span_t modalities) noexcept {
                      pixel_tubes_span_t const tubes = loaded.videos[nk::range(row_begin, row_end), nk::slice];
-                     return decode_videos(decoder, *pool_, tape, drawn, {&video, 1}, tubes, shapes, offsets, lengths,
+                     return decode_videos(decoder, pool_, tape, drawn, {&video, 1}, tubes, shapes, offsets, lengths,
                                           modalities, gpu_stream);
                  });
 }
@@ -606,7 +609,7 @@ expected_t paired_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session
 expected_t paired_loader_parquet_t::fill(gpu_stream_t &gpu_stream, u32_t gpu_rank, u32_t training_step,
                                          std::span<multimodal_batch_on_gpu_t> batches) noexcept {
     if (modality_ != modality_t::audio_k && modality_ != modality_t::text_k)
-        return expected_t::fail(status_t::invalid_input_k, "the {} column holds no recordings or texts",
+        return expected_t::fail(status_t::invalid_argument_k, "the {} column holds no recordings or texts",
                                 positive_.view());
     // A text pair packs its positives in the fill itself and never calls the decode.
     return fill_(
@@ -615,7 +618,7 @@ expected_t paired_loader_parquet_t::fill(gpu_stream_t &gpu_stream, u32_t gpu_ran
             u64r1_view_t drawn, segment_shapes_span_t, u32r1_span_t offsets, u32r1_span_t lengths,
             modality_span_t modalities) noexcept {
             audio_samples_span_t const samples = loaded.audio_samples[nk::range(row_begin, row_end), nk::slice];
-            return decode_audios(*pool_, tape, drawn, {&shape_.audio, 1}, samples, offsets, lengths, modalities,
+            return decode_audios(pool_, tape, drawn, {&shape_.audio, 1}, samples, offsets, lengths, modalities,
                                  loaded.dropped.span(), gpu_stream);
         });
 }

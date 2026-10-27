@@ -16,8 +16,6 @@
 #include <nvjpeg.h>                   // vendor-boundary: device-native batched JPEG decode
 #include <nppi_geometry_transforms.h> // vendor-boundary: batched crop+resize
 
-#include <forkunion.hpp> // vendor-boundary: the host-CPU decode worker pool
-
 #include "uform/loaders/image_loader.cuh"
 #include "uform/media/image.hpp"    // the triage probe and the CPU-fallback decode
 #include "uform/media/planning.hpp" // the budget, factor pair and center crop
@@ -33,8 +31,6 @@ using um::image_extent_t;
 using um::image_format_t;
 using um::patch_grid_t;
 using enum um::image_format_t;
-
-namespace fu = ashvardanian::forkunion;
 
 /** Purpose salts folded through @ref splitmix64_hash_t so the file draw and the row draw stay
  *  decorrelated under one @c (seed,step,rank) — the same salts the tokens loader uses. */
@@ -195,9 +191,9 @@ expected<nvjpeg_session_t> nvjpeg_session_t::make() noexcept {
     // GPU-hybrid device backend, also device input, where it is absent.
     if (nvjpegCreateEx(NVJPEG_BACKEND_HARDWARE_DEVICE, nullptr, nullptr, 0, &handle) != NVJPEG_STATUS_SUCCESS &&
         nvjpegCreateEx(NVJPEG_BACKEND_GPU_HYBRID_DEVICE, nullptr, nullptr, 0, &handle) != NVJPEG_STATUS_SUCCESS)
-        return result_t::fail(status_t::cuda_error_k, "nvJPEG device backend unavailable");
+        return result_t::fail(status_t::device_error_k, "nvJPEG device backend unavailable");
     if (nvjpegJpegStateCreate(handle, &session.jpeg_state_) != NVJPEG_STATUS_SUCCESS)
-        return result_t::fail(status_t::cuda_error_k, "nvJPEG state creation failed");
+        return result_t::fail(status_t::device_error_k, "nvJPEG state creation failed");
     return result_t {std::move(session)};
 }
 
@@ -219,14 +215,14 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
     }
     if (nvjpegDecodeBatchedInitialize(handle_, jpeg_state_, static_cast<int>(count), 1, NVJPEG_OUTPUT_RGBI) !=
         NVJPEG_STATUS_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "nvJPEG batch init failed ({} images)", count);
+        return expected_t::fail(status_t::device_error_k, "nvJPEG batch init failed ({} images)", count);
     // The hardware backend writes the destinations from streams not ordered after `stream`, so the
     // stream-ordered destinations, and the work that last held their memory, must retire first.
     if (CUresult result = cuStreamSynchronize(stream.get()); result != CUDA_SUCCESS)
         return cuda_failure(result, "nvJPEG destination drain failed ({} images)", count);
     if (nvjpegDecodeBatched(handle_, jpeg_state_, data.data(), lengths.data(), destinations.data(), stream.get()) !=
         NVJPEG_STATUS_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "nvJPEG batched decode failed");
+        return expected_t::fail(status_t::device_error_k, "nvJPEG batched decode failed");
     return {};
 }
 
@@ -238,7 +234,7 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
     context.hStream = stream.get();
     CUdevice device = 0;
     if (cuCtxGetDevice(&device) != CUDA_SUCCESS)
-        return result_t::fail(status_t::cuda_error_k, "NPP device query failed");
+        return result_t::fail(status_t::device_error_k, "NPP device query failed");
     context.nCudaDeviceId = device;
     // Accumulate the first failing driver result and push it up typed — never collapse it to a bare bool.
     CUresult result = cuStreamGetFlags(stream.get(), &context.nStreamFlags);
@@ -315,17 +311,17 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
                                                 static_cast<u32_t>(header_probe_bytes_k), static_cast<u32_t>(count));
             !launched)
             return result_t::fail(std::move(launched));
-        if (expected_t read = copy_device_to_host<b8_t>(
-                std::span<b8_t const> {staging}.first(count * header_probe_bytes_k), std::span<b8_t> {probe}, stream);
+        if (expected_t read = copy_device_to_host<b8_t>(bytes_view_t {staging}.first(count * header_probe_bytes_k),
+                                                        bytes_span_t {probe}, stream);
             !read)
             return result_t::fail(std::move(read));
         if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
-            return result_t::fail(status_t::cuda_error_k, "header gather readback failed");
+            return result_t::fail(status_t::device_error_k, "header gather readback failed");
         std::size_t still_pending = 0;
         for (std::size_t entry = 0; entry != count; ++entry) {
             std::size_t const index = pending[entry], window_offset = probes[index].resume_offset;
-            std::span<b8_t const> const window = std::span<b8_t const> {probe}.subspan(entry * header_probe_bytes_k,
-                                                                                       host_entries[entry].length);
+            bytes_view_t const window = bytes_view_t {probe}.subspan(entry * header_probe_bytes_k,
+                                                                     host_entries[entry].length);
             expected<um::image_probe_t> probed = um::probe_image(window, window_offset);
             if (!probed) {
                 warn_dropped(index, probed.description_.view());
@@ -466,7 +462,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
 /** Decode the plan's @c cpu_fallback_k rows (PNG, WebP, and any rejected JPEG) on @p pool : one pinned blob
  *  hop in, an RGBA decode per worker at the plan's @c native extent, then one bulk host-to-device
  *  copy into each scratch region. */
-[[nodiscard]] static expected_t decode_cpu_plans_(cpu_decode_pool_t &pool, std::span<image_plan_t> plans, u8_t *scratch,
+[[nodiscard]] static expected_t decode_cpu_plans_(pool_view_t pool, std::span<image_plan_t> plans, u8_t *scratch,
                                                   column_view_t tape, u64r1_view_t drawn_rows,
                                                   gpu_stream_t &stream) noexcept {
     struct cpu_task_t {
@@ -510,30 +506,32 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
         cpu_task_t const &task = tasks[index];
         auto const blob = tape[drawn_rows[task.plan_index]];
         if (expected_t copied = copy_device_to_host<b8_t>(
-                blob, std::span<b8_t> {blobs}.subspan(task.blob_offset, task.blob_length), stream);
+                blob, bytes_span_t {blobs}.subspan(task.blob_offset, task.blob_length), stream);
             !copied)
             return copied;
     }
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "CPU blob synchronization failed");
+        return expected_t::fail(status_t::device_error_k, "CPU blob synchronization failed");
 
     cpu_task_t const *const task_base = tasks.data();
     image_plan_t const *const plan_base = plans.data();
     b8_t const *const blob_base = blobs.data();
     pixel_t *const pixel_base = decoded.data();
     u8_t *const result_base = results.data();
-    pool.for_n(tasks.size(), [=](std::size_t index, fu::thread_in_domain_t) noexcept {
+    status_t const dispatched = pool.for_n(tasks.size(), [=](std::size_t index, std::size_t) noexcept {
         cpu_task_t const &task = task_base[index];
         image_plan_t const &plan = plan_base[task.plan_index];
-        std::span<b8_t const> const encoded {blob_base + task.blob_offset, task.blob_length};
+        bytes_view_t const encoded {blob_base + task.blob_offset, task.blob_length};
         um::pixel_image_span_t const destination {pixel_base + task.pixel_offset,
                                                   {plan.native.height, plan.native.width, image_channels_k}};
         result_base[index] = um::decode_image_rgba(encoded, plan.format, destination) ? 1u : 0u;
     });
+    if (dispatched != status_t::success_k)
+        return expected_t::fail(dispatched, "the decode pool refused {} CPU images", tasks.size());
     for (std::size_t index = 0; index != tasks.size(); ++index) {
         cpu_task_t const &task = tasks[index];
         if (!results[index])
-            return expected_t::fail(status_t::invalid_input_k, "CPU decode failed at image {}", task.plan_index);
+            return expected_t::fail(status_t::invalid_argument_k, "CPU decode failed at image {}", task.plan_index);
         if (expected_t uploaded = copy_host_to_device(
                 nk::tensor_view<pixel_t, 1> {pixel_base + task.pixel_offset, task.pixel_length},
                 nk::tensor_span<pixel_t, 1> {scratch + plans[task.plan_index].scratch_offset, task.pixel_length},
@@ -544,7 +542,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
     // Hold for the uploads: the pinned decode tape (`blobs` / `decoded`) frees synchronously on return,
     // so it must outlive its in-flight `cuMemcpyHtoDAsync` into the device scratch (a use-after-free otherwise).
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "CPU pixel upload synchronization failed");
+        return expected_t::fail(status_t::device_error_k, "CPU pixel upload synchronization failed");
     return {};
 }
 
@@ -649,7 +647,7 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
             resized_base + host_resized_offsets[index], static_cast<int>(target.width * image_channels_k), target_size,
             NppiRect {0, 0, target_size.width, target_size.height}, NPPI_INTER_LANCZOS, context.value_);
         if (resized_one != NPP_SUCCESS)
-            return expected_t::fail(status_t::cuda_error_k, "image resize failed (status={} image={})",
+            return expected_t::fail(status_t::device_error_k, "image resize failed (status={} image={})",
                                     static_cast<int>(resized_one), index);
     }
     // The per-image resized bases must be device-resident for the tile kernel — owning. It reads each
@@ -671,11 +669,10 @@ static __global__ void tile_patches_kernel_(pixel_patches_span_t images, pixel_t
     return {};
 }
 
-expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, column_view_t tape,
-                             u64r1_view_t drawn_rows, std::span<image_batch_shape_t const> representations,
-                             pixel_patches_span_t pixels, image_shape_span_t shapes, u32r1_span_t segment_offsets,
-                             u32r1_span_t segment_lengths, modality_span_t segment_modality, u32r1_span_t dropped,
-                             gpu_stream_t &stream) noexcept {
+expected_t ul::decode_images(nvjpeg_session_t &jpeg, pool_view_t pool, column_view_t tape, u64r1_view_t drawn_rows,
+                             std::span<image_batch_shape_t const> representations, pixel_patches_span_t pixels,
+                             image_shape_span_t shapes, u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
+                             modality_span_t segment_modality, u32r1_span_t dropped, gpu_stream_t &stream) noexcept {
     std::size_t const images = drawn_rows.size();
     if (images == 0) return {};
     // The batch grid names the geometry: columns is the row width, extent(2) the square patch side, extent(4)
@@ -687,16 +684,17 @@ expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, co
     std::size_t const capacity = static_cast<std::size_t>(pixels.extent(0)) * columns_per_row;
     if (images > max_segments || shapes.extent(0) < max_segments || segment_offsets.extent(0) < max_segments + 1u ||
         segment_modality.extent(0) < max_segments)
-        return expected_t::fail(status_t::shape_unsupported_k, "batch segments cannot hold {} images", images);
+        return expected_t::fail(status_t::unsupported_k, "batch segments cannot hold {} images", images);
     if (patch_size == 0 || columns_per_row == 0)
-        return expected_t::fail(status_t::shape_unsupported_k, "patch_size and columns must be nonzero");
+        return expected_t::fail(status_t::unsupported_k, "patch_size and columns must be nonzero");
     // The shape is the single source of geometry; the grid is the validated destination. Image carries no per-
     // representation variation yet (footprint is native-derived, patch side and channels are shared), so it consumes
     // one representation, matching the uniform decode contract while multi-representation awaits a varying field.
     if (representations.empty())
-        return expected_t::fail(status_t::invalid_input_k, "decode_images requires a non-empty representations span");
+        return expected_t::fail(status_t::invalid_argument_k,
+                                "decode_images requires a non-empty representations span");
     if (representations[0].patch_side != patch_size || representations[0].channels != channels)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "representation (patch_side={} channels={}) must match the image grid ({},{})",
                                 representations[0].patch_side, representations[0].channels, patch_size, channels);
 
@@ -740,8 +738,7 @@ expected_t ul::decode_images(nvjpeg_session_t &jpeg, cpu_decode_pool_t &pool, co
 
 expected<image_loader_parquet_t> image_loader_parquet_t::make(gpu_direct_storage_session_t &session,
                                                               sz::string_view_t path_or_glob, u64_t seed,
-                                                              cpu_decode_pool_t &pool,
-                                                              image_batch_shape_t image) noexcept {
+                                                              pool_view_t pool, image_batch_shape_t image) noexcept {
     using result_t = expected<image_loader_parquet_t>;
 
     // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths — POSIX glob(3).
@@ -750,7 +747,7 @@ expected<image_loader_parquet_t> image_loader_parquet_t::make(gpu_direct_storage
 
     image_loader_parquet_t loader;
     loader.storage_ = &session;
-    loader.pool_ = &pool;
+    loader.pool_ = pool;
     loader.absolute_paths_ = std::move(paths.value_);
     loader.seed_ = seed;
     loader.image_ = image;
@@ -765,7 +762,7 @@ expected<image_loader_parquet_t> image_loader_parquet_t::make(gpu_direct_storage
         auto metadata = parquet_file_t::table_metadata(session, loader.absolute_paths_[index]);
         if (!metadata) return result_t::fail(std::move(metadata));
         if (metadata->rows == 0)
-            return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
+            return result_t::fail(status_t::invalid_argument_k, "shard {} is empty", loader.absolute_paths_[index]);
         loader.row_prefix_[index + 1] = loader.row_prefix_[index] + metadata->rows;
     }
     return result_t {std::move(loader)};
@@ -780,7 +777,7 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
     // max_segments_per_gpu items and the cursor keeps as many as the rows·columns grid holds.
     std::size_t const images_per_batch = batches[0].segment_lengths.extent(0);
     if (images_per_batch == 0 || batches[0].images.extent(0) == 0)
-        return expected_t::fail(status_t::shape_unsupported_k, "the batch carries no image segments");
+        return expected_t::fail(status_t::unsupported_k, "the batch carries no image segments");
     std::size_t const total_images = unroll * images_per_batch;
 
     std::size_t const shard_count = absolute_paths_.size();
@@ -813,12 +810,13 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();
     if (pooled_rows < total_images)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "{} pooled rows across {} files cover fewer than the {} images this fill needs",
                                 pooled_rows, picked_shards.size(), total_images);
 
     switch_to_gpu_t gpu_scope {gpu_stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
+    if (!gpu_scope.ok())
+        return expected_t::fail(status_t::device_error_k, "context entry failed for the loader stream");
 
     // The reservoir's blob offsets to the host once — every per-row byte bound is then host arithmetic.
     column_view_t const column = reservoir.column(0);
@@ -830,7 +828,7 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
         !landed)
         return landed;
     if (cuStreamSynchronize(gpu_stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "reservoir offsets readback failed");
+        return expected_t::fail(status_t::device_error_k, "reservoir offsets readback failed");
 
     // Draw the whole fill's rows on the host — a keyed bijection over the pool, so each batch
     // draws a distinct scatter of rows across the pooled files.
@@ -847,12 +845,12 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
     for (std::size_t batch = 0; batch != unroll; ++batch) {
         multimodal_batch_on_gpu_t &loaded = batches[batch];
         if (images_per_batch > loaded.image_shapes.extent(0) || images_per_batch > loaded.segment_lengths.extent(0))
-            return expected_t::fail(status_t::shape_unsupported_k, "batch {} cannot hold {} image segments", batch,
+            return expected_t::fail(status_t::unsupported_k, "batch {} cannot hold {} image segments", batch,
                                     images_per_batch);
         // The batch's [rows,columns,P,P,C] image tensor names the whole grid directly: extent(2) is the square
         // patch side and extent(4) the RGBA channels — no arithmetic from a flattened run.
         std::span<image_batch_shape_t const> const representations {&image_, 1}; // one representation today
-        if (expected_t decoded = decode_images(decoder, *pool_, tape, batch_records[batch, nk::slice], representations,
+        if (expected_t decoded = decode_images(decoder, pool_, tape, batch_records[batch, nk::slice], representations,
                                                loaded.images.span(), loaded.image_shapes.span(),
                                                loaded.segment_offsets.span(), loaded.segment_lengths.span(),
                                                loaded.segment_modality.span(), loaded.dropped.span(), gpu_stream);

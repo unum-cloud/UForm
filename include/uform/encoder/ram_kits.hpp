@@ -27,25 +27,23 @@
  */
 #pragma once
 
-#include <cmath>   // `std::fmax` — the E4M3 scale floor
+#include <cmath>   // `std::fmax` — the E4M3 scale floor; `std::sqrt`, `std::exp` — the composed norms and gates
 #include <cstring> // `std::memcpy` — byte rows and angle rows
 
-#include <type_traits> // `std::conditional_t`, `std::is_same_v`
-
-#include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t`, the threads the integer entries split across
+#include <type_traits> // `std::conditional_t`, `std::is_same_v`, `std::is_const_v`
 
 #include <numkong/attention.h>    // `nk_attention_pack_*`, `nk_attention_packed_*`, `nk_attention_rope_bf16_*`
 #include <numkong/cast.h>         // `nk_cast_*`
+#include <numkong/dot.h>          // `nk_dot_f32_*` — the composed norms' sums of squares
 #include <numkong/dots.h>         // `nk_dots_pack_*`, `nk_dots_packed_*`
 #include <numkong/each.h>         // `nk_each_sum_f32_*`, `nk_each_scale_f32_*`, `nk_each_rmsnorm_bf16_*`, ...
 #include <numkong/reduce.h>       // `nk_reduce_minmax_f32_*`
 #include <numkong/trigonometry.h> // `nk_trig_sin_f32_*`, `nk_trig_cos_f32_*`
 
-#include "uform/encoder/entries.hpp" // `segment_layout_t`, `rope_grids_t`, `e4m3_range_k`
+#include "uform/encoder/entries.hpp"      // `segment_layout_t`, `rope_grids_t`, `e4m3_range_k`
+#include "uform/utilities/ram_device.hpp" // `pool_view_t`, the threads the integer entries split across
 
 namespace unum::uform::encoder {
-
-namespace fu = ashvardanian::forkunion;
 
 /** The first of @p kits_ whose every capability bit @p caps_ holds and whose kernels this build
  *  compiled, else @p floor_ . Reading order is the priority order. */
@@ -684,10 +682,148 @@ struct neon_elementwise_kit_t {
 };
 #endif // NUMKONG_TARGET_NEON
 
+/** Row @p row of a strided matrix starting at @p base , rows @p stride bytes apart. */
+template <typename value_type_>
+inline static value_type_ *row_at_(value_type_ *base, nk_size_t row, nk_size_t stride) noexcept { // vendor-boundary
+    using void_t = std::conditional_t<std::is_const_v<value_type_>, void const, void>;
+    using byte_t = std::conditional_t<std::is_const_v<value_type_>, uu::b8_t const, uu::b8_t>;
+    return static_cast<value_type_ *>(
+        static_cast<void_t *>(static_cast<byte_t *>(static_cast<void_t *>(base)) + row * stride));
+}
+
+/** RMSNorm over BFloat16 rows and its Float32-input twin, for classes NumKong ships no fused kernel
+ *  for: each group widens a stack chunk at a time through @p cast_ , sums its squares through
+ *  @p dot_f32_ , and takes the inverse RMS and the gain through @p scale_f32_ or @p fma_f32_ before
+ *  narrowing back, with NumKong's signature and a null gain meaning one. */
+template <auto cast_, auto dot_f32_, auto scale_f32_, auto fma_f32_>
+struct composed_norms {
+
+    /** Scalars one stack chunk widens at a time. */
+    static constexpr nk_size_t chunk_k = 256;
+
+    static nk_status_t rmsnorm_bf16(nk_bf16_t const *x, nk_f32_t const *gamma, nk_bf16_t *y,
+                                    nk_size_t rows, // vendor-boundary
+                                    nk_size_t groups, nk_size_t columns, nk_size_t x_stride, nk_size_t y_stride,
+                                    nk_f32_t epsilon, nk_stream_t stream) noexcept {
+        return normalize_(x, nk_bf16_k, gamma, y, rows, groups, columns, x_stride, y_stride, epsilon, stream);
+    }
+
+    static nk_status_t rmscast_bf16(nk_f32_t const *x, nk_f32_t const *gamma, nk_bf16_t *y,
+                                    nk_size_t rows, // vendor-boundary
+                                    nk_size_t groups, nk_size_t columns, nk_size_t x_stride, nk_size_t y_stride,
+                                    nk_f32_t epsilon, nk_stream_t stream) noexcept {
+        return normalize_(x, nk_f32_k, gamma, y, rows, groups, columns, x_stride, y_stride, epsilon, stream);
+    }
+
+  private:
+    template <typename input_type_>
+    static nk_status_t normalize_(input_type_ const *x, nk_dtype_t dtype, nk_f32_t const *gamma, nk_bf16_t *y,
+                                  nk_size_t rows, nk_size_t groups, nk_size_t columns, nk_size_t x_stride,
+                                  nk_size_t y_stride, nk_f32_t epsilon, nk_stream_t stream) noexcept {
+        nk_f32_t chunk[chunk_k];
+        nk_f32_t const zero = 0.0f;
+        for (nk_size_t row = 0; row != rows; ++row) {
+            input_type_ const *const x_row = row_at_(x, row, x_stride);
+            nk_bf16_t *const y_row = row_at_(y, row, y_stride);
+            for (nk_size_t group = 0; group != groups; ++group) {
+                input_type_ const *const source = x_row + group * columns;
+                nk_bf16_t *const target = y_row + group * columns;
+                nk_f64_t sum_of_squares = 0;
+                for (nk_size_t first = 0; first < columns; first += chunk_k) {
+                    nk_size_t const count = columns - first < chunk_k ? columns - first : chunk_k;
+                    nk_f64_t squares = 0;
+                    if (nk_status_t const status = cast_(source + first, dtype, chunk, nk_f32_k, count, stream);
+                        status != nk_success_k)
+                        return status;
+                    if (nk_status_t const status = dot_f32_(chunk, chunk, count, &squares, stream);
+                        status != nk_success_k)
+                        return status;
+                    sum_of_squares += squares;
+                }
+                nk_f32_t const inverse_rms = 1.0f /
+                                             std::sqrt(static_cast<nk_f32_t>(sum_of_squares / columns) + epsilon);
+                for (nk_size_t first = 0; first < columns; first += chunk_k) {
+                    nk_size_t const count = columns - first < chunk_k ? columns - first : chunk_k;
+                    nk_status_t status = cast_(source + first, dtype, chunk, nk_f32_k, count, stream);
+                    if (status == nk_success_k)
+                        status = gamma
+                                     ? fma_f32_(chunk, gamma + first, chunk, count, &inverse_rms, &zero, chunk, stream)
+                                     : scale_f32_(chunk, count, &inverse_rms, &zero, chunk, stream);
+                    if (status == nk_success_k)
+                        status = cast_(chunk, nk_f32_k, target + first, nk_bf16_k, count, stream);
+                    if (status != nk_success_k) return status;
+                }
+            }
+        }
+        return nk_success_k;
+    }
+};
+
+/** SwiGLU, @c silu(gate·gate_scale)·up·output_scale , as a Float32 loop the class unit's flags
+ *  vectorize, for classes NumKong has no exponential for; BFloat16 rows widen a stack chunk at a
+ *  time through @p cast_ , and a null @c up leaves the plain SiLU. */
+template <auto cast_>
+struct composed_swiglu {
+
+    /** Scalars one stack chunk widens at a time. */
+    static constexpr nk_size_t chunk_k = 256;
+
+    static nk_status_t swiglu_f32(nk_f32_t const *gate, nk_f32_t const *up, nk_f32_t *y,
+                                  nk_size_t rows, // vendor-boundary
+                                  nk_size_t columns, nk_size_t gate_stride, nk_size_t up_stride, nk_size_t y_stride,
+                                  nk_f32_t gate_scale, nk_f32_t output_scale, nk_stream_t) noexcept {
+        for (nk_size_t row = 0; row != rows; ++row)
+            gate_row_(
+                {row_at_(gate, row, gate_stride), columns},
+                up ? std::span<nk_f32_t const> {row_at_(up, row, up_stride), columns} : std::span<nk_f32_t const> {},
+                {row_at_(y, row, y_stride), columns}, gate_scale, output_scale);
+        return nk_success_k;
+    }
+
+    static nk_status_t swiglu_bf16(nk_bf16_t const *gate, nk_bf16_t const *up, nk_bf16_t *y,
+                                   nk_size_t rows, // vendor-boundary
+                                   nk_size_t columns, nk_size_t gate_stride, nk_size_t up_stride, nk_size_t y_stride,
+                                   nk_f32_t gate_scale, nk_f32_t output_scale, nk_stream_t stream) noexcept {
+        nk_f32_t gates[chunk_k], ups[chunk_k];
+        for (nk_size_t row = 0; row != rows; ++row) {
+            nk_bf16_t const *const gate_row = row_at_(gate, row, gate_stride);
+            nk_bf16_t const *const up_row = up ? row_at_(up, row, up_stride) : nullptr;
+            nk_bf16_t *const y_row = row_at_(y, row, y_stride);
+            for (nk_size_t first = 0; first < columns; first += chunk_k) {
+                nk_size_t const count = columns - first < chunk_k ? columns - first : chunk_k;
+                nk_status_t status = cast_(gate_row + first, nk_bf16_k, gates, nk_f32_k, count, stream);
+                if (status == nk_success_k && up_row)
+                    status = cast_(up_row + first, nk_bf16_k, ups, nk_f32_k, count, stream);
+                if (status != nk_success_k) return status;
+                gate_row_({gates, count},
+                          up_row ? std::span<nk_f32_t const> {ups, count} : std::span<nk_f32_t const> {},
+                          {gates, count}, gate_scale, output_scale);
+                if (status = cast_(gates, nk_f32_k, y_row + first, nk_bf16_k, count, stream); status != nk_success_k)
+                    return status;
+            }
+        }
+        return nk_success_k;
+    }
+
+  private:
+
+    /** One row of @c silu(gate·gate_scale)·up·output_scale into @p y ; an empty @p up gates by
+     *  one. */
+    static void gate_row_(std::span<nk_f32_t const> gate, std::span<nk_f32_t const> up, std::span<nk_f32_t> y,
+                          nk_f32_t gate_scale, nk_f32_t output_scale) noexcept {
+        for (nk_size_t column = 0; column != gate.size(); ++column) {
+            nk_f32_t const scaled = gate[column] * gate_scale;
+            nk_f32_t const gated = scaled / (1.0f + std::exp(-scaled)) * (up.empty() ? 1.0f : up[column]);
+            y[column] = gated * output_scale;
+        }
+    }
+};
+
 #if NUMKONG_TARGET_RVV
 
 /** RISC-V vectors' casts, arithmetic, reductions and trigonometry, which also rotate as @ref mrope
- *  composes them, over the serial norms and gates, which NumKong has no RISC-V kernel for. */
+ *  composes them, with the norms and gates composed from them, since NumKong has no RISC-V kernel
+ *  for those. */
 struct rvv_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
     static constexpr bool compiled_k = true;
@@ -699,10 +835,12 @@ struct rvv_elementwise_kit_t {
     static constexpr auto reduce_f32 = nk_reduce_minmax_f32_rvv;
     static constexpr auto sine_f32 = nk_trig_sin_f32_rvv;
     static constexpr auto cosine_f32 = nk_trig_cos_f32_rvv;
-    static constexpr auto rmscast_bf16 = serial_elementwise_kit_t::rmscast_bf16;
-    static constexpr auto rmsnorm_bf16 = serial_elementwise_kit_t::rmsnorm_bf16;
-    static constexpr auto swiglu_f32 = serial_elementwise_kit_t::swiglu_f32;
-    static constexpr auto swiglu_bf16 = serial_elementwise_kit_t::swiglu_bf16;
+    using norms_t = composed_norms<nk_cast_rvv, nk_dot_f32_rvv, nk_each_scale_f32_rvv, nk_each_fma_f32_rvv>;
+    using gates_t = composed_swiglu<nk_cast_rvv>;
+    static constexpr auto rmscast_bf16 = norms_t::rmscast_bf16;
+    static constexpr auto rmsnorm_bf16 = norms_t::rmsnorm_bf16;
+    static constexpr auto swiglu_f32 = gates_t::swiglu_f32;
+    static constexpr auto swiglu_bf16 = gates_t::swiglu_bf16;
 };
 #else
 struct rvv_elementwise_kit_t {
@@ -743,8 +881,8 @@ struct v128_elementwise_kit_t {
 #if NUMKONG_TARGET_V128 && NUMKONG_TARGET_V128RELAXED
 
 /** Relaxed SIMD's casts, arithmetic, reductions and trigonometry, which also rotate as @ref mrope
- *  composes them, over the fixed-width sums and the serial norms and gates, which NumKong has no
- *  WebAssembly kernel for. */
+ *  composes them, over the fixed-width sums, with the norms and gates composed from them, since
+ *  NumKong has no WebAssembly kernel for those. */
 struct v128relaxed_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_v128_k | nk_cap_v128relaxed_k;
     static constexpr bool compiled_k = true;
@@ -756,10 +894,13 @@ struct v128relaxed_elementwise_kit_t {
     static constexpr auto reduce_f32 = nk_reduce_minmax_f32_v128relaxed;
     static constexpr auto sine_f32 = nk_trig_sin_f32_v128relaxed;
     static constexpr auto cosine_f32 = nk_trig_cos_f32_v128relaxed;
-    static constexpr auto rmscast_bf16 = serial_elementwise_kit_t::rmscast_bf16;
-    static constexpr auto rmsnorm_bf16 = serial_elementwise_kit_t::rmsnorm_bf16;
-    static constexpr auto swiglu_f32 = serial_elementwise_kit_t::swiglu_f32;
-    static constexpr auto swiglu_bf16 = serial_elementwise_kit_t::swiglu_bf16;
+    using norms_t = composed_norms<nk_cast_v128relaxed, nk_dot_f32_v128relaxed, nk_each_scale_f32_v128relaxed,
+                                   nk_each_fma_f32_v128relaxed>;
+    using gates_t = composed_swiglu<nk_cast_v128relaxed>;
+    static constexpr auto rmscast_bf16 = norms_t::rmscast_bf16;
+    static constexpr auto rmsnorm_bf16 = norms_t::rmsnorm_bf16;
+    static constexpr auto swiglu_f32 = gates_t::swiglu_f32;
+    static constexpr auto swiglu_bf16 = gates_t::swiglu_bf16;
 };
 #else
 struct v128relaxed_elementwise_kit_t {
@@ -783,10 +924,11 @@ struct elementwise_ladder {
 
 /** Rows @c [t,:] of @p rows for each text segment's cells, copied from @c table[token] ; other rows
  *  stay as they are. Token IDs are trusted: packers write bytes only. */
-inline static void gather_bytes(segment_layout_t const &layout, nk::tensor_view<token_id_t, 1> grid_tokens,
-                                bf16r2_view_t table, bf16r2_span_t rows, fu::flat_pool_t &pool) noexcept {
+[[nodiscard]] inline static uu::status_t gather_bytes(segment_layout_t const &layout,
+                                                      nk::tensor_view<token_id_t, 1> grid_tokens, bf16r2_view_t table,
+                                                      bf16r2_span_t rows, uu::pool_view_t pool) noexcept {
     std::size_t const row_bytes = rows.extent(1) * sizeof(nk_bf16_t);
-    pool.for_n(layout.lengths.extent(0), [&](std::size_t segment, auto) noexcept {
+    return pool.for_n(layout.lengths.extent(0), [&](std::size_t segment, std::size_t) noexcept {
         if (layout.modality[segment] != modality_t::text_k) return;
         for (u32_t cell = 0; cell != layout.lengths[segment]; ++cell) {
             std::size_t const token = grid_tokens[layout.grid_offsets[segment] + cell];
@@ -848,10 +990,12 @@ template <typename elementwise_kit_type_>
 
 /** Every packed row's @c (t,h,w) into @p coords @b [rows,3] : text and audio @c (k,0,0) , image
  *  @c (0,k/cols,k%cols) , video @c (group·tube_frames·frame_stride,r,c) , PAD rows untouched. */
-inline static void fill_coords(segment_layout_t const &layout, nk::tensor_view<u16_t, 2> image_shapes,
-                               nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames, u32_t frame_stride,
-                               i16r2_span_t coords, fu::flat_pool_t &pool) noexcept {
-    pool.for_n(layout.lengths.extent(0), [&](std::size_t segment, auto) noexcept {
+[[nodiscard]] inline static uu::status_t fill_coords(segment_layout_t const &layout,
+                                                     nk::tensor_view<u16_t, 2> image_shapes,
+                                                     nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames,
+                                                     u32_t frame_stride, i16r2_span_t coords,
+                                                     uu::pool_view_t pool) noexcept {
+    return pool.for_n(layout.lengths.extent(0), [&](std::size_t segment, std::size_t) noexcept {
         modality_t const modality = layout.modality[segment];
         for (u32_t cell = 0; cell != layout.lengths[segment]; ++cell) {
             u32_t temporal = 0, height = 0, width = 0;

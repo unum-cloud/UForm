@@ -163,8 +163,15 @@ void uform_executor_for_ram(uform_executor_for_ram_t *arguments) {
 
 void uform_executor_on_pool(uform_executor_on_pool_t *arguments) {
     deferred_outcome_t outcome(arguments->outcome);
-    if (arguments->executor) *arguments->executor = nullptr;
-    propagate_error(uform_status_unsupported_k, outcome, "Borrowed pools are not wired yet");
+    if (reject_if(!arguments->executor, uform_status_invalid_argument_k, "The executor output must not be null",
+                  outcome))
+        return;
+    *arguments->executor = nullptr;
+    if (reject_if(!arguments->pool, uform_status_invalid_argument_k, "The lent pool must not be null", outcome)) return;
+    uform_executor_handle_t *const executor = new (std::nothrow) uform_executor_handle_t {};
+    if (reject_if(!executor, uform_status_out_of_memory_k, "The executor could not be allocated", outcome)) return;
+    if (arguments->deferred_limit) executor->deferred_limit = arguments->deferred_limit;
+    *arguments->executor = executor;
 }
 
 void uform_executor_for_vram(uform_executor_for_vram_t *arguments) {

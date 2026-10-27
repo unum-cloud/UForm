@@ -43,9 +43,9 @@ enum class load_stage_t : u8_t {
 
 /** Records a failed checkpoint read, geometry read or tower pack at @p stage with a static
  *  message per engine @p status : what the file holds is malformed, not an invalid argument. */
-static bool propagate_load_failure(utilities::status_t status, load_stage_t stage, uform_outcome_t *outcome) noexcept {
+static bool propagate_load_failure(status_t status, load_stage_t stage, uform_outcome_t *outcome) noexcept {
     switch (status) {
-    case utilities::status_t::invalid_input_k:
+    case status_t::invalid_argument_k:
         switch (stage) {
         case load_stage_t::reading_k:
             return propagate_error(uform_status_malformed_k, outcome, "The checkpoint is not a safetensors file");
@@ -55,11 +55,11 @@ static bool propagate_load_failure(utilities::status_t status, load_stage_t stag
             return propagate_error(uform_status_malformed_k, outcome, "The checkpoint misses or misshapes a tensor");
         }
         break;
-    case utilities::status_t::bad_alloc_k:
+    case status_t::bad_alloc_k:
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the model's weights");
-    case utilities::status_t::io_error_k:
+    case status_t::io_k:
         return propagate_error(uform_status_io_k, outcome, "The checkpoint file could not be opened or mapped");
-    case utilities::status_t::shape_unsupported_k:
+    case status_t::unsupported_k:
         return propagate_error(uform_status_unsupported_k, outcome, "No kernel of the picked class packs a tensor");
     default: break;
     }
@@ -96,20 +96,19 @@ static std::size_t tower_bytes(ue::geometry_t const &geometry, ue::precision_t p
 
 /** Parses the checkpoint @p loaded holds into a model handle in @p precision , its towers still to be packed; null
  *  once @p outcome records why not. */
-static std::unique_ptr<uform_model_handle_t> start_model(
-    utilities::expected<utilities::checkpoint_to_load_t> const &loaded, ue::precision_t precision,
-    uform_outcome_t *outcome) noexcept {
+static std::unique_ptr<uform_model_handle_t> start_model(expected<checkpoint_to_load_t> const &loaded,
+                                                         ue::precision_t precision, uform_outcome_t *outcome) noexcept {
     if (!loaded) return propagate_load_failure(loaded.status_, load_stage_t::reading_k, outcome), nullptr;
-    utilities::expected<ue::geometry_t> geometry = ue::geometry_t::from(*loaded);
+    expected<ue::geometry_t> geometry = ue::geometry_t::from(*loaded);
     if (!geometry) return propagate_load_failure(geometry.status_, load_stage_t::measuring_k, outcome), nullptr;
     std::unique_ptr<uform_model_handle_t> model {new (std::nothrow) uform_model_handle_t {}};
     if (!model) return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the model"), nullptr;
     model->geometry = *geometry;
     model->precision = precision;
     std::size_t const groups = geometry->choice_temperature_groups;
-    nk::tensor_view<utilities::f32_t, 2> const stored = loaded->float32("choices.inverse_temperatures");
-    utilities::f32_t const *const calibrated = stored.empty() ? nullptr : stored.data();
-    if (utilities::st::failed(model->choice_inverse_temperatures.resize(st::assume_uninitialized, groups)))
+    nk::tensor_view<f32_t, 2> const stored = loaded->float32("choices.inverse_temperatures");
+    f32_t const *const calibrated = stored.empty() ? nullptr : stored.data();
+    if (st::failed(model->choice_inverse_temperatures.resize(st::assume_uninitialized, groups)))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the model"), nullptr;
     for (std::size_t group = 0; group != groups; ++group)
         model->choice_inverse_temperatures[group] = calibrated ? calibrated[group] : 1.0f;
@@ -119,9 +118,9 @@ static std::unique_ptr<uform_model_handle_t> start_model(
 /** Packs one tower of @p model from @p checkpoint through @p verbs on @p stream , null on the host;
  *  null once @p outcome records why not. */
 template <encoder_home_t home_>
-static void *pack_tower(uform_model_handle_t &model, utilities::checkpoint_to_load_t const &checkpoint,
+static void *pack_tower(uform_model_handle_t &model, checkpoint_to_load_t const &checkpoint,
                         encoder_verbs<home_> const &verbs, nk_stream_t stream, uform_outcome_t *outcome) noexcept {
-    utilities::expected<void *> packed = verbs.create(checkpoint, model.geometry, model.precision, stream);
+    expected<void *> packed = verbs.create(checkpoint, model.geometry, model.precision, stream);
     if (!packed) return propagate_load_failure(packed.status_, load_stage_t::packing_k, outcome), nullptr;
     model.memory_usage += tower_bytes(model.geometry, model.precision);
     return *packed;
@@ -145,8 +144,8 @@ static bool host_capabilities(uform_executor_t executor, nk_capability_t &availa
 /** Packs a RAM model from @p loaded for the class @p ram_options pins, or the newest the CPU runs,
  *  and publishes it into @p output once the handler lets the load finish. */
 static void load_ram(uform_model_t *output, uform_executor_t executor, uform_ram_options_t const &ram_options,
-                     utilities::expected<utilities::checkpoint_to_load_t> loaded, ue::precision_t precision,
-                     uform_progress_t progress, uform_outcome_t *outcome) noexcept {
+                     expected<checkpoint_to_load_t> loaded, ue::precision_t precision, uform_progress_t progress,
+                     uform_outcome_t *outcome) noexcept {
     nk_capability_t available = 0;
     if (!host_capabilities(executor, available, outcome)) return;
     if (!cpu_pin_admitted(ram_options.cpu_class, available))
@@ -167,8 +166,8 @@ static void load_ram(uform_model_t *output, uform_executor_t executor, uform_ram
 /** Packs one replica per device of @p devices that @p vram names through the newest class of
  *  @p ladder_type_ every one of them runs; false once @p outcome records why not. */
 template <encoder_home_t home_, typename ladder_type_>
-static bool load_replicas(uform_model_handle_t &model, utilities::checkpoint_to_load_t const &checkpoint,
-                          vram_executor_t &devices, uform_vram_options_t const &vram, progress_ticks_t &ticks,
+static bool load_replicas(uform_model_handle_t &model, checkpoint_to_load_t const &checkpoint, vram_executor_t &devices,
+                          uform_vram_options_t const &vram, progress_ticks_t &ticks,
                           uform_outcome_t *outcome) noexcept {
     per_gpu_array<vram_replica_t> &replicas = std::get<per_gpu_array<vram_replica_t>>(model.towers);
     encoder_verbs<home_> const *verbs = nullptr;
@@ -189,7 +188,7 @@ static bool load_replicas(uform_model_handle_t &model, utilities::checkpoint_to_
         model.tables = verbs;
         void *const tower = pack_tower(model, checkpoint, *verbs, device.stream.get(), outcome);
         if (!tower) return false;
-        if (replicas.push_back(vram_replica_t {device.ordinal, tower}) != utilities::status_t::success_k)
+        if (replicas.push_back(vram_replica_t {device.ordinal, tower}) != status_t::success_k)
             return verbs->destroy(tower),
                    propagate_error(uform_status_out_of_memory_k, outcome, "Failed to list the replicas");
         if (ticks(++placed, devices.devices.size()) == continuation_t::cancel_k)
@@ -201,8 +200,8 @@ static bool load_replicas(uform_model_handle_t &model, utilities::checkpoint_to_
 /** Packs a VRAM model from @p loaded on every device of @p executor that @p vram names, all of them when it names
  *  none, and publishes it into @p output . */
 static void load_vram(uform_model_t *output, uform_executor_t executor, uform_vram_options_t const &vram,
-                      utilities::expected<utilities::checkpoint_to_load_t> loaded, ue::precision_t precision,
-                      uform_progress_t progress, uform_outcome_t *outcome) noexcept {
+                      expected<checkpoint_to_load_t> loaded, ue::precision_t precision, uform_progress_t progress,
+                      uform_outcome_t *outcome) noexcept {
     vram_executor_t *const devices = executor ? std::get_if<vram_executor_t>(&executor->executor) : nullptr;
     if (!devices) return propagate_error(uform_status_device_k, outcome, "A VRAM load needs a VRAM executor"), void();
     if (vram.devices_count && !vram.devices)
@@ -228,13 +227,13 @@ static void load_vram(uform_model_t *output, uform_executor_t executor, uform_vr
 }
 
 /** Maps the checkpoint file @p path , which the load closes before completing. */
-static utilities::expected<utilities::checkpoint_to_load_t> map_checkpoint(uform_bytes_view_t path) noexcept {
-    return utilities::checkpoint_to_load_t::make(text_of(path));
+static expected<checkpoint_to_load_t> map_checkpoint(uform_bytes_view_t path) noexcept {
+    return checkpoint_to_load_t::make(text_of(path));
 }
 
 /** Views the checkpoint image @p buffer , borrowed only until the towers are packed. */
-static utilities::expected<utilities::checkpoint_to_load_t> view_checkpoint(uform_bytes_view_t buffer) noexcept {
-    return utilities::checkpoint_to_load_t::view(
+static expected<checkpoint_to_load_t> view_checkpoint(uform_bytes_view_t buffer) noexcept {
+    return checkpoint_to_load_t::view(
         {static_cast<b8_t const *>(static_cast<void const *>(buffer.data)), buffer.length});
 }
 

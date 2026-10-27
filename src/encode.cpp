@@ -31,7 +31,7 @@ using namespace unum::uform;
 /** UTF-8 bytes, each a token, cut at the context. */
 struct text_packer_t {
     static constexpr modality_t modality_k = modality_t::text_k;
-    utilities::tape_view<b8_t const> tape;
+    tape_view<b8_t const> tape;
 
     std::size_t cell_bytes(ue::geometry_t const &) const noexcept { return sizeof(token_id_t); }
     failure_t validate(ue::geometry_t const &) const noexcept { return {}; }
@@ -45,7 +45,7 @@ struct text_packer_t {
 
     failure_t stage(std::size_t item, item_plan_t const &plan, bytes_span_t cells, ue::geometry_t const &,
                     std::size_t) const noexcept {
-        std::span<b8_t const> const bytes = tape[item];
+        bytes_view_t const bytes = tape[item];
         token_id_t *const tokens = static_cast<token_id_t *>(static_cast<void *>(cells.data()));
         for (u32_t token = 0; token != plan.tokens; ++token) tokens[token] = static_cast<token_id_t>(bytes[token]);
         return {};
@@ -56,7 +56,7 @@ struct text_packer_t {
  *  the context. */
 struct choice_packer_t {
     static constexpr modality_t modality_k = modality_t::text_k;
-    utilities::tape_view<b8_t const> tape;
+    tape_view<b8_t const> tape;
 
     std::size_t cell_bytes(ue::geometry_t const &) const noexcept { return sizeof(token_id_t); }
     failure_t validate(ue::geometry_t const &) const noexcept { return {}; }
@@ -70,7 +70,7 @@ struct choice_packer_t {
 
     failure_t stage(std::size_t item, item_plan_t const &plan, bytes_span_t cells, ue::geometry_t const &,
                     std::size_t) const noexcept {
-        std::span<b8_t const> const bytes = tape[item];
+        bytes_view_t const bytes = tape[item];
         token_id_t *const tokens = static_cast<token_id_t *>(static_cast<void *>(cells.data()));
         std::size_t const kept = plan.tokens - 1, skipped = bytes.size() - kept;
         for (std::size_t token = 0; token != kept; ++token)
@@ -83,7 +83,7 @@ struct choice_packer_t {
 /** Interleaved RGB rows, cropped to their patch grid's aspect and resized on the host. */
 struct pixels_packer_t {
     static constexpr modality_t modality_k = modality_t::image_k;
-    utilities::tape_view<b8_t const> tape;
+    tape_view<b8_t const> tape;
     std::span<u32_t const> heights;
     std::span<u32_t const> widths;
 
@@ -143,7 +143,7 @@ struct pixels_packer_t {
             rgba_pixels[pixel, 3] = 255;
         }
         std::size_t const side = geometry.image_patch_side;
-        utilities::expected_t const resized = um::resize_image(
+        expected_t const resized = um::resize_image(
             {rgba, {height, width, um::image_channels_k}},
             {static_cast<pixel_t *>(static_cast<void *>(cells.data())), {plan.shape[0], plan.shape[1], side, side, 4}});
         if (!resized) return {media_status_of(resized.status_), "An image could not be resized"};
@@ -154,7 +154,7 @@ struct pixels_packer_t {
 /** Mono Float32 samples, resampled to the model's rate and cut into frames. */
 struct samples_packer_t {
     static constexpr modality_t modality_k = modality_t::audio_k;
-    utilities::tape_view<f32_t const> tape;
+    tape_view<f32_t const> tape;
     u32_t sample_rate;
 
     std::size_t cell_bytes(ue::geometry_t const &geometry) const noexcept {
@@ -173,11 +173,11 @@ struct samples_packer_t {
     std::size_t resampled(std::size_t item, ue::geometry_t const &geometry) const noexcept {
         std::size_t const samples = tape[item].size();
         if (sample_rate == geometry.audio_sample_rate) return samples;
-        return utilities::divide_round_up(samples * geometry.audio_sample_rate, sample_rate);
+        return divide_round_up(samples * geometry.audio_sample_rate, sample_rate);
     }
 
     failure_t plan(std::size_t item, item_plan_t &plan, ue::geometry_t const &geometry, std::size_t) const noexcept {
-        plan.spanned = utilities::divide_round_up(resampled(item, geometry), geometry.audio_chunk_samples);
+        plan.spanned = divide_round_up(resampled(item, geometry), geometry.audio_chunk_samples);
         u32_t const cells = ue::media_cells(ue::modality_t::audio_k, geometry.columns);
         plan.tokens = static_cast<u32_t>(plan.spanned < cells ? plan.spanned : cells);
         return {};
@@ -191,8 +191,8 @@ struct samples_packer_t {
         std::span<f32_t const> const samples = tape[item];
         if (sample_rate == geometry.audio_sample_rate) std::memcpy(frames, samples.data(), kept * sizeof(f32_t));
         else if (kept) {
-            utilities::expected_t const resampled_into = um::resample_mono(samples, sample_rate,
-                                                                           geometry.audio_sample_rate, {frames, kept});
+            expected_t const resampled_into = um::resample_mono(samples, sample_rate, geometry.audio_sample_rate,
+                                                                {frames, kept});
             if (!resampled_into) return {media_status_of(resampled_into.status_), "A recording could not be resampled"};
         }
         std::memset(frames + kept, 0, (capacity - kept) * sizeof(f32_t));

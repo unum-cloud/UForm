@@ -30,15 +30,18 @@
 #include <type_traits>      // `std::is_trivially_copyable_v`
 #include <variant>          // `std::variant` - the executor's kind, the arena's residency, a deferred call
 
-#include <forkunion.hpp>          // vendor-boundary: `fu::flat_pool_t`, `fu::spin_mutex_t`, waiters & atomic refs
-#include <numkong/capabilities.h> // `nk_capability_t`, `nk_stream_t`
+#include <forkunion/atomics.hpp>      // `fu::standard_atomic_ref` & kin - the classes' atomic references
+#include <forkunion/capabilities.hpp> // `fu::x86_pause_t`, `fu::arm64_wfet_t` & waiter kin
+#include <forkunion/types.hpp>        // `fu::spin_mutex_t`, `fu::wait_capped_k`
+#include <numkong/capabilities.h>     // `nk_capability_t`, `nk_stream_t`
 #include <numkong/memory.h>       // `nk_allocator_t`, `nk_allocator_init_heap`
 #include <numkong/memory.hpp>     // `nk::stream_t` - the stream an executor owns
 
 #include "uform/uform.h" // every argument structure
 
-#include "uform/utilities/array.hpp" // `per_gpu_array`
-#include "uform/utilities/types.hpp" // `status_t`, the integer aliases, `sz::string_view_t`, `st::basic_vector`
+#include "uform/utilities/array.hpp"      // `per_gpu_array`
+#include "uform/utilities/ram_device.hpp" // `executor_t`, `lent_pool_t`, `pool_view_t`, `topology_t`
+#include "uform/utilities/types.hpp"      // `status_t`, the integer aliases, `sz::string_view_t`, `st::basic_vector`
 #include "uform/encoder/tower.hpp"   // `geometry_t`, `precision_t`, `outputs_t` - what a model's towers take
 
 namespace unum::uform {
@@ -49,10 +52,31 @@ namespace sz = ashvardanian::stringzilla;
 namespace st = ashvardanian::smashtable;
 
 using utilities::b8_t;
+using utilities::bytes_of;
 using utilities::bytes_span_t;
 using utilities::bytes_view_t;
+using utilities::caller_exclusivity_t;
+using utilities::checkpoint_to_load_t;
+using utilities::divide_round_up;
+using utilities::executor_t;
+using utilities::expected;
+using utilities::expected_t;
+using utilities::f32_t;
+using utilities::f32r2_span_t;
+using utilities::f32r2_view_t;
+using utilities::f64_t;
 using utilities::i32_t;
+using utilities::i64_t;
+using utilities::lent_pool_t;
+using utilities::max_gpus_per_host_k;
 using utilities::per_gpu_array;
+using utilities::pixel_t;
+using utilities::pool_view_t;
+using utilities::status_t;
+using utilities::tape_view;
+using utilities::token_id_t;
+using utilities::topology_t;
+using utilities::u16_t;
 using utilities::u32_t;
 using utilities::u64_t;
 using utilities::u8_t;
@@ -77,7 +101,7 @@ inline constexpr u64_t every_ticket_k = std::numeric_limits<u64_t>::max();
 /** The @p count entries of a C tape as the engine's typed tape, whose elements reach the last
  *  offset; null offsets make an empty tape, and null data no elements. */
 template <typename element_type_>
-[[nodiscard]] utilities::tape_view<element_type_> tape_of(uform_tape_view_t tape, std::size_t count) noexcept {
+[[nodiscard]] tape_view<element_type_> tape_of(uform_tape_view_t tape, std::size_t count) noexcept {
     if (!tape.offsets) return {};
     return {{static_cast<element_type_ *>(tape.data), tape.data ? tape.offsets[count] : 0}, {tape.offsets, count + 1}};
 }
@@ -645,19 +669,8 @@ host_verbs_t const *pick_host_verbs(cpu_ladder<classes_...>, cpu_class_t cpu_cla
 
 #pragma region Outcomes
 
-/** The C status a failure of the engine's own vocabulary crosses into. */
-[[nodiscard]] inline uform_status_t status_of(utilities::status_t status) noexcept {
-    switch (status) {
-    case utilities::status_t::success_k: return uform_status_success_k;
-    case utilities::status_t::bad_alloc_k: return uform_status_out_of_memory_k;
-    case utilities::status_t::invalid_input_k: return uform_status_invalid_argument_k;
-    case utilities::status_t::shape_unsupported_k: return uform_status_unsupported_k;
-    case utilities::status_t::cuda_error_k: return uform_status_device_k;
-    case utilities::status_t::io_error_k: return uform_status_io_k;
-    case utilities::status_t::other_k: return uform_status_internal_k;
-    }
-    return uform_status_internal_k;
-}
+/** The C status a failure of the engine's own vocabulary crosses into, whose values it shares. */
+[[nodiscard]] inline uform_status_t status_of(status_t status) noexcept { return static_cast<uform_status_t>(status); }
 
 /** The C status a NumKong failure crosses into; whatever a device answers beyond shapes and memory is the device's. */
 [[nodiscard]] inline uform_status_t status_of(nk_status_t status) noexcept {
@@ -731,7 +744,7 @@ class progress_ticks_t {
 
       private:
         [[nodiscard]] std::size_t boundary_(std::size_t index) const noexcept {
-            return utilities::divide_round_up(index * total_, slices_);
+            return divide_round_up(index * total_, slices_);
         }
 
         std::size_t index_;
@@ -818,7 +831,7 @@ class chunked_arena_t {
     /** Hands out @p bytes aligned for any kernel, growing by a chunk as large as everything held so far when full,
      *  or null when the policy or the limit refuses. */
     [[nodiscard]] void *allocate(std::size_t bytes) noexcept {
-        std::size_t const aligned = utilities::divide_round_up(bytes, nk_default_alignment_k) * nk_default_alignment_k;
+        std::size_t const aligned = divide_round_up(bytes, nk_default_alignment_k) * nk_default_alignment_k;
         for (; current_ != chunks_.size(); ++current_, used_ = 0)
             if (chunks_[current_].size() - used_ >= aligned) {
                 b8_t *const landed = chunks_[current_].data() + used_;
@@ -890,9 +903,10 @@ struct device_arena_t {
 /** A device stream an executor opened and closes, its vendor named by the device it was opened on. */
 using owned_stream_t = nk::stream_t;
 
-/** The host threads of a RAM executor, spawned and owned, and where its models place their bytes. */
+/** The host threads of a RAM executor, spawned here or lent by another library, and where its
+ *  models place their bytes. */
 struct ram_executor_t {
-    fu::flat_pool_t pool;
+    std::variant<executor_t, lent_pool_t> pool;
 
     /** What the threads run, as @c nk_cpu_capabilities_enabled reports. */
     nk_capability_t capabilities = 0;
@@ -927,11 +941,16 @@ struct vram_device_t {
 /** The devices of a VRAM executor, and the host threads that decode what the devices cannot. */
 struct vram_executor_t {
     per_gpu_array<vram_device_t> devices;
-    fu::flat_pool_t decoders;
+    executor_t decoders;
 
     /** Host pages for what only the decoders read: the plans and every thread's decode window. */
     host_arena_t staging;
 };
+
+/** The right to dispatch on @p pool , owned or lent. */
+[[nodiscard]] inline pool_view_t view_of(std::variant<executor_t, lent_pool_t> const &pool) noexcept {
+    return std::visit([](auto const &alternative) noexcept { return alternative.view(); }, pool);
+}
 
 #pragma endregion Executors
 
@@ -951,7 +970,7 @@ struct encoder_home_executor {
 };
 template <>
 struct encoder_home_executor<encoder_home_t::ram_k> {
-    using type = fu::flat_pool_t &;
+    using type = pool_view_t;
 };
 
 /** The verbs one encoder variant compiles in its class unit, defined in @c encoder_punned.hpp . */
@@ -1159,7 +1178,7 @@ struct uform_model_handle_t {
 
     /** Each question type's calibrated inverse temperature, in host memory where a choice's softmax
      *  runs; empty without the byte decoder. */
-    uf::utilities::st::basic_vector<uf::utilities::f32_t> choice_inverse_temperatures;
+    uf::st::basic_vector<uf::f32_t> choice_inverse_temperatures;
 
     /** The variant picked once at load: its home's verb table, which alone casts each tower
      *  back. */

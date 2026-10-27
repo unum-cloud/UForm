@@ -71,15 +71,15 @@ expected_t ue::fill_coords(u32r1_view_t segment_offsets, u32r1_view_t segment_le
                            image_shape_view_t image_shapes, video_shape_view_t video_shapes, u32_t tube_frames,
                            u32_t frame_stride, i16r2_span_t coords, gpu_stream_t &stream) noexcept {
     if (coords.extent(1) != 3)
-        return expected_t::fail(status_t::shape_unsupported_k, "coordinate table must be [{},3]", coords.extent(0));
+        return expected_t::fail(status_t::unsupported_k, "coordinate table must be [{},3]", coords.extent(0));
     std::size_t const segments = segment_lengths.extent(0);
     if (segment_offsets.extent(0) < segments || segment_modality.extent(0) != segments)
-        return expected_t::fail(status_t::invalid_input_k,
+        return expected_t::fail(status_t::invalid_argument_k,
                                 "offsets ({}), lengths ({}), and modality ({}) must span the segment count",
                                 segment_offsets.extent(0), segments, segment_modality.extent(0));
     if ((image_shapes.extent(0) != 0 && image_shapes.extent(1) != 2) ||
         (video_shapes.extent(0) != 0 && video_shapes.extent(1) != 3))
-        return expected_t::fail(status_t::shape_unsupported_k, "shape descriptors must be image [{},2], video [{},3]",
+        return expected_t::fail(status_t::unsupported_k, "shape descriptors must be image [{},2], video [{},3]",
                                 image_shapes.extent(0), video_shapes.extent(0));
     if (segments == 0) return {};
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
@@ -724,14 +724,14 @@ expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
     using result_t = expected<multimodal_batch_mixer_t>;
     std::size_t const members = multimem.local_member_count();
     if (members == 0 || arenas.size() != members)
-        return result_t::fail(status_t::invalid_input_k,
+        return result_t::fail(status_t::invalid_argument_k,
                               "every local multimem_domain member needs its arena ({} members, {} arenas)", members,
                               arenas.size());
     if (members > max_gpus_per_host_k)
-        return result_t::fail(status_t::shape_unsupported_k, "{} members exceed max_gpus_per_host_k ({})", members,
+        return result_t::fail(status_t::unsupported_k, "{} members exceed max_gpus_per_host_k ({})", members,
                               max_gpus_per_host_k);
     if (streams.size() != members)
-        return result_t::fail(status_t::invalid_input_k, "every member needs its stream ({} members, {} streams)",
+        return result_t::fail(status_t::invalid_argument_k, "every member needs its stream ({} members, {} streams)",
                               members, streams.size());
     u32_t const domains = colocated.multimem_domain_count();
     // Level-1 precondition: every local member's arena readable by every other — visibility is the
@@ -739,7 +739,7 @@ expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
     for (std::size_t member = 0; member != members; ++member)
         for (std::size_t peer = 0; peer != members; ++peer)
             if (!arenas[member].is_visible_to(static_cast<int>(peer)))
-                return result_t::fail(status_t::invalid_input_k,
+                return result_t::fail(status_t::invalid_argument_k,
                                       "member {}'s arena is not visible to device {} — " //
                                       "construct it with `visible_to`",
                                       member, peer);
@@ -762,7 +762,7 @@ expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
     for (std::size_t member = 0; member != members; ++member) {
         switch_to_gpu_t gpu_scope {streams[member]};
         if (!gpu_scope.ok())
-            return result_t::fail(status_t::cuda_error_k, "context entry failed for member {}'s routing tables",
+            return result_t::fail(status_t::device_error_k, "context entry failed for member {}'s routing tables",
                                   member);
         gpu_arena_alloc<u32_t> const routing_alloc {arenas[member]};
         mixer.world_lengths_[member] = u32r2_tensor_arena_t::uninitialized({world_gpus, segments}, routing_alloc).value;
@@ -785,7 +785,7 @@ expected<multimodal_batch_mixer_t> multimodal_batch_mixer_t::make(
     for (std::size_t member = 0; member != members; ++member) {
         switch_to_gpu_t gpu_scope {streams[member]};
         if (!gpu_scope.ok())
-            return result_t::fail(status_t::cuda_error_k, "context entry failed wiring member {}", member);
+            return result_t::fail(status_t::device_error_k, "context entry failed wiring member {}", member);
         u32_t const member_index = static_cast<u32_t>(multimem.member_offset() + member);
         auto wired = infiniband_all_gather<b8_t>::make(colocated, member_index, arenas[member], block_bytes,
                                                        streams[member], timeout_seconds);
@@ -805,21 +805,21 @@ expected_t multimodal_batch_mixer_t::operator()(std::size_t local, data_epoch_t 
                                                 std::span<multimodal_batch_on_gpu_t const> loaded,
                                                 multimodal_batch_on_gpu_t &mixed, gpu_stream_t &stream) noexcept {
     std::size_t const members = world_sources_.size();
-    if (local >= members) return expected_t::fail(status_t::invalid_input_k, "member {} of {}", local, members);
+    if (local >= members) return expected_t::fail(status_t::invalid_argument_k, "member {} of {}", local, members);
     if (loaded.size() != members)
-        return expected_t::fail(status_t::invalid_input_k, "every member needs its loaded batch ({} of {})",
+        return expected_t::fail(status_t::invalid_argument_k, "every member needs its loaded batch ({} of {})",
                                 loaded.size(), members);
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed ({})", local);
+    if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed ({})", local);
     std::size_t const member_index = multimem_->member_offset() + local;
 
     auto local_source = [&](std::size_t member, batch_source_t_ &source) noexcept -> expected_t {
         source = source_from_loaded_(loaded[member]);
         if (source.tokens.empty() || source.segment_offsets.empty() || source.segment_lengths.empty() ||
             source.segment_modality.empty())
-            return expected_t::fail(status_t::invalid_input_k, "member {}'s loaded batch is unallocated", member);
+            return expected_t::fail(status_t::invalid_argument_k, "member {}'s loaded batch is unallocated", member);
         if (source.tokens.data() == mixed.tokens.data())
-            return expected_t::fail(status_t::invalid_input_k,
+            return expected_t::fail(status_t::invalid_argument_k,
                                     "loaded and mixed batches must be distinct storage (member={})", member);
         return {};
     };
@@ -871,8 +871,8 @@ expected_t multimodal_batch_mixer_t::operator()(data_epoch_t data_epoch,
                                                 std::span<gpu_stream_t> streams) noexcept {
     std::size_t const members = world_sources_.size();
     if (streams.size() != members || mixed.size() != members)
-        return expected_t::fail(status_t::invalid_input_k, "every member needs its stream and mixed batch ({} members)",
-                                members);
+        return expected_t::fail(status_t::invalid_argument_k,
+                                "every member needs its stream and mixed batch ({} members)", members);
     for (std::size_t local = 0; local != members; ++local)
         if (expected_t staged = (*this)(local, data_epoch, loaded, mixed[local], streams[local]); !staged)
             return staged;

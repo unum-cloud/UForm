@@ -36,7 +36,7 @@
 #include "uform/loaders/audio_loader.cuh"   // `decode_audios`
 #include "uform/loaders/dataset_shards.hpp" // `parquet_file_t`, `expand_glob`, `column_view_t`
 #include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
-#include "uform/loaders/image_loader.cuh"   // `decode_images`, `nvjpeg_session_t`, `cpu_decode_pool_t`
+#include "uform/loaders/image_loader.cuh"   // `decode_images`, `nvjpeg_session_t`
 #include "uform/loaders/tokens_loader.cuh"  // `pack_tokens`
 #include "uform/loaders/video_loader.cuh"   // `decode_videos`, `nvdec_session_t`
 
@@ -92,9 +92,11 @@ struct paired_loader_parquet_t {
      *      @c text_k .
      *  @param[in] shape The run's batch shape, whose slice of @p modality is the decode's geometry.
      */
-    [[nodiscard]] static expected<paired_loader_parquet_t> make(
-        gpu_direct_storage_session_t &session, sz::string_view_t path_or_glob, u64_t seed, cpu_decode_pool_t &pool,
-        paired_loader_parquet_config_t config, modality_t modality, multimodal_batch_shape_t const &shape) noexcept;
+    [[nodiscard]] static expected<paired_loader_parquet_t> make(gpu_direct_storage_session_t &session,
+                                                                sz::string_view_t path_or_glob, u64_t seed,
+                                                                pool_view_t pool, paired_loader_parquet_config_t config,
+                                                                modality_t modality,
+                                                                multimodal_batch_shape_t const &shape) noexcept;
 
     /**
      *  @brief Fill @p batches with caption-image pairs on one GPU rank.
@@ -103,7 +105,7 @@ struct paired_loader_parquet_t {
      *  @param[in] gpu_rank Ensures different GPUs draw different rows from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
      *  @param[out] batches The batches whose segment table, bags, tokens and images get populated.
-     *  @retval status_t::invalid_input_k The loader's media are not images.
+     *  @retval status_t::invalid_argument_k The loader's media are not images.
      */
     [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, nvjpeg_session_t &decoder, u32_t gpu_rank,
                                   u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
@@ -115,7 +117,7 @@ struct paired_loader_parquet_t {
      *  @param[in] gpu_rank Ensures different GPUs draw different rows from the same dataset.
      *  @param[in] training_step Ensures subsequent steps sample different data.
      *  @param[out] batches The batches whose segment table, bags, tokens and videos get populated.
-     *  @retval status_t::invalid_input_k The loader's media are not videos.
+     *  @retval status_t::invalid_argument_k The loader's media are not videos.
      */
     [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, nvdec_session_t &decoder, u32_t gpu_rank,
                                   u32_t training_step, std::span<multimodal_batch_on_gpu_t> batches) noexcept;
@@ -127,7 +129,7 @@ struct paired_loader_parquet_t {
      *  @param[in] training_step Ensures subsequent steps sample different data.
      *  @param[out] batches The batches whose segment table, bags, tokens and audio samples get
      *      populated.
-     *  @retval status_t::invalid_input_k The loader's positives are images or videos.
+     *  @retval status_t::invalid_argument_k The loader's positives are images or videos.
      */
     [[nodiscard]] expected_t fill(gpu_stream_t &gpu_stream, u32_t gpu_rank, u32_t training_step,
                                   std::span<multimodal_batch_on_gpu_t> batches) noexcept;
@@ -163,7 +165,7 @@ struct paired_loader_parquet_t {
     gpu_direct_storage_session_t *storage_ = nullptr;
 
     /** The run's CPU-decode worker pool — borrowed, never spawned here. */
-    cpu_decode_pool_t *pool_ = nullptr;
+    pool_view_t pool_ {nullptr};
 
     /** The dataset's Parquet shard paths, sorted by the glob. */
     st::basic_vector<sz::string_t> absolute_paths_ {};

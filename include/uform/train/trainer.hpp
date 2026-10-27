@@ -401,8 +401,8 @@ struct trainer_t {
      *  @brief Load every replica from the checkpoint at @p path and continue from its saved step,
      *      with the optimizer's moments and masters and the contrastive temperatures it holds; the
      *      state it misses restarts, the masters re-seeded from the loaded weights.
-     *  @retval status_t::invalid_input_k A matrix the checkpoint misses.
-     *  @retval status_t::shape_unsupported_k A matrix or a state of another shape.
+     *  @retval status_t::invalid_argument_k A matrix the checkpoint misses.
+     *  @retval status_t::unsupported_k A matrix or a state of another shape.
      */
     [[nodiscard]] expected_t resume(sz::string_view_t path) noexcept;
 

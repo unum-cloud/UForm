@@ -402,7 +402,7 @@ expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
                                                             gpu_numerics_t const &numerics) noexcept {
     using result_t = expected<transformer_scratch_t>;
     if (config.hidden == 0 || config.max_tokens == 0)
-        return result_t::fail(status_t::invalid_input_k, "scratch capacities must be positive (hidden={} tokens={})",
+        return result_t::fail(status_t::invalid_argument_k, "scratch capacities must be positive (hidden={} tokens={})",
                               config.hidden, config.max_tokens);
     std::size_t const hidden = config.hidden;
     std::size_t const ffn = static_cast<std::size_t>(config.ffn_expansion) * hidden;
@@ -452,7 +452,7 @@ expected<transformer_scratch_t> transformer_scratch_t::make(gpu_arena_t &arena,
                                                                      transformer_head_dim_k, tokens,
                                                                      config.max_segments, &packed_keys_values_bytes);
         status != nk_success_k)
-        return result_t::fail(status_t::cuda_error_k, "attention pack sizing failed: {}", nk_status_name(status));
+        return result_t::fail(status_t::device_error_k, "attention pack sizing failed: {}", nk_status_name(status));
     transformer_scratch_t scratch;
     scratch.products = f32r1_tensor_arena_t::uninitialized({tokens * ffn}, f32_alloc).value;
     scratch.residual_grad = f32r2_tensor_arena_t::uninitialized({tokens, hidden}, f32_alloc).value;
@@ -494,12 +494,12 @@ expected<transformer_block_bf16_t> transformer_block_bf16_t::make(gpu_arena_t &a
                                                                   transformer_block_config_t config,
                                                                   gpu_numerics_t const &numerics) noexcept {
     if (config.hidden == 0 || config.hidden % transformer_head_dim_k != 0)
-        return expected<transformer_block_bf16_t>::fail(status_t::shape_unsupported_k,
+        return expected<transformer_block_bf16_t>::fail(status_t::unsupported_k,
                                                         "hidden must be a positive multiple of {} (got {})",
                                                         transformer_head_dim_k, config.hidden);
     if (config.max_tokens == 0 || config.max_segments == 0 || config.max_segment_tokens == 0)
         return expected<transformer_block_bf16_t>::fail(
-            status_t::invalid_input_k, "token capacities must be positive (tokens={} segments={} longest={})",
+            status_t::invalid_argument_k, "token capacities must be positive (tokens={} segments={} longest={})",
             config.max_tokens, config.max_segments, config.max_segment_tokens);
     transformer_block_bf16_t block;
     block.config_ = config;
@@ -563,17 +563,17 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
     u32_t const ffn = config_.ffn_expansion * hidden;
     u32_t const heads = hidden / transformer_head_dim_k;
     if (tokens == 0 || tokens > config_.max_tokens || input.extent(1) != hidden)
-        return expected_t::fail(status_t::shape_unsupported_k, "input [{}x{}] disagrees with the baked [{}x{}]", tokens,
+        return expected_t::fail(status_t::unsupported_k, "input [{}x{}] disagrees with the baked [{}x{}]", tokens,
                                 input.extent(1), config_.max_tokens, hidden);
     if (output.extent(0) != tokens || output.extent(1) != hidden)
-        return expected_t::fail(status_t::shape_unsupported_k, "output shape disagrees with the input");
+        return expected_t::fail(status_t::unsupported_k, "output shape disagrees with the input");
     if (segment_lengths.extent(0) != config_.max_segments || segment_offsets.extent(0) != config_.max_segments + 1u)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "segment descriptors disagree with the baked count ({} segments)",
                                 config_.max_segments);
     if (coords.extent(0) < tokens)
-        return expected_t::fail(status_t::invalid_input_k, "rope coordinates cover {} of {} tokens", coords.extent(0),
-                                tokens);
+        return expected_t::fail(status_t::invalid_argument_k, "rope coordinates cover {} of {} tokens",
+                                coords.extent(0), tokens);
     // Every stash's live extent records the step's token count — the shape the backward reads back,
     // never a shadow scalar. Resizing within the reserved capacity moves no address, and the `tokens
     // <= max_tokens` check above guarantees every one of these succeeds.
@@ -589,8 +589,8 @@ expected_t transformer_block_bf16_t::forward(f32r2_view_t input, f32r2_span_t ou
                          nk::succeeded(scratch_->mlp_normalized.resize({tokens, hidden})) &&
                          nk::succeeded(scratch_->silu_up.resize({tokens, ffn}));
     if (!resized)
-        return expected_t::fail(status_t::shape_unsupported_k, "activation stashes cannot hold {} tokens (baked {})",
-                                tokens, config_.max_tokens);
+        return expected_t::fail(status_t::unsupported_k, "activation stashes cannot hold {} tokens (baked {})", tokens,
+                                config_.max_tokens);
 
     // The backward's pre-norm derivative needs the raw input; a replay already reads it from here.
     if (input.data() != input_stash_.data())
@@ -708,11 +708,11 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
     u32_t const hidden = config_.hidden;
     u32_t const ffn = config_.ffn_expansion * hidden;
     u32_t const heads = hidden / transformer_head_dim_k;
-    if (tokens == 0) return expected_t::fail(status_t::invalid_input_k, "backward before a stashed forward");
+    if (tokens == 0) return expected_t::fail(status_t::invalid_argument_k, "backward before a stashed forward");
     if (output_grad.extent(0) != tokens || output_grad.extent(1) != hidden || input_grad.extent(0) != tokens ||
         input_grad.extent(1) != hidden)
-        return expected_t::fail(status_t::shape_unsupported_k, "gradient shapes disagree with the stashed [{}x{}]",
-                                tokens, hidden);
+        return expected_t::fail(status_t::unsupported_k, "gradient shapes disagree with the stashed [{}x{}]", tokens,
+                                hidden);
     // Backward-only transients the forward never touches — their live extent still needs setting to
     // this step's token count (the stashes above already carry it from the paired forward call).
 
@@ -720,8 +720,8 @@ expected_t transformer_block_bf16_t::backward(f32r2_view_t output_grad, f32r2_sp
     bool const resized = nk::succeeded(scratch.packed_qkv.resize({tokens, 3 * hidden})) &&
                          nk::succeeded(scratch.residual_grad.resize({tokens, hidden}));
     if (!resized)
-        return expected_t::fail(status_t::shape_unsupported_k, "gradient transients cannot hold {} tokens (baked {})",
-                                tokens, config_.max_tokens);
+        return expected_t::fail(status_t::unsupported_k, "gradient transients cannot hold {} tokens (baked {})", tokens,
+                                config_.max_tokens);
 
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     std::size_t const bands = divide_round_up(tokens, std::size_t {kernel_block_size_default_k});
@@ -861,10 +861,10 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
     u32_t const ffn = config_.ffn_expansion * hidden;
     u32_t const heads = hidden / transformer_head_dim_k;
     if (tokens == 0 || tokens > config_.max_tokens || input.extent(1) != hidden)
-        return expected_t::fail(status_t::shape_unsupported_k, "input [{}x{}] disagrees with the baked [{}x{}]", tokens,
+        return expected_t::fail(status_t::unsupported_k, "input [{}x{}] disagrees with the baked [{}x{}]", tokens,
                                 input.extent(1), config_.max_tokens, hidden);
     if (output.extent(0) != tokens || output.extent(1) != hidden)
-        return expected_t::fail(status_t::shape_unsupported_k, "output shape disagrees with the input");
+        return expected_t::fail(status_t::unsupported_k, "output shape disagrees with the input");
     // No backward reads any of these, but each still needs its live extent set before `.span()` /
     // `.view()` reflects this step's token count rather than the baked `max_tokens` capacity.
 
@@ -875,8 +875,8 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
         nk::succeeded(qkv_e4m3_.resize({tokens, 3 * hidden})) &&
         nk::succeeded(attn_output_e4m3_.resize({tokens, hidden})) && nk::succeeded(silu_up_e4m3_.resize({tokens, ffn}));
     if (!resized)
-        return expected_t::fail(status_t::shape_unsupported_k, "activation stashes cannot hold {} tokens (baked {})",
-                                tokens, config_.max_tokens);
+        return expected_t::fail(status_t::unsupported_k, "activation stashes cannot hold {} tokens (baked {})", tokens,
+                                config_.max_tokens);
 
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const token_grid {static_cast<u32_t>(tokens), 1u, 1u};
@@ -888,7 +888,7 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
                                                           tokens, groups, columns, stride, stride, config_.rms_eps,
                                                           stream.numkong());
         if (status != nk_success_k)
-            return expected_t::fail(status_t::cuda_error_k, "RMSNorm failed: {}", nk_status_name(status));
+            return expected_t::fail(status_t::device_error_k, "RMSNorm failed: {}", nk_status_name(status));
         return {};
     };
 
@@ -917,9 +917,9 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
     if (nk_status_t const status = numerics_.cast(qkv_.data(), nk_bf16_k, qkv_e4m3_.data(), nk_e4m3_k,
                                                   tokens * 3 * hidden, stream.numkong());
         status != nk_success_k)
-        return expected_t::fail(status_t::cuda_error_k, "Q/K/V cast failed: {}", nk_status_name(status));
+        return expected_t::fail(status_t::device_error_k, "Q/K/V cast failed: {}", nk_status_name(status));
     if (nk::failed(products_.resize({tokens, hidden})))
-        return expected_t::fail(status_t::shape_unsupported_k, "attention scratch cannot hold [{}x{}]", tokens, hidden);
+        return expected_t::fail(status_t::unsupported_k, "attention scratch cannot hold [{}x{}]", tokens, hidden);
     nk_e4m3_t const *const qkv_e4m3 = numkong_scalars(qkv_e4m3_.data());
     std::size_t const qkv_bytes = 3 * hidden * sizeof(e4m3_t);
     nk_status_t status = numerics_.attention_pack_e4m3(
@@ -931,7 +931,7 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
                                        qkv_bytes, packed_keys_values_.data(), products_.data(), hidden * sizeof(f32_t),
                                        NUMKONG_NULL, 0, NUMKONG_SIZE_MAX, NUMKONG_NULL, 0, stream.numkong());
     if (status != nk_success_k)
-        return expected_t::fail(status_t::cuda_error_k, "E4M3 attention failed: {}", nk_status_name(status));
+        return expected_t::fail(status_t::device_error_k, "E4M3 attention failed: {}", nk_status_name(status));
 
     // Out-projection consumes the attention output under per-token scales, adding the residual input.
     launched = launch_kernel(&transformer_token_quantize_kernel_<f32_t>, token_grid, block_shape, stream,
@@ -953,7 +953,7 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
             gate_up, gate_up + ffn, numkong_scalars(silu_up_.data()), tokens, ffn, 2 * ffn * sizeof(bf16_t),
             2 * ffn * sizeof(bf16_t), ffn * sizeof(bf16_t), 1.0f, 1.0f, stream.numkong());
         status != nk_success_k)
-        return expected_t::fail(status_t::cuda_error_k, "SwiGLU failed: {}", nk_status_name(status));
+        return expected_t::fail(status_t::device_error_k, "SwiGLU failed: {}", nk_status_name(status));
     if (launched)
         launched = launch_kernel(&transformer_token_quantize_kernel_<bf16_t>, token_grid, block_shape, stream,
                                  silu_up_.view(), silu_up_e4m3_.span(), token_scales_.span());
@@ -966,12 +966,13 @@ expected_t transformer_block_e4m3_t::project_(std::size_t product, e4m3r2_view_t
                                               gpu_stream_t &stream) noexcept {
     std::size_t const tokens = activations.extent(0), depth = activations.extent(1), width = values.extent(1);
     if (nk::failed(products_.resize({tokens, width})))
-        return expected_t::fail(status_t::shape_unsupported_k, "product scratch cannot hold [{}x{}]", tokens, width);
+        return expected_t::fail(status_t::unsupported_k, "product scratch cannot hold [{}x{}]", tokens, width);
     nk_status_t const status = numerics_.multiply_e4m3(
         numkong_scalars(activations.data()), packed_weights_[product].data(), products_.data(), tokens, width, depth,
         depth * sizeof(e4m3_t), width * sizeof(f32_t), NUMKONG_NULL, 0, stream.numkong());
     if (status != nk_success_k)
-        return expected_t::fail(status_t::cuda_error_k, "E4M3 product {} failed: {}", product, nk_status_name(status));
+        return expected_t::fail(status_t::device_error_k, "E4M3 product {} failed: {}", product,
+                                nk_status_name(status));
     f32r1_view_t const weight_descale {weight_descales_.data() + product, 1};
     dim3 const grid {static_cast<u32_t>(divide_round_up(tokens * width, kernel_block_size_default_k)), 1u, 1u};
     return launch_kernel(&transformer_token_rescale_kernel_, grid, dim3 {kernel_block_size_default_k, 1u, 1u}, stream,
@@ -1023,7 +1024,8 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
     if (nk_status_t const status = numerics_.attention_pack_size_e4m3(heads, transformer_head_dim_k, tokens,
                                                                       config_.max_segments, &packed_keys_values_bytes);
         status != nk_success_k)
-        return result_t::fail(status_t::cuda_error_k, "E4M3 attention pack sizing failed: {}", nk_status_name(status));
+        return result_t::fail(status_t::device_error_k, "E4M3 attention pack sizing failed: {}",
+                              nk_status_name(status));
     block.normalized_e4m3_ = e4m3r2_tensor_arena_t::uninitialized({tokens, hidden}, e4m3_alloc).value;
     block.qkv_e4m3_ = e4m3r2_tensor_arena_t::uninitialized({tokens, 3 * hidden}, e4m3_alloc).value;
     block.packed_keys_values_ =
@@ -1044,7 +1046,7 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
         widened = numerics_.cast(post_norm_scale_.data(), nk_bf16_k, block.post_norm_scale_.data(), nk_f32_k, hidden,
                                  stream.numkong());
     if (widened != nk_success_k)
-        return result_t::fail(status_t::cuda_error_k, "norm scale widening failed: {}", nk_status_name(widened));
+        return result_t::fail(status_t::device_error_k, "norm scale widening failed: {}", nk_status_name(widened));
 
     // Per-weight static quantisation: order-free max-abs, descale = max_abs/240, divide-and-cast, then the
     // one-time pack into NumKong's layout. Every weight is a rank-2 [out,in] matrix; the quantisation itself
@@ -1082,7 +1084,7 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
         std::size_t const columns = job.shadow->extent(0), depth = job.shadow->extent(1);
         nk_size_t packed_bytes = 0;
         if (nk_status_t const status = numerics_.pack_size_e4m3(columns, depth, &packed_bytes); status != nk_success_k)
-            return result_t::fail(status_t::cuda_error_k, "E4M3 pack sizing failed: {}", nk_status_name(status));
+            return result_t::fail(status_t::device_error_k, "E4M3 pack sizing failed: {}", nk_status_name(status));
         b8r1_tensor_arena_t &packed = block.packed_weights_[job.product];
         packed = b8r1_tensor_arena_t::uninitialized({static_cast<std::size_t>(packed_bytes)}, b8_alloc).value;
         if (!packed)
@@ -1091,7 +1093,7 @@ expected<transformer_block_e4m3_t> transformer_block_bf16_t::quantize_weights(gp
                                                            depth * sizeof(e4m3_t), packed.data(), 0, columns,
                                                            stream.numkong());
             status != nk_success_k)
-            return result_t::fail(status_t::cuda_error_k, "E4M3 weight packing failed: {}", nk_status_name(status));
+            return result_t::fail(status_t::device_error_k, "E4M3 weight packing failed: {}", nk_status_name(status));
     }
     return result_t {std::move(block)};
 }

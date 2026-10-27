@@ -48,7 +48,7 @@
 #include <fmt/format.h> // `fmt::println`, `fmt::format_to_n`
 #include <yyjson.h>     // `yyjson_read_file`
 
-#include <forkunion.hpp>                   // `fu::flat_pool_t`, `fu::standard_atomic_ref` - the scoring threads
+#include <forkunion/atomics.hpp>           // `fu::standard_atomic_ref` - the scoring threads
 #include <numkong/capabilities.h>          // `nk_cpu_capabilities_enabled`
 #include <numkong/dots.h>                  // `nk_dots_pack_f32_best`, `nk_dots_packed_f32_best`
 #include <smashtable/basic_hash_table.hpp> // `hash_map` — COCO image IDs to their files
@@ -60,10 +60,16 @@
 
 #include "uform/utilities/safetensors_format.hpp" // `checkpoint_to_load_t`, `checkpoint_to_save_t` — the calibrated copy
 #include "uform/utilities/types.hpp"              // `divide_round_up`
+#include "uform/utilities/ram_device.hpp"         // `executor_t`, `pool_view_t`, `topology_t`
 
 namespace fu = ashvardanian::forkunion;
 namespace st = ashvardanian::smashtable;
 namespace uu = unum::uform::utilities;
+using uu::caller_exclusivity_t;
+using uu::executor_t;
+using uu::expected;
+using uu::pool_view_t;
+using uu::topology_t;
 
 /** Append @p count trivially copyable @p items onto @p values , or report the refusal. */
 template <typename value_type_>
@@ -376,7 +382,7 @@ static constexpr std::size_t score_block_rows_k = 64;
  *  queries rank within each of @ref recall_depths_k . A query's targets are @p targets from
  *  @p offsets [query] to @p offsets [query + 1], and its rank counts the items scoring strictly
  *  above the best of them. */
-[[nodiscard]] static bool count_hits_(fu::flat_pool_t &pool, nk_capability_t capabilities,
+[[nodiscard]] static bool count_hits_(pool_view_t pool, nk_capability_t capabilities,
                                       st::basic_vector<float> const &queries, st::basic_vector<float> const &items,
                                       std::size_t dimensions, std::size_t const *offsets, std::uint32_t const *targets,
                                       std::span<std::size_t, 3> hits) noexcept {
@@ -392,10 +398,11 @@ static constexpr std::size_t score_block_rows_k = 64;
         return false;
     bool scored = true;
     std::size_t const blocks_count = uu::divide_round_up(queries_count, score_block_rows_k);
-    pool.for_n_dynamic(blocks_count, [&](std::size_t block, fu::thread_in_domain_t at) noexcept {
+    uu::status_t const dispatched = pool.for_n_dynamic(blocks_count, [&](std::size_t block,
+                                                                         std::size_t thread) noexcept {
         std::size_t const first = block * score_block_rows_k;
         std::size_t const count = std::min(score_block_rows_k, queries_count - first);
-        nk_f64_t *const scores = blocks.data() + at.thread * score_block_rows_k * items_count;
+        nk_f64_t *const scores = blocks.data() + thread * score_block_rows_k * items_count;
         if (nk_dots_packed_f32_best(queries.data() + first * dimensions, packed.data(), scores, count, items_count,
                                     dimensions, dimensions * sizeof(float), items_count * sizeof(nk_f64_t), nullptr, 0,
                                     capabilities, nullptr) != nk_success_k)
@@ -413,7 +420,7 @@ static constexpr std::size_t score_block_rows_k = 64;
         for (std::size_t k = 0; k != 3; ++k)
             fu::standard_atomic_ref<std::size_t> {hits[k]}.fetch_add(block_hits[k], std::memory_order_relaxed);
     });
-    return scored; // `for_n_dynamic` joined every thread
+    return dispatched == uu::status_t::success_k && scored; // `for_n_dynamic` joined every thread
 }
 
 /** Score every caption against every medium on @p encoder 's thread count, report both directions,
@@ -439,14 +446,17 @@ static constexpr std::size_t score_block_rows_k = 64;
     // A caption's one target is its own medium.
     for (std::size_t query = 0; query <= queries; ++query) owner_offsets[query] = query;
     nk_capability_t capabilities = 0;
-    fu::flat_pool_t pool;
-    if (nk_cpu_capabilities_enabled(&capabilities) != nk_success_k ||
-        fu::failed(pool.spawn(encoder.threads ? encoder.threads : fu::allowed_cores_count())))
-        return false;
+    if (nk_cpu_capabilities_enabled(&capabilities) != nk_success_k) return false;
+    expected<topology_t> topology = topology_t::make();
+    if (!topology) return false;
+    expected<executor_t> pool = executor_t::make(*topology,
+                                                 encoder.threads ? encoder.threads : topology->logical_cores_count(),
+                                                 caller_exclusivity_t::caller_inclusive_k);
+    if (!pool) return false;
     std::size_t text_hits[3] = {}, media_hits[3] = {};
-    if (!count_hits_(pool, capabilities, captions, media, encoder.dimensions, owner_offsets.data(), split.owners.data(),
-                     text_hits) ||
-        !count_hits_(pool, capabilities, media, captions, encoder.dimensions, caption_offsets.data(),
+    if (!count_hits_(pool->view(), capabilities, captions, media, encoder.dimensions, owner_offsets.data(),
+                     split.owners.data(), text_hits) ||
+        !count_hits_(pool->view(), capabilities, media, captions, encoder.dimensions, caption_offsets.data(),
                      captions_by_item.data(), media_hits))
         return false;
     for (std::size_t k = 0; k != 3; ++k) {

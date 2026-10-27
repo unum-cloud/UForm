@@ -246,7 +246,7 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
               facts_payload(job, 1, 2, local_devices, local_devices, "faux-peer", device_name, 0x1));
         auto result = mesh_topology_t::bootstrap(0, 2, &pause_between_polls, local_devices, base.c_str(), job, 10.0,
                                                  0x3);
-        suite.check(!result && result.status_ == status_t::shape_unsupported_k,
+        suite.check(!result && result.status_ == status_t::unsupported_k,
                     "lead should refuse a peer of other capabilities: {}", result.description_);
     }
 

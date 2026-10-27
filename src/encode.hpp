@@ -31,12 +31,7 @@ namespace unum::uform {
 namespace ue = unum::uform::encoder;
 namespace um = unum::uform::media;
 
-using utilities::f32_t;
 using encoder::modality_t;
-using utilities::pixel_t;
-using utilities::token_id_t;
-using utilities::u16_t;
-using utilities::u32_t;
 
 #pragma region Plans
 
@@ -47,10 +42,10 @@ struct failure_t {
 };
 
 /** The C status a media decoder's failure crosses into: whatever the bytes do not decode to is malformed. */
-inline uform_status_t media_status_of(utilities::status_t status) noexcept {
+inline uform_status_t media_status_of(status_t status) noexcept {
     switch (status) {
-    case utilities::status_t::bad_alloc_k: return uform_status_out_of_memory_k;
-    case utilities::status_t::shape_unsupported_k: return uform_status_unsupported_k;
+    case status_t::bad_alloc_k: return uform_status_out_of_memory_k;
+    case status_t::unsupported_k: return uform_status_unsupported_k;
     default: return uform_status_malformed_k;
     }
 }
@@ -99,7 +94,7 @@ inline failure_t validate_images(ue::geometry_t const &geometry) noexcept {
 
 /** The patch count an image of @p native extent spans before truncation. */
 inline std::size_t native_patches(um::image_extent_t native, u32_t patch_side) noexcept {
-    return utilities::divide_round_up(native.width, patch_side) * utilities::divide_round_up(native.height, patch_side);
+    return divide_round_up(native.width, patch_side) * divide_round_up(native.height, patch_side);
 }
 
 /** The refusal of every audio verb: a model without the audio entry. */
@@ -114,11 +109,11 @@ inline failure_t validate_audio(ue::geometry_t const &geometry) noexcept {
 #pragma region Sites
 
 /** The C status a tower's failure crosses into: a batch it calls invalid is a packing defect of the encode verbs. */
-inline failure_t tower_failure(utilities::status_t status) noexcept {
+inline failure_t tower_failure(status_t status) noexcept {
     switch (status) {
-    case utilities::status_t::invalid_input_k: return {uform_status_internal_k, "The tower refused a packed batch"};
-    case utilities::status_t::bad_alloc_k: return {uform_status_out_of_memory_k, "The tower ran out of memory"};
-    case utilities::status_t::shape_unsupported_k:
+    case status_t::invalid_argument_k: return {uform_status_internal_k, "The tower refused a packed batch"};
+    case status_t::bad_alloc_k: return {uform_status_out_of_memory_k, "The tower ran out of memory"};
+    case status_t::unsupported_k:
         return {uform_status_unsupported_k, "No kernel of the model's class takes the batch's shapes"};
     default: return {status_of(status), "The tower or its device failed to encode the batch"};
     }
@@ -140,7 +135,7 @@ inline ue::rows_span_t rebased(ue::rows_span_t rows, bytes_span_t staging) noexc
 
 /** A RAM call: the host tower on a pool, packing into the call's own arena, which also lends the scratch. */
 struct ram_site_t {
-    fu::flat_pool_t &pool;
+    pool_view_t pool;
 
     /** What only the host reads, and what the tower reads, both the call's arena on the host. */
     chunked_arena_t &staging;
@@ -149,10 +144,10 @@ struct ram_site_t {
     /** The variant the model's load picked, and its one host tower. */
     encoder_verbs<encoder_home_t::ram_k> const &verbs;
     void const *tower = nullptr;
-    std::span<b8_t> scratch {};
+    bytes_span_t scratch {};
 
     failure_t reserve(std::size_t tokens, std::size_t segments, std::size_t, ue::outputs_t) noexcept {
-        utilities::expected<std::size_t> bytes = verbs.scratch_bytes(tower, tokens, segments, pool);
+        expected<std::size_t> bytes = verbs.scratch_bytes(tower, tokens, segments, pool);
         if (!bytes) return tower_failure(bytes.status_);
         b8_t *const data = static_cast<b8_t *>(staging.allocate(*bytes));
         if (!data && *bytes) return {uform_status_out_of_memory_k, "Failed to allocate the activations"};
@@ -162,7 +157,7 @@ struct ram_site_t {
 
     failure_t encode(ue::multimodal_batch_view_t const &batch, bytes_view_t, std::span<std::size_t const>,
                      ue::outputs_t outputs) noexcept {
-        utilities::expected_t encoded = verbs.encode(tower, batch, outputs, scratch, pool);
+        expected_t encoded = verbs.encode(tower, batch, outputs, scratch, pool);
         return encoded ? failure_t {} : tower_failure(encoded.status_);
     }
 
@@ -177,7 +172,7 @@ struct ram_site_t {
 struct vram_shard_t {
     vram_device_t *device = nullptr;
     vram_replica_t const *replica = nullptr;
-    std::span<b8_t> scratch {};
+    bytes_span_t scratch {};
 
     /** Room for a whole slice's cells, of which the shard copies in only its own run, at the run's offset. */
     bytes_span_t cells {};
@@ -191,7 +186,7 @@ struct vram_shard_t {
 
     /** @b [segments,masked_vocabulary] where every shard writes its logits before copying them into
      *  host pages. */
-    utilities::f32r2_span_t masked_logits {};
+    f32r2_span_t masked_logits {};
 };
 
 /** A VRAM call: plans on the decoder pool into host pages, packs into pinned pages, and splits each
@@ -202,7 +197,7 @@ template <encoder_home_t home_>
 struct vram_site {
     using entries_kit_t = entries_kit_of<home_>;
 
-    fu::flat_pool_t &pool;
+    pool_view_t pool;
     chunked_arena_t &staging;
     chunked_arena_t &transfers;
 
@@ -216,8 +211,8 @@ struct vram_site {
                       ue::outputs_t surfaces) noexcept {
         cell_bytes = bytes_per_cell;
         for (vram_shard_t &shard : shards) {
-            utilities::expected<std::size_t> bytes = verbs.scratch_bytes(shard.replica->tower, tokens, segments,
-                                                                         shard.device->stream.get());
+            expected<std::size_t> bytes = verbs.scratch_bytes(shard.replica->tower, tokens, segments,
+                                                              shard.device->stream.get());
             if (!bytes) return tower_failure(bytes.status_);
             chunked_arena_t &memory = shard.device->scratch.chunks;
             memory.rewind();
@@ -263,7 +258,7 @@ struct vram_site {
         std::size_t first = 0;
         for (std::size_t index = 0; index != count && first != segments; ++index) {
             std::size_t last = first;
-            std::size_t const target = utilities::divide_round_up((index + 1) * tokens, count);
+            std::size_t const target = divide_round_up((index + 1) * tokens, count);
             while (last != segments && (packed_offsets[last + 1] - origin <= target || index + 1 == count)) ++last;
             if (last == first) continue;
             vram_shard_t const &shard = shards[index];
@@ -278,10 +273,8 @@ struct vram_site {
             nk::tensor_span<u16_t, 2> const video_shapes = shard.video_shapes[nk::range(0, items), nk::slice];
             std::size_t const run_first = begin * cell_bytes, run_bytes = (end - begin) * cell_bytes;
             if (!copied(shard.cells.subspan(run_first, run_bytes), cells.subspan(run_first, run_bytes)) ||
-                !copied(utilities::bytes_of(image_shapes),
-                        utilities::bytes_of(batch.image_shapes[shard_items, nk::slice])) ||
-                !copied(utilities::bytes_of(video_shapes),
-                        utilities::bytes_of(batch.video_shapes[shard_items, nk::slice])))
+                !copied(bytes_of(image_shapes), bytes_of(batch.image_shapes[shard_items, nk::slice])) ||
+                !copied(bytes_of(video_shapes), bytes_of(batch.video_shapes[shard_items, nk::slice])))
                 return moved;
 
             ue::multimodal_batch_view_t shard_batch = batch;
@@ -309,19 +302,16 @@ struct vram_site {
             if (!outputs.masked_logits
                      .empty()) // they land in host pages, so every shard computes them in its own memory
                 shard_outputs.masked_logits = shard.masked_logits[nk::range(0, items), nk::slice];
-            utilities::expected_t encoded = verbs.encode(shard.replica->tower, shard_batch, shard_outputs,
-                                                         shard.scratch, stream);
+            expected_t encoded = verbs.encode(shard.replica->tower, shard_batch, shard_outputs, shard.scratch, stream);
             if (!encoded) return tower_failure(encoded.status_);
             if (elsewhere &&
-                (!copied(utilities::bytes_of(landing.embeddings.bytes),
-                         utilities::bytes_of(shard_outputs.embeddings.bytes)) ||
-                 !copied(utilities::bytes_of(landing.states.bytes), utilities::bytes_of(shard_outputs.states.bytes)) ||
-                 !copied(utilities::bytes_of(landing.token_vectors.bytes),
-                         utilities::bytes_of(shard_outputs.token_vectors.bytes))))
+                (!copied(bytes_of(landing.embeddings.bytes), bytes_of(shard_outputs.embeddings.bytes)) ||
+                 !copied(bytes_of(landing.states.bytes), bytes_of(shard_outputs.states.bytes)) ||
+                 !copied(bytes_of(landing.token_vectors.bytes), bytes_of(shard_outputs.token_vectors.bytes))))
                 return moved;
             if (!outputs.masked_logits.empty() &&
-                !copied(utilities::bytes_of(outputs.masked_logits[nk::range(first, last), nk::slice]),
-                        utilities::bytes_of(shard_outputs.masked_logits)))
+                !copied(bytes_of(outputs.masked_logits[nk::range(first, last), nk::slice]),
+                        bytes_of(shard_outputs.masked_logits)))
                 return moved;
             first = last;
         }
@@ -423,11 +413,11 @@ failure_t validate_call(arguments_type_ const &arguments, uform_tape_view_t cons
 /** Turns the decoder's @p logits at each item's mask into probabilities over its choices alone, at
  *  its group's inverse temperature, on the host, and lands them in @p memory through @p site . */
 template <typename site_type_>
-failure_t land_choices(uform_text_choose_t &arguments, utilities::f32r2_view_t logits, site_type_ &site,
+failure_t land_choices(uform_text_choose_t &arguments, f32r2_view_t logits, site_type_ &site,
                        chunked_arena_t &memory) noexcept {
     uform_model_handle_t const &model = *arguments.model;
     std::size_t const count = arguments.count;
-    utilities::tape_view<u8_t const> const choices = tape_of<u8_t const>(arguments.choices, count);
+    tape_view<u8_t const> const choices = tape_of<u8_t const>(arguments.choices, count);
     std::size_t const origin = choices.offsets[0], total = choices.offsets[count] - origin;
     std::size_t *const offsets_memory = site.transfers.template allocate<std::size_t>(count + 1);
     f32_t *const probabilities_memory = site.transfers.template allocate<f32_t>(total ? total : 1);
@@ -462,15 +452,16 @@ failure_t land_choices(uform_text_choose_t &arguments, utilities::f32r2_view_t l
 
 /** Runs @p step for every item of @c [begin,end) on @p pool , answering the first failure any reported. */
 template <typename step_type_>
-failure_t for_items(fu::flat_pool_t &pool, std::size_t begin, std::size_t end, step_type_ step) noexcept {
+failure_t for_items(pool_view_t pool, std::size_t begin, std::size_t end, step_type_ step) noexcept {
     failure_t first {};
     fu::spin_mutex_t guard;
-    pool.for_n(end - begin, [&](std::size_t task, auto at) noexcept {
-        failure_t const failure = step(begin + task, static_cast<std::size_t>(at.thread));
+    status_t const dispatched = pool.for_n(end - begin, [&](std::size_t task, std::size_t thread) noexcept {
+        failure_t const failure = step(begin + task, thread);
         if (!failure.message) return;
         st::unique_lock<fu::spin_mutex_t> lock(guard);
         if (!first.message) first = failure;
     });
+    if (dispatched != status_t::success_k) return {status_of(dispatched), "The executor's pool refused the batch"};
     return first;
 }
 
@@ -617,8 +608,7 @@ void encode_items(arguments_type_ &arguments, packer_type_ &packer, site_type_ &
         }
         else if (embeddings) // every item of the slice is empty, which the tower refuses, and each pools to a zero row
             for (std::size_t item = slice.begin; item != slice.end; ++item)
-                if (failure_t const landed = site.land(utilities::bytes_of(surfaces.embeddings.bytes.row(item)),
-                                                       zero_row);
+                if (failure_t const landed = site.land(bytes_of(surfaces.embeddings.bytes.row(item)), zero_row);
                     landed.message)
                     return fail(landed);
         if (failure_t const finished = site.finish(); finished.message) return fail(finished);
@@ -654,11 +644,11 @@ void encode_on_devices(arguments_type_ &arguments, packer_type_ &packer, encoder
     vram_device_t &lead = devices.devices[0];
     devices.staging.chunks.rewind();
     lead.transfers.rewind();
-    vram_site<home_> site {devices.decoders, devices.staging.chunks, lead.transfers, memory.stream(), verbs};
+    vram_site<home_> site {devices.decoders.view(), devices.staging.chunks, lead.transfers, memory.stream(), verbs};
     for (vram_device_t &device : devices.devices)
         for (vram_replica_t const &replica : replicas)
             if (replica.ordinal == device.ordinal && (device.capabilities & vendor_of(home_)))
-                if (site.shards.push_back({&device, &replica}) != utilities::status_t::success_k)
+                if (site.shards.push_back({&device, &replica}) != status_t::success_k)
                     return fail({uform_status_internal_k, "More devices than one process drives"});
     if (!site.shards.size()) return fail({uform_status_device_k, "The model holds no replica on the executor"});
     encode_items(arguments, packer, site, memory, outcome);
@@ -686,13 +676,13 @@ void encode_call(arguments_type_ &arguments, packer_type_ &packer, uform_tape_vi
                 if (executor && !std::holds_alternative<ram_executor_t>(executor->executor))
                     return fail({uform_status_device_k, "A RAM model computes on a RAM executor or none"});
                 if (executor) {
-                    ram_site_t site {std::get<ram_executor_t>(executor->executor).pool, memory, memory, *verbs, tower};
+                    ram_site_t site {view_of(std::get<ram_executor_t>(executor->executor).pool), memory, memory, *verbs,
+                                     tower};
                     return encode_items(arguments, packer, site, memory, outcome);
                 }
-                fu::flat_pool_t caller;
-                if (fu::failed(caller.spawn(1)))
-                    return fail({uform_status_out_of_memory_k, "Failed to set up the caller"});
-                ram_site_t site {caller, memory, memory, *verbs, tower};
+                expected<executor_t> caller = executor_t::make(1, caller_exclusivity_t::caller_inclusive_k);
+                if (!caller) return fail({status_of(caller.status_), "Failed to set up the caller"});
+                ram_site_t site {caller->view(), memory, memory, *verbs, tower};
                 return encode_items(arguments, packer, site, memory, outcome);
             }
             else if constexpr (!gpu_vendor_compiled(vendor_of(home_)))

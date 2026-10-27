@@ -135,7 +135,7 @@ struct gpu_symmetric_arena_t {
     [[nodiscard]] CUdeviceptr base() const noexcept { return base_; }
 
     /** Member @p member 's usable slice. */
-    [[nodiscard]] std::span<std::byte> member_slice(std::size_t member) noexcept {
+    [[nodiscard]] bytes_span_t member_slice(std::size_t member) noexcept {
         return {device_pointer<std::byte>(base_ + member * member_stride_), bytes_per_member_};
     }
 

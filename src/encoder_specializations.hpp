@@ -76,27 +76,24 @@ constexpr bool vram_variant_advances() noexcept {
  *  body compiled in one class unit merges into another's. */
 template <typename tower_type_>
 struct ram_bodies {
-    static utilities::expected<void *> create(utilities::checkpoint_to_load_t const &checkpoint,
-                                              encoder::geometry_t const &geometry, encoder::precision_t precision,
-                                              nk_stream_t) noexcept {
-        utilities::expected<tower_type_> made = tower_type_::make(checkpoint, geometry, precision);
-        if (!made) return utilities::expected<void *>::fail(std::move(made));
+    static expected<void *> create(checkpoint_to_load_t const &checkpoint, encoder::geometry_t const &geometry,
+                                   encoder::precision_t precision, nk_stream_t) noexcept {
+        expected<tower_type_> made = tower_type_::make(checkpoint, geometry, precision);
+        if (!made) return expected<void *>::fail(std::move(made));
         tower_type_ *const tower = new (std::nothrow) tower_type_(std::move(*made));
-        if (!tower)
-            return utilities::expected<void *>::fail(utilities::status_t::bad_alloc_k, "tower allocation failed");
-        return utilities::expected<void *> {tower};
+        if (!tower) return expected<void *>::fail(status_t::bad_alloc_k, "tower allocation failed");
+        return expected<void *> {tower};
     }
 
     static void destroy(void *tower) noexcept { delete static_cast<tower_type_ *>(tower); }
 
-    static utilities::expected<std::size_t> scratch_bytes(void const *tower, std::size_t tokens, std::size_t segments,
-                                                          fu::flat_pool_t &pool) noexcept {
+    static expected<std::size_t> scratch_bytes(void const *tower, std::size_t tokens, std::size_t segments,
+                                               pool_view_t pool) noexcept {
         return static_cast<tower_type_ const *>(tower)->scratch_bytes(tokens, segments, pool.threads_count());
     }
 
-    static utilities::expected_t encode(void const *tower, encoder::multimodal_batch_view_t batch,
-                                        encoder::outputs_t outputs, std::span<b8_t> scratch,
-                                        fu::flat_pool_t &pool) noexcept {
+    static expected_t encode(void const *tower, encoder::multimodal_batch_view_t batch, encoder::outputs_t outputs,
+                             bytes_span_t scratch, pool_view_t pool) noexcept {
         return static_cast<tower_type_ const *>(tower)->encode(batch, outputs, scratch, pool);
     }
 };
@@ -105,35 +102,31 @@ struct ram_bodies {
  *  @p capabilities_ and waiting for the packs before the tower is handed out. */
 template <typename tower_type_, nk_capability_t capabilities_>
 struct vram_bodies {
-    static utilities::expected<void *> create(utilities::checkpoint_to_load_t const &checkpoint,
-                                              encoder::geometry_t const &geometry, encoder::precision_t precision,
-                                              nk_stream_t stream) noexcept {
+    static expected<void *> create(checkpoint_to_load_t const &checkpoint, encoder::geometry_t const &geometry,
+                                   encoder::precision_t precision, nk_stream_t stream) noexcept {
         nk_allocator_t policy {};
         if (nk_status_t const status = nk_allocator_init_device_best(&policy, capabilities_); status != nk_success_k)
-            return utilities::expected<void *>::fail(encoder::tower_status_of(status), "tower memory setup failed: {}",
-                                                     nk_status_name(status));
-        utilities::expected<tower_type_> made = tower_type_::make(checkpoint, geometry, precision, policy, stream);
-        if (!made) return utilities::expected<void *>::fail(std::move(made));
+            return expected<void *>::fail(encoder::tower_status_of(status), "tower memory setup failed: {}",
+                                          nk_status_name(status));
+        expected<tower_type_> made = tower_type_::make(checkpoint, geometry, precision, policy, stream);
+        if (!made) return expected<void *>::fail(std::move(made));
         nk_status_t const landed = nk_stream_synchronize_best(capabilities_, stream); // the packs and staged operands
         if (landed != nk_success_k)
-            return utilities::expected<void *>::fail(encoder::tower_status_of(landed), "load failed: {}",
-                                                     nk_status_name(landed));
+            return expected<void *>::fail(encoder::tower_status_of(landed), "load failed: {}", nk_status_name(landed));
         tower_type_ *const tower = new (std::nothrow) tower_type_(std::move(*made));
-        if (!tower)
-            return utilities::expected<void *>::fail(utilities::status_t::bad_alloc_k, "tower allocation failed");
-        return utilities::expected<void *> {tower};
+        if (!tower) return expected<void *>::fail(status_t::bad_alloc_k, "tower allocation failed");
+        return expected<void *> {tower};
     }
 
     static void destroy(void *tower) noexcept { delete static_cast<tower_type_ *>(tower); }
 
-    static utilities::expected<std::size_t> scratch_bytes(void const *tower, std::size_t tokens, std::size_t segments,
-                                                          nk_stream_t) noexcept {
+    static expected<std::size_t> scratch_bytes(void const *tower, std::size_t tokens, std::size_t segments,
+                                               nk_stream_t) noexcept {
         return static_cast<tower_type_ const *>(tower)->scratch_bytes(tokens, segments);
     }
 
-    static utilities::expected_t encode(void const *tower, encoder::multimodal_batch_view_t batch,
-                                        encoder::outputs_t outputs, std::span<b8_t> scratch,
-                                        nk_stream_t stream) noexcept {
+    static expected_t encode(void const *tower, encoder::multimodal_batch_view_t batch, encoder::outputs_t outputs,
+                             bytes_span_t scratch, nk_stream_t stream) noexcept {
         return static_cast<tower_type_ const *>(tower)->encode(batch, outputs, scratch, stream);
     }
 };

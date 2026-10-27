@@ -10,8 +10,6 @@
 #include <algorithm> // `std::min`, `std::find`, `std::upper_bound` — the weighted file draw
 #include <utility>   // `std::move` — expected-channel propagation
 
-#include <forkunion.hpp> // vendor-boundary: the host-CPU decode worker pool
-
 #include "uform/loaders/audio_loader.cuh"
 #include "uform/media/audio.hpp" // `decode_audio` — the libav decode and resample to mono
 
@@ -21,8 +19,6 @@ namespace um = unum::uform::media;
 using namespace ue;
 using namespace unum::uform::utilities;
 using namespace ul;
-
-namespace fu = ashvardanian::forkunion;
 
 /**
  *  @brief Write one batch's audio-segment geometry with the serial cursor model (the tokens loader's walk).
@@ -62,31 +58,32 @@ static __global__ void audio_segments_kernel_(u32r1_span_t segment_offsets, u32r
 inline constexpr u64_t file_draw_salt_k = 0x9E3779B97F4A7C15ull;
 inline constexpr u64_t row_draw_salt_k = 0xD1B54A32D192ED03ull;
 
-expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, u64r1_view_t drawn_rows,
+expected_t ul::decode_audios(pool_view_t pool, column_view_t tape, u64r1_view_t drawn_rows,
                              std::span<audio_batch_shape_t const> representations, audio_samples_span_t audio_samples,
                              u32r1_span_t segment_offsets, u32r1_span_t segment_lengths,
                              modality_span_t segment_modality, u32r1_span_t dropped, gpu_stream_t &stream) noexcept {
     std::size_t const clips = drawn_rows.size();
     if (clips == 0) return {};
     if (representations.empty())
-        return expected_t::fail(status_t::invalid_input_k, "decode_audios requires a non-empty representations span");
+        return expected_t::fail(status_t::invalid_argument_k,
+                                "decode_audios requires a non-empty representations span");
     u32_t const rows = static_cast<u32_t>(audio_samples.extent(0));
     u32_t const columns = static_cast<u32_t>(audio_samples.extent(1));
     u32_t const chunk_samples = static_cast<u32_t>(audio_samples.extent(2));
     if (columns == 0 || chunk_samples == 0)
-        return expected_t::fail(status_t::shape_unsupported_k, "the audio grid is empty (columns={} chunk={})", columns,
+        return expected_t::fail(status_t::unsupported_k, "the audio grid is empty (columns={} chunk={})", columns,
                                 chunk_samples);
     // The shape is the single source of geometry; each representation must match the grid's chunk width.
     for (audio_batch_shape_t const &representation : representations)
         if (representation.chunk_samples != chunk_samples)
-            return expected_t::fail(status_t::shape_unsupported_k,
+            return expected_t::fail(status_t::unsupported_k,
                                     "representation chunk_samples {} must match the audio grid's {}",
                                     representation.chunk_samples, chunk_samples);
     std::size_t const reps_count = representations.size();
     std::size_t const job_count = clips * reps_count; // one segment per (clip, representation)
     u32_t const clip_cells = media_cells(modality_t::audio_k, columns);
     if (segment_lengths.extent(0) < job_count || job_count * clip_cells > std::size_t {rows} * columns)
-        return expected_t::fail(status_t::shape_unsupported_k, "audio geometry cannot hold {} segments", job_count);
+        return expected_t::fail(status_t::unsupported_k, "audio geometry cannot hold {} segments", job_count);
     // One clip fills half a row: `clip_cells` frames, each of `chunk_samples` raw samples.
     u32_t const clip_samples = clip_cells * chunk_samples;
 
@@ -106,15 +103,15 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, u64r1_
         auto const blob = tape[drawn_rows[index]];
         encoded_offsets[index] = cursor;
         if (expected_t hopped = copy_device_to_host(b8r1_view_t {blob},
-                                                    std::span<b8_t> {encoded}.subspan(cursor, blob.size()), stream);
+                                                    bytes_span_t {encoded}.subspan(cursor, blob.size()), stream);
             !hopped)
             return hopped;
         cursor += blob.size();
     }
     encoded_offsets[clips] = cursor;
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "clip byte staging synchronization failed");
-    column_view_t const staged_tape {std::span<b8_t const> {encoded}, std::span<u64_t const> {encoded_offsets}};
+        return expected_t::fail(status_t::device_error_k, "clip byte staging synchronization failed");
+    column_view_t const staged_tape {bytes_view_t {encoded}, std::span<u64_t const> {encoded_offsets}};
 
     // Decode + resample to mono Float32 across the borrowed pool, into a pinned waveform landing
     // already carrying the grid's cell layout: clip `c` fills the half row at cell `c·clip_cells`
@@ -134,12 +131,14 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, u64r1_
     std::size_t const reps = reps_count;
     // A job is (clip, representation): job j = (clip j/reps, rep j%reps), resampled to that representation's rate and
     // chunked into row j. A clip is decoded once per representation (one decode for the single-representation case).
-    pool.for_n(job_count, [=](std::size_t job, fu::thread_in_domain_t) noexcept {
+    status_t const dispatched = pool.for_n(job_count, [=](std::size_t job, std::size_t) noexcept {
         std::size_t const clip = job / reps;
-        std::span<b8_t const> const bytes = staged_tape[clip];
+        bytes_view_t const bytes = staged_tape[clip];
         f32r1_span_t const job_waveform = job_waveforms[job, nk::slice];
         status_base[job] = static_cast<i32_t>(um::decode_audio(bytes, rate_base[job % reps], job_waveform).status_);
     });
+    if (dispatched != status_t::success_k)
+        return expected_t::fail(dispatched, "the decode pool refused {} audio jobs", job_count);
     // Mark-and-continue: a clip that fails to decode is left silence (decode_audio zeros its row), matching
     // the batch's "existence is read from the data" contract and the video loader's per-clip fault isolation. Only a
     // wholly failed batch is a systematic error (a bad codec / driver), so fail loud only then.
@@ -163,18 +162,17 @@ expected_t ul::decode_audios(cpu_decode_pool_t &pool, column_view_t tape, u64r1_
                                       static_cast<u32_t>(job_count), columns, rows);
     // Retire the whole stream-ordered chain before the pinned decode landing falls out of scope.
     if (staged && cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
-        staged = expected_t::fail(status_t::cuda_error_k, "audio staging synchronization failed");
+        staged = expected_t::fail(status_t::device_error_k, "audio staging synchronization failed");
     return staged;
 }
 
 expected<audio_loader_parquet_t> audio_loader_parquet_t::make(gpu_direct_storage_session_t &session,
                                                               sz::string_view_t path_or_glob, u64_t seed,
-                                                              cpu_decode_pool_t &pool,
-                                                              audio_batch_shape_t audio) noexcept {
+                                                              pool_view_t pool, audio_batch_shape_t audio) noexcept {
     using result_t = expected<audio_loader_parquet_t>;
 
     if (audio.chunk_samples == 0 || audio.sample_rate == 0)
-        return result_t::fail(status_t::invalid_input_k, "audio geometry is empty (chunk_samples={} sample_rate={})",
+        return result_t::fail(status_t::invalid_argument_k, "audio geometry is empty (chunk_samples={} sample_rate={})",
                               audio.chunk_samples, audio.sample_rate);
 
     // Expand the glob (or a plain path) into the dataset's sorted absolute shard paths — POSIX glob(3).
@@ -183,7 +181,7 @@ expected<audio_loader_parquet_t> audio_loader_parquet_t::make(gpu_direct_storage
 
     audio_loader_parquet_t loader;
     loader.storage_ = &session;
-    loader.pool_ = &pool;
+    loader.pool_ = pool;
     loader.absolute_paths_ = std::move(paths.value_);
     loader.seed_ = seed;
     loader.audio_ = audio;
@@ -198,7 +196,7 @@ expected<audio_loader_parquet_t> audio_loader_parquet_t::make(gpu_direct_storage
         auto metadata = parquet_file_t::table_metadata(session, loader.absolute_paths_[index]);
         if (!metadata) return result_t::fail(std::move(metadata));
         if (metadata->rows == 0)
-            return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
+            return result_t::fail(status_t::invalid_argument_k, "shard {} is empty", loader.absolute_paths_[index]);
         loader.row_prefix_[index + 1] = loader.row_prefix_[index] + metadata->rows;
     }
     return result_t {std::move(loader)};
@@ -211,7 +209,7 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
     audio_samples_view_t const first_grid = batches[0].audio_samples.view();
     std::size_t const rows = first_grid.extent(0);
     std::size_t const columns = first_grid.extent(1);
-    if (rows == 0 || columns == 0) return expected_t::fail(status_t::shape_unsupported_k, "the batch carries no audio");
+    if (rows == 0 || columns == 0) return expected_t::fail(status_t::unsupported_k, "the batch carries no audio");
 
     // The loader's single flat `audio_batch_shape_t` is the one representation (the shape is the
     // single source of geometry) — a size-1 span today, cross-product-ready for a future multi-rate
@@ -222,7 +220,7 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
     std::size_t const max_segments = batches[0].segment_lengths.extent(0);
     std::size_t const per_row = columns / media_cells(modality_t::audio_k, static_cast<u32_t>(columns));
     std::size_t const clips_per_batch = std::min<std::size_t>(max_segments, rows * per_row) / representations.size();
-    if (clips_per_batch == 0) return expected_t::fail(status_t::shape_unsupported_k, "the batch holds no audio clips");
+    if (clips_per_batch == 0) return expected_t::fail(status_t::unsupported_k, "the batch holds no audio clips");
     std::size_t const total_clips = unroll * clips_per_batch;
 
     std::size_t const shard_count = absolute_paths_.size();
@@ -254,12 +252,13 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();
     if (pooled_rows < total_clips)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "{} pooled rows across {} files cover fewer than the {} clips this fill needs",
                                 pooled_rows, picked_shards.size(), total_clips);
 
     switch_to_gpu_t gpu_scope {gpu_stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
+    if (!gpu_scope.ok())
+        return expected_t::fail(status_t::device_error_k, "context entry failed for the loader stream");
 
     // The reservoir's clip offsets to the host once — every per-row byte bound is then host arithmetic.
     column_view_t const column = reservoir.column(0);
@@ -271,7 +270,7 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
         !landed)
         return landed;
     if (cuStreamSynchronize(gpu_stream.get()) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "reservoir offsets readback failed");
+        return expected_t::fail(status_t::device_error_k, "reservoir offsets readback failed");
 
     // Draw the whole fill's rows on the host — a keyed bijection over the pool.
     u64_t const row_key = hash(seed_, gpu_rank, row_draw_salt_k);
@@ -288,9 +287,8 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
         audio_samples_view_t const grid_view = loaded.audio_samples.view();
         if (grid_view.extent(0) != rows || grid_view.extent(1) != columns ||
             clips_per_batch > loaded.segment_lengths.extent(0))
-            return expected_t::fail(status_t::shape_unsupported_k, "batch {} cannot hold {} clips", batch,
-                                    clips_per_batch);
-        if (expected_t decoded = decode_audios(*pool_, tape, batch_records[batch, nk::slice], representations,
+            return expected_t::fail(status_t::unsupported_k, "batch {} cannot hold {} clips", batch, clips_per_batch);
+        if (expected_t decoded = decode_audios(pool_, tape, batch_records[batch, nk::slice], representations,
                                                loaded.audio_samples.span(), loaded.segment_offsets.span(),
                                                loaded.segment_lengths.span(), loaded.segment_modality.span(),
                                                loaded.dropped.span(), gpu_stream);

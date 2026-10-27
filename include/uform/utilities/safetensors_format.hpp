@@ -162,10 +162,10 @@ struct checkpoint_mapping_t {
     [[nodiscard]] static expected<checkpoint_mapping_t> make(sz::string_view_t path) noexcept;
 
     /** The mapped bytes. */
-    [[nodiscard]] std::span<b8_t const> bytes() const noexcept { return bytes_; }
+    [[nodiscard]] bytes_view_t bytes() const noexcept { return bytes_; }
 
   private:
-    std::span<b8_t> bytes_ {};
+    bytes_span_t bytes_ {};
 };
 
 /**
@@ -189,7 +189,7 @@ struct checkpoint_to_load_t {
     [[nodiscard]] static expected<checkpoint_to_load_t> make(sz::string_view_t path) noexcept;
 
     /** Index a checkpoint image the caller owns, which must outlive the container. */
-    [[nodiscard]] static expected<checkpoint_to_load_t> view(std::span<b8_t const> buffer) noexcept;
+    [[nodiscard]] static expected<checkpoint_to_load_t> view(bytes_view_t buffer) noexcept;
 
     /** By-name lookup: a read-only rank-2 view into the image, or an @b empty view when the file misses
      *  @p name (or holds it in a dtype other than BFloat16) — check @c .empty() and decide. */

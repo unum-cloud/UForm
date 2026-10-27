@@ -276,8 +276,8 @@ struct trainer_config_t {
      *  @c --mixture takes a @c .json path, or the synthetic @c tokens|omni preset, where omni fills
      *  the media slices of @ref batch with 8-pixel RGB image patches, 2-frame video tubes and
      *  256-sample audio frames.
-     *  @retval status_t::invalid_input_k An unknown flag, a flag without its value, or a value it
-     *      does not take.
+     *  @retval status_t::invalid_argument_k An unknown flag, a flag without its value, or a value
+     *      it does not take.
      */
     [[nodiscard]] static expected<trainer_config_t> parse(int argc, char **argv) noexcept;
 
@@ -447,8 +447,8 @@ struct base_replica_t {
  *
  *  A @c masked_tokens decoder or a @c token_head.* matrix the checkpoint misses is re-seeded as
  *  @ref seed_weights seeds it, so a run adds the head its base never trained.
- *  @retval status_t::invalid_input_k A matrix the checkpoint misses.
- *  @retval status_t::shape_unsupported_k A matrix of another shape.
+ *  @retval status_t::invalid_argument_k A matrix the checkpoint misses.
+ *  @retval status_t::unsupported_k A matrix of another shape.
  */
 [[nodiscard]] expected_t load_weights(checkpoint_to_load_t const &checkpoint,
                                       st::basic_vector<differentiable_weights_t> const &weights,

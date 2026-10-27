@@ -186,7 +186,7 @@ struct infiniband_coordinates_t {
     if (expected_t awaited = topology.await_text(peer_host_domain, key, peer_text, timeout_seconds); !awaited)
         return awaited;
     if (!infiniband_coordinates_t::from_text(peer_text.view(), peer))
-        return expected_t::fail(status_t::io_error_k, "malformed coordinates from host_domain {} (key={}): \"{}\"",
+        return expected_t::fail(status_t::io_k, "malformed coordinates from host_domain {} (key={}): \"{}\"",
                                 peer_host_domain, key, peer_text);
     return {};
 }
@@ -198,7 +198,7 @@ struct infiniband_queue_handles_t {
 
     /** The send work-queue entry storage (host DMA memory the NIC fetches from), spanning
      *  @c send_queue_entry_count·send_queue_stride bytes. */
-    std::span<std::byte> send_queue {};
+    bytes_span_t send_queue {};
 
     /** The big-endian doorbell-record array; the send entry holds the producer counter the NIC polls. */
     u32_t *doorbell_record = nullptr;
@@ -230,7 +230,7 @@ struct infiniband_completion_handles_t {
 
     /** The completion-entry ring (host DMA memory the NIC writes into), spanning
      *  @c entry_count·entry_size bytes. */
-    std::span<std::byte> ring {};
+    bytes_span_t ring {};
 
     /** The big-endian completion doorbell record; set-consumer-index at entry 0. */
     u32_t *doorbell_record = nullptr;
@@ -643,7 +643,7 @@ struct infiniband_endpoint_t {
     [[nodiscard]] expected_t post_write(std::size_t local_offset, std::size_t remote_offset, std::size_t length,
                                         infiniband_signal_t signal = infiniband_signal_t::plain_signaled_k) noexcept {
         if (length == 0 || local_offset + length > gpu_buffer_.extent(0))
-            return expected_t::fail(status_t::invalid_input_k,
+            return expected_t::fail(status_t::invalid_argument_k,
                                     "write of {} bytes at local offset {} exceeds the registered {} bytes", length,
                                     local_offset, gpu_buffer_.extent(0));
         ibv_sge scatter_gather {};
@@ -661,7 +661,7 @@ struct infiniband_endpoint_t {
         work_request.wr.rdma.rkey = peer_coordinates_.remote_key;
         ibv_send_wr *rejected = nullptr;
         if (ibv_post_send(queue_pair_, &work_request, &rejected) != 0)
-            return expected_t::fail(status_t::io_error_k, "posting the RDMA write failed ({} bytes)", length);
+            return expected_t::fail(status_t::io_k, "posting the RDMA write failed ({} bytes)", length);
         return {};
     }
 
@@ -670,7 +670,7 @@ struct infiniband_endpoint_t {
         ibv_recv_wr work_request {};
         ibv_recv_wr *rejected = nullptr;
         if (ibv_post_recv(queue_pair_, &work_request, &rejected) != 0)
-            return expected_t::fail(status_t::io_error_k, "posting the receive failed");
+            return expected_t::fail(status_t::io_k, "posting the receive failed");
         return {};
     }
 
@@ -683,15 +683,15 @@ struct infiniband_endpoint_t {
         while (true) {
             ibv_wc completion {};
             int const reaped = ibv_poll_cq(completion_queue_, 1, &completion);
-            if (reaped < 0) return expected_t::fail(status_t::io_error_k, "polling the completion queue failed");
+            if (reaped < 0) return expected_t::fail(status_t::io_k, "polling the completion queue failed");
             if (reaped > 0) {
                 if (completion.status != IBV_WC_SUCCESS)
-                    return expected_t::fail(status_t::io_error_k, "completion failed (status={} vendor={})",
+                    return expected_t::fail(status_t::io_k, "completion failed (status={} vendor={})",
                                             static_cast<int>(completion.status), completion.vendor_err);
                 return {};
             }
             if (std::chrono::steady_clock::now() >= deadline)
-                return expected_t::fail(status_t::io_error_k, "no completion within {}s", timeout_seconds);
+                return expected_t::fail(status_t::io_k, "no completion within {}s", timeout_seconds);
             waiter(&unwatched, u32_t {0}, std::size_t {0});
         }
     }
@@ -1415,7 +1415,7 @@ struct infiniband_all_to_all {
         using result_t = expected<infiniband_all_to_all>;
         u32_t const domains = domain.multimem_domain_count();
         if (domains > 2u)
-            return result_t::fail(status_t::shape_unsupported_k,
+            return result_t::fail(status_t::unsupported_k,
                                   "all-to-all is wired for two domains; {} needs the multi-hop schedule", domains);
         infiniband_reach_t::heap_layout_t layout;
         layout.payload_bytes = static_cast<std::size_t>(domains) * block_scalars * sizeof(value_type_);
@@ -1485,7 +1485,7 @@ struct colocated_domain_t {
     [[nodiscard]] static expected<colocated_domain_t> make(mesh_topology_t &topology) noexcept {
         if (topology.shape.multimem_domain_count() != 1)
             return expected<colocated_domain_t>::fail(
-                status_t::other_k,
+                status_t::internal_k,
                 "built without UFORM_WITH_INFINIBAND — rebuild with libibverbs + libmlx5 for " //
                 "cross-domain collectives");
         colocated_domain_t domain;

@@ -213,5 +213,41 @@
       "inherits": "base",
       "configurePreset": "release"
     }
+  ],
+  "workflowPresets": [
+    {
+      "name": "check",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "check"
+        },
+        {
+          "type": "build",
+          "name": "check"
+        },
+        {
+          "type": "test",
+          "name": "check"
+        }
+      ]
+    },
+    {
+      "name": "release",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "release"
+        },
+        {
+          "type": "build",
+          "name": "release"
+        },
+        {
+          "type": "test",
+          "name": "release"
+        }
+      ]
+    }
   ]
 }

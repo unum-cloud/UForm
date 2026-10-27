@@ -417,12 +417,12 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, en
                                                           multimodal_batch_shape_t shape,
                                                           gpu_numerics_t const &numerics) noexcept {
     using result_t = expected<encoder_tower_bf16_t>;
-    if (config.depth == 0) return result_t::fail(status_t::invalid_input_k, "a tower needs at least one block");
+    if (config.depth == 0) return result_t::fail(status_t::invalid_argument_k, "a tower needs at least one block");
     if (config.vocabulary == 0)
-        return result_t::fail(status_t::invalid_input_k,
+        return result_t::fail(status_t::invalid_argument_k,
                               "the token entry is the only entry wired so far; " "vocabulary must be non-zero");
     if (config.rope_max_positions == 0)
-        return result_t::fail(status_t::invalid_input_k, "rope_max_positions must cover the longest sequence");
+        return result_t::fail(status_t::invalid_argument_k, "rope_max_positions must cover the longest sequence");
 
     encoder_tower_bf16_t tower;
     tower.config_ = config;
@@ -526,12 +526,12 @@ expected<encoder_tower_bf16_t> encoder_tower_bf16_t::make(gpu_arena_t &arena, en
                                config.video_patch_width != 0;
     bool const audio_present = config.audio_chunk_samples != 0;
     if (image_present && config.image_patch_height != config.image_patch_width)
-        return result_t::fail(status_t::invalid_input_k, "image patches must be square ({}x{})",
+        return result_t::fail(status_t::invalid_argument_k, "image patches must be square ({}x{})",
                               config.image_patch_height, config.image_patch_width);
     if (image_present && (config.image_channels == 0 || config.image_channels > 4))
-        return result_t::fail(status_t::invalid_input_k, "image_channels must be 1..4 ({})", config.image_channels);
+        return result_t::fail(status_t::invalid_argument_k, "image_channels must be 1..4 ({})", config.image_channels);
     if (video_present && (config.video_channels == 0 || config.video_channels > 3))
-        return result_t::fail(status_t::invalid_input_k, "video_channels must be 1..3 ({})", config.video_channels);
+        return result_t::fail(status_t::invalid_argument_k, "video_channels must be 1..3 ({})", config.video_channels);
 
     u32_t const image_patch_scalars = image_present ? patch_scalars(config.image_patch_height, config.image_channels)
                                                     : 0u;
@@ -632,7 +632,7 @@ expected<tower_pool_t> tower_pool_t::make(gpu_arena_t &arena, transformer_block_
     if (nk_status_t const status = numerics.attention_pack_size_bf16(heads, transformer_head_dim_k, tokens, segments,
                                                                      &packed_bytes);
         status != nk_success_k)
-        return result_t::fail(status_t::cuda_error_k, "pool pack sizing failed: {}", nk_status_name(status));
+        return result_t::fail(status_t::device_error_k, "pool pack sizing failed: {}", nk_status_name(status));
     st::basic_vector<u32_t> host;
     if (st::failed(host.resize(segments + 1u)))
         return result_t::fail(status_t::bad_alloc_k, "pool staging allocation failed ({} segments)", segments);
@@ -675,7 +675,7 @@ expected_t tower_pool_t::forward(bf16r1_view_t query, bf16r2_view_t states, u32r
         status = numerics_.cast(pooled_.data(), nk_f32_k, pooled.data(), nk_bf16_k, segments * hidden,
                                 stream.numkong());
     if (status != nk_success_k)
-        return expected_t::fail(status_t::cuda_error_k, "attention pool failed: {}", nk_status_name(status));
+        return expected_t::fail(status_t::device_error_k, "attention pool failed: {}", nk_status_name(status));
     return {};
 }
 
@@ -702,7 +702,7 @@ expected_t tower_pool_t::backward(bf16r1_view_t query, bf16r2_view_t pooled_grad
         status = numerics_.sum_f32(key_grad.data(), value_grad.data(), tokens * hidden, key_grad.data(),
                                    stream.numkong());
     if (status != nk_success_k)
-        return expected_t::fail(status_t::cuda_error_k, "attention pool backward failed: {}", nk_status_name(status));
+        return expected_t::fail(status_t::device_error_k, "attention pool backward failed: {}", nk_status_name(status));
     dim3 const channel_grid {static_cast<u32_t>(divide_round_up(hidden, kernel_block_size_default_k)), 1u, 1u};
     return launch_kernel(&tower_pool_query_grad_kernel_, channel_grid, dim3 {kernel_block_size_default_k, 1u, 1u},
                          stream, query_partials_.view(), query_grad);
@@ -832,8 +832,7 @@ expected<tower_token_head_t> tower_token_head_t::make(gpu_arena_t &arena, transf
                                                       u32_t width, gpu_numerics_t const &numerics) noexcept {
     using result_t = expected<tower_token_head_t>;
     if (width == 0 || width % 8u != 0u)
-        return result_t::fail(status_t::shape_unsupported_k, "the token width must be a positive multiple of 8 ({})",
-                              width);
+        return result_t::fail(status_t::unsupported_k, "the token width must be a positive multiple of 8 ({})", width);
     tower_token_head_t head;
     head.epsilon_ = block.rms_eps;
     head.numerics_ = numerics;
@@ -893,8 +892,8 @@ expected_t tower_token_head_t::backward(bf16r2_view_t vectors_grad, multimodal_b
                                         gpu_stream_t &stream) noexcept {
     std::size_t const tokens = gathered_.extent(0), hidden = gathered_.extent(1);
     if (vectors_grad.extent(0) != tokens || vectors_grad.extent(1) != vectors_.extent(1))
-        return expected_t::fail(status_t::shape_unsupported_k, "token vectors_grad must be [{},{}] (got [{},{}])",
-                                tokens, vectors_.extent(1), vectors_grad.extent(0), vectors_grad.extent(1));
+        return expected_t::fail(status_t::unsupported_k, "token vectors_grad must be [{},{}] (got [{},{}])", tokens,
+                                vectors_.extent(1), vectors_grad.extent(0), vectors_grad.extent(1));
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const row_grid {static_cast<u32_t>(tokens), 1u, 1u};
     std::size_t const token_bands = divide_round_up(tokens, std::size_t {kernel_block_size_default_k});
@@ -969,7 +968,7 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
     std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
     std::size_t const segments = batch.live_segments();
     if (live_tokens == 0 || live_tokens > config_.block.max_tokens || segments != config_.block.max_segments)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "batch disagrees with the baked capacities (tokens={} segments={})", live_tokens,
                                 segments);
 
@@ -983,7 +982,7 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
                          nk::succeeded(activations_b_.resize({live_tokens, hidden})) &&
                          nk::succeeded(coords_.resize({live_tokens, 3}));
     if (!resized)
-        return expected_t::fail(status_t::shape_unsupported_k, "tower scratch cannot hold {} live tokens (capacity {})",
+        return expected_t::fail(status_t::unsupported_k, "tower scratch cannot hold {} live tokens (capacity {})",
                                 live_tokens, entry_output_.capacity() / hidden);
 
     // Zero the coordinates (PAD / gap cells stay (0,0,0)) and the packed entry state (cells no segment writes
@@ -1044,7 +1043,7 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
             stack_output_.data(), widened_final_norm_scale_.data(), numkong_scalars(normalized_.data()), live_tokens, 1,
             hidden, hidden * sizeof(f32_t), hidden * sizeof(bf16_t), config_.block.rms_eps, stream.numkong());
     if (status != nk_success_k)
-        return expected_t::fail(status_t::cuda_error_k, "final norm failed: {}", nk_status_name(status));
+        return expected_t::fail(status_t::device_error_k, "final norm failed: {}", nk_status_name(status));
     if (config_.token_width != 0)
         if (expected_t projected = token_head_.forward(normalized_.view(), batch.view(), stream); !projected)
             return projected;
@@ -1052,8 +1051,8 @@ expected_t encoder_tower_bf16_t::forward(multimodal_batch_on_gpu_t const &batch,
     // Masked path stops here — the masked head reads normalized(); the contrastive path pools + heads.
     if (vertices.empty()) return {};
     if (vertices.extent(0) != segments || vertices.extent(1) != hidden)
-        return expected_t::fail(status_t::shape_unsupported_k, "vertices must be [{},{}] (got [{},{}])", segments,
-                                hidden, vertices.extent(0), vertices.extent(1));
+        return expected_t::fail(status_t::unsupported_k, "vertices must be [{},{}] (got [{},{}])", segments, hidden,
+                                vertices.extent(0), vertices.extent(1));
 
     // The attention pool: every segment's live tokens under the one learned query into pooled_.
     staged = pool_.forward(pool_query_.view(), normalized_.view(), segment_offsets, segment_lengths, pooled_.span(),
@@ -1118,13 +1117,14 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     bool const masked_present = hidden_grad.data() != nullptr;
     bool const tokens_present = token_vectors_grad.data() != nullptr;
     if (!pooled_present && !masked_present && !tokens_present)
-        return expected_t::fail(status_t::invalid_input_k,
+        return expected_t::fail(status_t::invalid_argument_k,
                                 "backward needs one of vertices_grad / hidden_grad / token_vectors_grad");
     if (tokens_present && config_.token_width == 0)
-        return expected_t::fail(status_t::invalid_input_k, "token_vectors_grad given to a tower without a token head");
+        return expected_t::fail(status_t::invalid_argument_k,
+                                "token_vectors_grad given to a tower without a token head");
     std::size_t const segments = batch.live_segments();
     if (pooled_present && (vertices_grad.extent(0) != segments || vertices_grad.extent(1) != hidden))
-        return expected_t::fail(status_t::shape_unsupported_k, "vertices_grad must be [{},{}] (got [{},{}])", segments,
+        return expected_t::fail(status_t::unsupported_k, "vertices_grad must be [{},{}] (got [{},{}])", segments,
                                 hidden, vertices_grad.extent(0), vertices_grad.extent(1));
 
     // The step's live extent, resized within each arena's reserved capacity — no address moves.
@@ -1133,9 +1133,8 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
                          nk::succeeded(token_grad_a_.resize({live_tokens, hidden})) &&
                          nk::succeeded(token_grad_b_.resize({live_tokens, hidden}));
     if (!resized)
-        return expected_t::fail(status_t::shape_unsupported_k,
-                                "gradient scratch cannot hold {} live tokens (capacity {})", live_tokens,
-                                token_grad_a_.capacity() / hidden);
+        return expected_t::fail(status_t::unsupported_k, "gradient scratch cannot hold {} live tokens (capacity {})",
+                                live_tokens, token_grad_a_.capacity() / hidden);
 
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const row_grid {static_cast<u32_t>(live_tokens), 1u, 1u};
@@ -1209,7 +1208,7 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
             status = numerics_.sum_f32(token_grad_a_.data(), token_grad_b_.data(), live_tokens * hidden,
                                        token_grad_a_.data(), stream.numkong());
         if (status != nk_success_k)
-            return expected_t::fail(status_t::cuda_error_k, "masked force join failed: {}", nk_status_name(status));
+            return expected_t::fail(status_t::device_error_k, "masked force join failed: {}", nk_status_name(status));
     }
     if (tokens_present) {
         if (!pooled_present && !masked_present)
@@ -1250,7 +1249,8 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
     if (nk_status_t const status = numerics_.cast(flowing.data(), nk_f32_k, normalized_grad_.data(), nk_bf16_k,
                                                   live_tokens * hidden, stream.numkong());
         status != nk_success_k)
-        return expected_t::fail(status_t::cuda_error_k, "entry gradient narrowing failed: {}", nk_status_name(status));
+        return expected_t::fail(status_t::device_error_k, "entry gradient narrowing failed: {}",
+                                nk_status_name(status));
     bf16r2_view_t const entry_grad = normalized_grad_.view();
 
     // Entry backward, text cells: deterministic embedding scatter over the whole packed grid. Keys start at
@@ -1281,7 +1281,7 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
             sort_workspace_.data(), sort_bytes, keys_in.data(), keys_out.data(), values_in.data(), values_out.data(),
             static_cast<int>(live_tokens), 0, sizeof(token_id_t) * 8, stream.get());
         sorted != cudaSuccess)
-        return expected_t::fail(status_t::cuda_error_k, "embedding sort failed (code={})", static_cast<int>(sorted));
+        return expected_t::fail(status_t::device_error_k, "embedding sort failed (code={})", static_cast<int>(sorted));
     staged = launch_kernel(&tower_embedding_scatter_kernel_, row_grid, block_shape, stream, tokens_view_t {keys_out},
                            u32r1_view_t {values_out}, entry_grad, entry_weight_grad_.span());
     if (!staged) return staged;
@@ -1540,7 +1540,7 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
     std::size_t const live_tokens = static_cast<std::size_t>(batch.tokens.extent(0)) * columns;
     std::size_t const segments = batch.live_segments();
     if (live_tokens == 0 || live_tokens > config_.block.max_tokens || segments != config_.block.max_segments)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "batch disagrees with the baked capacities (tokens={} segments={})", live_tokens,
                                 segments);
 
@@ -1549,7 +1549,7 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
                          nk::succeeded(activations_b_.resize({live_tokens, hidden})) &&
                          nk::succeeded(coords_.resize({live_tokens, 3}));
     if (!resized)
-        return expected_t::fail(status_t::shape_unsupported_k, "tower scratch cannot hold {} live tokens (capacity {})",
+        return expected_t::fail(status_t::unsupported_k, "tower scratch cannot hold {} live tokens (capacity {})",
                                 live_tokens, entry_output_.capacity() / hidden);
 
     if (expected_t zeroed = zero_async(coords_.span(), stream); !zeroed) return zeroed;
@@ -1606,8 +1606,7 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
     // Final norm over the packed token states — the block stack already emits BFloat16, so the tail
     // runs the training twin's own kernels with no dtype boundary.
     if (nk::failed(normalized_.resize({live_tokens, hidden})))
-        return expected_t::fail(status_t::shape_unsupported_k, "twin norm scratch cannot hold {} live tokens",
-                                live_tokens);
+        return expected_t::fail(status_t::unsupported_k, "twin norm scratch cannot hold {} live tokens", live_tokens);
     dim3 const token_grid {static_cast<u32_t>(live_tokens), 1u, 1u};
     staged = launch_kernel(&rmsnorm_forward_kernel, token_grid, block_shape, stream, layer_input,
                            final_norm_scale_.view(), normalized_.span(), final_inverse_rms_.span(),
@@ -1620,8 +1619,8 @@ expected_t encoder_tower_e4m3_t::forward(multimodal_batch_on_gpu_t const &batch,
     // Masked path stops here; the contrastive path pools + heads, exactly as the training twin.
     if (vertices.empty()) return {};
     if (vertices.extent(0) != segments || vertices.extent(1) != hidden)
-        return expected_t::fail(status_t::shape_unsupported_k, "vertices must be [{},{}] (got [{},{}])", segments,
-                                hidden, vertices.extent(0), vertices.extent(1));
+        return expected_t::fail(status_t::unsupported_k, "vertices must be [{},{}] (got [{},{}])", segments, hidden,
+                                vertices.extent(0), vertices.extent(1));
     staged = pool_.forward(pool_query_.view(), normalized_.view(), segment_offsets, segment_lengths, pooled_.span(),
                            stream);
     if (!staged) return staged;

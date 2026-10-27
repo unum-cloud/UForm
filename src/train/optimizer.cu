@@ -207,7 +207,8 @@ static __global__ void adafactor_reduce_gradient_peer_kernel_(multimem_member_t 
         return launch_kernel(&adafactor_reduce_gradient_peer_kernel_, grid_shape, block_shape, stream,
                              domain.member(member), destination, shard_begin, world_scale);
     }
-    return expected_t::fail(status_t::invalid_input_k, "unknown multimem tier {}", static_cast<u32_t>(domain.tier()));
+    return expected_t::fail(status_t::invalid_argument_k, "unknown multimem tier {}",
+                            static_cast<u32_t>(domain.tier()));
 }
 
 /** Enqueue the seeding of @p state 's Float32 master inside @p masters from its live BFloat16
@@ -225,7 +226,7 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
                                         gpu_stream_t &stream) noexcept {
     using result_t = expected<adafactor_t>;
     std::size_t const count = weights.size();
-    if (count == 0) return result_t::fail(status_t::invalid_input_k, "an optimizer needs weights");
+    if (count == 0) return result_t::fail(status_t::invalid_argument_k, "an optimizer needs weights");
     adafactor_t optimizer;
     optimizer.config_ = config;
     optimizer.numerics_ = numerics;
@@ -236,8 +237,8 @@ expected<adafactor_t> adafactor_t::make(gpu_arena_t &arena, std::span<differenti
         differentiable_weights_t const &matrix = weights[index];
         std::size_t const rows = matrix.weights.extent(0), cols = matrix.weights.extent(1);
         if (rows == 0 || cols == 0 || matrix.weights_grad.extent(0) != rows || matrix.weights_grad.extent(1) != cols)
-            return result_t::fail(status_t::shape_unsupported_k, "weights {} [{}x{}] disagree with grads [{}x{}]",
-                                  index, rows, cols, matrix.weights_grad.extent(0), matrix.weights_grad.extent(1));
+            return result_t::fail(status_t::unsupported_k, "weights {} [{}x{}] disagree with grads [{}x{}]", index,
+                                  rows, cols, matrix.weights_grad.extent(0), matrix.weights_grad.extent(1));
         if (sz::failed(optimizer.names_[index].assign(matrix.name.view())))
             return result_t::fail(status_t::bad_alloc_k, "weight name copy failed: {}", matrix.name.view());
         adafactor_state_t &state = optimizer.states_[index];
@@ -321,8 +322,8 @@ expected_t adafactor_t::load(checkpoint_to_load_t const &checkpoint, gpu_stream_
             f32r2_view_t const saved = checkpoint.float32(name.view());
             if (saved.empty()) return restart();
             if (saved.extent(0) != 1u || saved.extent(1) != destination.extent(0))
-                return expected_t::fail(status_t::shape_unsupported_k, "{} holds [{},{}], the live state [1,{}]",
-                                        name.view(), saved.extent(0), saved.extent(1), destination.extent(0));
+                return expected_t::fail(status_t::unsupported_k, "{} holds [{},{}], the live state [1,{}]", name.view(),
+                                        saved.extent(0), saved.extent(1), destination.extent(0));
             return copy_host_to_device(saved.flatten<1>(), destination, stream);
         };
         std::size_t const rows = state.weights.extent(0), cols = state.weights.extent(1);
@@ -384,7 +385,7 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
     bool const single_domain = world_reduce.identity();
     if (gpus == 0 || streams.size() != gpus || domain.local_member_count() != gpus ||
         weights.size() != gpus * weights_per_rank)
-        return result_t::fail(status_t::invalid_input_k,
+        return result_t::fail(status_t::invalid_argument_k,
                               "every rank needs an arena, stream, local domain member, and weights table ({} ranks)",
                               gpus);
     distributed_adafactor_t optimizer;
@@ -399,7 +400,7 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
 
     for (std::size_t rank = 0; rank != gpus; ++rank) {
         switch_to_gpu_t gpu_scope {streams[rank]};
-        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (rank={})", rank);
+        if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed (rank={})", rank);
         expected<adafactor_t> state = adafactor_t::make(
             arenas[rank], weights.subspan(rank * weights_per_rank, weights_per_rank), config, numerics, streams[rank]);
         if (!state) return result_t::fail(std::move(state));
@@ -436,7 +437,7 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
     if (!single_domain && domain.member_offset() == 0) {
         std::size_t const gradient_scalars = optimizer.ranks_[0].state.gradient_scalars();
         if (world_reduce.payload().extent(0) < gradient_scalars)
-            return result_t::fail(status_t::invalid_input_k,
+            return result_t::fail(status_t::invalid_argument_k,
                                   "the borrowed world all-reduce is too small: payload {} < gradient {} scalars",
                                   world_reduce.payload().extent(0), gradient_scalars);
     }
@@ -445,9 +446,9 @@ expected<distributed_adafactor_t> distributed_adafactor_t::make(
 
 expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, gpu_stream_t &stream) noexcept {
     std::size_t const gpus = ranks_.size();
-    if (rank >= gpus) return expected_t::fail(status_t::invalid_input_k, "rank {} of {}", rank, gpus);
+    if (rank >= gpus) return expected_t::fail(status_t::invalid_argument_k, "rank {} of {}", rank, gpus);
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed ({})", rank);
+    if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed ({})", rank);
     std::size_t const member = domain_->member_offset() + rank;
     gpu_fault_t *const fault = domain_->member(member).fault;
     f32_t *const window_base = domain_->payload(member).data() + window_.offset;
@@ -495,7 +496,7 @@ expected_t distributed_adafactor_t::step(std::size_t rank, f32_t learning_rate, 
 expected_t distributed_adafactor_t::step(f32_t learning_rate, std::span<gpu_stream_t> streams) noexcept {
     std::size_t const gpus = ranks_.size();
     if (streams.size() != gpus)
-        return expected_t::fail(status_t::invalid_input_k, "every rank needs its stream ({} ranks)", gpus);
+        return expected_t::fail(status_t::invalid_argument_k, "every rank needs its stream ({} ranks)", gpus);
     for (std::size_t rank = 0; rank != gpus; ++rank)
         if (expected_t staged = step(rank, learning_rate, streams[rank]); !staged) return staged;
     return {};
@@ -505,10 +506,10 @@ expected_t distributed_adafactor_t::load(checkpoint_to_load_t const &checkpoint,
                                          std::span<gpu_stream_t> streams) noexcept {
     std::size_t const gpus = ranks_.size();
     if (streams.size() != gpus)
-        return expected_t::fail(status_t::invalid_input_k, "every rank needs its stream ({} ranks)", gpus);
+        return expected_t::fail(status_t::invalid_argument_k, "every rank needs its stream ({} ranks)", gpus);
     for (std::size_t rank = 0; rank != gpus; ++rank) {
         switch_to_gpu_t gpu_scope {streams[rank]};
-        if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed ({})", rank);
+        if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed ({})", rank);
         if (expected_t loaded = ranks_[rank].state.load(checkpoint, streams[rank]); !loaded) return loaded;
     }
     return {};
@@ -594,7 +595,7 @@ expected_t adafactor_temperatures_t::step(f32r1_span_t inverse_temperatures, f32
     std::size_t const scalars = moments_.numel();
     if (inverse_temperatures.extent(0) * 2u != scalars || biases.extent(0) * 2u != scalars ||
         gradients.extent(0) != scalars)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "temperatures [{}], biases [{}] and gradients [{}] disagree with {} moments",
                                 inverse_temperatures.extent(0), biases.extent(0), gradients.extent(0), scalars);
     return launch_kernel(&adafactor_temperatures_kernel_, dim3 {1u, 1u, 1u}, dim3 {kernel_block_size_default_k, 1u, 1u},
@@ -616,7 +617,7 @@ expected_t adafactor_temperatures_t::load(checkpoint_to_load_t const &checkpoint
     f32r2_view_t const saved = checkpoint.float32(key_.view());
     if (saved.empty()) return zero_async(moments_.span(), stream);
     if (saved.extent(0) != 1u || saved.extent(1) != moments_.numel())
-        return expected_t::fail(status_t::shape_unsupported_k, "{} holds [{},{}], the run [1,{}]", key_.view(),
+        return expected_t::fail(status_t::unsupported_k, "{} holds [{},{}], the run [1,{}]", key_.view(),
                                 saved.extent(0), saved.extent(1), moments_.numel());
     return copy_host_to_device(saved.flatten<1>(), moments_.span(), stream);
 }

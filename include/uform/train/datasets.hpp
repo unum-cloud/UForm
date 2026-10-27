@@ -97,8 +97,8 @@ struct mixture_t {
 
     /**
      *  @brief Parse the mixture JSON at @p path .
-     *  @retval status_t::io_error_k The file does not open.
-     *  @retval status_t::invalid_input_k Malformed JSON, an unknown key, a missing field, or a
+     *  @retval status_t::io_k The file does not open.
+     *  @retval status_t::invalid_argument_k Malformed JSON, an unknown key, a missing field, or a
      *      media column whose name tells no modality.
      */
     [[nodiscard]] static expected<mixture_t> read(sz::string_view_t path) noexcept;
@@ -130,9 +130,11 @@ struct mixture_t {
 struct mixture_sampler_t {
 
     /**
-     *  @brief Size the counters for @p entries , borrowed, whose shards hold @p rows rows each, for
-     *      @p world_gpus GPUs packing @p batches_per_fill batches of @p segments segments per fill.
-     *  @retval status_t::invalid_input_k An entry caps its passes over shards that count no rows.
+     *  @brief Size the counters for @p entries , borrowed, whose shards hold @p rows rows each,
+     *      for @p world_gpus GPUs packing @p batches_per_fill batches of @p segments segments per
+     *      fill.
+     *  @retval status_t::invalid_argument_k An entry caps its passes over shards that count no
+     *      rows.
      */
     [[nodiscard]] static expected<mixture_sampler_t> make(std::span<mixture_entry_t const> entries,
                                                           std::span<std::size_t const> rows, std::size_t world_gpus,
@@ -218,7 +220,7 @@ struct dataset_source_t {
     mixture_t mixture_ {};
 
     /** The host workers the image fallback and the audio and video demux fan across. */
-    loaders::cpu_decode_pool_t pool_ {};
+    executor_t pool_ {};
 
     /** One loader per entry, in entry order. */
     st::basic_vector<loader_t> loaders_ {};

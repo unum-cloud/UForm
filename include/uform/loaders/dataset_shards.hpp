@@ -52,7 +52,7 @@ struct column_view_t {
     [[nodiscard]] std::size_t size() const noexcept { return offsets.empty() ? 0 : offsets.extent(0) - 1; }
 
     /** Element @p index 's bytes, sliced on the host, so @ref offsets must be host-resident. */
-    [[nodiscard]] std::span<b8_t const> operator[](std::size_t index) const noexcept {
+    [[nodiscard]] bytes_view_t operator[](std::size_t index) const noexcept {
         u64_t const *const bounds = offsets.data();
         return {payload.data() + bounds[index], static_cast<std::size_t>(bounds[index + 1] - bounds[index])};
     }

@@ -94,7 +94,7 @@ expected<telemetry_ledger_t> telemetry_ledger_t::make(gpu_arena_t &arena, u32_t 
                        .value;
     if (!ledger.rows_) return result_t::fail(status_t::bad_alloc_k, "ledger row table allocation failed ({})", rows);
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "ledger context entry failed");
+    if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "ledger context entry failed");
     if (expected_t reset = zero_async(ledger.rows_.span(), stream); !reset) return result_t::fail(std::move(reset));
     if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
         return cuda_failure<telemetry_ledger_t>(synced, "ledger row table reset drain failed");
@@ -161,7 +161,7 @@ expected<telemetry_row_t> telemetry_ledger_t::row(telemetry_probe_t probe, gpu_s
     using result_t = expected<telemetry_row_t>;
     if (probe.row == 0u) return result_t {telemetry_row_t {}};
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "ledger row context entry failed");
+    if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "ledger row context entry failed");
     if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
         return cuda_failure<telemetry_row_t>(synced, "ledger row synchronization failed");
     telemetry_row_t state;
@@ -174,7 +174,7 @@ expected<telemetry_row_t> telemetry_ledger_t::row(telemetry_probe_t probe, gpu_s
 expected_t telemetry_ledger_t::report(gpu_stream_t &stream) noexcept {
     if (channels_ == 0u || registered_ == 0u) return {};
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "ledger report context entry failed");
+    if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "ledger report context entry failed");
     if (CUresult synced = cuStreamSynchronize(stream.get()); synced != CUDA_SUCCESS)
         return cuda_failure(synced, "ledger report synchronization failed");
     st::basic_vector<telemetry_row_t> states;

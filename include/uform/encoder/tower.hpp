@@ -47,6 +47,7 @@
 namespace unum::uform::encoder {
 
 using uu::b8_t;
+using uu::bytes_span_t;
 using uu::expected_t;
 using uu::u8_t;
 
@@ -189,8 +190,8 @@ inline constexpr std::size_t product_qkv_k = 0, product_out_k = 1, product_gate_
     case nk_unexpected_dimensions_k:
     case nk_missing_kernel_k:
     case nk_misaligned_k:
-    case nk_pack_mismatch_k: return uu::status_t::shape_unsupported_k;
-    default: return uu::status_t::other_k;
+    case nk_pack_mismatch_k: return uu::status_t::unsupported_k;
+    default: return uu::status_t::internal_k;
     }
 }
 
@@ -297,7 +298,7 @@ template <typename attention_kit_type_>
         status = attention_kit_type_::pack_size_bf16(geometry.heads(), geometry.head_width, tokens, segments,
                                                      &pool_bytes);
     if (status != nk_success_k)
-        return expected<std::size_t>::fail(uu::status_t::other_k, "attention pack sizing failed: {}",
+        return expected<std::size_t>::fail(uu::status_t::internal_k, "attention pack sizing failed: {}",
                                            nk_status_name(status));
     return expected<std::size_t> {std::max<std::size_t>(block_bytes, pool_bytes)};
 }
@@ -331,7 +332,7 @@ template <typename attention_kit_type_>
                                                                   std::size_t columns) noexcept {
     bf16r2_view_t const tensor = checkpoint[name];
     if (tensor.empty() || tensor.extent(0) != rows || tensor.extent(1) != columns)
-        return expected<bf16r2_view_t>::fail(uu::status_t::invalid_input_k, "the checkpoint must hold {} as [{},{}]",
+        return expected<bf16r2_view_t>::fail(uu::status_t::invalid_argument_k, "the checkpoint must hold {} as [{},{}]",
                                              name, rows, columns);
     return expected<bf16r2_view_t> {tensor};
 }
@@ -367,9 +368,9 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
     if (precision == precision_t::bf16_k) status = products_kit_type_::pack_size_bf16(outputs, inputs, &bytes);
     else if constexpr (e4m3_products<products_kit_type_>)
         status = products_kit_type_::pack_size_e4m3(outputs, inputs, &bytes);
-    else return expected_t::fail(uu::status_t::shape_unsupported_k, "the class has no E4M3 products");
+    else return expected_t::fail(uu::status_t::unsupported_k, "the class has no E4M3 products");
     if (status != nk_success_k)
-        return expected_t::fail(uu::status_t::other_k, "pack sizing [{}x{}] failed: {}", outputs, inputs,
+        return expected_t::fail(uu::status_t::internal_k, "pack sizing [{}x{}] failed: {}", outputs, inputs,
                                 nk_status_name(status));
     packed.bytes = packed_bytes_t {placer.allocator};
     if (st::failed(packed.bytes.resize(st::assume_uninitialized, bytes)))
@@ -416,8 +417,8 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
  *  @brief Pack every weight of @p checkpoint for @p products_kit_type_ into memory @p placer
  *      places, in @p precision for the block products — E4M3 quantizes each with its own
  *      @c max_abs/240 descale — widening and quantizing on the host through @p staging_kit_type_ .
- *  @retval status_t::invalid_input_k A tensor is missing or misshapen.
- *  @retval status_t::shape_unsupported_k E4M3 asked of a products kit without E4M3 kernels.
+ *  @retval status_t::invalid_argument_k A tensor is missing or misshapen.
+ *  @retval status_t::unsupported_k E4M3 asked of a products kit without E4M3 kernels.
  */
 template <typename products_kit_type_, typename staging_kit_type_, typename placer_type_>
 [[nodiscard]] static expected<tower_weights_t> pack_weights(uu::checkpoint_to_load_t const &checkpoint,
@@ -550,7 +551,7 @@ template <typename products_kit_type_, typename staging_kit_type_, typename plac
 template <typename steps_type_>
 [[nodiscard]] static expected_t encode_steps(steps_type_ &steps, tower_weights_t const &weights,
                                              multimodal_batch_view_t batch, outputs_t outputs,
-                                             std::span<b8_t> scratch) noexcept {
+                                             bytes_span_t scratch) noexcept {
     using products_kit_t = typename steps_type_::products_kit_t;
     using attention_kit_t = typename steps_type_::attention_kit_t;
     using elementwise_kit_t = typename steps_type_::elementwise_kit_t;
@@ -559,23 +560,23 @@ template <typename steps_type_>
 
     std::size_t const segments = batch.segment_lengths.extent(0);
     if (segments == 0 || batch.segment_offsets.extent(0) < segments || batch.segment_modality.extent(0) != segments)
-        return expected_t::fail(uu::status_t::invalid_input_k,
+        return expected_t::fail(uu::status_t::invalid_argument_k,
                                 "a batch needs one offset, length and modality per item");
     if (outputs.embeddings.empty() && outputs.states.empty() && outputs.token_vectors.empty() &&
         outputs.masked_logits.empty())
-        return expected_t::fail(uu::status_t::invalid_input_k, "an encode keeps at least one surface");
+        return expected_t::fail(uu::status_t::invalid_argument_k, "an encode keeps at least one surface");
     if (!outputs.token_vectors.empty() && weights.token_head.projection.bytes.empty())
-        return expected_t::fail(uu::status_t::invalid_input_k, "the checkpoint carries no token head");
+        return expected_t::fail(uu::status_t::invalid_argument_k, "the checkpoint carries no token head");
     if (!outputs.masked_logits.empty() && weights.masked_tokens.decoder.bytes.empty())
-        return expected_t::fail(uu::status_t::invalid_input_k, "the checkpoint carries no byte decoder");
+        return expected_t::fail(uu::status_t::invalid_argument_k, "the checkpoint carries no byte decoder");
     std::size_t tokens = 0;
     for (std::size_t segment = 0; segment != segments; ++segment) {
         if (batch.segment_lengths[segment] > geometry.context)
-            return expected_t::fail(uu::status_t::invalid_input_k, "item {} spans {} cells, the context is {}", segment,
-                                    batch.segment_lengths[segment], geometry.context);
+            return expected_t::fail(uu::status_t::invalid_argument_k, "item {} spans {} cells, the context is {}",
+                                    segment, batch.segment_lengths[segment], geometry.context);
         tokens += batch.segment_lengths[segment];
     }
-    if (tokens == 0) return expected_t::fail(uu::status_t::invalid_input_k, "a batch needs a live cell");
+    if (tokens == 0) return expected_t::fail(uu::status_t::invalid_argument_k, "a batch needs a live cell");
     expected<std::size_t> keys_values = keys_values_bytes<attention_kit_t>(geometry, precision, tokens, segments);
     if (!keys_values) return expected_t::fail(std::move(keys_values));
     scratch_cursor_t cursor {scratch};

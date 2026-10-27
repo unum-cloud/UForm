@@ -59,7 +59,7 @@ inline constexpr u32_t segments_k = rows_k * segments_per_row_k;
         staging[index] = __float2bfloat16((uniform - 0.5f) * 0.1f);
     }
     if (cuMemcpyHtoD(device_address(device), staging.data(), count * sizeof(bf16_t)) != CUDA_SUCCESS)
-        return expected_t::fail(status_t::cuda_error_k, "uploading {} scalars failed", count);
+        return expected_t::fail(status_t::device_error_k, "uploading {} scalars failed", count);
     return {};
 }
 

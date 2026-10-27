@@ -17,10 +17,9 @@
 #include <algorithm> // `std::max`, `std::min`
 #include <span>      // `std::span` — the scratch a call borrows
 
-#include <forkunion.hpp> // vendor-boundary: `fu::flat_pool_t`, the threads every step splits across
-
-#include "uform/encoder/ram_kits.hpp" // the host entries
-#include "uform/encoder/tower.hpp"    // `tower_weights_t`, `pack_weights`, `encode_steps`
+#include "uform/encoder/ram_kits.hpp"     // the host entries
+#include "uform/encoder/tower.hpp"        // `tower_weights_t`, `pack_weights`, `encode_steps`
+#include "uform/utilities/ram_device.hpp" // `pool_view_t`, the threads every step splits across
 
 namespace unum::uform::encoder {
 
@@ -76,7 +75,7 @@ struct ram_steps {
     using attention_kit_t = attention_kit_type_;
     using elementwise_kit_t = elementwise_kit_type_;
 
-    fu::flat_pool_t &pool;
+    uu::pool_view_t pool;
     entries_rows_t rows;
 
     [[nodiscard]] nk_stream_t stream() const noexcept { return nullptr; }
@@ -92,11 +91,12 @@ struct ram_steps {
     [[nodiscard]] expected_t each(std::size_t tasks, sz::string_view_t what, body_type_ const &body) noexcept {
         std::size_t const width = rows.workers.extent(1);
         nk_status_t failure = nk_success_k;
-        pool.for_n(tasks, [&](std::size_t task, fu::flat_pool_t::thread_in_domain_t at) noexcept {
-            nk_status_t const status = body(task, f32r1_span_t {rows.workers.row(at.thread).data(), width});
-            if (status != nk_success_k)
-                atomic_ref_template_<nk_status_t> {failure}.store(status, std::memory_order_relaxed);
+        uu::status_t const status = pool.for_n(tasks, [&](std::size_t task, std::size_t thread) noexcept {
+            nk_status_t const step = body(task, f32r1_span_t {rows.workers.row(thread).data(), width});
+            if (step != nk_success_k)
+                atomic_ref_template_<nk_status_t> {failure}.store(step, std::memory_order_relaxed);
         });
+        if (expected_t refused = dispatched(status, what); !refused) return refused;
         return checked(failure, what); // `for_n` joined every worker
     }
 
@@ -137,14 +137,20 @@ struct ram_steps {
     [[nodiscard]] expected_t fill_coords(segment_layout_t const &layout, nk::tensor_view<u16_t, 2> image_shapes,
                                          nk::tensor_view<u16_t, 2> video_shapes, u32_t tube_frames, u32_t frame_stride,
                                          u32_t, i16r2_span_t coords) noexcept {
-        encoder::fill_coords(layout, image_shapes, video_shapes, tube_frames, frame_stride, coords, pool);
-        return {};
+        return dispatched(
+            encoder::fill_coords(layout, image_shapes, video_shapes, tube_frames, frame_stride, coords, pool),
+            "coordinate fill");
     }
 
     [[nodiscard]] expected_t gather_bytes(segment_layout_t const &layout, nk::tensor_view<token_id_t, 1> tokens,
                                           bf16r2_view_t table, bf16r2_span_t rows) noexcept {
-        encoder::gather_bytes(layout, tokens, table, rows, pool);
-        return {};
+        return dispatched(encoder::gather_bytes(layout, tokens, table, rows, pool), "byte gather");
+    }
+
+    /** @p status of a pool dispatch for step @p what , a failure naming the step. */
+    [[nodiscard]] static expected_t dispatched(uu::status_t status, sz::string_view_t what) noexcept {
+        if (status == uu::status_t::success_k) return {};
+        return expected_t::fail(status, "{} dispatch was refused by the pool", what);
     }
 
     [[nodiscard]] expected_t stage_patches(segment_layout_t const &layout, modality_t target,
@@ -197,7 +203,7 @@ struct ram_tower {
     /**
      *  @brief Pack every weight of @p checkpoint into NumKong's aligned heap, in @p precision for
      *      the block products.
-     *  @retval status_t::invalid_input_k A tensor is missing or misshapen.
+     *  @retval status_t::invalid_argument_k A tensor is missing or misshapen.
      */
     [[nodiscard]] static expected<ram_tower> make(uu::checkpoint_to_load_t const &checkpoint,
                                                   geometry_t const &geometry, precision_t precision) noexcept {
@@ -226,8 +232,8 @@ struct ram_tower {
     }
 
     /** Encode @p batch in host memory on @p pool 's threads. */
-    [[nodiscard]] expected_t encode(multimodal_batch_view_t batch, outputs_t outputs, std::span<b8_t> scratch,
-                                    fu::flat_pool_t &pool) const noexcept {
+    [[nodiscard]] expected_t encode(multimodal_batch_view_t batch, outputs_t outputs, bytes_span_t scratch,
+                                    uu::pool_view_t pool) const noexcept {
         scratch_cursor_t cursor {scratch};
         steps_t steps {pool, reserve_entries(cursor, weights_.geometry, pool.threads_count())};
         if (scratch.size() < cursor.used)

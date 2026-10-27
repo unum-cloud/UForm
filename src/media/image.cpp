@@ -35,7 +35,7 @@ template <typename integer_type_>
 
 /** Sniff a blob's compressed format from its leading bytes — JPEG @c FFD8FF , PNG @c 89504E47 ,
  *  WebP @c "RIFF"…"WEBP" ; anything else is unknown. */
-[[nodiscard]] static image_format_t sniff_format_(std::span<b8_t const> encoded) noexcept {
+[[nodiscard]] static image_format_t sniff_format_(bytes_view_t encoded) noexcept {
     auto const byte = [encoded](std::size_t index) noexcept { return std::to_integer<u8_t>(encoded[index]); };
     std::size_t const size = encoded.size();
     if (size >= 3 && byte(0) == 0xFF && byte(1) == 0xD8 && byte(2) == 0xFF) return format_jpeg_k;
@@ -51,8 +51,7 @@ template <typename integer_type_>
  *  big-endian UInt16. Only the frame headers carry them ( @c C0..CF except DHT @c C4 , JPG @c C8 ,
  *  DAC @c CC ). The walk starts past the SOI marker at the blob's head and at the window's first
  *  marker otherwise, and a walk leaving the window returns the offset it resumes at. */
-[[nodiscard]] static expected<image_probe_t> jpeg_probe_(std::span<b8_t const> window,
-                                                         std::size_t window_offset) noexcept {
+[[nodiscard]] static expected<image_probe_t> jpeg_probe_(bytes_view_t window, std::size_t window_offset) noexcept {
     b8_t const *const bytes = window.data();
     std::size_t const size = window.size();
     std::size_t offset = window_offset == 0 ? 2 : 0;
@@ -67,7 +66,7 @@ template <typename integer_type_>
             u32_t const height = load_big_endian_<u16_t>(bytes + offset + 5);
             u32_t const width = load_big_endian_<u16_t>(bytes + offset + 7);
             if (width == 0 || height == 0)
-                return expected<image_probe_t>::fail(status_t::invalid_input_k, "JPEG start-of-frame has no extent");
+                return expected<image_probe_t>::fail(status_t::invalid_argument_k, "JPEG start-of-frame has no extent");
             return image_probe_t {format_jpeg_k, image_extent_t {width, height}, 0};
         }
         offset += 2 + load_big_endian_<u16_t>(bytes + offset + 2); // skip this marker segment
@@ -77,40 +76,40 @@ template <typename integer_type_>
 
 /** A PNG's pixel extent from its IHDR — width and height are big-endian UInt32 at byte offsets 16 and 20 of the
  *  signature+IHDR prologue. */
-[[nodiscard]] static expected<image_extent_t> png_dimensions_(std::span<b8_t const> encoded) noexcept {
+[[nodiscard]] static expected<image_extent_t> png_dimensions_(bytes_view_t encoded) noexcept {
     b8_t const *const bytes = encoded.data();
     if (encoded.size() < 24)
-        return expected<image_extent_t>::fail(status_t::invalid_input_k, "PNG header prefix too short");
+        return expected<image_extent_t>::fail(status_t::invalid_argument_k, "PNG header prefix too short");
     u32_t const width = load_big_endian_<u32_t>(bytes + 16), height = load_big_endian_<u32_t>(bytes + 20);
     if (width == 0 || height == 0)
-        return expected<image_extent_t>::fail(status_t::invalid_input_k, "PNG IHDR has zero extent");
+        return expected<image_extent_t>::fail(status_t::invalid_argument_k, "PNG IHDR has zero extent");
     return image_extent_t {width, height};
 }
 
 /** A WebP's pixel extent — the container's canvas size via libwebp's header parser. */
-[[nodiscard]] static expected<image_extent_t> webp_dimensions_(std::span<b8_t const> encoded) noexcept {
+[[nodiscard]] static expected<image_extent_t> webp_dimensions_(bytes_view_t encoded) noexcept {
     int width = 0, height = 0;
     if (WebPGetInfo(codec_bytes_(encoded.data()), encoded.size(), &width, &height) == 0)
-        return expected<image_extent_t>::fail(status_t::invalid_input_k, "malformed WebP header");
+        return expected<image_extent_t>::fail(status_t::invalid_argument_k, "malformed WebP header");
     return image_extent_t {static_cast<u32_t>(width), static_cast<u32_t>(height)};
 }
 
-expected<image_probe_t> um::probe_image(std::span<b8_t const> encoded, std::size_t window_offset) noexcept {
+expected<image_probe_t> um::probe_image(bytes_view_t encoded, std::size_t window_offset) noexcept {
     if (window_offset != 0) return jpeg_probe_(encoded, window_offset);
     image_format_t const format = sniff_format_(encoded);
     if (format == format_unknown_k)
-        return expected<image_probe_t>::fail(status_t::invalid_input_k, "unrecognized image format");
+        return expected<image_probe_t>::fail(status_t::invalid_argument_k, "unrecognized image format");
     if (format == format_jpeg_k) return jpeg_probe_(encoded, 0);
     expected<image_extent_t> extent = format == format_png_k ? png_dimensions_(encoded) : webp_dimensions_(encoded);
     if (!extent) return expected<image_probe_t>::fail(std::move(extent));
     return image_probe_t {format, extent.value_, 0};
 }
 
-expected<image_plan_t> um::plan_image(std::span<b8_t const> encoded, u32_t patch_side, u32_t columns) noexcept {
+expected<image_plan_t> um::plan_image(bytes_view_t encoded, u32_t patch_side, u32_t columns) noexcept {
     expected<image_probe_t> probed = probe_image(encoded);
     if (!probed) return expected<image_plan_t>::fail(std::move(probed));
     if (probed->extent.width == 0)
-        return expected<image_plan_t>::fail(status_t::invalid_input_k, "no JPEG start-of-frame in the blob");
+        return expected<image_plan_t>::fail(status_t::invalid_argument_k, "no JPEG start-of-frame in the blob");
     image_plan_t plan;
     plan.format = probed->format;
     plan.native = probed->extent;
@@ -124,12 +123,11 @@ expected<image_plan_t> um::plan_image(std::span<b8_t const> encoded, u32_t patch
 /** Decode a JPEG through @p decoder into @p out with the @c 1/2ᵏ DCT scale landing exactly on its extent. TurboJPEG
  *  reports a corrupt or truncated stream where libjpeg's default error handler exits the process; @c TJPF_RGBA
  *  emits a constant 255 alpha, so a JPEG matches the RGBA grid. */
-[[nodiscard]] static expected_t decode_jpeg_(tjhandle decoder, std::span<b8_t const> encoded,
-                                             pixel_image_span_t out) noexcept {
+[[nodiscard]] static expected_t decode_jpeg_(tjhandle decoder, bytes_view_t encoded, pixel_image_span_t out) noexcept {
     unsigned char const *const bytes = codec_bytes_(encoded.data());
     std::size_t const size = encoded.size();
     if (tj3DecompressHeader(decoder, bytes, size) != 0)
-        return expected_t::fail(status_t::invalid_input_k, "malformed JPEG header: {}", tj3GetErrorStr(decoder));
+        return expected_t::fail(status_t::invalid_argument_k, "malformed JPEG header: {}", tj3GetErrorStr(decoder));
     int const width = static_cast<int>(out.extent(1)), height = static_cast<int>(out.extent(0));
     int const native_width = tj3Get(decoder, TJPARAM_JPEGWIDTH), native_height = tj3Get(decoder, TJPARAM_JPEGHEIGHT);
     tjscalingfactor scale {1, 1};
@@ -138,40 +136,39 @@ expected<image_plan_t> um::plan_image(std::span<b8_t const> encoded, u32_t patch
         if (TJSCALED(native_width, scale) == width && TJSCALED(native_height, scale) == height) break;
     }
     if (TJSCALED(native_width, scale) != width || TJSCALED(native_height, scale) != height)
-        return expected_t::fail(status_t::invalid_input_k, "no DCT scale takes a {}x{} JPEG to {}x{}", native_width,
+        return expected_t::fail(status_t::invalid_argument_k, "no DCT scale takes a {}x{} JPEG to {}x{}", native_width,
                                 native_height, width, height);
     if (tj3SetScalingFactor(decoder, scale) != 0 ||
         tj3Decompress8(decoder, bytes, size, out.data(), width * static_cast<int>(image_channels_k), TJPF_RGBA) != 0)
-        return expected_t::fail(status_t::invalid_input_k, "corrupt JPEG: {}", tj3GetErrorStr(decoder));
+        return expected_t::fail(status_t::invalid_argument_k, "corrupt JPEG: {}", tj3GetErrorStr(decoder));
     return {};
 }
 
-expected_t um::decode_image_rgba(std::span<b8_t const> encoded, image_format_t format,
-                                 pixel_image_span_t out) noexcept {
+expected_t um::decode_image_rgba(bytes_view_t encoded, image_format_t format, pixel_image_span_t out) noexcept {
     unsigned char const *const bytes = codec_bytes_(encoded.data());
     std::size_t const size = encoded.size();
     u32_t const height = static_cast<u32_t>(out.extent(0)), width = static_cast<u32_t>(out.extent(1));
     pixel_t *const pixels = out.data();
     std::size_t const stride = static_cast<std::size_t>(width) * image_channels_k;
     if (out.extent(2) != image_channels_k)
-        return expected_t::fail(status_t::shape_unsupported_k, "RGBA decode needs 4 channels, got {}", out.extent(2));
+        return expected_t::fail(status_t::unsupported_k, "RGBA decode needs 4 channels, got {}", out.extent(2));
     if (format == format_webp_k)
         return WebPDecodeRGBAInto(bytes, size, pixels, stride * height, static_cast<int>(stride)) != nullptr
                    ? expected_t {}
-                   : expected_t::fail(status_t::invalid_input_k, "corrupt WebP bitstream or extent mismatch");
+                   : expected_t::fail(status_t::invalid_argument_k, "corrupt WebP bitstream or extent mismatch");
     if (format == format_png_k) {
         png_image image {};
         image.version = PNG_IMAGE_VERSION;
         if (png_image_begin_read_from_memory(&image, bytes, size) == 0)
-            return expected_t::fail(status_t::invalid_input_k, "malformed PNG header");
+            return expected_t::fail(status_t::invalid_argument_k, "malformed PNG header");
         bool const fits = image.width == width && image.height == height;
         image.format = PNG_FORMAT_RGBA;
         bool const ok = fits &&
                         png_image_finish_read(&image, nullptr, pixels, static_cast<png_int_32>(stride), nullptr) != 0;
         png_image_free(&image);
-        return ok ? expected_t {} : expected_t::fail(status_t::invalid_input_k, "corrupt PNG or extent mismatch");
+        return ok ? expected_t {} : expected_t::fail(status_t::invalid_argument_k, "corrupt PNG or extent mismatch");
     }
-    if (format != format_jpeg_k) return expected_t::fail(status_t::invalid_input_k, "unrecognized image format");
+    if (format != format_jpeg_k) return expected_t::fail(status_t::invalid_argument_k, "unrecognized image format");
     tjhandle const decoder = tj3Init(TJINIT_DECOMPRESS);
     if (!decoder) return expected_t::fail(status_t::bad_alloc_k, "JPEG decoder allocation failed");
     expected_t decoded = decode_jpeg_(decoder, encoded, out);
@@ -179,10 +176,9 @@ expected_t um::decode_image_rgba(std::span<b8_t const> encoded, image_format_t f
     return decoded;
 }
 
-expected_t um::decode_image(std::span<b8_t const> encoded, image_plan_t const &plan,
-                            pixel_patches_span_t out) noexcept {
+expected_t um::decode_image(bytes_view_t encoded, image_plan_t const &plan, pixel_patches_span_t out) noexcept {
     if (out.extent(0) != plan.grid.rows || out.extent(1) != plan.grid.columns)
-        return expected_t::fail(status_t::shape_unsupported_k, "cells [{},{}] do not match the planned grid [{},{}]",
+        return expected_t::fail(status_t::unsupported_k, "cells [{},{}] do not match the planned grid [{},{}]",
                                 out.extent(0), out.extent(1), plan.grid.rows, plan.grid.columns);
     std::size_t const bytes = static_cast<std::size_t>(plan.decoded.width) * plan.decoded.height * image_channels_k;
     st::basic_vector<pixel_t> decoded;

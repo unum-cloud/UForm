@@ -116,11 +116,12 @@ expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view
                            u32r1_span_t dropped, gpu_stream_t &gpu_stream) noexcept {
     if (elements.extent(0) > segment_lengths.extent(0) || segment_offsets.extent(0) != segment_lengths.extent(0) + 1u ||
         segment_modality.extent(0) != segment_lengths.extent(0))
-        return expected_t::fail(status_t::shape_unsupported_k, "{} documents exceed a table of {} segments",
+        return expected_t::fail(status_t::unsupported_k, "{} documents exceed a table of {} segments",
                                 elements.extent(0), segment_lengths.extent(0));
     if (elements.empty()) return {};
     switch_to_gpu_t gpu_scope {gpu_stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
+    if (!gpu_scope.ok())
+        return expected_t::fail(status_t::device_error_k, "context entry failed for the loader stream");
     dim3 const one_block {1u, 1u, 1u};
     expected_t packed = launch_kernel(&tokens_geometry_kernel_, one_block, one_block, gpu_stream, texts.offsets,
                                       elements, prefix.extent(0), segment_offsets, segment_lengths, segment_modality,
@@ -150,7 +151,8 @@ expected_t ul::pack_tokens(column_view_t texts, u64r1_view_t elements, b8r1_view
         return expected_t::fail(status_t::bad_alloc_k, "row index allocation failed ({} draws)", total_segments);
 
     switch_to_gpu_t gpu_scope {gpu_stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed for the loader stream");
+    if (!gpu_scope.ok())
+        return expected_t::fail(status_t::device_error_k, "context entry failed for the loader stream");
     nk::tensor_span<u64_t, 2> const batch_records {record_indices.data(), unroll, documents};
     if (expected_t drawn = launch_kernel(&sample_rows_kernel_, dim3 {grid_size_for(total_segments), 1u, 1u},
                                          dim3 {kernel_block_size_default_k, 1u, 1u}, gpu_stream,
@@ -198,7 +200,7 @@ expected<tokens_loader_parquet_t> tokens_loader_parquet_t::make(gpu_direct_stora
         auto metadata = parquet_file_t::table_metadata(session, loader.absolute_paths_[index]);
         if (!metadata) return result_t::fail(std::move(metadata));
         if (metadata->rows == 0)
-            return result_t::fail(status_t::invalid_input_k, "shard {} is empty", loader.absolute_paths_[index]);
+            return result_t::fail(status_t::invalid_argument_k, "shard {} is empty", loader.absolute_paths_[index]);
         for (std::size_t group = 0; group != metadata->group_rows.size(); ++group) {
             if (metadata->group_rows[group] == 0) continue;
             if (st::failed(loader.group_prefix_.push_back(loader.group_prefix_[loader.group_shard_.size()] +
@@ -218,8 +220,7 @@ expected_t tokens_loader_parquet_t::fill(gpu_stream_t &gpu_stream, tokens_base_l
     if (batches.empty()) return {};
     std::size_t const unroll = batches.size();
     std::size_t const documents = batches[0].segment_lengths.extent(0);
-    if (documents == 0u)
-        return expected_t::fail(status_t::shape_unsupported_k, "the batch carries no segment capacity");
+    if (documents == 0u) return expected_t::fail(status_t::unsupported_k, "the batch carries no segment capacity");
     std::size_t const total_segments = unroll * documents;
 
     // Pick row groups with the keyed weighted draw shared with `drawn_shards`, then decode only
@@ -234,7 +235,7 @@ expected_t tokens_loader_parquet_t::fill(gpu_stream_t &gpu_stream, tokens_base_l
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();
     if (pooled_rows < total_segments)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "{} pooled rows across {} files cover fewer than the {} segments this fill needs",
                                 pooled_rows, picked->paths.size(), total_segments);
 
@@ -301,7 +302,7 @@ expected<st::basic_vector<sz::string_view_t>> tokens_loader_parquet_t::drawn_sha
     for (std::size_t index = 0; index != paths.size(); ++index) {
         auto bytes = file_size_bytes(paths[index]);
         if (!bytes) return expected_t::fail(std::move(bytes));
-        if (*bytes == 0) return expected_t::fail(status_t::invalid_input_k, "shard {} is empty", paths[index]);
+        if (*bytes == 0) return expected_t::fail(status_t::invalid_argument_k, "shard {} is empty", paths[index]);
         byte_prefix[index + 1] = byte_prefix[index] + *bytes;
         reservoir.charge(parquet_length_metadata_t {0, *bytes});
     }
@@ -333,8 +334,7 @@ expected_t tokens_loader_jsonl_t::fill(gpu_stream_t &gpu_stream, tokens_base_loa
     if (batches.empty()) return {};
     std::size_t const unroll = batches.size();
     std::size_t const documents = batches[0].segment_lengths.extent(0);
-    if (documents == 0u)
-        return expected_t::fail(status_t::shape_unsupported_k, "the batch carries no segment capacity");
+    if (documents == 0u) return expected_t::fail(status_t::unsupported_k, "the batch carries no segment capacity");
     std::size_t const total_segments = unroll * documents;
 
     std::size_t const shard_count = absolute_paths_.size();
@@ -363,7 +363,7 @@ expected_t tokens_loader_jsonl_t::fill(gpu_stream_t &gpu_stream, tokens_base_loa
             return expected_t::fail(status_t::bad_alloc_k, "reservoir parts allocation failed");
     }
     if (pooled_rows < total_segments)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "{} pooled rows across {} JSONL files cover fewer than the {} segments this fill needs",
                                 pooled_rows, parts.size(), total_segments);
 
@@ -399,8 +399,7 @@ expected_t tokens_loader_csv_t::fill(gpu_stream_t &gpu_stream, tokens_base_loade
     if (batches.empty()) return {};
     std::size_t const unroll = batches.size();
     std::size_t const documents = batches[0].segment_lengths.extent(0);
-    if (documents == 0u)
-        return expected_t::fail(status_t::shape_unsupported_k, "the batch carries no segment capacity");
+    if (documents == 0u) return expected_t::fail(status_t::unsupported_k, "the batch carries no segment capacity");
     std::size_t const total_segments = unroll * documents;
 
     std::size_t const shard_count = absolute_paths_.size();
@@ -430,7 +429,7 @@ expected_t tokens_loader_csv_t::fill(gpu_stream_t &gpu_stream, tokens_base_loade
             return expected_t::fail(status_t::bad_alloc_k, "reservoir parts allocation failed");
     }
     if (pooled_rows < total_segments)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "{} pooled rows across {} CSV files cover fewer than the {} segments this fill needs",
                                 pooled_rows, parts.size(), total_segments);
 

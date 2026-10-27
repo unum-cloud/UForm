@@ -23,6 +23,7 @@
 namespace unum::uform::media {
 
 using uu::b8_t;
+using uu::bytes_view_t;
 using uu::expected;
 using uu::expected_t;
 using uu::pixel_t;
@@ -87,10 +88,9 @@ struct image_plan_t {
  *  the next marker, and a probe of the window starting there with that @p window_offset continues
  *  the walk.
  *
- *  @retval status_t::invalid_input_k Unrecognized magic, a truncated header or a zero extent.
+ *  @retval status_t::invalid_argument_k Unrecognized magic, a truncated header or a zero extent.
  */
-[[nodiscard]] expected<image_probe_t> probe_image(std::span<b8_t const> encoded,
-                                                  std::size_t window_offset = 0) noexcept;
+[[nodiscard]] expected<image_probe_t> probe_image(bytes_view_t encoded, std::size_t window_offset = 0) noexcept;
 
 /**
  *  @brief Plan one image the way the NVIDIA loader plans it: probe, the row-filling grid, and the
@@ -100,8 +100,7 @@ struct image_plan_t {
  *  @param[in] patch_side The square patch side in pixels.
  *  @param[in] columns The batch row width in patches, which every image fills.
  */
-[[nodiscard]] expected<image_plan_t> plan_image(std::span<b8_t const> encoded, u32_t patch_side,
-                                                u32_t columns) noexcept;
+[[nodiscard]] expected<image_plan_t> plan_image(bytes_view_t encoded, u32_t patch_side, u32_t columns) noexcept;
 
 /**
  *  @brief Decode one blob to interleaved RGBA at @p out 's extent.
@@ -112,9 +111,9 @@ struct image_plan_t {
  *  @param[in] encoded The whole compressed blob.
  *  @param[in] format The blob's format, from @ref probe_image .
  *  @param[out] out The @b [height,width,4] destination.
- *  @retval status_t::invalid_input_k A corrupt bitstream or an extent no scale reaches.
+ *  @retval status_t::invalid_argument_k A corrupt bitstream or an extent no scale reaches.
  */
-[[nodiscard]] expected_t decode_image_rgba(std::span<b8_t const> encoded, image_format_t format,
+[[nodiscard]] expected_t decode_image_rgba(bytes_view_t encoded, image_format_t format,
                                            pixel_image_span_t out) noexcept;
 
 /**
@@ -123,7 +122,7 @@ struct image_plan_t {
  *
  *  @param[in] source The decoded @b [height,width,4] picture.
  *  @param[out] out The image's @b [rows,columns,P,P,4] cells.
- *  @retval status_t::shape_unsupported_k Channel counts other than 4, or an empty grid or source.
+ *  @retval status_t::unsupported_k Channel counts other than 4, or an empty grid or source.
  *  @retval status_t::bad_alloc_k The intermediate row buffer could not be allocated.
  */
 [[nodiscard]] expected_t resize_image(pixel_image_view_t source, pixel_patches_span_t out) noexcept;
@@ -135,7 +134,7 @@ struct image_plan_t {
  *  @param[in] plan The plan from @ref plan_image .
  *  @param[out] out The image's @b [plan.grid.rows,plan.grid.columns,P,P,4] cells.
  */
-[[nodiscard]] expected_t decode_image(std::span<b8_t const> encoded, image_plan_t const &plan,
+[[nodiscard]] expected_t decode_image(bytes_view_t encoded, image_plan_t const &plan,
                                       pixel_patches_span_t out) noexcept;
 
 } // namespace unum::uform::media

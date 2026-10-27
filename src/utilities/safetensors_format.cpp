@@ -54,14 +54,13 @@ struct checkpoint_file_t {
      *  holding a NUL, which `open` would cut short there, is refused. */
     [[nodiscard]] static expected<checkpoint_file_t> make(sz::string_view_t path, int flags) noexcept {
         if (path.contains('\0'))
-            return expected<checkpoint_file_t>::fail(status_t::invalid_input_k, "the path holds a NUL byte");
+            return expected<checkpoint_file_t>::fail(status_t::invalid_argument_k, "the path holds a NUL byte");
         sz::string_t path_text; // `open` needs a NUL-terminated `c_str`; short paths stay inline
         if (sz::failed(path_text.assign(path)))
             return expected<checkpoint_file_t>::fail(status_t::bad_alloc_k, "path staging failed");
         checkpoint_file_t file;
         file.descriptor_ = ::open(path_text.c_str(), flags, 0644);
-        if (file.descriptor_ < 0)
-            return expected<checkpoint_file_t>::fail(status_t::io_error_k, "open failed: {}", path);
+        if (file.descriptor_ < 0) return expected<checkpoint_file_t>::fail(status_t::io_k, "open failed: {}", path);
         return expected<checkpoint_file_t> {std::move(file)};
     }
 
@@ -78,7 +77,7 @@ struct checkpoint_file_t {
     for (bytes_view_t remaining = bytes; !remaining.empty();) {
         ssize_t const moved = ::pwrite(file.get(), remaining.data(), remaining.size(), static_cast<off_t>(offset));
         if (moved <= 0)
-            return expected_t::fail(status_t::io_error_k, "pwrite failed at {} ({} bytes left of {})", offset,
+            return expected_t::fail(status_t::io_k, "pwrite failed at {} ({} bytes left of {})", offset,
                                     remaining.size(), bytes.size());
         offset += static_cast<std::size_t>(moved);
         remaining = remaining.subspan(static_cast<std::size_t>(moved));
@@ -152,7 +151,7 @@ struct checkpoint_file_t {
     yyjson_val *root = document != nullptr ? yyjson_doc_get_root(document) : nullptr;
     yyjson_obj_iter iterator;
     if (root == nullptr || !yyjson_obj_iter_init(root, &iterator))
-        return expected_t::fail(status_t::invalid_input_k, "not a safetensors header");
+        return expected_t::fail(status_t::invalid_argument_k, "not a safetensors header");
 
     yyjson_val *key = nullptr;
     while ((key = yyjson_obj_iter_next(&iterator)) != nullptr) {
@@ -161,7 +160,7 @@ struct checkpoint_file_t {
         if (key_text == "__metadata__") {
             yyjson_obj_iter metadata_iterator;
             if (!yyjson_obj_iter_init(value, &metadata_iterator))
-                return expected_t::fail(status_t::invalid_input_k, "__metadata__ is not an object");
+                return expected_t::fail(status_t::invalid_argument_k, "__metadata__ is not an object");
             yyjson_val *metadata_key = nullptr;
             while ((metadata_key = yyjson_obj_iter_next(&metadata_iterator)) != nullptr) {
                 yyjson_val *metadata_value = yyjson_obj_iter_get_val(metadata_key);
@@ -178,7 +177,8 @@ struct checkpoint_file_t {
         }
         yyjson_val *dtype = yyjson_obj_get(value, "dtype");
         char const *dtype_chars = yyjson_get_str(dtype);
-        if (dtype_chars == nullptr) return expected_t::fail(status_t::invalid_input_k, "{} misses its dtype", key_text);
+        if (dtype_chars == nullptr)
+            return expected_t::fail(status_t::invalid_argument_k, "{} misses its dtype", key_text);
         sz::string_view_t const dtype_text {dtype_chars, yyjson_get_len(dtype)};
         checkpoint_dtype_t scalar_type = checkpoint_dtype_t::bf16_k;
         if (dtype_text == "F32") scalar_type = checkpoint_dtype_t::f32_k;
@@ -188,8 +188,8 @@ struct checkpoint_file_t {
         yyjson_val *shape = yyjson_obj_get(value, "shape");
         std::size_t const rank = yyjson_arr_size(shape);
         if (rank == 0 || rank > 2)
-            return expected_t::fail(status_t::shape_unsupported_k, "{} is rank-{} — this cell stores rank-1/2",
-                                    key_text, rank);
+            return expected_t::fail(status_t::unsupported_k, "{} is rank-{} — this cell stores rank-1/2", key_text,
+                                    rank);
         u64_t const cols = yyjson_get_uint(yyjson_arr_get(shape, rank - 1));
         u64_t const rows = rank == 2 ? yyjson_get_uint(yyjson_arr_get(shape, 0)) : 1;
 
@@ -198,8 +198,9 @@ struct checkpoint_file_t {
         u64_t const end = yyjson_get_uint(yyjson_arr_get(offsets, 1));
         bool const in_bounds = begin <= end && end <= payload_bytes && begin % scalar_size == 0;
         if (!in_bounds || end - begin != rows * cols * scalar_size)
-            return expected_t::fail(status_t::invalid_input_k, "{} holds bytes [{}, {}), its shape [{},{}] disagrees",
-                                    key_text, begin, end, rows, cols);
+            return expected_t::fail(status_t::invalid_argument_k,
+                                    "{} holds bytes [{}, {}), its shape [{},{}] disagrees", key_text, begin, end, rows,
+                                    cols);
 
         checkpoint_entry_t entry;
         if (expected_t owned = own_text_(entry.name, key_text); !owned) return owned;
@@ -224,30 +225,30 @@ expected_t checkpoint_to_save_t::reserve(u64_t total_bytes, u64_t tensor_count) 
 expected_t checkpoint_to_save_t::insert(sz::string_view_t name, nk::tensor_view<nk_bf16_t, 2> data) noexcept {
     if (data.stride_bytes(1) != sizeof(nk_bf16_t) ||
         data.stride_bytes(0) != static_cast<std::ptrdiff_t>(data.extent(1) * sizeof(nk_bf16_t)))
-        return expected_t::fail(status_t::shape_unsupported_k, "{} must be contiguous", name);
+        return expected_t::fail(status_t::unsupported_k, "{} must be contiguous", name);
     return insert_(name, checkpoint_dtype_t::bf16_k, bytes_of(data), data.extent(0), data.extent(1));
 }
 
 expected_t checkpoint_to_save_t::insert(sz::string_view_t name, nk::tensor_view<f32_t, 2> data) noexcept {
     if (data.stride_bytes(1) != sizeof(f32_t) ||
         data.stride_bytes(0) != static_cast<std::ptrdiff_t>(data.extent(1) * sizeof(f32_t)))
-        return expected_t::fail(status_t::shape_unsupported_k, "{} must be contiguous", name);
+        return expected_t::fail(status_t::unsupported_k, "{} must be contiguous", name);
     return insert_(name, checkpoint_dtype_t::f32_k, bytes_of(data), data.extent(0), data.extent(1));
 }
 
 expected_t checkpoint_to_save_t::insert_(sz::string_view_t name, checkpoint_dtype_t dtype, bytes_view_t data,
                                          std::size_t rows, std::size_t cols) noexcept {
     if (name.empty() || rows * cols == 0)
-        return expected_t::fail(status_t::invalid_input_k, "an entry needs a name and data");
+        return expected_t::fail(status_t::invalid_argument_k, "an entry needs a name and data");
     std::size_t const scalar_size = scalar_bytes_(dtype);
     if (payload_.size() % scalar_size != 0)
-        return expected_t::fail(status_t::invalid_input_k, "{} would start at byte {}, unaligned for {}", name,
+        return expected_t::fail(status_t::invalid_argument_k, "{} would start at byte {}, unaligned for {}", name,
                                 payload_.size(), dtype_name_(dtype));
     u64_t const key = static_cast<u64_t>(name.hash());
     if (auto const found = index_.find(key); found != index_.end()) {
         if (entries_[found.value()].name.view() == name)
-            return expected_t::fail(status_t::invalid_input_k, "duplicate entry: {}", name);
-        return expected_t::fail(status_t::invalid_input_k, "{} collides with {} in its name hash", name,
+            return expected_t::fail(status_t::invalid_argument_k, "duplicate entry: {}", name);
+        return expected_t::fail(status_t::invalid_argument_k, "{} collides with {} in its name hash", name,
                                 entries_[found.value()].name.view());
     }
 
@@ -285,7 +286,7 @@ expected_t checkpoint_to_save_t::metadata(sz::string_view_t key, sz::string_view
 }
 
 expected_t checkpoint_to_save_t::save(sz::string_view_t path) noexcept {
-    if (entries_.empty()) return expected_t::fail(status_t::invalid_input_k, "a checkpoint needs tensors");
+    if (entries_.empty()) return expected_t::fail(status_t::invalid_argument_k, "a checkpoint needs tensors");
 
     // The header builds in the hoisted scratch through a pool allocator spanning its whole backing —
     // grown lazily, doubling when the pool runs dry, so the buffer settles after the first save and a
@@ -329,11 +330,11 @@ expected_t checkpoint_to_save_t::save(sz::string_view_t path) noexcept {
         std::size_t const payload_base = sizeof(header_length) + header_length;
         if (written) written = write_at_(*file, payload_base, payload_);
         if (written && ::fsync(file->get()) != 0)
-            written = expected_t::fail(status_t::io_error_k, "fsync failed: {}", partial_path.view());
+            written = expected_t::fail(status_t::io_k, "fsync failed: {}", partial_path.view());
         if (!written) return written;
     }
     if (std::rename(partial_path.c_str(), final_path.c_str()) != 0)
-        return expected_t::fail(status_t::io_error_k, "renaming {} over {} failed", partial_path.view(), path);
+        return expected_t::fail(status_t::io_k, "renaming {} over {} failed", partial_path.view(), path);
     return {};
 }
 
@@ -365,11 +366,11 @@ expected<checkpoint_mapping_t> checkpoint_mapping_t::make(sz::string_view_t path
     expected<checkpoint_file_t> file = checkpoint_file_t::make(path, O_RDONLY);
     if (!file) return mapped_t::fail(std::move(file));
     struct ::stat file_stat {};
-    if (::fstat(file->get(), &file_stat) != 0) return mapped_t::fail(status_t::io_error_k, "fstat failed: {}", path);
+    if (::fstat(file->get(), &file_stat) != 0) return mapped_t::fail(status_t::io_k, "fstat failed: {}", path);
     std::size_t const file_bytes = static_cast<std::size_t>(file_stat.st_size);
-    if (file_bytes == 0) return mapped_t::fail(status_t::invalid_input_k, "{} is empty", path);
+    if (file_bytes == 0) return mapped_t::fail(status_t::invalid_argument_k, "{} is empty", path);
     void *const mapped = ::mmap(nullptr, file_bytes, PROT_READ, MAP_PRIVATE, file->get(), 0);
-    if (mapped == MAP_FAILED) return mapped_t::fail(status_t::io_error_k, "mmap failed: {}", path);
+    if (mapped == MAP_FAILED) return mapped_t::fail(status_t::io_k, "mmap failed: {}", path);
     checkpoint_mapping_t mapping;
     mapping.bytes_ = {static_cast<b8_t *>(mapped), file_bytes};
     return mapped_t {std::move(mapping)};
@@ -384,18 +385,18 @@ expected<checkpoint_to_load_t> checkpoint_to_load_t::make(sz::string_view_t path
     return loaded;
 }
 
-expected<checkpoint_to_load_t> checkpoint_to_load_t::view(std::span<b8_t const> buffer) noexcept {
+expected<checkpoint_to_load_t> checkpoint_to_load_t::view(bytes_view_t buffer) noexcept {
     using loaded_t = expected<checkpoint_to_load_t>;
 
     // The length prefix is untrusted bytes until proven otherwise, and the image's own extent is the only
     // honest bound on it: a header the image can't hold is corruption.
     u64_t header_length = 0;
     if (buffer.size() < sizeof(header_length))
-        return loaded_t::fail(status_t::invalid_input_k, "a {}-byte image is shorter than a length prefix",
+        return loaded_t::fail(status_t::invalid_argument_k, "a {}-byte image is shorter than a length prefix",
                               buffer.size());
     std::memcpy(&header_length, buffer.data(), sizeof(header_length));
     if (header_length == 0 || header_length > buffer.size() - sizeof(header_length))
-        return loaded_t::fail(status_t::invalid_input_k, "the image declares a {}-byte header, it holds {}",
+        return loaded_t::fail(status_t::invalid_argument_k, "the image declares a {}-byte header, it holds {}",
                               header_length, buffer.size());
     u64_t const payload_bytes = buffer.size() - sizeof(header_length) - header_length;
 
@@ -417,7 +418,7 @@ expected<checkpoint_to_load_t> checkpoint_to_load_t::view(std::span<b8_t const> 
         sz::string_view_t const name = loaded.entries_[position].name.view();
         u64_t const key = static_cast<u64_t>(name.hash());
         if (auto const found = loaded.index_.find(key); found != loaded.index_.end())
-            return loaded_t::fail(status_t::invalid_input_k, "{} and {} share a name hash",
+            return loaded_t::fail(status_t::invalid_argument_k, "{} and {} share a name hash",
                                   loaded.entries_[found.value()].name.view(), name);
         if (st::failed(loaded.index_.upsert(st::mapping<u64_t, u32_t> {key, static_cast<u32_t>(position)})))
             return loaded_t::fail(status_t::bad_alloc_k, "entry index growth failed");

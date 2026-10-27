@@ -184,7 +184,7 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
     st::basic_vector<differentiable_weights_t> const &weights, gpu_stream_t &stream) noexcept {
     using result_t = expected<st::basic_vector<bf16_t>>;
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed");
+    if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed");
     std::span<differentiable_weights_t const> const list = weights;
     std::size_t total = 0, largest = 0;
     for (differentiable_weights_t const &matrix : list) {
@@ -218,7 +218,7 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
                                                                        gpu_stream_t &stream) noexcept {
     using result_t = expected<st::basic_vector<bf16_t>>;
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed");
+    if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed");
     bf16r2_view_t const view = replica.normalized_grad.view();
     std::size_t const scalars = static_cast<std::size_t>(view.extent(0)) * view.extent(1);
     nk::tensor<bf16_t, pinned_alloc<bf16_t>, 1> staging =
@@ -690,7 +690,7 @@ static void late_interaction_resume(test_suite_t &suite, world_health_t &health,
         switch_to_gpu_t gpu_scope {trainer.streams[0]};
         expected_t stepped = read_temperatures_(trainer.replicas[0], trainer.streams[0], started)
                                  ? run_steps_(trainer, 0, 3)
-                                 : expected_t::fail(status_t::cuda_error_k, "temperature download failed");
+                                 : expected_t::fail(status_t::device_error_k, "temperature download failed");
         if (stepped) stepped = trainer.synchronize();
         if (stepped) stepped = trainer.save(path);
         if (stepped) stepped = run_steps_(trainer, 3, 4);

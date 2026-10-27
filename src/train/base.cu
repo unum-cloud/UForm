@@ -372,9 +372,9 @@ expected_t ut::load_weights(checkpoint_to_load_t const &checkpoint,
             continue;
         }
         if (saved.empty())
-            return expected_t::fail(status_t::invalid_input_k, "the checkpoint misses {}", name_text.view());
+            return expected_t::fail(status_t::invalid_argument_k, "the checkpoint misses {}", name_text.view());
         if (saved.extent(0) != matrix.weights.extent(0) || saved.extent(1) != matrix.weights.extent(1))
-            return expected_t::fail(status_t::shape_unsupported_k, "{} is [{},{}] in the checkpoint, [{},{}] live",
+            return expected_t::fail(status_t::unsupported_k, "{} is [{},{}] in the checkpoint, [{},{}] live",
                                     name_text.view(), saved.extent(0), saved.extent(1), matrix.weights.extent(0),
                                     matrix.weights.extent(1));
         if (CUresult result = cuMemcpyHtoDAsync(device_address(matrix.weights.data()), saved.data(),
@@ -389,7 +389,7 @@ expected_t ut::save_weights(checkpoint_to_save_t &checkpoint, trainer_config_t c
                             st::basic_vector<differentiable_weights_t> const &weights, u32_t steps,
                             gpu_stream_t &stream) noexcept {
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
+    if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
     std::span<differentiable_weights_t const> const list {weights};
     u64_t largest_scalars = 0;
     for (differentiable_weights_t const &matrix : list)
@@ -457,7 +457,7 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
             config.capture = eager_k;
             continue;
         }
-        if (arg + 1 == argc) return result_t::fail(status_t::invalid_input_k, "{} takes a value", flag);
+        if (arg + 1 == argc) return result_t::fail(status_t::invalid_argument_k, "{} takes a value", flag);
         ++arg;
         sz::string_view_t const value {argv[arg], std::strlen(argv[arg])};
         auto number = [&](auto &into) noexcept {
@@ -526,10 +526,11 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
             else if (value == "timings") config.telemetry_channels |= telemetry_timings_k;
             else taken = false;
         }
-        else return result_t::fail(status_t::invalid_input_k, "unknown flag {}", flag);
-        if (!taken) return result_t::fail(status_t::invalid_input_k, "{} does not take {}", flag, value);
+        else return result_t::fail(status_t::invalid_argument_k, "unknown flag {}", flag);
+        if (!taken) return result_t::fail(status_t::invalid_argument_k, "{} does not take {}", flag, value);
     }
-    if (!tier.hidden) return result_t::fail(status_t::invalid_input_k, "pass --tier tiny, small, medium, large or xl");
+    if (!tier.hidden)
+        return result_t::fail(status_t::invalid_argument_k, "pass --tier tiny, small, medium, large or xl");
     config.hidden = tier.hidden, config.depth = tier.depth;
     config.learning_rate = learning_rate != 0.0f ? learning_rate : tier.learning_rate;
     // Every tier trains the nested prefixes 64…1024 that fit its width, then the full width.
@@ -547,7 +548,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
     encoder_tower_config_t const tower_config = tower_config_(config);
     if (tower_config.rope_max_positions > static_cast<u32_t>(std::numeric_limits<i16_t>::max()))
         return result_t::fail(
-            status_t::shape_unsupported_k,
+            status_t::unsupported_k,
             "coordinates reach {} positions, past the i16 ceiling of {} (columns={} tube_frames={} " //
             "frame_stride={})",
             tower_config.rope_max_positions, std::numeric_limits<i16_t>::max(), shape.max_columns_per_row,
@@ -570,7 +571,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
     bool const video_live = reconstructs && shape.contains(modality_t::video_k);
     bool const audio_live = reconstructs && shape.contains(modality_t::audio_k);
     if (chooses && shape.max_choices_per_segment == 0)
-        return result_t::fail(status_t::invalid_input_k, "choices need the batch's max_choices_per_segment");
+        return result_t::fail(status_t::invalid_argument_k, "choices need the batch's max_choices_per_segment");
     if (reconstructs || chooses) {
         masked_tokens_config_t tokens_config;
         tokens_config.hidden = config.hidden;
@@ -673,7 +674,7 @@ expected<base_replica_t> base_replica_t::make(gpu_arena_t &arena, trainer_config
     }
     if (config.late_interacts()) {
         if (!config.contrasts())
-            return result_t::fail(status_t::invalid_input_k, "late interaction reads the contrastive relations");
+            return result_t::fail(status_t::invalid_argument_k, "late interaction reads the contrastive relations");
         u32_t const groups = std::max(config.contrastive.temperature_groups, 1u);
         replica.token_vectors_grad =
             bf16r2_tensor_arena_t::uninitialized({max_tokens, config.late_interaction.width}, bf16_alloc).value;

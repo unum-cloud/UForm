@@ -202,13 +202,12 @@ expected<infiniband_nic_t> infiniband_nic_t::make(u32_t local_gpu_index, u8_t in
     char gpu_path[PATH_MAX] = {};
     if (!format_into(gpu_link, "/sys/bus/pci/devices/{:04x}:{:02x}:{:02x}.0", pci_domain, pci_bus, pci_device) ||
         ::realpath(gpu_link.c_str(), gpu_path) == nullptr)
-        return expected<infiniband_nic_t>::fail(status_t::io_error_k, "GPU {} has no sysfs PCI path", local_gpu_index);
+        return expected<infiniband_nic_t>::fail(status_t::io_k, "GPU {} has no sysfs PCI path", local_gpu_index);
 
     int device_count = 0;
     ibv_device **device_list = ibv_get_device_list(&device_count);
     if (device_list == nullptr)
-        return expected<infiniband_nic_t>::fail(status_t::io_error_k,
-                                                "no RDMA devices visible (is the RDMA stack loaded?)");
+        return expected<infiniband_nic_t>::fail(status_t::io_k, "no RDMA devices visible (is the RDMA stack loaded?)");
     // The adapter sharing the deepest PCIe switch with the GPU serves it, and among one card's
     // functions the first port that can route.
     ibv_device *chosen_device = nullptr;
@@ -245,7 +244,7 @@ expected<infiniband_nic_t> infiniband_nic_t::make(u32_t local_gpu_index, u8_t in
                        !sz::failed(nic_name.assign(sz::string_view_t {ibv_get_device_name(chosen_device)}));
     ibv_free_device_list(device_list);
     if (nic.device_context_ == nullptr)
-        return expected<infiniband_nic_t>::fail(status_t::io_error_k, "no active RDMA port can route for GPU {} at {}",
+        return expected<infiniband_nic_t>::fail(status_t::io_k, "no active RDMA port can route for GPU {} at {}",
                                                 local_gpu_index, gpu_path);
     if (!named) return expected<infiniband_nic_t>::fail(status_t::bad_alloc_k, "NIC name allocation failed");
 
@@ -253,20 +252,19 @@ expected<infiniband_nic_t> infiniband_nic_t::make(u32_t local_gpu_index, u8_t in
     nic.path_mtu_ = static_cast<unsigned>(port_attributes.active_mtu);
     ibv_gid port_gid {};
     if (ibv_query_gid(nic.device_context_, infiniband_port, nic.global_identifier_index_, &port_gid) != 0)
-        return expected<infiniband_nic_t>::fail(status_t::io_error_k, "GID query failed on \"{}\" port {}", nic_name,
+        return expected<infiniband_nic_t>::fail(status_t::io_k, "GID query failed on \"{}\" port {}", nic_name,
                                                 infiniband_port);
     std::memcpy(nic.global_identifier_, port_gid.raw, sizeof(nic.global_identifier_));
 
     nic.protection_domain_ = ibv_alloc_pd(nic.device_context_);
     if (nic.protection_domain_ == nullptr)
-        return expected<infiniband_nic_t>::fail(status_t::io_error_k, "protection-domain allocation failed on {}",
-                                                nic_name);
+        return expected<infiniband_nic_t>::fail(status_t::io_k, "protection-domain allocation failed on {}", nic_name);
     return expected<infiniband_nic_t> {std::move(nic)};
 }
 
 expected<infiniband_endpoint_t> infiniband_endpoint_t::make(infiniband_nic_t &nic, b8r1_span_t gpu_buffer) noexcept {
     if (nic.context() == nullptr || gpu_buffer.empty())
-        return expected<infiniband_endpoint_t>::fail(status_t::invalid_input_k,
+        return expected<infiniband_endpoint_t>::fail(status_t::invalid_argument_k,
                                                      "an endpoint needs an opened NIC and a non-empty buffer");
     infiniband_endpoint_t endpoint;
     endpoint.infiniband_port_ = nic.port();
@@ -276,7 +274,7 @@ expected<infiniband_endpoint_t> infiniband_endpoint_t::make(infiniband_nic_t &ni
 
     endpoint.completion_queue_ = ibv_create_cq(nic.context(), infiniband_queue_depth_k, nullptr, nullptr, 0);
     if (endpoint.completion_queue_ == nullptr)
-        return expected<infiniband_endpoint_t>::fail(status_t::io_error_k, "completion-queue creation failed");
+        return expected<infiniband_endpoint_t>::fail(status_t::io_k, "completion-queue creation failed");
 
     ibv_qp_init_attr queue_pair_config {};
     queue_pair_config.send_cq = endpoint.completion_queue_;
@@ -289,8 +287,7 @@ expected<infiniband_endpoint_t> infiniband_endpoint_t::make(infiniband_nic_t &ni
     queue_pair_config.cap.max_recv_sge = 1;
     endpoint.queue_pair_ = ibv_create_qp(nic.protection_domain(), &queue_pair_config);
     if (endpoint.queue_pair_ == nullptr)
-        return expected<infiniband_endpoint_t>::fail(status_t::io_error_k,
-                                                     "Reliable-Connection queue-pair creation failed");
+        return expected<infiniband_endpoint_t>::fail(status_t::io_k, "Reliable-Connection queue-pair creation failed");
 
     if (expected_t registered = endpoint.register_gpu_memory_(nic.protection_domain()); !registered)
         return expected<infiniband_endpoint_t>::fail(std::move(registered));
@@ -315,7 +312,7 @@ expected_t infiniband_endpoint_t::connect(infiniband_coordinates_t const &peer) 
     to_initialized.qp_access_flags = infiniband_access_flags_k;
     int const initialized_mask = IBV_QP_STATE | IBV_QP_PKEY_INDEX | IBV_QP_PORT | IBV_QP_ACCESS_FLAGS;
     if (ibv_modify_qp(queue_pair_, &to_initialized, initialized_mask) != 0)
-        return expected_t::fail(status_t::io_error_k, "queue-pair transition to INIT failed");
+        return expected_t::fail(status_t::io_k, "queue-pair transition to INIT failed");
 
     ibv_qp_attr to_ready_to_receive {};
     to_ready_to_receive.qp_state = IBV_QPS_RTR;
@@ -336,7 +333,7 @@ expected_t infiniband_endpoint_t::connect(infiniband_coordinates_t const &peer) 
     int const ready_to_receive_mask = IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN | IBV_QP_RQ_PSN |
                                       IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER;
     if (ibv_modify_qp(queue_pair_, &to_ready_to_receive, ready_to_receive_mask) != 0)
-        return expected_t::fail(status_t::io_error_k, "queue-pair transition to RTR failed (peer lid={} qpn={})",
+        return expected_t::fail(status_t::io_k, "queue-pair transition to RTR failed (peer lid={} qpn={})",
                                 peer.local_identifier, peer.queue_pair_number);
 
     ibv_qp_attr to_ready_to_send {};
@@ -349,7 +346,7 @@ expected_t infiniband_endpoint_t::connect(infiniband_coordinates_t const &peer) 
     int const ready_to_send_mask = IBV_QP_STATE | IBV_QP_SQ_PSN | IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
                                    IBV_QP_MAX_QP_RD_ATOMIC;
     if (ibv_modify_qp(queue_pair_, &to_ready_to_send, ready_to_send_mask) != 0)
-        return expected_t::fail(status_t::io_error_k, "queue-pair transition to RTS failed");
+        return expected_t::fail(status_t::io_k, "queue-pair transition to RTS failed");
     return {};
 }
 
@@ -376,7 +373,7 @@ expected_t infiniband_endpoint_t::register_gpu_memory_(ibv_pd *protection_domain
     memory_region_ = ibv_reg_mr(protection_domain, gpu_buffer_.data(), gpu_buffer_.extent(0),
                                 infiniband_access_flags_k);
     if (memory_region_ == nullptr)
-        return expected_t::fail(status_t::io_error_k,
+        return expected_t::fail(status_t::io_k,
                                 "GPU memory-region registration failed: dmabuf export {} (fd={}), " //
                                 "ibv_reg_mr errno={} ({} bytes at 0x{:x})",
                                 exported == CUDA_SUCCESS ? "ok" : "unsupported", dmabuf_descriptor, errno,
@@ -387,18 +384,18 @@ expected_t infiniband_endpoint_t::register_gpu_memory_(ibv_pd *protection_domain
 expected<infiniband_queue_mapping_t> infiniband_queue_mapping_t::make(ibv_qp *queue_pair, gpu_arena_t &arena,
                                                                       host_page_registry_t &registry) noexcept {
     if (queue_pair == nullptr)
-        return expected<infiniband_queue_mapping_t>::fail(status_t::invalid_input_k, "null queue pair");
+        return expected<infiniband_queue_mapping_t>::fail(status_t::invalid_argument_k, "null queue pair");
     mlx5dv_qp raw_queue {};
     mlx5dv_obj object {};
     object.qp.in = queue_pair;
     object.qp.out = &raw_queue;
     if (mlx5dv_init_obj(&object, MLX5DV_OBJ_QP) != 0)
-        return expected<infiniband_queue_mapping_t>::fail(status_t::io_error_k,
+        return expected<infiniband_queue_mapping_t>::fail(status_t::io_k,
                                                           "the mlx5 provider refused to expose the queue pair");
     if (raw_queue.sq.buf == nullptr || raw_queue.dbrec == nullptr || raw_queue.bf.reg == nullptr ||
         raw_queue.sq.wqe_cnt == 0)
         return expected<infiniband_queue_mapping_t>::fail(
-            status_t::io_error_k, "the mlx5 provider exposed a null send queue / doorbell / BlueFlame register");
+            status_t::io_k, "the mlx5 provider exposed a null send queue / doorbell / BlueFlame register");
 
     infiniband_queue_mapping_t mapping;
     mapping.handles_.queue_pair_number = queue_pair->qp_num;
@@ -427,7 +424,7 @@ expected<infiniband_queue_mapping_t> infiniband_queue_mapping_t::make(ibv_qp *qu
     bytes_span_t const blueflame_host {static_cast<b8_t *>(raw_queue.bf.reg), blueflame_bytes};
     if (expected_t mapped = registry.acquire(blueflame_host, host_memory_t::mmio_k, blueflame_device); !mapped)
         return expected<infiniband_queue_mapping_t>::fail( //
-            status_t::io_error_k,
+            status_t::io_k,
             "the BlueFlame MMIO page would not map into GPU address space (CU_MEMHOSTREGISTER_IOMEMORY) — " //
             "device-initiated GDAKI is blocked on this platform: {}",
             mapped.description_);
@@ -450,22 +447,21 @@ expected<infiniband_queue_mapping_t> infiniband_queue_mapping_t::make(ibv_qp *qu
 expected<infiniband_completion_mapping_t> infiniband_completion_mapping_t::make(
     ibv_cq *completion_queue, gpu_arena_t &arena, host_page_registry_t &registry) noexcept {
     if (completion_queue == nullptr)
-        return expected<infiniband_completion_mapping_t>::fail(status_t::invalid_input_k, "null completion queue");
+        return expected<infiniband_completion_mapping_t>::fail(status_t::invalid_argument_k, "null completion queue");
     mlx5dv_cq raw_completion {};
     mlx5dv_obj object {};
     object.cq.in = completion_queue;
     object.cq.out = &raw_completion;
     if (mlx5dv_init_obj(&object, MLX5DV_OBJ_CQ) != 0)
         return expected<infiniband_completion_mapping_t>::fail(
-            status_t::io_error_k, "the mlx5 provider refused to expose the completion queue");
+            status_t::io_k, "the mlx5 provider refused to expose the completion queue");
     if (raw_completion.buf == nullptr || raw_completion.dbrec == nullptr || raw_completion.cqe_cnt == 0 ||
         raw_completion.cqe_size == 0)
         return expected<infiniband_completion_mapping_t>::fail(
-            status_t::io_error_k, "the mlx5 provider exposed a null completion ring / doorbell");
+            status_t::io_k, "the mlx5 provider exposed a null completion ring / doorbell");
     if ((raw_completion.cqe_cnt & (raw_completion.cqe_cnt - 1u)) != 0)
-        return expected<infiniband_completion_mapping_t>::fail(status_t::shape_unsupported_k,
-                                                               "the completion ring must be a power of two (got {})",
-                                                               raw_completion.cqe_cnt);
+        return expected<infiniband_completion_mapping_t>::fail(
+            status_t::unsupported_k, "the completion ring must be a power of two (got {})", raw_completion.cqe_cnt);
 
     infiniband_completion_mapping_t mapping;
     mapping.handles_.entry_count = raw_completion.cqe_cnt;
@@ -521,7 +517,7 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
     u32_t const domains = shape.multimem_domain_count();
     u32_t const domain_index = topology.multimem_domain_index();
     if (layout.rounds == 0 || layout.payload_bytes == 0)
-        return result_t::fail(status_t::invalid_input_k, "a member needs rounds and a payload (rounds={} bytes={})",
+        return result_t::fail(status_t::invalid_argument_k, "a member needs rounds and a payload (rounds={} bytes={})",
                               layout.rounds, layout.payload_bytes);
 
     infiniband_reach_t member;
@@ -540,12 +536,12 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
     // The heap zero and the round seed share the member's stream and land before any partner can
     // write: on the legacy stream the zero could follow the seed, so the sides disagreed on parity.
     if (cuMemsetD8Async(device_address(member.heap_.data()), 0, heap_bytes, stream.get()) != CUDA_SUCCESS)
-        return result_t::fail(status_t::cuda_error_k, "member heap reset failed");
+        return result_t::fail(status_t::device_error_k, "member heap reset failed");
     expected<barrier_round_t> counter = barrier_round_t::make(u32r1_span_t {member.round_scalar_.data(), 1},
                                                               layout.rounds, stream);
     if (!counter) return result_t::fail(std::move(counter));
     if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
-        return result_t::fail(status_t::cuda_error_k, "member heap reset did not land");
+        return result_t::fail(status_t::device_error_k, "member heap reset did not land");
     member.round_ = std::move(counter.value_);
     if (st::failed(member.endpoints_.resize(layout.rounds)) || st::failed(member.queues_.resize(layout.rounds)) ||
         st::failed(member.completions_.resize(layout.rounds)))
@@ -561,7 +557,7 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
     for (u32_t round = 0; round != layout.rounds; ++round) {
         u32_t const partner_domain = domain_index ^ (1u << round);
         if (partner_domain >= domains)
-            return result_t::fail(status_t::shape_unsupported_k,
+            return result_t::fail(status_t::unsupported_k,
                                   "non-power-of-two domain counts are unsupported ({} domains)", domains);
         expected<infiniband_endpoint_t> endpoint = infiniband_endpoint_t::make(nic, heap_span);
         if (!endpoint) return result_t::fail(std::move(endpoint));

@@ -22,8 +22,8 @@ using namespace unum::uform::utilities;
 expected<matryoshka_prefixes_t> matryoshka_prefixes_t::make(u32r1_view_t prefix_dims, std::size_t hidden) noexcept {
     std::size_t const count = prefix_dims.extent(0);
     if (count == 0 || count > max_matryoshka_prefixes_k)
-        return expected<matryoshka_prefixes_t>::fail(
-            status_t::shape_unsupported_k, "need 1..{} Matryoshka prefixes (got {})", max_matryoshka_prefixes_k, count);
+        return expected<matryoshka_prefixes_t>::fail(status_t::unsupported_k, "need 1..{} Matryoshka prefixes (got {})",
+                                                     max_matryoshka_prefixes_k, count);
     matryoshka_prefixes_t prefixes;
     prefixes.count_ = static_cast<u32_t>(count);
     for (std::size_t prefix_index = 0; prefix_index != count; ++prefix_index) {
@@ -31,7 +31,7 @@ expected<matryoshka_prefixes_t> matryoshka_prefixes_t::make(u32r1_view_t prefix_
         u32_t const previous = prefix_index != 0 ? prefix_dims[prefix_index - 1] : 0u;
         if (dim <= previous || dim > hidden)
             return expected<matryoshka_prefixes_t>::fail( //
-                status_t::shape_unsupported_k,
+                status_t::unsupported_k,
                 "prefix dims must ascend strictly within hidden (prefix={} dim={} previous={} hidden={})", prefix_index,
                 dim, previous, hidden);
         prefixes.dims_[prefix_index] = dim;
@@ -689,7 +689,7 @@ expected<contrastive_pair_loss_t> contrastive_pair_loss_t::make(gpu_arena_t &are
                                                                 contrastive_pair_loss_form_t form) noexcept {
     using result_t = expected<contrastive_pair_loss_t>;
     if (rows == 0 || candidates_per_row == 0)
-        return result_t::fail(status_t::shape_unsupported_k, "a pair loss needs rows and candidates ({}x{})", rows,
+        return result_t::fail(status_t::unsupported_k, "a pair loss needs rows and candidates ({}x{})", rows,
                               candidates_per_row);
     contrastive_pair_loss_t loss;
     loss.form_ = form;
@@ -711,17 +711,17 @@ expected_t contrastive_pair_loss_t::operator()(f32r4_span_t logits, contrastive_
     std::size_t const rows = from_vertex_accumulator_.extent(1);
     std::size_t const candidates = logits.extent(1) * logits.extent(3);
     if (logits.extent(2) != rows || relations.from_vertices_per_gpu() != rows)
-        return expected_t::fail(status_t::shape_unsupported_k, "{} logit rows and {} relation rows, {} baked",
+        return expected_t::fail(status_t::unsupported_k, "{} logit rows and {} relation rows, {} baked",
                                 logits.extent(2), relations.from_vertices_per_gpu(), rows);
     if (form_ == contrastive_pair_loss_form_t::ranked_k && candidates != ranked_grad_.extent(1))
-        return expected_t::fail(status_t::shape_unsupported_k, "{} candidates per row, {} baked", candidates,
+        return expected_t::fail(status_t::unsupported_k, "{} candidates per row, {} baked", candidates,
                                 ranked_grad_.extent(1));
     if (loss_out.empty() || live_anchors.empty())
-        return expected_t::fail(status_t::invalid_input_k, "the loss and the live count need one element each");
+        return expected_t::fail(status_t::invalid_argument_k, "the loss and the live count need one element each");
     u32_t const groups = recipe.temperature_group_count();
     if ((!bias_grad.empty() && bias_grad.extent(0) < groups) ||
         (!log_inverse_temperature_grad.empty() && log_inverse_temperature_grad.extent(0) < groups))
-        return expected_t::fail(status_t::shape_unsupported_k, "temperature gradients must span the {} groups", groups);
+        return expected_t::fail(status_t::unsupported_k, "temperature gradients must span the {} groups", groups);
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const row_grid {static_cast<u32_t>(rows), 1u, 1u};
     expected_t launched {};
@@ -748,11 +748,11 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
                                                               u32r1_view_t prefix_dims,
                                                               gpu_numerics_t const &numerics) noexcept {
     if (config.from_vertices_per_gpu == 0 || config.hidden == 0)
-        return expected<contrastive_segments_t>::fail(status_t::shape_unsupported_k,
+        return expected<contrastive_segments_t>::fail(status_t::unsupported_k,
                                                       "the segments loss scores pooled rows (vertices={} hidden={})",
                                                       config.from_vertices_per_gpu, config.hidden);
     if (config.to_vertices_per_gpu == 0 || config.gpu_subgraphs_per_step == 0)
-        return expected<contrastive_segments_t>::fail(status_t::invalid_input_k,
+        return expected<contrastive_segments_t>::fail(status_t::invalid_argument_k,
                                                       "need at least one subgraph of at least one vertex");
     expected<matryoshka_prefixes_t> prefixes = matryoshka_prefixes_t::make(prefix_dims, config.hidden);
     if (!prefixes) return expected<contrastive_segments_t>::fail(std::move(prefixes));
@@ -761,7 +761,7 @@ expected<contrastive_segments_t> contrastive_segments_t::make(gpu_arena_t &arena
         aligned = aligned && prefixes.value_.segment_begin(segment) % 8u == 0u;
     if (!aligned)
         return expected<contrastive_segments_t>::fail(
-            status_t::shape_unsupported_k, "hidden and every prefix must be multiples of 8 (hidden={})", config.hidden);
+            status_t::unsupported_k, "hidden and every prefix must be multiples of 8 (hidden={})", config.hidden);
 
     contrastive_segments_t loss;
     loss.prefixes_ = prefixes.value_;
@@ -844,13 +844,13 @@ expected_t contrastive_segments_t::score_(bf16r2_view_t vertices, nk::tensor_vie
                                           contrastive_relations_view_t relations, contrastive_recipe_t recipe,
                                           gpu_stream_t &stream) noexcept {
     if (vertices.extent(0) != config_.from_vertices_per_gpu || vertices.extent(1) != config_.hidden)
-        return expected_t::fail(status_t::shape_unsupported_k, "vertex tower [{}x{}] disagrees with the baked [{}x{}]",
+        return expected_t::fail(status_t::unsupported_k, "vertex tower [{}x{}] disagrees with the baked [{}x{}]",
                                 vertices.extent(0), vertices.extent(1), config_.from_vertices_per_gpu, config_.hidden);
     if (gpu_subgraphs.extent(0) != config_.gpu_subgraphs_per_step)
-        return expected_t::fail(status_t::shape_unsupported_k, "{} gpu_subgraphs staged, {} baked",
-                                gpu_subgraphs.extent(0), config_.gpu_subgraphs_per_step);
+        return expected_t::fail(status_t::unsupported_k, "{} gpu_subgraphs staged, {} baked", gpu_subgraphs.extent(0),
+                                config_.gpu_subgraphs_per_step);
     if (relations.from_vertices_per_gpu() != config_.from_vertices_per_gpu)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "the relation graph describes {} vertices, the loss was baked for {}",
                                 relations.from_vertices_per_gpu(), config_.from_vertices_per_gpu);
     std::size_t const to_vertices_per_mesh = static_cast<std::size_t>(config_.to_vertices_per_gpu) *
@@ -861,18 +861,17 @@ expected_t contrastive_segments_t::score_(bf16r2_view_t vertices, nk::tensor_vie
             subgraph.to_vertices.extent(1) != config_.hidden ||
             subgraph.to_vertices_grad.extent(0) != config_.to_vertices_per_gpu ||
             subgraph.to_vertices_grad.extent(1) != config_.hidden)
-            return expected_t::fail(status_t::shape_unsupported_k, "subgraph {} disagrees with the baked [{}x{}]",
+            return expected_t::fail(status_t::unsupported_k, "subgraph {} disagrees with the baked [{}x{}]",
                                     subgraph_index, config_.to_vertices_per_gpu, config_.hidden);
         if (subgraph.global_offset != subgraph_index * static_cast<std::size_t>(config_.to_vertices_per_gpu))
-            return expected_t::fail(status_t::shape_unsupported_k,
-                                    "subgraphs must tile the global vertex axis in order (offset={} expected={})",
-                                    subgraph.global_offset,
-                                    subgraph_index * static_cast<std::size_t>(config_.to_vertices_per_gpu));
+            return expected_t::fail(
+                status_t::unsupported_k, "subgraphs must tile the global vertex axis in order (offset={} expected={})",
+                subgraph.global_offset, subgraph_index * static_cast<std::size_t>(config_.to_vertices_per_gpu));
     }
     if (!relations.has_explicit_attract_edges() &&
         to_vertices_per_mesh < relations.self_edge_base + config_.from_vertices_per_gpu)
         return expected_t::fail( //
-            status_t::shape_unsupported_k,
+            status_t::unsupported_k,
             "self-edges need to_vertices_per_mesh>=self_edge_base+from_vertices_per_gpu " //
             "(neighbors={} base={} vertices={})",
             to_vertices_per_mesh, relations.self_edge_base, config_.from_vertices_per_gpu);
@@ -982,18 +981,17 @@ expected_t contrastive_segments_t::operator()(bf16r2_view_t vertices, nk::tensor
                                               gpu_stream_t &stream, f32r1_span_t log_inverse_temperature_grad,
                                               f32r1_span_t bias_grad) noexcept {
 
-    if (loss_out.empty()) return expected_t::fail(status_t::invalid_input_k, "a one-element loss_out span is required");
+    if (loss_out.empty())
+        return expected_t::fail(status_t::invalid_argument_k, "a one-element loss_out span is required");
     if (from_vertices_grad.extent(0) != config_.from_vertices_per_gpu || from_vertices_grad.extent(1) != config_.hidden)
-        return expected_t::fail(status_t::shape_unsupported_k,
-                                "from_vertices_grad shape disagrees with the baked [{}x{}]",
+        return expected_t::fail(status_t::unsupported_k, "from_vertices_grad shape disagrees with the baked [{}x{}]",
                                 config_.from_vertices_per_gpu, config_.hidden);
     if (!bias_grad.empty() && bias_grad.extent(0) < recipe.temperature_group_count())
-        return expected_t::fail(status_t::shape_unsupported_k, "bias_grad must span the {} pair types",
+        return expected_t::fail(status_t::unsupported_k, "bias_grad must span the {} pair types",
                                 recipe.temperature_group_count());
     if (!log_inverse_temperature_grad.empty() &&
         log_inverse_temperature_grad.extent(0) < recipe.temperature_group_count())
-        return expected_t::fail(status_t::shape_unsupported_k,
-                                "log_inverse_temperature_grad must span the {} pair types",
+        return expected_t::fail(status_t::unsupported_k, "log_inverse_temperature_grad must span the {} pair types",
                                 recipe.temperature_group_count());
     if (expected_t scored = score_(vertices, gpu_subgraphs, relations, recipe, stream); !scored) return scored;
     // Zero the Float32 owned-vertex force; the pair loss writes every row of its own accumulator.
@@ -1146,13 +1144,13 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     u32_t const domains = colocated.multimem_domain_count();
     if (gpus == 0 || streams.size() != gpus || domain.local_member_count() != gpus || towers.size() != gpus ||
         relations.size() != gpus || from_vertices_grads.size() != gpus)
-        return result_t::fail(status_t::invalid_input_k,
+        return result_t::fail(status_t::invalid_argument_k,
                               "every rank needs an arena, stream, tower, relations, gradient, " //
                               "and local domain member ({} ranks, {} local members)",
                               gpus, domain.local_member_count());
     if (config.gpu_subgraphs_per_step != members * domains ||
         config.to_vertices_per_gpu != config.from_vertices_per_gpu)
-        return result_t::fail(status_t::shape_unsupported_k,
+        return result_t::fail(status_t::unsupported_k,
                               "the self-scoring world scores one subgraph per GPU " //
                               "(subgraphs={} members={} domains={} neighbors={} vertices={})",
                               config.gpu_subgraphs_per_step, members, domains, config.to_vertices_per_gpu,
@@ -1190,7 +1188,7 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     for (std::size_t rank = 0; rank != gpus; ++rank)
         for (std::size_t peer = 0; peer != gpus; ++peer)
             if (!arenas[rank].is_visible_to(static_cast<int>(peer)))
-                return result_t::fail(status_t::invalid_input_k,
+                return result_t::fail(status_t::invalid_argument_k,
                                       "rank {}'s arena is not visible to device {} — " //
                                       "construct it with `visible_to`",
                                       rank, peer);
@@ -1209,7 +1207,7 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     // entered through the context the rank's stream already owns.
     for (std::size_t rank = 0; rank != gpus; ++rank) {
         switch_to_gpu_t gpu_scope {streams[rank]};
-        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (rank={})", rank);
+        if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed (rank={})", rank);
         expected<contrastive_segments_t> loss = contrastive_segments_t::make(arenas[rank], config, prefix_dims,
                                                                              numerics);
         if (!loss) return result_t::fail(std::move(loss));
@@ -1228,7 +1226,7 @@ expected<distributed_contrastive_segments_t> distributed_contrastive_segments_t:
     // The gather member, wired only where member 0 lives, and the per-rank loss summands on the lead device.
     {
         switch_to_gpu_t gpu_scope {streams[0]};
-        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (rank=0)");
+        if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed (rank=0)");
         expected<infiniband_all_gather<bf16_t>> gather_buffer = infiniband_all_gather<bf16_t>::make(
             colocated, 0, arenas[0], members * tower_scalars, streams[0], timeout_seconds);
         if (!gather_buffer) return result_t::fail(std::move(gather_buffer));
@@ -1276,9 +1274,9 @@ expected_t distributed_contrastive_segments_t::stage_world_tower_(std::size_t ra
 expected_t distributed_contrastive_segments_t::evaluate(std::size_t rank, contrastive_recipe_t recipe,
                                                         gpu_stream_t &stream) noexcept {
     if (rank >= losses_.size())
-        return expected_t::fail(status_t::invalid_input_k, "rank {} of {}", rank, losses_.size());
+        return expected_t::fail(status_t::invalid_argument_k, "rank {} of {}", rank, losses_.size());
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed ({})", rank);
+    if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed ({})", rank);
     std::size_t const member = domain_->member_offset() + rank;
     bf16r2_view_t const own_tower = world_tower_window_.scalars != 0 ? gather_sources_[rank]
                                                                      : subgraph_tables_[rank][rank].to_vertices;
@@ -1297,13 +1295,13 @@ expected_t distributed_contrastive_segments_t::operator()(std::size_t rank, cont
     std::size_t const subgraphs = config_.gpu_subgraphs_per_step;
     std::size_t const tower_scalars = static_cast<std::size_t>(config_.from_vertices_per_gpu) * config_.hidden;
     std::size_t const force_scalars = subgraphs * tower_scalars, groups = config_.temperature_groups;
-    if (rank >= gpus) return expected_t::fail(status_t::invalid_input_k, "rank {} of {}", rank, gpus);
+    if (rank >= gpus) return expected_t::fail(status_t::invalid_argument_k, "rank {} of {}", rank, gpus);
     if (recipe.temperature_group_count() > groups)
-        return expected_t::fail(status_t::shape_unsupported_k, "the recipe selects {} temperature groups of {}",
+        return expected_t::fail(status_t::unsupported_k, "the recipe selects {} temperature groups of {}",
                                 recipe.temperature_group_count(), groups);
 
     switch_to_gpu_t gpu_scope {stream};
-    if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed ({})", rank);
+    if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed ({})", rank);
 
     std::size_t const member = domain_->member_offset() + rank;
     expected_t staged = stage_world_tower_(rank, stream);
@@ -1357,7 +1355,7 @@ expected_t distributed_contrastive_segments_t::operator()(contrastive_recipe_t r
                                                           std::span<gpu_stream_t> streams) noexcept {
     std::size_t const gpus = losses_.size();
     if (streams.size() != gpus)
-        return expected_t::fail(status_t::invalid_input_k, "every rank needs its stream ({} ranks)", gpus);
+        return expected_t::fail(status_t::invalid_argument_k, "every rank needs its stream ({} ranks)", gpus);
     for (std::size_t rank = 0; rank != gpus; ++rank)
         if (expected_t staged = (*this)(rank, recipe, streams[rank]); !staged) return staged;
     return {};

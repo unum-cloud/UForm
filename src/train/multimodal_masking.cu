@@ -335,7 +335,7 @@ expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, masked_token
                                                 gpu_numerics_t const &numerics) noexcept {
     using result_t = expected<masked_tokens_t>;
     if (config.vocabulary == 0 || config.hidden == 0 || config.max_tokens == 0)
-        return result_t::fail(status_t::shape_unsupported_k,
+        return result_t::fail(status_t::unsupported_k,
                               "the masked head needs a full geometry (vocabulary={} hidden={} tokens={})",
                               config.vocabulary, config.hidden, config.max_tokens);
     masked_tokens_t head;
@@ -364,7 +364,7 @@ expected<masked_tokens_t> masked_tokens_t::make(gpu_arena_t &arena, masked_token
     if (config.max_segments == 0) return result_t {std::move(head)};
     // The choices reuse the token rows' logits, which also widen the decoder gradient they add to.
     if (config.max_segments > config.max_tokens || config.max_tokens < config.hidden)
-        return result_t::fail(status_t::shape_unsupported_k,
+        return result_t::fail(status_t::unsupported_k,
                               "choices need no more segments than tokens, and tokens past the width " //
                               "(segments={} tokens={} hidden={})",
                               config.max_segments, config.max_tokens, config.hidden);
@@ -385,13 +385,12 @@ expected_t masked_tokens_t::corrupt(tokens_view_t clean, tokens_span_t distorted
                                     masking_recipe_t recipe, data_epoch_t data_epoch, gpu_stream_t &stream) noexcept {
     std::size_t const tokens = clean.extent(0);
     if (distorted.extent(0) != tokens || loss_weights.extent(0) != tokens)
-        return expected_t::fail(status_t::shape_unsupported_k, "corrupt buffers disagree on token count ({})", tokens);
+        return expected_t::fail(status_t::unsupported_k, "corrupt buffers disagree on token count ({})", tokens);
     if (recipe.token_mean_span == 0.0f) // the geometric open / continue rates divide by it below
-        return expected_t::fail(status_t::shape_unsupported_k, "masking recipe needs a non-zero token_mean_span");
+        return expected_t::fail(status_t::unsupported_k, "masking recipe needs a non-zero token_mean_span");
     if (recipe.replace_fraction + recipe.random_fraction > 1.0f) // the kept fraction is the remainder, must stay ≥ 0
-        return expected_t::fail(status_t::shape_unsupported_k,
-                                "masking recipe replace+random fractions exceed one ({} + {})", recipe.replace_fraction,
-                                recipe.random_fraction);
+        return expected_t::fail(status_t::unsupported_k, "masking recipe replace+random fractions exceed one ({} + {})",
+                                recipe.replace_fraction, recipe.random_fraction);
     if (expected_t seeded = copy_device_to_device(clean, distorted, stream); !seeded) return seeded;
     if (expected_t reset = zero_async(loss_weights, stream); !reset) return reset;
 
@@ -412,10 +411,9 @@ expected_t masked_tokens_t::operator()(bf16r2_view_t normalized, tokens_view_t c
     std::size_t const tokens = config_.max_tokens;
     if (normalized.extent(0) != tokens || normalized_grad.extent(0) != tokens || clean_targets.extent(0) != tokens ||
         loss_weights.extent(0) != tokens)
-        return expected_t::fail(status_t::shape_unsupported_k, "masked head token count mismatch (expected {})",
-                                tokens);
+        return expected_t::fail(status_t::unsupported_k, "masked head token count mismatch (expected {})", tokens);
     if (normalized.extent(1) != hidden || normalized_grad.extent(1) != hidden || loss_summands.extent(0) != 2)
-        return expected_t::fail(status_t::shape_unsupported_k, "masked head geometry mismatch (hidden={})", hidden);
+        return expected_t::fail(status_t::unsupported_k, "masked head geometry mismatch (hidden={})", hidden);
 
     dim3 const one_block {1u, 1u, 1u};
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
@@ -452,11 +450,10 @@ expected_t masked_tokens_t::choose(bf16r2_view_t normalized, multimodal_batch_vi
     if (segments == 0 || batch.segment_choices.extent(0) != segments ||
         batch.segment_choice_targets.extent(0) != segments ||
         batch.segment_choice_targets.extent(1) != batch.segment_choices.extent(1))
-        return expected_t::fail(status_t::shape_unsupported_k, "choices need [{},width] choice and target tables",
-                                segments);
+        return expected_t::fail(status_t::unsupported_k, "choices need [{},width] choice and target tables", segments);
     if (normalized.extent(0) != config_.max_tokens || normalized_grad.extent(0) != config_.max_tokens ||
         normalized.extent(1) != hidden || normalized_grad.extent(1) != hidden || loss_summands.extent(0) != 2)
-        return expected_t::fail(status_t::shape_unsupported_k, "choice head geometry mismatch (hidden={})", hidden);
+        return expected_t::fail(status_t::unsupported_k, "choice head geometry mismatch (hidden={})", hidden);
 
     dim3 const one_block {1u, 1u, 1u};
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
@@ -632,7 +629,7 @@ expected<masked_patches_t> masked_patches_t::make(gpu_arena_t &arena, masked_pat
     using result_t = expected<masked_patches_t>;
     if (config.hidden == 0 || config.patch_pixels == 0 || config.max_patches == 0 || config.temporal_groups == 0 ||
         config.max_patches % config.temporal_groups != 0)
-        return result_t::fail(status_t::shape_unsupported_k,
+        return result_t::fail(status_t::unsupported_k,
                               "the patch head needs a full geometry (hidden={} pixels={} patches={} groups={})",
                               config.hidden, config.patch_pixels, config.max_patches, config.temporal_groups);
     masked_patches_t head;
@@ -683,8 +680,7 @@ expected_t masked_patches_t::sample_mask(masking_recipe_t recipe, data_epoch_t d
 expected_t masked_patches_t::corrupt_raw(nk::tensor_span<pixel_t, 2> raw_patches, gpu_stream_t &stream) noexcept {
     u32_t const patches = config_.max_patches;
     if (raw_patches.extent(0) != patches)
-        return expected_t::fail(status_t::shape_unsupported_k, "corrupt_raw expects [{},patch_scalars] patch rows",
-                                patches);
+        return expected_t::fail(status_t::unsupported_k, "corrupt_raw expects [{},patch_scalars] patch rows", patches);
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const patch_grid {grid_size_for(patches), 1u, 1u};
     return launch_kernel(&patch_corrupt_raw_kernel_, patch_grid, block_shape, stream, raw_patches, mask_.view());
@@ -696,10 +692,10 @@ expected_t masked_patches_t::operator()(bf16r2_view_t normalized, bf16r2_view_t 
     u32_t const hidden = config_.hidden, patch_pixels = config_.patch_pixels;
     std::size_t const patches = config_.max_patches;
     if (normalized.extent(0) != patches || normalized_grad.extent(0) != patches || clean_patches.extent(0) != patches)
-        return expected_t::fail(status_t::shape_unsupported_k, "patch head count mismatch (expected {})", patches);
+        return expected_t::fail(status_t::unsupported_k, "patch head count mismatch (expected {})", patches);
     if (normalized.extent(1) != hidden || normalized_grad.extent(1) != hidden ||
         clean_patches.extent(1) != patch_pixels || loss_summands.extent(0) != 2)
-        return expected_t::fail(status_t::shape_unsupported_k, "patch head geometry mismatch (hidden={})", hidden);
+        return expected_t::fail(status_t::unsupported_k, "patch head geometry mismatch (hidden={})", hidden);
 
     dim3 const one_block {1u, 1u, 1u};
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
@@ -833,7 +829,7 @@ expected<masked_frames_t> masked_frames_t::make(gpu_arena_t &arena, masked_frame
                                                 gpu_numerics_t const &numerics) noexcept {
     using result_t = expected<masked_frames_t>;
     if (config.hidden == 0 || config.chunk_samples == 0 || config.max_frames == 0)
-        return result_t::fail(status_t::shape_unsupported_k,
+        return result_t::fail(status_t::unsupported_k,
                               "the frame head needs a full geometry (hidden={} samples={} frames={})", config.hidden,
                               config.chunk_samples, config.max_frames);
     masked_frames_t head;
@@ -884,8 +880,7 @@ expected_t masked_frames_t::sample_mask(masking_recipe_t recipe, data_epoch_t da
 expected_t masked_frames_t::corrupt_raw(f32r2_span_t raw_frames, gpu_stream_t &stream) noexcept {
     u32_t const frames = config_.max_frames;
     if (raw_frames.extent(0) != frames)
-        return expected_t::fail(status_t::shape_unsupported_k, "corrupt_raw expects [{},chunk_samples] frame rows",
-                                frames);
+        return expected_t::fail(status_t::unsupported_k, "corrupt_raw expects [{},chunk_samples] frame rows", frames);
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};
     dim3 const frame_grid {grid_size_for(frames), 1u, 1u};
     return launch_kernel(&frame_corrupt_raw_kernel_, frame_grid, block_shape, stream, raw_frames, mask_.view());
@@ -896,10 +891,10 @@ expected_t masked_frames_t::operator()(bf16r2_view_t normalized, f32r2_view_t cl
     u32_t const hidden = config_.hidden, chunk_samples = config_.chunk_samples;
     std::size_t const frames = config_.max_frames;
     if (normalized.extent(0) != frames || normalized_grad.extent(0) != frames || clean_frames.extent(0) != frames)
-        return expected_t::fail(status_t::shape_unsupported_k, "frame head count mismatch (expected {})", frames);
+        return expected_t::fail(status_t::unsupported_k, "frame head count mismatch (expected {})", frames);
     if (normalized.extent(1) != hidden || normalized_grad.extent(1) != hidden ||
         clean_frames.extent(1) != chunk_samples || loss_summands.extent(0) != 2)
-        return expected_t::fail(status_t::shape_unsupported_k, "frame head geometry mismatch (hidden={})", hidden);
+        return expected_t::fail(status_t::unsupported_k, "frame head geometry mismatch (hidden={})", hidden);
 
     dim3 const one_block {1u, 1u, 1u};
     dim3 const block_shape {kernel_block_size_default_k, 1u, 1u};

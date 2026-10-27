@@ -27,7 +27,6 @@
 
 #include <vector> // `std::vector`
 
-#include <forkunion.hpp>
 #include <numkong/capabilities.h>
 #include <numkong/memory.hpp>
 
@@ -87,11 +86,12 @@ static std::vector<float> read_floats(char const *path) {
  *  for a host variant or a stream for a device one, with the batch and the outputs in memory both
  *  sides address, placed under @p capabilities . */
 template <encoder_home_t home_>
-static bool encode(test_suite_t &suite, encoder_verbs<home_> const &verbs,
-                   utilities::checkpoint_to_load_t const &checkpoint, geometry_t const &geometry, precision_t precision,
-                   nk_capability_t capabilities, typename encoder_home_executor<home_>::type executor,
-                   nk_stream_t stream, encoded_t &encoded) {
-    utilities::expected<void *> made = verbs.create(checkpoint, geometry, precision, stream);
+static bool encode(test_suite_t &suite, encoder_verbs<home_> const &verbs, checkpoint_to_load_t const &checkpoint,
+                   geometry_t const &geometry, precision_t precision, nk_capability_t capabilities,
+                   typename encoder_home_executor<home_>::type executor, nk_stream_t stream, encoded_t &encoded) {
+    expected<void *> made = verbs.create(checkpoint, geometry, precision, stream);
+    if (!made && made.status_ == status_t::unsupported_k && precision == precision_t::e4m3_k)
+        return suite.skip("the class has no E4M3 products"), false;
     if (!made) return suite.check(false, "tower: {}", made.description_), false;
     void *const tower = *made;
 
@@ -102,13 +102,13 @@ static bool encode(test_suite_t &suite, encoder_verbs<home_> const &verbs,
     if (initialized != nk_success_k || (on_device ? nk_allocator_init_device_best(&scratch_policy, capabilities)
                                                   : nk_allocator_init_heap(&scratch_policy, 64)) != nk_success_k)
         return verbs.destroy(tower), suite.check(false, "allocators: {}", nk_status_name(initialized)), false;
-    nk::allocator<utilities::b8_t> const allocator {shared, stream};
+    nk::allocator<b8_t> const allocator {shared, stream};
 
-    using batch_t = encoder::multimodal_batch<nk::allocator<utilities::b8_t>>;
+    using batch_t = encoder::multimodal_batch<nk::allocator<b8_t>>;
     encoder::multimodal_batch_shape_t shape;
     shape.max_rows_per_gpu = items_k, shape.max_segments_per_gpu = items_k,
     shape.max_columns_per_row = geometry.context;
-    utilities::expected<batch_t> batch = batch_t::make(allocator, shape);
+    expected<batch_t> batch = batch_t::make(allocator, shape);
     if (!batch) return verbs.destroy(tower), suite.check(false, "batch: {}", batch.description_), false;
     auto offsets = batch->segment_offsets.span();
     auto lengths = batch->segment_lengths.span();
@@ -117,19 +117,18 @@ static bool encode(test_suite_t &suite, encoder_verbs<home_> const &verbs,
     std::size_t tokens = 0;
     for (std::size_t item = 0; item != items_k; ++item) {
         std::size_t const length = std::strlen(texts_k[item]);
-        offsets[item] = static_cast<utilities::u32_t>(item * geometry.context);
-        lengths[item] = static_cast<utilities::u32_t>(length);
+        offsets[item] = static_cast<u32_t>(item * geometry.context);
+        lengths[item] = static_cast<u32_t>(length);
         modalities[item] = encoder::modality_t::text_k;
         for (std::size_t cell = 0; cell != length; ++cell)
-            grid[item, cell] = static_cast<utilities::token_id_t>(static_cast<unsigned char>(texts_k[item][cell]));
+            grid[item, cell] = static_cast<token_id_t>(static_cast<unsigned char>(texts_k[item][cell]));
         tokens += length;
     }
-    offsets[items_k] = static_cast<utilities::u32_t>(items_k * geometry.context);
+    offsets[items_k] = static_cast<u32_t>(items_k * geometry.context);
 
-    utilities::expected<std::size_t> bytes = verbs.scratch_bytes(tower, tokens, items_k, executor);
+    expected<std::size_t> bytes = verbs.scratch_bytes(tower, tokens, items_k, executor);
     if (!bytes) return verbs.destroy(tower), suite.check(false, "scratch: {}", bytes.description_), false;
-    st::basic_vector<utilities::b8_t, nk::allocator<utilities::b8_t>> scratch {
-        nk::allocator<utilities::b8_t> {scratch_policy, stream}};
+    st::basic_vector<b8_t, nk::allocator<b8_t>> scratch {nk::allocator<b8_t> {scratch_policy, stream}};
     using shared_floats_t = st::basic_vector<float, nk::allocator<float>>;
     shared_floats_t states {nk::allocator<float> {allocator}}, embeddings {nk::allocator<float> {allocator}},
         token_vectors {nk::allocator<float> {allocator}}, masked_logits {nk::allocator<float> {allocator}};
@@ -139,11 +138,11 @@ static bool encode(test_suite_t &suite, encoder_verbs<home_> const &verbs,
         st::failed(token_vectors.resize(st::assume_uninitialized, tokens * geometry.token_width)) ||
         st::failed(masked_logits.resize(st::assume_uninitialized, items_k * geometry.masked_vocabulary)))
         return verbs.destroy(tower), suite.check(false, "scratch and outputs allocation failed"), false;
-    outputs_t const outputs {{utilities::f32r2_span_t {embeddings.data(), items_k, geometry.hidden}, nk_f32_k},
-                             {utilities::f32r2_span_t {states.data(), tokens, geometry.hidden}, nk_f32_k},
-                             {utilities::f32r2_span_t {token_vectors.data(), tokens, geometry.token_width}, nk_f32_k},
+    outputs_t const outputs {{f32r2_span_t {embeddings.data(), items_k, geometry.hidden}, nk_f32_k},
+                             {f32r2_span_t {states.data(), tokens, geometry.hidden}, nk_f32_k},
+                             {f32r2_span_t {token_vectors.data(), tokens, geometry.token_width}, nk_f32_k},
                              {masked_logits.data(), items_k, geometry.masked_vocabulary}};
-    utilities::expected_t ran = verbs.encode(tower, batch->view(), outputs, scratch, executor);
+    expected_t ran = verbs.encode(tower, batch->view(), outputs, scratch, executor);
     nk_status_t const finished = on_device ? nk_stream_synchronize_best(capabilities, stream) : nk_success_k;
     verbs.destroy(tower);
     if (!ran) return suite.check(false, "encode: {}", ran.description_), false;
@@ -177,9 +176,9 @@ static void check_agreement(test_suite_t &suite, char const *who, encoded_t cons
 /** Encodes in @p precision through the variant of @p class_ , when this machine runs it and it
  *  advances past its parent, and compares with the serial floor's @p reference . */
 template <cpu_class_t class_>
-static void class_parity(test_suite_t &suite, utilities::checkpoint_to_load_t const &checkpoint,
-                         geometry_t const &geometry, fu::flat_pool_t &pool, nk_capability_t available,
-                         precision_t precision, encoded_t const &reference, double tolerance) {
+static void class_parity(test_suite_t &suite, checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
+                         pool_view_t pool, nk_capability_t available, precision_t precision, encoded_t const &reference,
+                         double tolerance) {
     if (!numkong_admits(available, class_)) return suite.skip("this machine does not run the class");
     encoder_verbs<encoder_home_t::ram_k> const *const verbs =
         encoder_class_tables<encoder_home_t::ram_k, class_>::find();
@@ -196,7 +195,7 @@ static void class_parity(test_suite_t &suite, utilities::checkpoint_to_load_t co
  *  picked, and compares with the serial floor's @p reference . */
 template <encoder_home_t home_>
 static void check_device_variant(test_suite_t &suite, encoder_verbs<home_> const *verbs,
-                                 utilities::checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
+                                 checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
                                  precision_t precision, nk_capability_t capabilities, nk_stream_t stream,
                                  encoded_t const &reference, double tolerance) {
     if (!verbs) return suite.skip("this build compiles no variant for the device's vendor");
@@ -208,9 +207,9 @@ static void check_device_variant(test_suite_t &suite, encoder_verbs<home_> const
 
 /** Encodes in @p precision on @p device through the newest class its vendor's ladder admits, and
  *  compares with the serial floor's @p reference . */
-static void device_parity(test_suite_t &suite, utilities::checkpoint_to_load_t const &checkpoint,
-                          geometry_t const &geometry, uform_gpu_device_t device, precision_t precision,
-                          encoded_t const &reference, double tolerance) {
+static void device_parity(test_suite_t &suite, checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
+                          uform_gpu_device_t device, precision_t precision, encoded_t const &reference,
+                          double tolerance) {
     bool const amd = device.vendor == uform_gpu_vendor_amd_k;
     nk::expected<nk::device_t> const opened = nk::device_t::make(
         amd ? nk::device_kind_t::rocm_k : nk::device_kind_t::cuda_k, device.vendor_ordinal);
@@ -262,10 +261,9 @@ static void token_vectors_unit_length(test_suite_t &suite, encoded_t const &refe
 
 /** Runs @ref class_parity for every class of the ladder this build compiled, in both precisions. */
 template <cpu_class_t... classes_>
-static void run_class_parity(test_suite_t &suite, cpu_ladder<classes_...>,
-                             utilities::checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
-                             fu::flat_pool_t &pool, nk_capability_t available, encoded_t const &bf16_reference,
-                             encoded_t const &e4m3_reference) {
+static void run_class_parity(test_suite_t &suite, cpu_ladder<classes_...>, checkpoint_to_load_t const &checkpoint,
+                             geometry_t const &geometry, pool_view_t pool, nk_capability_t available,
+                             encoded_t const &bf16_reference, encoded_t const &e4m3_reference) {
     auto rung = [&]<cpu_class_t class_>() {
         if constexpr (cpu_class_compiled(class_) && class_ != cpu_class_t::serial_k) {
             char const *const name = uform_cpu_class_name(static_cast<uform_cpu_class_t>(class_));
@@ -282,28 +280,28 @@ int main(int argc, char **argv) {
     if (argc != 2 && argc != 4)
         return fmt::println(stderr, "Usage: {} <tiny.safetensors> [<states.f32> <embeddings.f32>]", argv[0]), 1;
     test_suite_t suite = test_suite_t::make(argv[0]);
-    utilities::expected<utilities::checkpoint_to_load_t> checkpoint = utilities::checkpoint_to_load_t::make(
-        {argv[1], std::strlen(argv[1])});
+    expected<checkpoint_to_load_t> checkpoint = checkpoint_to_load_t::make({argv[1], std::strlen(argv[1])});
     if (!checkpoint) return suite.check(false, "checkpoint: {}", checkpoint.description_), suite.finish();
-    utilities::expected<geometry_t> geometry = geometry_t::from(*checkpoint);
+    expected<geometry_t> geometry = geometry_t::from(*checkpoint);
     if (!geometry) return suite.check(false, "geometry: {}", geometry.description_), suite.finish();
 
     nk_capability_t available = 0;
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k)
         return suite.check(false, "no CPU capabilities"), suite.finish();
-    fu::flat_pool_t pool;
-    if (fu::failed(pool.spawn(4))) return suite.check(false, "pool spawn failed"), suite.finish();
+    expected<executor_t> pool = executor_t::make(4, caller_exclusivity_t::caller_inclusive_k);
+    if (!pool) return suite.check(false, "pool: {}", pool.description_), suite.finish();
 
     encoder_verbs<encoder_home_t::ram_k> const &serial =
         *encoder_class_tables<encoder_home_t::ram_k, cpu_class_t::serial_k>::find();
     encoded_t bf16_reference, e4m3_reference;
-    if (!encode(suite, serial, *checkpoint, *geometry, precision_t::bf16_k, nk_cap_serial_k, pool, nullptr,
+    if (!encode(suite, serial, *checkpoint, *geometry, precision_t::bf16_k, nk_cap_serial_k, pool->view(), nullptr,
                 bf16_reference) ||
-        !encode(suite, serial, *checkpoint, *geometry, precision_t::e4m3_k, nk_cap_serial_k, pool, nullptr,
+        !encode(suite, serial, *checkpoint, *geometry, precision_t::e4m3_k, nk_cap_serial_k, pool->view(), nullptr,
                 e4m3_reference))
         return suite.finish();
     suite.run("token_vectors/unit_length", token_vectors_unit_length, bf16_reference, geometry->token_width);
-    run_class_parity(suite, cpu_ladder_t {}, *checkpoint, *geometry, pool, available, bf16_reference, e4m3_reference);
+    run_class_parity(suite, cpu_ladder_t {}, *checkpoint, *geometry, pool->view(), available, bf16_reference,
+                     e4m3_reference);
     per_gpu_array<uform_gpu_device_t> const listed = listed_gpu_devices();
     for (i32_t const device : suite.settings.devices) {
         suite.run(fmt::format("device_parity/{}/bf16", device), device_parity, *checkpoint, *geometry, listed[device],

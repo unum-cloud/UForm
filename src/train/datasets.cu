@@ -15,7 +15,6 @@
 
 #include "uform/train/datasets.hpp"
 
-namespace fu = ashvardanian::forkunion;
 namespace ue = unum::uform::encoder;
 using ue::audio_batch_shape_t;
 using ue::byte_pad_k;
@@ -46,7 +45,7 @@ using namespace unum::uform::train;
 
 /** Copy the string @p value into @p into , or fail naming @p key . */
 [[nodiscard]] static expected_t read_string_(yyjson_val *value, char const *key, sz::string_t &into) noexcept {
-    if (!yyjson_is_str(value)) return expected_t::fail(status_t::invalid_input_k, "\"{}\" is not a string", key);
+    if (!yyjson_is_str(value)) return expected_t::fail(status_t::invalid_argument_k, "\"{}\" is not a string", key);
     if (sz::failed(into.assign(sz::string_view_t {yyjson_get_str(value), yyjson_get_len(value)})))
         return expected_t::fail(status_t::bad_alloc_k, "\"{}\" staging failed", key);
     return {};
@@ -54,19 +53,19 @@ using namespace unum::uform::train;
 
 /** Read a @c query key into @p sides : the named role queries; the bag's others are documents. */
 [[nodiscard]] static expected_t read_query_sides_(yyjson_val *value, role_sides_t &sides) noexcept {
-    if (!yyjson_is_str(value)) return expected_t::fail(status_t::invalid_input_k, "\"query\" is not a string");
+    if (!yyjson_is_str(value)) return expected_t::fail(status_t::invalid_argument_k, "\"query\" is not a string");
     sz::string_view_t const query {yyjson_get_str(value), yyjson_get_len(value)};
     using side_t = late_interaction_side_t;
     if (query == "anchor") sides = {side_t::query_k, side_t::document_k, side_t::document_k};
     else if (query == "positives") sides = {side_t::document_k, side_t::query_k, side_t::document_k};
     else if (query == "both") sides = {side_t::query_and_document_k, side_t::query_and_document_k, side_t::document_k};
-    else return expected_t::fail(status_t::invalid_input_k, "\"query\" is {}, not anchor, positives or both", query);
+    else return expected_t::fail(status_t::invalid_argument_k, "\"query\" is {}, not anchor, positives or both", query);
     return {};
 }
 
 /** Read a @c choices object into @p entry 's state, choices, targets and group columns. */
 [[nodiscard]] static expected_t read_choices_(yyjson_val *object, mixture_entry_t &entry) noexcept {
-    if (!yyjson_is_obj(object)) return expected_t::fail(status_t::invalid_input_k, "\"choices\" is not an object");
+    if (!yyjson_is_obj(object)) return expected_t::fail(status_t::invalid_argument_k, "\"choices\" is not an object");
     std::size_t index = 0, count = 0;
     yyjson_val *key = nullptr, *value = nullptr;
     yyjson_obj_foreach(object, index, count, key, value) {
@@ -76,17 +75,18 @@ using namespace unum::uform::train;
         else if (name == "choices") read = read_string_(value, "choices", entry.choices);
         else if (name == "targets") read = read_string_(value, "targets", entry.targets);
         else if (name == "group") read = read_string_(value, "group", entry.group);
-        else return expected_t::fail(status_t::invalid_input_k, "unknown choices key \"{}\"", name);
+        else return expected_t::fail(status_t::invalid_argument_k, "unknown choices key \"{}\"", name);
         if (!read) return read;
     }
     if (entry.state.empty() || entry.choices.empty() || entry.targets.empty())
-        return expected_t::fail(status_t::invalid_input_k, "\"choices\" needs \"state\", \"choices\" and \"targets\"");
+        return expected_t::fail(status_t::invalid_argument_k,
+                                "\"choices\" needs \"state\", \"choices\" and \"targets\"");
     return {};
 }
 
 /** Parse one entry of the @c datasets array into @p entry . */
 [[nodiscard]] static expected_t read_entry_(yyjson_val *object, mixture_entry_t &entry) noexcept {
-    if (!yyjson_is_obj(object)) return expected_t::fail(status_t::invalid_input_k, "a dataset is not an object");
+    if (!yyjson_is_obj(object)) return expected_t::fail(status_t::invalid_argument_k, "a dataset is not an object");
     std::size_t index = 0, count = 0;
     yyjson_val *key = nullptr, *value = nullptr;
     yyjson_obj_foreach(object, index, count, key, value) {
@@ -104,59 +104,59 @@ using namespace unum::uform::train;
         else if (name == "query") read = read_query_sides_(value, entry.sides);
         else if (name == "choices") read = read_choices_(value, entry);
         else if (name == "weight") {
-            if (!yyjson_is_num(value)) return expected_t::fail(status_t::invalid_input_k, "\"weight\" is not a number");
+            if (!yyjson_is_num(value))
+                return expected_t::fail(status_t::invalid_argument_k, "\"weight\" is not a number");
             entry.weight = yyjson_get_num(value);
         }
         else if (name == "epochs") {
             if (!yyjson_is_uint(value) || yyjson_get_uint(value) == 0)
-                return expected_t::fail(status_t::invalid_input_k, "\"epochs\" is not a positive integer");
+                return expected_t::fail(status_t::invalid_argument_k, "\"epochs\" is not a positive integer");
             entry.epochs = static_cast<std::size_t>(yyjson_get_uint(value));
         }
         // Read by the acquisition and mining scripts, not by the loaders.
         else if (name != "positives_per_caption" && name != "min_epochs")
-            return expected_t::fail(status_t::invalid_input_k, "unknown key \"{}\"", name);
+            return expected_t::fail(status_t::invalid_argument_k, "unknown key \"{}\"", name);
         if (!read) return read;
     }
     if (entry.name.empty() || entry.glob.empty() || !(entry.weight > 0.0))
-        return expected_t::fail(status_t::invalid_input_k, "a dataset needs a name, a glob and a positive weight");
+        return expected_t::fail(status_t::invalid_argument_k, "a dataset needs a name, a glob and a positive weight");
     if (!entry.text.empty() + !entry.anchor.empty() + !entry.state.empty() != 1)
-        return expected_t::fail(status_t::invalid_input_k, "{} needs one of \"text\", \"anchor\" or \"choices\"",
+        return expected_t::fail(status_t::invalid_argument_k, "{} needs one of \"text\", \"anchor\" or \"choices\"",
                                 entry.name.view());
     if (!entry.anchor.empty() && entry.positive.empty())
-        return expected_t::fail(status_t::invalid_input_k, "{} pairs its anchor with no \"positive\"",
+        return expected_t::fail(status_t::invalid_argument_k, "{} pairs its anchor with no \"positive\"",
                                 entry.name.view());
     if (entry.media.empty()) return {};
     if (entry.media != entry.positive)
-        return expected_t::fail(status_t::invalid_input_k, "{} names media {} other than its positive {}",
+        return expected_t::fail(status_t::invalid_argument_k, "{} names media {} other than its positive {}",
                                 entry.name.view(), entry.media.view(), entry.positive.view());
     entry.modality = modality_of_(entry.media.view());
     if (entry.modality == modality_t::text_k)
-        return expected_t::fail(status_t::invalid_input_k, "{} names media {}, which tells no modality",
+        return expected_t::fail(status_t::invalid_argument_k, "{} names media {}, which tells no modality",
                                 entry.name.view(), entry.media.view());
     return {};
 }
 
 expected<mixture_t> mixture_t::read(sz::string_view_t path) noexcept {
     using result_t = expected<mixture_t>;
-    if (path.contains('\0')) return result_t::fail(status_t::invalid_input_k, "the mixture path holds a NUL byte");
+    if (path.contains('\0')) return result_t::fail(status_t::invalid_argument_k, "the mixture path holds a NUL byte");
     sz::string_t terminated;
     if (sz::failed(terminated.assign(path))) return result_t::fail(status_t::bad_alloc_k, "path staging failed");
     yyjson_read_err error {};
     yyjson_doc *const document = yyjson_read_file(terminated.c_str(), 0, nullptr, &error);
     if (document == nullptr)
-        return result_t::fail(
-            error.code == YYJSON_READ_ERROR_FILE_OPEN ? status_t::io_error_k : status_t::invalid_input_k,
-            "{}: {} at byte {}", path, error.msg, error.pos);
+        return result_t::fail(error.code == YYJSON_READ_ERROR_FILE_OPEN ? status_t::io_k : status_t::invalid_argument_k,
+                              "{}: {} at byte {}", path, error.msg, error.pos);
     mixture_t mixture;
     expected_t parsed = [&]() noexcept -> expected_t {
         yyjson_val *const root = yyjson_doc_get_root(document);
         yyjson_val *const name = yyjson_obj_get(root, "mixture");
         yyjson_val *const datasets = yyjson_obj_get(root, "datasets");
         if (!yyjson_is_arr(datasets) || yyjson_arr_size(datasets) == 0)
-            return expected_t::fail(status_t::invalid_input_k, "no \"datasets\" array");
+            return expected_t::fail(status_t::invalid_argument_k, "no \"datasets\" array");
         if (expected_t read = read_string_(name, "mixture", mixture.name); !read) return read;
         if (yyjson_obj_size(root) != 2)
-            return expected_t::fail(status_t::invalid_input_k, "keys beside \"mixture\" and \"datasets\"");
+            return expected_t::fail(status_t::invalid_argument_k, "keys beside \"mixture\" and \"datasets\"");
         std::size_t index = 0, count = 0;
         yyjson_val *object = nullptr;
         yyjson_arr_foreach(datasets, index, count, object) {
@@ -168,11 +168,11 @@ expected<mixture_t> mixture_t::read(sz::string_view_t path) noexcept {
         u32_t pairs = 0;
         for (mixture_entry_t const &entry : mixture.datasets) pairs += !entry.anchor.empty();
         if (pairs != 0 && pairs != mixture.datasets.size())
-            return expected_t::fail(status_t::invalid_input_k, "pairs share the mixture with plain text or choices");
+            return expected_t::fail(status_t::invalid_argument_k, "pairs share the mixture with plain text or choices");
         return {};
     }();
     yyjson_doc_free(document);
-    if (!parsed) return result_t::fail(status_t::invalid_input_k, "{}: {}", path, parsed.description_.view());
+    if (!parsed) return result_t::fail(status_t::invalid_argument_k, "{}: {}", path, parsed.description_.view());
     return result_t {std::move(mixture)};
 }
 
@@ -217,8 +217,8 @@ expected<mixture_sampler_t> mixture_sampler_t::make(std::span<mixture_entry_t co
     for (std::size_t entry = 0; entry != entries.size(); ++entry) {
         mixture_entry_t const &dataset = entries[entry];
         if (dataset.epochs != 0 && rows[entry] == 0)
-            return result_t::fail(status_t::invalid_input_k, "{} caps its epochs, but only Parquet footers count rows",
-                                  dataset.name.view());
+            return result_t::fail(status_t::invalid_argument_k,
+                                  "{} caps its epochs, but only Parquet footers count rows", dataset.name.view());
         // A fill draws as many pairs as its segments hold, or documents for plain text, whether or
         // not its batches admit them all.
         std::size_t const roles = dataset.anchor.empty() ? 1u : dataset.negative.empty() ? 2u : 3u;
@@ -302,8 +302,14 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
     std::span<mixture_entry_t const> const entries = placed.mixture_.datasets;
     bool const pairs = !entries.empty() && !entries[0].anchor.empty();
 
-    if (pairs && fu::failed(placed.pool_.spawn(fu::allowed_cores_count())))
-        return expected_t::fail(status_t::bad_alloc_k, "the decode pool did not spawn");
+    if (pairs) {
+        expected<topology_t> topology = topology_t::make();
+        if (!topology) return expected_t::fail(std::move(topology));
+        expected<executor_t> pool = executor_t::make(*topology, topology->logical_cores_count(),
+                                                     caller_exclusivity_t::caller_inclusive_k);
+        if (!pool) return expected_t::fail(std::move(pool));
+        placed.pool_ = std::move(*pool);
+    }
 
     auto adopt = [&](auto loader) noexcept -> expected_t {
         if (!loader) return expected_t::fail(std::move(loader));
@@ -318,7 +324,7 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
             made = adopt(choices_loader_parquet_t::make(
                 session, glob, config.seed, {entry.state.view(), entry.choices.view(), entry.targets.view()}));
         else if (!entry.state.empty())
-            made = expected_t::fail(status_t::invalid_input_k, "{} holds no Parquet shards of choices", glob);
+            made = expected_t::fail(status_t::invalid_argument_k, "{} holds no Parquet shards of choices", glob);
         else if (!pairs && glob.ends_with(".parquet"))
             made = adopt(tokens_loader_parquet_t::make(session, glob, config.seed));
         else if (!pairs && glob.ends_with(".jsonl"))
@@ -326,14 +332,15 @@ expected_t dataset_source_t::open(dataset_source_t &placed, trainer_config_t &co
         else if (!pairs && (glob.ends_with(".csv") || glob.ends_with(".txt")))
             made = adopt(tokens_loader_csv_t::make(session, glob, config.seed));
         else if (!pairs)
-            made = expected_t::fail(status_t::invalid_input_k, "{} holds no Parquet, JSONL, CSV or text shards", glob);
+            made = expected_t::fail(status_t::invalid_argument_k, "{} holds no Parquet, JSONL, CSV or text shards",
+                                    glob);
         else if (entry.modality == modality_t::video_k && config.nvdec_engines == 0)
-            made = expected_t::fail(status_t::invalid_input_k,
+            made = expected_t::fail(status_t::invalid_argument_k,
                                     "{} holds video: --nvdec-engines names the GPU's NVDEC engine count",
                                     entry.name.view());
         else
             made = adopt(
-                paired_loader_parquet_t::make(session, glob, config.seed, placed.pool_,
+                paired_loader_parquet_t::make(session, glob, config.seed, placed.pool_.view(),
                                               {entry.anchor.view(), entry.positive.view(), entry.negative.view(),
                                                entry.anchor_prefix.view(), entry.positive_prefix.view(), entry.sides},
                                               entry.modality, shape));
@@ -384,7 +391,7 @@ expected_t dataset_source_t::make(dataset_source_t &placed, trainer_t &trainer, 
 
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {trainer.streams[member]};
-        if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
+        if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
         st::basic_vector<multimodal_batch_on_gpu_t> filled;
         for (std::size_t batch_index = 0; batch_index != batches_per_fill; ++batch_index) {
             expected<multimodal_batch_on_gpu_t> batch = multimodal_batch_on_gpu_t::make(
@@ -532,7 +539,7 @@ expected_t dataset_source_t::relate_(trainer_t &trainer) noexcept {
     if (!pairs) {
         for (std::size_t member = 0; member != gpus; ++member) {
             switch_to_gpu_t gpu_scope {trainer.streams[member]};
-            if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
+            if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
             base_replica_t &replica = trainer.replicas[member];
             if (expected_t related = replica.relations.upload_self_edges(
                     segments, replica.batch.segment_lengths.view(), mixer_.world_lengths(member).flatten<1>(),
@@ -547,7 +554,7 @@ expected_t dataset_source_t::relate_(trainer_t &trainer) noexcept {
 
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {trainer.streams[member]};
-        if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
+        if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
         multimodal_batch_on_gpu_t const &mixed = trainer.replicas[member].batch;
         expected_t copied = copy_device_to_host(mixed.segment_bag.view(), bags_[member, nk::slice],
                                                 trainer.streams[member]);
@@ -570,7 +577,7 @@ expected_t dataset_source_t::relate_(trainer_t &trainer) noexcept {
         base_replica_t &replica = trainer.replicas[member];
         gpu_stream_t &stream = trainer.streams[member];
         switch_to_gpu_t gpu_scope {stream};
-        if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed");
+        if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
         expected_t staged = replica.relations.upload(
             edges_.attract(), edges_.repel(), edges_.ignore(), replica.batch.segment_lengths.view(),
             mixer_.world_lengths(member).flatten<1>(), replica.batch.segment_key.view(),

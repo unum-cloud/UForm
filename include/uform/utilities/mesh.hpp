@@ -210,11 +210,11 @@ struct mesh_location_t {
     if (gpus_per_host_domain == 0 || gpus_per_host_domain > gpus_per_multimem_domain ||
         gpus_per_multimem_domain > gpus_per_colocated_domain)
         return expected<mesh_shape_t>::fail(
-            status_t::invalid_input_k, "need 1 <= host <= multimem <= colocated (host={} multimem={} colocated={})",
+            status_t::invalid_argument_k, "need 1 <= host <= multimem <= colocated (host={} multimem={} colocated={})",
             gpus_per_host_domain, gpus_per_multimem_domain, gpus_per_colocated_domain);
     if (gpus_per_multimem_domain % gpus_per_host_domain != 0 ||
         gpus_per_colocated_domain % gpus_per_multimem_domain != 0)
-        return expected<mesh_shape_t>::fail(status_t::invalid_input_k,
+        return expected<mesh_shape_t>::fail(status_t::invalid_argument_k,
                                             "domains must nest evenly (host={} multimem={} colocated={})",
                                             gpus_per_host_domain, gpus_per_multimem_domain, gpus_per_colocated_domain);
     return mesh_shape_t {gpus_per_host_domain, gpus_per_multimem_domain, gpus_per_colocated_domain};
@@ -235,13 +235,13 @@ struct mesh_location_t {
     int device_count = 0;
     if (CUresult result = cuDeviceGetCount(&device_count); result != CUDA_SUCCESS)
         return cuda_failure<mesh_shape_t>(result, "device count query failed");
-    if (device_count <= 0) return expected<mesh_shape_t>::fail(status_t::invalid_input_k, "no CUDA devices visible");
+    if (device_count <= 0) return expected<mesh_shape_t>::fail(status_t::invalid_argument_k, "no CUDA devices visible");
     u32_t const gpus = static_cast<u32_t>(device_count);
     return mesh_shape_t {gpus, gpus, gpus};
 }
 
-/** Whether every ordered pair of @p devices has a P2P path, failing with @c shape_unsupported_k on
- *  the first pair without one — what the members of one domain need, since they read each other's
+/** Whether every ordered pair of @p devices has a P2P path, failing with @c unsupported_k on the
+ *  first pair without one — what the members of one domain need, since they read each other's
  *  memory. */
 [[nodiscard]] inline expected_t peers_reach_each_other(std::span<i32_t const> devices) noexcept {
     for (i32_t const device_index : devices) {
@@ -258,8 +258,8 @@ struct mesh_location_t {
                 return cuda_failure(result, "P2P capability query failed (device={} peer={})", device_index,
                                     peer_index);
             if (can_access == 0)
-                return expected_t::fail(status_t::shape_unsupported_k,
-                                        "devices {} and {} share a domain but no P2P path", device_index, peer_index);
+                return expected_t::fail(status_t::unsupported_k, "devices {} and {} share a domain but no P2P path",
+                                        device_index, peer_index);
         }
     }
     return {};
@@ -511,7 +511,7 @@ struct mesh_topology_t {
         u64_t capabilities = 0) noexcept {
         if (host_domain_count == 0 || host_domain_index >= host_domain_count)
             return expected<mesh_topology_t>::fail( //
-                status_t::invalid_input_k,
+                status_t::invalid_argument_k,
                 "host_domain_index must be in [0,host_domain_count) (host_domain_index={} host_domain_count={})",
                 host_domain_index, host_domain_count);
         expected<mesh_shape_t> local = discover_mesh_shape();
@@ -524,7 +524,7 @@ struct mesh_topology_t {
             if (char const *value = std::getenv("UFORM_GPUS_PER_MULTIMEM_DOMAIN"); value != nullptr) // vendor-boundary
                 if (!parse_u32_(sz::string_view_t {value}, gpus_per_multimem_domain))
                     return expected<mesh_topology_t>::fail(
-                        status_t::invalid_input_k, "$UFORM_GPUS_PER_MULTIMEM_DOMAIN is not a number: \"{}\"", value);
+                        status_t::invalid_argument_k, "$UFORM_GPUS_PER_MULTIMEM_DOMAIN is not a number: \"{}\"", value);
         if (gpus_per_multimem_domain == 0) gpus_per_multimem_domain = local_devices;
         expected<mesh_shape_t> shape = make_mesh_shape(local_devices, gpus_per_multimem_domain,
                                                        local_devices * host_domain_count);
@@ -553,7 +553,7 @@ struct mesh_topology_t {
                 base = sz::string_view_t {value};
         if (base.empty())
             return expected<mesh_topology_t>::fail( //
-                status_t::invalid_input_k,
+                status_t::invalid_argument_k,
                 "a multi-host_domain bootstrap needs a shared exchange directory: pass one or set " //
                 "$UFORM_EXCHANGE_DIR (host_domain_count={})",
                 host_domain_count);
@@ -562,17 +562,17 @@ struct mesh_topology_t {
                 job = sz::string_view_t {value};
         if (job.empty())
             return expected<mesh_topology_t>::fail( //
-                status_t::invalid_input_k,
+                status_t::invalid_argument_k,
                 "a multi-host_domain bootstrap needs a unique job id: pass one or set $UFORM_JOB_ID " //
                 "(host_domain_count={})",
                 host_domain_count);
         if (base.contains('\0') || job.contains('\0'))
-            return expected<mesh_topology_t>::fail(status_t::invalid_input_k,
+            return expected<mesh_topology_t>::fail(status_t::invalid_argument_k,
                                                    "the exchange directory and the job id hold no NUL byte");
         if (!format_into(topology.exchange_directory, "{}/{}", base, job))
             return expected<mesh_topology_t>::fail(status_t::bad_alloc_k, "exchange path assembly failed");
         if (int const directory_error = make_directories_(topology.exchange_directory.view()); directory_error != 0)
-            return expected<mesh_topology_t>::fail(status_t::io_error_k,
+            return expected<mesh_topology_t>::fail(status_t::io_k,
                                                    "creating the exchange directory failed (path={} error={})",
                                                    topology.exchange_directory, directory_error);
 
@@ -612,16 +612,15 @@ struct mesh_topology_t {
             return expected_t::fail(status_t::bad_alloc_k, "exchange path assembly failed (key={})", key);
         std::FILE *file = std::fopen(temporary_path.c_str(), "w");
         if (file == nullptr)
-            return expected_t::fail(status_t::io_error_k, "opening \"{}\" for writing failed", temporary_path);
+            return expected_t::fail(status_t::io_k, "opening \"{}\" for writing failed", temporary_path);
         bool const written = std::fwrite(text.data(), 1u, text.size(), file) == text.size() && std::fflush(file) == 0 &&
                              ::fsync(fileno(file)) == 0;
         std::fclose(file);
         if (!written)
-            return expected_t::fail(status_t::io_error_k, "writing {} bytes to \"{}\" failed", text.size(),
-                                    temporary_path);
+            return expected_t::fail(status_t::io_k, "writing {} bytes to \"{}\" failed", text.size(), temporary_path);
         if (std::rename(temporary_path.c_str(), final_path.value_.c_str()) != 0)
-            return expected_t::fail(status_t::io_error_k, "renaming \"{}\" into place failed (error={})",
-                                    final_path.value_, errno);
+            return expected_t::fail(status_t::io_k, "renaming \"{}\" into place failed (error={})", final_path.value_,
+                                    errno);
         return {};
     }
 
@@ -646,7 +645,7 @@ struct mesh_topology_t {
                 return {};
             }
             if (std::chrono::steady_clock::now() >= deadline)
-                return expected_t::fail(status_t::io_error_k, "no payload \"{}\" appeared within {}s", path.value_,
+                return expected_t::fail(status_t::io_k, "no payload \"{}\" appeared within {}s", path.value_,
                                         timeout_seconds);
             poll_pause();
         }
@@ -769,7 +768,7 @@ struct mesh_topology_t {
                 if (*character == ' ') *character = '_';
             if (device_ordinal == 0) std::memcpy(self.device_name, name, sizeof(name));
             else if (std::strcmp(self.device_name, name) != 0)
-                return expected<local_probe_t>::fail(status_t::shape_unsupported_k,
+                return expected<local_probe_t>::fail(status_t::unsupported_k,
                                                      "mixed local GPUs: device 0 is {}, device {} is {}",
                                                      self.device_name, device_ordinal, name);
             CUuuid uuid {};
@@ -777,7 +776,7 @@ struct mesh_topology_t {
             if (CUresult result = cuDeviceGetUuid(&uuid, device); result != CUDA_SUCCESS)
                 return cuda_failure<local_probe_t>(result, "device uuid query failed (device={})", device_ordinal);
             if (probe.uuids.push_back(uuid) != status_t::success_k)
-                return expected<local_probe_t>::fail(status_t::shape_unsupported_k,
+                return expected<local_probe_t>::fail(status_t::unsupported_k,
                                                      "a host_domain drives {} GPUs, over the {} cap", device_count,
                                                      max_gpus_per_host_k);
         }
@@ -912,30 +911,30 @@ struct mesh_topology_t {
                 return awaited;
             facts_t facts;
             if (!parse_facts_(peer_facts.view(), facts))
-                return expected_t::fail(status_t::io_error_k, "malformed facts from host_domain {}: \"{}\"", peer_index,
+                return expected_t::fail(status_t::io_k, "malformed facts from host_domain {}: \"{}\"", peer_index,
                                         peer_facts);
             if (facts.schema != sz::string_view_t {mesh_schema_k})
-                return expected_t::fail(status_t::io_error_k, "host_domain {} published schema \"{}\", expected {}",
+                return expected_t::fail(status_t::io_k, "host_domain {} published schema \"{}\", expected {}",
                                         peer_index, facts.schema, mesh_schema_k);
             if (facts.job != job)
-                return expected_t::fail(status_t::io_error_k, "host_domain {} belongs to job \"{}\", expected \"{}\"",
+                return expected_t::fail(status_t::io_k, "host_domain {} belongs to job \"{}\", expected \"{}\"",
                                         peer_index, facts.job, job);
             if (facts.host_domain_index != peer_index)
-                return expected_t::fail(status_t::io_error_k, "host_domain {} published a mismatched index {}",
-                                        peer_index, facts.host_domain_index);
+                return expected_t::fail(status_t::io_k, "host_domain {} published a mismatched index {}", peer_index,
+                                        facts.host_domain_index);
             if (facts.host_domain_count != host_domain_count())
                 return expected_t::fail( //
-                    status_t::shape_unsupported_k,
+                    status_t::unsupported_k,
                     "world-size disagreement: host_domain {} was launched with {} host_domains, host_domain 0 with {}",
                     peer_index, facts.host_domain_count, host_domain_count());
             if (facts.multimem != shape.gpus_per_multimem_domain)
                 return expected_t::fail( //
-                    status_t::shape_unsupported_k,
+                    status_t::unsupported_k,
                     "multimem-extent disagreement: host_domain {} was launched with {}, host_domain 0 with {}",
                     peer_index, facts.multimem, shape.gpus_per_multimem_domain);
             if (facts.capabilities != self_capabilities)
                 return expected_t::fail( //
-                    status_t::shape_unsupported_k,
+                    status_t::unsupported_k,
                     "capability disagreement: host_domain {} dispatches with {:#x}, host_domain 0 with {:#x}",
                     peer_index, facts.capabilities, self_capabilities);
             mesh_host_domain_t peer;
@@ -945,7 +944,7 @@ struct mesh_topology_t {
             copy_token_(facts.device_name, peer.device_name);
             if (peer.device_count != self.device_count || std::strcmp(peer.device_name, self.device_name) != 0)
                 return expected_t::fail( //
-                    status_t::shape_unsupported_k,
+                    status_t::unsupported_k,
                     "the mesh must be uniform: host_domain {} ({}) has {}×{}, host_domain 0 ({}) has {}×{}", peer_index,
                     peer.hostname, peer.device_count, peer.device_name, self.hostname, self.device_count,
                     self.device_name);
@@ -955,15 +954,15 @@ struct mesh_topology_t {
                 if (token.empty()) continue;
                 CUuuid uuid {};
                 if (!parse_uuid_(token, uuid))
-                    return expected_t::fail(status_t::io_error_k,
-                                            "host_domain {} published a malformed GPU uuid \"{}\"", peer_index, token);
+                    return expected_t::fail(status_t::io_k, "host_domain {} published a malformed GPU uuid \"{}\"",
+                                            peer_index, token);
                 if (st::failed(claimed.push_back({uuid, peer_index})))
                     return expected_t::fail(status_t::bad_alloc_k, "GPU-uniqueness table push failed");
                 ++peer_uuids;
             }
             if (peer_uuids != facts.devices)
-                return expected_t::fail(status_t::io_error_k, "host_domain {} listed {} GPU uuids for {} devices",
-                                        peer_index, peer_uuids, facts.devices);
+                return expected_t::fail(status_t::io_k, "host_domain {} listed {} GPU uuids for {} devices", peer_index,
+                                        peer_uuids, facts.devices);
             host_domains[peer_index] = peer;
         }
 
@@ -979,7 +978,7 @@ struct mesh_topology_t {
                 sz::string_t uuid_hex;
                 (void)format_uuid_(uuid_hex, claimed[index].uuid);
                 return expected_t::fail( //
-                    status_t::shape_unsupported_k,
+                    status_t::unsupported_k,
                     "GPU {} is claimed by both host_domain {} and host_domain {} — the launcher did not partition " "CU" "DA" "_V" "IS" "IB" "LE" "_D" "EV" "IC" "ES" " a" "cr" "os" "s " "co" "-l" "oc" "at" "ed" " p" "ro" "ce" "ss" "e" "s",
                     uuid_hex, claimed[index - 1u].owner, claimed[index].owner);
             }
@@ -997,11 +996,11 @@ struct mesh_topology_t {
         sz::string_t manifest;
         if (expected_t awaited = await_text(0u, "manifest", manifest, timeout_seconds); !awaited) return awaited;
         if (!parse_manifest_(manifest.view(), job, shape.gpus_per_multimem_domain, host_domains))
-            return expected_t::fail(status_t::io_error_k, "malformed or foreign manifest (host_domain={}): \"{}\"",
+            return expected_t::fail(status_t::io_k, "malformed or foreign manifest (host_domain={}): \"{}\"",
                                     host_domain_index, manifest);
         if (self().device_count != probed.device_count || std::strcmp(self().device_name, probed.device_name) != 0)
             return expected_t::fail( //
-                status_t::shape_unsupported_k,
+                status_t::unsupported_k,
                 "the manifest disagrees with the local probe (host_domain={}): manifest says {}×{}, probed {}×{}",
                 host_domain_index, self().device_count, self().device_name, probed.device_count, probed.device_name);
         return {};

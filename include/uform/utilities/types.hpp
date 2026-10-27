@@ -26,6 +26,8 @@
 #include <stringzilla/stringzilla.hpp> // `sz::string_t` — the exception-free diagnostics carrier
 #include <smashtable/basic_vector.hpp> // `st::basic_vector` — the exception-free growable array
 
+#include "uform/types.h" // `uform_status_t`, whose values `status_t` takes
+
 /** `std::format` support for StringZilla slices, so diagnostics interpolate them directly —
  *  no conversion shims at call sites. */
 template <>
@@ -264,29 +266,33 @@ struct splitmix64_hash_t {
     return value;
 }
 
-/** Outcome of any fallible operation. @c success_k==0 ; all error codes are negative + stable. */
+/** Outcome of any fallible operation. Every enumerator takes its value from @c uform_status_t , so
+ *  crossing the C ABI is a cast. */
 enum class status_t : i32_t {
 
     /** The operation completed; outputs are valid. */
-    success_k = 0,
+    success_k = uform_status_success_k,
 
     /** A caller-provided buffer was too small or a device allocation failed. */
-    bad_alloc_k = -10,
+    bad_alloc_k = uform_status_out_of_memory_k,
 
     /** A caller argument was null, empty, or otherwise invalid. */
-    invalid_input_k = -11,
+    invalid_argument_k = uform_status_invalid_argument_k,
 
     /** The requested geometry / dtype / extents are unsupported by the dispatched kernel. */
-    shape_unsupported_k = -12,
+    unsupported_k = uform_status_unsupported_k,
 
     /** A CUDA Runtime call failed. */
-    cuda_error_k = -13,
+    device_error_k = uform_status_device_k,
 
     /** A host I/O / file operation failed (read / write / rename / timeout on a peer's file). */
-    io_error_k = -19,
+    io_k = uform_status_io_k,
+
+    /** A shared resource, such as a thread pool, was busy with another caller's work. */
+    contended_k = uform_status_contended_k,
 
     /** An unclassified failure; prefer a specific code above when one fits. */
-    other_k = -1,
+    internal_k = uform_status_internal_k,
 };
 
 /** Static-string name for a @ref status_t value (the single name table; no allocation). */
@@ -294,11 +300,12 @@ enum class status_t : i32_t {
     switch (status) {
     case status_t::success_k: return "success";
     case status_t::bad_alloc_k: return "bad_alloc";
-    case status_t::invalid_input_k: return "invalid_input";
-    case status_t::shape_unsupported_k: return "shape_unsupported";
-    case status_t::cuda_error_k: return "cuda_error";
-    case status_t::io_error_k: return "io_error";
-    case status_t::other_k: return "other";
+    case status_t::invalid_argument_k: return "invalid_argument";
+    case status_t::unsupported_k: return "unsupported";
+    case status_t::device_error_k: return "device_error";
+    case status_t::io_k: return "io";
+    case status_t::contended_k: return "contended";
+    case status_t::internal_k: return "internal";
     }
     return "unknown";
 }

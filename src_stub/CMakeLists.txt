@@ -49,7 +49,7 @@ set_target_properties(uform_static_stub PROPERTIES OUTPUT_NAME "uform_static")
 # The C suite the engine's library runs too, linked against the static stand-in. It is written in C, but the library
 # it links is C++, so the C++ driver links it and brings the standard library along.
 add_executable(uform_test_c_stub ${PROJECT_SOURCE_DIR}/c/test.c)
-target_link_libraries(uform_test_c_stub PRIVATE uform_static_stub)
+target_link_libraries(uform_test_c_stub PRIVATE uform_static_stub forkunion::static)
 set_target_properties(
     uform_test_c_stub
     PROPERTIES C_STANDARD 99

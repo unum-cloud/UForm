@@ -625,7 +625,7 @@ static void run_sharded_oracle_case(test_suite_t &suite, oracle_graph_t graph, c
                                           world_keys, world_k, first_vertex, 1.0f, stream);
             // The host edges are refilled by the next call, so their copies land first.
             if (staged && cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
-                staged = expected_t::fail(status_t::cuda_error_k, "relation staging drain failed");
+                staged = expected_t::fail(status_t::device_error_k, "relation staging drain failed");
         }
         else
             staged = relations.upload_self_edges(rows, world_lengths[owned, nk::slice], world_lengths, first_vertex,

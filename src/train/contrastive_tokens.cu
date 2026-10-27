@@ -469,11 +469,11 @@ expected<contrastive_tokens_t> contrastive_tokens_t::make(gpu_arena_t &arena, co
     if (config.segments_per_gpu == 0 || config.head_tokens_per_gpu == 0 || config.query_tokens_per_gpu == 0 ||
         config.documents_per_gpu == 0 || config.band_tokens == 0 || config.gpu_subgraphs_per_step == 0)
         return result_t::fail(
-            status_t::invalid_input_k,
+            status_t::invalid_argument_k,
             "the tokens loss needs segments, head rows, query rows, documents, a band and a subgraph");
     if (config.width % 8u != 0u || config.query_tokens_per_gpu % 8u != 0u || config.band_tokens % warp_size_k != 0u)
         return result_t::fail(
-            status_t::shape_unsupported_k,
+            status_t::unsupported_k,
             "width and query rows must be multiples of 8 and the band of {} (width={} queries={} " "band={})",
             warp_size_k, config.width, config.query_tokens_per_gpu, config.band_tokens);
     config.document_tokens_per_gpu = static_cast<u32_t>(
@@ -549,7 +549,7 @@ expected_t contrastive_tokens_t::stage(bf16r2_view_t token_vectors, u32r1_view_t
                                        multimodal_batch_view_t const &batch, gpu_stream_t &stream) noexcept {
     if (token_vectors.extent(0) != config_.head_tokens_per_gpu || token_vectors.extent(1) != config_.width ||
         token_offsets.extent(0) != config_.segments_per_gpu + 1u)
-        return expected_t::fail(status_t::shape_unsupported_k,
+        return expected_t::fail(status_t::unsupported_k,
                                 "token head output [{}x{}] over {} offsets disagrees with the baked [{}x{}] over {}",
                                 token_vectors.extent(0), token_vectors.extent(1), token_offsets.extent(0),
                                 config_.head_tokens_per_gpu, config_.width, config_.segments_per_gpu + 1u);
@@ -587,7 +587,7 @@ expected_t contrastive_tokens_t::score(std::size_t subgraph_index, gpu_query_sub
                                        f32r2_span_t raw_scores, gpu_stream_t &stream) noexcept {
     if (subgraph_index >= config_.gpu_subgraphs_per_step ||
         subgraph.query_vectors.extent(0) != config_.query_tokens_per_gpu)
-        return expected_t::fail(status_t::shape_unsupported_k, "query subgraph {} disagrees with the baked shape",
+        return expected_t::fail(status_t::unsupported_k, "query subgraph {} disagrees with the baked shape",
                                 subgraph_index);
     std::size_t const band = config_.band_tokens;
     f32r2_span_t const maxima = maxima_[subgraph_index, nk::slice];
@@ -680,7 +680,7 @@ expected_t contrastive_tokens_t::finish(f32r2_view_t query_grad, u32r1_view_t to
                                         multimodal_batch_view_t const &batch, bf16r2_span_t token_vectors_grad,
                                         gpu_stream_t &stream) noexcept {
     if (token_vectors_grad.extent(0) != config_.head_tokens_per_gpu || token_vectors_grad.extent(1) != config_.width)
-        return expected_t::fail(status_t::shape_unsupported_k, "token_vectors_grad must be [{}x{}]",
+        return expected_t::fail(status_t::unsupported_k, "token_vectors_grad must be [{}x{}]",
                                 config_.head_tokens_per_gpu, config_.width);
     return launch_kernel(&contrastive_tokens_finish_kernel_, dim3 {config_.head_tokens_per_gpu, 1u, 1u},
                          dim3 {kernel_block_size_default_k, 1u, 1u}, stream, batch, token_offsets,
@@ -695,7 +695,7 @@ expected_t contrastive_tokens_t::operator()(bf16r2_view_t token_vectors, u32r1_v
                                             gpu_stream_t &stream, f32r1_span_t log_inverse_temperature_grad,
                                             f32r1_span_t bias_grad) noexcept {
     if (config_.gpu_subgraphs_per_step != 1)
-        return expected_t::fail(status_t::invalid_input_k, "a {}-subgraph tokens loss runs distributed",
+        return expected_t::fail(status_t::invalid_argument_k, "a {}-subgraph tokens loss runs distributed",
                                 config_.gpu_subgraphs_per_step);
     std::size_t const segments = config_.segments_per_gpu;
     f32r2_span_t const raw_scores = scores_.span().reshape<2>({segments, segments});
@@ -718,16 +718,16 @@ expected<distributed_contrastive_tokens_t> distributed_contrastive_tokens_t::mak
     std::size_t const gpus = arenas.size();
     u32_t const domains = colocated.multimem_domain_count();
     if (gpus == 0 || streams.size() != gpus || domain.local_member_count() != gpus)
-        return result_t::fail(status_t::invalid_input_k, "every rank needs an arena, a stream and a local member");
+        return result_t::fail(status_t::invalid_argument_k, "every rank needs an arena, a stream and a local member");
     if (domain.member_count() != gpus || config.gpu_subgraphs_per_step != gpus * domains)
-        return result_t::fail(status_t::shape_unsupported_k,
+        return result_t::fail(status_t::unsupported_k,
                               "the tokens loss scores one query tile per GPU, every domain held whole by one " //
                               "process (subgraphs={} members={} local={} domains={})",
                               config.gpu_subgraphs_per_step, domain.member_count(), gpus, domains);
     for (std::size_t rank = 0; rank != gpus; ++rank)
         for (std::size_t peer = 0; peer != gpus; ++peer)
             if (!arenas[rank].is_visible_to(static_cast<int>(peer)))
-                return result_t::fail(status_t::invalid_input_k,
+                return result_t::fail(status_t::invalid_argument_k,
                                       "rank {}'s arena is not visible to device {}, construct it with `visible_to`",
                                       rank, peer);
 
@@ -757,7 +757,7 @@ expected<distributed_contrastive_tokens_t> distributed_contrastive_tokens_t::mak
     std::size_t const score_scalars = subgraphs * segments * segments;
     for (std::size_t rank = 0; rank != gpus; ++rank) {
         switch_to_gpu_t gpu_scope {streams[rank]};
-        if (!gpu_scope.ok()) return result_t::fail(status_t::cuda_error_k, "context entry failed (rank={})", rank);
+        if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed (rank={})", rank);
         expected<contrastive_tokens_t> loss = contrastive_tokens_t::make(arenas[rank], config, numerics);
         if (!loss) return result_t::fail(std::move(loss));
         distributed.losses_[rank] = std::move(loss.value_);
@@ -868,10 +868,11 @@ expected_t distributed_contrastive_tokens_t::operator()(std::span<gpu_tokens_inp
                                                         std::span<gpu_stream_t> streams) noexcept {
     std::size_t const gpus = losses_.size();
     if (inputs.size() != gpus || streams.size() != gpus)
-        return expected_t::fail(status_t::invalid_input_k, "every rank needs its inputs and stream ({} ranks)", gpus);
+        return expected_t::fail(status_t::invalid_argument_k, "every rank needs its inputs and stream ({} ranks)",
+                                gpus);
     for (gpu_tokens_inputs_t const &rank_inputs : inputs)
         if (rank_inputs.recipe.temperature_group_count() > config_.temperature_groups)
-            return expected_t::fail(status_t::shape_unsupported_k, "a recipe selects {} temperature groups of {}",
+            return expected_t::fail(status_t::unsupported_k, "a recipe selects {} temperature groups of {}",
                                     rank_inputs.recipe.temperature_group_count(), config_.temperature_groups);
     // Phase-major: every rank's phase is enqueued before any rank's next one, so a rank spinning at
     // a barrier never holds the host while its peers' arrivals wait unenqueued behind it.
@@ -883,7 +884,7 @@ expected_t distributed_contrastive_tokens_t::operator()(std::span<gpu_tokens_inp
     for (phase_t const phase : phases)
         for (std::size_t rank = 0; rank != gpus; ++rank) {
             switch_to_gpu_t gpu_scope {streams[rank]};
-            if (!gpu_scope.ok()) return expected_t::fail(status_t::cuda_error_k, "context entry failed ({})", rank);
+            if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed ({})", rank);
             std::size_t const member = domain_->member_offset() + rank;
             if (expected_t staged = (this->*phase)(rank, inputs[rank], streams[rank]); !staged) return staged;
             if (expected_t met = domain_->barrier(member, streams[rank]); !met) return met;

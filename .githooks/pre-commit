@@ -14,7 +14,7 @@ rejection_count=0
 project_include_prefix="uform"
 sibling_projects='numkong|stringzilla|forkunion|smashtable|usearch|ucall|ustore'
 cmake_published_variables="UFORM_IS_MAIN_PROJECT"
-cmake_third_party_variables="EMSCRIPTEN_SYSTEM_PROCESSOR WASI_SDK_PATH WASI_SDK_PREFIX"
+cmake_third_party_variables="EMSCRIPTEN_SYSTEM_PROCESSOR WASI_SDK_PATH WASI_SDK_PREFIX YYJSON_INSTALL"
 
 # Prints the reason and the first offending lines, and counts the rejection.
 fail() { # fail <matches> <message-line>...
@@ -1103,6 +1103,105 @@ check_c_limit_macros() {
         "$file spells a C limit macro - write std::numeric_limits<type>::lowest(), max(), quiet_NaN() or infinity():"
 }
 
+# Utilities sit below every family: a header under `include/uform/utilities/` includes or embeds nothing from
+# `encoder/`, `loaders/`, `media/` or `train/`, whose headers include utilities, never the reverse. Whatever a utility
+# needs from a family moves down into utilities, or the family keeps it and the utility takes it as an argument.
+check_utilities_layering() {
+    local reaching
+    reaching=$(grep -nE '^[[:space:]]*#[[:space:]]*(include|embed)[[:space:]]*[<"]uform/(encoder|loaders|media|train)/' \
+        "$staged_blob" || true)
+    [ -z "$reaching" ] || fail "$reaching" \
+        "$file reaches above utilities - a utility includes or embeds only utilities, never an encoder, loader, media or train header:"
+}
+
+# Spelled-out byte spans in C++ sources - `utilities/types.hpp` names them once: `bytes_span_t` for
+# mutable runs, `bytes_view_t` for read-only ones.
+check_spelled_byte_spans() {
+    local spelled
+    spelled=$(printf '%s\n' "$added" |
+        grep -vE 'using bytes_(span|view)_t =' |
+        grep -E 'std::span<(std::byte|byte_t|b8_t)( const)?>' || true)
+    [ -z "$spelled" ] || fail "$spelled" \
+        "$file spells out a byte span - use bytes_span_t / bytes_view_t from uform/utilities/types.hpp:"
+}
+
+# The C library's math functions are spelled through `std::`, so overload resolution picks the `float`
+# or `double` flavour and no `<math.h>` macro shadows them; a bare `sqrt(` or a global `::atan2(` reaches
+# the C symbol. Members, other qualified calls and a like-named function's own definition pass. `round`
+# stays out, since the walks name their callables so.
+libc_math_names='sqrt|cbrt|pow|exp|exp2|expm1|log|log2|log10|log1p|sin|cos|tan|asin|acos|atan|atan2|sinh|cosh|tanh|asinh|acosh|atanh|hypot|fabs|fmod|remainder|floor|ceil|trunc|lround|llround|nearbyint|rint|fma|fmin|fmax|fdim|copysign|ldexp|frexp|modf|scalbn|ilogb|logb|erf|erfc|tgamma|lgamma'
+check_bare_libc_math() {
+    local bare
+    bare=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(#|//|/\*|\*( |/|$))' |
+        sed -E 's/"([^"\\]|\\.)*"//g; s://.*$::' |
+        grep -E "(^\+|[^A-Za-z0-9_:.>]|(^\+|[^A-Za-z0-9_])::)($libc_math_names)[[:space:]]*\(" |
+        grep -vE "\b(void|auto|bool|float|double|[a-z0-9_]+_t)[[:space:]]+($libc_math_names)[[:space:]]*\(" || true)
+    [ -z "$bare" ] || fail "$bare" \
+        "$file calls a C math function bare - spell it std::sqrt(x) or std::atan2(y, x):"
+}
+
+# A two-way structured binding is an `expected` taken apart, so its halves read `[thing, status]`:
+# the status half is `status` or `<verb>_status`, never a participle, and the payload half never
+# carries the suffix. A `std::pair` binds under the same rule; `[first, second]` says nothing either.
+check_expected_bindings() {
+    local participle suffixed
+    participle=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(//|/\*|\*( |/|$))' |
+        grep -E 'auto( const)?&? \[[a-z_]+, [a-z_]+\] =' | grep -vE '\b(from_chars|to_chars|format_to_n)\(' |
+        grep -vE 'auto( const)?&? \[[a-z_]+, (status|[a-z]+(_[a-z]+)*_status)\] =' || true)
+    suffixed=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(//|/\*|\*( |/|$))' |
+        grep -E 'auto( const)?&? \[[a-z_]+_status, ' || true)
+    [ -z "$participle$suffixed" ] || fail "$participle$suffixed" \
+        "$file binds an expected as [payload, participle] - the status half is \`status\` or \`<verb>_status\`:"
+}
+
+# A kept file never has its first-appearance date rewritten: `@date` marks when the code first appeared.
+check_header_date_kept() {
+    local rewritten
+    rewritten=$(grep -E '^-.*@date([[:space:]]|$)' "$results_directory/$ordinal.diff" 2> /dev/null || true)
+    [ -z "$rewritten" ] || fail "$rewritten" \
+        "$file rewrites its @date - keep the date the code first appeared, never the last edit:"
+}
+
+# A C verb's argument struct reads its fields as writes before reads: output pointers (views, counts, double
+# pointers) first, then `arena`, then the scalar knobs - nothing that outputs follows the arena, and no
+# `outputs_*` knob precedes it.
+check_verb_field_order() {
+    local misordered
+    misordered=$(< "$staged_blob" awk '
+        { sub(/\/\*.*\*\//, "") }
+        /\/\*/ { commenting = 1 }
+        commenting { if (/\*\//) commenting = 0; next }
+        /^typedef struct uform_[a-z0-9_]+_t \{/ { opened = NR; count = 0; next }
+        opened && /^\} uform_[a-z0-9_]+_t;/ {
+            name = $2; sub(/;$/, "", name); arena = 0
+            for (field = 1; field <= count; ++field) if (names[field] == "arena" && types[field] == "uform_arena_t") arena = field
+            if (arena) {
+                block = arena
+                while (block > 1 && output[block - 1]) block--
+                for (field = 1; field <= count; ++field) {
+                    if (output[field] && field < block)
+                        printf "line %d: %s.%s lands apart from the outputs before arena\n", opened, name, names[field]
+                    if (field > arena && (output[field] || names[field] == "scalar"))
+                        printf "line %d: %s.%s follows arena\n", opened, name, names[field]
+                    if (field < arena && names[field] ~ /^outputs_/)
+                        printf "line %d: %s.%s precedes arena\n", opened, name, names[field]
+                }
+            }
+            opened = 0; next
+        }
+        opened && /;[[:space:]]*$/ {
+            line = $0; sub(/;[[:space:]]*$/, "", line); sub(/^[[:space:]]+/, "", line)
+            field_name = line; sub(/.*[[:space:]*]/, "", field_name)
+            field_type = line; sub(/[A-Za-z0-9_]+$/, "", field_type); sub(/[[:space:]*]+$/, "", field_type)
+            pointer = line ~ /\*[[:space:]]*[A-Za-z0-9_]+$/
+            ++count; names[count] = field_name; types[count] = field_type
+            output[count] = pointer && (field_type ~ /_view_t$/ || field_type == "size_t" ||
+                                        line ~ /\*\*[[:space:]]*[A-Za-z0-9_]+$/)
+        }')
+    [ -z "$misordered" ] || fail "$misordered" \
+        "$file orders a verb's fields out of reads, writes, arena, knobs and observers:"
+}
+
 # endregion Naming and Vocabulary
 
 # region C++ Surface and Containers
@@ -1478,6 +1577,20 @@ check_library_sleeps() {
         "$file sleeps or yields in an engine - wait through the waiter or pause src/ passes:"
 }
 
+# Host threads are owned in one place: `utilities/ram_device.hpp` wraps ForkUnion's C ABI, and engines dispatch on the
+# `pool_view_t` it hands them, never on a ForkUnion pool or topology class of their own.
+check_forkunion_pools_in_engines() {
+    local pools
+    pools=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+        grep -E '#[[:space:]]*include[[:space:]]*[<"](forkunion\.hpp|forkunion/flat\.hpp)[>"]|\bfu::(flat_pool_t|basic_pool|machine_topology_t|thread_in_domain_t)\b' ||
+        true)
+    if [ "$file" != include/uform/utilities/ram_device.hpp ]; then
+        pools+=$(printf '%s\n' "$added" | grep -E '#[[:space:]]*include[[:space:]]*[<"]forkunion\.h[>"]' || true)
+    fi
+    [ -z "$pools" ] || fail "$pools" \
+        "$file names a ForkUnion pool or the C ABI - dispatch on the pool_view_t that utilities/ram_device.hpp hands out:"
+}
+
 # CUDA's `atomicAdd`-family intrinsics never name their memory order - they are relaxed at device scope, and a
 # reader cannot tell whether that was chosen. Every shared word goes through `cuda::atomic_ref` from
 # `<cuda/atomic>` with an explicit order, as weak as the protocol allows.
@@ -1670,6 +1783,21 @@ check_test_oracle_never_compiled_out() {
     [ -z "$asserts" ] || fail "$asserts" \
         "$file asserts in a test - write \`suite.check_equal(count, 3u, \"rows\");\` from test/harness.hpp," \
         "            which counts the failure and never compiles out:"
+}
+
+# Subscripting a call's result chains two accessors where the container offers one:
+# `matrix.row(i)[j]`, `pool.begin()[i]`, and `.data()[i]` all hide the same raw-pointer hop.
+# Use the multi-index `operator()` - `matrix(i, j)` - or the container's own `operator[]`;
+# a bare `.data()` pointer is reserved for one-time lifts handed to syscalls and SIMD kernels.
+check_call_chained_subscript() {
+    local chained
+    # An identifier must sit against the opening parenthesis, so a dereference `(*owner)[i]` and
+    # an array-reference parameter `(&ids)[width]` stay out of it - neither is a call.
+    chained=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns | grep -E '[A-Za-z0-9_>]\([^()]*\)\[' ||
+        true)
+    [ -z "$chained" ] || fail "$chained" \
+        "$file subscripts a call result - write matrix(row, column) or results[index]," \
+        "            never results.data()[index]:"
 }
 
 # endregion C++ Surface and Containers
@@ -2177,6 +2305,13 @@ judge_path() {
     [ ! -f "$results_directory/$ordinal.added" ] || added=$(< "$results_directory/$ordinal.added")
     [ -s "$staged_lines_path" ] || echo > "$staged_lines_path"
     added_lines=$(< "$staged_lines_path")
+    check_header_date_kept
+    case "$file" in
+    include/uform/utilities/*) check_utilities_layering ;;
+    esac
+    case "$file" in
+    c/uform/*.h) check_verb_field_order ;;
+    esac
     case "$file" in
     include/* | src/* | test/* | tools/* | bench/*) judge_cuda_path ;;
     esac
@@ -2212,6 +2347,7 @@ judge_path() {
         check_iterator_laundering
         check_namespace_directories
         check_namespace_reopened
+        check_expected_bindings
         ;;&
     # Declarations in headers are already judged by the bare-comment check of the CUDA cells.
     *.hpp | *.cuh) ;;
@@ -2228,6 +2364,9 @@ judge_path() {
         check_include_groups
         check_qualified_namespace
         check_c_limit_macros
+        check_bare_libc_math
+        check_spelled_byte_spans
+        check_call_chained_subscript
         check_template_parameter_underscores
         check_template_type_suffixes
         check_suffixed_template_names
@@ -2275,6 +2414,7 @@ judge_path() {
     # yield on their own, nor hold a capability mask.
     include/uform/*.hpp | include/uform/*.cuh)
         check_library_sleeps
+        check_forkunion_pools_in_engines
         check_capability_masks_in_engines
         ;;&
     # The code every GPU vendor shares, and the C verbs above every residency.

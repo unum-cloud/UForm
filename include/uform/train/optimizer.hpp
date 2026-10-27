@@ -137,7 +137,7 @@ struct adafactor_t {
      *      which the caller loads first. The step count continues from the checkpoint's step.
      *
      *  The caller drains @p stream before releasing @p checkpoint .
-     *  @retval status_t::shape_unsupported_k A saved state of another shape.
+     *  @retval status_t::unsupported_k A saved state of another shape.
      */
     [[nodiscard]] expected_t load(checkpoint_to_load_t const &checkpoint, gpu_stream_t &stream) noexcept;
 
@@ -312,7 +312,7 @@ struct adafactor_temperatures_t {
     /**
      *  @brief Upload the second moment @p checkpoint holds on @p stream ; a file without one
      *      restarts it at zero.
-     *  @retval status_t::shape_unsupported_k A saved moment of another group count.
+     *  @retval status_t::unsupported_k A saved moment of another group count.
      */
     [[nodiscard]] expected_t load(checkpoint_to_load_t const &checkpoint, gpu_stream_t &stream) noexcept;
 
