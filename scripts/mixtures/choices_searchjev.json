@@ -1,0 +1,16 @@
+{
+  "mixture": "choices_searchjev",
+  "datasets": [
+    {
+      "name": "searchjev_decisions",
+      "weight": 1.0,
+      "glob": "data/searchjev-decisions/train/searchjev_train_*.parquet",
+      "choices": {
+        "state": "state",
+        "choices": "choices",
+        "targets": "targets",
+        "group": "group"
+      }
+    }
+  ]
+}

@@ -566,6 +566,23 @@ struct choices_t {
     return items ? total / double(items) : 0;
 }
 
+/** The share of items whose highest logit is the target's most likely choice, the same under
+ *  every temperature. */
+[[nodiscard]] static double top_choice_accuracy_(choices_t const &held_out, std::span<double const> logits) noexcept {
+    std::size_t const items = held_out.states.count();
+    std::size_t correct = 0;
+    for (std::size_t item = 0; item != items; ++item) {
+        std::size_t const begin = held_out.choices.offsets[item], end = held_out.choices.offsets[item + 1];
+        std::size_t top = begin, wanted = begin;
+        for (std::size_t choice = begin; choice != end; ++choice) {
+            if (logits[choice] > logits[top]) top = choice;
+            if (held_out.targets[choice] > held_out.targets[wanted]) wanted = choice;
+        }
+        correct += begin != end && top == wanted;
+    }
+    return items ? double(correct) / double(items) : 0;
+}
+
 /** The top-choice expected calibration error over 15 equal confidence bins, a choice correct when
  *  it is the target's most likely, under @p beta per group. */
 [[nodiscard]] static double calibration_error_(choices_t const &held_out, std::span<double const> logits,
@@ -668,8 +685,9 @@ struct choices_t {
                      before[group], betas[group], choice_loss_(held_out, logits, before[group], group),
                      choice_loss_(held_out, logits, betas[group], group));
     }
-    fmt::println("calibrate: {} choices over {} groups, top-choice ECE {:.4f} -> {:.4f}", items, groups,
-                 calibration_error_(held_out, logits, before), calibration_error_(held_out, logits, betas));
+    fmt::println("calibrate: {} choices over {} groups, top-choice accuracy {:.4f}, ECE {:.4f} -> {:.4f}", items,
+                 groups, top_choice_accuracy_(held_out, logits), calibration_error_(held_out, logits, before),
+                 calibration_error_(held_out, logits, betas));
 
     st::basic_vector<float> fitted;
     if (st::failed(fitted.resize(st::assume_uninitialized, groups)))
