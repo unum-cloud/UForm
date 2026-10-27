@@ -38,7 +38,7 @@
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `copy_host_to_device`, `copy_device_to_host`
 #include "uform/utilities/types.hpp"        // `splitmix64_hash_t`, `epoch_permutation`, `data_epoch_t`, `to_string`
 #include "uform/loaders/audio_loader.cuh"   // `decode_audios`
-#include "uform/loaders/dataset_shards.hpp" // `column_view_t`
+#include "uform/loaders/dataset_shards.hpp" // `column_view_t`, `row_group_draw_t`
 #include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
 #include "uform/loaders/image_loader.cuh"   // `nvjpeg_session_t`, `decode_images`
 #include "uform/loaders/tokens_loader.cuh"  // `tokens_loader_parquet_t`, `drawn_shards`
@@ -350,43 +350,52 @@ static void mixture_sampler_retires_capped_entries(test_suite_t &suite) {
     }
 }
 
-/** The weighted file pick is row-proportional, distinct, and floored at two shards. */
+/** The row-group draw is row-proportional, distinct, floored at two shards, and reads only the
+ *  groups it drew, in the ascending order cuDF reads them. */
 static void file_pick_is_weighted_and_distinct(test_suite_t &suite) {
-    constexpr splitmix64_hash_t hash {};
     u64_t const seed = 0x515Eull;
-    stack_array<std::size_t, 5> rows; // file 2 owns ~85% of the rows
+    constexpr std::size_t groups_per_shard = 4;
+    stack_array<std::size_t, 5> rows; // shard 2 owns ~85% of the rows
     for (std::size_t count : {std::size_t {10}, std::size_t {5}, std::size_t {200}, std::size_t {20}, std::size_t {5}})
         (void)rows.push_back(count);
-    st::basic_vector<std::size_t> prefix;
-    if (st::failed(prefix.push_back(0))) return suite.check(false, "prefix scratch alloc failed");
-    for (std::size_t r = 0; r != rows.size(); ++r)
-        if (st::failed(prefix.push_back(prefix[r] + rows[r]))) return suite.check(false, "prefix scratch alloc failed");
-    std::size_t const total_rows = prefix[rows.size()];
+    sz::string_view_t const names[5] = {"a", "b", "c", "d", "e"};
+    row_group_draw_t draw;
+    for (std::size_t shard = 0; shard != rows.size(); ++shard) {
+        parquet_length_metadata_t footer;
+        footer.rows = rows[shard] * groups_per_shard;
+        if (st::failed(footer.group_complete_rows.resize(groups_per_shard, std::size_t {rows[shard]})) ||
+            st::failed(footer.group_rows.resize(groups_per_shard, std::size_t {rows[shard]})))
+            return suite.check(false, "footer scratch alloc failed");
+        if (expected_t appended = draw.append_shard(names[shard], footer); !appended)
+            return suite.check(false, "a shard should append: {}", appended.description_);
+    }
+    if (expected_t reserved = draw.reserve(rows.size() * groups_per_shard); !reserved)
+        return suite.check(false, "the pick storage should reserve: {}", reserved.description_);
 
     st::basic_vector<std::size_t> hits;
     if (st::failed(hits.resize(rows.size()))) return suite.check(false, "hits scratch alloc failed");
     std::size_t const steps = 4000;
-    bool floored = true, distinct = true;
+    bool floored = true, ordered = true, partial = true;
     for (std::size_t step = 0; step != steps; ++step) {
-        stack_array<std::size_t, 5> picked;
-        std::size_t attempt = 0;
-        while (picked.size() < 2 && picked.size() < rows.size()) {
-            std::size_t const position = hash(seed, step, 0u, file_draw_salt_k, attempt) % total_rows;
-            ++attempt;
-            std::size_t file = 0;
-            while (file + 1 < prefix.size() && prefix[file + 1] <= position) ++file; // upper_bound - 1
-            bool already = false;
-            for (std::size_t p = 0; p != picked.size(); ++p) already = already || picked[p] == file;
-            if (already) continue;
-            (void)picked.push_back(file);
+        if (expected_t drawn = draw.draw(seed, step, 0u, file_draw_salt_k, 1u, 2u); !drawn)
+            return suite.check(false, "a draw should succeed: {}", drawn.description_);
+        sz::strings_view_t const paths = draw.picked_paths();
+        tape_view<u32_t const> const groups = draw.picked_groups();
+        floored = floored && paths.size() >= 2 && groups.size() == paths.size();
+        partial = partial && groups.elements.size() < groups_per_shard * paths.size();
+        for (std::size_t pick = 0; pick != paths.size(); ++pick) {
+            ordered = ordered && (pick == 0 || paths[pick - 1] < paths[pick]);
+            std::span<u32_t const> const local = groups[pick];
+            for (std::size_t index = 1; index < local.size(); ++index)
+                ordered = ordered && local[index - 1] < local[index];
+            ++hits[static_cast<std::size_t>(paths[pick].front() - 'a')];
         }
-        floored = floored && picked.size() >= 2;
-        distinct = distinct && (picked.size() < 2 || picked[0] != picked[1]);
-        for (std::size_t p = 0; p != picked.size(); ++p) ++hits[picked[p]];
     }
-    suite.check(floored, "every pick must draw at least two shards");
-    suite.check(distinct, "the drawn shards must be distinct");
-    suite.check(hits[2] > hits[1] * 5, "the pick must be weighted by row count (file2={} file1={})", hits[2], hits[1]);
+    suite.check(floored, "every draw must pick at least two shards");
+    suite.check(ordered, "the picked shards and each shard's groups must be distinct and ascending");
+    suite.check(partial, "a draw must read only the groups it drew, not whole shards");
+    suite.check(hits[2] > hits[1] * 5, "the draw must be weighted by row count (shard2={} shard1={})", hits[2],
+                hits[1]);
 }
 
 // Tier B — the multi-segment-per-row packing cursor, host oracle of the token loader's scan: each

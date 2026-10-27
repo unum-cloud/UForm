@@ -35,16 +35,16 @@ inline constexpr unsigned infiniband_doorbell_block_threads_k = 32u;
  *  The payload write is unsignaled; only the 4-byte inline flag write is signaled — exactly one
  *  completion per round is produced and drained, so the small send ring never overflows across replays.
  */
-static __global__ void infiniband_allreduce_post_kernel_(infiniband_links_view_t links, u32_t round, f32_t const *shard,
-                                                         std::size_t shard_scalars,
+static __global__ void infiniband_allreduce_post_kernel_(infiniband_links_view_t links, u32_t round,
+                                                         std::span<f32_t const> shard,
                                                          infiniband_round_view_t flag_round) {
     if (threadIdx.x != 0) return;
     infiniband_link_t const link = links[round];
     u32_t const step_parity = (flag_round[0] / static_cast<u32_t>(links.extent(0))) & 1u;
     u32_t const flag_value = flag_round[0] + round + 1u;
-    infiniband_post_write(link.queue, shard, link.local_access_key,
+    infiniband_post_write(link.queue, shard.data(), link.local_access_key,
                           link.remote_heap_base + link.landing_offset + step_parity * link.landing_parity_stride,
-                          link.remote_access_key, static_cast<u32_t>(shard_scalars * sizeof(f32_t)),
+                          link.remote_access_key, static_cast<u32_t>(shard.size_bytes()),
                           infiniband_signaling_t::unsignaled_k, nullptr);
     infiniband_post_write(link.queue, nullptr, link.local_access_key,
                           link.remote_heap_base + link.remote_flag_offset + step_parity * sizeof(u32_t),
@@ -76,14 +76,14 @@ static __global__ void infiniband_flag_wait_kernel_(infiniband_links_view_t link
  *  one explicit round-to-nearest-even add per element — no fused-multiply-add contraction, so the
  *  SPMD-static fold order is bit-identical on every domain. The heap is symmetric with the shard at its
  *  offset 0, so the landing sits at its own offset past the shard. */
-static __global__ void infiniband_accumulate_f32_kernel_(infiniband_links_view_t links, u32_t round, f32_t *shard,
-                                                         std::size_t shard_scalars,
-                                                         infiniband_round_view_t flag_round) {
+static __global__ void infiniband_accumulate_f32_kernel_(infiniband_links_view_t links, u32_t round,
+                                                         std::span<f32_t> shard, infiniband_round_view_t flag_round) {
     infiniband_link_t const link = links[round];
     u32_t const step_parity = (flag_round[0] / static_cast<u32_t>(links.extent(0))) & 1u;
-    f32_t const *landing = shard + (link.landing_offset + step_parity * link.landing_parity_stride) / sizeof(f32_t);
+    f32_t const *landing = shard.data() +
+                           (link.landing_offset + step_parity * link.landing_parity_stride) / sizeof(f32_t);
     std::size_t const stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
-    for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < shard_scalars;
+    for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; index < shard.size();
          index += stride)
         shard[index] = __fadd_rn(shard[index], landing[index]);
 }
@@ -631,23 +631,22 @@ expected<infiniband_reach_t> infiniband_reach_t::make_(mesh_topology_t const &to
 
 expected_t infiniband_reach_t::allreduce_sum(gpu_stream_t &stream) noexcept {
     if (layout_.rounds == 0) return {};
-    std::size_t const shard_scalars = layout_.payload_bytes / sizeof(f32_t);
-    f32_t *const shard = typed_span<f32_t>(heap_.span()).data();
-    unsigned const accumulate_grid = grid_size_for(shard_scalars);
+    std::span<f32_t> const shard {typed_span<f32_t>(heap_.span()).data(), layout_.payload_bytes / sizeof(f32_t)};
+    unsigned const accumulate_grid = grid_size_for(shard.size());
     dim3 const doorbell_grid {1u, 1u, 1u};
     dim3 const doorbell_block {infiniband_doorbell_block_threads_k, 1u, 1u};
     infiniband_links_view_t const links {links_.data(), layout_.rounds};
     infiniband_round_view_t const round_view {round_scalar_.data(), 1};
     for (u32_t round = 0; round != layout_.rounds; ++round) {
         expected_t launched = launch_kernel(&infiniband_allreduce_post_kernel_, doorbell_grid, doorbell_block, stream,
-                                            links, round, shard, shard_scalars, round_view);
+                                            links, round, std::span<f32_t const> {shard}, round_view);
         if (launched)
             launched = launch_kernel(&infiniband_flag_wait_kernel_, doorbell_grid, doorbell_block, stream, links, round,
                                      round_view);
         if (launched)
             launched = launch_kernel(&infiniband_accumulate_f32_kernel_, dim3 {accumulate_grid, 1u, 1u},
                                      dim3 {kernel_block_size_default_k, 1u, 1u}, stream, links, round, shard,
-                                     shard_scalars, round_view);
+                                     round_view);
         if (!launched) return launched;
     }
     return {};

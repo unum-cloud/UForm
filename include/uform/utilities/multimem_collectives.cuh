@@ -304,20 +304,20 @@ struct multimem_tier_choice_t {
 struct multimem_member_t {
 
     /** Multicast base of the Float32 payload — `multimem` loads and stores fan out here. */
-    f32_t *multimem_payload = nullptr;
+    f32_t *multimem_payload = nullptr; // device-boundary
 
     /** Multicast address of the arrival counter. */
-    u32_t *multimem_flag = nullptr;
+    u32_t *multimem_flag = nullptr; // device-boundary
 
     /** Member 0's payload replica, the start of the contiguous symmetric range. */
-    f32_t *replica_payloads = nullptr;
+    f32_t *replica_payloads = nullptr; // device-boundary
 
     /** Member 0's arrival counter. */
-    u32_t *replica_flags = nullptr;
+    u32_t *replica_flags = nullptr; // device-boundary
 
     /** This member's own round scalar (one word above its arrival flag) — read for the barrier
      *  target and self-advanced by the barrier kernels, never touched by any other member. */
-    u32_t *round = nullptr;
+    u32_t *round = nullptr; // device-boundary
 
     /** Distance between adjacent members' replicas, in 4-byte payload scalars or flag words alike. */
     std::size_t replica_stride_words = 0;
@@ -333,7 +333,7 @@ struct multimem_member_t {
 
     /** Where a trapping kernel of this member records why: its GPU's record in the mesh's
      *  @ref mesh_topology_t::faults ; null for a member another process drives. */
-    gpu_fault_t *fault = nullptr;
+    gpu_fault_t *fault = nullptr; // device-boundary
 
 #if defined(__CUDACC__)
 

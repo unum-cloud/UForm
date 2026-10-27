@@ -92,7 +92,7 @@ static __global__ void image_segments_kernel_(patch_grid_t const *grids, u32_t l
 struct gather_entry_t {
 
     /** Where the image's compressed bytes start in the device tape. */
-    b8_t const *source;
+    b8_t const *source; // device-boundary
 
     /** How many of them (capped at the probe size) to lift. */
     u32_t length;
@@ -209,8 +209,8 @@ expected_t nvjpeg_session_t::decode_jpeg_batch(std::span<jpeg_entry_t const> ent
         st::failed(destinations.resize(st::assume_uninitialized, count)))
         return expected_t::fail(status_t::bad_alloc_k, "nvJPEG parallel-array allocation failed ({} images)", count);
     for (std::size_t index = 0; index != count; ++index) {
-        data[index] = nvjpeg_bytes_(entries[index].bitstream);
-        lengths[index] = entries[index].length;
+        data[index] = nvjpeg_bytes_(entries[index].bitstream.data());
+        lengths[index] = entries[index].bitstream.size();
         destinations[index] = entries[index].destination;
     }
     if (nvjpegDecodeBatchedInitialize(handle_, jpeg_state_, static_cast<int>(count), 1, NVJPEG_OUTPUT_RGBI) !=
@@ -407,7 +407,7 @@ static __global__ void rgb_to_rgba_kernel_(rgba_expand_entry_t const *entries, u
         if (plan.format != format_jpeg_k) continue;
         auto const blob = tape[drawn_rows[index]];
         std::size_t const pixels = static_cast<std::size_t>(plan.native.width) * plan.native.height;
-        if (st::failed(entries.push_back(jpeg_entry_t {blob.data(), blob.size(), index, rgb_bytes, nvjpegImage_t {}})))
+        if (st::failed(entries.push_back(jpeg_entry_t {bytes_view_t {blob}, index, rgb_bytes, nvjpegImage_t {}})))
             return expected_t::fail(status_t::bad_alloc_k, "JPEG batch table growth failed");
         rgb_bytes += pixels * rgb_channels_k;
     }
@@ -805,7 +805,8 @@ expected_t image_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvjpeg_session
     }
 
     // Decode the picked files' blob column into one device reservoir; the true pool is the decoded rows.
-    auto reservoir_read = parquet_file_t::make(*storage_, picked_paths, {&config.column, 1}, gpu_stream);
+    auto reservoir_read = parquet_file_t::make(*storage_, std::span<sz::string_view_t const> {picked_paths},
+                                               std::span<sz::string_view_t const> {&config.column, 1}, {}, gpu_stream);
     if (!reservoir_read) return expected_t::fail(std::move(reservoir_read));
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();

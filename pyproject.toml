@@ -104,6 +104,8 @@ minimum-version = "build-system.requires"
 wheel.packages = ["python/uform"]
 
 [tool.scikit-build.cmake.define]
+CMAKE_C_COMPILER = "clang-22"
+CMAKE_CXX_COMPILER = "clang++-22"
 UFORM_BUILD_LIB_C = "ON"
 UFORM_BUILD_LIB_PYTHON = "ON"
 UFORM_BUILD_TEST = "OFF"

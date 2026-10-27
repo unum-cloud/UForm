@@ -581,7 +581,7 @@ static batch_source_t_ source_from_loaded_(multimodal_batch_on_gpu_t const &load
  *  is block @c domain of that member's window. Resolved arithmetically in-kernel, so no table bounds the world;
  *  a dead modality's zero-byte region reads as null, exactly as the gather kernels expect. */
 struct batch_windows_t_ {
-    b8_t const *first_window = nullptr;
+    b8_t const *first_window = nullptr; // device-boundary
     std::size_t member_stride = 0;
     batch_block_layout_t_ layout {};
     u32_t members = 0;

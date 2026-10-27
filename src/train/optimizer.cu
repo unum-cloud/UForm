@@ -294,18 +294,18 @@ expected_t adafactor_t::save(checkpoint_to_save_t &checkpoint, gpu_stream_t &str
         return cuda_failure(result, "optimizer state download failed");
     for (std::size_t index = 0; index != states_.size(); ++index) {
         adafactor_state_t const &state = states_[index];
-        auto insert = [&](char const *part, f32_t const *values, std::size_t count) noexcept {
+        auto insert = [&](char const *part, std::span<f32_t const> values) noexcept {
             sz::string_t name;
             if (!format_into(name, "optimizer.{}.{}", names_[index].view(), part))
                 return expected_t::fail(status_t::bad_alloc_k, "optimizer state name format failed");
-            return checkpoint.insert(name.view(), f32r2_view_t {values, 1, count});
+            return checkpoint.insert(name.view(), f32r2_view_t {values.data(), 1, values.size()});
         };
         std::size_t const rows = state.weights.extent(0), cols = state.weights.extent(1);
-        expected_t inserted = insert("row_moments", moments.data() + state.row_moment_offset, rows);
-        if (inserted) inserted = insert("column_moments", moments.data() + state.column_moment_offset, cols);
-        if (inserted && rows == 1u) inserted = insert("master", masters.data() + state.master_offset, cols);
+        expected_t inserted = insert("row_moments", {moments.data() + state.row_moment_offset, rows});
+        if (inserted) inserted = insert("column_moments", {moments.data() + state.column_moment_offset, cols});
+        if (inserted && rows == 1u) inserted = insert("master", {masters.data() + state.master_offset, cols});
         if (inserted && !first_moments_.empty())
-            inserted = insert("first_moment", first_moments.data() + state.gradient_offset, rows * cols);
+            inserted = insert("first_moment", {first_moments.data() + state.gradient_offset, rows * cols});
         if (!inserted) return inserted;
     }
     return {};

@@ -65,8 +65,9 @@ using namespace unum::uform::test;
  *  early-vs-late comparison genuinely marginal (a ~0.7% rise on the world mean) while every machinery invariant
  *  held.
  */
-[[nodiscard]] static trainer_config_t test_geometry_(bool omni) noexcept {
+[[nodiscard]] static trainer_config_t test_geometry_(bool omni, u64_t seed) noexcept {
     trainer_config_t config;
+    config.seed = seed;
     config.batch = multimodal_batch_shape_t {2u, 2u, 64u};
     if (omni) {
         config.batch = multimodal_batch_shape_t {4u, 4u, 64u};
@@ -258,6 +259,7 @@ inline constexpr char const *world_unhealthy_k = "an earlier case found the worl
  *  floor. */
 static void learning_rate_schedule(test_suite_t &suite) {
     trainer_config_t config;
+    config.seed = suite.settings.seed;
     config.learning_rate = 1.0e-3f;
     config.min_learning_rate = 1.0e-5f;
     config.warmup_steps = 10;
@@ -528,8 +530,8 @@ static void run_sweep_cell_(test_suite_t &suite, world_health_t &health, tier_t 
 }
 
 /** One sweep cell's config: @p subset 's media bits over @p rows full-width rows of @p columns cells. */
-[[nodiscard]] static trainer_config_t sweep_config_(u32_t subset, u32_t rows, u32_t columns) noexcept {
-    trainer_config_t config = test_geometry_(false);
+[[nodiscard]] static trainer_config_t sweep_config_(u32_t subset, u32_t rows, u32_t columns, u64_t seed) noexcept {
+    trainer_config_t config = test_geometry_(false, seed);
     config.batch = multimodal_batch_shape_t {rows, rows, columns};
     config.steps = 4;
     if (subset & 1u) config.batch.image = image_batch_shape_t {8u, 3u};
@@ -555,18 +557,20 @@ static void mixture_sweep(test_suite_t &suite, world_health_t &health, tier_t wi
             if (!format_into(label, "sweep/1gpu/tokens{}{}{}/rows={}", (subset & 1u) ? ",image" : "",
                              (subset & 2u) ? ",video" : "", (subset & 4u) ? ",audio" : "", rows))
                 return suite.check(false, "sweep label format failed");
-            suite.run(label.view(), run_sweep_cell_, health, cheap, label.view(), sweep_config_(subset, rows, 64u));
+            suite.run(label.view(), run_sweep_cell_, health, cheap, label.view(),
+                      sweep_config_(subset, rows, 64u, suite.settings.seed));
         }
     suite.run("sweep/1gpu/omni/rows=5", run_sweep_cell_, health, cheap, "sweep/1gpu/omni/rows=5",
-              sweep_config_(7u, 5u, 64u));
+              sweep_config_(7u, 5u, 64u, suite.settings.seed));
     suite.run("sweep/1gpu/omni/rows=2,columns=96", run_sweep_cell_, health, cheap, "sweep/1gpu/omni/rows=2,columns=96",
-              sweep_config_(7u, 2u, 96u));
+              sweep_config_(7u, 2u, 96u, suite.settings.seed));
     for (u32_t subset = 0; subset != 8u; ++subset) {
         sz::string_t label;
         if (!format_into(label, "sweep/wide/tokens{}{}{}/rows=2", (subset & 1u) ? ",image" : "",
                          (subset & 2u) ? ",video" : "", (subset & 4u) ? ",audio" : ""))
             return suite.check(false, "sweep label format failed");
-        suite.run(label.view(), run_sweep_cell_, health, wide, label.view(), sweep_config_(subset, 2u, 64u));
+        suite.run(label.view(), run_sweep_cell_, health, wide, label.view(),
+                  sweep_config_(subset, 2u, 64u, suite.settings.seed));
     }
 }
 
@@ -586,7 +590,7 @@ static void segment_budget(test_suite_t &suite) {
  *  segments cover it exactly once and in order, and the step still trains finitely. */
 static void packed_rows(test_suite_t &suite, world_health_t &health, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
-    trainer_config_t config = test_geometry_(false);
+    trainer_config_t config = test_geometry_(false, suite.settings.seed);
     config.batch = batch_capacity(config.batch, 2u, 3.0);
     config.capture = eager_k;
     trainer_t trainer;
@@ -628,7 +632,7 @@ static void packed_rows(test_suite_t &suite, world_health_t &health, tier_t tier
  *  over one fixed eager preamble produce the same shared @c d(normalized) up to reduction order. */
 static void graph_capture(test_suite_t &suite, world_health_t &health, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
-    trainer_config_t const config = test_geometry_(false);
+    trainer_config_t const config = test_geometry_(false, suite.settings.seed);
     trainer_t trainer;
     if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
         return suite.check(false, "capture trainer bring-up: {}", built.description_);
@@ -676,7 +680,7 @@ static void graph_capture(test_suite_t &suite, world_health_t &health, tier_t ti
  *  moments would not. */
 static void late_interaction_resume(test_suite_t &suite, world_health_t &health, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
-    trainer_config_t config = test_geometry_(false);
+    trainer_config_t config = test_geometry_(false, suite.settings.seed);
     config.objective = objective_t::contrastive_k;
     config.late_interaction.weight = 1.0f;
     config.late_interaction.width = 32;
@@ -720,7 +724,7 @@ static void late_interaction_resume(test_suite_t &suite, world_health_t &health,
  *  first, falls by the last step, and the token term stays zero throughout. */
 static void choices_replay(test_suite_t &suite, world_health_t &health, tier_t tier) {
     if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
-    trainer_config_t config = test_geometry_(false);
+    trainer_config_t config = test_geometry_(false, suite.settings.seed);
     // Rows as wide as the model: the envelope's one-row probe reads choices off its tokens.
     config.batch = multimodal_batch_shape_t {2u, 4u, 256u};
     config.batch.max_choices_per_segment = 4u;
@@ -824,8 +828,10 @@ int main(int, char **argv) {
     suite.run("capture/replay", graph_capture, health, cheap);
     suite.run("resume/late_interaction", late_interaction_resume, health, cheap);
     suite.run("choices/replay", choices_replay, health, cheap);
-    suite.run("conformance/tokens", run_base_conformance, health, "tokens", test_geometry_(false), wide);
-    suite.run("conformance/omni", run_base_conformance, health, "omni", test_geometry_(true), wide);
+    suite.run("conformance/tokens", run_base_conformance, health, "tokens", test_geometry_(false, suite.settings.seed),
+              wide);
+    suite.run("conformance/omni", run_base_conformance, health, "omni", test_geometry_(true, suite.settings.seed),
+              wide);
     mixture_sweep(suite, health, wide, cheap);
     return suite.finish();
 }

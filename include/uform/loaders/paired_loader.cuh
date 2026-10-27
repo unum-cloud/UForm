@@ -12,7 +12,8 @@
  *  rows into one reservoir, and draws rows by a keyed bijection over the pool. A row whose anchor
  *  or text positive is a list contributes one of its elements, drawn by a key of its own, so every
  *  element of a row recurs across steps. A row's negatives are a list too: strings for a text
- *  positive, and shard-local row indices into the positive column for media.
+ *  positive, and shard-local row indices into the positive column for media, whose row passes over
+ *  when the fill drew no row group holding its negative.
  *
  *  @section paired_layout One bag per pair or triplet
  *
@@ -75,9 +76,8 @@ struct paired_loader_parquet_config_t {
 /**
  *  @brief The loader object: dataset-scoped, rank-agnostic, one media modality per dataset.
  *
- *  @warning Holds one dataset's shard footers; keep one per input dataset. @ref fill allocates its
- *      scratch on demand and is safe to call concurrently for different GPU ranks on different
- *      streams.
+ *  @warning Holds one dataset's shard footers; keep one per input dataset. @ref fill draws into the
+ *      loader's own pick storage, so one GPU rank fills at a time.
  */
 struct paired_loader_parquet_t {
 
@@ -151,7 +151,7 @@ struct paired_loader_parquet_t {
     }
 
     /** The rows holding every role column across the shards, the ones a fill draws. */
-    [[nodiscard]] std::size_t rows() const noexcept { return group_prefix_[group_prefix_.size() - 1]; }
+    [[nodiscard]] std::size_t rows() const noexcept { return groups_.rows(); }
 
   private:
 
@@ -166,9 +166,6 @@ struct paired_loader_parquet_t {
 
     /** The run's CPU-decode worker pool — borrowed, never spawned here. */
     pool_view_t pool_ {nullptr};
-
-    /** The dataset's Parquet shard paths, sorted by the glob. */
-    st::basic_vector<sz::string_t> absolute_paths_ {};
 
     /** The caption column, the positive column resolved to its blob leaf, and the negative column,
      *  empty for none. */
@@ -186,21 +183,18 @@ struct paired_loader_parquet_t {
     /** The run seed keying the file, row and caption draws. */
     u64_t seed_ = 0;
 
-    /** @b [shards+1] cumulative footer row counts, bounding a media negative's shard-local row. */
-    st::basic_vector<std::size_t> row_prefix_ {};
+    /** The shards' row groups holding every role column, and each fill's pick of them. */
+    row_group_draw_t groups_ {};
 
-    /** @b [groups+1] cumulative complete rows of every row group over the shards in order, the
-     *  weighted draw's search table, and @b [shards+1] each shard's first group in it. */
-    st::basic_vector<std::size_t> group_prefix_ {}, shard_first_group_ {};
+    /** Per drawable shard, each row group's first shard-local row and then the shard's rows, which
+     *  place a drawn group's rows and a media negative's row. */
+    st::basic_vector<std::size_t> group_starts_ {};
 
-    /** @b [groups] each row group's shard, rows, and first shard-local row. */
-    st::basic_vector<std::size_t> group_shard_ {}, group_rows_ {}, group_first_row_ {};
+    /** @b [shards+1] each drawable shard's first entry in @ref group_starts_ . */
+    st::basic_vector<std::size_t> shard_starts_ {};
 
-    /** The shards with a complete row, which bound the draw's floor of two. */
-    std::size_t drawable_shards_ = 0;
-
-    /** @b [shards] each shard path's hash, which a row's sample key folds with its shard-local row,
-     *  so every entry that reads one shard keys its rows alike. */
+    /** @b [shards] each drawable shard path's hash, which a row's sample key folds with its
+     *  shard-local row, so every entry that reads one shard keys its rows alike. */
     st::basic_vector<u64_t> shard_keys_ {};
 
     /** The device bytes a fill's reservoir can take, from the footers. */

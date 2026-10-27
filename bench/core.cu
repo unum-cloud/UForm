@@ -49,8 +49,9 @@ inline constexpr u32_t rows_k = 8, columns_k = 256, segments_per_row_k = 2;
 /** Segments of the batch, which are also the vertices of the contrastive row. */
 inline constexpr u32_t segments_k = rows_k * segments_per_row_k;
 
-/** Uploads @p count BFloat16 values in @b [-0.05,0.05) to @p device , keyed by @p salt . */
-[[nodiscard]] static expected_t upload_keyed_(bf16_t *device, std::size_t count, u64_t seed, u64_t salt) noexcept {
+/** Uploads BFloat16 values in @b [-0.05,0.05) over @p device , keyed by @p salt . */
+[[nodiscard]] static expected_t upload_keyed_(std::span<bf16_t> device, u64_t seed, u64_t salt) noexcept {
+    std::size_t const count = device.size();
     st::basic_vector<bf16_t> staging;
     if (st::failed(staging.resize(count)))
         return expected_t::fail(status_t::bad_alloc_k, "staging {} scalars failed", count);
@@ -58,7 +59,7 @@ inline constexpr u32_t segments_k = rows_k * segments_per_row_k;
         f32_t const uniform = static_cast<f32_t>(splitmix64_hash_t {}(seed, salt, index) >> 40) * 0x1.0p-24f;
         staging[index] = __float2bfloat16((uniform - 0.5f) * 0.1f);
     }
-    if (cuMemcpyHtoD(device_address(device), staging.data(), count * sizeof(bf16_t)) != CUDA_SUCCESS)
+    if (cuMemcpyHtoD(device_address(device.data()), staging.data(), count * sizeof(bf16_t)) != CUDA_SUCCESS)
         return expected_t::fail(status_t::device_error_k, "uploading {} scalars failed", count);
     return {};
 }
@@ -127,9 +128,9 @@ static void tower_forward_backward(loop_t &loop, u64_t seed) {
     st::basic_vector<differentiable_weights_t> weights;
     if (expected_t filled = tower->fill(weights); !filled) return loop.fail(filled.description_.view());
     for (std::size_t matrix = 0; matrix != weights.size(); ++matrix)
-        if (expected_t seeded = upload_keyed_(weights[matrix].weights.data(),
-                                              weights[matrix].weights.extent(0) * weights[matrix].weights.extent(1),
-                                              seed, matrix);
+        if (expected_t seeded = upload_keyed_(
+                {weights[matrix].weights.data(), weights[matrix].weights.extent(0) * weights[matrix].weights.extent(1)},
+                seed, matrix);
             !seeded)
             return loop.fail(seeded.description_.view());
 
@@ -158,7 +159,7 @@ static void tower_forward_backward(loop_t &loop, u64_t seed) {
     bf16_t *vertices = arena->allocate_object<bf16_t>(segments_k * hidden_k);
     bf16_t *vertices_grad = arena->allocate_object<bf16_t>(segments_k * hidden_k);
     if (vertices == nullptr || vertices_grad == nullptr) return loop.fail("vertex allocation failed");
-    if (expected_t seeded = upload_keyed_(vertices_grad, segments_k * hidden_k, seed, weights.size()); !seeded)
+    if (expected_t seeded = upload_keyed_({vertices_grad, segments_k * hidden_k}, seed, weights.size()); !seeded)
         return loop.fail(seeded.description_.view());
     if (expected_t packed = tower->pack_weights(*stream); !packed) return loop.fail(packed.description_.view());
 
@@ -201,7 +202,7 @@ static void contrastive_loss(loop_t &loop, u64_t seed) {
     f32_t *loss_out = arena->allocate_object<f32_t>(1);
     if (tower == nullptr || grad == nullptr || column_grad == nullptr || loss_out == nullptr)
         return loop.fail("vertex allocation failed");
-    if (expected_t seeded = upload_keyed_(tower, scalars, seed, 0); !seeded)
+    if (expected_t seeded = upload_keyed_({tower, scalars}, seed, 0); !seeded)
         return loop.fail(seeded.description_.view());
     gpu_subgraph_t subgraph;
     subgraph.to_vertices = bf16r2_view_t {tower, segments_k, hidden_k};
@@ -265,7 +266,7 @@ static void contrastive_tokens(loop_t &loop, u64_t seed) {
     if (vectors == nullptr || grad == nullptr || offsets_device == nullptr || sides_device == nullptr ||
         loss_out == nullptr)
         return loop.fail("token allocation failed");
-    if (expected_t seeded = upload_keyed_(vectors, scalars, seed, 1); !seeded)
+    if (expected_t seeded = upload_keyed_({vectors, scalars}, seed, 1); !seeded)
         return loop.fail(seeded.description_.view());
     cuMemcpyHtoD(device_address(offsets_device), offsets.data(), (segments + 1u) * sizeof(u32_t));
     cuMemcpyHtoD(device_address(sides_device), sides.data(), segments * sizeof(late_interaction_side_t));

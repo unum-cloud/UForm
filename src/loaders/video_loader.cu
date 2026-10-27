@@ -58,12 +58,15 @@ struct codec_entry_t {
     CUvideodecoder decoder = nullptr;
 };
 
+/** Flat interleaved-RGB frames of the shared decode scratch. */
+using pixel_frames_span_t = nk::tensor_span<pixel_t, 1>;
+
 /** Per-clip mutable state the three NVDEC parser callbacks reach through the engine's @c current pointer —
  *  the destination frames, the frame budget, and the grid-scaled geometry. */
 struct video_decode_context_t {
 
-    /** Base of this decode group's frames in the shared scratch — the NV12 → RGB destination. */
-    pixel_t *frames_base = nullptr;
+    /** This decode group's frames in the shared scratch — the NV12 → RGB destination. */
+    pixel_frames_span_t frames {};
 
     /** The caller's stream every display-callback conversion enqueues on (the engines own none). */
     gpu_stream_t *stream = nullptr;
@@ -71,7 +74,7 @@ struct video_decode_context_t {
     /** The frame budget this job keeps — the display callback stops once this many are decoded. */
     std::size_t frames_requested = 0;
 
-    /** Frames converted and written so far — the running index into @c frames_base . */
+    /** Frames converted and written so far — the running index into @c frames . */
     std::size_t frames_decoded = 0;
 
     /** The clip's grid target height in pixels: @c patch_rows·P . */
@@ -419,7 +422,7 @@ extern "C" int CUDAAPI on_picture_display(void *user_data, CUVIDPARSERDISPINFO *
     pixel_t const *nv12_luma = device_pointer<pixel_t const>(nv12_pointer);
     pixel_t const *nv12_chroma = nv12_luma + static_cast<std::size_t>(nv12_pitch) * context->height;
     std::size_t const per_frame_pixels = context->height * context->width;
-    pixel_t *frame_destination = context->frames_base + context->frames_decoded * per_frame_pixels * 3u;
+    pixel_t *frame_destination = context->frames.data() + context->frames_decoded * per_frame_pixels * 3u;
     expected_t launched = launch_kernel(
         &nv12_to_interleaved_rgb_kernel_, dim3 {grid_size_for(per_frame_pixels), 1u, 1u},
         dim3 {kernel_block_size_default_k, 1u, 1u}, *context->stream, nv12_luma, nv12_chroma, frame_destination,
@@ -840,8 +843,8 @@ struct decode_jobs_t {
     /** Per-group NVDEC callback context @b [group_count] — published on an engine, filled by the callbacks. */
     std::span<video_decode_context_t> contexts {};
 
-    /** Base of the shared frame scratch — group @c g lands at @c frames_base+groups[g].frames_offset . */
-    pixel_t *frames_base = nullptr;
+    /** The shared frame scratch — group @c g lands at @c frames+groups[g].frames_offset . */
+    pixel_frames_span_t frames {};
 
     /** Patch edge P — a group's decode target is @c patch_rows·P by @c patch_cols·P . */
     u32_t patch_size = 0;
@@ -898,7 +901,7 @@ struct engine_cursor_t {
             continue;
         }
         video_decode_context_t &context = drive.contexts[group];
-        context.frames_base = drive.frames_base + unit.frames_offset;
+        context.frames = {drive.frames.data() + unit.frames_offset, drive.frames.extent(0) - unit.frames_offset};
         context.frames_requested = unit.frames_to_decode;
         context.height = static_cast<std::size_t>(unit.patch_rows) * drive.patch_size;
         context.width = static_cast<std::size_t>(unit.patch_cols) * drive.patch_size;
@@ -1121,7 +1124,7 @@ expected_t nvdec_session_t::decode_into(pool_view_t pool, column_view_t clips,
     drive.demuxed = demuxed_view;
     drive.groups = plan.groups;
     drive.contexts = std::span<video_decode_context_t> {plan.contexts}.first(group_count);
-    drive.frames_base = frames.data();
+    drive.frames = pixel_frames_span_t {std::span<pixel_t> {frames}};
     drive.patch_size = geometry.patch_size;
     drive.stream = &stream;
     if (expected_t decoded = drive_decode_(drive, stream); !decoded) return decoded;
@@ -1247,7 +1250,9 @@ expected_t video_loader_parquet_t::fill(gpu_stream_t &gpu_stream, nvdec_session_
         pooled_estimate += row_prefix_[file + 1] - row_prefix_[file];
     }
 
-    auto reservoir_read = parquet_file_t::make(*storage_, picked_paths, {&config.clip_column, 1}, gpu_stream);
+    auto reservoir_read = parquet_file_t::make(*storage_, std::span<sz::string_view_t const> {picked_paths},
+                                               std::span<sz::string_view_t const> {&config.clip_column, 1}, {},
+                                               gpu_stream);
     if (!reservoir_read) return expected_t::fail(std::move(reservoir_read));
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();

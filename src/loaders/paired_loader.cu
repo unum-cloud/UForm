@@ -13,7 +13,7 @@
  */
 #include <cmath> // `std::ceil`, the pairs a fill's rows hold
 
-#include <algorithm> // `std::upper_bound`, `std::find`, `std::min`
+#include <algorithm> // `std::upper_bound`, `std::lower_bound`, `std::min`
 #include <span>      // `std::as_bytes`, `std::as_writable_bytes`
 
 #include <cuda.h> // `cuStreamSynchronize`
@@ -163,7 +163,6 @@ expected<paired_loader_parquet_t> paired_loader_parquet_t::make(gpu_direct_stora
     paired_loader_parquet_t loader;
     loader.storage_ = &session;
     loader.pool_ = pool;
-    loader.absolute_paths_ = std::move(paths.value_);
     loader.seed_ = seed;
     loader.modality_ = modality;
     loader.shape_ = shape;
@@ -173,45 +172,39 @@ expected<paired_loader_parquet_t> paired_loader_parquet_t::make(gpu_direct_stora
         sz::failed(loader.positive_prefix_.assign(config.positive_prefix)))
         return result_t::fail(status_t::bad_alloc_k, "column name staging failed");
 
-    std::size_t const shards = loader.absolute_paths_.size();
-    if (st::failed(loader.row_prefix_.resize(shards + 1)) || st::failed(loader.shard_first_group_.resize(shards + 1)) ||
-        st::failed(loader.shard_keys_.resize(shards)) || st::failed(loader.group_prefix_.push_back(0)))
-        return result_t::fail(status_t::bad_alloc_k, "shard table allocation failed ({} shards)", shards);
-    // A media negative names any row of its shard, so such a loader reads whole shards.
-    bool const whole_shards = !config.negative.empty() && modality != modality_t::text_k;
     // A media positive lives in the sibling tar, so only the text roles must fill a row.
     sz::string_view_t const roles[3] = {config.anchor, config.negative,
                                         modality == modality_t::text_k ? config.positive : sz::string_view_t {}};
-    loader.row_prefix_[0] = 0;
-    for (std::size_t index = 0; index != shards; ++index) {
-        loader.shard_keys_[index] = static_cast<u64_t>(loader.absolute_paths_[index].hash());
-        loader.shard_first_group_[index] = loader.group_shard_.size();
-        auto metadata = parquet_file_t::table_metadata(session, loader.absolute_paths_[index], roles);
+    if (st::failed(loader.shard_starts_.push_back(0)))
+        return result_t::fail(status_t::bad_alloc_k, "shard table allocation failed");
+    std::size_t groups = 0;
+    for (sz::string_t const &path : paths.value_) {
+        auto metadata = parquet_file_t::table_metadata(session, path, std::span<sz::string_view_t const> {roles});
         if (!metadata) return result_t::fail(std::move(metadata));
-        if (metadata->rows == 0)
-            return result_t::fail(status_t::invalid_argument_k, "shard {} is empty", loader.absolute_paths_[index]);
+        if (metadata->rows == 0) return result_t::fail(status_t::invalid_argument_k, "shard {} is empty", path);
+        std::size_t const rows_before = loader.rows();
+        if (expected_t appended = loader.groups_.append_shard(path, *metadata); !appended)
+            return result_t::fail(std::move(appended));
+        groups += metadata->group_rows.size();
+        loader.reservoir_.charge(*metadata);
+        if (loader.rows() == rows_before) continue; // the draw leaves the shard out, and so do its tables
         std::size_t first_row = 0;
-        for (std::size_t group = 0; group != metadata->group_rows.size(); ++group) {
-            if (st::failed(loader.group_prefix_.push_back(loader.group_prefix_[loader.group_shard_.size()] +
-                                                          metadata->group_complete_rows[group])) ||
-                st::failed(loader.group_shard_.push_back(std::size_t {index})) ||
-                st::failed(loader.group_rows_.push_back(std::size_t {metadata->group_rows[group]})) ||
-                st::failed(loader.group_first_row_.push_back(std::size_t {first_row})))
+        for (std::size_t const group_rows : metadata->group_rows) {
+            if (st::failed(loader.group_starts_.push_back(std::size_t {first_row})))
                 return result_t::fail(status_t::bad_alloc_k, "row-group table append failed");
-            first_row += metadata->group_rows[group];
+            first_row += group_rows;
         }
-        loader.row_prefix_[index + 1] = loader.row_prefix_[index] + metadata->rows;
-        if (loader.group_prefix_[loader.group_shard_.size()] != loader.group_prefix_[loader.shard_first_group_[index]])
-            ++loader.drawable_shards_;
-        if (whole_shards) loader.reservoir_.charge(*metadata);
-        else loader.reservoir_.charge_groups(*metadata);
+        if (st::failed(loader.group_starts_.push_back(std::size_t {first_row})) ||
+            st::failed(loader.shard_starts_.push_back(loader.group_starts_.size())) ||
+            st::failed(loader.shard_keys_.push_back(static_cast<u64_t>(path.hash()))))
+            return result_t::fail(status_t::bad_alloc_k, "shard table append failed");
     }
-    loader.shard_first_group_[shards] = loader.group_shard_.size();
-    if (loader.group_prefix_[loader.group_shard_.size()] == 0)
+    if (loader.rows() == 0)
         return result_t::fail(status_t::invalid_argument_k,
                               "{} holds no row with every role column: anchor {}, negative {}", path_or_glob,
                               config.anchor, config.negative.empty() ? sz::string_view_t {"none"} : config.negative);
-    if (parquet_file_t::column_metadata(session, loader.absolute_paths_[0], sample_key_column_k) &&
+    if (expected_t reserved = loader.groups_.reserve(groups); !reserved) return result_t::fail(std::move(reserved));
+    if (parquet_file_t::column_metadata(session, paths.value_[0], sample_key_column_k) &&
         sz::failed(loader.key_.assign(sample_key_column_k)))
         return result_t::fail(status_t::bad_alloc_k, "column name staging failed");
     if (modality == modality_t::text_k) {
@@ -225,8 +218,7 @@ expected<paired_loader_parquet_t> paired_loader_parquet_t::make(gpu_direct_stora
     sz::string_t leaf;
     if (!format_into(leaf, "{}.bytes", config.positive))
         return result_t::fail(status_t::bad_alloc_k, "column name staging failed");
-    bool const nested = static_cast<bool>(
-        parquet_file_t::column_metadata(session, loader.absolute_paths_[0], leaf.view()));
+    bool const nested = static_cast<bool>(parquet_file_t::column_metadata(session, paths.value_[0], leaf.view()));
     if (sz::failed(loader.positive_.assign(nested ? leaf.view() : config.positive)))
         return result_t::fail(status_t::bad_alloc_k, "column name staging failed");
     return result_t {std::move(loader)};
@@ -249,68 +241,39 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
     std::size_t const pairs = std::min(segments / roles, row_pairs), total_pairs = unroll * pairs;
     if (pairs == 0) return expected_t::fail(status_t::unsupported_k, "{} segments hold no pair", segments);
 
-    // Row groups drawn by a keyed position over the complete rows, as the text loader draws them:
-    // distinct groups accumulate until they cover the pairs, then only a new shard's group meets
-    // the floor of two. A media negative names any row of its shard, so its shard comes whole.
-    std::size_t const group_count = group_shard_.size();
-    std::size_t const floor_files = std::min<std::size_t>(2, drawable_shards_);
-    std::size_t const total_rows = group_prefix_[group_count];
-    bool const whole_shards = negatives && media;
+    if (expected_t picked = groups_.draw(seed_, training_step, gpu_rank, file_draw_salt_k, total_pairs, 2); !picked)
+        return picked;
     constexpr splitmix64_hash_t hash {};
-    st::basic_vector<sz::string_view_t> picked_paths;
-    st::basic_vector<std::size_t> picked_shards, picked_ids;
-    st::basic_vector<st::basic_vector<u32_t>> picked_groups;
-    std::size_t pooled_estimate = 0, attempt = 0;
-    while ((pooled_estimate < total_pairs || picked_paths.size() < floor_files) && pooled_estimate < total_rows) {
-        std::size_t const position = hash(seed_, training_step, gpu_rank, file_draw_salt_k, attempt) % total_rows;
-        ++attempt;
-        std::size_t const group = static_cast<std::size_t>(
-            std::upper_bound(group_prefix_.begin(), group_prefix_.end(), position) - group_prefix_.begin() - 1);
-        if (std::find(picked_ids.begin(), picked_ids.end(), group) != picked_ids.end()) continue;
-        std::size_t const shard = group_shard_[group];
-        auto const found = std::find(picked_shards.begin(), picked_shards.end(), shard);
-        if (found != picked_shards.end() && (whole_shards || pooled_estimate >= total_pairs)) continue;
-        std::size_t const pick = static_cast<std::size_t>(found - picked_shards.begin());
-        if (found == picked_shards.end() && (st::failed(picked_shards.push_back(std::size_t {shard})) ||
-                                             st::failed(picked_paths.push_back(absolute_paths_[shard].view())) ||
-                                             st::failed(picked_groups.push_back(st::basic_vector<u32_t> {}))))
-            return expected_t::fail(status_t::bad_alloc_k, "shard pick append failed");
-        std::size_t const first = whole_shards ? shard_first_group_[shard] : group;
-        std::size_t const last = whole_shards ? shard_first_group_[shard + 1] : group + 1;
-        for (std::size_t taken = first; taken != last; ++taken) {
-            if (st::failed(picked_ids.push_back(std::size_t {taken})) ||
-                st::failed(picked_groups[pick].push_back(static_cast<u32_t>(taken - shard_first_group_[shard]))))
-                return expected_t::fail(status_t::bad_alloc_k, "row-group pick append failed");
-            pooled_estimate += group_prefix_[taken + 1] - group_prefix_[taken];
-        }
-    }
-    for (st::basic_vector<u32_t> &groups : picked_groups)
-        std::sort(groups.begin(), groups.end()); // cuDF reads them ascending
+    sz::strings_view_t const picked_paths = groups_.picked_paths();
+    std::span<u32_t const> const picked_shards = groups_.picked_shards();
+    tape_view<u32_t const> const picked_groups = groups_.picked_groups();
+    // A drawable shard's group starts, its row count at the back.
+    auto const starts_of = [&](std::size_t shard) noexcept {
+        return std::span<std::size_t const> {group_starts_}.subspan(shard_starts_[shard],
+                                                                    shard_starts_[shard + 1] - shard_starts_[shard]);
+    };
 
-    // Each read group's first reservoir row and first shard-local row, and each pick's first read:
-    // the reservoir holds the picks in order and each pick's groups ascending.
-    st::basic_vector<std::size_t> read_bases, read_starts, pick_reads;
+    // Each read group's first reservoir row: the reservoir holds the picks in order and each pick's
+    // groups ascending, so the reads index the picked tape's elements.
+    st::basic_vector<std::size_t> read_bases;
+    if (st::failed(read_bases.resize(st::assume_uninitialized, picked_groups.elements.size() + 1)))
+        return expected_t::fail(status_t::bad_alloc_k, "read table allocation failed");
     std::size_t reservoir_rows = 0;
-    for (std::size_t pick = 0; pick != picked_shards.size(); ++pick) {
-        if (st::failed(pick_reads.push_back(read_bases.size())))
-            return expected_t::fail(status_t::bad_alloc_k, "read table append failed");
-        for (u32_t const local : picked_groups[pick]) {
-            std::size_t const group = shard_first_group_[picked_shards[pick]] + local;
-            if (st::failed(read_bases.push_back(std::size_t {reservoir_rows})) ||
-                st::failed(read_starts.push_back(std::size_t {group_first_row_[group]})))
-                return expected_t::fail(status_t::bad_alloc_k, "read table append failed");
-            reservoir_rows += group_rows_[group];
+    for (std::size_t pick = 0; pick != picked_groups.size(); ++pick) {
+        std::span<std::size_t const> const starts = starts_of(picked_shards[pick]);
+        for (std::size_t read = picked_groups.offsets[pick]; read != picked_groups.offsets[pick + 1]; ++read) {
+            u32_t const group = picked_groups.elements[read];
+            read_bases[read] = reservoir_rows;
+            reservoir_rows += starts[group + 1] - starts[group];
         }
     }
-    if (st::failed(pick_reads.push_back(read_bases.size())) ||
-        st::failed(read_bases.push_back(std::size_t {reservoir_rows})))
-        return expected_t::fail(status_t::bad_alloc_k, "read table append failed");
+    read_bases[picked_groups.elements.size()] = reservoir_rows;
 
     sz::string_view_t names[4] = {anchor_.view(), positive_.view(), negative_.view(), {}};
     names[roles] = key_.view();
     std::size_t const read_columns = key_.empty() ? roles : roles + 1u;
-    auto reservoir_read = parquet_file_t::make(*storage_, picked_paths, {names, read_columns}, picked_groups,
-                                               gpu_stream);
+    auto reservoir_read = parquet_file_t::make(
+        *storage_, picked_paths, std::span<sz::string_view_t const> {names, read_columns}, picked_groups, gpu_stream);
     if (!reservoir_read) return expected_t::fail(std::move(reservoir_read));
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();
@@ -383,27 +346,33 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
         if (is_empty(anchor_offsets, anchor) || is_empty(positive_offsets, positive)) continue;
         std::size_t const read = static_cast<std::size_t>(std::upper_bound(read_bases.begin(), read_bases.end(), row) -
                                                           read_bases.begin() - 1);
-        std::size_t const pick = static_cast<std::size_t>(std::upper_bound(pick_reads.begin(), pick_reads.end(), read) -
-                                                          pick_reads.begin() - 1);
+        std::size_t const pick = static_cast<std::size_t>(
+            std::upper_bound(picked_groups.offsets.begin(), picked_groups.offsets.end(), read) -
+            picked_groups.offsets.begin() - 1);
         std::size_t const shard = picked_shards[pick];
-        u64_t const local_row = read_starts[read] + (row - read_bases[read]);
+        std::span<std::size_t const> const starts = starts_of(shard);
+        u64_t const local_row = starts[picked_groups.elements[read]] + (row - read_bases[read]);
         if (negatives) {
             auto const [negative_first, negative_count] = elements_of_(negative_groups, row);
             if (negative_count == 0) continue;
             u64_t negative = negative_first + hash(row_key, training_step, draw, negative_draw_salt_k) % negative_count;
             if (media) {
-                // A media negative is a shard-local row of the positive column, rebased here.
-                std::size_t const shard_rows = row_prefix_[shard + 1] - row_prefix_[shard];
+                // A media negative is a shard-local row of the positive column, rebased here
+                // when its group was drawn.
+                std::size_t const shard_rows = starts.back();
                 i32_t const local = negative_rows[negative];
                 if (local < 0 || static_cast<std::size_t>(local) >= shard_rows)
                     return expected_t::fail(status_t::invalid_argument_k, "{} names negative row {} of a {}-row shard",
                                             picked_paths[pick], local, shard_rows);
-                // The whole shard was read, so one of the pick's groups holds the row.
-                std::size_t resident = pick_reads[pick];
-                while (read_starts[resident] + (read_bases[resident + 1] - read_bases[resident]) <=
-                       static_cast<std::size_t>(local))
-                    ++resident;
-                negative = read_bases[resident] + (static_cast<u64_t>(local) - read_starts[resident]);
+                u32_t const group = static_cast<u32_t>(
+                    std::upper_bound(starts.begin(), starts.end(), static_cast<std::size_t>(local)) - starts.begin() -
+                    1);
+                std::span<u32_t const> const read_groups = picked_groups[pick];
+                auto const resident = std::lower_bound(read_groups.begin(), read_groups.end(), group);
+                if (resident == read_groups.end() || *resident != group) continue;
+                std::size_t const negative_read = picked_groups.offsets[pick] +
+                                                  static_cast<std::size_t>(resident - read_groups.begin());
+                negative = read_bases[negative_read] + (static_cast<u64_t>(local) - starts[group]);
             }
             if (is_empty(media ? positive_offsets : negative_offsets, negative)) continue;
             drawn_roles[negative_role_k, found] = negative;

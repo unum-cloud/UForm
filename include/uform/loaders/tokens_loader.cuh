@@ -79,9 +79,9 @@ struct tokens_base_loader_parquet_config_t {
 /**
  *  @brief The loader object: dataset-scoped, rank-agnostic, GPU-accelerated.
  *
- *  @warning This class manages a considerable amount of metadata per dataset and you should only have one of them
- *      per input dataset. The "fill" methods allocate memory on-demand and are safe to call concurrently for different
- *      GPU ranks with different streams.
+ *  @warning This class manages a considerable amount of metadata per dataset and you should only
+ *      have one of them per input dataset. The "fill" methods draw into the loader's own pick
+ *      storage, so one GPU rank fills at a time.
  */
 struct tokens_loader_parquet_t {
 
@@ -120,47 +120,25 @@ struct tokens_loader_parquet_t {
      *      conformance.
      *
      *  @p target_segments is the pool target ( @c unroll·segments_per_batch ) a @ref fill would cover; the
-     *  returned views borrow the loader's owned paths, valid for the loader's lifetime.
+     *  returned views borrow the loader's owned paths and pick storage, valid until the next draw.
      *
      *  @param[in] gpu_rank The GPU rank the draw is keyed by — different ranks draw different shard sets.
      *  @param[in] training_step The step the draw is keyed by.
      *  @param[in] target_segments The number of rows the pooled shards must cover.
      */
-    [[nodiscard]] expected<st::basic_vector<sz::string_view_t>> drawn_shards(
-        u32_t gpu_rank, u32_t training_step, std::size_t target_segments) const noexcept;
+    [[nodiscard]] expected<sz::strings_view_t> drawn_shards(u32_t gpu_rank, u32_t training_step,
+                                                            std::size_t target_segments) noexcept;
 
   private:
-
-    /** The shards one fill reads and, per shard, the ascending row groups it decodes. */
-    struct picked_groups_t {
-        st::basic_vector<sz::string_view_t> paths {};
-        st::basic_vector<st::basic_vector<u32_t>> groups {};
-    };
-
-    /** The keyed weighted pick shared by @ref fill and @ref drawn_shards : draw distinct row groups
-     *  with probability proportional to their row count, keyed by @c (seed,step,rank) , until the
-     *  pool covers @p target_segments rows from ≥2 shards, unless the dataset is one. Pure over the
-     *  footers. */
-    [[nodiscard]] expected<picked_groups_t> pick_groups_(u32_t gpu_rank, u32_t training_step,
-                                                         std::size_t target_segments) const noexcept;
 
     /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
     gpu_direct_storage_session_t *storage_ = nullptr;
 
-    /** The dataset's Parquet shard paths — borrowed from the composition root. */
-    st::basic_vector<sz::string_t> absolute_paths_ {};
-
     /** The run seed keying the random file and row draws. */
     u64_t seed_ = 0;
 
-    /** @b [groups+1] cumulative row-group row counts over every shard in order — the weighted
-     *  draw's search table (an @c upper_bound maps a keyed row position to its owning group) and,
-     *  at its back, the dataset's total rows. Read once per dataset; shared across every GPU the
-     *  loader serves. */
-    st::basic_vector<std::size_t> group_prefix_ {};
-
-    /** @b [groups] each row group's shard and its index within that shard. */
-    st::basic_vector<u32_t> group_shard_ {}, group_index_ {};
+    /** The shards' row groups weighted by their rows, and each fill's pick of them. */
+    row_group_draw_t groups_ {};
 
     /** The device bytes a fill's reservoir can take, from the footers. */
     reservoir_bound_t reservoir_ {};
@@ -171,7 +149,7 @@ struct tokens_loader_parquet_t {
     [[nodiscard]] reservoir_bound_t reservoir() const noexcept { return reservoir_; }
 
     /** The rows across the shards, from their footers. */
-    [[nodiscard]] std::size_t rows() const noexcept { return group_prefix_[group_prefix_.size() - 1]; }
+    [[nodiscard]] std::size_t rows() const noexcept { return groups_.rows(); }
 };
 
 /** The JSONL tokens loader's baked knobs — a different config is a different loader. */

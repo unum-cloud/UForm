@@ -882,19 +882,19 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
     dim3 const token_grid {static_cast<u32_t>(tokens), 1u, 1u};
     f32r1_view_t const token_scales_view = token_scales_.view();
     // RMSNorm of `groups` vectors of `columns` per token, in place when `target` is `source`.
-    auto const normalize = [&](bf16_t const *source, f32_t const *gamma, bf16_t *target, std::size_t groups,
-                               std::size_t columns, std::size_t stride) -> expected_t {
-        nk_status_t const status = numerics_.rmsnorm_bf16(numkong_scalars(source), gamma, numkong_scalars(target),
-                                                          tokens, groups, columns, stride, stride, config_.rms_eps,
-                                                          stream.numkong());
+    auto const normalize = [&](bf16r2_view_t source, std::span<f32_t const> gamma, bf16r2_span_t target,
+                               std::size_t groups, std::size_t columns) -> expected_t {
+        nk_status_t const status = numerics_.rmsnorm_bf16(
+            numkong_scalars(source.data()), gamma.data(), numkong_scalars(target.data()), tokens, groups, columns,
+            source.stride_bytes(0), target.stride_bytes(0), config_.rms_eps, stream.numkong());
         if (status != nk_success_k)
             return expected_t::fail(status_t::device_error_k, "RMSNorm failed: {}", nk_status_name(status));
         return {};
     };
 
     // Pre-attention RMSNorm in BFloat16, per-token E4M3 quantisation, QKV product, scale fold.
-    expected_t launched = normalize(input.data(), pre_norm_scale_.data(), normalized_.data(), 1, hidden,
-                                    hidden * sizeof(bf16_t));
+    expected_t launched = normalize(input, std::span<f32_t const> {pre_norm_scale_.data(), hidden}, normalized_.span(),
+                                    1, hidden);
     if (launched)
         launched = launch_kernel(&transformer_token_quantize_kernel_<bf16_t>, token_grid, block_shape, stream,
                                  normalized_.view(), normalized_e4m3_.span(), token_scales_.span());
@@ -902,8 +902,7 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
     launched = project_(product_qkv_k, normalized_e4m3_.view(), token_scales_view, {}, qkv_.span(), stream);
     if (!launched) return launched;
     // Unit QK-norm of every Q and K head vector, adjacent in each token's row, then M-RoPE.
-    launched = normalize(qkv_.data(), nullptr, qkv_.data(), 2 * heads, transformer_head_dim_k,
-                         3 * hidden * sizeof(bf16_t));
+    launched = normalize(qkv_.view(), {}, qkv_.span(), 2 * heads, transformer_head_dim_k);
     if (!launched) return launched;
     // The QKV product's scale fold has read the Float32 products, so they hold the rotary rows
     // until the attention.
@@ -940,8 +939,8 @@ expected_t transformer_block_e4m3_t::forward(bf16r2_view_t input, bf16r2_span_t 
         launched = project_(product_out_k, attn_output_e4m3_.view(), token_scales_view, input, attn_residual_.span(),
                             stream);
     if (launched)
-        launched = normalize(attn_residual_.data(), post_norm_scale_.data(), normalized_.data(), 1, hidden,
-                             hidden * sizeof(bf16_t));
+        launched = normalize(attn_residual_.view(), std::span<f32_t const> {post_norm_scale_.data(), hidden},
+                             normalized_.span(), 1, hidden);
     if (launched)
         launched = launch_kernel(&transformer_token_quantize_kernel_<bf16_t>, token_grid, block_shape, stream,
                                  normalized_.view(), normalized_e4m3_.span(), token_scales_.span());

@@ -73,11 +73,10 @@ using uu::topology_t;
 
 /** Append @p count trivially copyable @p items onto @p values , or report the refusal. */
 template <typename value_type_>
-[[nodiscard]] static bool append_(st::basic_vector<value_type_> &values, value_type_ const *items,
-                                  std::size_t count) noexcept {
+[[nodiscard]] static bool append_(st::basic_vector<value_type_> &values, std::span<value_type_ const> items) noexcept {
     std::size_t const size = values.size();
-    if (st::failed(values.resize(st::assume_uninitialized, size + count))) return false;
-    if (count) std::memcpy(values.data() + size, items, count * sizeof(value_type_));
+    if (st::failed(values.resize(st::assume_uninitialized, size + items.size()))) return false;
+    if (!items.empty()) std::memcpy(values.data() + size, items.data(), items.size_bytes());
     return true;
 }
 
@@ -91,7 +90,7 @@ struct strings_t {
     [[nodiscard]] bool append(std::initializer_list<std::string_view> parts) noexcept {
         if (offsets.empty() && st::failed(offsets.push_back(std::size_t {0}))) return false;
         for (std::string_view part : parts)
-            if (!append_(bytes, part.data(), part.size())) return false;
+            if (!append_<char>(bytes, std::span<char const> {part})) return false;
         return !st::failed(offsets.push_back(bytes.size()));
     }
     [[nodiscard]] std::size_t count() const noexcept { return offsets.empty() ? 0 : offsets.size() - 1; }

@@ -10,7 +10,7 @@
 #include <dirent.h>   // vendor-boundary: POSIX `opendir` / `readdir` — the raw directory scan, no glob to link
 #include <sys/stat.h> // vendor-boundary: POSIX `stat` — the footerless formats' byte-size file weight
 
-#include <algorithm> // `std::sort` — the deterministic shard order, `std::find_if` — a sidecar's missing column
+#include <algorithm> // `std::sort`, `std::upper_bound` — the shard order and the row-group draw, `std::find_if`
 #include <limits>    // `std::numeric_limits` — a statistic-less group's unbounded span
 #include <span>      // `std::span` — the borrowed payload / offsets
 #include <string>
@@ -203,7 +203,7 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
  *  them. */
 [[nodiscard]] static expected<column_span_t> read_tar_members_(
     cudf::column_view byte_offsets, cudf::column_view byte_lengths, sz::string_view_t extension,
-    std::span<sz::string_view_t const> paths, std::span<std::size_t const> rows_per_shard, rmm::cuda_stream_view stream,
+    sz::strings_view_t paths, std::span<std::size_t const> rows_per_shard, rmm::cuda_stream_view stream,
     rmm::device_buffer &payload) { // vendor-boundary: cuDF throws into the caller's try
     using result_t = expected<column_span_t>;
     std::size_t const rows = static_cast<std::size_t>(byte_offsets.size());
@@ -310,23 +310,103 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
     return result_t {std::move(column)};
 }
 
+expected_t row_group_draw_t::append_shard(sz::string_view_t path, parquet_length_metadata_t const &footer) noexcept {
+    if ((shard_offsets_.empty() && st::failed(shard_offsets_.push_back(0))) ||
+        (group_prefix_.empty() && st::failed(group_prefix_.push_back(0))))
+        return expected_t::fail(status_t::bad_alloc_k, "row-group table allocation failed");
+    std::size_t const groups_before = drawable_groups_.size();
+    for (std::size_t group = 0; group != footer.group_complete_rows.size(); ++group) {
+        std::size_t const complete_rows = footer.group_complete_rows[group];
+        if (complete_rows == 0) continue;
+        if (st::failed(drawable_groups_.push_back(static_cast<u32_t>(group))) ||
+            st::failed(group_prefix_.push_back(group_prefix_.back() + complete_rows)))
+            return expected_t::fail(status_t::bad_alloc_k, "row-group table append failed for {}", path);
+    }
+    if (drawable_groups_.size() == groups_before) return {};
+    sz::string_t owned;
+    if (sz::failed(owned.assign(path)) || st::failed(paths_.push_back(std::move(owned))) ||
+        st::failed(shard_offsets_.push_back(drawable_groups_.size())))
+        return expected_t::fail(status_t::bad_alloc_k, "shard table append failed for {}", path);
+    return {};
+}
+
+expected_t row_group_draw_t::reserve(std::size_t groups) noexcept {
+    groups = std::min(groups, drawable_groups_.size());
+    std::size_t const shards = std::min(groups, paths_.size());
+    if (st::failed(drawn_.reserve(groups)) || st::failed(picked_groups_.reserve(groups)) ||
+        st::failed(picked_shards_.reserve(shards)) || st::failed(picked_paths_.reserve(shards)) ||
+        st::failed(picked_offsets_.reserve(shards + 1)))
+        return expected_t::fail(status_t::bad_alloc_k, "pick storage allocation failed ({} groups)", groups);
+    return {};
+}
+
+expected_t row_group_draw_t::draw(u64_t seed, u64_t step, std::size_t rank, u64_t salt, std::size_t rows,
+                                  std::size_t floor_shards) noexcept {
+    std::size_t const groups = drawable_groups_.size(), total_rows = this->rows();
+    if (total_rows == 0) return expected_t::fail(status_t::invalid_argument_k, "no shard holds a complete row");
+    auto const shard_of = [&](u32_t group) noexcept {
+        return static_cast<std::size_t>(std::upper_bound(shard_offsets_.begin(), shard_offsets_.end(), group) -
+                                        shard_offsets_.begin() - 1);
+    };
+    drawn_.clear(), picked_shards_.clear(), picked_paths_.clear(), picked_offsets_.clear(), picked_groups_.clear();
+
+    // Distinct groups accumulate until they hold the rows, then only a fresh shard's group meets
+    // the floor.
+    constexpr splitmix64_hash_t hash {};
+    std::size_t const floor = std::min(floor_shards, paths_.size());
+    std::size_t pooled = 0, shards = 0;
+    for (std::size_t attempt = 0; (pooled < rows || shards < floor) && drawn_.size() != groups; ++attempt) {
+        std::size_t const position = hash(seed, step, rank, salt, attempt) % total_rows;
+        u32_t const group = static_cast<u32_t>(std::upper_bound(group_prefix_.begin(), group_prefix_.end(), position) -
+                                               group_prefix_.begin() - 1);
+        std::size_t const shard = shard_of(group);
+        bool repeated = false, fresh = true;
+        for (u32_t const earlier : drawn_) {
+            repeated |= earlier == group;
+            fresh &= earlier < shard_offsets_[shard] || earlier >= shard_offsets_[shard + 1];
+        }
+        if (repeated || (!fresh && pooled >= rows)) continue;
+        if (drawn_.size() == drawn_.capacity())
+            return expected_t::fail(status_t::bad_alloc_k, "a draw outgrew its {} reserved row groups", drawn_.size());
+        (void)drawn_.push_back(st::assume_reserved, u32_t {group});
+        pooled += group_prefix_[group + 1] - group_prefix_[group];
+        shards += fresh;
+    }
+
+    // Drawable groups number shard-major, so sorted IDs list the shards and each shard's groups
+    // ascending.
+    std::sort(drawn_.begin(), drawn_.end());
+    for (u32_t const group : drawn_) {
+        std::size_t const shard = shard_of(group);
+        if (picked_shards_.empty() || picked_shards_.back() != shard) {
+            (void)picked_shards_.push_back(st::assume_reserved, static_cast<u32_t>(shard));
+            (void)picked_paths_.push_back(st::assume_reserved, paths_[shard].view());
+            (void)picked_offsets_.push_back(st::assume_reserved, picked_groups_.size());
+        }
+        (void)picked_groups_.push_back(st::assume_reserved, u32_t {drawable_groups_[group]});
+    }
+    (void)picked_offsets_.push_back(st::assume_reserved, picked_groups_.size());
+    return {};
+}
+
+sz::strings_view_t row_group_draw_t::picked_paths() const noexcept {
+    return std::span<sz::string_view_t const> {picked_paths_};
+}
+
+std::span<u32_t const> row_group_draw_t::picked_shards() const noexcept { return picked_shards_; }
+
+tape_view<u32_t const> row_group_draw_t::picked_groups() const noexcept { return {picked_groups_, picked_offsets_}; }
+
+std::size_t row_group_draw_t::rows() const noexcept { return group_prefix_.empty() ? 0 : group_prefix_.back(); }
+
 expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &storage, sz::string_view_t path,
-                                              std::span<sz::string_view_t const> columns,
-                                              gpu_stream_t &stream) noexcept {
-    return make(storage, {&path, 1}, columns, stream); // The single-shard convenience over the concatenating read.
+                                              sz::strings_view_t columns, gpu_stream_t &stream) noexcept {
+    // The single-shard convenience over the concatenating read.
+    return make(storage, std::span<sz::string_view_t const> {&path, 1}, columns, {}, stream);
 }
 
-expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &storage,
-                                              std::span<sz::string_view_t const> paths,
-                                              std::span<sz::string_view_t const> columns,
-                                              gpu_stream_t &stream) noexcept {
-    return make(storage, paths, columns, std::span<st::basic_vector<u32_t> const> {}, stream); // every row group
-}
-
-expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &,
-                                              std::span<sz::string_view_t const> paths,
-                                              std::span<sz::string_view_t const> columns,
-                                              std::span<st::basic_vector<u32_t> const> row_groups,
+expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const &, sz::strings_view_t paths,
+                                              sz::strings_view_t columns, tape_view<u32_t const> row_groups,
                                               gpu_stream_t &stream) noexcept {
     using result_t = expected<parquet_file_t>;
     if (paths.empty() || columns.empty())
@@ -418,9 +498,9 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
     }
 }
 
-expected<parquet_length_metadata_t> parquet_file_t::table_metadata(
-    gpu_direct_storage_session_t const &, sz::string_view_t path,
-    std::span<sz::string_view_t const> complete_columns) noexcept {
+expected<parquet_length_metadata_t> parquet_file_t::table_metadata(gpu_direct_storage_session_t const &,
+                                                                   sz::string_view_t path,
+                                                                   sz::strings_view_t complete_columns) noexcept {
     using result_t = expected<parquet_length_metadata_t>;
     try {
         // Footer only — no page decode: every row group's rows and uncompressed bytes.

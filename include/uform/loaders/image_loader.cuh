@@ -65,11 +65,8 @@ using media::pixel_patches_span_t;
  *  from an owning table of these. */
 struct jpeg_entry_t {
 
-    /** Device bitstream pointer into the reservoir tape. */
-    b8_t const *bitstream;
-
-    /** The bitstream's byte count. */
-    std::size_t length;
+    /** Device bitstream view into the reservoir tape. */
+    bytes_view_t bitstream;
 
     /** The plan this entry decodes — maps back for fallback marking / RGBA expansion. */
     std::size_t plan_index;

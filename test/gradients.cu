@@ -72,14 +72,14 @@ using namespace unum::uform::utilities;
 using namespace unum::uform::train;
 using namespace unum::uform::test;
 
-/** Download @p count BFloat16 scalars at @p device into @p widened , widened once by NumKong. */
-[[nodiscard]] static bool download_widened_(bf16_t const *device, std::size_t count,
-                                            st::basic_vector<f64_t> &widened) noexcept {
+/** Download the BFloat16 scalars of @p device into @p widened , widened once by NumKong. */
+[[nodiscard]] static bool download_widened_(std::span<bf16_t const> device, st::basic_vector<f64_t> &widened) noexcept {
+    std::size_t const count = device.size();
     st::basic_vector<nk_bf16_t> staging;
     if (st::failed(staging.resize(st::assume_uninitialized, count)) ||
         st::failed(widened.resize(st::assume_uninitialized, count)))
         return false;
-    cuMemcpyDtoH(staging.data(), device_address(device), count * sizeof(nk_bf16_t));
+    cuMemcpyDtoH(staging.data(), device_address(device.data()), count * sizeof(nk_bf16_t));
     return widen_from_bf16(staging, widened);
 }
 
@@ -205,8 +205,8 @@ static void finite_differences(test_suite_t &suite, device_t &device, bool omni)
     st::basic_vector<nk_bf16_t> staging;
     for (differentiable_weights_t const &matrix : replica.weights) {
         std::size_t const scalars = matrix.weights.numel();
-        if (!download_widened_(matrix.weights.data(), scalars, weights) ||
-            !download_widened_(matrix.weights_grad.data(), scalars, gradient) ||
+        if (!download_widened_({matrix.weights.data(), scalars}, weights) ||
+            !download_widened_({matrix.weights_grad.data(), scalars}, gradient) ||
             st::failed(plus.resize(st::assume_uninitialized, scalars)) ||
             st::failed(minus.resize(st::assume_uninitialized, scalars)) ||
             st::failed(staging.resize(st::assume_uninitialized, scalars)))
@@ -368,10 +368,10 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
         else if (matrix.name.view() == "token_head.projection") projected = &matrix;
     bf16r2_view_t const normalized = replica.tower.normalized();
     std::size_t const hidden = config.hidden, width = config.late_interaction.width;
-    if (norm == nullptr || projected == nullptr || !download_widened_(normalized.data(), normalized.numel(), states) ||
-        !download_widened_(norm->weights.data(), hidden, scale) ||
-        !download_widened_(norm->weights_grad.data(), hidden, scale_grad) ||
-        !download_widened_(projected->weights.data(), width * hidden, projection))
+    if (norm == nullptr || projected == nullptr || !download_widened_(normalized.values().value, states) ||
+        !download_widened_({norm->weights.data(), hidden}, scale) ||
+        !download_widened_({norm->weights_grad.data(), hidden}, scale_grad) ||
+        !download_widened_({projected->weights.data(), width * hidden}, projection))
         return suite.check(false, "token head replay staging failed");
     f64_t const epsilon = replica.tower.config().block.rms_eps;
     f64r2_view_t const projection_rows {projection.data(), width, hidden};
@@ -418,8 +418,8 @@ static void token_head_finite_differences(test_suite_t &suite, device_t &device)
         sz::string_view_t const name = matrix.name.view();
         if (name != "token_head.projection" && name != "final_norm") continue;
         std::size_t const scalars = matrix.weights.numel();
-        if (!download_widened_(matrix.weights.data(), scalars, weights) ||
-            !download_widened_(matrix.weights_grad.data(), scalars, gradient) ||
+        if (!download_widened_({matrix.weights.data(), scalars}, weights) ||
+            !download_widened_({matrix.weights_grad.data(), scalars}, gradient) ||
             st::failed(plus.resize(st::assume_uninitialized, scalars)) ||
             st::failed(minus.resize(st::assume_uninitialized, scalars)))
             return suite.check(false, "host staging for {} failed", name);
@@ -650,7 +650,7 @@ static void adafactor_reference(test_suite_t &suite, device_t &device, f32_t bet
                     update_energy += update_at(row, column) * update_at(row, column);
             f64_t const clip = 1.0 / std::max(1.0, std::sqrt(update_energy / (rows * columns)) / config.clip_threshold);
             st::basic_vector<f64_t> device_weights;
-            if (!download_widened_(state.weights.data(), rows * columns, device_weights))
+            if (!download_widened_({state.weights.data(), rows * columns}, device_weights))
                 return suite.check(false, "weights readback failed");
             f64r2_view_t const got {device_weights.data(), rows, columns};
             f64r2_view_t const started {state.host_weights.data(), rows, columns};
@@ -738,7 +738,7 @@ static void adafactor_small_steps(test_suite_t &suite, device_t &device) {
     if (expected_t stepped = optimizer->step(static_cast<f32_t>(learning_rate), device.stream); !stepped)
         return suite.check(false, "step: {}", stepped.description_);
     cuStreamSynchronize(device.stream.get());
-    if (!download_widened_(matrix.weights.data(), rows * columns, matrix.host_weights))
+    if (!download_widened_({matrix.weights.data(), rows * columns}, matrix.host_weights))
         return suite.check(false, "weights readback failed");
     f64_t const total = nk::reduce_moments<nk::f64_t>(matrix.host_weights).value.sum;
     f64_t const mean_step = 1.0 - total / static_cast<f64_t>(rows * columns);
@@ -822,7 +822,7 @@ static void choices_cross_entropy(test_suite_t &suite, device_t &device) {
         prior_weight_grad[index] = keyed_uniform_(suite.settings.seed, 74u, index) * 0.01f;
     if (!upload_narrowed_(states, normalized.data()) || !upload_narrowed_(prior_grad, normalized_grad.data()) ||
         !upload_narrowed_(prior_weight_grad, head->decoder_gradients().data()) ||
-        !download_widened_(table[0].weights.data(), decoder_scalars, decoder))
+        !download_widened_({table[0].weights.data(), decoder_scalars}, decoder))
         return suite.check(false, "state staging failed");
 
     choices_config_t const config {2.0f, 0.5f};
@@ -876,8 +876,8 @@ static void choices_cross_entropy(test_suite_t &suite, device_t &device) {
                 "the choices loss is {:.6f}, the Float64 oracle {:.6f}", measured_loss, oracle_loss);
 
     st::basic_vector<f64_t> landed_grad, landed_weight_grad;
-    if (!download_widened_(normalized_grad.data(), states.size(), landed_grad) ||
-        !download_widened_(head->decoder_gradients().data(), decoder_scalars, landed_weight_grad))
+    if (!download_widened_({normalized_grad.data(), states.size()}, landed_grad) ||
+        !download_widened_({head->decoder_gradients().data(), decoder_scalars}, landed_weight_grad))
         return suite.check(false, "gradient readback failed");
     f64_t untouched = 0, gap = 0, magnitude = 0;
     for (std::size_t index = 0; index != states.size(); ++index) {
@@ -1072,8 +1072,8 @@ static void block_host_replay(test_suite_t &suite, device_t &device) {
     cuStreamSynchronize(device.stream.get());
     cuMemcpyDtoH(output.data(), device_address(device_output), output.size() * sizeof(f32_t));
     st::basic_vector<f64_t> narrowed_grad, packed_grad;
-    if (!download_widened_(scratch->narrowed_grad.data(), tokens * hidden, narrowed_grad) ||
-        !download_widened_(scratch->packed_qkv.data(), tokens * 3 * hidden, packed_grad))
+    if (!download_widened_({scratch->narrowed_grad.data(), tokens * hidden}, narrowed_grad) ||
+        !download_widened_({scratch->packed_qkv.data(), tokens * 3 * hidden}, packed_grad))
         return suite.check(false, "gradients readback failed");
     f64r2_view_t const qkv_weights {weights[0].data(), 3 * hidden, hidden};
     f64r2_view_t const out_weights {weights[1].data(), hidden, hidden};
@@ -1292,7 +1292,7 @@ static void block_recompute_replays(test_suite_t &suite, device_t &device) {
         if (st::failed(input_grads[pass].resize(tokens * hidden))) return suite.check(false, "host staging failed");
         cuMemcpyDtoH(input_grads[pass].data(), device_address(device_input_grad), tokens * hidden * sizeof(f32_t));
         for (u32_t matrix = 0; matrix != 4u; ++matrix)
-            if (!download_widened_(weight_grads[matrix].data(), weight_grads[matrix].extent(0), grads[pass][matrix]))
+            if (!download_widened_({weight_grads[matrix].data(), weight_grads[matrix].extent(0)}, grads[pass][matrix]))
                 return suite.check(false, "gradients readback failed");
     }
     if (!staged) return suite.check(false, "block step: {}", staged.description_);

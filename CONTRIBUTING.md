@@ -94,6 +94,10 @@ The pre-commit hook refuses a namespace no directory backs and a nameless one.
   An operation NumKong lacks is a kit operation in UForm, composed from NumKong components or written custom.
 - __Ranges.__
   Past the C boundary a range is a `std::span`, a NumKong `tensor_view` or `tensor_span`, or a `tape_view`; a pointer with a count is a C ABI or vendor shape only.
+  A ragged list of numbers, like the row groups of each picked shard, is a `tape_view`, never a span of vectors.
+  A list of strings an interface reads, like shard paths or column names, is a StringZilla `sz::strings_view_t`, which borrows an Arrow tape and a span of `sz::string_view_t` alike, so the caller keeps whichever it holds.
+  Owners behind those views stay plain: an `st::basic_vector` of `sz::string_t` or of `sz::string_view_t` is fine as a member or a local.
+  Structs read inside kernels keep pointer and count members, marked `device-boundary`, where a view would change the register budget.
 
 ### Naming
 

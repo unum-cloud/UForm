@@ -34,7 +34,7 @@
 #include "uform/encoder/multimodal_batch.cuh"       // `multimodal_batch_on_gpu_t`, `byte_pad_k`, `byte_mask_k`
 #include "uform/utilities/vram_nvidia_schedule.cuh" // `gpu_stream_t`, `switch_to_gpu_t`, `launch_kernel`
 #include "uform/utilities/types.hpp"                // `expected`, `status_t`, `token_id_t`, `epoch_permutation`
-#include "uform/loaders/dataset_shards.hpp"         // `parquet_file_t`, `expand_glob`, `column_view_t`
+#include "uform/loaders/dataset_shards.hpp"         // `parquet_file_t`, `row_group_draw_t`, `expand_glob`
 #include "uform/loaders/direct_storage.hpp"         // `gpu_direct_storage_session_t`
 
 namespace unum::uform::loaders {
@@ -57,9 +57,8 @@ struct choices_loader_parquet_config_t {
 /**
  *  @brief The loader object: dataset-scoped and rank-agnostic.
  *
- *  @warning Holds one dataset's shard footers; keep one per input dataset. @ref fill allocates its
- *      scratch on demand and is safe to call concurrently for different GPU ranks on different
- *      streams.
+ *  @warning Holds one dataset's shard footers; keep one per input dataset. @ref fill draws into the
+ *      loader's own pick storage, so one GPU rank fills at a time.
  */
 struct choices_loader_parquet_t {
 
@@ -92,15 +91,12 @@ struct choices_loader_parquet_t {
     [[nodiscard]] reservoir_bound_t reservoir() const noexcept { return reservoir_; }
 
     /** The rows holding every column across the shards, the ones a fill draws. */
-    [[nodiscard]] std::size_t rows() const noexcept { return group_prefix_[group_prefix_.size() - 1]; }
+    [[nodiscard]] std::size_t rows() const noexcept { return groups_.rows(); }
 
   private:
 
     /** The configured KvikIO / GDS storage session — borrowed, the reader's precondition. */
     gpu_direct_storage_session_t *storage_ = nullptr;
-
-    /** The dataset's Parquet shard paths, sorted by the glob. */
-    st::basic_vector<sz::string_t> absolute_paths_ {};
 
     /** The state, choices and targets columns. */
     sz::string_t state_ {}, choices_ {}, targets_ {};
@@ -108,15 +104,8 @@ struct choices_loader_parquet_t {
     /** The run seed keying the file and row draws. */
     u64_t seed_ = 0;
 
-    /** @b [groups+1] cumulative complete rows of every row group over the shards in order, the
-     *  weighted draw's search table. */
-    st::basic_vector<std::size_t> group_prefix_ {};
-
-    /** @b [groups] each row group's shard and its index within the shard. */
-    st::basic_vector<u32_t> group_shard_ {}, group_index_ {};
-
-    /** The shards with a complete row, which bound the draw's floor of two. */
-    std::size_t drawable_shards_ = 0;
+    /** The shards' row groups holding all three columns, and each fill's pick of them. */
+    row_group_draw_t groups_ {};
 
     /** The device bytes a fill's reservoir can take, from the footers. */
     reservoir_bound_t reservoir_ {};

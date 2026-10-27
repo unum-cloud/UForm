@@ -419,10 +419,10 @@ expected_t ut::save_weights(checkpoint_to_save_t &checkpoint, trainer_config_t c
         text.clear();
         return format_into(text, "{}", value) && static_cast<bool>(checkpoint.metadata(key, text.view()));
     };
-    auto record_list = [&](sz::string_view_t key, f32_t const *values, std::size_t count) noexcept {
+    auto record_list = [&](sz::string_view_t key, std::span<f32_t const> values) noexcept {
         text.clear();
         bool formatted = true;
-        for (std::size_t index = 0; index != count; ++index)
+        for (std::size_t index = 0; index != values.size(); ++index)
             formatted = formatted && (index == 0 || format_into(text, ",")) && format_into(text, "{}", values[index]);
         return formatted && static_cast<bool>(checkpoint.metadata(key, text.view()));
     };
@@ -434,12 +434,12 @@ expected_t ut::save_weights(checkpoint_to_save_t &checkpoint, trainer_config_t c
         record("rope_base", tower.rope_base) && record("context", tower.rope_max_positions) &&
         record("columns", config.batch.max_columns_per_row) && record("image_patch_side", tower.image_patch_height) &&
         record("image_channels", tower.image_channels) &&
-        record_list("image_pixel_mean", tower.image_pixel_mean, tower.image_channels) &&
-        record_list("image_pixel_std", tower.image_pixel_std, tower.image_channels) &&
+        record_list("image_pixel_mean", {tower.image_pixel_mean, tower.image_channels}) &&
+        record_list("image_pixel_std", {tower.image_pixel_std, tower.image_channels}) &&
         record("video_patch_side", tower.video_patch_height) && record("video_tube_frames", tower.video_tube_frames) &&
         record("video_frame_stride", tower.video_frame_stride) && record("video_channels", tower.video_channels) &&
-        record_list("video_pixel_mean", tower.video_pixel_mean, tower.video_channels) &&
-        record_list("video_pixel_std", tower.video_pixel_std, tower.video_channels) &&
+        record_list("video_pixel_mean", {tower.video_pixel_mean, tower.video_channels}) &&
+        record_list("video_pixel_std", {tower.video_pixel_std, tower.video_channels}) &&
         record("audio_chunk_samples", tower.audio_chunk_samples) &&
         record("audio_sample_rate", config.batch.audio.sample_rate);
     if (!recorded) return expected_t::fail(status_t::bad_alloc_k, "checkpoint metadata staging failed");

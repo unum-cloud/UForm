@@ -5,14 +5,14 @@
  *  @brief The Parquet choices loader's bodies and its packing kernel — see the header for the
  *      contract.
  *
- *  A fill reads the state, choices and targets columns of the picked shards into one reservoir,
+ *  A fill reads the state, choices and targets columns of the drawn row groups into one reservoir,
  *  lands the offsets, the choices and the targets on the host, draws every row there, and lays each
  *  batch's segment table and choice rows out on the host too. One kernel then copies each state's
  *  kept tail from the reservoir and appends the mask byte.
  */
 #include <cstring> // `std::memcpy` — a target's little-endian Float32 bytes
 
-#include <algorithm> // `std::upper_bound`, `std::find`, `std::min`, `std::sort`
+#include <algorithm> // `std::min`
 #include <span>      // `std::as_writable_bytes`
 
 #include <cuda.h> // `cuStreamSynchronize`
@@ -69,33 +69,26 @@ expected<choices_loader_parquet_t> choices_loader_parquet_t::make(gpu_direct_sto
 
     choices_loader_parquet_t loader;
     loader.storage_ = &session;
-    loader.absolute_paths_ = std::move(paths.value_);
     loader.seed_ = seed;
     if (sz::failed(loader.state_.assign(config.state)) || sz::failed(loader.choices_.assign(config.choices)) ||
-        sz::failed(loader.targets_.assign(config.targets)) || st::failed(loader.group_prefix_.push_back(0)))
+        sz::failed(loader.targets_.assign(config.targets)))
         return result_t::fail(status_t::bad_alloc_k, "column name staging failed");
     sz::string_view_t const columns[3] = {config.state, config.choices, config.targets};
-    for (std::size_t index = 0; index != loader.absolute_paths_.size(); ++index) {
+    std::size_t groups = 0;
+    for (sz::string_t const &path : paths.value_) {
         expected<parquet_length_metadata_t> metadata = parquet_file_t::table_metadata(
-            session, loader.absolute_paths_[index], columns);
+            session, path, std::span<sz::string_view_t const> {columns});
         if (!metadata) return result_t::fail(std::move(metadata));
-        if (metadata->rows == 0)
-            return result_t::fail(status_t::invalid_argument_k, "shard {} is empty", loader.absolute_paths_[index]);
-        std::size_t const groups_before = loader.group_shard_.size();
-        for (std::size_t group = 0; group != metadata->group_rows.size(); ++group) {
-            if (metadata->group_complete_rows[group] == 0) continue;
-            if (st::failed(loader.group_prefix_.push_back(loader.group_prefix_[loader.group_shard_.size()] +
-                                                          metadata->group_complete_rows[group])) ||
-                st::failed(loader.group_shard_.push_back(static_cast<u32_t>(index))) ||
-                st::failed(loader.group_index_.push_back(static_cast<u32_t>(group))))
-                return result_t::fail(status_t::bad_alloc_k, "row-group table append failed");
-        }
-        loader.drawable_shards_ += loader.group_shard_.size() != groups_before;
-        loader.reservoir_.charge_groups(*metadata);
+        if (metadata->rows == 0) return result_t::fail(status_t::invalid_argument_k, "shard {} is empty", path);
+        if (expected_t appended = loader.groups_.append_shard(path, *metadata); !appended)
+            return result_t::fail(std::move(appended));
+        groups += metadata->group_rows.size();
+        loader.reservoir_.charge(*metadata);
     }
     if (loader.rows() == 0)
         return result_t::fail(status_t::invalid_argument_k, "{} holds no row with a state, choices and targets",
                               path_or_glob);
+    if (expected_t reserved = loader.groups_.reserve(groups); !reserved) return result_t::fail(std::move(reserved));
     return result_t {std::move(loader)};
 }
 
@@ -108,43 +101,13 @@ expected_t choices_loader_parquet_t::fill(gpu_stream_t &gpu_stream, u32_t gpu_ra
     std::size_t const width = batches[0].segment_choices.extent(1), total_segments = unroll * segments;
     if (width == 0) return expected_t::fail(status_t::unsupported_k, "the batches carry no choice columns");
 
-    // Row groups drawn by a keyed position over the complete rows, as the other loaders draw them:
-    // distinct groups accumulate until they cover the segments, then only a new shard meets the
-    // floor of two.
+    if (expected_t picked = groups_.draw(seed_, training_step, gpu_rank, file_draw_salt_k, total_segments, 2); !picked)
+        return picked;
     constexpr splitmix64_hash_t hash {};
-    std::size_t const group_count = group_shard_.size(), total_rows = this->rows();
-    std::size_t const floor_files = std::min<std::size_t>(2, drawable_shards_);
-    st::basic_vector<sz::string_view_t> picked_paths;
-    st::basic_vector<u32_t> picked_shards;
-    st::basic_vector<std::size_t> picked_ids;
-    st::basic_vector<st::basic_vector<u32_t>> picked_groups;
-    std::size_t pooled_estimate = 0, attempt = 0;
-    while ((pooled_estimate < total_segments || picked_paths.size() < floor_files) && picked_ids.size() < group_count) {
-        std::size_t const position = hash(seed_, training_step, gpu_rank, file_draw_salt_k, attempt) % total_rows;
-        ++attempt;
-        std::size_t const group = static_cast<std::size_t>(
-            std::upper_bound(group_prefix_.begin(), group_prefix_.end(), position) - group_prefix_.begin() - 1);
-        if (std::find(picked_ids.begin(), picked_ids.end(), group) != picked_ids.end()) continue;
-        u32_t const shard = group_shard_[group];
-        std::size_t const pick = static_cast<std::size_t>(std::find(picked_shards.begin(), picked_shards.end(), shard) -
-                                                          picked_shards.begin());
-        bool const fresh = pick == picked_shards.size();
-        if (!fresh && pooled_estimate >= total_segments) continue;
-        if (fresh && (st::failed(picked_shards.push_back(u32_t {shard})) ||
-                      st::failed(picked_paths.push_back(absolute_paths_[shard].view())) ||
-                      st::failed(picked_groups.push_back(st::basic_vector<u32_t> {}))))
-            return expected_t::fail(status_t::bad_alloc_k, "shard pick append failed");
-        if (st::failed(picked_ids.push_back(std::size_t {group})) ||
-            st::failed(picked_groups[pick].push_back(u32_t {group_index_[group]})))
-            return expected_t::fail(status_t::bad_alloc_k, "row-group pick append failed");
-        pooled_estimate += group_prefix_[group + 1] - group_prefix_[group];
-    }
-    for (st::basic_vector<u32_t> &groups : picked_groups)
-        std::sort(groups.begin(), groups.end()); // cuDF reads them ascending
-
     sz::string_view_t const names[3] = {state_.view(), choices_.view(), targets_.view()};
-    expected<parquet_file_t> reservoir_read = parquet_file_t::make(*storage_, picked_paths, names, picked_groups,
-                                                                   gpu_stream);
+    expected<parquet_file_t> reservoir_read = parquet_file_t::make(*storage_, groups_.picked_paths(),
+                                                                   std::span<sz::string_view_t const> {names},
+                                                                   groups_.picked_groups(), gpu_stream);
     if (!reservoir_read) return expected_t::fail(std::move(reservoir_read));
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();
@@ -196,7 +159,7 @@ expected_t choices_loader_parquet_t::fill(gpu_stream_t &gpu_stream, u32_t gpu_ra
         return expected_t::fail(status_t::unsupported_k,
                                 "{} pooled rows across {} files hold no choice of at most {} distinct bytes with " //
                                 "a target each",
-                                pooled_rows, picked_paths.size(), width);
+                                pooled_rows, groups_.picked_paths().size(), width);
 
     // Each batch's tables are laid out on the host, one batch at a time, and reused once uploaded.
     st::basic_vector<u32_t> offsets, lengths;

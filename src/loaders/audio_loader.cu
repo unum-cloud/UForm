@@ -247,7 +247,8 @@ expected_t audio_loader_parquet_t::fill(gpu_stream_t &gpu_stream, audio_loader_p
     }
 
     // Decode the picked files' clip column into one device reservoir; the true pool is the decoded rows.
-    auto reservoir_read = parquet_file_t::make(*storage_, picked_paths, {&config.column, 1}, gpu_stream);
+    auto reservoir_read = parquet_file_t::make(*storage_, std::span<sz::string_view_t const> {picked_paths},
+                                               std::span<sz::string_view_t const> {&config.column, 1}, {}, gpu_stream);
     if (!reservoir_read) return expected_t::fail(std::move(reservoir_read));
     parquet_file_t const reservoir = std::move(reservoir_read.value_);
     std::size_t const pooled_rows = reservoir.rows();

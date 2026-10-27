@@ -73,22 +73,19 @@ struct parquet_length_metadata_t {
 };
 
 /** The device bytes a fill's reservoir can take outside the arena, @c fixed_bytes+rows·row_bytes
- *  for a fill of @c rows rows. A fill reads at least two shards or row groups, and more only while
- *  its rows fall short, so it reads at most one past what its rows need. Every byte counts thrice,
- *  as cuDF holds the compressed chunks, the decompressed pages and the decoded columns at once. */
+ *  for a fill of @c rows rows. A fill draws row groups while its rows fall short, then at most one
+ *  more for a second shard, so it reads at most two groups past what its rows need. Every byte
+ *  counts thrice, as cuDF holds the compressed chunks, the decompressed pages and the decoded
+ *  columns at once. */
 struct reservoir_bound_t {
     std::size_t fixed_bytes = 0, row_bytes = 0;
     static constexpr std::size_t copies_k = 3;
 
-    /** Widen the bound to cover a whole-shard read of @p shard 's footer, or of @c shard.bytes
-     *  alone when it tells no rows. */
+    /** Widen the bound to cover reads of @p shard 's row groups: the largest group times the two a
+     *  fill draws past its rows, and the densest group's bytes per row. A footer without groups, as
+     *  the footerless formats weigh a file, counts its @c bytes whole. */
     void charge(parquet_length_metadata_t const &shard) noexcept {
-        fixed_bytes = std::max(fixed_bytes, 2 * copies_k * shard.bytes);
-        if (shard.rows != 0) row_bytes = std::max(row_bytes, copies_k * divide_round_up(shard.bytes, shard.rows));
-    }
-
-    /** Widen the bound to cover a read of only some row groups of @p shard 's footer. */
-    void charge_groups(parquet_length_metadata_t const &shard) noexcept {
+        if (shard.group_rows.empty()) fixed_bytes = std::max(fixed_bytes, 2 * copies_k * shard.bytes);
         for (std::size_t group = 0; group != shard.group_rows.size(); ++group) {
             fixed_bytes = std::max(fixed_bytes, 2 * copies_k * shard.group_bytes[group]);
             if (shard.group_rows[group] != 0)
@@ -102,6 +99,59 @@ struct reservoir_bound_t {
         fixed_bytes = std::max(fixed_bytes, other.fixed_bytes);
         row_bytes = std::max(row_bytes, other.row_bytes);
     }
+};
+
+/** A keyed weighted draw of Parquet row groups across shards, sized by their complete rows, and
+ *  the reader's arguments for the groups one fill drew. */
+struct row_group_draw_t {
+
+    /** Append @p path 's @p footer : its row groups with a complete row become drawable, and a
+     *  shard without one is left out. */
+    [[nodiscard]] expected_t append_shard(sz::string_view_t path, parquet_length_metadata_t const &footer) noexcept;
+
+    /** Reserve every fill's pick storage for at most @p groups row groups, after the last shard. */
+    [[nodiscard]] expected_t reserve(std::size_t groups) noexcept;
+
+    /** Draw distinct groups keyed by @p seed , @p step , @p rank and @p salt until they hold
+     *  @p rows complete rows from at least @p floor_shards shards, or every group is drawn;
+     *  allocates nothing. */
+    [[nodiscard]] expected_t draw(u64_t seed, u64_t step, std::size_t rank, u64_t salt, std::size_t rows,
+                                  std::size_t floor_shards) noexcept;
+
+    /** The shards the last draw touched, ascending. */
+    [[nodiscard]] sz::strings_view_t picked_paths() const noexcept;
+
+    /** The shards the last draw touched, by their order among the drawable shards. */
+    [[nodiscard]] std::span<u32_t const> picked_shards() const noexcept;
+
+    /** Per picked shard, the local indices of its drawn groups, ascending. */
+    [[nodiscard]] tape_view<u32_t const> picked_groups() const noexcept;
+
+    /** Complete rows across every drawable group, the draw's position range. */
+    [[nodiscard]] std::size_t rows() const noexcept;
+
+  private:
+
+    /** Every drawable shard's path, in glob order. */
+    st::basic_vector<sz::string_t> paths_ {};
+
+    /** @b [shards+1] offsets into @ref drawable_groups_ , one entry per shard. */
+    st::basic_vector<std::size_t> shard_offsets_ {};
+
+    /** Each shard's drawable row groups by their index within the shard, shard by shard. */
+    st::basic_vector<u32_t> drawable_groups_ {};
+
+    /** @b [groups+1] cumulative complete rows over @ref drawable_groups_ , the weighted search
+     *  table. */
+    st::basic_vector<std::size_t> group_prefix_ {};
+
+    /** The last fill's drawn group IDs, then its picked shards, paths and their group tape, all
+     *  reserved once. */
+    st::basic_vector<u32_t> drawn_ {};
+    st::basic_vector<u32_t> picked_shards_ {};
+    st::basic_vector<sz::string_view_t> picked_paths_ {};
+    st::basic_vector<std::size_t> picked_offsets_ {};
+    st::basic_vector<u32_t> picked_groups_ {};
 };
 
 /** One Parquet shard's requested columns, decoded and owned on device. Move-only; the cuDF
@@ -125,24 +175,15 @@ struct parquet_file_t {
      *  @param[in] columns Column names to decode, in the order @ref column indexes them.
      */
     [[nodiscard]] static expected<parquet_file_t> make(gpu_direct_storage_session_t const &storage,
-                                                       sz::string_view_t path,
-                                                       std::span<sz::string_view_t const> columns,
+                                                       sz::string_view_t path, sz::strings_view_t columns,
                                                        gpu_stream_t &stream) noexcept;
 
-    /** Decode @p columns of @b several shards at once into @b one concatenated file — cuDF reads
-     *  all @p paths and returns a single table whose rows are the shards' rows back to back. The
-     *  row draw's reservoir. */
+    /** Decode @p columns of @b several shards at once into @b one concatenated file, the row draw's
+     *  reservoir, whose rows follow the paths, then their groups, back to back. @p row_groups holds
+     *  one ascending entry of row-group indices per path, and an empty tape reads every group. */
     [[nodiscard]] static expected<parquet_file_t> make(gpu_direct_storage_session_t const &storage,
-                                                       std::span<sz::string_view_t const> paths,
-                                                       std::span<sz::string_view_t const> columns,
-                                                       gpu_stream_t &stream) noexcept;
-
-    /** Decode only @p row_groups of @p paths , one ascending list per path, into one concatenated
-     *  file whose rows follow the paths, then the groups, back to back. */
-    [[nodiscard]] static expected<parquet_file_t> make(gpu_direct_storage_session_t const &storage,
-                                                       std::span<sz::string_view_t const> paths,
-                                                       std::span<sz::string_view_t const> columns,
-                                                       std::span<st::basic_vector<u32_t> const> row_groups,
+                                                       sz::strings_view_t paths, sz::strings_view_t columns,
+                                                       tape_view<u32_t const> row_groups,
                                                        gpu_stream_t &stream) noexcept;
 
     /** Read only the shard's Parquet footer at @p path — @c num_rows , the @b whole table's summed
@@ -150,7 +191,7 @@ struct parquet_file_t {
      *  fill — never touching the row groups' pages or the GPU. */
     [[nodiscard]] static expected<parquet_length_metadata_t> table_metadata(
         gpu_direct_storage_session_t const &storage, sz::string_view_t path,
-        std::span<sz::string_view_t const> complete_columns = {}) noexcept;
+        sz::strings_view_t complete_columns = std::span<sz::string_view_t const> {}) noexcept;
 
     /** Read only the shard's Parquet footer at @p path — @c num_rows and @p column 's summed
      *  column-chunk byte size — never touching the row groups or the GPU. */
