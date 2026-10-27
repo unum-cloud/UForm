@@ -119,7 +119,7 @@ static constexpr failure_messages_t bootstrap_failures_k {
     "The mesh bootstrap failed",
     "Host memory ran out during the mesh bootstrap",
     "The mesh options are invalid: an index past the count, or peers without a directory and a job",
-    "The processes disagree on the mesh's shape, GPU class or capabilities",
+    "The processes disagree on the mesh's shape or GPU class",
     "A GPU of the mesh could not be probed or pinned",
     "The exchange directory could not be written, or a peer never arrived",
 };

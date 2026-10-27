@@ -31,40 +31,51 @@ using namespace unum::uform::utilities;
 }
 
 /**
- *  @brief Update one state's row and column moments — a CTA per row for the row means, then the columns
- *      strided serially over the rows; both fixed-order.
+ *  @brief Update one state's row and column moments — a CTA per warp-wide column tile, whose
+ *      warps each fold an interleaved band of rows before warp 0 folds the bands in warp order,
+ *      then a CTA per row for the row means; both fixed-order.
  *
- *  __grid_size__ @c [rows + ceil(cols/block),1,1] ; the first @c rows CTAs own rows, the rest stripe
- *  columns; no dynamic shared memory.
+ *  __grid_size__ @c [column_tiles+rows,1,1] , a tile per warp of columns; the first CTAs own column
+ *  tiles, so their longer walks start first, and the rest own rows; no dynamic shared memory.
  */
-static __global__ void adafactor_moments_kernel_(adafactor_state_t state, f32r1_span_t moments,
-                                                 f32r1_view_t reduced_gradients, f32_t beta2, f32_t epsilon1) {
+static __global__ void __launch_bounds__(kernel_block_size_default_k, 1)
+    adafactor_moments_kernel_(adafactor_state_t state, f32r1_span_t moments, f32r1_view_t reduced_gradients,
+                              f32_t beta2, f32_t epsilon1) {
+    constexpr unsigned warps_k = kernel_block_size_default_k / warp_size_k;
+    __shared__ f32_t band_totals[warps_k][warp_size_k];
     u32_t const rows = static_cast<u32_t>(state.weights.extent(0));
     u32_t const cols = static_cast<u32_t>(state.weights.extent(1));
-    if (blockIdx.x < rows) {
-        u32_t const row = blockIdx.x;
-        f32_t thread_partial = 0.0f;
-        for (u32_t column = threadIdx.x; column < cols; column += blockDim.x) {
-            f32_t const gradient = adafactor_gradient_(state, reduced_gradients, row, column);
-            thread_partial += gradient * gradient;
+    u32_t const column_tiles = static_cast<u32_t>(divide_round_up(cols, warp_size_k));
+    if (blockIdx.x < column_tiles) {
+        unsigned const lane_index = threadIdx.x % warp_size_k, warp_index = threadIdx.x / warp_size_k;
+        u32_t const column = blockIdx.x * warp_size_k + lane_index;
+        f32_t band_total = 0.0f;
+        if (column < cols) {
+#pragma unroll 16 // keeps the band's loads in flight ahead of the ordered sum
+            for (u32_t row = warp_index; row < rows; row += warps_k) {
+                f32_t const gradient = adafactor_gradient_(state, reduced_gradients, row, column);
+                band_total += gradient * gradient;
+            }
         }
-        f32_t const mean = block_reduce_broadcast<kernel_block_size_default_k>(thread_partial) / f32_t(cols);
-        if (threadIdx.x == 0u)
-            moments[state.row_moment_offset + row] = beta2 * moments[state.row_moment_offset + row] +
-                                                     (1.0f - beta2) * (mean + epsilon1);
-    }
-    else {
-        u32_t const column = (blockIdx.x - rows) * blockDim.x + threadIdx.x;
-        if (column >= cols) return;
-        f32_t total = 0.0f;
-        for (u32_t row = 0; row != rows; ++row) {
-            f32_t const gradient = adafactor_gradient_(state, reduced_gradients, row, column);
-            total += gradient * gradient;
-        }
-        f32_t const mean = total / f32_t(rows);
+        band_totals[warp_index][lane_index] = band_total;
+        __syncthreads();
+        if (warp_index != 0u || column >= cols) return;
+        for (unsigned band = 1; band != warps_k; ++band) band_total += band_totals[band][lane_index];
+        f32_t const mean = band_total / f32_t(rows);
         moments[state.column_moment_offset + column] = beta2 * moments[state.column_moment_offset + column] +
                                                        (1.0f - beta2) * (mean + epsilon1);
+        return;
     }
+    u32_t const row = blockIdx.x - column_tiles;
+    f32_t thread_partial = 0.0f;
+    for (u32_t column = threadIdx.x; column < cols; column += blockDim.x) {
+        f32_t const gradient = adafactor_gradient_(state, reduced_gradients, row, column);
+        thread_partial += gradient * gradient;
+    }
+    f32_t const mean = block_reduce_broadcast<kernel_block_size_default_k>(thread_partial) / f32_t(cols);
+    if (threadIdx.x == 0u)
+        moments[state.row_moment_offset + row] = beta2 * moments[state.row_moment_offset + row] +
+                                                 (1.0f - beta2) * (mean + epsilon1);
 }
 
 /** The mean of @p state 's row moments, folded by the whole CTA in a fixed order, so every CTA of
@@ -359,8 +370,8 @@ expected_t adafactor_t::step(f32_t learning_rate, gpu_stream_t &stream, f32r1_vi
         adafactor_state_t const &state = states_[index];
         u32_t const rows = static_cast<u32_t>(state.weights.extent(0));
         std::size_t const cols = state.weights.extent(1);
-        u32_t const column_blocks = static_cast<u32_t>(divide_round_up(cols, kernel_block_size_default_k));
-        expected_t staged = launch_kernel(&adafactor_moments_kernel_, dim3 {rows + column_blocks, 1u, 1u}, block_shape,
+        u32_t const column_tiles = static_cast<u32_t>(divide_round_up(cols, warp_size_k));
+        expected_t staged = launch_kernel(&adafactor_moments_kernel_, dim3 {column_tiles + rows, 1u, 1u}, block_shape,
                                           stream, state, moments_.span(), reduced_gradients, decay, config_.epsilon1);
         if (staged)
             staged = launch_kernel(&adafactor_scale_kernel_, dim3 {rows, 1u, 1u}, block_shape, stream, state,

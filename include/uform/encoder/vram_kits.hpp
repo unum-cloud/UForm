@@ -131,6 +131,7 @@ struct cuda_products_kit_t {
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_cuda;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_cuda;
     static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_cuda;
+    static constexpr auto symmetric_bf16 = nk_dots_symmetric_bf16_cuda;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_cuda;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_cuda;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_cuda;
@@ -150,6 +151,7 @@ struct ampere_products_kit_t {
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_ampere;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_ampere;
     static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_ampere;
+    static constexpr auto symmetric_bf16 = nk_dots_symmetric_bf16_ampere;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_ampere;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_ampere;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_ampere;
@@ -171,6 +173,7 @@ struct hopper_products_kit_t {
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_hopper;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_hopper;
     static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_hopper;
+    static constexpr auto symmetric_bf16 = nk_dots_symmetric_bf16_hopper;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_ampere;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_ampere;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_ampere;
@@ -190,6 +193,7 @@ struct blackwell_products_kit_t {
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_blackwell;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_blackwell;
     static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_blackwell;
+    static constexpr auto symmetric_bf16 = nk_dots_symmetric_bf16_blackwell;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_blackwell;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_blackwell;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_blackwell;
@@ -211,6 +215,7 @@ struct blackwellrtx_products_kit_t {
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_ampere;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_ampere;
     static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_ampere;
+    static constexpr auto symmetric_bf16 = nk_dots_symmetric_bf16_ampere;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_blackwellrtx;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_blackwellrtx;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_blackwellrtx;
@@ -230,6 +235,7 @@ struct rocm_products_kit_t {
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_rocm;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_rocm;
     static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_rocm;
+    static constexpr auto symmetric_bf16 = nk_dots_symmetric_bf16_rocm;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_rocm;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_rocm;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_rocm;
@@ -249,6 +255,7 @@ struct cdna3_products_kit_t {
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_cdna3;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_cdna3;
     static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_cdna3;
+    static constexpr auto symmetric_bf16 = nk_dots_symmetric_bf16_cdna3;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_cdna3;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_cdna3;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_cdna3;
@@ -268,6 +275,7 @@ struct cdna4_products_kit_t {
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_cdna4;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_cdna4;
     static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_cdna4;
+    static constexpr auto symmetric_bf16 = nk_dots_symmetric_bf16_cdna4;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_cdna4;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_cdna4;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_cdna4;
@@ -287,6 +295,7 @@ struct cdna5_products_kit_t {
     static constexpr auto pack_bf16 = nk_dots_pack_bf16_cdna5;
     static constexpr auto multiply_bf16 = nk_dots_packed_bf16_cdna5;
     static constexpr auto multiply_workspace_size_bf16 = nk_dots_packed_workspace_size_bf16_cdna5;
+    static constexpr auto symmetric_bf16 = nk_dots_symmetric_bf16_cdna5;
     static constexpr auto pack_size_e4m3 = nk_dots_pack_size_e4m3_cdna5;
     static constexpr auto pack_e4m3 = nk_dots_pack_e4m3_cdna5;
     static constexpr auto multiply_e4m3 = nk_dots_packed_e4m3_cdna5;

@@ -31,7 +31,7 @@
  */
 #include <cmath>   // `std::sqrt`
 #include <cstdio>  // `std::fopen`, `std::fread`, `std::remove`
-#include <cstring> // `std::memset`, `std::strcmp`
+#include <cstring> // `std::memset`, `std::memcpy`, `std::strcmp`
 
 #include <dirent.h> // `opendir`, `readdir` — the image directory
 
@@ -41,7 +41,8 @@
 #include <cuda.h>       // `cuMemcpyDtoH`
 #include <fmt/format.h> // `fmt::println`, `fmt::format_to_n`
 
-#include <numkong/cast.h>              // `nk_bf16_to_f32_serial`, `nk_f32_to_bf16_serial`
+#include <numkong/capabilities.h>      // `nk_cpu_capabilities_enabled`
+#include <numkong/each.h>              // `nk_each_scale_bf16_best` — the halved columns
 #include <smashtable/basic_vector.hpp> // `basic_vector` — every growable table here
 
 #include "uform/encode.h"
@@ -130,17 +131,18 @@ static constexpr char const *kept_metadata_k[] = {
     if (st::failed(staging.resize(st::assume_uninitialized, grown_rows * grown_cols)))
         return expected_t::fail(status_t::bad_alloc_k, "{} staging failed", name);
     nk::tensor_span<nk_bf16_t, 2> const target {staging.data(), grown_rows, grown_cols};
+    nk_capability_t capabilities = 0;
+    if (columns == columns_t::halved_k && nk_cpu_capabilities_enabled(&capabilities) != nk_success_k)
+        return expected_t::fail(status_t::unsupported_k, "{} found no CPU capabilities", name);
+    nk_f32_t const half = 0.5f, zero = 0.0f;
     for (std::size_t row = 0; row != grown_rows; ++row) {
         std::size_t const source_row = row_bands ? row / (2 * band) * band + row % band : row;
-        for (std::size_t column = 0; column != grown_cols; ++column) {
-            nk_bf16_t value = source[source_row, column % cols];
-            if (columns == columns_t::halved_k) {
-                nk_f32_t widened;
-                nk_bf16_to_f32_serial(&value, &widened);
-                widened *= 0.5f;
-                nk_f32_to_bf16_serial(&widened, &value);
-            }
-            target[row, column] = value;
+        nk_bf16_t const *const from = &source[source_row, 0];
+        for (std::size_t first = 0; first != grown_cols; first += cols) {
+            nk_bf16_t *const to = &target[row, first];
+            if (columns != columns_t::halved_k) std::memcpy(to, from, cols * sizeof(nk_bf16_t));
+            else if (nk_each_scale_bf16_best(from, cols, &half, &zero, to, capabilities, nullptr) != nk_success_k)
+                return expected_t::fail(status_t::unsupported_k, "{} halving failed", name);
         }
     }
     return grown.insert(name, nk::tensor_view<nk_bf16_t, 2> {staging.data(), grown_rows, grown_cols});

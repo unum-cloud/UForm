@@ -69,13 +69,19 @@ static __global__ void tower_text_keys_kernel_(tokens_view_t tokens, u32r1_view_
 }
 
 /**
- *  @brief Deterministic embedding-gradient scatter over the pre-sorted (token, position) pairs: one CTA
- *      per position range start walks its whole duplicate run serially — fixed order, no atomics.
+ *  @brief Deterministic embedding-gradient scatter over the pre-sorted (token, position) pairs: one
+ *      CTA per run head, its warps folding interleaved bands of the duplicate run — fixed order, no
+ *      atomics.
+ *
+ *  Each band covers a block-wide chunk of channels, and the bands fold in warp order.
  *
  *  __grid_size__ @c [tokens,1,1] ; a CTA whose row is not a run head exits immediately.
  */
-static __global__ void tower_embedding_scatter_kernel_(tokens_view_t sorted_tokens, u32r1_view_t sorted_positions,
-                                                       bf16r2_view_t token_grad, bf16r2_span_t table_grad) {
+static __global__ void __launch_bounds__(kernel_block_size_default_k, 1)
+    tower_embedding_scatter_kernel_(tokens_view_t sorted_tokens, u32r1_view_t sorted_positions,
+                                    bf16r2_view_t token_grad, bf16r2_span_t table_grad) {
+    constexpr unsigned warps_k = kernel_block_size_default_k / warp_size_k;
+    __shared__ f32_t band_totals[warps_k][warps_k][warp_size_k];
     std::size_t const row = blockIdx.x;
     std::size_t const tokens = sorted_tokens.extent(0);
     token_id_t const token = sorted_tokens[row];
@@ -84,11 +90,27 @@ static __global__ void tower_embedding_scatter_kernel_(tokens_view_t sorted_toke
     if (static_cast<std::size_t>(token) >= table_grad.extent(0)) return;
     if (row != 0 && sorted_tokens[row - 1] == token) return; // Not this run's head.
     u32_t const hidden = static_cast<u32_t>(table_grad.extent(1));
-    for (u32_t channel = threadIdx.x; channel < hidden; channel += blockDim.x) {
-        f32_t total = 0.0f;
-        for (std::size_t run = row; run < tokens && sorted_tokens[run] == token; ++run)
-            total += __bfloat162float(token_grad[static_cast<std::size_t>(sorted_positions[run]), channel]);
-        table_grad[static_cast<std::size_t>(token), channel] = __float2bfloat16_rn(total);
+    unsigned const lane_index = threadIdx.x % warp_size_k, warp_index = threadIdx.x / warp_size_k;
+    for (u32_t chunk_first = 0; chunk_first < hidden; chunk_first += kernel_block_size_default_k) {
+        f32_t lane_totals[warps_k] = {};
+        for (std::size_t run = row + warp_index; run < tokens && sorted_tokens[run] == token; run += warps_k) {
+            std::size_t const position = sorted_positions[run];
+#pragma unroll
+            for (unsigned tile = 0; tile != warps_k; ++tile) {
+                u32_t const channel = chunk_first + tile * warp_size_k + lane_index;
+                if (channel < hidden) lane_totals[tile] += __bfloat162float(token_grad[position, channel]);
+            }
+        }
+#pragma unroll
+        for (unsigned tile = 0; tile != warps_k; ++tile) band_totals[warp_index][tile][lane_index] = lane_totals[tile];
+        __syncthreads();
+        u32_t const channel = chunk_first + threadIdx.x;
+        if (channel < hidden) {
+            f32_t total = 0.0f;
+            for (unsigned band = 0; band != warps_k; ++band) total += band_totals[band][warp_index][lane_index];
+            table_grad[static_cast<std::size_t>(token), channel] = __float2bfloat16_rn(total);
+        }
+        __syncthreads();
     }
 }
 
@@ -1253,10 +1275,10 @@ expected_t encoder_tower_bf16_t::backward(bf16r2_view_t vertices_grad, bf16r2_vi
                                 nk_status_name(status));
     bf16r2_view_t const entry_grad = normalized_grad_.view();
 
-    // Entry backward, text cells: deterministic embedding scatter over the whole packed grid. Keys start at
-    // the sentinel (max token id) so every non-text cell folds into one trailing run the scatter skips; the
-    // text segments overwrite their keys, positions are the flat cell indices, and the sort + serial per-run
-    // fold stay deterministic with no atomics.
+    // Entry backward, text cells: deterministic embedding scatter over the whole packed grid. Keys
+    // start at the sentinel (max token ID) so every non-text cell folds into one trailing run the
+    // scatter skips; the text segments overwrite their keys, positions are the flat cell indices,
+    // and the sort + banded per-run fold stay deterministic with no atomics.
 
     if (expected_t zeroed = zero_async(entry_weight_grad_.span(), stream); !zeroed) return zeroed;
     // The sort scratch is one arena split into two halves, max_tokens apart: [0,live) and [max,max+live).

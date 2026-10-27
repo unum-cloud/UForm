@@ -17,7 +17,7 @@
  *      - @ref world_reconciles — the substance: a lead reads a peer's facts, validates agreement, and
  *        assembles the world; a follower adopts the lead's manifest. Both are driven against a @b matching
  *        simulated peer planted with this box's real GPU identity, so agreement genuinely passes,
- *        and a peer of other capabilities is refused. Needs a visible GPU (bootstrap front-loads
+ *        and a peer of another GPU class is refused. Needs a visible GPU (bootstrap front-loads
  *        `discover_mesh_shape`); a box without one SKIPs.
  *      - @ref barrier_traps_past_deadline — a domain barrier no other arrival reaches traps after
  *        the domain's timeout rather than hanging, and leaves the sentence naming why in the mesh's
@@ -54,12 +54,12 @@ namespace fs = std::filesystem;
 /** One host_domain's facts in the exact line-oriented wire format `build_facts_` emits — what a
  *  peer publishes under its `mesh` key for the lead to read. */
 static sz::string_t facts_payload(sz::string_view_t job, u32_t index, u32_t count, u32_t multimem, u32_t devices,
-                                  sz::string_view_t hostname, sz::string_view_t device_name, u64_t capabilities) {
+                                  sz::string_view_t hostname, sz::string_view_t device_name, u32_t gpu_class) {
     sz::string_t text;
     (void)format_into(text,
                       "schema {}\njob {}\nhost_domain_index {}\nhost_domain_count {}\n" //
-                      "multimem {}\ncapabilities {:x}\nhostname {}\ndevices {}\ndevice_name {}\nuuids",
-                      mesh_schema_k, job, index, count, multimem, capabilities, hostname, devices, device_name);
+                      "multimem {}\ngpu_class {}\nhostname {}\ndevices {}\ndevice_name {}\nuuids",
+                      mesh_schema_k, job, index, count, multimem, gpu_class, hostname, devices, device_name);
     // Synthetic per-GPU UUIDs, distinct across host_domains and never colliding with a real GPU id, so the
     // lead's world-uniqueness check sees this faux peer's devices as its own disjoint set.
     for (u32_t gpu = 0; gpu != devices; ++gpu)
@@ -237,9 +237,9 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
         }
     }
 
-    // The lead refuses a peer whose GPUs dispatch with other capabilities.
+    // The lead refuses a peer whose GPUs train as another class.
     {
-        char const *job = "reconcile_capabilities";
+        char const *job = "reconcile_gpu_class";
         fs::path const directory = base / job;
         fs::create_directories(directory, error);
         plant(directory / "host_domain1.mesh",
@@ -247,7 +247,7 @@ static void world_reconciles(test_suite_t &suite, fs::path const &base, u32_t lo
         auto result = mesh_topology_t::bootstrap(0, 2, &pause_between_polls, local_devices, base.c_str(), job, 10.0,
                                                  0x3);
         suite.check(!result && result.status_ == status_t::unsupported_k,
-                    "lead should refuse a peer of other capabilities: {}", result.description_);
+                    "lead should refuse a peer of another GPU class: {}", result.description_);
     }
 
     // A follower rebuilds the same world by adopting the lead's manifest, validating its own row.

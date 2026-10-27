@@ -128,11 +128,10 @@ def test_executor_is_built_through_its_residency():
         uform.Executor()
 
 
-def test_borrowed_pools_are_unsupported():
-    """`on_pool` mirrors the C verb, which reports unsupported until borrowing is designed across projects."""
-    with pytest.raises(uform.UnsupportedError) as caught:
+def test_borrowed_pools_need_a_pool():
+    """`on_pool` mirrors the C verb, which refuses a null pool it could borrow no threads from."""
+    with pytest.raises(uform.InvalidArgumentError):
         uform.Executor.on_pool(0)
-    assert isinstance(caught.value, NotImplementedError)
 
 
 def test_load_ram_and_describe(checkpoint: Path):

@@ -30,6 +30,8 @@
  *        another block overwrote their shared scratch reproduces its backward bitwise.
  *      - @ref choices_cross_entropy : the calibrated choices' loss, their force on the answer rows
  *        and the decoder's gradient against a Float64 oracle, then a central difference.
+ *      - @ref spectrum_replay : the coding rate, the Lipschitz penalty and their force on the
+ *        pooled rows against a Float64 replay, whose own force a central difference checks.
  *
  *  The forward and the backward both round their activations to BFloat16, so a forward's loss
  *  carries a few thousandths of a nat of rounding noise and a finite difference agrees with the
@@ -43,14 +45,17 @@
 
 #include <unistd.h> // `::getpid`
 
-#include <algorithm> // `std::max`, `std::min`
+#include <algorithm> // `std::max`, `std::min`, `std::fill`, `std::copy`
+#include <limits>    // `std::numeric_limits`
 #include <span>      // `std::span`
 
 #include <cuda.h> // `cuInit`, `cuMemcpyHtoD`, `cuMemcpyDtoH`, `cuStreamSynchronize`
 
 #include <numkong/reduce.hpp> // `nk::reduce_moments`
 
+#include "uform/utilities/mesh.hpp"          // `mesh_topology_t`
 #include "uform/train/optimizer.hpp"         // `adafactor_t`
+#include "uform/train/pooled_spectrum.cuh"   // `distributed_pooled_spectrum_t`
 #include "uform/train/transformer_block.cuh" // `transformer_block_bf16_t`, `transformer_scratch_t`
 #include "uform/train/base.cuh"             // `base_replica_t`, `trainer_config_t`, `seed_weights`
 
@@ -1305,6 +1310,233 @@ static void block_recompute_replays(test_suite_t &suite, device_t &device) {
             "the {} weight gradient survives the replay bitwise", names[matrix]);
 }
 
+/** Normalize every row of @p pooled into @p units , an all-zero row staying zero, and return the
+ *  inverse norms in @p inverse_norms . */
+static void normalize_rows_(f64r2_view_t pooled, f64r2_span_t units, std::span<f64_t> inverse_norms) noexcept {
+    std::size_t const rows = pooled.extent(0), hidden = pooled.extent(1);
+    for (std::size_t row = 0; row != rows; ++row) {
+        std::span<f64_t const> const values {&pooled[row, 0], hidden};
+        f64_t const energy = dot(values, values);
+        inverse_norms[row] = energy > 0.0 ? 1.0 / std::sqrt(energy) : 0.0;
+        for (std::size_t channel = 0; channel != hidden; ++channel)
+            units[row, channel] = values[channel] * inverse_norms[row];
+    }
+}
+
+/** The coding rate @c ½·logdet(I+α·ZᵀZ) of the unit rows @p units in Float64, leaving the
+ *  Cholesky factor of @c I+α·ZᵀZ in the lower triangle of @p lower . */
+[[nodiscard]] static f64_t coding_rate_replay_(f64r2_view_t units, f64_t alpha, f64r2_span_t lower) noexcept {
+    std::size_t const rows = units.extent(0), hidden = units.extent(1);
+    for (std::size_t row = 0; row != hidden; ++row)
+        for (std::size_t column = 0; column <= row; ++column) {
+            f64_t gram = 0.0;
+            for (std::size_t unit = 0; unit != rows; ++unit) gram += units[unit, row] * units[unit, column];
+            lower[row, column] = (row == column ? 1.0 : 0.0) + alpha * gram;
+        }
+    f64_t rate = 0.0;
+    for (std::size_t pivot = 0; pivot != hidden; ++pivot) {
+        for (std::size_t inner = 0; inner != pivot; ++inner)
+            lower[pivot, pivot] -= lower[pivot, inner] * lower[pivot, inner];
+        lower[pivot, pivot] = std::sqrt(lower[pivot, pivot]);
+        for (std::size_t row = pivot + 1; row != hidden; ++row) {
+            for (std::size_t inner = 0; inner != pivot; ++inner)
+                lower[row, pivot] -= lower[row, inner] * lower[pivot, inner];
+            lower[row, pivot] /= lower[pivot, pivot];
+        }
+        rate += std::log(lower[pivot, pivot]);
+    }
+    return rate;
+}
+
+/** The pooled-code loss @c −λ_tcr·R+λ_lip·‖Z·v‖² of the raw rows @p pooled at the fixed direction
+ *  @p direction , in Float64. */
+[[nodiscard]] static f64_t spectrum_loss_replay_(f64r2_view_t pooled, pooled_spectrum_config_t config,
+                                                 std::span<f64_t const> direction) noexcept {
+    std::size_t const rows = pooled.extent(0), hidden = pooled.extent(1);
+    st::basic_vector<f64_t> units, inverse_norms, lower;
+    if (st::failed(units.resize(rows * hidden)) || st::failed(inverse_norms.resize(rows)) ||
+        st::failed(lower.resize(hidden * hidden)))
+        return std::numeric_limits<f64_t>::quiet_NaN();
+    f64r2_span_t const unit_rows {units.data(), rows, hidden};
+    normalize_rows_(pooled, unit_rows, inverse_norms);
+    f64_t const alpha = f64_t(hidden) / (f64_t(config.rows_per_world) * config.epsilon_squared);
+    f64_t const rate = coding_rate_replay_(unit_rows, alpha, f64r2_span_t {lower.data(), hidden, hidden});
+    f64_t lipschitz = 0.0;
+    for (std::size_t row = 0; row != rows; ++row) {
+        f64_t const projection = dot(std::span<f64_t const> {&unit_rows[row, 0], hidden}, direction);
+        lipschitz += projection * projection;
+    }
+    return -f64_t(config.coding_rate_weight) * rate + f64_t(config.lipschitz_weight) * lipschitz;
+}
+
+/** The pooled-code regularizers on one GPU against a Float64 replay of the same formulas: the
+ *  coding rate, the top eigenvalue after the configured power steps, and the force on every raw
+ *  row, with an all-zero row taking none. The replay's own force is checked by central differences
+ *  of its loss, and a second call reproduces the terms bitwise and doubles the force. */
+static void spectrum_replay(test_suite_t &suite, device_t &device) {
+    switch_to_gpu_t scope {device.stream};
+    // Three tiles of channels run the panel, the trailing update and the mirror; 37 rows pad to 40.
+    std::size_t const rows = 37, hidden = 96, empty_row = 5;
+    pooled_spectrum_config_t config;
+    config.rows_per_gpu = static_cast<u32_t>(rows);
+    config.hidden = static_cast<u32_t>(hidden);
+    config.rows_per_world = static_cast<u32_t>(rows);
+    config.coding_rate_weight = 1.0f;
+    config.epsilon_squared = 0.5f;
+    config.lipschitz_weight = 0.5f;
+
+    // A shared offset gives the rows a pooled code's anisotropy, so the top eigenvalue stands out.
+    st::basic_vector<f64_t> pooled_host;
+    st::basic_vector<nk_bf16_t> staging;
+    if (st::failed(pooled_host.resize(rows * hidden)) || st::failed(staging.resize(rows * hidden)))
+        return suite.check(false, "host staging failed");
+    f64r2_span_t const pooled_rows {pooled_host.data(), rows, hidden};
+    for (std::size_t row = 0; row != rows; ++row)
+        for (std::size_t channel = 0; channel != hidden; ++channel)
+            pooled_rows[row, channel] = row == empty_row
+                                            ? 0.0
+                                            : 0.3 + keyed_uniform_(suite.settings.seed, 11u, row * hidden + channel);
+    if (!narrow_to_bf16(pooled_host, staging)) return suite.check(false, "host rounding failed");
+
+    // The Float64 replay: the power iteration off the exact unit rows, the coding rate off the
+    // BFloat16 ones the device's Gram reads.
+    st::basic_vector<f64_t> units, rounded, inverse_norms, lower, direction, image, projections, solve, expected_force;
+    st::basic_vector<nk_bf16_t> rounded_staging;
+    if (st::failed(units.resize(rows * hidden)) || st::failed(rounded.resize(rows * hidden)) ||
+        st::failed(inverse_norms.resize(rows)) || st::failed(lower.resize(hidden * hidden)) ||
+        st::failed(direction.resize(hidden)) || st::failed(image.resize(hidden)) ||
+        st::failed(projections.resize(rows)) || st::failed(solve.resize(hidden)) ||
+        st::failed(expected_force.resize(rows * hidden)) || st::failed(rounded_staging.resize(rows * hidden)))
+        return suite.check(false, "replay staging failed");
+    f64r2_span_t const unit_rows {units.data(), rows, hidden};
+    f64r2_span_t const factor {lower.data(), hidden, hidden};
+    normalize_rows_(pooled_rows, unit_rows, inverse_norms);
+    std::copy(units.begin(), units.end(), rounded.begin());
+    if (!narrow_to_bf16(rounded, rounded_staging)) return suite.check(false, "unit rounding failed");
+    f64_t const alpha = f64_t(hidden) / (f64_t(rows) * config.epsilon_squared);
+    f64_t const expected_rate = coding_rate_replay_(f64r2_view_t {rounded.data(), rows, hidden}, alpha, factor);
+    std::fill(direction.begin(), direction.end(), 1.0 / std::sqrt(f64_t(hidden)));
+    for (u32_t iteration = 0;; ++iteration) {
+        for (std::size_t row = 0; row != rows; ++row)
+            projections[row] = dot(std::span<f64_t const> {&unit_rows[row, 0], hidden}, direction);
+        if (iteration == config.power_iterations) break;
+        std::fill(image.begin(), image.end(), 0.0);
+        for (std::size_t row = 0; row != rows; ++row)
+            for (std::size_t channel = 0; channel != hidden; ++channel)
+                image[channel] += unit_rows[row, channel] * projections[row];
+        f64_t const norm = std::sqrt(dot(image, image));
+        for (std::size_t channel = 0; channel != hidden; ++channel) direction[channel] = image[channel] / norm;
+    }
+    f64_t const expected_top = dot(projections, projections);
+
+    // Every row's force with the Gram factored off `gram_units`, returning the largest magnitude.
+    auto replay_forces = [&](f64r2_view_t gram_units, f64r2_span_t forces) noexcept {
+        (void)coding_rate_replay_(gram_units, alpha, factor);
+        f64_t largest = 0.0;
+        for (std::size_t row = 0; row != rows; ++row) {
+            std::span<f64_t const> const unit {&unit_rows[row, 0], hidden};
+            std::copy(unit.begin(), unit.end(), solve.begin());
+            for (std::size_t pivot = 0; pivot != hidden; ++pivot) {
+                for (std::size_t inner = 0; inner != pivot; ++inner)
+                    solve[pivot] -= factor[pivot, inner] * solve[inner];
+                solve[pivot] /= factor[pivot, pivot];
+            }
+            for (std::size_t pivot = hidden; pivot-- != 0;) {
+                for (std::size_t inner = pivot + 1; inner != hidden; ++inner)
+                    solve[pivot] -= factor[inner, pivot] * solve[inner];
+                solve[pivot] /= factor[pivot, pivot];
+            }
+            for (std::size_t channel = 0; channel != hidden; ++channel)
+                solve[channel] = -f64_t(config.coding_rate_weight) * alpha * solve[channel] +
+                                 2.0 * f64_t(config.lipschitz_weight) * projections[row] * direction[channel];
+            f64_t const radial = dot(unit, solve);
+            for (std::size_t channel = 0; channel != hidden; ++channel) {
+                forces[row, channel] = (solve[channel] - unit[channel] * radial) * inverse_norms[row];
+                largest = std::max(largest, std::fabs(forces[row, channel]));
+            }
+        }
+        return largest;
+    };
+
+    // The exact force against central differences of the replayed loss at its settled direction.
+    f64r2_span_t const forces {expected_force.data(), rows, hidden};
+    f64_t const largest_exact = replay_forces(unit_rows, forces);
+    for (std::size_t probe = 0; probe != 4; ++probe) {
+        std::size_t const row = (probe * 11 + 1) % rows, channel = (probe * 29 + 3) % hidden;
+        f64_t const original = pooled_rows[row, channel], step = 1.0e-6;
+        pooled_rows[row, channel] = original + step;
+        f64_t const plus = spectrum_loss_replay_(pooled_rows, config, direction);
+        pooled_rows[row, channel] = original - step;
+        f64_t const minus = spectrum_loss_replay_(pooled_rows, config, direction);
+        pooled_rows[row, channel] = original;
+        f64_t const measured = (plus - minus) / (2.0 * step);
+        suite.check(std::fabs(measured - forces[row, channel]) <= 1.0e-6 * largest_exact,
+                    "replay force [{},{}] {:.9g} against its central difference {:.9g}", row, channel,
+                    forces[row, channel], measured);
+    }
+    // The device's Gram reads the BFloat16 unit rows, moving its force by under 1% of the peak.
+    f64_t const largest_force = replay_forces(f64r2_view_t {rounded.data(), rows, hidden}, forces);
+
+    // The one-GPU world: one host domain and one multimem domain, every collective the identity.
+    expected<gpu_arena_t> arena = gpu_arena_t::make(0, case_arena_bytes_k);
+    if (!arena) return suite.check(false, "arena: {}", arena.description_);
+    gpu_arena_alloc<bf16_t> bf16_alloc {*arena};
+    bf16r2_tensor_arena_t pooled = bf16r2_tensor_arena_t::uninitialized({rows, hidden}, bf16_alloc).value;
+    bf16r2_tensor_arena_t pooled_grad = bf16r2_tensor_arena_t::uninitialized({rows, hidden}, bf16_alloc).value;
+    if (!pooled || !pooled_grad) return suite.check(false, "pooled rows allocation failed");
+    cuMemcpyHtoD(device_address(pooled.data()), staging.data(), staging.size() * sizeof(nk_bf16_t));
+    if (expected_t zeroed = zero_async(pooled_grad.span(), device.stream); !zeroed)
+        return suite.check(false, "gradient zeroing: {}", zeroed.description_);
+    expected<mesh_topology_t> topology = mesh_topology_t::bootstrap(0, 1, &pause_between_polls, 0,
+                                                                    "/tmp/uform_exchange_local", "spectrum_replay");
+    if (!topology) return suite.check(false, "single-domain bootstrap: {}", topology.description_);
+    i32_t const devices[1] = {0};
+    std::span<gpu_stream_t> const streams {&device.stream, 1};
+    expected<multimem_domain_t> domain = multimem_domain_t::make(
+        topology.value_, devices, distributed_pooled_spectrum_t::payload_scalars_needed(config), streams, 120.0);
+    if (!domain) return suite.check(false, "multimem domain: {}", domain.description_);
+    expected<colocated_domain_t> colocated = colocated_domain_t::make(topology.value_);
+    if (!colocated) return suite.check(false, "colocated domain: {}", colocated.description_);
+    expected<distributed_pooled_spectrum_t> spectrum = distributed_pooled_spectrum_t::make(
+        domain.value_, colocated.value_, std::span<gpu_arena_t> {&arena.value_, 1}, streams, {}, 0, config,
+        device.numerics);
+    if (!spectrum) return suite.check(false, "spectrum: {}", spectrum.description_);
+
+    f32_t terms[2][2] = {};
+    st::basic_vector<f64_t> gradient;
+    for (std::size_t call = 0; call != 2; ++call) {
+        if (expected_t shaped = spectrum.value_(0, pooled.view(), pooled_grad.span(), device.stream); !shaped)
+            return suite.check(false, "call {}: {}", call, shaped.description_);
+        if (expected_t copied = copy_device_to_host(spectrum.value_.terms(0), std::span<f32_t> {terms[call]},
+                                                    device.stream);
+            !copied)
+            return suite.check(false, "terms download: {}", copied.description_);
+        cuStreamSynchronize(device.stream.get());
+        if (!download_widened_({pooled_grad.data(), rows * hidden}, gradient))
+            return suite.check(false, "gradient download failed");
+        f64r2_view_t const gradient_rows {gradient.data(), rows, hidden};
+        f64_t const scale = f64_t(call + 1);
+        f64_t worst = 0.0, empty = 0.0;
+        for (std::size_t row = 0; row != rows; ++row)
+            for (std::size_t channel = 0; channel != hidden; ++channel) {
+                worst = std::max(worst, std::fabs(gradient_rows[row, channel] - scale * forces[row, channel]));
+                if (row == empty_row) empty = std::max(empty, std::fabs(gradient_rows[row, channel]));
+            }
+        // One BFloat16 rounding per call over Float32 solves of a condition number near 200.
+        suite.check(worst <= 0x1.0p-7 * scale * largest_force,
+                    "call {}: the force misses the replay by {:.3g} of its peak {:.3g}", call, worst,
+                    scale * largest_force);
+        suite.check(empty == 0.0, "call {}: the all-zero row takes no force, got {:.3g}", call, empty);
+    }
+    suite.check(std::fabs(terms[0][0] - expected_rate) <= 1.0e-5 * expected_rate,
+                "the coding rate {:.7g} against the replay's {:.7g}", terms[0][0], expected_rate);
+    suite.check(std::fabs(terms[0][1] - expected_top) <= 1.0e-5 * expected_top,
+                "the top eigenvalue {:.7g} against the replay's {:.7g}", terms[0][1], expected_top);
+    suite.check(std::memcmp(terms[0], terms[1], sizeof(terms[0])) == 0,
+                "a second call reproduces the terms bitwise: rate {} vs {}, top {} vs {}", terms[0][0], terms[1][0],
+                terms[0][1], terms[1][1]);
+}
+
 int main(int, char **argv) {
     ::setenv("CUDA_MODULE_LOADING", "EAGER", 1);
     test_suite_t suite = test_suite_t::make(argv[0]);
@@ -1312,7 +1544,8 @@ int main(int, char **argv) {
     char const *const cases[] = {"gradients/tokens",    "gradients/omni",          "gradients/token_head",
                                  "masking/text_rows",   "masking/media_rows",      "init/chance_entropy",
                                  "adafactor/reference", "adafactor/first_moment",  "adafactor/small_steps",
-                                 "block/host_replay",   "block/recompute_replays", "choices/cross_entropy"};
+                                 "block/host_replay",   "block/recompute_replays", "choices/cross_entropy",
+                                 "spectrum/replay"};
     if (cuInit(0) != CUDA_SUCCESS || cuDeviceGetCount(&device_count) != CUDA_SUCCESS || device_count <= 0) {
         for (char const *name : cases) suite.skip(name, no_cuda_device_k);
         return suite.finish();
@@ -1341,5 +1574,6 @@ int main(int, char **argv) {
     suite.run("block/host_replay", block_host_replay, device);
     suite.run("block/recompute_replays", block_recompute_replays, device);
     suite.run("choices/cross_entropy", choices_cross_entropy, device);
+    suite.run("spectrum/replay", spectrum_replay, device);
     return suite.finish();
 }

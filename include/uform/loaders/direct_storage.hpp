@@ -44,7 +44,8 @@ enum class storage_read_path_t : u8_t {
  *      the composition root, thread it by reference into every reader.
  *
  *  Owns nothing: KvikIO's state is process-global, so construction is a one-shot @c set_up_kvikio call
- *  behind the exception firewall of this cell's @c .cpp .
+ *  behind the exception firewall of this cell's @c .cpp . That call also gives KvikIO a thread per
+ *  core and every device a stream-ordered RMM pool, so cuDF's frees never synchronize the device.
  */
 struct gpu_direct_storage_session_t {
 

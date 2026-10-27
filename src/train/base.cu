@@ -498,6 +498,17 @@ expected<trainer_config_t> trainer_config_t::parse(int argc, char **argv) noexce
         else if (flag == "--brier-weight")
             taken = number(config.choices.brier_weight) && std::isfinite(config.choices.brier_weight) &&
                     config.choices.brier_weight >= 0.0f;
+        else if (flag == "--tcr-lambda")
+            taken = number(config.tcr_lambda) && std::isfinite(config.tcr_lambda) && config.tcr_lambda >= 0.0f;
+        else if (flag == "--tcr-epsilon-squared")
+            taken = number(config.tcr_epsilon_squared) && std::isfinite(config.tcr_epsilon_squared) &&
+                    config.tcr_epsilon_squared > 0.0f;
+        else if (flag == "--lipschitz-lambda")
+            taken = number(config.lipschitz_lambda) && std::isfinite(config.lipschitz_lambda) &&
+                    config.lipschitz_lambda >= 0.0f;
+        else if (flag == "--grad-spike-threshold")
+            taken = number(config.grad_spike_threshold) && std::isfinite(config.grad_spike_threshold) &&
+                    config.grad_spike_threshold >= 0.0f;
         else if (flag == "--objective") {
             if (value == "masked") config.objective = objective_t::masked_k;
             else if (value == "contrastive") config.objective = objective_t::contrastive_k;

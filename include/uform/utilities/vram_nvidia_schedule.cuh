@@ -296,6 +296,10 @@ using dots_packed_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const *a, void const
                                                   nk_size_t columns, nk_size_t depth, nk_size_t a_stride,
                                                   nk_size_t c_stride, void *workspace, nk_size_t workspace_bytes,
                                                   nk_stream_t stream);
+using dots_symmetric_bf16_kernel_t = nk_status_t (*)(nk_bf16_t const *vectors, nk_size_t vector_count, nk_size_t depth,
+                                                     nk_size_t stride, nk_f32_t *result, nk_size_t result_stride,
+                                                     nk_size_t rows_begin, nk_size_t rows_end, void *workspace,
+                                                     nk_size_t workspace_bytes, nk_stream_t stream);
 using dots_packed_e4m3_kernel_t = nk_status_t (*)(nk_e4m3_t const *a, void const *b_packed, nk_f32_t *c, nk_size_t rows,
                                                   nk_size_t columns, nk_size_t depth, nk_size_t a_stride,
                                                   nk_size_t c_stride, void *workspace, nk_size_t workspace_bytes,
@@ -360,6 +364,7 @@ struct gpu_numerics_t {
     dots_pack_bf16_kernel_t pack_bf16 = nullptr;
     dots_packed_bf16_kernel_t multiply_bf16 = nullptr;
     nk_dots_packed_workspace_size_punned_t multiply_workspace_size_bf16 = nullptr;
+    dots_symmetric_bf16_kernel_t symmetric_bf16 = nullptr;
     nk_dots_pack_size_punned_t pack_size_e4m3 = nullptr;
     dots_pack_e4m3_kernel_t pack_e4m3 = nullptr;
     dots_packed_e4m3_kernel_t multiply_e4m3 = nullptr;

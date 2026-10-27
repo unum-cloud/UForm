@@ -23,6 +23,7 @@
 #include "uform/train/introspect.cuh"                 // `telemetry_ledger_t`, `telemetry_probe_t`
 #include "uform/utilities/mesh.hpp"                   // `mesh_topology_t`
 #include "uform/train/optimizer.hpp"                  // `distributed_adafactor_t`
+#include "uform/train/pooled_spectrum.cuh"            // `distributed_pooled_spectrum_t`
 #include "uform/train/base.cuh"                       // `trainer_config_t`, `base_replica_t`
 
 namespace unum::uform::train {
@@ -372,6 +373,10 @@ struct trainer_t {
      *  it is. */
     per_gpu_array<adafactor_temperatures_t> token_temperatures {};
 
+    /** The pooled-code regularizers and the gradient spike gate, wired only when the run weights a
+     *  regularizer or sets a spike threshold. */
+    distributed_pooled_spectrum_t spectrum {};
+
     /** One captured forward and backward region per GPU under @c replayed_k ; empty runs the regions eagerly. */
     per_gpu_array<gpu_replay_graph_t> forward_graphs {}, backward_graphs {};
 
@@ -410,7 +415,8 @@ struct trainer_t {
     [[nodiscard]] expected_t capture() noexcept;
 
     /** One optimizer step: @p source fills the batches, then per replica the preamble and the forward region, the
-     *  contrastive collective, and per replica the backward region and the optimizer's slice. */
+     *  contrastive collective, the pooled-code regularizers, per replica the backward region, the
+     *  spike gate, and per replica the optimizer's slice. */
     [[nodiscard]] expected_t step(batch_source_t source, optimizer_step_t optimizer_step,
                                   step_report_t &report) noexcept;
 

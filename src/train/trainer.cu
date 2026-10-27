@@ -70,6 +70,7 @@ static gpu_numerics_t gpu_numerics_of() noexcept {
     numerics.pack_bf16 = products_kit_t::pack_bf16;
     numerics.multiply_bf16 = products_kit_t::multiply_bf16;
     numerics.multiply_workspace_size_bf16 = products_kit_t::multiply_workspace_size_bf16;
+    numerics.symmetric_bf16 = products_kit_t::symmetric_bf16;
     numerics.pack_size_e4m3 = products_kit_t::pack_size_e4m3;
     numerics.pack_e4m3 = products_kit_t::pack_e4m3;
     numerics.multiply_e4m3 = products_kit_t::multiply_e4m3;
@@ -151,7 +152,7 @@ expected_t mesh_t::make(mesh_t &placed, mesh_options_t const &options, std::span
                                                             : static_cast<u32_t>(devices.size());
     expected<mesh_topology_t> topology = mesh_topology_t::bootstrap(
         options.host_domain_index, options.host_domain_count, &pause_between_polls_, multimem, options.directory,
-        options.job, options.timeout_seconds, options.capabilities);
+        options.job, options.timeout_seconds, static_cast<u32_t>(uf::gpu_class_of(options.capabilities)));
     if (!topology) return expected_t::fail(std::move(topology));
 
     bool own_members = devices.size() == topology.value_.shape.gpus_per_host_domain;
@@ -263,6 +264,11 @@ struct device_budget_t {
     if (gpus == 0 || gpus != topology.shape.gpus_per_host_domain)
         return expected_t::fail(status_t::invalid_argument_k, "the trainer drives the mesh's {} devices, not {}",
                                 topology.shape.gpus_per_host_domain, gpus);
+    if (config.regularizes() && !config.contrasts())
+        return expected_t::fail(status_t::invalid_argument_k,
+                                "the coding rate and the Lipschitz penalty shape the pooled rows, which only a " //
+                                "contrastive objective pools (λ_tcr={} λ_lip={})",
+                                config.tcr_lambda, config.lipschitz_lambda);
     placed.config = config;
     placed.mesh = &mesh;
     placed.numerics = numerics;
@@ -606,10 +612,20 @@ struct device_budget_t {
     std::size_t const token_scalars = config.late_interacts()
                                           ? distributed_contrastive_tokens_t::payload_scalars_needed(tokens_config)
                                           : 0u;
+    pooled_spectrum_config_t spectrum_config;
+    spectrum_config.rows_per_gpu = static_cast<u32_t>(segments);
+    spectrum_config.hidden = config.hidden;
+    spectrum_config.rows_per_world = static_cast<u32_t>(vertices_per_mesh);
+    spectrum_config.coding_rate_weight = config.tcr_lambda;
+    spectrum_config.epsilon_squared = config.tcr_epsilon_squared;
+    spectrum_config.lipschitz_weight = config.lipschitz_lambda;
+    spectrum_config.spike_threshold = config.grad_spike_threshold;
+    std::size_t const spectrum_scalars = distributed_pooled_spectrum_t::payload_scalars_needed(spectrum_config);
     expected<multimem_domain_t> domain = multimem_domain_t::make(
         mesh.topology, placed.devices,
         multimem_domain_t::window_scalars(gradient_scalars) + multimem_domain_t::window_scalars(force_scalars) +
-            multimem_domain_t::window_scalars(token_scalars) + mixer_scalars,
+            multimem_domain_t::window_scalars(token_scalars) + multimem_domain_t::window_scalars(spectrum_scalars) +
+            mixer_scalars,
         placed.streams, mesh.timeout_seconds);
     if (!domain) return expected_t::fail(std::move(domain));
     placed.domain = std::move(domain.value_);
@@ -675,6 +691,13 @@ struct device_budget_t {
             if (placed.token_temperatures.push_back(std::move(temperatures.value_)) != status_t::success_k)
                 return expected_t::fail(status_t::bad_alloc_k, "token temperature optimizer table full");
         }
+    }
+    if (config.regularizes() || config.gates_spikes()) {
+        expected<distributed_pooled_spectrum_t> spectrum = distributed_pooled_spectrum_t::make(
+            placed.domain, mesh.colocated, placed.arenas, placed.streams, registrations, lead_weights.size(),
+            spectrum_config, placed.numerics, mesh.timeout_seconds);
+        if (!spectrum) return expected_t::fail(std::move(spectrum));
+        placed.spectrum = std::move(spectrum.value_);
     }
     if (config.capture == replayed_k) return placed.capture();
     return {};
@@ -809,12 +832,27 @@ expected_t trainer_t::step(batch_source_t source, optimizer_step_t optimizer_ste
         }
         if (expected_t contrasted = late_interaction(inputs.view(), streams.span()); !contrasted) return contrasted;
     }
+    if (config.regularizes())
+        for (std::size_t member = 0; member != gpus; ++member)
+            if (expected_t shaped = spectrum(member, replicas[member].vertices.view(),
+                                             replicas[member].vertices_grad.span(), streams[member]);
+                !shaped)
+                return shaped;
     for (std::size_t member = 0; member != gpus; ++member) {
         switch_to_gpu_t gpu_scope {streams[member]};
         if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
         expected_t stepped = backward_graphs.size() ? backward_graphs[member].launch(streams[member].get())
                                                     : replicas[member].backward_region(streams[member]);
-        if (stepped) stepped = optimizer.step(member, report.learning_rate, streams[member]);
+        if (stepped && config.gates_spikes()) stepped = spectrum.measure_gradients(member, streams[member]);
+        if (!stepped) return stepped;
+    }
+    // Every process reads the same world norm, so all refuse the same step before any applies it.
+    if (config.gates_spikes())
+        if (expected_t admitted = spectrum.admit_gradients(streams[0]); !admitted) return admitted;
+    for (std::size_t member = 0; member != gpus; ++member) {
+        switch_to_gpu_t gpu_scope {streams[member]};
+        if (!gpu_scope.ok()) return expected_t::fail(status_t::device_error_k, "context entry failed");
+        expected_t stepped = optimizer.step(member, report.learning_rate, streams[member]);
         if (stepped && config.contrasts())
             stepped = temperatures[member].step(replicas[member].inverse_temperatures.span(),
                                                 replicas[member].biases.span(), contrastive.temperature_grads(member),

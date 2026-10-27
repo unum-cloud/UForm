@@ -28,6 +28,10 @@
  *        the same trainer, so both model-region modes run under every mixture.
  *      - @ref graph_capture — the capture contract holds and two replays agree, on the one-GPU mesh.
  *      - @ref choices_replay — choices alone replay through the items source: their term falls.
+ *      - @ref spectrum_spike : the pooled-code regularizers ride a contrastive step, and a forced
+ *        gradient spike refuses the next step with the weights untouched.
+ *      - @ref spectrum_world : on two or more GPUs every rank reaches the same coding rate bitwise,
+ *        matching one GPU holding every row; a one-GPU world skips it.
  */
 #include <cmath>   // `std::isfinite`
 #include <cstdlib> // `std::getenv`, `std::strtod`
@@ -35,6 +39,7 @@
 
 #include <algorithm> // `std::max` — the reusable staging tensor's size
 #include <span>      // `std::span` — device lists
+#include <vector>    // `std::vector` — the world's pooled rows and coding rates
 
 #include <cuda.h> // `cuInit`, `cuStreamSynchronize`
 
@@ -766,6 +771,132 @@ static void choices_replay(test_suite_t &suite, world_health_t &health, tier_t t
         suite.check(false, "choices end-of-case drain: {}", drained.description_);
 }
 
+/** The regularizers ride a contrastive step, and a forced gradient spike fails the next step before
+ *  the optimizer moves a weight: a threshold far below one makes every second gradient a spike. */
+static void spectrum_spike(test_suite_t &suite, world_health_t &health, tier_t tier) {
+    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
+    trainer_config_t config = test_geometry_(false, suite.settings.seed);
+    config.objective = objective_t::contrastive_k;
+    config.tcr_lambda = 0.1f;
+    config.lipschitz_lambda = 1.0e-3f;
+    config.grad_spike_threshold = 1.0e-6f;
+    trainer_t trainer;
+    if (expected_t built = make_trainer_(trainer, tier, config, health); !built)
+        return suite.check(false, "spectrum trainer bring-up: {}", built.description_);
+    if (expected_t first = run_steps_(trainer, 0u, 1u); !first)
+        return suite.check(false, "the first step, with nothing to spike against: {}", first.description_);
+    switch_to_gpu_t gpu_scope {trainer.streams[0]};
+    f32_t terms[2] = {};
+    if (expected_t copied = copy_device_to_host(trainer.spectrum.terms(0), std::span<f32_t> {terms},
+                                                trainer.streams[0]);
+        !copied)
+        return suite.check(false, "terms download: {}", copied.description_);
+    cuStreamSynchronize(trainer.streams[0].get());
+    suite.check(std::isfinite(terms[0]) && terms[0] > 0.0f && std::isfinite(terms[1]) && terms[1] > 0.0f,
+                "the coding rate {} and the top eigenvalue {} read finite and positive", terms[0], terms[1]);
+    expected<st::basic_vector<bf16_t>> before = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
+    expected_t const spiked = run_steps_(trainer, 1u, 2u);
+    expected<st::basic_vector<bf16_t>> after = snapshot_weights_(trainer.replicas[0].weights, trainer.streams[0]);
+    suite.check(!spiked && spiked.status_ == status_t::internal_k, "a threshold of {} refuses the second step",
+                config.grad_spike_threshold);
+    suite.check(before && after && snapshots_match_(before.value_, after.value_),
+                "the refused step leaves the weights untouched");
+    if (expected_t drained = trainer.synchronize(); !drained)
+        suite.check(false, "spectrum end-of-case drain: {}", drained.description_);
+}
+
+/** Every rank of a world of two or more GPUs reaches the same coding rate bit for bit, and it
+ *  matches one GPU holding every row of the world. */
+static void spectrum_world(test_suite_t &suite, world_health_t &health, tier_t wide, tier_t cheap) {
+    if (!world_still_healthy_(suite, health)) return suite.skip(world_unhealthy_k);
+    mesh_topology_t &topology = wide.mesh.topology;
+    std::size_t const gpus = wide.devices.size(), world_gpus = topology.shape.gpus_per_colocated_domain;
+    if (world_gpus < 2u) return suite.skip("the world holds one GPU, and the world Gram needs two");
+    std::size_t const rows = 24, hidden = 64, world_rows = rows * world_gpus;
+    // A shared offset gives the rows the anisotropy pooled codes carry.
+    std::vector<f64_t> world_values(world_rows * hidden);
+    std::vector<nk_bf16_t> world_pooled(world_rows * hidden);
+    for (std::size_t index = 0; index != world_values.size(); ++index)
+        world_values[index] = 0.3 + f64_t(splitmix64_hash_t {}(suite.settings.seed, 13u, index) >> 40) * 0x1.0p-23 -
+                              1.0;
+    if (!narrow_to_bf16(world_values, world_pooled)) return suite.check(false, "host rounding failed");
+
+    // The coding rate over `devices`, each holding its slice of the world rows from `first_row`,
+    // read back from every rank.
+    auto coding_rates = [&](mesh_t &mesh, std::span<i32_t const> devices, gpu_numerics_t const &numerics,
+                            std::size_t rows_per_gpu, std::size_t first_row,
+                            std::vector<f32_t> &rates) noexcept -> expected_t {
+        pooled_spectrum_config_t config;
+        config.rows_per_gpu = static_cast<u32_t>(rows_per_gpu);
+        config.hidden = static_cast<u32_t>(hidden);
+        config.rows_per_world = static_cast<u32_t>(world_rows);
+        config.coding_rate_weight = 1.0f;
+        per_gpu_array<gpu_stream_t> streams;
+        per_gpu_array<gpu_arena_t> arenas;
+        per_gpu_array<bf16r2_tensor_arena_t> pooled, pooled_grad;
+        for (std::size_t rank = 0; rank != devices.size(); ++rank) {
+            expected<gpu_stream_t> stream = gpu_stream_t::make(devices[rank]);
+            if (!stream) return expected_t::fail(std::move(stream));
+            if (streams.push_back(std::move(stream.value_)) != status_t::success_k)
+                return expected_t::fail(status_t::bad_alloc_k, "stream table full");
+            switch_to_gpu_t gpu_scope {streams[rank]};
+            expected<gpu_arena_t> arena = gpu_arena_t::make(devices[rank], 1ull << 28, devices);
+            if (!arena) return expected_t::fail(std::move(arena));
+            if (arenas.push_back(std::move(arena.value_)) != status_t::success_k)
+                return expected_t::fail(status_t::bad_alloc_k, "arena table full");
+            gpu_arena_alloc<bf16_t> bf16_alloc {arenas[rank]};
+            if (pooled.push_back(bf16r2_tensor_arena_t::uninitialized({rows_per_gpu, hidden}, bf16_alloc).value) !=
+                    status_t::success_k ||
+                pooled_grad.push_back(bf16r2_tensor_arena_t::uninitialized({rows_per_gpu, hidden}, bf16_alloc).value) !=
+                    status_t::success_k ||
+                !pooled[rank] || !pooled_grad[rank])
+                return expected_t::fail(status_t::bad_alloc_k, "pooled rows allocation failed");
+            std::size_t const begin = (first_row + rank * rows_per_gpu) * hidden;
+            cuMemcpyHtoD(device_address(pooled[rank].data()), world_pooled.data() + begin,
+                         rows_per_gpu * hidden * sizeof(nk_bf16_t));
+            if (expected_t zeroed = zero_async(pooled_grad[rank].span(), streams[rank]); !zeroed) return zeroed;
+        }
+        expected<multimem_domain_t> domain = multimem_domain_t::make(
+            mesh.topology, devices, distributed_pooled_spectrum_t::payload_scalars_needed(config), streams.span(),
+            test_rendezvous_timeout_seconds_k);
+        if (!domain) return expected_t::fail(std::move(domain));
+        expected<distributed_pooled_spectrum_t> spectrum = distributed_pooled_spectrum_t::make(
+            domain.value_, mesh.colocated, arenas.span(), streams.span(), {}, 0, config, numerics,
+            test_rendezvous_timeout_seconds_k);
+        if (!spectrum) return expected_t::fail(std::move(spectrum));
+        for (std::size_t rank = 0; rank != devices.size(); ++rank)
+            if (expected_t shaped = spectrum.value_(rank, pooled[rank].view(), pooled_grad[rank].span(), streams[rank]);
+                !shaped)
+                return shaped;
+        rates.assign(devices.size(), 0.0f);
+        for (std::size_t rank = 0; rank != devices.size(); ++rank) {
+            switch_to_gpu_t gpu_scope {streams[rank]};
+            f32_t terms[2] = {};
+            if (expected_t copied = copy_device_to_host(spectrum.value_.terms(rank), std::span<f32_t> {terms},
+                                                        streams[rank]);
+                !copied)
+                return copied;
+            if (CUresult result = cuStreamSynchronize(streams[rank].get()); result != CUDA_SUCCESS)
+                return cuda_failure(result, "rank {} drain failed", rank);
+            rates[rank] = terms[0];
+        }
+        return {};
+    };
+
+    std::vector<f32_t> world_rates, single_rate;
+    std::size_t const first_row = topology.first_gpu_index() * rows;
+    if (expected_t ran = coding_rates(wide.mesh, wide.devices, wide.numerics, rows, first_row, world_rates); !ran)
+        return suite.check(false, "world coding rate: {}", ran.description_);
+    if (expected_t ran = coding_rates(cheap.mesh, cheap.devices, cheap.numerics, world_rows, 0, single_rate); !ran)
+        return suite.check(false, "single-GPU coding rate: {}", ran.description_);
+    for (std::size_t rank = 1; rank != gpus; ++rank)
+        suite.check(std::memcmp(&world_rates[rank], &world_rates[0], sizeof(f32_t)) == 0,
+                    "rank {} reads the coding rate {} where rank 0 reads {}", rank, world_rates[rank], world_rates[0]);
+    // The world sums Float32 Grams in another order than one GPU's NumKong product does.
+    suite.check(std::fabs(world_rates[0] - single_rate[0]) <= 1.0e-4f * single_rate[0],
+                "the world's coding rate {} against one GPU holding every row {}", world_rates[0], single_rate[0]);
+}
+
 int main(int, char **argv) {
     // Lazy module loading deadlocks against the InfiniBand doorbell kernels' flag spins: the spinning
     // wait blocks its context, the peer's next launch blocks on module loading behind it, and neither
@@ -782,6 +913,8 @@ int main(int, char **argv) {
         suite.skip("capture/replay", no_cuda_device_k);
         suite.skip("resume/late_interaction", no_cuda_device_k);
         suite.skip("choices/replay", no_cuda_device_k);
+        suite.skip("spectrum/spike", no_cuda_device_k);
+        suite.skip("spectrum/world", no_cuda_device_k);
         suite.skip("conformance/tokens", no_cuda_device_k);
         suite.skip("conformance/omni", no_cuda_device_k);
         suite.skip("sweep", no_cuda_device_k);
@@ -828,6 +961,8 @@ int main(int, char **argv) {
     suite.run("capture/replay", graph_capture, health, cheap);
     suite.run("resume/late_interaction", late_interaction_resume, health, cheap);
     suite.run("choices/replay", choices_replay, health, cheap);
+    suite.run("spectrum/spike", spectrum_spike, health, cheap);
+    suite.run("spectrum/world", spectrum_world, health, wide, cheap);
     suite.run("conformance/tokens", run_base_conformance, health, "tokens", test_geometry_(false, suite.settings.seed),
               wide);
     suite.run("conformance/omni", run_base_conformance, health, "omni", test_geometry_(true, suite.settings.seed),

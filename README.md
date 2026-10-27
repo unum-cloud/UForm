@@ -71,7 +71,7 @@ The uniform encoder processes all bytes at full width, then an attention-pool di
 The pooled embedding is the deployment surface — every retrieval query, image-text match, and reranker score runs through one fixed-length vector — so its _information density_ and _dimensional decorrelation_ together set retrieval quality.
 Neither follows from masked-modelling cross-entropy alone: under pure reconstruction pressure the pool collapses rank, concentrating its energy in a handful of directions.
 Two opt-in auxiliary regularizers shape that pooled code's spectrum from both ends.
-The trainer's configuration declares both as `tcr_lambda` and `lipschitz_lambda`, zero by default, and their kernels are not yet wired into the step.
+The trainer takes both as `--tcr-lambda` and `--lipschitz-lambda`, zero by default, and sums the coding rate's Gram over every GPU of the world.
 
 __Total Coding Rate__ (TCR), from the [MCR²](https://arxiv.org/abs/2006.08558) work, raises the floor — the coding rate of an L2-normalized batch of pooled rows $Z$:
 

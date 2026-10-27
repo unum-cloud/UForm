@@ -1,9 +1,9 @@
 /**
- *  @brief Conformance suite for the media data-loaders and the batch's coordinate adapter — one binary,
- *      four tiers.
  *  @file test/loaders.cu
  *  @author Ash Vardanian
  *  @date July 6, 2026
+ *  @brief Conformance suite for the media data-loaders and the batch's coordinate adapter — one
+ *      binary, four tiers.
  *
  *  Tier A is host-only: the keyed draw and the weighted file pick. Tier B is a host oracle
  *  of the multi-segment-per-row packing cursor. Tier C is on-device with no external media: a fabricated
@@ -16,10 +16,12 @@
  *  suite at arbitrarily-shaped real media: the decode assertions are @b shape-agnostic — the modality tag,
  *  the segment geometry, the factorization products, and finite content — never a baked resolution. With no
  *  fixture set, a decode tier simply skips; there is no embedded stand-in media in the suite.
+ *  The paired fill reads the image entries of every @c UFORM_TEST_MIXTURE mixture the same way.
  */
 #include <cstddef> // `std::size_t`
 #include <cstdlib> // `std::getenv`
 #include <cstdio>  // `std::fopen` — reading an optional media fixture
+#include <cstring> // `std::memcmp` — a fill against its replay
 #include <cmath>   // `std::isfinite`
 
 #include <sys/stat.h> // `mkdir` — the glob fixture
@@ -41,6 +43,7 @@
 #include "uform/loaders/dataset_shards.hpp" // `column_view_t`, `row_group_draw_t`
 #include "uform/loaders/direct_storage.hpp" // `gpu_direct_storage_session_t`
 #include "uform/loaders/image_loader.cuh"   // `nvjpeg_session_t`, `decode_images`
+#include "uform/loaders/paired_loader.cuh"  // `paired_loader_parquet_t`
 #include "uform/loaders/tokens_loader.cuh"  // `tokens_loader_parquet_t`, `drawn_shards`
 #include "uform/loaders/video_loader.cuh"   // `nvdec_session_t`, `decode_videos`
 #include "uform/media/planning.hpp"         // `image_patch_grid`, `video_tube_grid`
@@ -1154,6 +1157,76 @@ static void multimodal_packet_routes(test_suite_t &suite, gpu_arena_t &arena, gp
     suite.check(image_ok, "multimodal: the packed image segment's real cells must route to (0,row,col)");
 }
 
+/** Fill two steps back to back on one stream with no drain between, then replay the first step
+ *  and require it bitwise equal: a fill frees its reservoir stream-ordered, so the next fill's
+ *  read must not land in memory the first fill's queued decode still reads. */
+static void paired_fill_replays_after_back_to_back_fills(test_suite_t &suite, ut::mixture_entry_t const &entry,
+                                                         gpu_arena_t &arena, gpu_stream_t &stream, pool_view_t pool,
+                                                         nvjpeg_session_t &jpeg) {
+    sz::string_view_t const name = entry.name.view();
+    expected<gpu_direct_storage_session_t> session = gpu_direct_storage_session_t::make();
+    if (!session) return suite.check(false, "the storage session should make: {}", session.description_);
+    u32_t const columns = 256u, patch = 16u, channels = 4u, rows = 8u, segments = 16u;
+    multimodal_batch_shape_t shape {};
+    shape.max_rows_per_gpu = rows;
+    shape.max_segments_per_gpu = segments;
+    shape.max_bags_per_gpu = segments / 2u;
+    shape.max_columns_per_row = columns;
+    shape.image.patch_side = patch;
+    shape.image.channels = channels;
+    paired_loader_parquet_config_t config;
+    config.anchor = entry.anchor.view(), config.positive = entry.positive.view();
+    expected<paired_loader_parquet_t> loader = paired_loader_parquet_t::make(*session, entry.glob.view(), 42u, pool,
+                                                                             config, modality_t::image_k, shape);
+    if (!loader) return suite.check(false, "[{}] the paired loader should make: {}", name, loader.description_);
+
+    st::basic_vector<multimodal_batch_on_gpu_t> first, second;
+    for (std::size_t batch = 0; batch != 2; ++batch) {
+        expected<multimodal_batch_on_gpu_t> made_first = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {arena},
+                                                                                         shape);
+        expected<multimodal_batch_on_gpu_t> made_second = multimodal_batch_on_gpu_t::make(gpu_arena_alloc_t {arena},
+                                                                                          shape);
+        if (!made_first || !made_second || st::failed(first.push_back(std::move(made_first.value_))) ||
+            st::failed(second.push_back(std::move(made_second.value_))))
+            return suite.check(false, "[{}] the batches should make", name);
+    }
+    using tokensr1_tensor_pinned_t = nk::tensor<token_id_t, pinned_alloc<token_id_t>, 1>;
+    std::size_t const pixels = first[0].images.numel(), tokens = first[0].tokens.numel();
+    pixelr1_tensor_pinned_t filled_pixels =
+        pixelr1_tensor_pinned_t::zeros({2 * pixels}, pinned_alloc<pixel_t> {}).value;
+    pixelr1_tensor_pinned_t replayed_pixels =
+        pixelr1_tensor_pinned_t::zeros({2 * pixels}, pinned_alloc<pixel_t> {}).value;
+    tokensr1_tensor_pinned_t filled_tokens =
+        tokensr1_tensor_pinned_t::zeros({2 * tokens}, pinned_alloc<token_id_t> {}).value;
+    tokensr1_tensor_pinned_t replayed_tokens =
+        tokensr1_tensor_pinned_t::zeros({2 * tokens}, pinned_alloc<token_id_t> {}).value;
+    if (!filled_pixels || !replayed_pixels || !filled_tokens || !replayed_tokens)
+        return suite.check(false, "[{}] the readback buffers should allocate", name);
+    auto const read_back = [&](pixelr1_tensor_pinned_t &into_pixels, tokensr1_tensor_pinned_t &into_tokens) noexcept {
+        for (std::size_t batch = 0; batch != first.size(); ++batch)
+            if (!copy_device_to_host(first[batch].images.view().flatten<1>(),
+                                     nk::tensor_span<pixel_t, 1> {into_pixels.data() + batch * pixels, pixels},
+                                     stream) ||
+                !copy_device_to_host(first[batch].tokens.view().flatten<1>(),
+                                     nk::tensor_span<token_id_t, 1> {into_tokens.data() + batch * tokens, tokens},
+                                     stream))
+                return false;
+        return cuStreamSynchronize(stream.get()) == CUDA_SUCCESS;
+    };
+
+    expected_t filled = loader->fill(stream, jpeg, 0u, 0u, first);
+    if (filled) filled = loader->fill(stream, jpeg, 0u, 1u, second);
+    if (!filled) return suite.check(false, "[{}] the back-to-back fills should succeed: {}", name, filled.description_);
+    if (!read_back(filled_pixels, filled_tokens)) return suite.check(false, "[{}] the first readback", name);
+    if (expected_t replayed = loader->fill(stream, jpeg, 0u, 0u, first); !replayed)
+        return suite.check(false, "[{}] the replay should succeed: {}", name, replayed.description_);
+    if (!read_back(replayed_pixels, replayed_tokens)) return suite.check(false, "[{}] the replay readback", name);
+    suite.check(std::memcmp(filled_pixels.data(), replayed_pixels.data(), 2 * pixels * sizeof(pixel_t)) == 0,
+                "[{}] the first fill's pixels should match its replay", name);
+    suite.check(std::memcmp(filled_tokens.data(), replayed_tokens.data(), 2 * tokens * sizeof(token_id_t)) == 0,
+                "[{}] the first fill's tokens should match its replay", name);
+}
+
 /**
  *  @brief The distributed sampling tier: every rank bootstraps the mesh, draws its shard set from a shared
  *      dataset (the keyed weighted pick), publishes it to the rendezvous, and asserts its set differs from
@@ -1270,6 +1343,14 @@ int main(int, char **argv) {
         suite.run("image_batch_matches_single", image_batch_matches_single, image_blobs, arena, stream, pool, jpeg);
         suite.run("multimodal_packet_routes", multimodal_packet_routes, arena, stream, pool, jpeg,
                   first_env_fixture("UFORM_TEST_AUDIO"), first_env_fixture("UFORM_TEST_IMAGE"));
+        for_each_env_input("UFORM_TEST_MIXTURE", [&](sz::string_view_t path) {
+            expected<ut::mixture_t> mixture = ut::mixture_t::read(path);
+            if (!mixture) return suite.check(false, "{} should read: {}", path, mixture.description_);
+            for (ut::mixture_entry_t const &entry : mixture->datasets)
+                if (entry.modality == modality_t::image_k)
+                    suite.run("paired_fill_replays_after_back_to_back_fills",
+                              paired_fill_replays_after_back_to_back_fills, entry, arena, stream, pool, jpeg);
+        });
     }
 
     // Video — external only (a codec-bearing clip can't be embedded cheaply); each file at one representation, then

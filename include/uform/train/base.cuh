@@ -204,18 +204,17 @@ struct trainer_config_t {
      *  positive. */
     choices_config_t choices {};
 
-    /** The tensor-condition-regularization distortion target @c ε² . Not consumed anywhere yet —
-     *  carried from the validated draft envelope until the regularizer lands. */
+    /** The Total Coding Rate's distortion target @c ε² . */
     f32_t tcr_epsilon_squared = 0.5f;
 
-    /** Abort ceiling on a single step's gradient-norm spike; zero disables. Not consumed anywhere yet —
-     *  carried from the validated draft envelope until the health gates land. */
+    /** Abort ceiling on a single step's gradient-norm spike, as a multiple of the last admitted
+     *  step's norm; zero disables. */
     f32_t grad_spike_threshold = 0.0f;
 
-    /** The tensor-condition-regularization loss weight; zero disables. Not consumed anywhere yet. */
+    /** The Total Coding Rate's loss weight over the world's pooled rows; zero disables. */
     f32_t tcr_lambda = 0.0f;
 
-    /** The Lipschitz-penalty loss weight; zero disables. Not consumed anywhere yet. */
+    /** The Lipschitz-penalty loss weight; zero disables. */
     f32_t lipschitz_lambda = 0.0f;
 
     /** The run's base seed; the masking recipe and every synthetic draw key derive from it. */
@@ -298,6 +297,12 @@ struct trainer_config_t {
 
     /** Whether the run trains calibrated choices through the byte decoder. */
     [[nodiscard]] bool chooses() const noexcept { return choices.weight > 0.0f; }
+
+    /** Whether the coding rate or the Lipschitz penalty shapes the pooled code. */
+    [[nodiscard]] bool regularizes() const noexcept { return tcr_lambda > 0.0f || lipschitz_lambda > 0.0f; }
+
+    /** Whether a gradient spike fails the step. */
+    [[nodiscard]] bool gates_spikes() const noexcept { return grad_spike_threshold > 0.0f; }
 };
 
 /**

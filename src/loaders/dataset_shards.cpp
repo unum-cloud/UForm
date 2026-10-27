@@ -425,6 +425,9 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
         for (sz::string_view_t column : columns) names.emplace_back(column.data(), column.size());
         switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
         if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed for the read");
+        // GPU Direct reads land out of stream order, in pool memory a queued kernel may still read.
+        if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+            return result_t::fail(status_t::device_error_k, "stream drain before the read failed");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
 
         // A column the sidecar lacks is each row's member of its sibling tar, read through the byte
@@ -632,6 +635,9 @@ expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, 
     try {
         switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
         if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed for the read");
+        // GPU Direct reads land out of stream order, in pool memory a queued kernel may still read.
+        if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+            return result_t::fail(status_t::device_error_k, "stream drain before the read failed");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
         // One JSON object per line; KvikIO / GDS streams the bytes, cuDF decodes on the GPU.
         auto options = cudf::io::json_reader_options::builder(
@@ -723,6 +729,9 @@ expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::
     try {
         switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
         if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed for the read");
+        // GPU Direct reads land out of stream order, in pool memory a queued kernel may still read.
+        if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
+            return result_t::fail(status_t::device_error_k, "stream drain before the read failed");
         rmm::cuda_stream_view const cudf_stream {stream.get()};
         std::string const name {column}; // vendor-boundary
         // Read only the wanted column, forced to string so type inference cannot surprise us; KvikIO /

@@ -33,11 +33,11 @@
  *
  *  Secondary roles, in descending importance: @b phase @b ordering (arenas allocated → MRs registered → QPs
  *  connected → training starts; @ref mesh_topology_t::barrier keeps any host_domain from running ahead),
- *  @b agreement @b validation (GPU model, count and capabilities, world size, multimem extent,
- *  schema and job identity), and @b boot @b verification (a bounded await turns a wedged
- *  host_domain into a named failure, never a hang). The exchange runs once per job, before step 0;
- *  the moment the transport is wired, all synchronization moves onto NVLink / InfiniBand and the
- *  directory is never touched again.
+ *  @b agreement @b validation (GPU model, count and class, world size, multimem extent, schema and
+ *  job identity), and @b boot @b verification (a bounded await turns a wedged host_domain into a
+ *  named failure, never a hang). The exchange runs once per job, before step 0; the moment the
+ *  transport is wired, all synchronization moves onto NVLink / InfiniBand and the directory is
+ *  never touched again.
  *
  *  @section mesh_worlds Three concrete worlds
  *
@@ -273,7 +273,7 @@ inline constexpr std::size_t device_name_capacity_k = 64u;
 
 /** Version tag heading every exchange payload, so a foreign or future-format file in the exchange
  *  directory fails loudly on its first line instead of misparsing. */
-inline constexpr char mesh_schema_k[] = "uform.mesh.2";
+inline constexpr char mesh_schema_k[] = "uform.mesh.3";
 
 /** One host_domain's published facts — the payload of the bootstrap exchange, one entry per
  *  host_domain in @ref mesh_topology_t::host_domains . POD, so an @c st::basic_vector holds the
@@ -375,10 +375,10 @@ using mesh_pause_t = void (*)() noexcept;
  *  published (write-temp + @c fsync + @c rename , so a peer never reads a half-written file). The
  *  exchange is @b lead-aggregated and costs @b O(host_domain_count) file operations, never
  *  O(host_domain_count²): every host_domain publishes one facts file; the lead reads them all,
- *  validates agreement (identical GPU model, count and capabilities, world size, multimem extent
- *  and job — a mismatch fails loudly naming both parties), and publishes @b one merged manifest;
- *  every follower reads only that manifest. The same @ref publish_text / @ref await_text / @ref
- *  barrier primitives then carry every later wiring phase — InfiniBand queue-pair coordinates,
+ *  validates agreement (identical GPU model, count and class, world size, multimem extent and job
+ *  — a mismatch fails loudly naming both parties), and publishes @b one merged manifest; every
+ *  follower reads only that manifest. The same @ref publish_text / @ref await_text / @ref barrier
+ *  primitives then carry every later wiring phase — InfiniBand queue-pair coordinates,
  *  memory-region rkeys, symmetric-heap base addresses, multicast fabric handles — so the transport
  *  adds payloads, not machinery.
  *
@@ -395,19 +395,19 @@ using mesh_pause_t = void (*)() noexcept;
  *
  *  @code{.sh}
  *  $ cat /shared/exchange/20260702-193412-8841/host_domain7.mesh
- *  schema uform.mesh.2
+ *  schema uform.mesh.3
  *  job 20260702-193412-8841
  *  host_domain_index 7
  *  host_domain_count 36
  *  multimem 72
- *  capabilities 17000000000000
+ *  gpu_class 4
  *  hostname nvl72-rack0-tray7
  *  devices 4
  *  device_name NVIDIA_GB200
  *  uuids 5c1e0a...c9 5c1e0a...ca 5c1e0a...cb 5c1e0a...cc
  *
  *  $ cat /shared/exchange/20260702-193412-8841/host_domain0.manifest
- *  schema uform.mesh.2
+ *  schema uform.mesh.3
  *  job 20260702-193412-8841
  *  multimem 72
  *  host_domain 0 hostname nvl72-rack0-tray0 devices 4 device_name NVIDIA_GB200
@@ -502,13 +502,14 @@ struct mesh_topology_t {
      *      multi-host_domain bootstrap without one fails loudly — an anonymous shared namespace is how
      *      node families collide.
      *  @param[in] timeout_seconds Upper bound on every await; a missing peer fails loudly, never hangs.
-     *  @param[in] capabilities The NumKong capabilities this host_domain's GPUs dispatch with after
-     *      any class pin, which every peer must share, so no two replicas run different kernels.
+     *  @param[in] gpu_class The class ordinal this host_domain's GPUs train as after any pin, from
+     *      the C ABI's enumeration, which every peer must share, so no two replicas run different
+     *      kernels.
      */
     [[nodiscard]] static expected<mesh_topology_t> bootstrap(
         u32_t host_domain_index, u32_t host_domain_count, mesh_pause_t poll_pause, u32_t gpus_per_multimem_domain = 0,
         sz::string_view_t directory = {}, sz::string_view_t job_id = {}, f64_t timeout_seconds = 120.0,
-        u64_t capabilities = 0) noexcept {
+        u32_t gpu_class = 0) noexcept {
         if (host_domain_count == 0 || host_domain_index >= host_domain_count)
             return expected<mesh_topology_t>::fail( //
                 status_t::invalid_argument_k,
@@ -577,15 +578,14 @@ struct mesh_topology_t {
                                                    topology.exchange_directory, directory_error);
 
         sz::string_t facts_text;
-        if (!build_facts_(facts_text, probed.value_.facts, topology.shape, job, capabilities,
-                          probed.value_.uuids.view()))
+        if (!build_facts_(facts_text, probed.value_.facts, topology.shape, job, gpu_class, probed.value_.uuids.view()))
             return expected<mesh_topology_t>::fail(status_t::bad_alloc_k, "facts assembly failed (host_domain={})",
                                                    host_domain_index);
         if (expected_t published = topology.publish_text("mesh", facts_text.view()); !published)
             return expected<mesh_topology_t>::fail(std::move(published));
 
         expected_t exchanged = host_domain_index == 0
-                                   ? topology.collect_world_as_lead_(job, probed.value_, capabilities, timeout_seconds)
+                                   ? topology.collect_world_as_lead_(job, probed.value_, gpu_class, timeout_seconds)
                                    : topology.adopt_manifest_(job, probed.value_.facts, timeout_seconds);
         if (!exchanged) return expected<mesh_topology_t>::fail(std::move(exchanged));
 
@@ -689,8 +689,8 @@ struct mesh_topology_t {
         u32_t multimem = 0;
         u32_t devices = 0;
 
-        /** The NumKong capabilities the process's GPUs dispatch with, after its executor's pin. */
-        u64_t capabilities = 0;
+        /** The class ordinal the process's GPUs train as, after its executor's pin. */
+        u32_t gpu_class = 0;
     };
 
     /** One probed physical GPU identity paired with the host_domain that claims it — the flat table
@@ -711,12 +711,6 @@ struct mesh_topology_t {
     /** Parse a whole decimal token; @c false on anything but a clean number. */
     [[nodiscard]] static bool parse_u32_(sz::string_view_t token, u32_t &value) noexcept {
         std::from_chars_result const result = std::from_chars(token.data(), token.data() + token.size(), value);
-        return result.ec == std::errc {} && result.ptr == token.data() + token.size();
-    }
-
-    /** Parse a whole hexadecimal token; @c false on anything but a clean number. */
-    [[nodiscard]] static bool parse_hex_u64_(sz::string_view_t token, u64_t &value) noexcept {
-        std::from_chars_result const result = std::from_chars(token.data(), token.data() + token.size(), value, 16);
         return result.ec == std::errc {} && result.ptr == token.data() + token.size();
     }
 
@@ -786,7 +780,7 @@ struct mesh_topology_t {
     /** Assemble the line-oriented facts payload — the exact inverse of @ref parse_facts_ .
      *  @c false only on allocation failure. */
     [[nodiscard]] static bool build_facts_(sz::string_t &text, mesh_host_domain_t const &self,
-                                           mesh_shape_t const &shape, sz::string_view_t job, u64_t capabilities,
+                                           mesh_shape_t const &shape, sz::string_view_t job, u32_t gpu_class,
                                            std::span<CUuuid const> uuids) noexcept {
         bool built = format_into(text,
                                  "schema {}\n"            //
@@ -794,13 +788,13 @@ struct mesh_topology_t {
                                  "host_domain_index {}\n" //
                                  "host_domain_count {}\n" //
                                  "multimem {}\n"          //
-                                 "capabilities {:x}\n"    //
+                                 "gpu_class {}\n"         //
                                  "hostname {}\n"          //
                                  "devices {}\n"           //
                                  "device_name {}\n"       //
                                  "uuids",
                                  mesh_schema_k, job, self.host_domain_index, shape.host_domain_count(),
-                                 shape.gpus_per_multimem_domain, capabilities, self.hostname, self.device_count,
+                                 shape.gpus_per_multimem_domain, gpu_class, self.hostname, self.device_count,
                                  self.device_name);
         for (CUuuid const &uuid : uuids) built = built && format_into(text, " ") && format_uuid_(text, uuid);
         return built;
@@ -812,7 +806,7 @@ struct mesh_topology_t {
     [[nodiscard]] static bool parse_facts_(sz::string_view_t payload, facts_t &facts) noexcept {
         sz::byteset_t const whitespaces = sz::whitespaces_set();
         bool index_parsed = false, count_parsed = false, multimem_parsed = false, devices_parsed = false,
-             capabilities_parsed = false;
+             class_parsed = false;
         for (sz::string_view_t line : payload.split(sz::newlines_set())) {
             auto [key, match, value] = line.partition(' ');
             value = value.strip(whitespaces);
@@ -824,10 +818,10 @@ struct mesh_topology_t {
             else if (key == "host_domain_index") index_parsed = parse_u32_(value, facts.host_domain_index);
             else if (key == "host_domain_count") count_parsed = parse_u32_(value, facts.host_domain_count);
             else if (key == "multimem") multimem_parsed = parse_u32_(value, facts.multimem);
-            else if (key == "capabilities") capabilities_parsed = parse_hex_u64_(value, facts.capabilities);
+            else if (key == "gpu_class") class_parsed = parse_u32_(value, facts.gpu_class);
             else if (key == "devices") devices_parsed = parse_u32_(value, facts.devices);
         }
-        return index_parsed && count_parsed && multimem_parsed && capabilities_parsed && devices_parsed &&
+        return index_parsed && count_parsed && multimem_parsed && class_parsed && devices_parsed &&
                !facts.schema.empty() && !facts.job.empty() && !facts.hostname.empty() && !facts.device_name.empty() &&
                !facts.uuids.empty();
     }
@@ -890,10 +884,10 @@ struct mesh_topology_t {
     }
 
     /** The lead's half of the exchange: read every peer's facts, validate agreement against this
-     *  host_domain's own @p probed facts, @p self_capabilities and the world @ref shape , fill
+     *  host_domain's own @p probed facts, @p self_gpu_class and the world @ref shape , fill
      *  @ref host_domains , and publish the merged manifest. */
     [[nodiscard]] expected_t collect_world_as_lead_(sz::string_view_t job, local_probe_t const &probed,
-                                                    u64_t self_capabilities, f64_t timeout_seconds) noexcept {
+                                                    u32_t self_gpu_class, f64_t timeout_seconds) noexcept {
         mesh_host_domain_t const &self = probed.facts;
         st::basic_vector<claimed_gpu_t> claimed;
         // The world's physical GPU identities, this host_domain's first; sorted once at the end to prove
@@ -932,11 +926,11 @@ struct mesh_topology_t {
                     status_t::unsupported_k,
                     "multimem-extent disagreement: host_domain {} was launched with {}, host_domain 0 with {}",
                     peer_index, facts.multimem, shape.gpus_per_multimem_domain);
-            if (facts.capabilities != self_capabilities)
+            if (facts.gpu_class != self_gpu_class)
                 return expected_t::fail( //
                     status_t::unsupported_k,
-                    "capability disagreement: host_domain {} dispatches with {:#x}, host_domain 0 with {:#x}",
-                    peer_index, facts.capabilities, self_capabilities);
+                    "GPU class disagreement: host_domain {} trains as class {}, host_domain 0 as class {}", peer_index,
+                    facts.gpu_class, self_gpu_class);
             mesh_host_domain_t peer;
             peer.host_domain_index = peer_index;
             peer.device_count = facts.devices;

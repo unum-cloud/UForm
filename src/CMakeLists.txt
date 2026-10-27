@@ -451,6 +451,7 @@ if (UFORM_BUILD_CUDA)
         encoder/multimodal_batch.cu
         train/contrastive_segments.cu
         train/contrastive_tokens.cu
+        train/pooled_spectrum.cu
         train/optimizer.cu
         train/transformer_block.cu
         train/encoder_tower.cu

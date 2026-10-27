@@ -538,10 +538,7 @@ expected_t paired_loader_parquet_t::fill_(gpu_stream_t &gpu_stream, u32_t gpu_ra
             !paired)
             return paired;
     }
-    // The reservoir and the scratch tables free with this scope, after the stream retires every
-    // read of them.
-    if (CUresult result = cuStreamSynchronize(gpu_stream.get()); result != CUDA_SUCCESS)
-        return cuda_failure(result, "paired fill drain failed");
+    // The reservoir and scratch tables free stream-ordered, after every read this stream queued.
     return {};
 }
 
