@@ -88,7 +88,7 @@ Two DGX B300 nodes form the `{8, 8, 16}` world: one process per node drives its 
 Build once on a node, in a checkout on the shared filesystem, so every rung runs from the same tree and the mixtures' relative `data/` globs resolve:
 
 ```sh
-cmake --preset cuda -D UFORM_CUDA_ARCHITECTURES=100f-real -D UFORM_WITH_INFINIBAND=ON
+cmake --preset cuda -D UFORM_CUDA_ARCH=100f -D UFORM_WITH_INFINIBAND=ON
 cmake --build build_cuda --parallel
 export UFORM_EXCHANGE_DIR=/shared/uform/exchange
 mkdir -p "${UFORM_EXCHANGE_DIR}"

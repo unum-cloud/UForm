@@ -1,6 +1,6 @@
 # GPU languages, and the C++23 dialect every CUDA unit compiles at.
 
-if (UFORM_BUILD_CUDA)
+if (UFORM_CUDA_ARCH)
     enable_language(CUDA)
     if (CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13)
         message(FATAL_ERROR "UForm needs CUDA 13 or newer, found ${CMAKE_CUDA_COMPILER_VERSION}")
@@ -9,7 +9,13 @@ if (UFORM_BUILD_CUDA)
     enable_language(ASM)
     find_package(CUDAToolkit 13 REQUIRED)
 endif ()
-if (UFORM_BUILD_ROCM)
+# One code object per listed target; `native` leaves CMake to list the visible GPUs through `rocm_agent_enumerator`.
+if (UFORM_ROCM_ARCH)
+    if (UFORM_ROCM_ARCH STREQUAL "all")
+        set(CMAKE_HIP_ARCHITECTURES gfx942 gfx950 gfx1250 gfx1251)
+    elseif (NOT UFORM_ROCM_ARCH STREQUAL "native")
+        set(CMAKE_HIP_ARCHITECTURES ${UFORM_ROCM_ARCH})
+    endif ()
     enable_language(HIP)
 endif ()
 

@@ -1096,10 +1096,18 @@ static char const* write_scratch_checkpoint(void) {
     return path;
 }
 
+/** Prints the version line, then the capabilities as "- Compiled for:" and "- This machine:". */
+static void print_machine(FILE* stream) {
+    fprintf(stream, "UForm %s\n- Compiled for: %s\n- This machine: %s\n", uform_version_name(),
+            uform_capabilities_compiled(), uform_capabilities_available());
+}
+
 int main(int argc, char* argv[]) {
-    printf("UForm %s\n", uform_version_name());
-    printf("- Compiled for: %s\n", uform_capabilities_compiled());
-    printf("- This machine: %s\n", uform_capabilities_available());
+    print_machine(stdout);
+    // ctest hides passing output, so the job summary is where a green run shows what it covered
+    char const* const summary_path = getenv("GITHUB_STEP_SUMMARY");
+    FILE* const summary = summary_path ? fopen(summary_path, "a") : NULL;
+    if (summary) print_machine(summary), fclose(summary);
     char const* const filter = getenv("UFORM_FILTER");
     if (filter && *filter) test_filter = filter;
     printf("- Filter: %s\n", test_filter ? test_filter : "none");

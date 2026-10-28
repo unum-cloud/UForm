@@ -211,6 +211,8 @@ public struct CPUClass: Hashable, Sendable, CustomStringConvertible {
     public static let wasm32V128 = CPUClass(raw: uform_cpu_class_wasm32_v128_k)
     /// WebAssembly with relaxed SIMD, threads and 64-bit addressing.
     public static let wasm64Extended = CPUClass(raw: uform_cpu_class_wasm64_extended_k)
+    /// The one class of a monoversioned build, with every capability it compiled.
+    public static let monoversioned = CPUClass(raw: uform_cpu_class_monoversioned_k)
 
     /// The class as the library spells it, like `intel-haswell`. Calls `uform_cpu_class_name`.
     public var description: String { String(cString: uform_cpu_class_name(raw)) }

@@ -299,12 +299,13 @@ char const *uform_cpu_class_name(uform_cpu_class_t cpu_class) {
     case uform_cpu_class_alibaba_c930_k: return "alibaba-c930";
     case uform_cpu_class_wasm32_v128_k: return "wasm32-v128";
     case uform_cpu_class_wasm64_extended_k: return "wasm64-extended";
+    case uform_cpu_class_monoversioned_k: return "monoversioned";
     default: return "unrecognized";
     }
 }
 
 uform_cpu_class_t uform_cpu_class_from_name(uform_bytes_view_t name) {
-    for (int code = uform_cpu_class_serial_k; code <= uform_cpu_class_wasm64_extended_k; ++code) {
+    for (int code = uform_cpu_class_serial_k; code <= uform_cpu_class_monoversioned_k; ++code) {
         uform_cpu_class_t const cpu_class = static_cast<uform_cpu_class_t>(code);
         if (named(name, uform_cpu_class_name(cpu_class))) return cpu_class;
     }

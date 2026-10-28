@@ -764,6 +764,9 @@ pub enum CPUClass {
     /// WebAssembly with relaxed SIMD, shared memory for real thread pools, and 64-bit
     /// addressing.
     Wasm64Extended = 17,
+    /// The one class of a monoversioned build: every capability its floor implies or its preset
+    /// vouches for, as the kernel libraries compiled them.
+    Monoversioned = 18,
 }
 
 impl CPUClass {
@@ -786,6 +789,7 @@ impl CPUClass {
             15 => CPUClass::AlibabaC930,
             16 => CPUClass::Wasm32V128,
             17 => CPUClass::Wasm64Extended,
+            18 => CPUClass::Monoversioned,
             _ => return None,
         };
         Some(cpu_class)

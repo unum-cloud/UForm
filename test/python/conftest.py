@@ -20,8 +20,7 @@ def pytest_report_header() -> list[str]:
     """What this run is actually exercising, printed where pytest prints its own header."""
     return [
         f"- Platform: {platform.platform()}",
-        f"- Python: {platform.python_version()}",
-        f"- UForm: {uform.version()} from {uform.Model.__module__}",
+        f"- UForm: {uform.version()} from {uform.lib.__file__}",
         f"- Capabilities compiled: {uform.capabilities_compiled()}",
         f"- Capabilities available: {uform.capabilities_available()}",
         f"- Checkpoint: {os.environ.get('UFORM_TEST_CHECKPOINT', 'none, the stub loads any bytes')}",

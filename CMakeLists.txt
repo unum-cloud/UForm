@@ -34,7 +34,7 @@
 #
 # Feature gates.
 #
-# `-DUFORM_BUILD_CUDA=ON` adds the NVIDIA residency and `-DUFORM_BUILD_ROCM=ON` the AMD one; `-DUFORM_BUILD_TRAIN=ON`
+# `-DUFORM_CUDA_ARCH=all` adds the NVIDIA residency and `-DUFORM_ROCM_ARCH=all` the AMD one; `-DUFORM_BUILD_TRAIN=ON`
 # adds the trainer, the mesh and the loaders over CUDA, which the `cuda` preset and the machine profiles set. Without
 # them only the host libraries and the
 # media codecs are needed, and with `-DUFORM_WITH_CODECS=OFF`, the default on WebAssembly, not even the codecs. Every
@@ -44,12 +44,12 @@
 # `-DUFORM_BUILD_TOOLS=ON` and `-DUFORM_BUILD_BENCH=ON` add the suites in `test/`, the trainer in `tools/` and the
 # benchmarks in `bench/`, which every build leaves out unless asked.
 #
-# Targets. `-DUFORM_TARGET_ARCH=native` or a CPU name like `graniterapids` tunes UForm's own units and its libraries for
-# one CPU, and on WebAssembly picks the module's `serial`, `v128` or `v128relaxed` capability for the libraries.
-# `-DUFORM_TARGET_CLASSES=intel_granite` compiles the encoder for `serial` and the named CPU classes alone, and `native`
-# for the newest of each lineage this host runs. `-DUFORM_CUDA_ARCHITECTURES=100f-real` compiles one GPU code, and
-# `native` the family code of each visible GPU. The `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper` and `vera_rubin`
-# presets set all three for one machine.
+# Targets. `-DUFORM_MARCH=native`, an ISA level like `x86-64-v3` or a CPU name like `graniterapids` raises the floor of
+# UForm's own units and its libraries, and on WebAssembly picks the module's `serial`, `v128` or `v128relaxed`
+# capability. `-DUFORM_MULTIVERSIONED=OFF` builds for that floor alone: only the CPU classes it implies exist, and the
+# newest of each lineage replaces its parents, `serial` included. `-DUFORM_CUDA_ARCH=100f` compiles one GPU code as
+# SASS, and with it only the GPU classes it runs, `native` the family code of each visible GPU, and `all` the release
+# set. The `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper` and `vera_rubin` presets set all three for one machine.
 cmake_minimum_required(VERSION 3.28)
 
 project(
@@ -76,8 +76,14 @@ if (PROJECT_IS_TOP_LEVEL AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
 endif ()
 
 option(UFORM_INSTALL "Install the C headers, libraries and CMake package" ${PROJECT_IS_TOP_LEVEL})
-option(UFORM_BUILD_CUDA "Add the NVIDIA residency" OFF)
-option(UFORM_BUILD_ROCM "Add the AMD residency" OFF)
+set(UFORM_CUDA_ARCH
+    ""
+    CACHE STRING "NVIDIA code the residency and every CUDA unit build for: empty for none, all, native or one"
+)
+set(UFORM_ROCM_ARCH
+    ""
+    CACHE STRING "AMD target the residency builds for: empty for none, all, native or one"
+)
 option(UFORM_BUILD_TRAIN "Add the NVIDIA trainer, the mesh and the loaders, which link the CUDA libraries" OFF)
 option(UFORM_BUILD_SHARED "Compile uform_static and uform_shared in the default build and install them" OFF)
 option(UFORM_BUILD_STUB "Build uform_static_stub and uform_shared_stub" OFF)
@@ -98,29 +104,14 @@ option(UFORM_WITH_CODECS "Decode images, video and audio through the host codecs
        ${uform_codecs_default_}
 )
 # Seeded from the environment at the first configure, so `pip`, `cargo` and other wrappers honour it.
-set(UFORM_TARGET_ARCH
-    "$ENV{UFORM_TARGET_ARCH}"
-    CACHE STRING "CPU UForm and its libraries are tuned for: empty, native, a CPU name, or serial, v128 or v128relaxed"
+set(UFORM_MARCH
+    "$ENV{UFORM_MARCH}"
+    CACHE STRING "The `-march` floor of UForm and its libraries: empty, native, a CPU, or serial, v128 or v128relaxed"
 )
-set(UFORM_TARGET_CLASSES
-    ""
-    CACHE STRING "CPU classes the encoder compiles beside serial: empty for all, a list, or native for this host's"
-)
-# One cubin per generation plus an Ampere PTX tail, as in NumKong, from Ampere up since UForm's kernels need it;
-# iterate on one card with its own code, like "89-real". Only the Hopper and Blackwell codes reach the switch bundle,
-# see `src/CMakeLists.txt`.
-set(UFORM_CUDA_ARCHITECTURES
-    "80-real;89-real;90a-real;100f-real;120f-real;80-virtual"
-    CACHE STRING "GPU architectures every CUDA unit, NumKong's included, compiles for"
-)
+option(UFORM_MULTIVERSIONED "Keep every CPU class above the floor, or only the best ones UFORM_MARCH implies" ON)
 
-if (UFORM_TARGET_CLASSES STREQUAL "native" AND NOT UFORM_TARGET_ARCH STREQUAL "native")
-    message(
-        FATAL_ERROR "UFORM_TARGET_CLASSES=native reads what this host runs, which only UFORM_TARGET_ARCH=native probes"
-    )
-endif ()
-if (UFORM_BUILD_TRAIN AND NOT UFORM_BUILD_CUDA)
-    message(FATAL_ERROR "UFORM_BUILD_TRAIN needs UFORM_BUILD_CUDA, as the trainer runs on NVIDIA alone")
+if (UFORM_BUILD_TRAIN AND NOT UFORM_CUDA_ARCH)
+    message(FATAL_ERROR "UFORM_BUILD_TRAIN needs UFORM_CUDA_ARCH, as the trainer runs on NVIDIA alone")
 endif ()
 if (UFORM_BUILD_TRAIN AND NOT UFORM_WITH_CODECS)
     message(FATAL_ERROR "UFORM_BUILD_TRAIN needs UFORM_WITH_CODECS, as the loaders decode on the host too")
@@ -163,10 +154,11 @@ endif ()
 
 include(cmake/uform_platform.cmake)
 
-# UForm's CUDA units take their own copy of the architecture list after the libraries resolved theirs. "native" maps
-# each visible GPU to the code its capability rows need, family suffix included, where CMake's own resolution would drop
-# it; eight cards of one kind still compile one code.
-if (UFORM_BUILD_CUDA)
+# UForm's CUDA units take their own copy of the architecture list after the libraries resolved theirs. `all` is the
+# release set, one cubin per generation plus an Ampere PTX tail, from Ampere up since UForm's kernels need it. "native"
+# maps each visible GPU to the code its capability rows need, family suffix included, where CMake's own resolution would
+# drop it; eight cards of one kind still compile one code. A native or named code compiles as SASS alone.
+if (UFORM_CUDA_ARCH)
     set(uform_cuda_native_codes_
         75-real=75-real
         80-real=80-real
@@ -179,29 +171,31 @@ if (UFORM_BUILD_CUDA)
         120-real=120f-real
         121-real=121f-real
     )
-    set(uform_cuda_architectures_)
-    foreach (entry_ IN LISTS UFORM_CUDA_ARCHITECTURES)
-        if (entry_ STREQUAL "native")
-            foreach (visible_ IN LISTS CMAKE_CUDA_ARCHITECTURES_NATIVE)
-                set(native_code_)
-                foreach (pair_ IN LISTS uform_cuda_native_codes_)
-                    if (pair_ MATCHES "^${visible_}=(.+)$")
-                        set(native_code_ ${CMAKE_MATCH_1})
-                    endif ()
-                endforeach ()
-                if (NOT native_code_)
-                    message(FATAL_ERROR "UFORM_CUDA_ARCHITECTURES=native has no code for the visible ${visible_} GPU; "
-                                        "name its code instead"
-                    )
-                endif ()
-                if (NOT native_code_ IN_LIST uform_cuda_architectures_)
-                    list(APPEND uform_cuda_architectures_ ${native_code_})
+    if (UFORM_CUDA_ARCH STREQUAL "all")
+        set(uform_cuda_architectures_ 80-real 89-real 90a-real 100f-real 120f-real 80-virtual)
+    elseif (UFORM_CUDA_ARCH STREQUAL "native")
+        set(uform_cuda_architectures_)
+        foreach (visible_ IN LISTS CMAKE_CUDA_ARCHITECTURES_NATIVE)
+            set(native_code_)
+            foreach (pair_ IN LISTS uform_cuda_native_codes_)
+                if (pair_ MATCHES "^${visible_}=(.+)$")
+                    set(native_code_ ${CMAKE_MATCH_1})
                 endif ()
             endforeach ()
-        else ()
-            list(APPEND uform_cuda_architectures_ ${entry_})
-        endif ()
-    endforeach ()
+            if (NOT native_code_)
+                message(FATAL_ERROR "UFORM_CUDA_ARCH=native has no code for the visible ${visible_} GPU; "
+                                    "name its code instead"
+                )
+            endif ()
+            if (NOT native_code_ IN_LIST uform_cuda_architectures_)
+                list(APPEND uform_cuda_architectures_ ${native_code_})
+            endif ()
+        endforeach ()
+    elseif (UFORM_CUDA_ARCH MATCHES "^[0-9]+[af]?$")
+        set(uform_cuda_architectures_ ${UFORM_CUDA_ARCH}-real)
+    else ()
+        message(FATAL_ERROR "UFORM_CUDA_ARCH takes all, native or one code like 100f, not `${UFORM_CUDA_ARCH}`")
+    endif ()
     if (CMAKE_VERSION VERSION_LESS 3.31 AND uform_cuda_architectures_ MATCHES "1[0-9][0-9][af]")
         message(FATAL_ERROR "Three-digit \"a\" and \"f\" CUDA codes need CMake 3.31, found ${CMAKE_VERSION}")
     endif ()

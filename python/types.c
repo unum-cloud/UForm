@@ -163,7 +163,7 @@ uform_py_enum_t uform_py_mood = {.name = "Mood",
 uform_py_enum_t uform_py_cpu_class = {.name = "CPUClass",
                                       .base = "IntEnum",
                                       .first = uform_cpu_class_serial_k,
-                                      .last = uform_cpu_class_wasm64_extended_k,
+                                      .last = uform_cpu_class_monoversioned_k,
                                       .spell = spell_cpu_class};
 uform_py_enum_t uform_py_gpu_class = {.name = "GPUClass",
                                       .base = "IntEnum",

@@ -18,9 +18,13 @@ use std::env;
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-/// Every CMake option an implementation can switch on, so a reconfigured tree never keeps an
-/// earlier choice.
-const KNOWN_OPTIONS: &[&str] = &["UFORM_BUILD_STUB", "UFORM_BUILD_CUDA", "UFORM_BUILD_ROCM"];
+/// Every CMake option an implementation can switch on, with the values switching it on and off,
+/// so a reconfigured tree never keeps an earlier choice.
+const KNOWN_OPTIONS: &[(&str, &str, &str)] = &[
+    ("UFORM_BUILD_STUB", "ON", "OFF"),
+    ("UFORM_CUDA_ARCH", "all", ""),
+    ("UFORM_ROCM_ARCH", "all", ""),
+];
 
 /// One implementation of the C interface, and what CMake must be told to produce it.
 #[derive(Clone, Copy)]
@@ -64,21 +68,21 @@ const ENGINE: Implementation = Implementation {
 /// The engine with the NVIDIA residency, the trainer and the mesh.
 const ENGINE_CUDA: Implementation = Implementation {
     feature: "cuda",
-    options: &["UFORM_BUILD_CUDA"],
+    options: &["UFORM_CUDA_ARCH"],
     ..ENGINE
 };
 
 /// The engine with the AMD residency.
 const ENGINE_ROCM: Implementation = Implementation {
     feature: "rocm",
-    options: &["UFORM_BUILD_ROCM"],
+    options: &["UFORM_ROCM_ARCH"],
     ..ENGINE
 };
 
 /// The engine with both GPU residencies, driven by one binary.
 const ENGINE_CUDA_ROCM: Implementation = Implementation {
     feature: "cuda and rocm",
-    options: &["UFORM_BUILD_CUDA", "UFORM_BUILD_ROCM"],
+    options: &["UFORM_CUDA_ARCH", "UFORM_ROCM_ARCH"],
     ..ENGINE
 };
 
@@ -149,9 +153,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .profile("RelWithDebInfo")
         .build_target(chosen.target)
         .always_configure(false);
-    for option in KNOWN_OPTIONS {
-        let wanted = chosen.options.contains(option);
-        library.define(option, if wanted { "ON" } else { "OFF" });
+    for (option, on, off) in KNOWN_OPTIONS {
+        library.define(option, if chosen.options.contains(option) { on } else { off });
     }
 
     // `FetchContent` builds each sibling crate's tree rather than downloading the pinned revision again.
@@ -173,7 +176,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .define("CMAKE_C_COMPILER", "clang")
             .define("CMAKE_CXX_COMPILER", &compiler);
     }
-    if chosen.options.contains(&"UFORM_BUILD_CUDA") {
+    if chosen.options.contains(&"UFORM_CUDA_ARCH") {
         library.define("CMAKE_CUDA_HOST_COMPILER", &compiler);
     }
 

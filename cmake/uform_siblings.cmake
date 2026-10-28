@@ -24,31 +24,33 @@ function (uform_sibling name_ override_ repository_ tag_)
 endfunction ()
 
 # The header-only NumKong target stubs out the `_best` dispatch the inference products and attention run through, so
-# UForm builds the compiled library, with the GPU vendors its own switches add, for its own architectures. Every
-# library tunes its units for the CPU UForm targets, when it names one.
-set(NUMKONG_BUILD_CUDA ${UFORM_BUILD_CUDA})
-set(NUMKONG_BUILD_ROCM ${UFORM_BUILD_ROCM})
-set(NUMKONG_CUDA_ARCHITECTURES "${UFORM_CUDA_ARCHITECTURES}")
-if (UFORM_TARGET_ARCH)
-    set(NUMKONG_TARGET_ARCH "${UFORM_TARGET_ARCH}")
-    set(STRINGZILLA_TARGET_ARCH "${UFORM_TARGET_ARCH}")
-    set(FORKUNION_TARGET_ARCH "${UFORM_TARGET_ARCH}")
+# UForm builds the compiled library, with the GPU vendors its own switches add, for its own architectures. No other
+# library's GPU code runs in UForm. Every library compiles at the floor and build kind UForm names.
+set(NUMKONG_CUDA_ARCH "${UFORM_CUDA_ARCH}")
+set(NUMKONG_ROCM_ARCH "${UFORM_ROCM_ARCH}")
+if (UFORM_MARCH)
+    set(NUMKONG_MARCH "${UFORM_MARCH}")
+    set(STRINGZILLA_MARCH "${UFORM_MARCH}")
+    set(FORKUNION_MARCH "${UFORM_MARCH}")
 endif ()
+set(NUMKONG_MULTIVERSIONED ${UFORM_MULTIVERSIONED})
+set(STRINGZILLA_MULTIVERSIONED ${UFORM_MULTIVERSIONED})
+set(FORKUNION_MULTIVERSIONED ${UFORM_MULTIVERSIONED})
 uform_sibling(
     numkong FETCHCONTENT_SOURCE_DIR_NUMKONG https://github.com/ashvardanian/NumKong
-    3fecca8d625ccc89ba2605e195e621e48446c795
+    5d67bd8aafa28867b2d73694f24496c274721397
 )
 uform_sibling(
     stringzilla FETCHCONTENT_SOURCE_DIR_STRINGZILLA https://github.com/ashvardanian/StringZilla
-    53fb6a67b188561ffcab506ee3d03901716b1b49
+    a43a398cecd159f6c383843756540b898a45bee7
 )
 uform_sibling(
     forkunion FETCHCONTENT_SOURCE_DIR_FORKUNION https://github.com/ashvardanian/ForkUnion
-    0b9296ebe0dc3886f4f850f0dc97d6ce382ac909
+    5fac4b88fcd2f611db41055da2b20e1e765449a2
 )
 
 # SmashTable's containers, header-only
 uform_sibling(
     smashtable FETCHCONTENT_SOURCE_DIR_SMASHTABLE https://github.com/ashvardanian/SmashTable
-    e45080c7ea61a5a9c7fc90ac8b9595b49b341574
+    fe3d32edb4685b925e62a427ef6ebdf74b311af9
 )

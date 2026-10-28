@@ -155,7 +155,7 @@ Engines, loaders, tools and tests dispatch through the `pool_view_t` either one 
 The hook refuses a ForkUnion pool or topology class under `include/uform/`, and a `std::thread` in a CUDA source, where one host thread drives every device through its streams and events.
 
 Shared words follow the Atomics rule above, and `src/lib.hpp` alone picks the primitives for each CPU class.
-`waiter_for_cpu_class` pairs a class with its waiter: PAUSE on the AVX2 and AVX-512 cores, TPAUSE on the WAITPKG Xeons, YIELD on the older Arm cores, WFET on the Armv9.2 ones, WRS on RISC-V and `memory.atomic.wait` on WebAssembly.
+`waiter_for_cpu_class` pairs a class with its waiter: PAUSE on the AVX2 and AVX-512 cores, TPAUSE on the WAITPKG Xeons, YIELD on the older Arm cores, WFE on the Armv9.2 ones, WFET only where a monoversioned preset vouches for it, WRS on RISC-V and `memory.atomic.wait` on WebAssembly.
 `atomic_ref_for_cpu_class` pairs it with its atomic reference: RCpc or LSE on the Armv8.6 and newer cores, CMPCCXADD on the newest Xeons, Zacas on RISC-V and a notifying reference on WebAssembly.
 Each specialization sits under the `FORKUNION_TARGET_<BIT>` verdict of the probe.
 A class whose bit is off falls back to the standard yield and reference, and `forkunion_capabilities_of` reads the bits a class needs off the two types, so a ladder admits it only where the runtime confirms them.
@@ -232,13 +232,13 @@ The benchmarks in `bench/` share `bench/harness.hpp`: `uform_bench_encoder` buil
 
 ## Flags and Constants
 
-Every CMake option carries the `UFORM_` prefix, and every `UFORM_BUILD_*` switch is off by default, so a build names only what it wants:
+Every CMake option carries the `UFORM_` prefix, and every `UFORM_BUILD_*` switch is off and every `UFORM_*_ARCH` empty by default, so a build names only what it wants:
 
 - `UFORM_BUILD_SHARED`: `uform_static` and `uform_shared` in the default build and the install; without it they build only for the targets that link them.
 - `UFORM_BUILD_STUB`: `uform_static_stub` and `uform_shared_stub` from `src_stub/`, which the bindings then link instead.
-- `UFORM_BUILD_CUDA`: the NVIDIA residency.
-- `UFORM_BUILD_ROCM`: the AMD residency.
-- `UFORM_BUILD_TRAIN`: the trainer, the mesh and the loaders over CUDA, which the `cuda` preset and the machine profiles set; only they link CUDA libraries into the C library.
+- `UFORM_CUDA_ARCH`: the NVIDIA residency, for `all` the release set, `native` the family code of each visible GPU, or one code like `100f`; only the GPU classes NumKong compiles for those codes exist.
+- `UFORM_ROCM_ARCH`: the AMD residency, for `all` of `gfx942`, `gfx950`, `gfx1250` and `gfx1251`, `native`, or one target.
+- `UFORM_BUILD_TRAIN`: the trainer, the mesh and the loaders over CUDA, which needs `UFORM_CUDA_ARCH` and which the `cuda` preset and the machine profiles set; only they link CUDA libraries into the C library.
 - `UFORM_BUILD_TEST`: the suites in `test/` and the C tests.
 - `UFORM_BUILD_TOOLS`: the trainer in `tools/`, with `UFORM_BUILD_TRAIN`.
 - `UFORM_BUILD_BENCH`: the benchmarks in `bench/`.
@@ -247,10 +247,14 @@ Every CMake option carries the `UFORM_` prefix, and every `UFORM_BUILD_*` switch
 - `UFORM_INSTALL`: with `UFORM_BUILD_SHARED`, the C headers, `uform_static`, `uform_shared` and a CMake package under `lib/cmake/uform`, which `find_package(uform)` reads as `uform::static`, `uform::shared` and `uform::header`, on in a top-level build.
 - `UFORM_WITH_INFINIBAND`: `AUTO` probes for InfiniBand and enables it when present, `ON` requires it and `OFF` leaves it out.
 - `UFORM_WITH_CODECS`: the host image, video and audio codecs the verbs over files decode with, on by default and off on WebAssembly, Android and Windows presets; CUDA needs it.
-- `UFORM_TARGET_ARCH`: the CPU UForm's units and its libraries' are tuned for, `native` or a name like `graniterapids`, and on WebAssembly the module's `serial`, `v128` or `v128relaxed`; empty by default, seeded from the environment.
-- `UFORM_TARGET_CLASSES`: the CPU classes the encoder compiles beside `serial`, every class when empty, and under `native`, which needs `UFORM_TARGET_ARCH=native`, the newest of each lineage this host runs.
-- `UFORM_CUDA_ARCHITECTURES`: the GPU codes every CUDA unit compiles for, `75-real;80-real;89-real;90a-real;100f-real;120f-real;80-virtual` by default, and `native` for the family code of each visible GPU.
-- The `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper` and `vera_rubin` presets build the C library for one machine, pinning its CPU, its one CPU class and its one GPU code.
+- `UFORM_MARCH`: the `-march` floor of UForm's units and its libraries', an ISA level, `native` or a CPU name like `graniterapids`, and on WebAssembly the module's `serial`, `v128` or `v128relaxed`; empty by default, seeded from the environment.
+- `UFORM_MULTIVERSIONED`: on by default, every CPU class that exists, `serial` included, picked at run time; off, one `monoversioned` CPU class over every capability the libraries enabled, which is what the floor implies and what a preset vouches for with `-D <LIBRARY>_TARGET_<CAPABILITY>=1`, and only the newest GPU class of each lineage beside the vendor-wide one, so a pin below them is refused.
+- The `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper` and `vera_rubin` presets build the C library for one machine, naming its CPU and its one GPU code.
+
+GPU code follows one policy per build kind.
+The release set compiles UForm's own CUDA units for `80`, `89`, `90a`, `100f` and `120f` cubins with a `compute_80` PTX tail, the encoder bundle's generic SIMT kernels as `compute_80` PTX alone, and the `multimem` bundle as one plain `90` cubin with its PTX, as it needs nothing past Hopper.
+A native or named code compiles every unit and bundle as that code's SASS alone.
+AMD compiles one code object per listed target either way.
 - `UFORM_SITE_PACKAGES` and `UFORM_CUDF_ROOT`: the directory the libcudf wheel discovery searches, or the prefix holding the libraries themselves.
 
 Binaries take long kebab-case flags with no short forms, as `uform_bench_encoder --checkpoint model.safetensors --cpu-class intel-haswell` does, and spell classes, scalars and statuses as the C name tables do.

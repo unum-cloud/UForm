@@ -464,7 +464,7 @@ typedef enum uform_cpu_class_t {
     /** Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles. */
     uform_cpu_class_apple_m4_k,
 
-    /** Graviton5-class Arm - Neoverse V3, Armv9.2. */
+    /** Graviton5-class Arm - Neoverse V3, Armv9.2; reserved, as its kits equal @c apple_m2's. */
     uform_cpu_class_aws_g5_k,
 
     /** Vera-class Arm - NVIDIA's Armv9.2-generation cores with FP8 dot products. */
@@ -479,6 +479,10 @@ typedef enum uform_cpu_class_t {
     /** WebAssembly with relaxed SIMD, shared memory for real thread pools, and 64-bit
      *  addressing. */
     uform_cpu_class_wasm64_extended_k,
+
+    /** The one class of a monoversioned build: every capability its floor implies or its preset
+     *  vouches for, as the kernel libraries compiled them. */
+    uform_cpu_class_monoversioned_k,
 } uform_cpu_class_t;
 
 /** The GPU families UForm ships tuned variants for, the device twin of @c uform_cpu_class_t:

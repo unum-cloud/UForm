@@ -174,7 +174,6 @@ jobs:
         run: |
           rustup toolchain install beta --profile minimal --component clippy
           rustup default beta
-          rustc -vV
       - name: Lint Rust
         run: cargo clippy --all-targets --features stub -- -D warnings
       - name: Build Rust over the Engine
@@ -320,18 +319,23 @@ jobs:
     name: Build NVIDIA and AMD Libraries
     runs-on: ubuntu-26.04
     container:
-      image: rocm/dev-ubuntu-26.04:latest
+      image: rocm/dev-ubuntu-26.04:10.0.0-full
       options: -v /usr/share/dotnet:/host/dotnet -v /usr/local/lib/android:/host/android -v /opt/ghc:/host/ghc
     steps:
       - name: Free Disk Space
         run: rm -rf /host/dotnet/* /host/android/* /host/ghc/*
-      - name: Install CUDA and the Codecs
+      # ROCm 10's Clang is LLVM 23, under which NVCC 13.4's front end rejects libstdc++'s `<atomic>`, so NVCC hosts
+      # on Clang 22.
+      - name: Install CUDA, Clang 22 and the Codecs
         run: |
-          apt-get update && apt-get install -y curl git cmake ninja-build python3-venv
+          apt-get update && apt-get install -y curl gnupg git cmake ninja-build python3-venv
           curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
           dpkg -i cuda-keyring_1.1-1_all.deb
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+            > /etc/apt/sources.list.d/llvm.list
           apt-get update
-          apt-get install -y libibverbs-dev $UBUNTU_CODECS \
+          apt-get install -y clang-22 libibverbs-dev $UBUNTU_CODECS \
             cuda-minimal-build-"$CUDA_VERSION" cuda-driver-dev-"$CUDA_VERSION" \
             libnvjpeg-dev-"$CUDA_VERSION" libnpp-dev-"$CUDA_VERSION" \
             libnvidia-decode-580
@@ -346,7 +350,7 @@ jobs:
       - name: Build Libraries and the Trainer
         run: |
           cmake --preset cuda_rocm_library -D UFORM_BUILD_TOOLS=ON -D CMAKE_HIP_ARCHITECTURES=gfx942 \
-            -D CMAKE_PREFIX_PATH=/opt/rocm
+            -D CMAKE_PREFIX_PATH=/opt/rocm -D CMAKE_CUDA_HOST_COMPILER=clang++-22
           cmake --build --preset cuda_rocm_library
 
   # Compile-only: the inference library with both GPU residencies and no trainer must name no GPU driver or training
@@ -355,7 +359,7 @@ jobs:
   check_vendor_boundary:
     name: Check the Inference Library Links No GPU Driver
     runs-on: ubuntu-26.04
-    container: rocm/dev-ubuntu-26.04:latest
+    container: rocm/dev-ubuntu-26.04:10.0.0-full
     steps:
       - name: Install CUDA, Clang 22 and the Codecs
         run: |
@@ -379,7 +383,7 @@ jobs:
         run: |
           readelf -d build_linux_cuda_rocm/c/libuform_shared.so | tee dependencies.txt
           if grep -E 'NEEDED.*\[(libcuda|libcublas|libcublasLt|libcufile|libnccl|libnvjpeg|libnppc)\.' dependencies.txt; then
-            echo "libuform_shared links a GPU driver or a training library" >&2
+            echo "::error::libuform_shared links a GPU driver or a training library"
             exit 1
           fi
 

@@ -165,8 +165,8 @@ A device's position in that listing is the ordinal `uform_vram_options_t::device
 Residency is in the verb name, as in USearch and UStore, so a residency a build lacks has no verb to call:
 
 - __RAM__: `uform_model_load_ram` and `uform_model_load_ram_buffer` place the weights in host memory, on the NUMA nodes `uform_ram_options_t` names, and every build carries them.
-- __NVIDIA__: `uform_model_load_vram` and `uform_model_load_vram_buffer` place them on the CUDA devices `uform_vram_options_t` names, in builds with `UFORM_BUILD_CUDA`.
-- __AMD__: the same VRAM verbs place them on ROCm devices, in builds with `UFORM_BUILD_ROCM`.
+- __NVIDIA__: `uform_model_load_vram` and `uform_model_load_vram_buffer` place them on the CUDA devices `uform_vram_options_t` names, in builds with `UFORM_CUDA_ARCH`.
+- __AMD__: the same VRAM verbs place them on ROCm devices, in builds with `UFORM_ROCM_ARCH`.
 
 On NVIDIA, text and JPEG images never leave the device; container demux, PNG and WebP, audio, and every modality on AMD decode on host threads the executor spawns beside its streams.
 `uform_capabilities_compiled` and `uform_capabilities_available` report what the binary was built with and what the machine offers.

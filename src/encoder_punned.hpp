@@ -66,8 +66,8 @@ template <encoder_home_t home_>
 using entries_kit_of = std::conditional_t<home_ == encoder_home_t::vram_amd_k, encoder::vram_amd_entries_kit_t,
                                           encoder::vram_nvidia_entries_kit_t>;
 
-/** The newest compiled class on @p ladder that fits under @p ceiling, as its verbs; the serial
- *  floor always answers. */
+/** The newest compiled class on @p ladder that fits under @p ceiling, as its verbs, one of which
+ *  @ref pick_cpu_ceiling made sure of. */
 template <cpu_class_t... classes_>
 encoder_verbs<encoder_home_t::ram_k> const *pick_cpu_variant(cpu_ladder<classes_...>, cpu_ceiling_t ceiling) noexcept {
     encoder_verbs<encoder_home_t::ram_k> const *picked = nullptr;
@@ -92,15 +92,17 @@ encoder_verbs<home_> const *pick_gpu_variant(gpu_ladder<classes_...>, uform_gpu_
                                             ? device_capabilities
                                             : numkong_capabilities_of(static_cast<gpu_class_t>(pinned));
         auto rung = [&]<gpu_class_t class_>() noexcept {
-            if (picked) return;
-            if constexpr (class_ == gpu_class_t::unknown_k) {
-                if (pinned != uform_gpu_class_unknown_k) return;
+            if constexpr (gpu_class_compiled(class_)) {
+                if (picked) return;
+                if constexpr (class_ == gpu_class_t::unknown_k) {
+                    if (pinned != uform_gpu_class_unknown_k) return;
+                }
+                else {
+                    nk_capability_t const wanted = numkong_capabilities_of(class_);
+                    if ((device_capabilities & wanted) != wanted || (ceiling & wanted) != wanted) return;
+                }
+                picked = encoder_class_tables<home_, class_>::find();
             }
-            else {
-                nk_capability_t const wanted = numkong_capabilities_of(class_);
-                if ((device_capabilities & wanted) != wanted || (ceiling & wanted) != wanted) return;
-            }
-            picked = encoder_class_tables<home_, class_>::find();
         };
         (rung.template operator()<classes_>(), ...);
     }

@@ -108,6 +108,7 @@ class CPUClass(IntEnum):
     ALIBABA_C930 = 15
     WASM32_V128 = 16
     WASM64_EXTENDED = 17
+    MONOVERSIONED = 18
 
 class GPUClass(IntEnum):
     """The GPU families dispatch picks from, valued as `uform_gpu_class_t`; a VRAM placement may pin one."""

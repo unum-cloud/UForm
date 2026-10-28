@@ -52,19 +52,21 @@ using vram_tower_of =
                         entries_kit_of<home_>,
                         typename encoder::elementwise_ladder<numkong_capabilities_of(cpu_class_t::serial_k)>::kit_t>;
 
-/** Whether a host class picks kits its parent does not; the serial floor always does. Both sides
+/** Whether a host class picks kits its parent does not; the serial floor always does, and so does
+ *  a class whose parent the build left out, as a monoversioned build leaves serial. Both sides
  *  take the class's own atomic reference, as each class names it through an alias template of its
  *  own. */
 template <cpu_class_t cpu_class_>
 constexpr bool ram_variant_advances() noexcept {
-    if constexpr (cpu_class_ == cpu_class_t::serial_k) return true;
+    if constexpr (cpu_class_ == cpu_class_t::serial_k || !cpu_class_compiled(parent_class_of(cpu_class_))) return true;
     else return !std::is_same_v<ram_tower_of<cpu_class_>, ram_tower_of<parent_class_of(cpu_class_), cpu_class_>>;
 }
 
-/** Whether a device class picks a tower its parent does not; the vendor floor always does. */
+/** Whether a device class picks a tower its parent does not; the vendor floor always does, and so
+ *  does a class whose parent the build left out. */
 template <encoder_home_t home_, gpu_class_t gpu_class_>
 constexpr bool vram_variant_advances() noexcept {
-    if constexpr (gpu_class_ == gpu_class_t::unknown_k) return true;
+    if constexpr (gpu_class_ == gpu_class_t::unknown_k || !gpu_class_compiled(parent_class_of(gpu_class_))) return true;
     else return !std::is_same_v<vram_tower_of<home_, gpu_class_>, vram_tower_of<home_, parent_class_of(gpu_class_)>>;
 }
 

@@ -9,7 +9,7 @@
     {
       "name": "base",
       "hidden": true,
-      "description": "Ninja, a build tree named after the preset, a compilation database for the language server, the host codecs, and any compiler launchers the environment names, like CMAKE_CXX_COMPILER_LAUNCHER=ccache. Pin the compiler path or UFORM_CUDA_ARCHITECTURES of one machine in a CMakeUserPresets.json on top.",
+      "description": "Ninja, a build tree named after the preset, a compilation database for the language server, the host codecs, and any compiler launchers the environment names, like CMAKE_CXX_COMPILER_LAUNCHER=ccache. Pin the compiler path or UFORM_CUDA_ARCH of one machine in a CMakeUserPresets.json on top.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build_${presetName}",
       "cacheVariables": {
@@ -57,12 +57,12 @@
       "name": "check",
       "inherits": "base",
       "displayName": "Check - fastest compile cycle",
-      "description": "Does it still compile, nothing more: -O0 without debug information on the host, and in ptxas where CUDA is added, with warnings as errors.",
+      "description": "Does it still compile, nothing more: -O0 without debug information on the host, and in cicc and ptxas where CUDA is added, with warnings as errors.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
-        "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O0 -Xptxas -O0 -DNDEBUG",
+        "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O0 -Xcicc -O0 -Xptxas -O0 -DNDEBUG",
         "UFORM_BUILD_SHARED": "ON",
         "UFORM_BUILD_TEST": "ON",
         "UFORM_BUILD_TOOLS": "ON",
@@ -98,9 +98,9 @@
       "name": "cuda",
       "inherits": "release",
       "displayName": "CUDA - every target with the NVIDIA residency",
-      "description": "The release build plus the NVIDIA residency, the trainer, the mesh and the loaders, for the default Turing-through-Blackwell architectures.",
+      "description": "The release build plus the NVIDIA residency, the trainer, the mesh and the loaders, for the release set of Ampere-through-Blackwell codes.",
       "cacheVariables": {
-        "UFORM_BUILD_CUDA": "ON",
+        "UFORM_CUDA_ARCH": "all",
         "UFORM_BUILD_TRAIN": "ON"
       }
     },
@@ -111,7 +111,7 @@
       "description": "The release build plus the AMD residency, its HIP units compiled by ROCm's own Clang.",
       "cacheVariables": {
         "CMAKE_HIP_COMPILER": "/opt/rocm/llvm/bin/clang++",
-        "UFORM_BUILD_ROCM": "ON"
+        "UFORM_ROCM_ARCH": "all"
       }
     },
     {
@@ -153,8 +153,8 @@
       "description": "Clang compiles the host code of both vendors: NVCC hosts on it, and ROCm's own Clang compiles the HIP units.",
       "cacheVariables": {
         "CMAKE_HIP_COMPILER": "/opt/rocm/llvm/bin/clang++",
-        "UFORM_BUILD_CUDA": "ON",
-        "UFORM_BUILD_ROCM": "ON",
+        "UFORM_CUDA_ARCH": "all",
+        "UFORM_ROCM_ARCH": "all",
         "UFORM_BUILD_TRAIN": "ON"
       }
     },
@@ -168,8 +168,8 @@
       "description": "Both vendors' encoder variants in one shared library that links no GPU runtime of its own, which the vendor-boundary check reads with readelf.",
       "cacheVariables": {
         "CMAKE_HIP_COMPILER": "/opt/rocm/llvm/bin/clang++",
-        "UFORM_BUILD_CUDA": "ON",
-        "UFORM_BUILD_ROCM": "ON"
+        "UFORM_CUDA_ARCH": "all",
+        "UFORM_ROCM_ARCH": "all"
       }
     },
     {
@@ -181,7 +181,7 @@
         "CMAKE_C_COMPILER": null,
         "CMAKE_CXX_COMPILER": null,
         "CMAKE_CUDA_HOST_COMPILER": null,
-        "UFORM_TARGET_ARCH": "v128",
+        "UFORM_MARCH": "v128",
         "UFORM_WITH_CODECS": "OFF",
         "CMAKE_CROSSCOMPILING_EMULATOR": "node"
       }
@@ -195,7 +195,7 @@
         "CMAKE_C_COMPILER": null,
         "CMAKE_CXX_COMPILER": null,
         "CMAKE_CUDA_HOST_COMPILER": null,
-        "UFORM_TARGET_ARCH": "v128relaxed",
+        "UFORM_MARCH": "v128relaxed",
         "UFORM_WITH_CODECS": "OFF",
         "CMAKE_CROSSCOMPILING_EMULATOR": "node"
       }
@@ -209,7 +209,7 @@
         "CMAKE_C_COMPILER": null,
         "CMAKE_CXX_COMPILER": null,
         "CMAKE_CUDA_HOST_COMPILER": null,
-        "UFORM_TARGET_ARCH": "v128",
+        "UFORM_MARCH": "v128",
         "UFORM_WITH_CODECS": "OFF"
       }
     },
@@ -250,16 +250,14 @@
         "base",
         "linux"
       ],
-      "description": "The C library for one machine: its CPU floor and class, only the NumKong capabilities it runs, and its one GPU code.",
+      "description": "One machine: its CPU floor, every kernel-library capability spelled as 1 or 0, and its one GPU code.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "UFORM_BUILD_SHARED": "ON",
-        "UFORM_BUILD_CUDA": "ON",
         "UFORM_BUILD_TRAIN": "ON",
         "UFORM_BUILD_TEST": "OFF",
         "UFORM_BUILD_BENCH": "OFF",
-        "NUMKONG_PROFILE_CAPABILITIES": "ON",
-        "STRINGZILLA_PROFILE_CAPABILITIES": "ON"
+        "UFORM_MULTIVERSIONED": "OFF"
       }
     },
     {
@@ -267,14 +265,30 @@
       "inherits": "machine",
       "displayName": "Xeon 4 with Hopper - compile only",
       "cacheVariables": {
-        "UFORM_TARGET_ARCH": "sapphirerapids",
-        "UFORM_TARGET_CLASSES": "intel_sapphire",
-        "NUMKONG_TARGET_SIERRA": "0",
-        "NUMKONG_TARGET_TURIN": "0",
-        "NUMKONG_TARGET_DIAMOND": "0",
+        "UFORM_MARCH": "sapphirerapids",
+        "UFORM_CUDA_ARCH": "90a",
+        "NUMKONG_TARGET_HASWELL": "1",
+        "NUMKONG_TARGET_SKYLAKE": "1",
+        "NUMKONG_TARGET_ICELAKE": "1",
+        "NUMKONG_TARGET_GENOA": "1",
+        "NUMKONG_TARGET_SAPPHIRE": "1",
+        "NUMKONG_TARGET_SAPPHIREAMX": "1",
         "NUMKONG_TARGET_GRANITEAMX": "0",
+        "NUMKONG_TARGET_DIAMOND": "0",
         "NUMKONG_TARGET_DIAMONDAMX": "0",
-        "UFORM_CUDA_ARCHITECTURES": "90a-real"
+        "NUMKONG_TARGET_TURIN": "0",
+        "NUMKONG_TARGET_ALDER": "1",
+        "NUMKONG_TARGET_SIERRA": "0",
+        "STRINGZILLA_TARGET_WESTMERE": "1",
+        "STRINGZILLA_TARGET_GOLDMONT": "1",
+        "STRINGZILLA_TARGET_HASWELL": "1",
+        "STRINGZILLA_TARGET_SKYLAKE": "1",
+        "STRINGZILLA_TARGET_ICELAKE": "1",
+        "FORKUNION_TARGET_X86_PAUSE": "1",
+        "FORKUNION_TARGET_X86_TPAUSE": "1",
+        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
+        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X86_RAOINT": "0"
       }
     },
     {
@@ -282,42 +296,134 @@
       "inherits": "machine",
       "displayName": "Xeon 6 with Blackwell - compile only",
       "cacheVariables": {
-        "UFORM_TARGET_ARCH": "graniterapids",
-        "UFORM_TARGET_CLASSES": "intel_granite",
-        "NUMKONG_TARGET_SIERRA": "0",
-        "NUMKONG_TARGET_TURIN": "0",
+        "UFORM_MARCH": "graniterapids",
+        "UFORM_CUDA_ARCH": "100f",
+        "NUMKONG_TARGET_HASWELL": "1",
+        "NUMKONG_TARGET_SKYLAKE": "1",
+        "NUMKONG_TARGET_ICELAKE": "1",
+        "NUMKONG_TARGET_GENOA": "1",
+        "NUMKONG_TARGET_SAPPHIRE": "1",
+        "NUMKONG_TARGET_SAPPHIREAMX": "1",
+        "NUMKONG_TARGET_GRANITEAMX": "1",
         "NUMKONG_TARGET_DIAMOND": "0",
         "NUMKONG_TARGET_DIAMONDAMX": "0",
-        "UFORM_CUDA_ARCHITECTURES": "100f-real"
+        "NUMKONG_TARGET_TURIN": "0",
+        "NUMKONG_TARGET_ALDER": "1",
+        "NUMKONG_TARGET_SIERRA": "0",
+        "STRINGZILLA_TARGET_WESTMERE": "1",
+        "STRINGZILLA_TARGET_GOLDMONT": "1",
+        "STRINGZILLA_TARGET_HASWELL": "1",
+        "STRINGZILLA_TARGET_SKYLAKE": "1",
+        "STRINGZILLA_TARGET_ICELAKE": "1",
+        "FORKUNION_TARGET_X86_PAUSE": "1",
+        "FORKUNION_TARGET_X86_TPAUSE": "1",
+        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
+        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X86_RAOINT": "0"
       }
     },
     {
       "name": "grace_hopper",
       "inherits": "machine",
       "displayName": "Grace with Hopper - compile only",
-      "description": "Neoverse V2 runs apple_m2 in full, and aws_g5 needs WFET.",
+      "description": "Grace's 128-bit SVE gains nothing over NEON, so every SVE capability is off.",
       "cacheVariables": {
-        "UFORM_TARGET_ARCH": "neoverse-v2",
-        "UFORM_TARGET_CLASSES": "apple_m2",
+        "UFORM_MARCH": "grace",
+        "UFORM_CUDA_ARCH": "90a",
+        "NUMKONG_TARGET_NEON": "1",
+        "NUMKONG_TARGET_NEONHALF": "1",
+        "NUMKONG_TARGET_NEONSDOT": "1",
+        "NUMKONG_TARGET_NEONBFDOT": "1",
+        "NUMKONG_TARGET_NEONFHM": "1",
+        "NUMKONG_TARGET_SVE": "0",
+        "NUMKONG_TARGET_SVEHALF": "0",
+        "NUMKONG_TARGET_SVEBFDOT": "0",
+        "NUMKONG_TARGET_SVESDOT": "0",
+        "NUMKONG_TARGET_SVE2": "0",
         "NUMKONG_TARGET_NEONFP8": "0",
         "NUMKONG_TARGET_SME": "0",
         "NUMKONG_TARGET_SMEF64": "0",
         "NUMKONG_TARGET_SMEBI32": "0",
-        "UFORM_CUDA_ARCHITECTURES": "90a-real"
+        "STRINGZILLA_TARGET_NEON": "1",
+        "STRINGZILLA_TARGET_NEONAES": "1",
+        "STRINGZILLA_TARGET_NEONSHA": "1",
+        "STRINGZILLA_TARGET_SVE": "0",
+        "STRINGZILLA_TARGET_SVE2": "0",
+        "STRINGZILLA_TARGET_SVE2AES": "0",
+        "FORKUNION_TARGET_ARM64_YIELD": "1",
+        "FORKUNION_TARGET_ARM64_WFET": "0",
+        "FORKUNION_TARGET_ARM64_DC_CVAC": "1",
+        "FORKUNION_TARGET_ARM64_PRFM": "1",
+        "FORKUNION_TARGET_ARM64_LSE": "1",
+        "FORKUNION_TARGET_ARM64_RCPC": "1"
       }
     },
     {
       "name": "vera_rubin",
       "inherits": "machine",
       "displayName": "Vera with Rubin - compile only",
-      "description": "Olympus cores need Clang 22 or GCC 15, and CUDA 13.4 names no Rubin code, so Rubin runs the Blackwell bundle on 100f.",
+      "description": "Olympus cores need Clang 22 or GCC 15 and CUDA 13.4 names no Rubin code, so it compiles 100f; WFET is on, as no compiler macro reports it, and SVE off, as on Grace.",
       "cacheVariables": {
-        "UFORM_TARGET_ARCH": "olympus",
-        "UFORM_TARGET_CLASSES": "nvidia_vera",
+        "UFORM_MARCH": "olympus",
+        "UFORM_CUDA_ARCH": "100f",
+        "NUMKONG_TARGET_NEON": "1",
+        "NUMKONG_TARGET_NEONHALF": "1",
+        "NUMKONG_TARGET_NEONSDOT": "1",
+        "NUMKONG_TARGET_NEONBFDOT": "1",
+        "NUMKONG_TARGET_NEONFHM": "1",
+        "NUMKONG_TARGET_SVE": "0",
+        "NUMKONG_TARGET_SVEHALF": "0",
+        "NUMKONG_TARGET_SVEBFDOT": "0",
+        "NUMKONG_TARGET_SVESDOT": "0",
+        "NUMKONG_TARGET_SVE2": "0",
+        "NUMKONG_TARGET_NEONFP8": "1",
         "NUMKONG_TARGET_SME": "0",
         "NUMKONG_TARGET_SMEF64": "0",
         "NUMKONG_TARGET_SMEBI32": "0",
-        "UFORM_CUDA_ARCHITECTURES": "100f-real"
+        "STRINGZILLA_TARGET_NEON": "1",
+        "STRINGZILLA_TARGET_NEONAES": "1",
+        "STRINGZILLA_TARGET_NEONSHA": "1",
+        "STRINGZILLA_TARGET_SVE": "0",
+        "STRINGZILLA_TARGET_SVE2": "0",
+        "STRINGZILLA_TARGET_SVE2AES": "0",
+        "FORKUNION_TARGET_ARM64_YIELD": "1",
+        "FORKUNION_TARGET_ARM64_WFET": "1",
+        "FORKUNION_TARGET_ARM64_DC_CVAC": "1",
+        "FORKUNION_TARGET_ARM64_PRFM": "1",
+        "FORKUNION_TARGET_ARM64_LSE": "1",
+        "FORKUNION_TARGET_ARM64_RCPC": "1"
+      }
+    },
+    {
+      "name": "venice_mi450",
+      "inherits": "machine",
+      "displayName": "EPYC Venice with MI450 - compile only",
+      "description": "Clang 22 names no Zen 6 core, so it compiles at znver5 and spells the rows GCC 16's znver6 implies; gfx1250 covers MI450X and MI455X.",
+      "cacheVariables": {
+        "UFORM_MARCH": "znver5",
+        "UFORM_ROCM_ARCH": "gfx1250",
+        "NUMKONG_TARGET_HASWELL": "1",
+        "NUMKONG_TARGET_SKYLAKE": "1",
+        "NUMKONG_TARGET_ICELAKE": "1",
+        "NUMKONG_TARGET_GENOA": "1",
+        "NUMKONG_TARGET_SAPPHIRE": "1",
+        "NUMKONG_TARGET_SAPPHIREAMX": "0",
+        "NUMKONG_TARGET_GRANITEAMX": "0",
+        "NUMKONG_TARGET_DIAMOND": "0",
+        "NUMKONG_TARGET_DIAMONDAMX": "0",
+        "NUMKONG_TARGET_TURIN": "1",
+        "NUMKONG_TARGET_ALDER": "1",
+        "NUMKONG_TARGET_SIERRA": "1",
+        "STRINGZILLA_TARGET_WESTMERE": "1",
+        "STRINGZILLA_TARGET_GOLDMONT": "1",
+        "STRINGZILLA_TARGET_HASWELL": "1",
+        "STRINGZILLA_TARGET_SKYLAKE": "1",
+        "STRINGZILLA_TARGET_ICELAKE": "1",
+        "FORKUNION_TARGET_X86_PAUSE": "1",
+        "FORKUNION_TARGET_X86_TPAUSE": "0",
+        "FORKUNION_TARGET_X86_CLDEMOTE": "1",
+        "FORKUNION_TARGET_X86_CMPCCXADD": "0",
+        "FORKUNION_TARGET_X86_RAOINT": "0"
       }
     }
   ],

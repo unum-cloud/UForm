@@ -128,6 +128,7 @@ enum class cpu_class_t : u32_t {
     alibaba_c930_k = uform_cpu_class_alibaba_c930_k,
     wasm32_v128_k = uform_cpu_class_wasm32_v128_k,
     wasm64_extended_k = uform_cpu_class_wasm64_extended_k,
+    monoversioned_k = uform_cpu_class_monoversioned_k,
 };
 
 /** The GPU classes of @c uform_gpu_class_t as the engine names them, with the same ordinals. */
@@ -171,11 +172,12 @@ constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcep
                nk_cap_neonfhm_k;
     case cpu_class_t::apple_m4_k:
         return numkong_capabilities_of(cpu_class_t::apple_m2_k) | nk_cap_sme_k | nk_cap_smebi32_k;
-    case cpu_class_t::nvidia_vera_k: return numkong_capabilities_of(cpu_class_t::aws_g5_k) | nk_cap_neonfp8_k;
+    case cpu_class_t::nvidia_vera_k: return numkong_capabilities_of(cpu_class_t::apple_m2_k) | nk_cap_neonfp8_k;
     case cpu_class_t::alibaba_c930_k: return nk_cap_serial_k | nk_cap_rvv_k | nk_cap_rvvbb_k;
     case cpu_class_t::wasm32_v128_k: return nk_cap_serial_k | nk_cap_v128_k;
     case cpu_class_t::wasm64_extended_k:
         return numkong_capabilities_of(cpu_class_t::wasm32_v128_k) | nk_cap_v128relaxed_k;
+    case cpu_class_t::monoversioned_k: return nk_cpu_capabilities_compiled_();
     default: return nk_cap_serial_k;
     }
 }
@@ -217,7 +219,7 @@ constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
     case cpu_class_t::intel_icelake_k: return cpu_class_t::intel_skylake_k;
     case cpu_class_t::intel_skylake_k: return cpu_class_t::intel_haswell_k;
     case cpu_class_t::intel_sierra_k: return cpu_class_t::intel_haswell_k;
-    case cpu_class_t::nvidia_vera_k: return cpu_class_t::aws_g5_k;
+    case cpu_class_t::nvidia_vera_k: return cpu_class_t::apple_m2_k;
     case cpu_class_t::aws_g5_k: return cpu_class_t::apple_m2_k;
     case cpu_class_t::apple_m4_k: return cpu_class_t::apple_m2_k;
     case cpu_class_t::apple_m2_k: return cpu_class_t::aws_g2_k;
@@ -246,9 +248,10 @@ constexpr gpu_class_t gpu_class_of(uform_gpu_vendor_t vendor, u32_t architecture
 }
 
 /** The wait instruction one CPU class pairs: x86 spins PAUSE, the WAITPKG Xeons and the monitored
- *  Arm & RISC-V classes arm TPAUSE, WFET & WRS, WebAssembly threads sleep in @c memory.atomic.wait,
+ *  Arm & RISC-V classes arm TPAUSE, WFE & WRS, WebAssembly threads sleep in @c memory.atomic.wait,
  *  everything else yields - as does any class whose @c FORKUNION_TARGET_<BIT> is off in the probe
- *  list. */
+ *  list. WFE sleeps on uncapped waits and yields on capped ones, so it needs no bit to confirm; the
+ *  timed WFET only a monoversioned build reaches, where a preset vouches for it. */
 template <cpu_class_t cpu_class_>
 struct waiter_for_cpu_class {
     using type = fu::standard_yield_t;
@@ -303,14 +306,14 @@ struct waiter_for_cpu_class<cpu_class_t::apple_m4_k> {
     using type = fu::arm64_yield_t;
 };
 #endif
-#if FORKUNION_TARGET_ARM64_WFET
+#if FORKUNION_TARGET_ARM64_WFE
 template <>
 struct waiter_for_cpu_class<cpu_class_t::aws_g5_k> {
-    using type = fu::arm64_wfet_t;
+    using type = fu::arm64_wfe_t;
 };
 template <>
 struct waiter_for_cpu_class<cpu_class_t::nvidia_vera_k> {
-    using type = fu::arm64_wfet_t;
+    using type = fu::arm64_wfe_t;
 };
 #endif
 #if FORKUNION_TARGET_RISCV64_WRS
@@ -418,6 +421,17 @@ struct atomic_ref_for_cpu_class<cpu_class_t::wasm64_extended_k> {
     using type = fu::wasm_atomic_ref<value_type_>;
 };
 #endif
+#if UFORM_TARGET_MONOVERSIONED
+template <>
+struct waiter_for_cpu_class<cpu_class_t::monoversioned_k> {
+    using type = fu::preferred_yield_t;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::monoversioned_k> {
+    template <typename value_type_>
+    using type = fu::preferred_atomic_ref<value_type_>;
+};
+#endif
 
 /** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause: the runtime
  *  confirms nothing about them, and a class differing by one alone earns no rung. */
@@ -452,6 +466,7 @@ constexpr fu::capabilities_t forkunion_capabilities_of(cpu_class_t cpu_class) no
     case cpu_class_t::alibaba_c930_k: return forkunion_capabilities_of<cpu_class_t::alibaba_c930_k>();
     case cpu_class_t::wasm32_v128_k: return forkunion_capabilities_of<cpu_class_t::wasm32_v128_k>();
     case cpu_class_t::wasm64_extended_k: return forkunion_capabilities_of<cpu_class_t::wasm64_extended_k>();
+    case cpu_class_t::monoversioned_k: return forkunion_capabilities_of<cpu_class_t::monoversioned_k>();
     default: return forkunion_capabilities_of<cpu_class_t::serial_k>();
     }
 }
@@ -459,7 +474,7 @@ constexpr fu::capabilities_t forkunion_capabilities_of(cpu_class_t cpu_class) no
 /** The C enum's class as the engine names it; @c uform_cpu_class_unknown_k derives nothing, so it
  *  names the serial floor. */
 constexpr cpu_class_t cpu_class_of(uform_cpu_class_t cpu_class) noexcept {
-    if (cpu_class == uform_cpu_class_unknown_k || cpu_class > uform_cpu_class_wasm64_extended_k)
+    if (cpu_class == uform_cpu_class_unknown_k || cpu_class > uform_cpu_class_monoversioned_k)
         return cpu_class_t::serial_k;
     return static_cast<cpu_class_t>(cpu_class);
 }
@@ -470,22 +485,6 @@ struct cpu_ceiling_t {
     nk_capability_t compute = nk_cap_serial_k;
     fu::capabilities_t sync = fu::capabilities_unknown_k;
 };
-
-/** The ceiling @p pinned sets, the one caller of NumKong's and ForkUnion's CPU detection; a class
- *  this machine does not run, or one past the enum, is refused as unsupported. */
-inline expected<cpu_ceiling_t> pick_cpu_ceiling(uform_cpu_class_t pinned) noexcept {
-    cpu_ceiling_t detected;
-    if (nk_cpu_capabilities_enabled(&detected.compute) != nk_success_k) detected.compute = nk_cap_serial_k;
-    detected.sync = fu::cpu_capabilities();
-    if (pinned == uform_cpu_class_unknown_k) return detected;
-    if (pinned > uform_cpu_class_wasm64_extended_k)
-        return expected<cpu_ceiling_t>::fail(status_t::unsupported_k, "no CPU class has that ordinal");
-    cpu_class_t const pinned_class = cpu_class_of(pinned);
-    cpu_ceiling_t const wanted {numkong_capabilities_of(pinned_class), forkunion_capabilities_of(pinned_class)};
-    if ((detected.compute & wanted.compute) != wanted.compute || (detected.sync & wanted.sync) != wanted.sync)
-        return expected<cpu_ceiling_t>::fail(status_t::unsupported_k, "the CPU does not run the pinned class");
-    return wanted;
-}
 
 /** Whether @p rung fits under @p ceiling: its kits and waiters need nothing the ceiling lacks. */
 constexpr bool cpu_rung_fits(cpu_class_t rung, cpu_ceiling_t ceiling) noexcept {
@@ -511,8 +510,10 @@ struct cpu_ladder {};
 template <gpu_class_t... classes_>
 struct gpu_ladder {};
 
-/** This architecture's ladder, the serial floor last. */
-#if NUMKONG_ARCH_X8664_
+/** This architecture's ladder, the serial floor last, or a monoversioned build's one class. */
+#if UFORM_TARGET_MONOVERSIONED
+using cpu_ladder_t = cpu_ladder<cpu_class_t::monoversioned_k>;
+#elif NUMKONG_ARCH_X8664_
 using cpu_ladder_t =
     cpu_ladder<cpu_class_t::intel_diamond_k, cpu_class_t::intel_granite_k, cpu_class_t::intel_sapphire_k,
                cpu_class_t::amd_genoa_k, cpu_class_t::intel_icelake_k, cpu_class_t::intel_skylake_k,
@@ -558,7 +559,9 @@ constexpr gpu_class_t parent_class_of(gpu_class_t gpu_class) noexcept {
  *  through @c UFORM_TARGET_<CLASS>; a ladder never picks a class without one. */
 constexpr bool cpu_class_compiled(cpu_class_t cpu_class) noexcept {
     switch (cpu_class) {
+#if UFORM_TARGET_SERIAL
     case cpu_class_t::serial_k: return true;
+#endif
 #if UFORM_TARGET_INTEL_HASWELL
     case cpu_class_t::intel_haswell_k: return true;
 #endif
@@ -607,6 +610,64 @@ constexpr bool cpu_class_compiled(cpu_class_t cpu_class) noexcept {
 #if UFORM_TARGET_WASM64_EXTENDED
     case cpu_class_t::wasm64_extended_k: return true;
 #endif
+#if UFORM_TARGET_MONOVERSIONED
+    case cpu_class_t::monoversioned_k: return true;
+#endif
+    default: return false;
+    }
+}
+
+/** The ceiling @p pinned sets, the one caller of NumKong's and ForkUnion's CPU detection; a class
+ *  this machine does not run, one past the enum, and a ceiling no compiled class fits, like one
+ *  below a monoversioned build's masks, are refused as unsupported. */
+inline expected<cpu_ceiling_t> pick_cpu_ceiling(uform_cpu_class_t pinned) noexcept {
+    cpu_ceiling_t picked;
+    if (nk_cpu_capabilities_enabled(&picked.compute) != nk_success_k) picked.compute = nk_cap_serial_k;
+    picked.sync = fu::cpu_capabilities();
+    if (pinned != uform_cpu_class_unknown_k) {
+        if (pinned > uform_cpu_class_monoversioned_k)
+            return expected<cpu_ceiling_t>::fail(status_t::unsupported_k, "no CPU class has that ordinal");
+        cpu_class_t const pinned_class = cpu_class_of(pinned);
+        cpu_ceiling_t const wanted {numkong_capabilities_of(pinned_class), forkunion_capabilities_of(pinned_class)};
+        if ((picked.compute & wanted.compute) != wanted.compute || (picked.sync & wanted.sync) != wanted.sync)
+            return expected<cpu_ceiling_t>::fail(status_t::unsupported_k, "the CPU does not run the pinned class");
+        picked = wanted;
+    }
+    for (auto rung = uform_cpu_class_serial_k; rung <= uform_cpu_class_monoversioned_k;
+         rung = static_cast<uform_cpu_class_t>(rung + 1))
+        if (cpu_class_compiled(cpu_class_of(rung)) && cpu_rung_fits(cpu_class_of(rung), picked)) return picked;
+    return expected<cpu_ceiling_t>::fail(status_t::unsupported_k, "the build compiled no class under that ceiling");
+}
+
+/** Whether the build compiled the unit of @p gpu_class, as CMake told the dispatch unit through
+ *  @c UFORM_TARGET_<CLASS>; the vendor floor's unit comes with its vendor. */
+constexpr bool gpu_class_compiled(gpu_class_t gpu_class) noexcept {
+    switch (gpu_class) {
+    case gpu_class_t::unknown_k: return true;
+#if UFORM_TARGET_NVIDIA_AMPERE
+    case gpu_class_t::nvidia_ampere_k: return true;
+#endif
+#if UFORM_TARGET_NVIDIA_ADA
+    case gpu_class_t::nvidia_ada_k: return true;
+#endif
+#if UFORM_TARGET_NVIDIA_HOPPER
+    case gpu_class_t::nvidia_hopper_k: return true;
+#endif
+#if UFORM_TARGET_NVIDIA_BLACKWELL
+    case gpu_class_t::nvidia_blackwell_k: return true;
+#endif
+#if UFORM_TARGET_NVIDIA_BLACKWELLRTX
+    case gpu_class_t::nvidia_blackwellrtx_k: return true;
+#endif
+#if UFORM_TARGET_AMD_CDNA3
+    case gpu_class_t::amd_cdna3_k: return true;
+#endif
+#if UFORM_TARGET_AMD_CDNA4
+    case gpu_class_t::amd_cdna4_k: return true;
+#endif
+#if UFORM_TARGET_AMD_CDNA5
+    case gpu_class_t::amd_cdna5_k: return true;
+#endif
     default: return false;
     }
 }
@@ -641,8 +702,8 @@ struct host_class_tables {
     static void wait(u64_t &word, u64_t seen) noexcept;
 };
 
-/** The host verbs of the newest compiled class on @p ladder that fits under @p ceiling; the serial
- *  floor always answers. */
+/** The host verbs of the newest compiled class on @p ladder that fits under @p ceiling, one of
+ *  which @ref pick_cpu_ceiling made sure of. */
 template <cpu_class_t... classes_>
 host_verbs_t const *pick_host_verbs(cpu_ladder<classes_...>, cpu_ceiling_t ceiling) noexcept {
     host_verbs_t const *picked = nullptr;
