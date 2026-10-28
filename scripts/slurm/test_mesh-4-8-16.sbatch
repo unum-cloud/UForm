@@ -24,9 +24,9 @@
 set -euo pipefail
 
 # The mesh test needs no InfiniBand — the rendezvous is filesystem-only, so a lean build suffices.
-BINARY="${UFORM_TEST_BINARY:-build_release/uform_test_mesh}"
+BINARY="${UFORM_TEST_BINARY:-build_cuda/uform_test_mesh}"
 [[ -x "$BINARY" ]] || {
-    echo "FATAL: $BINARY not built — cmake --build build_release --target uform_test_mesh"
+    echo "FATAL: $BINARY not built — cmake --build build_cuda --target uform_test_mesh"
     exit 1
 }
 

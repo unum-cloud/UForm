@@ -15,8 +15,9 @@ add_library(uform_shared SHARED ${uform_library_exclusion_})
 add_library(uform::shared ALIAS uform_shared)
 # The encoder's variants follow `uform_host`, so the baseline's copy of an inline function they share comes first.
 target_link_libraries(uform_shared PRIVATE uform_host ${uform_encoder_variants_})
-# The archives it links were compiled with default visibility, so only the linker can keep their symbols in.
-if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+# The archives it links, NumKong's, ForkUnion's and yyjson's among them, were compiled with default visibility, so only
+# the linker can keep their symbols in.
+if (CMAKE_SYSTEM_NAME MATCHES "^(Linux|Android|FreeBSD)$")
     target_link_options(uform_shared PRIVATE "LINKER:--exclude-libs,ALL")
 endif ()
 set(uform_variant_objects_)
@@ -44,7 +45,7 @@ target_include_directories(
 target_link_libraries(uform_shared PUBLIC uform_header)
 target_link_libraries(uform_static PUBLIC uform_header)
 # The system codecs the host decoders call stay shared libraries, which an archive can only name to its consumers.
-if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^wasm")
+if (UFORM_WITH_CODECS)
     target_link_libraries(
         uform_static
         INTERFACE "${UFORM_TURBOJPEG_LIBRARY}"
@@ -58,7 +59,7 @@ if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^wasm")
     )
 endif ()
 # NumKong compiles each GPU generation into an object library of its own beside its archive's objects, which the
-# archive therefore takes one by one.
+# archive therefore takes one by one, naming to its consumers the vendor runtime those units launch through.
 foreach (
     numkong_unit_ IN
     ITEMS cuda
@@ -77,24 +78,29 @@ foreach (
         target_sources(uform_static PRIVATE $<TARGET_OBJECTS:numkong_${numkong_unit_}_>)
     endif ()
 endforeach ()
-# Each GPU vendor's variants join both flavors above, and the archive names that vendor's runtime to its consumers.
-if (TARGET uform_encoder_vram_nvidia_variants)
-    target_link_libraries(uform_static INTERFACE CUDA::cudart CUDA::cuda_driver)
+if (TARGET numkong_cuda_)
+    target_link_libraries(uform_static INTERFACE CUDA::cudart)
 endif ()
-# The training verbs join both flavors with the NVIDIA build, and the archive names the training stack to its consumers.
+if (TARGET numkong_rocm_)
+    target_link_libraries(uform_static INTERFACE hip::host)
+endif ()
+# Each GPU vendor's variants join both flavors above and open that vendor's driver at first use, linking none.
+if (TARGET uform_encoder_vram_nvidia_variants OR TARGET uform_encoder_vram_amd_variants)
+    target_link_libraries(uform_static INTERFACE ${CMAKE_DL_LIBS})
+endif ()
+# The training verbs join both flavors with UFORM_BUILD_TRAIN, and the archive names the training stack to its
+# consumers.
 if (TARGET uform_nvidia_train)
     target_link_libraries(uform_shared PRIVATE uform_nvidia_train uform::train)
     target_sources(uform_static PRIVATE $<TARGET_OBJECTS:uform_nvidia_train>)
     target_link_libraries(uform_static INTERFACE $<BUILD_INTERFACE:uform::train>)
-endif ()
-if (TARGET uform_encoder_vram_amd_variants)
-    target_link_libraries(uform_static INTERFACE hip::host)
 endif ()
 set_target_properties(
     uform_shared uform_static
     PROPERTIES LINKER_LANGUAGE CXX
                C_VISIBILITY_PRESET hidden
                CXX_VISIBILITY_PRESET hidden
+               VISIBILITY_INLINES_HIDDEN ON
 )
 
 # The test is C, so it reaches the C++ runtime and the host's thread library through the archive's link language.

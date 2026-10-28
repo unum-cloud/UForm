@@ -25,8 +25,6 @@ CLI usage:
     uv run scripts/data/download_m4_instruct.py --out-dir $UFORM_DATA_ROOT/m4-instruct
 """
 
-from __future__ import annotations
-
 import argparse
 import sys
 from pathlib import Path

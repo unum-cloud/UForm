@@ -420,7 +420,8 @@ UFORM_EXPORT void uform_mesh_describe(uform_mesh_describe_t *arguments) {
     description.host_domain_index = topology.host_domain_index;
     description.first_gpu_index = topology.first_gpu_index();
     description.multimem_tier = static_cast<uform_multimem_tier_t>(tier.value_.tier);
-    description.gpu_class = static_cast<uform_gpu_class_t>(gpu_class_of(capabilities_of(arguments->mesh->executor)));
+    description.gpu_class = static_cast<uform_gpu_class_t>(
+        std::get<vram_executor_t>(arguments->mesh->executor->executor).devices[0].gpu_class);
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 

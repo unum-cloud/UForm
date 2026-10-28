@@ -36,8 +36,6 @@ CLI usage:
     uv run scripts/data/download_coco_captions.py --out-dir $UFORM_DATA_ROOT/coco_captions
 """
 
-from __future__ import annotations
-
 import argparse
 import shutil
 import sys

@@ -219,6 +219,7 @@ pub struct uform_executor_for_vram_t {
     pub executor: *mut uform_executor_t,
     pub outcome: *mut uform_outcome_t,
     pub vram: uform_vram_options_t,
+    pub ram: uform_ram_options_t,
     pub streams: *const *mut c_void,
     pub scratch_limit: usize,
     pub deferred_limit: usize,
@@ -1425,9 +1426,10 @@ impl Executor {
     /// driven by whichever host thread submits - which is why this takes no thread count.
     ///
     /// `devices` are positions in what [`gpu_devices`] lists, and `gpu_class` pins the class every
-    /// one of them dispatches as, where `None` derives theirs. `streams` is empty, or holds one
-    /// CUDA stream per device in `devices` order. Zero `scratch_limit` lets scratch grow as batches
-    /// ask.
+    /// one of them dispatches as, where `None` derives theirs. The host decoders take 7/8 of the
+    /// cores local to `memory_domains` and dispatch as `cpu_class`, where `None` derives the CPU's
+    /// own. `streams` is empty, or holds one CUDA stream per device in `devices` order. Zero
+    /// `scratch_limit` lets scratch grow as batches ask.
     ///
     /// Calls `uform_executor_for_vram`.
     ///
@@ -1436,6 +1438,8 @@ impl Executor {
     pub unsafe fn for_vram(
         devices: &[i32],
         gpu_class: Option<GPUClass>,
+        memory_domains: &[i32],
+        cpu_class: Option<CPUClass>,
         streams: &[*mut c_void],
         scratch_limit: usize,
         deferred_limit: usize,
@@ -1449,6 +1453,7 @@ impl Executor {
             executor: &mut handle,
             outcome: &mut outcome,
             vram: vram_options(devices, gpu_class),
+            ram: ram_options(memory_domains, cpu_class),
             // The C side reads one stream per device from any non-null pointer.
             streams: match streams.is_empty() {
                 true => ptr::null(),
@@ -1929,7 +1934,7 @@ mod tests {
     fn executors_report_what_this_build_lacks() {
         let pooled = unsafe { Executor::on_pool(&[], None, ptr::null_mut(), 0) };
         assert_eq!(pooled.unwrap_err().status, Status::Unsupported);
-        let mismatched = unsafe { Executor::for_vram(&[0, 1], None, &[ptr::null_mut()], 0, 0) };
+        let mismatched = unsafe { Executor::for_vram(&[0, 1], None, &[], None, &[ptr::null_mut()], 0, 0) };
         assert_eq!(mismatched.unwrap_err().status, Status::ShapeMismatch);
     }
 

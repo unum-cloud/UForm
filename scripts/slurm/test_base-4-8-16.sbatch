@@ -52,7 +52,7 @@ echo "uform-test-base: ${total_gpus} GPU(s) = ${host_domain_count} node(s) x ${g
 # The preflight probe runs first: uform_test_env names each environment gap (library resolution, GPUDirect
 # registration, the rendezvous directory) in one line per node; under `set -e` a failing probe aborts the
 # job before the suite spends a minute discovering the gap mid-run.
-env_binary="${UFORM_ENV_BINARY:-$(dirname "${UFORM_TEST_BINARY:-build_release/uform_test_base}")/uform_test_env}"
+env_binary="${UFORM_ENV_BINARY:-$(dirname "${UFORM_TEST_BINARY:-build_cuda/uform_test_base}")/uform_test_env}"
 if [[ -x "${env_binary}" ]]; then
     srun --ntasks="${host_domain_count}" --ntasks-per-node=1 --gpu-bind=none "${env_binary}"
 fi
@@ -60,4 +60,4 @@ fi
 # Line-buffered so a hung run shows how far it got instead of a silent block-buffered void; the optional
 # UFORM_TEST_ONLY=tokens|omni|sweep fast lane rides through --export like the rest of the contract.
 srun --ntasks="${host_domain_count}" --ntasks-per-node=1 --gpu-bind=none \
-    stdbuf -oL "${UFORM_TEST_BINARY:-build_release/uform_test_base}"
+    stdbuf -oL "${UFORM_TEST_BINARY:-build_cuda/uform_test_base}"

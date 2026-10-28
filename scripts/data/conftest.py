@@ -1,7 +1,5 @@
 """The report header, the `UFORM_FILTER` hook and the seeding fixtures every `test_*.py` suite inherits."""
 
-from __future__ import annotations
-
 import random
 
 import pytest

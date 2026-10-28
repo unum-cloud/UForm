@@ -33,8 +33,6 @@ CLI usage:
     uv run scripts/data/download_droid.py --camera observation.images.wrist_image_left --max-frames 400
 """
 
-from __future__ import annotations
-
 import argparse
 import glob
 import io

@@ -11,7 +11,7 @@ env:
   NODE_VERSION: 22
   EMSCRIPTEN_VERSION: 6.0.9
   UBUNTU_CODECS: >-
-    libjpeg-turbo8-dev libpng-dev libwebp-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
+    libturbojpeg0-dev libpng-dev libwebp-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
     libswscale-dev
   MACOS_CODECS: jpeg-turbo libpng webp ffmpeg
 
@@ -259,7 +259,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-26.04, ubuntu-26.04-arm, macos-15, macos-15-intel]
-        python-version: ["312", "313", "313t", "314", "314t"]
+        python-version: ["312", "313", "314", "314t", "315", "315t"]
     steps:
       - name: Check Out Refreshed Version
         uses: actions/checkout@v7
@@ -281,7 +281,6 @@ jobs:
         run: cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: cp${{ matrix.python-version }}-*
-          CIBW_ENABLE: cpython-freethreading
           CIBW_ARCHS: native
           CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_34
           CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_34
@@ -290,7 +289,7 @@ jobs:
             apk add libjpeg-turbo-dev libpng-dev libwebp-dev ffmpeg-dev;
             else
             dnf install -y epel-release && dnf config-manager --set-enabled crb &&
-            dnf install -y libjpeg-turbo-devel libpng-devel libwebp-devel libavcodec-free-devel
+            dnf install -y turbojpeg-devel libpng-devel libwebp-devel libavcodec-free-devel
             libavformat-free-devel libavutil-free-devel libswresample-free-devel libswscale-free-devel;
             fi
           # Homebrew bottles target the runner's own macOS, which the wheels then require.

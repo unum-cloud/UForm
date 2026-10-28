@@ -140,6 +140,7 @@ The presets choose the residencies a build carries:
 
 - `library` builds the engine for the host alone.
 - `cuda_rocm_library` adds the NVIDIA and AMD residencies, the trainer and the mesh, with Clang hosting both vendors' compilers.
+- `linux_cuda_rocm` adds both residencies without the trainer, and launches UForm's own kernels through drivers opened at first use.
 - `wasm32_emscripten` and `wasm32_wasi` build for WebAssembly, which takes decoded media only.
 - `stub_library` builds `src_stub/`, a stand-in answering the same verbs over the C++ standard library and ForkUnion.
 

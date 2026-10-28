@@ -33,7 +33,7 @@ ctest --test-dir build_library
 ```
 
 - `library` builds the engine for the host alone, and `stub_library` the stand-in in `src_stub/`.
-- `cuda_rocm_library` adds both GPU residencies, while `debug`, `check`, `relwithdebinfo` and `release` also build the trainer and its suites, `check` with warnings as errors.
+- `cuda_rocm_library` adds both GPU residencies and the trainer, `linux_cuda_rocm` both residencies alone, the tree whose `readelf` check guards the vendor boundary, while `debug`, `check`, `relwithdebinfo` and `release` also build the trainer and its suites, `check` with warnings as errors.
 - `wasm32_emscripten` and `wasm32_wasi` build for WebAssembly, with Node or Wasmtime running the tests.
 - `-D UFORM_BUILD_BENCH=ON` adds the benchmarks [`bench/README.md`](bench/README.md) describes.
 
@@ -224,7 +224,7 @@ CTest labels sort the suites by what they need: `host` runs anywhere, `cuda` wan
 
 ```sh
 ctest --test-dir build_library -L host
-UFORM_SEED=random ctest --test-dir build_release -L cuda --output-on-failure
+UFORM_SEED=random ctest --test-dir build_cuda -L cuda --output-on-failure
 ```
 
 [`test/README.md`](test/README.md) describes the tiers from one process to many nodes.
@@ -236,16 +236,21 @@ Every CMake option carries the `UFORM_` prefix, and every `UFORM_BUILD_*` switch
 
 - `UFORM_BUILD_SHARED`: `uform_static` and `uform_shared` in the default build and the install; without it they build only for the targets that link them.
 - `UFORM_BUILD_STUB`: `uform_static_stub` and `uform_shared_stub` from `src_stub/`, which the bindings then link instead.
-- `UFORM_BUILD_CUDA`: the NVIDIA residency, the trainer, the mesh and the loaders.
+- `UFORM_BUILD_CUDA`: the NVIDIA residency.
 - `UFORM_BUILD_ROCM`: the AMD residency.
+- `UFORM_BUILD_TRAIN`: the trainer, the mesh and the loaders over CUDA, which the `cuda` preset and the machine profiles set; only they link CUDA libraries into the C library.
 - `UFORM_BUILD_TEST`: the suites in `test/` and the C tests.
-- `UFORM_BUILD_TOOLS`: the trainer in `tools/`, with CUDA.
+- `UFORM_BUILD_TOOLS`: the trainer in `tools/`, with `UFORM_BUILD_TRAIN`.
 - `UFORM_BUILD_BENCH`: the benchmarks in `bench/`.
 - `UFORM_BUILD_PYTHON` and `UFORM_BUILD_NODE`: the CPython extension and the Node addon, which scikit-build-core and cmake-js set.
 - `UFORM_WERROR`: warnings as errors, which the `check` preset sets.
 - `UFORM_INSTALL`: with `UFORM_BUILD_SHARED`, the C headers, `uform_static`, `uform_shared` and a CMake package under `lib/cmake/uform`, which `find_package(uform)` reads as `uform::static`, `uform::shared` and `uform::header`, on in a top-level build.
 - `UFORM_WITH_INFINIBAND`: `AUTO` probes for InfiniBand and enables it when present, `ON` requires it and `OFF` leaves it out.
-- `UFORM_CUDA_ARCHITECTURES`: the GPU codes every CUDA unit compiles for, `80-real;89-real;90a-real;100f-real;120f-real` by default.
+- `UFORM_WITH_CODECS`: the host image, video and audio codecs the verbs over files decode with, on by default and off on WebAssembly, Android and Windows presets; CUDA needs it.
+- `UFORM_TARGET_ARCH`: the CPU UForm's units and its libraries' are tuned for, `native` or a name like `graniterapids`, and on WebAssembly the module's `serial`, `v128` or `v128relaxed`; empty by default, seeded from the environment.
+- `UFORM_TARGET_CLASSES`: the CPU classes the encoder compiles beside `serial`, every class when empty, and under `native`, which needs `UFORM_TARGET_ARCH=native`, the newest of each lineage this host runs.
+- `UFORM_CUDA_ARCHITECTURES`: the GPU codes every CUDA unit compiles for, `75-real;80-real;89-real;90a-real;100f-real;120f-real;80-virtual` by default, and `native` for the family code of each visible GPU.
+- The `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper` and `vera_rubin` presets build the C library for one machine, pinning its CPU, its one CPU class and its one GPU code.
 - `UFORM_SITE_PACKAGES` and `UFORM_CUDF_ROOT`: the directory the libcudf wheel discovery searches, or the prefix holding the libraries themselves.
 
 Binaries take long kebab-case flags with no short forms, as `uform_bench_encoder --checkpoint model.safetensors --cpu-class intel-haswell` does, and spell classes, scalars and statuses as the C name tables do.
@@ -300,8 +305,8 @@ An engine here is a CPU or GPU class: a rung of a ladder that runs the encoder t
 1. Kits: where NumKong compiles kernels no existing kit calls, add a `<capability>_products_kit_t`, `_attention_kit_t` or `_elementwise_kit_t` to `include/uform/encoder/ram_kits.hpp`, or to `vram_kits.hpp` for a GPU, under `#if NUMKONG_TARGET_<CAPABILITY>` beside a twin whose `compiled_k` is false, and list it in its family's ladder in priority order.
 2. The C enum: append the class to `uform_cpu_class_t` or `uform_gpu_class_t` in `c/uform/types.h`, spell it in the name tables of `src/types.cpp`, and move the bounds in `src/lib.hpp` and `c/test.c` that name the last enumerator.
 3. The class: in `src/lib.hpp`, add its `cpu_class_t` or `gpu_class_t` enumerator, its row of `numkong_capabilities_of` as its parent's mask plus a delta, its `parent_class_of`, and its place newest first in `cpu_ladder_t`, `nvidia_ladder_t` or `amd_ladder_t`.
-4. Its primitives: a CPU class adds its cases to `forkunion_capabilities_of` and `cpu_class_compiled`, and specializes `waiter_for_cpu_class` and `atomic_ref_for_cpu_class` when it pairs a ForkUnion primitive its parent lacks; a GPU class joins the list `gpu_class_of` walks.
-5. The build: a CPU class restates its delta in `src/CMakeLists.txt` as `uform_cpu_class(<class> <CLASS> OVER <parent> <capability> <MACRO>...)`, which reaches `src/lib.hpp` as `UFORM_TARGET_<CLASS>`, and a GPU class is one `uform_nvidia_class(<class>)` or `uform_amd_class(<class>)` line.
+4. Its primitives: a CPU class adds its cases to `forkunion_capabilities_of` and `cpu_class_compiled`, and specializes `waiter_for_cpu_class` and `atomic_ref_for_cpu_class` when it pairs a ForkUnion primitive its parent lacks; a GPU class adds the architecture numbers its driver reports to `gpu_class_of`.
+5. The build: a CPU class restates its delta in `src/CMakeLists.txt` as `uform_cpu_class(<class> <CLASS> OVER <parent> <capability> <MACRO>... FORKUNION <capability>...)`, which reaches `src/lib.hpp` as `UFORM_TARGET_<CLASS>`, and a GPU class is one `uform_nvidia_class(<class>)` or `uform_amd_class(<class>)` line.
 6. The class unit: `src/encoder/ram_variants_<class>.cpp` instantiates `encoder_class_tables` for `encoder_home_t::ram_k` and `host_class_tables` for the class, while `src/encoder/vram_variants_<vendor>_<class>.cpp` instantiates `encoder_class_tables` for its vendor's home.
 
 A class whose kits match its parent's answers no table, so the ladder falls through to the parent, and a CPU row whose delta NumKong did not compile builds no unit at all.

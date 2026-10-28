@@ -38,8 +38,6 @@ so a broken reshape fails at acquisition instead of silently mistraining. Enumer
 zstd/cuDF repack, and the round-trip verify are reused verbatim from the repack cores.
 """
 
-from __future__ import annotations
-
 import argparse
 import os
 import shutil

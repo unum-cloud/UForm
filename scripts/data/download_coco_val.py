@@ -16,8 +16,6 @@ CLI usage:
     uv run scripts/data/download_coco_val.py --force
 """
 
-from __future__ import annotations
-
 import argparse
 import sys
 import urllib.request

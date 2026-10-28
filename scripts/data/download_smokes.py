@@ -17,8 +17,6 @@ CLI usage:
     uv run scripts/data/download_smokes.py --force
 """
 
-from __future__ import annotations
-
 import argparse
 import importlib
 import os

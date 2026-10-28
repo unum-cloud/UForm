@@ -31,7 +31,7 @@ namespace unum::uform::encoder {
 
 #pragma region Entries
 
-/** What a vendor's runtime reports about one of its devices beside its capabilities. */
+/** What a vendor's runtime reports about one of its devices, its architecture numbers included. */
 struct device_description_t {
 
     /** The vendor's own name for the device, NUL-terminated and truncated to fit. */
@@ -42,6 +42,12 @@ struct device_description_t {
 
     /** Device memory in bytes. */
     u64_t memory_bytes = 0;
+
+    /** The architecture's major number: NVIDIA's compute capability major, AMD's gfx major. */
+    u32_t architecture_major = 0;
+
+    /** The architecture's minor number: NVIDIA's compute capability minor, AMD's gfx minor. */
+    u32_t architecture_minor = 0;
 };
 
 /**
@@ -55,7 +61,8 @@ struct device_description_t {
 struct vram_nvidia_entries_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_cuda_k;
 
-    /** Reads the name, compute units and memory of the vendor's device @p vendor_ordinal . */
+    /** Reads the name, compute units, memory and compute capability of the vendor's device
+     *  @p vendor_ordinal . */
     static nk_status_t describe(std::size_t vendor_ordinal, device_description_t &description) noexcept;
 
     /** @p source into @p target , as long, either side in host or device memory. */

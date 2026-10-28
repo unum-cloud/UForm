@@ -267,6 +267,10 @@ export interface ExecutorForVramConfig {
   devices?: number[];
   /** The GPU class every device dispatches as, spelled like "nvidia-hopper"; absent derives the devices' own. */
   gpuClass?: string;
+  /** NUMA node IDs whose cores the host decoders take; absent takes every node. */
+  memoryDomains?: number[];
+  /** The CPU class the host decoders dispatch as, spelled like "intel-haswell"; absent derives the CPU's own. */
+  cpuClass?: string;
   /** Borrowed CUDA stream addresses, one per device in `devices` order; absent creates its own. */
   streams?: bigint[];
   /** Ceiling on scratch bytes per device; absent lets scratch grow as batches ask. */

@@ -33,7 +33,7 @@
 #include "uform/media/video.hpp"       // `demux_video`, `decode_video_frames`, `video_channels_k`
 #include "uform/train/trainer.hpp"
 
-#include "lib.hpp"            // `gpu_class_t`, `gpu_class_of`, `numkong_capabilities_of`
+#include "lib.hpp"            // `gpu_class_t`, `numkong_capabilities_of`
 #include "train/numerics.hpp" // `gpu_numerics_of`
 
 namespace ue = unum::uform::encoder;
@@ -91,8 +91,20 @@ static gpu_numerics_t gpu_numerics_of() noexcept {
     return numerics;
 }
 
+/** The newest NVIDIA class whose kits @p capabilities hold, as a run's processes agree on them
+ *  by mask. */
+static uf::gpu_class_t nvidia_class_held_(nk_capability_t capabilities) noexcept {
+    for (uf::gpu_class_t const gpu_class :
+         {uf::gpu_class_t::nvidia_blackwellrtx_k, uf::gpu_class_t::nvidia_blackwell_k, uf::gpu_class_t::nvidia_hopper_k,
+          uf::gpu_class_t::nvidia_ada_k, uf::gpu_class_t::nvidia_ampere_k}) {
+        nk_capability_t const wanted = uf::numkong_capabilities_of(gpu_class);
+        if ((capabilities & wanted) == wanted) return gpu_class;
+    }
+    return uf::gpu_class_t::unknown_k;
+}
+
 gpu_numerics_t ut::gpu_numerics_of(nk_capability_t capabilities) noexcept {
-    switch (uf::gpu_class_of(capabilities)) {
+    switch (nvidia_class_held_(capabilities)) {
     case uf::gpu_class_t::nvidia_blackwellrtx_k: return ::gpu_numerics_of<uf::gpu_class_t::nvidia_blackwellrtx_k>();
     case uf::gpu_class_t::nvidia_blackwell_k: return ::gpu_numerics_of<uf::gpu_class_t::nvidia_blackwell_k>();
     case uf::gpu_class_t::nvidia_hopper_k: return ::gpu_numerics_of<uf::gpu_class_t::nvidia_hopper_k>();
@@ -152,7 +164,7 @@ expected_t mesh_t::make(mesh_t &placed, mesh_options_t const &options, std::span
                                                             : static_cast<u32_t>(devices.size());
     expected<mesh_topology_t> topology = mesh_topology_t::bootstrap(
         options.host_domain_index, options.host_domain_count, &pause_between_polls_, multimem, options.directory,
-        options.job, options.timeout_seconds, static_cast<u32_t>(uf::gpu_class_of(options.capabilities)));
+        options.job, options.timeout_seconds, static_cast<u32_t>(nvidia_class_held_(options.capabilities)));
     if (!topology) return expected_t::fail(std::move(topology));
 
     bool own_members = devices.size() == topology.value_.shape.gpus_per_host_domain;

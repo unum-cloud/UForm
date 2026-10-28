@@ -9,8 +9,6 @@ exits non-zero on the first failed assertion. Pure stdlib — imports `acquire_s
 `acquire_manifest`, none of which pull a heavy dependency at import time.
 """
 
-from __future__ import annotations
-
 import math
 import os
 

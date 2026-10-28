@@ -8,11 +8,11 @@ Each prints the version, the capabilities and its settings, then one row per ben
 The benchmarks build with `-D UFORM_BUILD_BENCH=ON`, beside the C library:
 
 ```sh
-cmake --preset release -D UFORM_BUILD_BENCH=ON
-cmake --build build_release --target uform_bench_encoder uform_bench_core
+cmake --preset cuda -D UFORM_BUILD_BENCH=ON
+cmake --build build_cuda --target uform_bench_encoder uform_bench_core
 ```
 
-`uform_bench_encoder` builds on every tree, the CPU-only `library` preset included, while `uform_bench_core` needs `-D UFORM_BUILD_CUDA=ON`.
+`uform_bench_encoder` builds on every tree, the CPU-only `library` preset included, while `uform_bench_core` needs `-D UFORM_BUILD_TRAIN=ON`.
 
 ## Encoder Throughput
 
@@ -22,9 +22,9 @@ cmake --build build_release --target uform_bench_encoder uform_bench_core
 - `choose/batch_1` and `choose/batch_64`: scoring four choices per item, in items per second, for checkpoints carrying the byte decoder.
 
 ```sh
-build_release/uform_bench_encoder --checkpoint model.safetensors
-build_release/uform_bench_encoder --checkpoint model.safetensors --cpu-class intel-haswell --precision e4m3
-build_release/uform_bench_encoder --checkpoint model.safetensors --residency vram --gpu-class nvidia-hopper
+build_cuda/uform_bench_encoder --checkpoint model.safetensors
+build_cuda/uform_bench_encoder --checkpoint model.safetensors --cpu-class intel-haswell --precision e4m3
+build_cuda/uform_bench_encoder --checkpoint model.safetensors --residency vram --gpu-class nvidia-hopper
 ```
 
 - `--checkpoint`: the `.safetensors` file to load, required.
@@ -51,5 +51,5 @@ Both binaries read the same environment variables:
 - `UFORM_TIME_LIMIT`: the timed run per benchmark, like `200ms` or `10s`, `10s` by default.
 
 ```sh
-UFORM_FILTER=choose UFORM_TIME_LIMIT=2s build_release/uform_bench_encoder --checkpoint model.safetensors
+UFORM_FILTER=choose UFORM_TIME_LIMIT=2s build_cuda/uform_bench_encoder --checkpoint model.safetensors
 ```

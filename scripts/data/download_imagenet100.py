@@ -16,8 +16,6 @@ CLI usage:
     uv run scripts/data/download_imagenet100.py --repo-id ambityga/imagenet100
 """
 
-from __future__ import annotations
-
 import argparse
 import sys
 from pathlib import Path

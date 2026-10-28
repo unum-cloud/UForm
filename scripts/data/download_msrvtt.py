@@ -26,8 +26,6 @@ CLI usage:
     uv run scripts/data/download_msrvtt.py --repo-id friedrichor/MSR-VTT
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

@@ -29,8 +29,6 @@ Usage:
     srun ... uv run scripts/data/acquire_corpus.py --modality all   # cluster-wide (rank/world from Slurm)
 """
 
-from __future__ import annotations
-
 import argparse
 import glob
 import subprocess

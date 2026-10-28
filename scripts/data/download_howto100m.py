@@ -57,8 +57,6 @@ CLI usage:
     uv run scripts/data/download_howto100m.py --index-cap 1000000                # index a larger slice
 """
 
-from __future__ import annotations
-
 import json
 import urllib.request
 from pathlib import Path

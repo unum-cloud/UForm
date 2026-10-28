@@ -42,8 +42,6 @@ Usage:
     uv run scripts/data/download_msmarco.py --fraction 0.25    # leading quarter of the shards
 """
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 

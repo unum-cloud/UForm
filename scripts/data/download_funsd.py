@@ -20,8 +20,6 @@ CLI usage:
     uv run scripts/data/download_funsd.py --force
 """
 
-from __future__ import annotations
-
 import argparse
 import sys
 from pathlib import Path

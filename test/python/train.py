@@ -4,8 +4,6 @@ Run with `uv run pytest test/python/train.py`. Training is GPU-only, so on a bui
 constructors raise `DeviceError`, and these suites check everything the binding validates before that.
 """
 
-from __future__ import annotations
-
 from array import array
 from pathlib import Path
 

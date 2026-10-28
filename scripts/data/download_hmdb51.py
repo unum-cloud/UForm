@@ -21,8 +21,6 @@ CLI usage:
     uv run scripts/data/download_hmdb51.py --repo-id jxie/hmdb51
 """
 
-from __future__ import annotations
-
 import argparse
 import sys
 import urllib.request

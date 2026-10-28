@@ -9,24 +9,45 @@
     {
       "name": "base",
       "hidden": true,
-      "description": "Ninja, a build tree named after the preset, and a compilation database for the language server, for the default Ampere-through-Blackwell architectures. Pin the compiler path or UFORM_CUDA_ARCHITECTURES of one machine in a CMakeUserPresets.json on top.",
+      "description": "Ninja, a build tree named after the preset, a compilation database for the language server, the host codecs, and any compiler launchers the environment names, like CMAKE_CXX_COMPILER_LAUNCHER=ccache. Pin the compiler path or UFORM_CUDA_ARCHITECTURES of one machine in a CMakeUserPresets.json on top.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build_${presetName}",
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
         "CMAKE_C_COMPILER": "clang",
         "CMAKE_CXX_COMPILER": "clang++",
-        "CMAKE_CUDA_HOST_COMPILER": "clang++"
+        "CMAKE_CUDA_HOST_COMPILER": "clang++",
+        "CMAKE_C_COMPILER_LAUNCHER": "$env{CMAKE_C_COMPILER_LAUNCHER}",
+        "CMAKE_CXX_COMPILER_LAUNCHER": "$env{CMAKE_CXX_COMPILER_LAUNCHER}",
+        "CMAKE_CUDA_COMPILER_LAUNCHER": "$env{CMAKE_CUDA_COMPILER_LAUNCHER}",
+        "UFORM_WITH_CODECS": "ON"
+      }
+    },
+    {
+      "name": "linux",
+      "hidden": true,
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "windows",
+      "hidden": true,
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
       }
     },
     {
       "name": "debug",
       "inherits": "base",
       "displayName": "Debug - unoptimized host code",
-      "description": "Unoptimized host code with full DWARF, every library, tool and suite.",
+      "description": "Unoptimized host code with full DWARF, every host library, tool and suite.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "UFORM_BUILD_CUDA": "ON",
         "UFORM_BUILD_SHARED": "ON",
         "UFORM_BUILD_TEST": "ON",
         "UFORM_BUILD_TOOLS": "ON"
@@ -36,13 +57,12 @@
       "name": "check",
       "inherits": "base",
       "displayName": "Check - fastest compile cycle",
-      "description": "Does it still compile, nothing more: -O0 without debug information on the host and in ptxas, with warnings as errors.",
+      "description": "Does it still compile, nothing more: -O0 without debug information on the host, and in ptxas where CUDA is added, with warnings as errors.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
         "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O0 -Xptxas -O0 -DNDEBUG",
-        "UFORM_BUILD_CUDA": "ON",
         "UFORM_BUILD_SHARED": "ON",
         "UFORM_BUILD_TEST": "ON",
         "UFORM_BUILD_TOOLS": "ON",
@@ -57,7 +77,6 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O2 -g -lineinfo -DNDEBUG",
-        "UFORM_BUILD_CUDA": "ON",
         "UFORM_BUILD_SHARED": "ON",
         "UFORM_BUILD_TEST": "ON",
         "UFORM_BUILD_TOOLS": "ON"
@@ -66,14 +85,33 @@
     {
       "name": "release",
       "inherits": "base",
-      "displayName": "Release - every target",
-      "description": "Libraries, the trainer and the conformance suites, fully optimized.",
+      "displayName": "Release - every host target",
+      "description": "The host libraries and the conformance suites, fully optimized.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "UFORM_BUILD_CUDA": "ON",
         "UFORM_BUILD_SHARED": "ON",
         "UFORM_BUILD_TEST": "ON",
         "UFORM_BUILD_TOOLS": "ON"
+      }
+    },
+    {
+      "name": "cuda",
+      "inherits": "release",
+      "displayName": "CUDA - every target with the NVIDIA residency",
+      "description": "The release build plus the NVIDIA residency, the trainer, the mesh and the loaders, for the default Turing-through-Blackwell architectures.",
+      "cacheVariables": {
+        "UFORM_BUILD_CUDA": "ON",
+        "UFORM_BUILD_TRAIN": "ON"
+      }
+    },
+    {
+      "name": "rocm",
+      "inherits": "release",
+      "displayName": "ROCm - every target with the AMD residency",
+      "description": "The release build plus the AMD residency, its HIP units compiled by ROCm's own Clang.",
+      "cacheVariables": {
+        "CMAKE_HIP_COMPILER": "/opt/rocm/llvm/bin/clang++",
+        "UFORM_BUILD_ROCM": "ON"
       }
     },
     {
@@ -116,6 +154,21 @@
       "cacheVariables": {
         "CMAKE_HIP_COMPILER": "/opt/rocm/llvm/bin/clang++",
         "UFORM_BUILD_CUDA": "ON",
+        "UFORM_BUILD_ROCM": "ON",
+        "UFORM_BUILD_TRAIN": "ON"
+      }
+    },
+    {
+      "name": "linux_cuda_rocm",
+      "inherits": [
+        "library",
+        "linux"
+      ],
+      "displayName": "Linux CUDA and ROCm - the inference library with both GPU residencies and no trainer",
+      "description": "Both vendors' encoder variants in one shared library that links no GPU runtime of its own, which the vendor-boundary check reads with readelf.",
+      "cacheVariables": {
+        "CMAKE_HIP_COMPILER": "/opt/rocm/llvm/bin/clang++",
+        "UFORM_BUILD_CUDA": "ON",
         "UFORM_BUILD_ROCM": "ON"
       }
     },
@@ -128,8 +181,22 @@
         "CMAKE_C_COMPILER": null,
         "CMAKE_CXX_COMPILER": null,
         "CMAKE_CUDA_HOST_COMPILER": null,
-        "NUMKONG_TARGET_ARCH": "v128",
-        "STRINGZILLA_TARGET_ARCH": "v128",
+        "UFORM_TARGET_ARCH": "v128",
+        "UFORM_WITH_CODECS": "OFF",
+        "CMAKE_CROSSCOMPILING_EMULATOR": "node"
+      }
+    },
+    {
+      "name": "wasm64_emscripten",
+      "inherits": "library",
+      "displayName": "WebAssembly Emscripten 64 - the extended C library for isolated pages and Node",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-wasm64-emscripten.cmake",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": null,
+        "CMAKE_CXX_COMPILER": null,
+        "CMAKE_CUDA_HOST_COMPILER": null,
+        "UFORM_TARGET_ARCH": "v128relaxed",
+        "UFORM_WITH_CODECS": "OFF",
         "CMAKE_CROSSCOMPILING_EMULATOR": "node"
       }
     },
@@ -142,8 +209,115 @@
         "CMAKE_C_COMPILER": null,
         "CMAKE_CXX_COMPILER": null,
         "CMAKE_CUDA_HOST_COMPILER": null,
-        "NUMKONG_TARGET_ARCH": "v128",
-        "STRINGZILLA_TARGET_ARCH": "v128"
+        "UFORM_TARGET_ARCH": "v128",
+        "UFORM_WITH_CODECS": "OFF"
+      }
+    },
+    {
+      "name": "android_arm64",
+      "inherits": "library",
+      "displayName": "Android ARM64 - the C library through the NDK's toolchain",
+      "toolchainFile": "$env{ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": null,
+        "CMAKE_CXX_COMPILER": null,
+        "CMAKE_CUDA_HOST_COMPILER": null,
+        "ANDROID_ABI": "arm64-v8a",
+        "ANDROID_PLATFORM": "android-28",
+        "UFORM_WITH_CODECS": "OFF"
+      }
+    },
+    {
+      "name": "msvc2026_x64",
+      "inherits": [
+        "library",
+        "windows"
+      ],
+      "displayName": "Windows x64 - the C library with Visual Studio 2026",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": null,
+        "CMAKE_CXX_COMPILER": null,
+        "CMAKE_CUDA_HOST_COMPILER": null,
+        "UFORM_WITH_CODECS": "OFF"
+      }
+    },
+    {
+      "name": "machine",
+      "hidden": true,
+      "inherits": [
+        "base",
+        "linux"
+      ],
+      "description": "The C library for one machine: its CPU floor and class, only the NumKong capabilities it runs, and its one GPU code.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "UFORM_BUILD_SHARED": "ON",
+        "UFORM_BUILD_CUDA": "ON",
+        "UFORM_BUILD_TRAIN": "ON",
+        "UFORM_BUILD_TEST": "OFF",
+        "UFORM_BUILD_BENCH": "OFF",
+        "NUMKONG_PROFILE_CAPABILITIES": "ON",
+        "STRINGZILLA_PROFILE_CAPABILITIES": "ON"
+      }
+    },
+    {
+      "name": "xeon4_hopper",
+      "inherits": "machine",
+      "displayName": "Xeon 4 with Hopper - compile only",
+      "cacheVariables": {
+        "UFORM_TARGET_ARCH": "sapphirerapids",
+        "UFORM_TARGET_CLASSES": "intel_sapphire",
+        "NUMKONG_TARGET_SIERRA": "0",
+        "NUMKONG_TARGET_TURIN": "0",
+        "NUMKONG_TARGET_DIAMOND": "0",
+        "NUMKONG_TARGET_GRANITEAMX": "0",
+        "NUMKONG_TARGET_DIAMONDAMX": "0",
+        "UFORM_CUDA_ARCHITECTURES": "90a-real"
+      }
+    },
+    {
+      "name": "xeon6_blackwell",
+      "inherits": "machine",
+      "displayName": "Xeon 6 with Blackwell - compile only",
+      "cacheVariables": {
+        "UFORM_TARGET_ARCH": "graniterapids",
+        "UFORM_TARGET_CLASSES": "intel_granite",
+        "NUMKONG_TARGET_SIERRA": "0",
+        "NUMKONG_TARGET_TURIN": "0",
+        "NUMKONG_TARGET_DIAMOND": "0",
+        "NUMKONG_TARGET_DIAMONDAMX": "0",
+        "UFORM_CUDA_ARCHITECTURES": "100f-real"
+      }
+    },
+    {
+      "name": "grace_hopper",
+      "inherits": "machine",
+      "displayName": "Grace with Hopper - compile only",
+      "description": "Neoverse V2 runs apple_m2 in full, and aws_g5 needs WFET.",
+      "cacheVariables": {
+        "UFORM_TARGET_ARCH": "neoverse-v2",
+        "UFORM_TARGET_CLASSES": "apple_m2",
+        "NUMKONG_TARGET_NEONFP8": "0",
+        "NUMKONG_TARGET_SME": "0",
+        "NUMKONG_TARGET_SMEF64": "0",
+        "NUMKONG_TARGET_SMEBI32": "0",
+        "UFORM_CUDA_ARCHITECTURES": "90a-real"
+      }
+    },
+    {
+      "name": "vera_rubin",
+      "inherits": "machine",
+      "displayName": "Vera with Rubin - compile only",
+      "description": "Olympus cores need Clang 22 or GCC 15, and CUDA 13.4 names no Rubin code, so Rubin runs the Blackwell bundle on 100f.",
+      "cacheVariables": {
+        "UFORM_TARGET_ARCH": "olympus",
+        "UFORM_TARGET_CLASSES": "nvidia_vera",
+        "NUMKONG_TARGET_SME": "0",
+        "NUMKONG_TARGET_SMEF64": "0",
+        "NUMKONG_TARGET_SMEBI32": "0",
+        "UFORM_CUDA_ARCHITECTURES": "100f-real"
       }
     }
   ],
@@ -165,6 +339,14 @@
       "configurePreset": "release"
     },
     {
+      "name": "cuda",
+      "configurePreset": "cuda"
+    },
+    {
+      "name": "rocm",
+      "configurePreset": "rocm"
+    },
+    {
       "name": "library",
       "configurePreset": "library"
     },
@@ -181,12 +363,48 @@
       "configurePreset": "cuda_rocm_library"
     },
     {
+      "name": "linux_cuda_rocm",
+      "configurePreset": "linux_cuda_rocm",
+      "targets": [
+        "uform_shared"
+      ]
+    },
+    {
       "name": "wasm32_emscripten",
       "configurePreset": "wasm32_emscripten"
     },
     {
+      "name": "wasm64_emscripten",
+      "configurePreset": "wasm64_emscripten"
+    },
+    {
       "name": "wasm32_wasi",
       "configurePreset": "wasm32_wasi"
+    },
+    {
+      "name": "android_arm64",
+      "configurePreset": "android_arm64"
+    },
+    {
+      "name": "msvc2026_x64",
+      "configurePreset": "msvc2026_x64",
+      "configuration": "Release"
+    },
+    {
+      "name": "xeon4_hopper",
+      "configurePreset": "xeon4_hopper"
+    },
+    {
+      "name": "xeon6_blackwell",
+      "configurePreset": "xeon6_blackwell"
+    },
+    {
+      "name": "grace_hopper",
+      "configurePreset": "grace_hopper"
+    },
+    {
+      "name": "vera_rubin",
+      "configurePreset": "vera_rubin"
     }
   ],
   "testPresets": [
@@ -216,6 +434,16 @@
       "name": "release",
       "inherits": "base",
       "configurePreset": "release"
+    },
+    {
+      "name": "cuda",
+      "inherits": "base",
+      "configurePreset": "cuda"
+    },
+    {
+      "name": "rocm",
+      "inherits": "base",
+      "configurePreset": "rocm"
     }
   ],
   "workflowPresets": [

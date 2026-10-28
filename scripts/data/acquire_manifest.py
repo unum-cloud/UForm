@@ -52,8 +52,6 @@ Every row whose `requires_new_knob` is True or whose `fraction_mechanism` is "no
 surfaced by the driver's balance table.
 """
 
-from __future__ import annotations
-
 import os
 import shutil
 from dataclasses import dataclass

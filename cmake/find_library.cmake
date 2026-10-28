@@ -1,4 +1,4 @@
-# Resolve a vendor library for the loader tier (libcudf, cuFile, NVDEC, libav*, ...). One layered search:
+# Resolve a vendor library for the loader tier (libcudf, NVDEC, libav*, ...). One layered search:
 # the RAPIDS / NVIDIA cu13 Python-wheel layouts
 # (`site-packages/<wheel>/lib64`, `site-packages/nvidia/cu13/lib`), then the system CUDA toolkit and the Debian
 # multiarch directories. `uform_library_hints_` holds the shared defaults; a call's `EXTRA_HINTS` are searched

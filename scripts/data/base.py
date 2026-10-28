@@ -1,7 +1,5 @@
 """Every `UFORM_*` variable the `test_*.py` suites read, parsed once at import into `SETTINGS`."""
 
-from __future__ import annotations
-
 import os
 import re
 import secrets

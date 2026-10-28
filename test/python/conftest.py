@@ -6,8 +6,6 @@ the real library with the tiny checkpoint `UFORM_TEST_CHECKPOINT` names, and aga
 which loads any bytes as a model; shapes always come from the model's own description.
 """
 
-from __future__ import annotations
-
 import os
 import platform
 from collections.abc import Iterator

@@ -4,8 +4,6 @@ Run with `uv run pytest test/python/encode.py`. Texts are tokenizer-free, a byte
 follow from the inputs and the model's own description; media shapes are only checked for consistency.
 """
 
-from __future__ import annotations
-
 import asyncio
 import io
 import struct

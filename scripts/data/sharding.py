@@ -20,8 +20,6 @@ Rank/world resolution order (first that fully resolves wins):
 This module never imports or reimplements Slurm; it only reads the env vars Slurm exports.
 """
 
-from __future__ import annotations
-
 import contextlib
 import os
 from collections.abc import Iterator, Sequence

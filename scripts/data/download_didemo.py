@@ -44,8 +44,6 @@ Usage:
     uv run scripts/data/download_didemo.py --data-root $UFORM_DATA_ROOT --no-repack
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

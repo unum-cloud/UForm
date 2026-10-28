@@ -226,16 +226,21 @@ constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
     }
 }
 
-/** The class a device of @p device_capabilities runs, the newest generation whose kits it holds;
- *  unknown for a host mask or a device no class covers. */
-constexpr gpu_class_t gpu_class_of(nk_capability_t device_capabilities) noexcept {
-    for (gpu_class_t const gpu_class :
-         {gpu_class_t::apple_metal10_k, gpu_class_t::apple_metal9_k, gpu_class_t::apple_metal7_k,
-          gpu_class_t::amd_cdna5_k, gpu_class_t::amd_cdna4_k, gpu_class_t::amd_cdna3_k,
-          gpu_class_t::nvidia_blackwellrtx_k, gpu_class_t::nvidia_blackwell_k, gpu_class_t::nvidia_hopper_k,
-          gpu_class_t::nvidia_ada_k, gpu_class_t::nvidia_ampere_k}) {
-        nk_capability_t const wanted = numkong_capabilities_of(gpu_class);
-        if ((device_capabilities & wanted) == wanted) return gpu_class;
+/** The class of a device as its vendor's driver reports its architecture: NVIDIA's compute
+ *  capability, AMD's gfx major and minor digits; unknown for a device no class covers. */
+constexpr gpu_class_t gpu_class_of(uform_gpu_vendor_t vendor, u32_t architecture_major,
+                                   u32_t architecture_minor) noexcept {
+    if (vendor == uform_gpu_vendor_nvidia_k) {
+        if (architecture_major == 12) return gpu_class_t::nvidia_blackwellrtx_k;
+        if (architecture_major == 10) return gpu_class_t::nvidia_blackwell_k;
+        if (architecture_major == 9) return gpu_class_t::nvidia_hopper_k;
+        if (architecture_major * 10 + architecture_minor >= 89) return gpu_class_t::nvidia_ada_k;
+        if (architecture_major == 8) return gpu_class_t::nvidia_ampere_k;
+    }
+    if (vendor == uform_gpu_vendor_amd_k) {
+        if (architecture_major == 9 && architecture_minor == 4) return gpu_class_t::amd_cdna3_k;
+        if (architecture_major == 9 && architecture_minor == 5) return gpu_class_t::amd_cdna4_k;
+        if (architecture_major == 12 && architecture_minor == 5) return gpu_class_t::amd_cdna5_k;
     }
     return gpu_class_t::unknown_k;
 }
@@ -311,7 +316,7 @@ struct waiter_for_cpu_class<cpu_class_t::nvidia_vera_k> {
 #if FORKUNION_TARGET_RISCV64_WRS
 template <>
 struct waiter_for_cpu_class<cpu_class_t::alibaba_c930_k> {
-    using type = fu::risc5_wrs_t;
+    using type = fu::riscv64_wrs_t;
 };
 #endif
 #if FORKUNION_TARGET_WASM_WAIT
@@ -398,7 +403,7 @@ struct atomic_ref_for_cpu_class<cpu_class_t::nvidia_vera_k> {
 template <>
 struct atomic_ref_for_cpu_class<cpu_class_t::alibaba_c930_k> {
     template <typename value_type_>
-    using type = fu::risc5_zacas_atomic_ref<value_type_>;
+    using type = fu::riscv64_zacas_atomic_ref<value_type_>;
 };
 #endif
 #if FORKUNION_TARGET_WASM_WAIT
@@ -417,7 +422,7 @@ struct atomic_ref_for_cpu_class<cpu_class_t::wasm64_extended_k> {
 /** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause: the runtime
  *  confirms nothing about them, and a class differing by one alone earns no rung. */
 inline constexpr fu::capabilities_t baseline_hints_k = fu::capability_x86_pause_k | fu::capability_arm64_yield_k |
-                                                       fu::capability_risc5_pause_k;
+                                                       fu::capability_riscv64_pause_k;
 
 /** Lowers one CPU class onto ForkUnion's mask - the bits the runtime must confirm before the
  *  class's waiter and atomic reference are trusted, read off the two types themselves. */
@@ -451,28 +456,6 @@ constexpr fu::capabilities_t forkunion_capabilities_of(cpu_class_t cpu_class) no
     }
 }
 
-/** Whether every compute bit one CPU class lowers onto is present in @p available. */
-constexpr bool numkong_admits(nk_capability_t available, cpu_class_t cpu_class) noexcept {
-    nk_capability_t const wanted = numkong_capabilities_of(cpu_class);
-    return (available & wanted) == wanted;
-}
-
-/** Whether the runtime confirms every ForkUnion bit one CPU class needs. */
-inline bool forkunion_admits(cpu_class_t cpu_class) noexcept {
-    fu::capabilities_t const wanted = forkunion_capabilities_of(cpu_class);
-    return (fu::runtime_capabilities() & wanted) == wanted;
-}
-
-/** Whether @p rung runs wherever @p pinned does: its NumKong and ForkUnion masks are subsets of
- *  the pinned class's, so a pin admits exactly the rungs a machine of that class would. */
-constexpr bool cpu_class_within(cpu_class_t rung, cpu_class_t pinned) noexcept {
-    nk_capability_t const rung_compute = numkong_capabilities_of(rung),
-                          pinned_compute = numkong_capabilities_of(pinned);
-    fu::capabilities_t const rung_sync = forkunion_capabilities_of(rung),
-                             pinned_sync = forkunion_capabilities_of(pinned);
-    return (rung_compute & pinned_compute) == rung_compute && (rung_sync & pinned_sync) == rung_sync;
-}
-
 /** The C enum's class as the engine names it; @c uform_cpu_class_unknown_k derives nothing, so it
  *  names the serial floor. */
 constexpr cpu_class_t cpu_class_of(uform_cpu_class_t cpu_class) noexcept {
@@ -481,17 +464,33 @@ constexpr cpu_class_t cpu_class_of(uform_cpu_class_t cpu_class) noexcept {
     return static_cast<cpu_class_t>(cpu_class);
 }
 
-/** Whether this machine runs @p pinned, the class a caller told a load to dispatch as: every
- *  NumKong bit in @p available and every ForkUnion bit the runtime confirms; no pin always runs. */
-inline bool cpu_pin_admitted(uform_cpu_class_t pinned, nk_capability_t available) noexcept {
-    if (pinned == uform_cpu_class_unknown_k) return true;
-    if (pinned > uform_cpu_class_wasm64_extended_k) return false;
-    return numkong_admits(available, cpu_class_of(pinned)) && forkunion_admits(cpu_class_of(pinned));
+/** What one handle may use: the masks this machine runs when nothing is pinned, the pinned class's
+ *  masks when it runs them. */
+struct cpu_ceiling_t {
+    nk_capability_t compute = nk_cap_serial_k;
+    fu::capabilities_t sync = fu::capabilities_unknown_k;
+};
+
+/** The ceiling @p pinned sets, the one caller of NumKong's and ForkUnion's CPU detection; a class
+ *  this machine does not run, or one past the enum, is refused as unsupported. */
+inline expected<cpu_ceiling_t> pick_cpu_ceiling(uform_cpu_class_t pinned) noexcept {
+    cpu_ceiling_t detected;
+    if (nk_cpu_capabilities_enabled(&detected.compute) != nk_success_k) detected.compute = nk_cap_serial_k;
+    detected.sync = fu::cpu_capabilities();
+    if (pinned == uform_cpu_class_unknown_k) return detected;
+    if (pinned > uform_cpu_class_wasm64_extended_k)
+        return expected<cpu_ceiling_t>::fail(status_t::unsupported_k, "no CPU class has that ordinal");
+    cpu_class_t const pinned_class = cpu_class_of(pinned);
+    cpu_ceiling_t const wanted {numkong_capabilities_of(pinned_class), forkunion_capabilities_of(pinned_class)};
+    if ((detected.compute & wanted.compute) != wanted.compute || (detected.sync & wanted.sync) != wanted.sync)
+        return expected<cpu_ceiling_t>::fail(status_t::unsupported_k, "the CPU does not run the pinned class");
+    return wanted;
 }
 
-/** Whether a ladder may take @p rung under @p pinned: every rung when nothing is pinned. */
-constexpr bool cpu_pin_takes(uform_cpu_class_t pinned, cpu_class_t rung) noexcept {
-    return pinned == uform_cpu_class_unknown_k || cpu_class_within(rung, cpu_class_of(pinned));
+/** Whether @p rung fits under @p ceiling: its kits and waiters need nothing the ceiling lacks. */
+constexpr bool cpu_rung_fits(cpu_class_t rung, cpu_ceiling_t ceiling) noexcept {
+    return (numkong_capabilities_of(rung) & ~ceiling.compute) == 0 &&
+           (forkunion_capabilities_of(rung) & ~ceiling.sync) == 0;
 }
 
 /** The capabilities a device of @p device_class runs under @p pinned: its own class's when
@@ -613,26 +612,16 @@ constexpr bool cpu_class_compiled(cpu_class_t cpu_class) noexcept {
 }
 
 /** Whether the build compiled the units of @p home 's vendor, as CMake told the dispatch unit
- *  through @c UFORM_TARGET_CUDA and @c UFORM_TARGET_ROCM ; every class of a compiled vendor has a
+ *  through @c UFORM_ARCH_CUDA_ and @c UFORM_ARCH_ROCM_ ; every class of a compiled vendor has a
  *  unit, the ones advancing nothing past their parent answering no table. */
 constexpr bool gpu_vendor_compiled([[maybe_unused]] nk_capability_t vendor) noexcept {
-#if UFORM_TARGET_CUDA
+#if UFORM_ARCH_CUDA_
     if (vendor == nk_cap_cuda_k) return true;
 #endif
-#if UFORM_TARGET_ROCM
+#if UFORM_ARCH_ROCM_
     if (vendor == nk_cap_rocm_k) return true;
 #endif
     return false;
-}
-
-/** The newest class on @p ladder that @p available and the ForkUnion runtime run and @p pinned
- *  takes, whose NumKong mask every call dispatches under. */
-template <cpu_class_t... classes_>
-inline cpu_class_t pick_cpu_class(cpu_ladder<classes_...>, uform_cpu_class_t pinned,
-                                  nk_capability_t available) noexcept {
-    for (cpu_class_t const rung : {classes_...})
-        if (cpu_pin_takes(pinned, rung) && numkong_admits(available, rung) && forkunion_admits(rung)) return rung;
-    return cpu_class_t::serial_k;
 }
 
 /** The verbs one CPU class compiles in its class unit for the C layer, which is compiled once at
@@ -652,14 +641,14 @@ struct host_class_tables {
     static void wait(u64_t &word, u64_t seen) noexcept;
 };
 
-/** The host verbs of the newest compiled class on @p ladder that runs wherever @p cpu_class does;
- *  the serial floor always answers. */
+/** The host verbs of the newest compiled class on @p ladder that fits under @p ceiling; the serial
+ *  floor always answers. */
 template <cpu_class_t... classes_>
-host_verbs_t const *pick_host_verbs(cpu_ladder<classes_...>, cpu_class_t cpu_class) noexcept {
+host_verbs_t const *pick_host_verbs(cpu_ladder<classes_...>, cpu_ceiling_t ceiling) noexcept {
     host_verbs_t const *picked = nullptr;
     auto rung = [&]<cpu_class_t class_>() noexcept {
         if constexpr (cpu_class_compiled(class_))
-            if (!picked && cpu_class_within(class_, cpu_class)) picked = host_class_tables<class_>::find();
+            if (!picked && cpu_rung_fits(class_, ceiling)) picked = host_class_tables<class_>::find();
     };
     (rung.template operator()<classes_>(), ...);
     return picked;
@@ -908,8 +897,8 @@ using owned_stream_t = nk::stream_t;
 struct ram_executor_t {
     std::variant<executor_t, lent_pool_t> pool;
 
-    /** What the threads run, as @c nk_cpu_capabilities_enabled reports. */
-    nk_capability_t capabilities = 0;
+    /** What the threads may run: the machine's masks, or the pinned class's. */
+    cpu_ceiling_t ceiling;
 
     /** The NUMA nodes the executor's models place their bytes in. */
     st::basic_vector<i32_t> memory_domains;
@@ -927,6 +916,9 @@ struct vram_device_t {
 
     /** What the device runs, whose group names the vendor every NumKong call dispatches on. */
     nk_capability_t capabilities = 0;
+
+    /** The class the device dispatches as: its driver's report, or the pinned class it holds. */
+    gpu_class_t gpu_class = gpu_class_t::unknown_k;
 
     /** Declared before the scratch, so the scratch returns its chunks while the stream still lives. */
     owned_stream_t stream;

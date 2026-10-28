@@ -42,8 +42,6 @@ CLI usage:
     uv run scripts/data/carve_msrvtt_val.py
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import os

@@ -31,8 +31,6 @@ CLI usage:
     uv run scripts/data/download_kinetics400.py --fraction 0.30  # leading 30% of the shards
 """
 
-from __future__ import annotations
-
 import argparse
 import csv
 import os

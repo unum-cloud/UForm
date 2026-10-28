@@ -162,7 +162,10 @@ typedef struct fetched_t {
 
 static void copy_out(void *target, void const *source, size_t bytes, bool on_device) {
     if (!bytes) return;
-    if (!on_device) return (void)memcpy(target, source, bytes);
+    if (!on_device) {
+        memcpy(target, source, bytes);
+        return;
+    }
     CUresult const copied = cuMemcpyDtoH(target, (CUdeviceptr)source, bytes);
     expect(copied == CUDA_SUCCESS, "Copying device outputs back failed");
 }
@@ -312,13 +315,18 @@ int main(int argc, char *argv[]) {
     expect_success(&outcome, "Whole-box VRAM executor");
     uform_mesh_t mesh = NULL;
     uform_mesh_bootstrap(&(uform_mesh_bootstrap_t) {.mesh = &mesh, .executor = box, .outcome = &outcome});
-    expect_success(&outcome, "Mesh bootstrap");
-    uform_mesh_description_t layout = {0};
-    uform_mesh_describe(&(uform_mesh_describe_t) {.mesh = mesh, .outcome = &outcome, .description = &layout});
-    expect_success(&outcome, "Mesh describe");
-    expect(layout.gpu_class != uform_gpu_class_unknown_k, "The mesh dispatches as a known GPU class");
-    printf("Mesh: %zu GPUs dispatching as %s\n", layout.gpus_per_host_domain, uform_gpu_class_name(layout.gpu_class));
-    uform_mesh_free(mesh);
+    // A build without the trainer has no mesh and refuses one as unsupported.
+    if (outcome.status == uform_status_unsupported_k) printf("Mesh: skipped, this build trains on no GPU\n");
+    else {
+        expect_success(&outcome, "Mesh bootstrap");
+        uform_mesh_description_t layout = {0};
+        uform_mesh_describe(&(uform_mesh_describe_t) {.mesh = mesh, .outcome = &outcome, .description = &layout});
+        expect_success(&outcome, "Mesh describe");
+        expect(layout.gpu_class != uform_gpu_class_unknown_k, "The mesh dispatches as a known GPU class");
+        printf("Mesh: %zu GPUs dispatching as %s\n", layout.gpus_per_host_domain,
+               uform_gpu_class_name(layout.gpu_class));
+        uform_mesh_free(mesh);
+    }
     uform_executor_free(box);
 
     // A load names its device by the UForm ordinal, which counts AMD devices after NVIDIA's.

@@ -672,11 +672,14 @@ public final class Executor: @unchecked Sendable {
 
     /// Opens one submission stream on every named device, or borrows the caller's `streams`, one per device in
     /// `devices` order; an empty list derives one free device. A zero `scratchLimit` lets per-device scratch grow
-    /// as batches ask. A `gpuClass` dispatches every device as that class; nil derives theirs. Calls
+    /// as batches ask. A `gpuClass` dispatches every device as that class; nil derives theirs. The host decoders take
+    /// 7/8 of the cores local to `memoryDomains` and dispatch as `cpuClass`, where nil derives the CPU's own. Calls
     /// `uform_executor_for_vram`.
     public static func forVram(
         devices: [Int32] = [],
         gpuClass: GPUClass? = nil,
+        memoryDomains: [Int32] = [],
+        cpuClass: CPUClass? = nil,
         streams: [UnsafeMutableRawPointer?]? = nil,
         scratchLimit: Int = 0,
         deferredLimit: Int = 0
@@ -692,6 +695,7 @@ public final class Executor: @unchecked Sendable {
             executor: executor,
             outcome: landing.outcome,
             vram: landing.vram(devices, gpuClass),
+            ram: landing.ram(memoryDomains, cpuClass),
             streams: lentStreams,
             scratch_limit: scratchLimit,
             deferred_limit: deferredLimit

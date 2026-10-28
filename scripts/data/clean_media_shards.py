@@ -58,8 +58,6 @@ atomic temp-then-rename, with a per-modality drop manifest JSON.
     uv run scripts/data/clean_media_shards.py --modality images --decoder cpu --workers 64 --dry-run
 """
 
-from __future__ import annotations
-
 import argparse
 import concurrent.futures
 import dataclasses

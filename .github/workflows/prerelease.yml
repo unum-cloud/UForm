@@ -16,10 +16,9 @@ env:
   WASI_SDK_VERSION: "34"
   WASMTIME_VERSION: v48.0.2
   CUDA_VERSION: "13-4"
-  ROCM_VERSION: 7.2.4
   # The host codecs the engine decodes images, video and audio with; WebAssembly builds take decoded media instead.
   UBUNTU_CODECS: >-
-    libjpeg-turbo8-dev libpng-dev libwebp-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
+    libturbojpeg0-dev libpng-dev libwebp-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
     libswscale-dev
   MACOS_CODECS: jpeg-turbo libpng webp ffmpeg
 
@@ -315,32 +314,30 @@ jobs:
           ctest --test-dir build_wasm32_wasi --output-on-failure
 
   # Compile-only: no hosted runner carries a GPU, so this proves both residencies, the trainer and the mesh build.
+  # ROCm publishes no Ubuntu 26.04 packages, so AMD's 26.04 image carries it, and the mounted host folders let the job
+  # free the runner's disk.
   build_gpu_libraries:
     name: Build NVIDIA and AMD Libraries
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
+    container:
+      image: rocm/dev-ubuntu-26.04:latest
+      options: -v /usr/share/dotnet:/host/dotnet -v /usr/local/lib/android:/host/android -v /opt/ghc:/host/ghc
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
       - name: Free Disk Space
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+        run: rm -rf /host/dotnet/* /host/android/* /host/ghc/*
       - name: Install CUDA and the Codecs
         run: |
-          curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-          sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          sudo apt-get update
-          sudo apt-get install -y ninja-build libibverbs-dev $UBUNTU_CODECS \
+          apt-get update && apt-get install -y curl git cmake ninja-build python3-venv
+          curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
+          dpkg -i cuda-keyring_1.1-1_all.deb
+          apt-get update
+          apt-get install -y libibverbs-dev $UBUNTU_CODECS \
             cuda-minimal-build-"$CUDA_VERSION" cuda-driver-dev-"$CUDA_VERSION" \
-            cuda-nvtx-"$CUDA_VERSION" libcufile-dev-"$CUDA_VERSION" libnvjpeg-dev-"$CUDA_VERSION" libnpp-dev-"$CUDA_VERSION" \
+            libnvjpeg-dev-"$CUDA_VERSION" libnpp-dev-"$CUDA_VERSION" \
             libnvidia-decode-580
           echo "/usr/local/cuda-${CUDA_VERSION/-/.}/bin" >> "$GITHUB_PATH"
-      - name: Install ROCm
-        run: |
-          sudo mkdir -p /etc/apt/keyrings
-          curl -sSL https://repo.radeon.com/rocm/rocm.gpg.key | gpg --dearmor | sudo tee /etc/apt/keyrings/rocm.gpg > /dev/null
-          echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/rocm.gpg] https://repo.radeon.com/rocm/apt/${ROCM_VERSION} noble main" \
-            | sudo tee /etc/apt/sources.list.d/rocm.list
-          sudo apt-get update
-          sudo apt-get install -y rocm-core rocm-llvm rocm-device-libs rocm-cmake hipcc hip-dev hip-runtime-amd
+      - name: Checkout
+        uses: actions/checkout@v7
       # The loaders read Parquet through libcudf, which ships as a wheel that CMake finds in the repository's `.venv`.
       - name: Install libcudf
         run: |
@@ -351,6 +348,78 @@ jobs:
           cmake --preset cuda_rocm_library -D UFORM_BUILD_TOOLS=ON -D CMAKE_HIP_ARCHITECTURES=gfx942 \
             -D CMAKE_PREFIX_PATH=/opt/rocm
           cmake --build --preset cuda_rocm_library
+
+  # Compile-only: the inference library with both GPU residencies and no trainer must name no GPU driver or training
+  # library among its direct dependencies. The CUDA and HIP runtimes still arrive through NumKong's GPU kits, which
+  # launch through them, until those kits hand out launch plans; `TODO.md` tracks adding both runtimes here.
+  check_vendor_boundary:
+    name: Check the Inference Library Links No GPU Driver
+    runs-on: ubuntu-26.04
+    container: rocm/dev-ubuntu-26.04:latest
+    steps:
+      - name: Install CUDA, Clang 22 and the Codecs
+        run: |
+          apt-get update && apt-get install -y curl gnupg git cmake ninja-build binutils
+          curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
+          dpkg -i cuda-keyring_1.1-1_all.deb
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+            > /etc/apt/sources.list.d/llvm.list
+          apt-get update
+          apt-get install -y clang-22 $UBUNTU_CODECS cuda-minimal-build-"$CUDA_VERSION"
+          echo "/usr/local/cuda-${CUDA_VERSION/-/.}/bin" >> "$GITHUB_PATH"
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Build the Inference Library
+        run: |
+          cmake --preset linux_cuda_rocm -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 \
+            -D CMAKE_CUDA_HOST_COMPILER=clang++-22 -D CMAKE_HIP_ARCHITECTURES=gfx942 -D CMAKE_PREFIX_PATH=/opt/rocm
+          cmake --build --preset linux_cuda_rocm
+      - name: Check Its Direct Dependencies
+        run: |
+          readelf -d build_linux_cuda_rocm/c/libuform_shared.so | tee dependencies.txt
+          if grep -E 'NEEDED.*\[(libcuda|libcublas|libcublasLt|libcufile|libnccl|libnvjpeg|libnppc)\.' dependencies.txt; then
+            echo "libuform_shared links a GPU driver or a training library" >&2
+            exit 1
+          fi
+
+  # Compile-only: each machine profile builds the C library for one CPU class and one GPU code, the Arm ones on Arm
+  # runners. Clang 22 compiles the host code, as the first Clang to know Olympus.
+  build_machine_profile:
+    name: Build Machine Profile ${{ matrix.preset }}
+    runs-on: ${{ contains(fromJSON('["grace_hopper", "vera_rubin"]'), matrix.preset) && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [xeon4_hopper, xeon6_blackwell, grace_hopper, vera_rubin]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Free Disk Space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+      - name: Install CUDA, Clang 22 and the Codecs
+        run: |
+          if [ "$(uname -m)" = aarch64 ]; then cuda_repository=sbsa; else cuda_repository=x86_64; fi
+          curl -sSLO "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/${cuda_repository}/cuda-keyring_1.1-1_all.deb"
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang-22 libibverbs-dev $UBUNTU_CODECS \
+            cuda-minimal-build-"$CUDA_VERSION" cuda-driver-dev-"$CUDA_VERSION" \
+            libnvjpeg-dev-"$CUDA_VERSION" libnpp-dev-"$CUDA_VERSION" \
+            libnvidia-decode-580
+          echo "/usr/local/cuda-${CUDA_VERSION/-/.}/bin" >> "$GITHUB_PATH"
+      - name: Install libcudf
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --extra-index-url https://pypi.nvidia.com libcudf-cu13
+      - name: Build
+        run: |
+          cmake --preset ${{ matrix.preset }} -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 \
+            -D CMAKE_CUDA_HOST_COMPILER=clang++-22
+          cmake --build --preset ${{ matrix.preset }}
 
   build_docs:
     name: Build Docs

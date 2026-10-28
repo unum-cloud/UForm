@@ -36,8 +36,6 @@ Layout: the zip lands under `<DATA_ROOT>/c4_200m/` with a `data/c4_200m` symlink
     UFORM_DATA_ROOT=$UFORM_DATA_ROOT uv run scripts/data/download_c4_200m.py    # env-var root
 """
 
-from __future__ import annotations
-
 import argparse
 import csv
 import io

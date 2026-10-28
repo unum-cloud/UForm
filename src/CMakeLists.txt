@@ -72,16 +72,20 @@ endfunction ()
 
 # The encoder's RAM variants compile per CPU class. A variant inlines its class's kits and host entries and runs on
 # nothing older, so its unit takes the class's instruction set outright. A class is its parent plus a delta, the NumKong
-# capabilities `numkong_capabilities_of` adds over `parent_class_of`, restated here row for row: it inherits its
-# parent's flags, adds the flags of each delta capability NumKong compiled, and exists only when its parent does and
-# some delta compiled. Each capability it holds also reaches the unit as `NUMKONG_TARGET_<CAPABILITY>=1`, so its kits
-# never depend on which macros a flag set implies; capabilities follow `OVER` as `name MACRO` pairs. An Arm or RISC-V
-# compiler keeps only the last `-march=`, so those rows spell the union of their lineage after `MARCH`, which lands
-# last. `uform_host` reads the existing classes as `UFORM_TARGET_<CLASS>`, collected in `uform_cpu_gates_`. The
+# capabilities `numkong_capabilities_of` adds over `parent_class_of`, restated here row for row, and after `FORKUNION`
+# the ForkUnion capabilities its waiter or atomic reference adds: it inherits its parent's flags, adds the flags of each
+# NumKong delta, and exists only when its parent does and every delta is enabled, the switches after the probes
+# included. Each NumKong capability it holds also reaches the unit as `NUMKONG_TARGET_<CAPABILITY>=1`, so its kits never
+# depend on which macros a flag set implies; capabilities follow `OVER` as `name MACRO` pairs. An Arm or RISC-V compiler
+# keeps only the last `-march=`, so those rows spell the union of their lineage after `MARCH`, which lands last. The
 # `serial` class is the floor every CPU runs.
+#
+# UFORM_TARGET_CLASSES keeps every existing class when empty, `serial` and the named ones for a list, and under `native`
+# the newest class of each lineage whose capabilities this host runs, as NumKong's and ForkUnion's probes found.
+# `uform_host` reads each declared class as `UFORM_TARGET_<CLASS>`, 1 for a kept one and 0 otherwise.
 set(uform_class_serial_exists_ TRUE)
-set(uform_cpu_classes_ serial)
-set(uform_cpu_gates_)
+set(uform_class_serial_runs_ TRUE)
+set(uform_cpu_rows_)
 
 # A WebAssembly module carries the one SIMD capability its toolchain declares, so its verdicts read the compiler's own
 # macros rather than a NumKong probe.
@@ -98,13 +102,11 @@ endif ()
 
 # Declares the CPU class @p class_, gated as `UFORM_TARGET_<target_macro>`, over the class named after `OVER`.
 function (uform_cpu_class class_ target_macro_)
-    cmake_parse_arguments(PARSE_ARGV 2 arg "" "OVER;MARCH" "")
-    if (NOT uform_class_${arg_OVER}_exists_)
-        return()
-    endif ()
+    cmake_parse_arguments(PARSE_ARGV 2 arg "" "OVER;MARCH" "FORKUNION")
     set(flags_ ${uform_class_${arg_OVER}_flags_})
     set(definitions_ ${uform_class_${arg_OVER}_definitions_})
-    set(advances_ FALSE)
+    set(exists_ ${uform_class_${arg_OVER}_exists_})
+    set(runs_ ${uform_class_${arg_OVER}_runs_})
     list(LENGTH arg_UNPARSED_ARGUMENTS entries_)
     if (entries_)
         math(EXPR last_ "${entries_} - 1")
@@ -112,15 +114,42 @@ function (uform_cpu_class class_ target_macro_)
             math(EXPR macro_index_ "${index_} + 1")
             list(GET arg_UNPARSED_ARGUMENTS ${index_} capability_)
             list(GET arg_UNPARSED_ARGUMENTS ${macro_index_} capability_macro_)
-            if (numkong_target_${capability_}_compiles OR uform_target_${capability_}_compiles_)
-                set(advances_ TRUE)
+            if (numkong_target_${capability_}_enabled OR uform_target_${capability_}_compiles_)
                 list(APPEND flags_ ${numkong_target_${capability_}_flags})
                 list(APPEND definitions_ NUMKONG_TARGET_${capability_macro_}=1)
+            else ()
+                set(exists_ FALSE)
+            endif ()
+            if (NOT numkong_target_${capability_}_runs)
+                set(runs_ FALSE)
             endif ()
         endforeach ()
     endif ()
+    # ForkUnion's verdicts reach every class unit through `forkunion::cpu_capabilities_compiled`, so they add no flags.
+    foreach (capability_ IN LISTS arg_FORKUNION)
+        if (NOT forkunion_target_${capability_}_enabled)
+            set(exists_ FALSE)
+        endif ()
+        if (NOT forkunion_target_${capability_}_runs)
+            set(runs_ FALSE)
+        endif ()
+    endforeach ()
     if (arg_MARCH)
         list(APPEND flags_ -march=${arg_MARCH})
+    endif ()
+    if (UFORM_TARGET_CLASSES STREQUAL "native")
+        set(kept_ ${runs_})
+        # The newest class of a lineage stands in for its parent, whose unit then goes.
+        if (runs_)
+            set(uform_class_${arg_OVER}_kept_
+                FALSE
+                PARENT_SCOPE
+            )
+        endif ()
+    elseif (UFORM_TARGET_CLASSES AND NOT class_ IN_LIST UFORM_TARGET_CLASSES)
+        set(kept_ FALSE)
+    else ()
+        set(kept_ ${exists_})
     endif ()
     set(uform_class_${class_}_flags_
         "${flags_}"
@@ -130,27 +159,24 @@ function (uform_cpu_class class_ target_macro_)
         "${definitions_}"
         PARENT_SCOPE
     )
-    # A class whose row names no delta is its parent's alias: a lineage step for its children, with no unit of its own.
-    if (NOT entries_)
-        set(uform_class_${class_}_exists_
-            TRUE
-            PARENT_SCOPE
-        )
-    else ()
-        set(uform_class_${class_}_exists_
-            ${advances_}
-            PARENT_SCOPE
-        )
-    endif ()
-    if (NOT advances_)
-        return()
-    endif ()
-    set(uform_cpu_classes_
-        ${uform_cpu_classes_} ${class_}
+    set(uform_class_${class_}_exists_
+        ${exists_}
         PARENT_SCOPE
     )
-    set(uform_cpu_gates_
-        ${uform_cpu_gates_} "UFORM_TARGET_${target_macro_}=1"
+    set(uform_class_${class_}_runs_
+        ${runs_}
+        PARENT_SCOPE
+    )
+    set(uform_class_${class_}_kept_
+        ${kept_}
+        PARENT_SCOPE
+    )
+    set(uform_class_${class_}_macro_
+        ${target_macro_}
+        PARENT_SCOPE
+    )
+    set(uform_cpu_rows_
+        ${uform_cpu_rows_} ${class_}
         PARENT_SCOPE
     )
 endfunction ()
@@ -219,7 +245,7 @@ uform_cpu_class(
     smebi32
     SMEBI32
 )
-uform_cpu_class(aws_g5 AWS_G5 OVER apple_m2)
+uform_cpu_class(aws_g5 AWS_G5 OVER apple_m2 FORKUNION arm64_wfet)
 uform_cpu_class(
     nvidia_vera
     NVIDIA_VERA
@@ -245,13 +271,32 @@ uform_cpu_class(
 uform_cpu_class(wasm32_v128 WASM32_V128 OVER serial v128 V128)
 uform_cpu_class(wasm64_extended WASM64_EXTENDED OVER wasm32_v128 v128relaxed V128RELAXED)
 
+set(uform_cpu_classes_ serial)
+set(uform_cpu_gates_)
+foreach (class_ IN LISTS uform_cpu_rows_)
+    if (uform_class_${class_}_kept_)
+        list(APPEND uform_cpu_classes_ ${class_})
+    endif ()
+    list(APPEND uform_cpu_gates_ "UFORM_TARGET_${uform_class_${class_}_macro_}=$<BOOL:${uform_class_${class_}_kept_}>")
+endforeach ()
+if (NOT UFORM_TARGET_CLASSES STREQUAL "native")
+    foreach (class_ IN LISTS UFORM_TARGET_CLASSES)
+        if (NOT class_ STREQUAL "serial" AND NOT uform_class_${class_}_kept_)
+            message(
+                FATAL_ERROR "UFORM_TARGET_CLASSES names ${class_}, which no row declares or this toolchain cannot build"
+            )
+        endif ()
+    endforeach ()
+endif ()
+
 # The GPU classes compile no device code of their own: NumKong's libraries carry every generation's kernels, and one
 # bundle per vendor carries UForm's entries. So a class is a host unit picking its generation's kits, every class of a
 # built vendor exists, and the vendor-wide class `nvidia` or `amd`, on NumKong's generic kits, runs every device of the
 # vendor without a class of its own. Their units see `NUMKONG_ARCH_<VENDOR>_` and NumKong's
 # `numkong_<vendor>_capabilities_compiled_`, which declare the generations its library compiled, and `uform_host` reads
-# a built vendor as `UFORM_TARGET_CUDA` or `UFORM_TARGET_ROCM`.
-set(uform_gpu_gates_)
+# each vendor as `UFORM_ARCH_CUDA_` or `UFORM_ARCH_ROCM_`, 1 when built and 0 otherwise. Rubin runs the Blackwell class
+# through `parent_class_of`, so it compiles nothing of its own.
+set(uform_gpu_gates_ "UFORM_ARCH_CUDA_=$<BOOL:${UFORM_BUILD_CUDA}>" "UFORM_ARCH_ROCM_=$<BOOL:${UFORM_BUILD_ROCM}>")
 function (uform_nvidia_class class_)
     set(uform_class_${class_}_exists_
         TRUE
@@ -275,7 +320,6 @@ endfunction ()
 if (UFORM_BUILD_CUDA)
     set(uform_nvidia_classes_)
     set(uform_nvidia_definitions_ "NUMKONG_ARCH_CUDA_=1")
-    list(APPEND uform_gpu_gates_ "UFORM_TARGET_CUDA=1")
     uform_nvidia_class(nvidia)
     uform_nvidia_class(nvidia_ampere)
     uform_nvidia_class(nvidia_ada)
@@ -287,7 +331,6 @@ if (UFORM_BUILD_ROCM)
     enable_language(ASM)
     set(uform_amd_classes_)
     set(uform_amd_definitions_ "NUMKONG_ARCH_ROCM_=1")
-    list(APPEND uform_gpu_gates_ "UFORM_TARGET_ROCM=1")
     uform_amd_class(amd)
     uform_amd_class(amd_cdna3)
     uform_amd_class(amd_cdna4)
@@ -332,7 +375,7 @@ function (uform_variants modality_ residency_ backend_)
 endfunction ()
 
 # The encoder's variant libraries, and each GPU vendor's entries: one host unit launching by name the kernels its
-# bundle carries for every configured architecture.
+# bundle carries for every configured architecture, through the driver it opens at first use rather than links.
 set(uform_encoder_variants_)
 uform_variants(encoder ram cpu ${uform_cpu_classes_})
 if (UFORM_BUILD_CUDA)
@@ -341,11 +384,11 @@ if (UFORM_BUILD_CUDA)
     target_link_libraries(
         uform_encoder_vram_nvidia_variants
         PRIVATE $<BUILD_INTERFACE:numkong_cuda_capabilities_compiled_>
-        PUBLIC CUDA::cuda_driver
+        PUBLIC ${CMAKE_DL_LIBS}
     )
     uform_gpu_bundle(
         uform_encoder_vram_nvidia_variants nvidia uform_encoder_nvidia encoder/vram_kernels_nvidia.cu CODES
-        ${UFORM_CUDA_ARCHITECTURES}
+        ${CMAKE_CUDA_ARCHITECTURES}
     )
     target_link_libraries(
         uform_encoder_nvidia_device PRIVATE numkong::static forkunion::header stringzilla::static smashtable::header
@@ -358,7 +401,7 @@ if (UFORM_BUILD_ROCM)
     target_link_libraries(
         uform_encoder_vram_amd_variants
         PRIVATE $<BUILD_INTERFACE:numkong_rocm_capabilities_compiled_>
-        PUBLIC hip::host
+        PUBLIC ${CMAKE_DL_LIBS}
     )
     uform_gpu_bundle(
         uform_encoder_vram_amd_variants amd uform_encoder_amd encoder/vram_kernels_amd.hip CODES
@@ -366,8 +409,9 @@ if (UFORM_BUILD_ROCM)
     )
 endif ()
 target_compile_definitions(uform_host PUBLIC ${uform_cpu_gates_} ${uform_gpu_gates_})
-# Training runs on NVIDIA alone: without CUDA its verbs refuse, and with it `uform_nvidia_train` below serves them.
-if (NOT UFORM_BUILD_CUDA)
+# Training runs on NVIDIA alone: without UFORM_BUILD_TRAIN its verbs refuse, and with it `uform_nvidia_train` below
+# serves them.
+if (NOT UFORM_BUILD_TRAIN)
     target_sources(uform_host PRIVATE train_absent.cpp)
 endif ()
 target_link_libraries(
@@ -377,9 +421,9 @@ target_link_libraries(
 # the class units and the dispatch unit name the same rungs, and the dispatch unit admits them at run time.
 target_link_libraries(uform_host PUBLIC $<BUILD_INTERFACE:forkunion::cpu_capabilities_compiled>)
 
-# The host decoders and the verbs over encoded files, over the codecs the top-level file discovers; WebAssembly takes
-# already-decoded media instead, and its verbs over files report themselves unsupported.
-if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^wasm")
+# The host decoders and the verbs over encoded files, over the codecs the top-level file discovers; without
+# UFORM_WITH_CODECS a build takes already-decoded media instead, and its verbs over files report themselves unsupported.
+if (UFORM_WITH_CODECS)
     uform_find_library(UFORM_SWSCALE_LIBRARY swscale)
     if (NOT UFORM_SWSCALE_LIBRARY)
         message(FATAL_ERROR "uform: libswscale not found — install the ffmpeg dev package: "
@@ -416,16 +460,19 @@ set_target_properties(
                VISIBILITY_INLINES_HIDDEN ON
 )
 
-if (UFORM_BUILD_CUDA)
+# The training stack is the one part exempt from the vendor boundary: the trainer, the mesh and the loaders link the
+# CUDA driver, NVML, nvJPEG, NPP, NVDEC and cuDF outright, so they build only under UFORM_BUILD_TRAIN, and the
+# inference library, whose encoder variants open their drivers at first use, links them only then.
+if (UFORM_BUILD_TRAIN)
     set(CMAKE_JOB_POOL_COMPILE uform_cuda_units)
 
-    # The configured codes that run `multimem`: those NumKong's cached Hopper and datacenter-Blackwell capabilities list,
-    # with or without CMake's "-real" or "-virtual", each compiled for its own code alone; "native" takes both families.
+    # The resolved codes that run `multimem`: those NumKong's cached Hopper and datacenter-Blackwell capabilities list,
+    # with or without CMake's "-real" or "-virtual", each compiled for its own code alone.
     set(uform_multicast_codes_)
     foreach (multicast_architecture_ IN LISTS numkong_target_hopper_architectures
                                               numkong_target_blackwell_architectures
     )
-        foreach (architecture_ IN LISTS UFORM_CUDA_ARCHITECTURES)
+        foreach (architecture_ IN LISTS CMAKE_CUDA_ARCHITECTURES)
             if (architecture_ MATCHES "^${multicast_architecture_}(-real|-virtual)?$"
                 AND NOT "${multicast_architecture_}-real" IN_LIST uform_multicast_codes_
             )
@@ -433,9 +480,6 @@ if (UFORM_BUILD_CUDA)
             endif ()
         endforeach ()
     endforeach ()
-    if ("native" IN_LIST UFORM_CUDA_ARCHITECTURES)
-        set(uform_multicast_codes_ 90a-real 100f-real)
-    endif ()
 
     # `src/train` → `uform::train`: the training stack compiled once, never per consumer, linked by the `uform_base`
     # tool and the conformance suites alike.
@@ -525,13 +569,8 @@ if (UFORM_BUILD_CUDA)
                 "${uform_cudf_prefix_}/rapids_logger/include"
     )
 
-    # cuFile GPU Direct Storage.
-    target_link_libraries(uform_loaders PRIVATE "${UFORM_CUFILE_LIBRARY}")
-
     # Image decode: nvJPEG + NPP on the GPU, the three CPU codecs for the fallback.
-    target_link_libraries(
-        uform_loaders PRIVATE CUDA::nvjpeg CUDA::nppig CUDA::nppc JPEG::JPEG PNG::PNG "${UFORM_WEBP_LIBRARY}"
-    )
+    target_link_libraries(uform_loaders PRIVATE CUDA::nvjpeg CUDA::nppig CUDA::nppc PNG::PNG "${UFORM_WEBP_LIBRARY}")
 
     # Video: NVDEC decode + libavformat/avcodec host demux to Annex-B (the nv-codec-headers carry the `cuvid*` decls).
     # The libav headers live under the multiarch `/usr/include/<triple>` prefix.

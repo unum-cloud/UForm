@@ -126,18 +126,19 @@ static void *pack_tower(uform_model_handle_t &model, checkpoint_to_load_t const 
     return *packed;
 }
 
-/** The CPU capabilities a RAM load picks its class within: the executor's, or this machine's
- *  without one. */
-static bool host_capabilities(uform_executor_t executor, nk_capability_t &available,
-                              uform_outcome_t *outcome) noexcept {
-    if (!executor) {
-        if (nk_cpu_capabilities_enabled(&available) != nk_success_k)
-            return propagate_error(uform_status_device_k, outcome, "The CPU capabilities could not be read");
-        return true;
-    }
-    ram_executor_t const *const ram = std::get_if<ram_executor_t>(&executor->executor);
-    if (!ram) return propagate_error(uform_status_device_k, outcome, "A RAM load needs a RAM executor or none");
-    available = ram->capabilities;
+/** The ceiling a RAM load picks its class under: the class @p pinned names, or else the executor's
+ *  ceiling, or the machine's without one; a pin past the executor's ceiling is refused. */
+static bool host_ceiling(uform_executor_t executor, uform_cpu_class_t pinned, cpu_ceiling_t &ceiling,
+                         uform_outcome_t *outcome) noexcept {
+    ram_executor_t const *const ram = executor ? std::get_if<ram_executor_t>(&executor->executor) : nullptr;
+    if (executor && !ram)
+        return propagate_error(uform_status_device_k, outcome, "A RAM load needs a RAM executor or none");
+    if (ram && pinned == uform_cpu_class_unknown_k) return ceiling = ram->ceiling, true;
+    expected<cpu_ceiling_t> picked = pick_cpu_ceiling(pinned);
+    if (!picked) return propagate_error(uform_status_unsupported_k, outcome, "The CPU does not admit the pinned class");
+    ceiling = *picked;
+    if (ram && ((ceiling.compute & ~ram->ceiling.compute) || (ceiling.sync & ~ram->ceiling.sync)))
+        return propagate_error(uform_status_unsupported_k, outcome, "The executor does not admit the pinned class");
     return true;
 }
 
@@ -146,12 +147,9 @@ static bool host_capabilities(uform_executor_t executor, nk_capability_t &availa
 static void load_ram(uform_model_t *output, uform_executor_t executor, uform_ram_options_t const &ram_options,
                      expected<checkpoint_to_load_t> loaded, ue::precision_t precision, uform_progress_t progress,
                      uform_outcome_t *outcome) noexcept {
-    nk_capability_t available = 0;
-    if (!host_capabilities(executor, available, outcome)) return;
-    if (!cpu_pin_admitted(ram_options.cpu_class, available))
-        return propagate_error(uform_status_unsupported_k, outcome, "The CPU does not admit the pinned class"), void();
-    encoder_verbs<encoder_home_t::ram_k> const *const verbs = pick_cpu_variant(cpu_ladder_t {}, ram_options.cpu_class,
-                                                                               available);
+    cpu_ceiling_t ceiling;
+    if (!host_ceiling(executor, ram_options.cpu_class, ceiling, outcome)) return;
+    encoder_verbs<encoder_home_t::ram_k> const *const verbs = pick_cpu_variant(cpu_ladder_t {}, ceiling);
     std::unique_ptr<uform_model_handle_t> model = start_model(loaded, precision, outcome);
     if (!model) return;
     model->tables = verbs;

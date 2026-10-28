@@ -48,11 +48,13 @@ A CPU class is its parent plus a delta.
 `nvidia_ladder_t` reads `nvidia_blackwellrtx` → `nvidia_blackwell` → `nvidia_hopper` → `nvidia_ada` → `nvidia_ampere`, and `amd_ladder_t` reads `amd_cdna5` → `amd_cdna4` → `amd_cdna3`.
 Each ends on its vendor floor, `gpu_class_t::unknown_k`, which runs NumKong's generic kits on any device of the vendor without a class of its own.
 
-- `uform_executor_for_ram` picks its class through `pick_cpu_class` and keeps that class's `host_verbs_t`, which the C layer waits through.
-- `uform_model_load_ram` walks `pick_cpu_variant` to the newest compiled rung whose NumKong bits the machine reports, whose ForkUnion bits the runtime confirms, and which the pinned `cpu_class` admits, the serial floor always answering.
-- A pinned class admits every rung whose two masks are subsets of its own, so pinning behaves as running on a machine of that class.
+- `pick_cpu_ceiling` is the one caller of NumKong's and ForkUnion's CPU detection: unpinned it answers the masks this machine runs, pinned it answers the class's masks, refusing a class the machine does not run.
+- `uform_executor_for_ram` and `uform_executor_for_vram` keep their ceiling and the `host_verbs_t` of the newest class under it, which the C layer waits through.
+- `uform_model_load_ram` walks `pick_cpu_variant` to the newest rung with `cpu_class_compiled` and `cpu_rung_fits` under the load's ceiling, the serial floor always answering.
+- A rung fits when its two masks are subsets of the ceiling's, so pinning behaves as running on a machine of that class.
+- A device's GPU class comes from its driver: `gpu_class_of` maps NVIDIA's compute capability and AMD's gfx numbers, which the entries kits' `describe` records.
 - `uform_model_load_vram` lets `visit_vram_home` pick the vendor's home and ladder from the devices' capabilities, and `pick_gpu_variant` walks it under the pinned `gpu_class`.
-- `cpu_class_compiled` and `gpu_vendor_compiled` read the `UFORM_TARGET_<CLASS>`, `UFORM_TARGET_CUDA` and `UFORM_TARGET_ROCM` definitions `src/CMakeLists.txt` passes for every unit it compiled, so a ladder never asks for a table the build lacks.
+- `cpu_class_compiled` and `gpu_vendor_compiled` read the `UFORM_TARGET_<CLASS>`, `UFORM_ARCH_CUDA_` and `UFORM_ARCH_ROCM_` definitions `src/CMakeLists.txt` passes as 1 for every unit it compiled and 0 otherwise, so a ladder never asks for a table the build lacks.
 
 ## Waiters and Atomics
 

@@ -283,6 +283,8 @@ class Executor:
         scratch_limit: int = 0,
         deferred_limit: int = 0,
         gpu_class: GPUClass | None = None,
+        memory_domains: Sequence[int] | None = None,
+        cpu_class: CPUClass | None = None,
     ) -> Executor:
         """Opens one submission stream on every named device. Calls `uform_executor_for_vram`."""
         ...

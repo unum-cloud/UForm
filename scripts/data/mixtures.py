@@ -20,8 +20,6 @@ contract the `acquire` assert and `acquire_manifest` / `mine_hard_negatives` rea
 only, so importing it stays cheap enough that those tools read it instead of re-inlining glob strings.
 """
 
-from __future__ import annotations
-
 import json
 from functools import cache
 from pathlib import Path

@@ -179,7 +179,8 @@ template <cpu_class_t class_>
 static void class_parity(test_suite_t &suite, checkpoint_to_load_t const &checkpoint, geometry_t const &geometry,
                          pool_view_t pool, nk_capability_t available, precision_t precision, encoded_t const &reference,
                          double tolerance) {
-    if (!numkong_admits(available, class_)) return suite.skip("this machine does not run the class");
+    if (!cpu_rung_fits(class_, {available, fu::cpu_capabilities()}))
+        return suite.skip("this machine does not run the class");
     encoder_verbs<encoder_home_t::ram_k> const *const verbs =
         encoder_class_tables<encoder_home_t::ram_k, class_>::find();
     if (!verbs) return suite.skip("the class picks the kits its parent does");

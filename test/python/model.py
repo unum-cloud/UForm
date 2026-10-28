@@ -4,8 +4,6 @@ Run with `uv run pytest test/python/model.py` once the extension is built agains
 engine; every check reads its expectations from the C contract, never from the stub's choices.
 """
 
-from __future__ import annotations
-
 import asyncio
 from enum import IntEnum, IntFlag
 from pathlib import Path

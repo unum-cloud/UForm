@@ -32,8 +32,6 @@ CLI usage:
     uv run scripts/data/download_vatex.py --rank 0 --world 16              # this worker's disjoint stride
 """
 
-from __future__ import annotations
-
 import json
 import urllib.request
 from pathlib import Path

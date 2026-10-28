@@ -28,8 +28,6 @@ Pass `--compression snappy|none` to change the Parquet codec (default `zstd`); p
 to re-repack a shard whose `.parquet` sibling already exists.
 """
 
-from __future__ import annotations
-
 import argparse
 import io
 import os

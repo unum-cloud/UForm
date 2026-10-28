@@ -17,8 +17,6 @@ Usage:
     uv run scripts/data/list_registry.py--json       # machine-readable
 """
 
-from __future__ import annotations
-
 import argparse
 import glob
 import json

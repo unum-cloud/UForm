@@ -39,8 +39,6 @@ launching the multi-hour cc12m sweep).  Pass `--overwrite` to re-repack a shard 
 `.parquet` sibling already exists.
 """
 
-from __future__ import annotations
-
 import argparse
 import os
 import sys

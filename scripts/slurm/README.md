@@ -73,8 +73,8 @@ The binary must sit on a filesystem every node sees, and `UFORM_EXCHANGE_DIR` mu
 `uform_test_mesh` links the training libraries, so every node needs the shared libraries the build found, and `uform_test_env` names any that is missing.
 
 ```
-cmake --build build_release --target uform_test_mesh
-cp build_release/uform_test_mesh /shared/uform/uform_test_mesh
+cmake --build build_cuda --target uform_test_mesh
+cp build_cuda/uform_test_mesh /shared/uform/uform_test_mesh
 sbatch --chdir=/shared/uform --partition=<p> --account=<a> \
        --export=ALL,UFORM_EXCHANGE_DIR=/shared/uform/exchange,UFORM_TEST_BINARY=/shared/uform/uform_test_mesh \
        scripts/slurm/test_mesh-4-8-16.sbatch
@@ -88,8 +88,8 @@ Two DGX B300 nodes form the `{8, 8, 16}` world: one process per node drives its 
 Build once on a node, in a checkout on the shared filesystem, so every rung runs from the same tree and the mixtures' relative `data/` globs resolve:
 
 ```sh
-cmake --preset release -D UFORM_CUDA_ARCHITECTURES=100f-real -D UFORM_WITH_INFINIBAND=ON
-cmake --build build_release --parallel
+cmake --preset cuda -D UFORM_CUDA_ARCHITECTURES=100f-real -D UFORM_WITH_INFINIBAND=ON
+cmake --build build_cuda --parallel
 export UFORM_EXCHANGE_DIR=/shared/uform/exchange
 mkdir -p "${UFORM_EXCHANGE_DIR}"
 ```
@@ -98,17 +98,17 @@ mkdir -p "${UFORM_EXCHANGE_DIR}"
 Each rung below must pass before the next one runs, and every command runs from the checkout's root with the site's `--partition` and `--account`:
 
 1. The preflight on both nodes, which names any missing library, GPUDirect registration or unshared exchange directory:
-   `srun --nodes=2 --ntasks-per-node=1 --gpus-per-node=8 --exclusive build_release/uform_test_env`
+   `srun --nodes=2 --ntasks-per-node=1 --gpus-per-node=8 --exclusive build_cuda/uform_test_env`
 2. The mesh bootstrap across both nodes, every rank assembling a byte-identical world table:
-   `sbatch --nodes=2 --ntasks=2 --ntasks-per-node=1 --gpus-per-task=8 --export=ALL,UFORM_TEST_BINARY=build_release/uform_test_mesh scripts/slurm/test_mesh-4-8-16.sbatch`
+   `sbatch --nodes=2 --ntasks=2 --ntasks-per-node=1 --gpus-per-task=8 --export=ALL,UFORM_TEST_BINARY=build_cuda/uform_test_mesh scripts/slurm/test_mesh-4-8-16.sbatch`
 3. The batch mixer on one node, then across both:
-   `sbatch --nodes=1 --export=ALL,UFORM_TEST_BINARY=build_release/uform_test_mixer scripts/slurm/test_mixer-8-16.sbatch`, then the same with `--nodes=2`.
+   `sbatch --nodes=1 --export=ALL,UFORM_TEST_BINARY=build_cuda/uform_test_mixer scripts/slurm/test_mixer-8-16.sbatch`, then the same with `--nodes=2`.
 4. The cross-domain contrastive loss, one process per node against the Float64 global reference:
-   `srun --nodes=2 --ntasks-per-node=1 --gpus-per-node=8 --exclusive --export=ALL,UFORM_JOB_ID=contrastive-$(date +%s) bash -c 'UFORM_HOST_DOMAIN_INDEX=$SLURM_PROCID exec build_release/uform_test_contrastive'`
+   `srun --nodes=2 --ntasks-per-node=1 --gpus-per-node=8 --exclusive --export=ALL,UFORM_JOB_ID=contrastive-$(date +%s) bash -c 'UFORM_HOST_DOMAIN_INDEX=$SLURM_PROCID exec build_cuda/uform_test_contrastive'`
 5. The Base conformance suite on one node, then across both:
-   `sbatch --nodes=1 --export=ALL,UFORM_TEST_BINARY=build_release/uform_test_base scripts/slurm/test_base-4-8-16.sbatch`, then the same with `--nodes=2`.
+   `sbatch --nodes=1 --export=ALL,UFORM_TEST_BINARY=build_cuda/uform_test_base scripts/slurm/test_base-4-8-16.sbatch`, then the same with `--nodes=2`.
 6. Training on the tiny mixtures, one node of 8 GPUs first, then both nodes:
-   `srun --nodes=1 --ntasks=1 --gpus-per-node=8 --exclusive build_release/uform_base --tier tiny --mixture scripts/mixtures/tiny_text_masked.json --objective masked --steps 50`, then
+   `srun --nodes=1 --ntasks=1 --gpus-per-node=8 --exclusive build_cuda/uform_base --tier tiny --mixture scripts/mixtures/tiny_text_masked.json --objective masked --steps 50`, then
    `sbatch --export=ALL,UFORM_TIER=tiny,UFORM_MIXTURE=scripts/mixtures/tiny_text_masked.json,UFORM_OBJECTIVE=masked scripts/slurm/base-2-8-16.sbatch` for the masked objective, and
    `sbatch --export=ALL,UFORM_TIER=tiny,UFORM_MIXTURE=scripts/mixtures/tiny_image_contrastive.json,UFORM_OBJECTIVE=joint scripts/slurm/base-2-8-16.sbatch` for the contrastive pairs.
 

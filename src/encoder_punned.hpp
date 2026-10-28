@@ -66,20 +66,15 @@ template <encoder_home_t home_>
 using entries_kit_of = std::conditional_t<home_ == encoder_home_t::vram_amd_k, encoder::vram_amd_entries_kit_t,
                                           encoder::vram_nvidia_entries_kit_t>;
 
-/** The newest compiled class on @p ladder whose kits @p available runs, whose atomic reference
- *  ForkUnion admits, and which @p pinned takes, as its verbs; the serial floor always answers. */
+/** The newest compiled class on @p ladder that fits under @p ceiling, as its verbs; the serial
+ *  floor always answers. */
 template <cpu_class_t... classes_>
-encoder_verbs<encoder_home_t::ram_k> const *pick_cpu_variant(cpu_ladder<classes_...>, uform_cpu_class_t pinned,
-                                                             nk_capability_t available) noexcept {
+encoder_verbs<encoder_home_t::ram_k> const *pick_cpu_variant(cpu_ladder<classes_...>, cpu_ceiling_t ceiling) noexcept {
     encoder_verbs<encoder_home_t::ram_k> const *picked = nullptr;
     auto rung = [&]<cpu_class_t class_>() noexcept {
-        if constexpr (cpu_class_compiled(class_)) {
-            if (picked) return;
-            if (class_ != cpu_class_t::serial_k &&
-                (!cpu_pin_takes(pinned, class_) || !numkong_admits(available, class_) || !forkunion_admits(class_)))
-                return;
-            picked = encoder_class_tables<encoder_home_t::ram_k, class_>::find();
-        }
+        if constexpr (cpu_class_compiled(class_))
+            if (!picked && cpu_rung_fits(class_, ceiling))
+                picked = encoder_class_tables<encoder_home_t::ram_k, class_>::find();
     };
     (rung.template operator()<classes_>(), ...);
     return picked;

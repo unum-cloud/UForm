@@ -25,9 +25,9 @@ set -euo pipefail
 
 # The sampling tier needs a GPU (the GDS session opens the dataset) but no InfiniBand — the rendezvous is
 # filesystem-only, so a lean build suffices.
-BINARY="${UFORM_TEST_BINARY:-build_release/uform_test_loaders}"
+BINARY="${UFORM_TEST_BINARY:-build_cuda/uform_test_loaders}"
 [[ -x "$BINARY" ]] || {
-    echo "FATAL: $BINARY not built — cmake --build build_release --target uform_test_loaders"
+    echo "FATAL: $BINARY not built — cmake --build build_cuda --target uform_test_loaders"
     exit 1
 }
 : "${UFORM_TEST_DATASET:?set UFORM_TEST_DATASET to a shared-FS Parquet glob every rank samples}"

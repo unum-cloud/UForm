@@ -22,8 +22,6 @@ Or under pytest (every `test_*` function below is an independent case):
     python -m pytest scripts/data/test_mixtures.py
 """
 
-from __future__ import annotations
-
 import json
 import re
 from pathlib import Path

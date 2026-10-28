@@ -34,8 +34,6 @@ CLI usage:
     uv run scripts/data/download_auto_acd.py --print-plan --world 2 --rank 0  # dry-run: show the clip stride
 """
 
-from __future__ import annotations
-
 import csv
 import re
 from pathlib import Path

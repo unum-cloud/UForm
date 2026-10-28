@@ -21,8 +21,6 @@ Usage:
     uv run scripts/data/download_searchjev_decisions.py [--data-root data]
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import struct

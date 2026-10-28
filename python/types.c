@@ -1249,8 +1249,9 @@ static PyObject *Executor_on_pool(PyTypeObject *type, PyObject *const *args, Py_
     return executor_adopt(type, handle, 0);
 }
 
-static char const doc_Executor_for_vram[] =                                                      //
-    "for_vram(devices=None, *, scratch_limit=0, deferred_limit=0, gpu_class=None) -> Executor\n" //
+static char const doc_Executor_for_vram[] =                                                         //
+    "for_vram(devices=None, *, scratch_limit=0, deferred_limit=0, gpu_class=None,\n"                //
+    "         memory_domains=None, cpu_class=None) -> Executor\n"                                   //
     "\n"                                                                                         //
     "Opens one submission stream on every named device, all of them driven by whichever\n"       //
     "thread submits, and spawns the host threads that decode what the devices cannot.\n"         //
@@ -1264,42 +1265,58 @@ static char const doc_Executor_for_vram[] =                                     
     "  deferred_limit (int, optional): Deferred calls tracked at once; 0 takes a default.\n"     //
     "  gpu_class (GPUClass, optional): The class every device dispatches as; None derives\n"     //
     "    the devices' own, which must agree.\n"                                                  //
+    "  memory_domains (Sequence[int], optional): NUMA node IDs whose cores the host\n"          //
+    "    decoders take; None derives every node the process may allocate on.\n"                 //
+    "  cpu_class (CPUClass, optional): The class the host decoders dispatch as; None derives\n" //
+    "    the CPU's own.\n"                                                                       //
     "\n"                                                                                         //
     "Example:\n"                                                                                 //
     "  >>> executor = uform.Executor.for_vram([0, 1])   # doctest: +SKIP";
 
 static PyObject *Executor_for_vram(PyTypeObject *type, PyObject *const *args, Py_ssize_t positional_args_count,
                                    PyObject *args_names_tuple) {
-    PyObject *devices_object, *scratch_limit_object, *deferred_limit_object, *gpu_class_object;
+    PyObject *devices_object, *scratch_limit_object, *deferred_limit_object, *gpu_class_object,
+        *memory_domains_object, *cpu_class_object;
     uform_py_argument_t const arguments[] = {
         {"devices", &devices_object},
         {"scratch_limit", &scratch_limit_object},
         {"deferred_limit", &deferred_limit_object},
         {"gpu_class", &gpu_class_object},
+        {"memory_domains", &memory_domains_object},
+        {"cpu_class", &cpu_class_object},
     };
     size_t scratch_limit = 0, deferred_limit = 0;
-    int gpu_class = 0;
-    int32_t *devices = NULL;
-    size_t devices_count = 0;
+    int gpu_class = 0, cpu_class = 0;
+    int32_t *devices = NULL, *memory_domains = NULL;
+    size_t devices_count = 0, memory_domains_count = 0;
     if (uform_py_arguments_parse("for_vram", args, positional_args_count, args_names_tuple, 0, 1, arguments,
                                  sizeof(arguments) / sizeof(*arguments)) != 0 ||
         uform_py_size_from_object(scratch_limit_object, "scratch_limit", &scratch_limit) != 0 ||
         uform_py_size_from_object(deferred_limit_object, "deferred_limit", &deferred_limit) != 0 ||
         uform_py_class_from_object(gpu_class_object, "gpu_class", &uform_py_gpu_class, &gpu_class) != 0 ||
-        uform_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0)
+        uform_py_class_from_object(cpu_class_object, "cpu_class", &uform_py_cpu_class, &cpu_class) != 0)
         return NULL;
+    if (uform_py_ordinals_from_object(devices_object, "devices", &devices, &devices_count) != 0) return NULL;
+    if (uform_py_ordinals_from_object(memory_domains_object, "memory_domains", &memory_domains,
+                                      &memory_domains_count) != 0) {
+        PyMem_Free(devices);
+        return NULL;
+    }
 
     uform_executor_t handle = NULL;
     uform_outcome_t outcome = {0};
-    uform_executor_for_vram_t executor_arguments = {.executor = &handle,
-                                                    .outcome = &outcome,
-                                                    .vram = {devices, devices_count, (uform_gpu_class_t)gpu_class},
-                                                    .scratch_limit = scratch_limit,
-                                                    .deferred_limit = deferred_limit};
+    uform_executor_for_vram_t executor_arguments = {
+        .executor = &handle,
+        .outcome = &outcome,
+        .vram = {devices, devices_count, (uform_gpu_class_t)gpu_class},
+        .ram = {memory_domains, memory_domains_count, (uform_cpu_class_t)cpu_class},
+        .scratch_limit = scratch_limit,
+        .deferred_limit = deferred_limit};
     Py_BEGIN_ALLOW_THREADS;
     uform_executor_for_vram(&executor_arguments);
     Py_END_ALLOW_THREADS;
     PyMem_Free(devices);
+    PyMem_Free(memory_domains);
 
     if (uform_py_raise_on_outcome(&outcome) != 0) return NULL;
     return executor_adopt(type, handle, devices_count ? devices_count : 1); // a GPU executor drives one at least

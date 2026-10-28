@@ -59,7 +59,7 @@ echo "uform-base: ${total_gpus} GPU(s) = ${host_domain_count} node(s) x ${gpus_p
 # One task per node; that process owns all of its node's GPUs, so it must SEE them all (no per-task GPU
 # mask). Slurm sets SLURM_NODEID per task, which base.cu reads as its host_domain_index.
 srun --ntasks="${host_domain_count}" --ntasks-per-node=1 --gpu-bind=none \
-    "${UFORM_BASE_BIN:-build_release/uform_base}" \
+    "${UFORM_BASE_BIN:-build_cuda/uform_base}" \
     --tier "${UFORM_TIER:?set UFORM_TIER to tiny|small|medium|large|xl}" \
     --mixture "${UFORM_MIXTURE:?set UFORM_MIXTURE to a scripts/mixtures/*.json}" \
     --objective "${UFORM_OBJECTIVE:-contrastive}" \

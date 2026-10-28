@@ -32,7 +32,7 @@
 
 set -euo pipefail
 
-base_binary="${UFORM_BASE_BIN:-build_release/uform_base}"
+base_binary="${UFORM_BASE_BIN:-build_cuda/uform_base}"
 if [[ ! -x "${base_binary}" ]]; then
     echo "uform-base-2-8-16: no executable at ${base_binary}; stage it on the shared filesystem" >&2
     exit 1

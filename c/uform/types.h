@@ -98,6 +98,34 @@
 #include <stddef.h> // `size_t`
 #include <stdint.h> // `uint8_t`, `int32_t`
 
+/* Inferring target OS: Windows, macOS, Linux, FreeBSD, or WASI */
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
+#define UFORM_OS_WINDOWS_ 1
+#else
+#define UFORM_OS_WINDOWS_ 0
+#endif
+#if defined(__APPLE__) && defined(__MACH__)
+#define UFORM_OS_APPLE_ 1
+#else
+#define UFORM_OS_APPLE_ 0
+#endif
+#if defined(__linux__)
+#define UFORM_OS_LINUX_ 1
+#else
+#define UFORM_OS_LINUX_ 0
+#endif
+#if defined(__FreeBSD__)
+#define UFORM_OS_FREEBSD_ 1
+#else
+#define UFORM_OS_FREEBSD_ 0
+#endif
+#if defined(__wasi__)
+#define UFORM_OS_WASI_ 1
+#else
+#define UFORM_OS_WASI_ 0
+#endif
+#define UFORM_OS_POSIX_ (UFORM_OS_LINUX_ || UFORM_OS_APPLE_ || UFORM_OS_FREEBSD_)
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -670,6 +698,9 @@ typedef struct uform_executor_for_vram_t {
     /** The devices of the models it will drive; copied, not borrowed. */
     uform_vram_options_t vram;
 
+    /** The memory domains and the CPU class of its host decoders; copied, not borrowed. */
+    uform_ram_options_t ram;
+
     /** The @b optional borrowed CUDA streams, one per device in @c vram order; @c NULL creates its
      *  own. Borrowing is not wired yet, so any non-null value reports
      *  @c uform_status_unsupported_k. */
@@ -688,9 +719,10 @@ typedef struct uform_executor_for_vram_t {
  *      host thread submits; borrowing the caller's streams reports @c uform_status_unsupported_k
  *      for now.
  *
- *  Text and JPEG images never leave the device; the rest of decoding - container demux, PNG and WebP, audio,
- *  and every modality on AMD - runs on host threads the executor spawns beside its streams, 7/8 of the cores
- *  local to its devices. A GPU executor never changes process-wide device flags.
+ *  Text and JPEG images never leave the device; the rest of decoding - container demux, PNG and
+ *  WebP, audio, and every modality on AMD - runs on host threads the executor spawns beside its
+ *  streams, 7/8 of the cores local to the memory domains @c ram names, dispatching as its
+ *  @c cpu_class . A GPU executor never changes process-wide device flags.
  */
 UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t* arguments);
 

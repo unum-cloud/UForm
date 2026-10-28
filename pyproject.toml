@@ -2,7 +2,7 @@
 #   - `macos` wheels for x86_64, arm64, and universal2;
 #   - `windows` wheels for AMD64 and ARM64;
 #   - `manylinux` and `musllinux` wheels for Linux on x86_64 and aarch64;
-#   * for CPython 3.12 to 3.14, including free-threaded 3.13t and 3.14t.
+#   * for CPython 3.12 to 3.15, including free-threaded 3.14t and 3.15t.
 [build-system]
 build-backend = "scikit_build_core.build"
 requires = ["scikit-build-core>=0.10"]
@@ -26,6 +26,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Programming Language :: Python :: Free Threading :: 3 - Stable",
     "Programming Language :: Python :: Implementation :: CPython",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
@@ -116,9 +117,8 @@ provider = "scikit_build_core.metadata.regex"
 regex = "(?P<value>.+)"
 
 [tool.cibuildwheel]
-build = "cp312-* cp313-* cp313t-* cp314-* cp314t-*"
+build = "cp312-* cp313-* cp314-* cp314t-* cp315-* cp315t-*"
 build-verbosity = 0
-enable = ["cpython-freethreading"]
 test-command = "python -X faulthandler -m pytest -x {project}/test/python"
 test-groups = ["test"]
 

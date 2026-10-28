@@ -21,8 +21,6 @@ Usage:
     uv run scripts/data/data_unigram_floor.py --batches 20 --batch_size 64 --max_seq 1024
 """
 
-from __future__ import annotations
-
 import argparse
 import glob as globbing
 import math

@@ -52,8 +52,6 @@ Pass `--limit-shards N` for a small validation run before the full mining sweep.
 Pass `--overwrite` to re-mine shards that already carry `negative_indices`.
 """
 
-from __future__ import annotations
-
 import argparse
 import glob
 import io

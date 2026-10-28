@@ -21,7 +21,7 @@ endif ()
 # root, where the sbatch scripts and the launch configurations look for it, and resolves shared libraries beside itself
 # first, so the tree runs on nodes whose native installs diverge from the build node's. The training and loader
 # archives carry the host objects behind the C interface's probes.
-if (UFORM_BUILD_CUDA)
+if (UFORM_BUILD_TRAIN)
     set(CMAKE_JOB_POOL_COMPILE uform_cuda_units)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}")
     set(CMAKE_BUILD_RPATH "$ORIGIN")
@@ -63,7 +63,7 @@ endif ()
 
 # The backpropagation suite: finite differences against every analytic gradient of the masked replica, the masking
 # and initialization invariants, and Adafactor against a host replay.
-if (UFORM_BUILD_CUDA)
+if (UFORM_BUILD_TRAIN)
     add_executable(uform_test_gradients gradients.cu)
     target_link_libraries(uform_test_gradients PRIVATE uform::train fmt::fmt)
     target_include_directories(uform_test_gradients PRIVATE "${PROJECT_SOURCE_DIR}/c")

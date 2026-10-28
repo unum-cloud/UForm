@@ -37,8 +37,6 @@ Layout: the source CSV lands under `<DATA_ROOT>/google-text-norm/en_train.csv` w
     UFORM_DATA_ROOT=$UFORM_DATA_ROOT uv run scripts/data/download_google_text_norm.py   # env-var root
 """
 
-from __future__ import annotations
-
 import argparse
 import csv
 import os

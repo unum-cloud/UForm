@@ -6,11 +6,11 @@
  *      writes and a read-only mapping — see the header for the contract.
  */
 #include <cstdio>  // `std::rename` — the written file replaces the previous checkpoint at once
+#include <cstdlib> // `std::malloc`, `std::free`
 #include <cstring> // `std::memcpy` — the length prefix, the header and the tensor bytes
 
-#include <unistd.h>   // `pwrite`, `close`
+#include <unistd.h>   // `pread`, `pwrite`, `close`
 #include <fcntl.h>    // `open`
-#include <sys/mman.h> // `mmap`, `munmap`
 #include <sys/stat.h> // `fstat` — the file extent
 
 #include <charconv> // `std::from_chars` — the step metadata parse
@@ -19,6 +19,10 @@
 #include <yyjson.h> // the safetensors JSON header — exceptions-free C
 
 #include "uform/utilities/safetensors_format.hpp"
+
+#if !UFORM_OS_WASI_
+#include <sys/mman.h> // `mmap`, `munmap`
+#endif
 
 namespace uu = unum::uform::utilities;
 using namespace uu;
@@ -83,6 +87,32 @@ struct checkpoint_file_t {
         remaining = remaining.subspan(static_cast<std::size_t>(moved));
     }
     return {};
+}
+
+#if UFORM_OS_WASI_
+
+/** Read @p bytes from @p offset , whole or fail, looped as @ref write_at_ is. */
+[[nodiscard]] static expected_t read_at_(checkpoint_file_t const &file, std::size_t offset,
+                                         bytes_span_t bytes) noexcept {
+    for (bytes_span_t remaining = bytes; !remaining.empty();) {
+        ssize_t const moved = ::pread(file.get(), remaining.data(), remaining.size(), static_cast<off_t>(offset));
+        if (moved <= 0)
+            return expected_t::fail(status_t::io_k, "pread failed at {} ({} bytes left of {})", offset,
+                                    remaining.size(), bytes.size());
+        offset += static_cast<std::size_t>(moved);
+        remaining = remaining.subspan(static_cast<std::size_t>(moved));
+    }
+    return {};
+}
+#endif
+
+/** Release @p bytes : unmapped, or freed on WASI, which reads them in for want of @c mmap . */
+static void release_(bytes_span_t bytes) noexcept {
+#if UFORM_OS_WASI_
+    std::free(bytes.data());
+#else
+    ::munmap(bytes.data(), bytes.size());
+#endif
 }
 
 /**
@@ -353,14 +383,14 @@ checkpoint_mapping_t::checkpoint_mapping_t(checkpoint_mapping_t &&other) noexcep
 
 checkpoint_mapping_t &checkpoint_mapping_t::operator=(checkpoint_mapping_t &&other) noexcept {
     if (this != &other) {
-        if (!bytes_.empty()) ::munmap(bytes_.data(), bytes_.size());
+        if (!bytes_.empty()) release_(bytes_);
         bytes_ = std::exchange(other.bytes_, {});
     }
     return *this;
 }
 
 checkpoint_mapping_t::~checkpoint_mapping_t() noexcept {
-    if (!bytes_.empty()) ::munmap(bytes_.data(), bytes_.size());
+    if (!bytes_.empty()) release_(bytes_);
 }
 
 expected<checkpoint_mapping_t> checkpoint_mapping_t::make(sz::string_view_t path) noexcept {
@@ -371,8 +401,17 @@ expected<checkpoint_mapping_t> checkpoint_mapping_t::make(sz::string_view_t path
     if (::fstat(file->get(), &file_stat) != 0) return mapped_t::fail(status_t::io_k, "fstat failed: {}", path);
     std::size_t const file_bytes = static_cast<std::size_t>(file_stat.st_size);
     if (file_bytes == 0) return mapped_t::fail(status_t::invalid_argument_k, "{} is empty", path);
+#if UFORM_OS_WASI_
+    void *const mapped = std::malloc(file_bytes);
+    if (!mapped) return mapped_t::fail(status_t::bad_alloc_k, "{} needs {} bytes", path, file_bytes);
+    if (expected_t read = read_at_(*file, 0, {static_cast<b8_t *>(mapped), file_bytes}); !read) {
+        std::free(mapped);
+        return mapped_t::fail(std::move(read));
+    }
+#else
     void *const mapped = ::mmap(nullptr, file_bytes, PROT_READ, MAP_PRIVATE, file->get(), 0);
     if (mapped == MAP_FAILED) return mapped_t::fail(status_t::io_k, "mmap failed: {}", path);
+#endif
     checkpoint_mapping_t mapping;
     mapping.bytes_ = {static_cast<b8_t *>(mapped), file_bytes};
     return mapped_t {std::move(mapping)};

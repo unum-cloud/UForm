@@ -10,8 +10,6 @@ that the same shard maps to the same output on every rank and across resumes —
 atomic-rename `already_done` skip correct under a rank partition.
 """
 
-from __future__ import annotations
-
 import math
 import os
 from collections.abc import Sequence

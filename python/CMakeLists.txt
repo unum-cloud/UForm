@@ -33,13 +33,20 @@ set_target_properties(uform_python PROPERTIES LINKER_LANGUAGE CXX)
 target_include_directories(uform_python PRIVATE ${PROJECT_SOURCE_DIR}/c ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(uform_python PRIVATE ${uform_python_library_})
 
-# CPython's own symbols come from the interpreter, so they are absent at link time and the linker must not insist.
+# CPython's own symbols come from the interpreter, so they are absent at link time and the linker must not insist. The
+# module's one export is its init function, and the archive's symbols, NumKong's kernels among them, stay inside it.
+set_target_properties(
+    uform_python
+    PROPERTIES C_VISIBILITY_PRESET hidden
+               CXX_VISIBILITY_PRESET hidden
+               VISIBILITY_INLINES_HIDDEN ON
+)
 if (APPLE)
-    target_link_options(uform_python PRIVATE -undefined dynamic_lookup)
+    target_link_options(uform_python PRIVATE -undefined dynamic_lookup "LINKER:-exported_symbol,_PyInit_lib")
 elseif (MSVC)
     target_link_options(uform_python PRIVATE /FORCE)
 else ()
-    target_link_options(uform_python PRIVATE -Wl,--unresolved-symbols=ignore-all)
+    target_link_options(uform_python PRIVATE -Wl,--unresolved-symbols=ignore-all "LINKER:--exclude-libs,ALL")
 endif ()
 
 # Named, or every dependency's own install rules land in the wheel beside the extension.

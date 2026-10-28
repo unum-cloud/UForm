@@ -652,15 +652,17 @@ static napi_value uform_js_executor_on_pool(napi_env env, napi_callback_info inf
     return uform_js_executor_adopt(env, &outcome, handle, uform_js_residency_ram_k);
 }
 
-/** @c forVram({devices, gpuClass, streams, scratchLimit, deferredLimit}) → a stream per device. */
+/** @c forVram({devices, gpuClass, memoryDomains, cpuClass, streams, scratchLimit, deferredLimit})
+ *  → a stream per device and host decoders over NUMA nodes. */
 static napi_value uform_js_executor_for_vram(napi_env env, napi_callback_info info) {
     napi_value config = NULL;
     uform_outcome_t outcome = {uform_status_success_k, NULL};
     uform_executor_t handle = NULL;
     uform_executor_for_vram_t for_vram = {.executor = &handle, .outcome = &outcome};
-    int32_t *ordinals = NULL;
+    int32_t *ordinals = NULL, *memory_domains = NULL;
     if (!uform_js_arguments(env, info, 1, &config, NULL) ||
         !uform_js_gpu_class_from_value(env, uform_js_property(env, config, "gpuClass"), &for_vram.vram.gpu_class) ||
+        !uform_js_cpu_class_from_value(env, uform_js_property(env, config, "cpuClass"), &for_vram.ram.cpu_class) ||
         !uform_js_size_from_value(env, uform_js_property(env, config, "scratchLimit"), "scratchLimit",
                                   &for_vram.scratch_limit) ||
         !uform_js_size_from_value(env, uform_js_property(env, config, "deferredLimit"), "deferredLimit",
@@ -669,6 +671,12 @@ static napi_value uform_js_executor_for_vram(napi_env env, napi_callback_info in
                                       &for_vram.vram.devices_count))
         return NULL;
     for_vram.vram.devices = ordinals;
+    if (!uform_js_ordinals_from_value(env, uform_js_property(env, config, "memoryDomains"), "memoryDomains",
+                                      &memory_domains, &for_vram.ram.memory_domains_count)) {
+        free(ordinals);
+        return NULL;
+    }
+    for_vram.ram.memory_domains = memory_domains;
 
     napi_value const streams_value = uform_js_property(env, config, "streams");
     void **streams = NULL;
@@ -678,6 +686,7 @@ static napi_value uform_js_executor_for_vram(napi_env env, napi_callback_info in
         if (napi_is_array(env, streams_value, &is_array) != napi_ok || !is_array ||
             napi_get_array_length(env, streams_value, &streams_count) != napi_ok ||
             streams_count != for_vram.vram.devices_count) {
+            free(memory_domains);
             free(ordinals);
             uform_js_throw_field(env, "streams", "must be an array of BigInt addresses, one per device");
             return NULL;
@@ -691,6 +700,7 @@ static napi_value uform_js_executor_for_vram(napi_env env, napi_callback_info in
         }
         if (!read) {
             free(streams);
+            free(memory_domains);
             free(ordinals);
             if (!streams) uform_js_throw(env, uform_status_out_of_memory_k, "Could not allocate the streams");
             return NULL;
@@ -699,6 +709,7 @@ static napi_value uform_js_executor_for_vram(napi_env env, napi_callback_info in
     }
     uform_executor_for_vram(&for_vram);
     free(streams);
+    free(memory_domains);
     free(ordinals);
     return uform_js_executor_adopt(env, &outcome, handle, uform_js_residency_vram_k);
 }

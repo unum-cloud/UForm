@@ -212,13 +212,13 @@ static std::size_t cores_of(topology_t const &topology, st::basic_vector<i32_t> 
 }
 
 /** Sizes @p executor 's deferred table at @p limit entries, zero taking the default, gives it the
- *  host verbs of @p cpu_class , lists it, and hands it out through @p output; frees it once
- *  @p outcome records why not. */
-static void hand_out_executor(std::unique_ptr<uform_executor_handle_t> executor, cpu_class_t cpu_class,
+ *  host verbs of the newest class under @p ceiling , lists it, and hands it out through @p output;
+ *  frees it once @p outcome records why not. */
+static void hand_out_executor(std::unique_ptr<uform_executor_handle_t> executor, cpu_ceiling_t ceiling,
                               std::size_t limit, uform_executor_t *output, uform_outcome_t *outcome) noexcept {
     if (st::failed(executor->deferred.resize(limit ? limit : deferred_limit_default_k)))
         return propagate_error(uform_status_out_of_memory_k, outcome, "Failed to allocate the deferred table"), void();
-    executor->host_verbs = pick_host_verbs(cpu_ladder_t {}, cpu_class);
+    executor->host_verbs = pick_host_verbs(cpu_ladder_t {}, ceiling);
     {
         st::unique_lock<fu::spin_mutex_t> lock(deferred_registry.guard);
         executor->next_listed = deferred_registry.executors;
@@ -238,21 +238,49 @@ static void delist_executor(uform_executor_handle_t &executor) noexcept {
         }
 }
 
-/** The capabilities a device of @p detected capabilities runs under @p pinned : its class's, a
- *  pinned class's it holds, or, for a device no class covers and nothing pins, its own; zero when
- *  the pin refuses it. */
-static nk_capability_t device_class_capabilities(nk_capability_t detected, uform_gpu_class_t pinned) noexcept {
-    gpu_class_t const device_class = gpu_class_of(detected);
-    if (device_class == gpu_class_t::unknown_k && pinned == uform_gpu_class_unknown_k) return detected;
-    return gpu_pin_capabilities(device_class, pinned);
-}
-
 /** Reads the name, compute units and memory of @p home_ 's device @p vendor_ordinal through its
  *  vendor's entries kit; false for a vendor this build lacks or a runtime that refuses. */
 template <encoder_home_t home_>
 static bool describe_device(std::size_t vendor_ordinal, ue::device_description_t &description) noexcept {
     if constexpr (!gpu_vendor_compiled(vendor_of(home_))) return false;
     else return entries_kit_of<home_>::describe(vendor_ordinal, description) == nk_success_k;
+}
+
+/** The vendor's name in the C interface for a NumKong device kind. */
+static uform_gpu_vendor_t gpu_vendor_of(nk::device_kind_t kind) noexcept {
+    return kind == nk::device_kind_t::cuda_k ? uform_gpu_vendor_nvidia_k : uform_gpu_vendor_amd_k;
+}
+
+/** Fills @p description of @p kind 's device @p vendor_ordinal from its driver and answers the
+ *  class its architecture numbers name; unknown for a vendor this build lacks or a runtime that
+ *  refuses. */
+static gpu_class_t describe_gpu(nk::device_kind_t kind, std::size_t vendor_ordinal,
+                                ue::device_description_t &description) noexcept {
+    bool const described = kind == nk::device_kind_t::cuda_k
+                               ? describe_device<encoder_home_t::vram_nvidia_k>(vendor_ordinal, description)
+                               : describe_device<encoder_home_t::vram_amd_k>(vendor_ordinal, description);
+    if (!described) return gpu_class_t::unknown_k;
+    return gpu_class_of(gpu_vendor_of(kind), description.architecture_major, description.architecture_minor);
+}
+
+/** The NumKong kits this build compiled for @p kind 's devices, its vendor's group bit included. */
+static nk_capability_t compiled_for(nk::device_kind_t kind) noexcept {
+    nk_capability_t compiled = 0;
+    nk_status_t const status = kind == nk::device_kind_t::cuda_k ? nk_cuda_capabilities_compiled(&compiled)
+                                                                 : nk_rocm_capabilities_compiled(&compiled);
+    return status == nk_success_k ? compiled : 0;
+}
+
+/** The capabilities a device of @p device_class , from @p kind 's vendor, runs under @p pinned :
+ *  its class's, a pinned class's it holds, or the vendor floor for a device no class covers and
+ *  nothing pins; only what this build compiled, and zero when the pin refuses it. */
+static nk_capability_t device_capabilities(nk::device_kind_t kind, gpu_class_t device_class,
+                                           uform_gpu_class_t pinned) noexcept {
+    nk_capability_t const vendor = kind == nk::device_kind_t::cuda_k ? nk_cap_cuda_k : nk_cap_rocm_k;
+    nk_capability_t const held = device_class == gpu_class_t::unknown_k && pinned == uform_gpu_class_unknown_k
+                                     ? vendor
+                                     : gpu_pin_capabilities(device_class, pinned);
+    return held ? (held | vendor) & compiled_for(kind) : 0;
 }
 
 /** Opens a stream and a scratch arena on the GPU the process-wide @p listed ordinal names, CUDA's
@@ -268,11 +296,13 @@ static bool open_device(per_gpu_array<vram_device_t> &devices, i32_t listed, nk_
     nk_size_t const vendor_ordinal = kind == nk::device_kind_t::cuda_k ? flat_ordinal : flat_ordinal - cuda_devices;
     nk::expected<nk::device_t> const device = nk::device_t::make(kind, vendor_ordinal);
     if (!device) return propagate_error(status_of(static_cast<nk_status_t>(device.status)), outcome, "No such GPU");
-    nk::expected<nk_capability_t> const detected = device.value.capabilities_enabled();
-    if (!detected || !detected.value)
+    if (!compiled_for(kind))
         return propagate_error(uform_status_device_k, outcome, "This build holds no kernels for the GPU");
-    nk_capability_t const capabilities = device_class_capabilities(detected.value, pinned);
+    ue::device_description_t description;
+    gpu_class_t const device_class = describe_gpu(kind, vendor_ordinal, description);
+    nk_capability_t const capabilities = device_capabilities(kind, device_class, pinned);
     if (!capabilities) return propagate_error(uform_status_unsupported_k, outcome, "The GPU does not admit the pin");
+    gpu_class_t const gpu_class = pinned == uform_gpu_class_unknown_k ? device_class : static_cast<gpu_class_t>(pinned);
     nk::expected<owned_stream_t> stream = owned_stream_t::make(device.value);
     if (!stream)
         return propagate_error(status_of(static_cast<nk_status_t>(stream.status)), outcome, "Failed to open a stream");
@@ -285,6 +315,7 @@ static bool open_device(per_gpu_array<vram_device_t> &devices, i32_t listed, nk_
     vram_device_t opened {listed,
                           static_cast<i32_t>(vendor_ordinal),
                           capabilities,
+                          gpu_class,
                           std::move(stream.value),
                           device_arena_t {chunked_arena_t(policy, handle, scratch_limit)},
                           chunked_arena_t(pages, handle, 0)};
@@ -324,20 +355,12 @@ UFORM_EXPORT void uform_gpu_devices(uform_gpu_devices_t *arguments) {
         if (!count) continue; // a vendor this build or machine lacks lists nothing
         for (std::size_t ordinal = 0; ordinal != count.value; ++ordinal, ++listed) {
             if (listed >= arguments->devices_capacity) continue;
-            nk::expected<nk::device_t> const device = nk::device_t::make(kind, ordinal);
-            nk::expected<nk_capability_t> const detected = device ? device.value.capabilities_enabled()
-                                                                  : nk::expected<nk_capability_t> {};
-            nk_capability_t const capabilities = detected ? detected.value : 0;
             uform_gpu_device_t &entry = arguments->devices[listed];
             entry = {};
-            entry.vendor = kind == nk::device_kind_t::cuda_k ? uform_gpu_vendor_nvidia_k : uform_gpu_vendor_amd_k;
+            entry.vendor = gpu_vendor_of(kind);
             entry.vendor_ordinal = static_cast<u32_t>(ordinal);
-            entry.gpu_class = static_cast<uform_gpu_class_t>(gpu_class_of(capabilities));
             ue::device_description_t description;
-            bool const described = kind == nk::device_kind_t::cuda_k
-                                       ? describe_device<encoder_home_t::vram_nvidia_k>(ordinal, description)
-                                       : describe_device<encoder_home_t::vram_amd_k>(ordinal, description);
-            if (!described) continue;
+            entry.gpu_class = static_cast<uform_gpu_class_t>(describe_gpu(kind, ordinal, description));
             std::memcpy(entry.name, description.name, sizeof(entry.name));
             entry.compute_units = description.compute_units;
             entry.memory_bytes = description.memory_bytes;
@@ -347,18 +370,15 @@ UFORM_EXPORT void uform_gpu_devices(uform_gpu_devices_t *arguments) {
     propagate_error(uform_status_success_k, outcome, nullptr);
 }
 
-/** Picks the CPU class @p ram pins or the best one this machine admits, then hands out
- *  @p executor , whose pool and memory domains are set. */
+/** Sets the ceiling @p ram pins, or the machine's, then hands out @p executor , whose pool and
+ *  memory domains are set. */
 static void hand_out_ram_executor(std::unique_ptr<uform_executor_handle_t> executor, uform_ram_options_t const &ram,
                                   std::size_t limit, uform_executor_t *output, uform_outcome_t *outcome) noexcept {
-    nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k)
-        return propagate_error(uform_status_device_k, outcome, "The CPU capabilities could not be read"), void();
-    if (!cpu_pin_admitted(ram.cpu_class, available))
+    expected<cpu_ceiling_t> ceiling = pick_cpu_ceiling(ram.cpu_class);
+    if (!ceiling)
         return propagate_error(uform_status_unsupported_k, outcome, "The CPU does not admit the pinned class"), void();
-    cpu_class_t const cpu_class = pick_cpu_class(cpu_ladder_t {}, ram.cpu_class, available);
-    std::get<ram_executor_t>(executor->executor).capabilities = numkong_capabilities_of(cpu_class);
-    hand_out_executor(std::move(executor), cpu_class, limit, output, outcome);
+    std::get<ram_executor_t>(executor->executor).ceiling = *ceiling;
+    hand_out_executor(std::move(executor), *ceiling, limit, output, outcome);
 }
 
 UFORM_EXPORT void uform_executor_for_ram(uform_executor_for_ram_t *arguments) {
@@ -403,6 +423,9 @@ UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t *arguments) 
         return propagate_error(uform_status_unsupported_k, outcome, "Borrowed streams are not wired yet"), void();
     if (vram.devices_count && !vram.devices)
         return propagate_error(uform_status_invalid_argument_k, outcome, "The devices must not be null"), void();
+    expected<cpu_ceiling_t> ceiling = pick_cpu_ceiling(arguments->ram.cpu_class);
+    if (!ceiling)
+        return propagate_error(uform_status_unsupported_k, outcome, "The CPU does not admit the pinned class"), void();
     nk_size_t cuda_devices = 0, rocm_devices = 0;
     if (nk_cuda_count_devices(&cuda_devices) != nk_success_k) cuda_devices = 0;
     if (nk_rocm_count_devices(&rocm_devices) != nk_success_k) rocm_devices = 0;
@@ -422,17 +445,15 @@ UFORM_EXPORT void uform_executor_for_vram(uform_executor_for_vram_t *arguments) 
             return;
     }
     for (vram_device_t const &device : devices.devices)
-        if (gpu_class_of(device.capabilities) != gpu_class_of(devices.devices[0].capabilities))
+        if (device.gpu_class != devices.devices[0].gpu_class)
             return propagate_error(uform_status_config_mismatch_k, outcome, "The devices differ in class"), void();
-    expected<executor_t> decoders = executor_t::make(*topology, derived_threads(topology->logical_cores_count()),
+    st::basic_vector<i32_t> memory_domains;
+    if (!adopt_memory_domains(memory_domains, arguments->ram, *topology, outcome)) return;
+    expected<executor_t> decoders = executor_t::make(*topology, derived_threads(cores_of(*topology, memory_domains)),
                                                      caller_exclusivity_t::caller_inclusive_k);
     if (!decoders) return propagate_error(status_of(decoders.status_), outcome, "Failed to spawn the decoders"), void();
     devices.decoders = std::move(*decoders);
-    nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k)
-        return propagate_error(uform_status_device_k, outcome, "The CPU capabilities could not be read"), void();
-    cpu_class_t const cpu_class = pick_cpu_class(cpu_ladder_t {}, uform_cpu_class_unknown_k, available);
-    hand_out_executor(std::move(executor), cpu_class, arguments->deferred_limit, arguments->executor, outcome);
+    hand_out_executor(std::move(executor), *ceiling, arguments->deferred_limit, arguments->executor, outcome);
 }
 
 UFORM_EXPORT void uform_executor_drain(uform_executor_drain_t *arguments) {
@@ -713,18 +734,15 @@ UFORM_EXPORT char const *uform_capabilities_compiled(void) {
 UFORM_EXPORT char const *uform_capabilities_available(void) {
     static char const *const rendered = [] {
         static char text[NUMKONG_CAPABILITIES_NAME_CAPACITY] = {};
-        nk_capability_t available = 0;
-        if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = 0;
-        nk_size_t cuda_devices = 0, rocm_devices = 0;
-        if (nk_cuda_count_devices(&cuda_devices) != nk_success_k) cuda_devices = 0;
-        if (nk_rocm_count_devices(&rocm_devices) != nk_success_k) rocm_devices = 0;
-        for (nk_size_t ordinal = 0; ordinal != cuda_devices; ++ordinal) {
-            nk_capability_t device = 0;
-            if (nk_cuda_capabilities_enabled(ordinal, &device) == nk_success_k) available |= device;
-        }
-        for (nk_size_t ordinal = 0; ordinal != rocm_devices; ++ordinal) {
-            nk_capability_t device = 0;
-            if (nk_rocm_capabilities_enabled(ordinal, &device) == nk_success_k) available |= device;
+        expected<cpu_ceiling_t> const ceiling = pick_cpu_ceiling(uform_cpu_class_unknown_k);
+        nk_capability_t available = ceiling ? ceiling->compute : nk_cap_serial_k;
+        for (nk::device_kind_t const kind : {nk::device_kind_t::cuda_k, nk::device_kind_t::rocm_k}) {
+            nk::expected<std::size_t> const count = nk::device_t::count(kind);
+            for (std::size_t ordinal = 0; count && ordinal != count.value; ++ordinal) {
+                ue::device_description_t description;
+                gpu_class_t const device_class = describe_gpu(kind, ordinal, description);
+                available |= device_capabilities(kind, device_class, uform_gpu_class_unknown_k);
+            }
         }
         nk_capabilities_name(available, text, sizeof(text));
         return text;

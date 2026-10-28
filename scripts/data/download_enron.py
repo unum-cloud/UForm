@@ -35,8 +35,6 @@ Layout: the tarball lands under `<DATA_ROOT>/enron/` with a `data/enron` symlink
     UFORM_DATA_ROOT=$UFORM_DATA_ROOT uv run scripts/data/download_enron.py      # env-var root
 """
 
-from __future__ import annotations
-
 import argparse
 import email
 import email.policy

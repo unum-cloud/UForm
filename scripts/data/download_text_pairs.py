@@ -37,8 +37,6 @@ Usage:
     uv run scripts/data/download_text_pairs.py --repack-only --only mmarco --data-root /data/Data
 """
 
-from __future__ import annotations
-
 import argparse
 import gzip
 import json

@@ -1002,7 +1002,7 @@ impl Mesh {
 /// ```no_run
 /// use uform::*;
 ///
-/// let executor = unsafe { Executor::for_vram(&[0], None, &[], 0, 0)? };
+/// let executor = unsafe { Executor::for_vram(&[0], None, &[], None, &[], 0, 0)? };
 /// let trainer = Trainer::init_vram(&executor, TrainerInitVramConfig {
 ///     depth: 12,
 ///     hidden: 512,
