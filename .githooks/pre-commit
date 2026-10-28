@@ -2618,15 +2618,15 @@ run_tree_checks() {
 
     # A `uform_sibling` pin and the submodule's gitlink name the same commit, or a recursive clone and a plain one
     # build different code. Both sides are read from the index, so the comparison is against what this commit records.
-    if staged_any CMakeLists.txt numkong stringzilla forkunion; then
+    if staged_any cmake/uform_siblings.cmake numkong stringzilla forkunion; then
         while read -r sibling pinned; do
             recorded=$(git ls-files --stage -- "$sibling" | awk '$1 == "160000" { print $2 }')
             [ -n "$recorded" ] || continue
             if [ "$recorded" != "$pinned" ]; then
-                echo "pre-commit: $sibling pin has drifted: CMakeLists.txt says ${pinned:0:12}, the submodule records ${recorded:0:12}"
+                echo "pre-commit: $sibling pin has drifted: cmake/uform_siblings.cmake says ${pinned:0:12}, the submodule records ${recorded:0:12}"
                 rejection_count=$((rejection_count + 1))
             fi
-        done < <(git show :CMakeLists.txt 2> /dev/null | awk '
+        done < <(git show :cmake/uform_siblings.cmake 2> /dev/null | awk '
             /^[ \t]*uform_sibling\(/ { inside = 1; record = ""; sub(/.*uform_sibling\(/, "") }
             inside { record = record " " $0 }
             inside && /\)/ {

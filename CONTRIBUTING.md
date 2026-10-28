@@ -17,7 +17,7 @@ Later, bring every submodule to the tip of its branch before bumping the commits
 git submodule foreach --quiet 'git pull --ff-only --quiet'
 ```
 
-`CMakeLists.txt` builds each submodule in place when it is checked out, and otherwise fetches the commit `uform_sibling` pins for it.
+`cmake/uform_siblings.cmake` builds each submodule in place when it is checked out, and otherwise fetches the commit `uform_sibling` pins for it.
 A commit that moves a submodule moves its pin too, and the pre-commit hook refuses one where the two disagree.
 Machine specifics such as a compiler path go into a gitignored `CMakeUserPresets.json`, whose presets inherit the ones in `CMakePresets.json`.
 
