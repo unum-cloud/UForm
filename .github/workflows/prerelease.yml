@@ -425,6 +425,28 @@ jobs:
             -D CMAKE_CUDA_HOST_COMPILER=clang++-22
           cmake --build --preset ${{ matrix.preset }}
 
+  # Compile-only: the Venice profile builds the C library for Zen 6 and MI450-class GPUs, without the trainer, in AMD's
+  # image, as ROCm publishes no Ubuntu 26.04 packages.
+  build_venice_profile:
+    name: Build Machine Profile venice_mi450
+    runs-on: ubuntu-26.04
+    container: rocm/dev-ubuntu-26.04:10.0.0-full
+    steps:
+      - name: Install Clang 22 and the Codecs
+        run: |
+          apt-get update && apt-get install -y curl gnupg git cmake ninja-build
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+            > /etc/apt/sources.list.d/llvm.list
+          apt-get update && apt-get install -y clang-22 $UBUNTU_CODECS
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Build
+        run: |
+          cmake --preset venice_mi450 -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 \
+            -D CMAKE_PREFIX_PATH=/opt/rocm
+          cmake --build --preset venice_mi450
+
   build_docs:
     name: Build Docs
     runs-on: ubuntu-26.04

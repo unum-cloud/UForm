@@ -144,8 +144,52 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?);
     let chosen = selected()?;
+    let target_os = env::var("CARGO_CFG_TARGET_OS")?;
 
-    let mut library = cmake::Config::new(&manifest);
+    // A directory holding the chosen archive that CMake already built, like a parent project's build
+    // tree or a release, skips the build here. Pass the archive's exact directory.
+    println!("cargo:rerun-if-env-changed=UFORM_LIBRARY_DIR");
+    match env::var_os("UFORM_LIBRARY_DIR") {
+        Some(directory) => {
+            let directory = PathBuf::from(directory);
+            let archive = match env::var("CARGO_CFG_TARGET_ENV")?.as_str() {
+                "msvc" => format!("{}.lib", chosen.library),
+                _ => format!("lib{}.a", chosen.library),
+            };
+            println!("cargo:rerun-if-changed={}", directory.join(archive).display());
+            println!("cargo:rustc-link-search=native={}", directory.display());
+        }
+        None => build_library(&manifest, chosen, &target_os)?,
+    }
+
+    println!("cargo:rustc-link-lib=static={}", chosen.library);
+    if target_os != "wasi" {
+        for dependency in chosen.dependencies {
+            println!("cargo:rustc-link-lib=dylib={dependency}");
+        }
+    }
+
+    // The archive is C++, so the standard library it was compiled against has to come along.
+    match target_os.as_str() {
+        "windows" => {}
+        "macos" | "ios" => println!("cargo:rustc-link-lib=dylib=c++"),
+        // wasi-sdk ships libc++ and libc++abi as archives under its sysroot, in the `noeh` multilib the
+        // toolchain file compiles against.
+        "wasi" => {
+            let sysroot = PathBuf::from(env::var("WASI_SDK_PATH")?).join("share/wasi-sysroot/lib/wasm32-wasip1/noeh");
+            println!("cargo:rustc-link-search=native={}", sysroot.display());
+            println!("cargo:rustc-link-lib=static=c++");
+            println!("cargo:rustc-link-lib=static=c++abi");
+        }
+        _ => println!("cargo:rustc-link-lib=dylib=stdc++"),
+    }
+    Ok(())
+}
+
+/// Builds the chosen archive through CMake into Cargo's output directory and adds where it landed
+/// to the search path.
+fn build_library(manifest: &Path, chosen: Implementation, target_os: &str) -> Result<(), Box<dyn Error>> {
+    let mut library = cmake::Config::new(manifest);
     // The crate reconfigures on every invocation by default, which on this tree is a fresh probe of
     // every dependency before a build that has nothing to do.
     // CMake's Debug configuration instruments for sanitizers whose runtimes rustc never links.
@@ -182,7 +226,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // `cmake-rs` has no WASI system name to hand CMake, so the checked-in toolchain names the SDK and the
     // sysroot; the one thing a user sets is `WASI_SDK_PATH`.
-    let target_os = env::var("CARGO_CFG_TARGET_OS")?;
     if target_os == "wasi" {
         println!("cargo:rerun-if-env-changed=WASI_SDK_PATH");
         println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_FEATURE");
@@ -210,27 +253,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         "cargo:rustc-link-search=native={}",
         build.join("RelWithDebInfo").display()
     );
-    println!("cargo:rustc-link-lib=static={}", chosen.library);
-    if target_os != "wasi" {
-        for dependency in chosen.dependencies {
-            println!("cargo:rustc-link-lib=dylib={dependency}");
-        }
-    }
-
-    // The archive is C++, so the standard library it was compiled against has to come along.
-    match target_os.as_str() {
-        "windows" => {}
-        "macos" | "ios" => println!("cargo:rustc-link-lib=dylib=c++"),
-        // wasi-sdk ships libc++ and libc++abi as archives under its sysroot, in the `noeh` multilib the
-        // toolchain file compiles against.
-        "wasi" => {
-            let sysroot = PathBuf::from(env::var("WASI_SDK_PATH")?).join("share/wasi-sysroot/lib/wasm32-wasip1/noeh");
-            println!("cargo:rustc-link-search=native={}", sysroot.display());
-            println!("cargo:rustc-link-lib=static=c++");
-            println!("cargo:rustc-link-lib=static=c++abi");
-        }
-        _ => println!("cargo:rustc-link-lib=dylib=stdc++"),
-    }
 
     // Only what the chosen implementation actually compiles, so a stand-in build ignores the
     // engine's sources and an engine build ignores the stand-in's.

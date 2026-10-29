@@ -86,9 +86,12 @@
       "name": "release",
       "inherits": "base",
       "displayName": "Release - every host target",
-      "description": "The host libraries and the conformance suites, fully optimized.",
+      "description": "The host libraries and the conformance suites, fully optimized, with build paths remapped so the binaries name none.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
+        "CMAKE_CXX_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
+        "CMAKE_CUDA_FLAGS": "-Xcompiler=-ffile-prefix-map=${sourceDir}=.",
         "UFORM_BUILD_SHARED": "ON",
         "UFORM_BUILD_TEST": "ON",
         "UFORM_BUILD_TOOLS": "ON"
@@ -118,9 +121,12 @@
       "name": "library",
       "inherits": "base",
       "displayName": "Library - the C library for the host alone",
-      "description": "The C library alone, fully optimized, without the trainer or the conformance suites.",
+      "description": "The C library alone, fully optimized, without the trainer or the conformance suites, with build paths remapped.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
+        "CMAKE_CXX_FLAGS": "-ffile-prefix-map=${sourceDir}=.",
+        "CMAKE_CUDA_FLAGS": "-Xcompiler=-ffile-prefix-map=${sourceDir}=.",
         "UFORM_BUILD_SHARED": "ON"
       }
     },
@@ -402,6 +408,7 @@
       "cacheVariables": {
         "UFORM_MARCH": "znver5",
         "UFORM_ROCM_ARCH": "gfx1250",
+        "UFORM_BUILD_TRAIN": "OFF",
         "NUMKONG_TARGET_HASWELL": "1",
         "NUMKONG_TARGET_SKYLAKE": "1",
         "NUMKONG_TARGET_ICELAKE": "1",

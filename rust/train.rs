@@ -1212,7 +1212,10 @@ impl<'arena, Modalities: AsRef<[Modality]>, Contents: TapeView<u8>> Calling
             .iter()
             .any(|&length| length != 0 && length != count)
         {
-            return Err(fail(Status::ShapeMismatch, "pass no bags, groups or sides, or one per item"));
+            return Err(fail(
+                Status::ShapeMismatch,
+                "pass no bags, groups or sides, or one per item",
+            ));
         }
         let (choices, choice_targets) = lower_choices(config.choices, config.choice_targets, count)?;
         let relations = uform_relations_view_t {
@@ -1350,10 +1353,16 @@ mod tests {
 
         let word = size_of::<usize>();
         assert_eq!(offset_of!(BatchShape, max_choices_per_item), 4 * word);
-        assert_eq!(offset_of!(uform_contrastive_t, pair_loss), size_of::<uform_contrastive_t>() - word);
+        assert_eq!(
+            offset_of!(uform_contrastive_t, pair_loss),
+            size_of::<uform_contrastive_t>() - word
+        );
         assert_eq!(offset_of!(LateInteraction, pair_loss), 7 * word);
         assert_eq!(size_of::<Choices>(), 8);
-        assert_eq!(offset_of!(uform_trainer_step_t, choices), offset_of!(uform_trainer_step_t, sides) + word);
+        assert_eq!(
+            offset_of!(uform_trainer_step_t, choices),
+            offset_of!(uform_trainer_step_t, sides) + word
+        );
         assert_eq!(
             offset_of!(uform_trainer_step_t, choice_targets),
             offset_of!(uform_trainer_step_t, choices) + 3 * word
@@ -1363,9 +1372,15 @@ mod tests {
             offset_of!(uform_trainer_step_t, choice_targets) + 3 * word
         );
         let late_interaction_loss = offset_of!(TrainerStepStats, late_interaction_loss);
-        assert_eq!(late_interaction_loss, offset_of!(TrainerStepStats, masked_audio_loss) + 4);
+        assert_eq!(
+            late_interaction_loss,
+            offset_of!(TrainerStepStats, masked_audio_loss) + 4
+        );
         assert_eq!(offset_of!(TrainerStepStats, choices_loss), late_interaction_loss + 4);
-        assert_eq!(offset_of!(TrainerStepStats, dropped), offset_of!(TrainerStepStats, truncated) + word);
+        assert_eq!(
+            offset_of!(TrainerStepStats, dropped),
+            offset_of!(TrainerStepStats, truncated) + word
+        );
         assert_eq!(offset_of!(uform_mesh_description_t, gpu_class), 5 * word + 4);
     }
 

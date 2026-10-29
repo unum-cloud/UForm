@@ -1,0 +1,12 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+include("${CMAKE_CURRENT_LIST_DIR}/uformTargets.cmake")
+# The archive installs outside the SDK, so its targets load only where it was installed, with the codecs it links.
+if (EXISTS "${CMAKE_CURRENT_LIST_DIR}/uformStaticTargets.cmake")
+    if (@UFORM_WITH_CODECS@)
+        find_dependency(PNG)
+    endif ()
+    include("${CMAKE_CURRENT_LIST_DIR}/uformStaticTargets.cmake")
+endif ()

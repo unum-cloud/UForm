@@ -22,6 +22,7 @@ Three features swap what is linked, and `build.rs` refuses the stub beside eithe
 - `stub` links a stand-in that answers the same verbs over the C++ standard library alone, with deterministic rows, seconds to build and no codecs, for testing a caller and never for shipping.
 
 CMake builds the NumKong, StringZilla, ForkUnion and SmashTable trees of the crates Cargo resolved, rather than fetching their pinned revisions again.
+`UFORM_LIBRARY_DIR`, naming the directory of a `libuform_static.a` CMake already built, links that archive instead of running CMake.
 A WASI build reads the SDK from `WASI_SDK_PATH` and needs `-C target-feature=+simd128`.
 The suites run against the stub:
 

@@ -298,3 +298,5 @@ endif ()
 if (UFORM_BUILD_NODE)
     add_subdirectory(javascript)
 endif ()
+
+include(cmake/uform_install.cmake)

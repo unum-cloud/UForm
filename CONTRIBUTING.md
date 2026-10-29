@@ -149,7 +149,7 @@ Tensors index by rank, `tensor[row, column]`, and slice through the same subscri
 
 ### Threads and Placement
 
-Host threads and the machine's topology come from ForkUnion's C ABI in `forkunion.h`, wrapped once by `include/uform/utilities/ram_device.hpp`, and nothing else calls a `fu_*` function.
+Host threads and the machine's topology come from ForkUnion's C ABI in `forkunion/forkunion.h`, wrapped once by `include/uform/utilities/ram_device.hpp`, and nothing else calls a `fu_*` function.
 There `topology_t` harvests the machine through `fu_topology_new`, `executor_t` spawns a pool through `fu_pool_new` and `fu_pool_spawn` and deletes it in its destructor, and `lent_pool_t` wraps a pool another library lends through `uform_executor_on_pool`, dispatching on it but never deleting it.
 Engines, loaders, tools and tests dispatch through the `pool_view_t` either one hands out, `for_n` for tasks of similar cost and `for_n_dynamic` for uneven ones, and a dispatch finding the pool busy answers `status_t::contended_k` rather than waiting.
 The hook refuses a ForkUnion pool or topology class under `include/uform/`, and a `std::thread` in a CUDA source, where one host thread drives every device through its streams and events.
@@ -244,7 +244,7 @@ Every CMake option carries the `UFORM_` prefix, and every `UFORM_BUILD_*` switch
 - `UFORM_BUILD_BENCH`: the benchmarks in `bench/`.
 - `UFORM_BUILD_PYTHON` and `UFORM_BUILD_NODE`: the CPython extension and the Node addon, which scikit-build-core and cmake-js set.
 - `UFORM_WERROR`: warnings as errors, which the `check` preset sets.
-- `UFORM_INSTALL`: with `UFORM_BUILD_SHARED`, the C headers, `uform_static`, `uform_shared` and a CMake package under `lib/cmake/uform`, which `find_package(uform)` reads as `uform::static`, `uform::shared` and `uform::header`, on in a top-level build.
+- `UFORM_INSTALL`: with `UFORM_BUILD_SHARED`, the C headers, `uform_static`, `uform_shared`, a `uform.pc` and a CMake package under `lib/cmake/uform`, which `find_package(uform)` reads as `uform::static`, `uform::shared` and `uform::header`, on in a top-level build. Its `sdk` component holds the shared library, the C headers, both package files and the license, and `cpack --config build_library/CPackConfig.cmake` packs it alone, stripped, into `uform-<version>-<platform>-sdk.tar.gz`; the `library` and `release` presets remap the source directory out of every binary.
 - `UFORM_WITH_INFINIBAND`: `AUTO` probes for InfiniBand and enables it when present, `ON` requires it and `OFF` leaves it out.
 - `UFORM_WITH_CODECS`: the host image, video and audio codecs the verbs over files decode with, on by default and off on WebAssembly, Android and Windows presets; CUDA needs it.
 - `UFORM_MARCH`: the `-march` floor of UForm's units and its libraries', an ISA level, `native` or a CPU name like `graniterapids`, and on WebAssembly the module's `serial`, `v128` or `v128relaxed`; empty by default, seeded from the environment.
@@ -252,7 +252,7 @@ Every CMake option carries the `UFORM_` prefix, and every `UFORM_BUILD_*` switch
 - The `xeon4_hopper`, `xeon6_blackwell`, `grace_hopper` and `vera_rubin` presets build the C library for one machine, naming its CPU and its one GPU code.
 
 GPU code follows one policy per build kind.
-The release set compiles UForm's own CUDA units for `80`, `89`, `90a`, `100f` and `120f` cubins with a `compute_80` PTX tail, the encoder bundle's generic SIMT kernels as `compute_80` PTX alone, and the `multimem` bundle as one plain `90` cubin with its PTX, as it needs nothing past Hopper.
+The release set compiles UForm's own CUDA units for `80`, `89`, `90a`, `100f` and `120f` cubins with a `compute_80` PTX tail, the encoder bundle's generic SIMT kernels as `compute_75` PTX alone, and the `multimem` bundle as one plain `90` cubin with its PTX, as it needs nothing past Hopper.
 A native or named code compiles every unit and bundle as that code's SASS alone.
 AMD compiles one code object per listed target either way.
 - `UFORM_SITE_PACKAGES` and `UFORM_CUDF_ROOT`: the directory the libcudf wheel discovery searches, or the prefix holding the libraries themselves.

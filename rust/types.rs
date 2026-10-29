@@ -808,7 +808,12 @@ impl FromStr for CPUClass {
 
     /// Calls `uform_cpu_class_from_name`.
     fn from_str(text: &str) -> Result<Self> {
-        read_spelling(text, uform_cpu_class_from_name, uform_cpu_class_name, CPUClass::from_raw)
+        read_spelling(
+            text,
+            uform_cpu_class_from_name,
+            uform_cpu_class_name,
+            CPUClass::from_raw,
+        )
     }
 }
 
@@ -879,7 +884,12 @@ impl FromStr for GPUClass {
 
     /// Calls `uform_gpu_class_from_name`.
     fn from_str(text: &str) -> Result<Self> {
-        read_spelling(text, uform_gpu_class_from_name, uform_gpu_class_name, GPUClass::from_raw)
+        read_spelling(
+            text,
+            uform_gpu_class_from_name,
+            uform_gpu_class_name,
+            GPUClass::from_raw,
+        )
     }
 }
 
@@ -1187,7 +1197,9 @@ pub(crate) fn path_view(path: &Path) -> Result<uform_bytes_view_t> {
     }
     #[cfg(not(unix))]
     {
-        let path = path.to_str().ok_or(fail(Status::InvalidArgument, "the path is not valid UTF-8"))?;
+        let path = path
+            .to_str()
+            .ok_or(fail(Status::InvalidArgument, "the path is not valid UTF-8"))?;
         Ok(path.as_bytes().into())
     }
 }

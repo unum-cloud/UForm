@@ -21,7 +21,7 @@
 #include <stdlib.h>  // `exit`, `getenv`
 #include <string.h>  // `memcmp`, `memset`, `strcmp`, `strlen`, `strstr`
 
-#include <forkunion.h> // `fu_pool_new`, `fu_topology_new` - the pool a lender spawns
+#include <forkunion/forkunion.h> // `fu_pool_new`, `fu_topology_new` - the pool a lender spawns
 
 #include "uform/uform.h"
 

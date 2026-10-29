@@ -260,13 +260,17 @@ static void token_vectors_unit_length(test_suite_t &suite, encoded_t const &refe
     suite.check(worst < 1e-2, "token vectors have unit length: worst deviation {:.4e}", worst);
 }
 
+/** The class parity compares against: serial, or the one class of a monoversioned build. */
+constexpr cpu_class_t reference_class_k = cpu_class_compiled(cpu_class_t::serial_k) ? cpu_class_t::serial_k
+                                                                                    : cpu_class_t::monoversioned_k;
+
 /** Runs @ref class_parity for every class of the ladder this build compiled, in both precisions. */
 template <cpu_class_t... classes_>
 static void run_class_parity(test_suite_t &suite, cpu_ladder<classes_...>, checkpoint_to_load_t const &checkpoint,
                              geometry_t const &geometry, pool_view_t pool, nk_capability_t available,
                              encoded_t const &bf16_reference, encoded_t const &e4m3_reference) {
     auto rung = [&]<cpu_class_t class_>() {
-        if constexpr (cpu_class_compiled(class_) && class_ != cpu_class_t::serial_k) {
+        if constexpr (cpu_class_compiled(class_) && class_ != reference_class_k) {
             char const *const name = uform_cpu_class_name(static_cast<uform_cpu_class_t>(class_));
             suite.run(fmt::format("class_parity/{}/bf16", name), class_parity<class_>, checkpoint, geometry, pool,
                       available, precision_t::bf16_k, bf16_reference, 5e-2);
@@ -292,13 +296,14 @@ int main(int argc, char **argv) {
     expected<executor_t> pool = executor_t::make(4, caller_exclusivity_t::caller_inclusive_k);
     if (!pool) return suite.check(false, "pool: {}", pool.description_), suite.finish();
 
-    encoder_verbs<encoder_home_t::ram_k> const &serial =
-        *encoder_class_tables<encoder_home_t::ram_k, cpu_class_t::serial_k>::find();
+    encoder_verbs<encoder_home_t::ram_k> const &reference =
+        *encoder_class_tables<encoder_home_t::ram_k, reference_class_k>::find();
+    nk_capability_t const reference_capabilities = numkong_capabilities_of(reference_class_k);
     encoded_t bf16_reference, e4m3_reference;
-    if (!encode(suite, serial, *checkpoint, *geometry, precision_t::bf16_k, nk_cap_serial_k, pool->view(), nullptr,
-                bf16_reference) ||
-        !encode(suite, serial, *checkpoint, *geometry, precision_t::e4m3_k, nk_cap_serial_k, pool->view(), nullptr,
-                e4m3_reference))
+    if (!encode(suite, reference, *checkpoint, *geometry, precision_t::bf16_k, reference_capabilities, pool->view(),
+                nullptr, bf16_reference) ||
+        !encode(suite, reference, *checkpoint, *geometry, precision_t::e4m3_k, reference_capabilities, pool->view(),
+                nullptr, e4m3_reference))
         return suite.finish();
     suite.run("token_vectors/unit_length", token_vectors_unit_length, bf16_reference, geometry->token_width);
     run_class_parity(suite, cpu_ladder_t {}, *checkpoint, *geometry, pool->view(), available, bf16_reference,

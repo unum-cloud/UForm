@@ -14,6 +14,7 @@ It compiles as plain C11, holds no C++ type, and never logs.
 A caller only encoding may include `encode.h` alone, since each header pulls in `types.h`.
 Statuses, scalars, rows, tapes, progress, arenas and the executor contract mirror USearch's `types.h` value for value, so embeddings and failures cross between the two libraries unchanged.
 `find_package(uform)` reads an install as `uform::static`, `uform::shared` and `uform::header`.
+An install or the SDK archive also answers `pkg-config --libs uform` with the shared library, which exports the `uform_*` functions alone.
 
 ## Quickstart
 

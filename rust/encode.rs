@@ -812,7 +812,10 @@ impl<'arena, Texts: TapeView<u8>, Choices: TapeView<u8>> Calling for TextChoose<
         let choices = self.choices.tape(&mut self.gathered_choices)?;
         let groups = self.config.temperature_groups;
         if choices.count != texts.count || (!groups.is_empty() && groups.len() != texts.count) {
-            return Err(fail(Status::ShapeMismatch, "every item needs its choices and, if any, one group"));
+            return Err(fail(
+                Status::ShapeMismatch,
+                "every item needs its choices and, if any, one group",
+            ));
         }
         self.count = texts.count;
         let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
@@ -1267,7 +1270,9 @@ mod tests {
         }
         let encoded = encoded?;
         let states = encoded.states.ok_or(fail(Status::Internal, "no states"))?;
-        let vectors = encoded.token_vectors.ok_or(fail(Status::Internal, "no token vectors"))?;
+        let vectors = encoded
+            .token_vectors
+            .ok_or(fail(Status::Internal, "no token vectors"))?;
         assert_eq!(vectors.offsets()?, states.offsets()?);
         let rows = vectors.rows()?;
         assert_eq!(rows.columns(), token_width);

@@ -391,11 +391,11 @@ endfunction ()
 
 # The encoder's variant libraries, and each GPU vendor's entries: one host unit launching by name the kernels its
 # bundle carries for every configured architecture, through the driver it opens at first use rather than links. Those
-# kernels are generic SIMT code needing nothing past Ampere, so the release set carries them as `compute_80` PTX alone,
+# kernels are generic SIMT code needing nothing past Turing, so the release set carries them as `compute_75` PTX alone,
 # which every later generation compiles at load, and a named code as its SASS alone.
 set(uform_encoder_variants_)
 if (UFORM_CUDA_ARCH STREQUAL "all")
-    set(uform_encoder_nvidia_codes_ 80-virtual)
+    set(uform_encoder_nvidia_codes_ 75-virtual)
 else ()
     set(uform_encoder_nvidia_codes_ ${CMAKE_CUDA_ARCHITECTURES})
 endif ()

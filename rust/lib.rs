@@ -40,8 +40,8 @@ pub use model::{
     ModelLoadVramConfig, ModelVerbs,
 };
 pub use train::{
-    AudioShape, BatchShape, Choices, Contrastive, Edges, ImageShape, LateInteraction, LateInteractionSide,
-    Masking, Mesh, MeshDescription, MeshOptions, Modality, MultimemTier, Negatives, Objective, PairLossForm, Relations,
+    AudioShape, BatchShape, Choices, Contrastive, Edges, ImageShape, LateInteraction, LateInteractionSide, Masking,
+    Mesh, MeshDescription, MeshOptions, Modality, MultimemTier, Negatives, Objective, PairLossForm, Relations,
     Schedule, TrainVerbs, Trainer, TrainerInitVramConfig, TrainerSave, TrainerSaveConfig, TrainerStep,
     TrainerStepConfig, TrainerStepStats, VideoShape,
 };

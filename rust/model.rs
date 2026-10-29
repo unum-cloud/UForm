@@ -24,11 +24,10 @@ use core::ptr;
 use std::path::Path;
 
 use crate::types::{
-    check, fail, lower_progress, path_view, ram_options, uform_bytes_view_t,
-    uform_completion_blocking_k, uform_completion_t, uform_cpu_class_t, uform_executor_t, uform_gpu_class_t,
-    uform_outcome_t, uform_progress_t, uform_ram_options_t, uform_scalar_t, uform_vram_options_t, vram_options,
-    Blocking, CPUClass, Callbacks, Calling, Completion, Deferring, Executor, GPUClass, Handles, On, ProgressCallback,
-    Result, Scalar, Status,
+    check, fail, lower_progress, path_view, ram_options, uform_bytes_view_t, uform_completion_blocking_k,
+    uform_completion_t, uform_cpu_class_t, uform_executor_t, uform_gpu_class_t, uform_outcome_t, uform_progress_t,
+    uform_ram_options_t, uform_scalar_t, uform_vram_options_t, vram_options, Blocking, CPUClass, Callbacks, Calling,
+    Completion, Deferring, Executor, GPUClass, Handles, On, ProgressCallback, Result, Scalar, Status,
 };
 
 // region: Raw Declarations
@@ -649,7 +648,10 @@ pub(crate) mod tests {
             ..ModelLoadRamBufferConfig::from(&checkpoint)
         };
         let description = Model::load_ram_buffer(config)?.describe()?;
-        assert_eq!((description.cpu_class, description.gpu_class), (Some(CPUClass::Serial), None));
+        assert_eq!(
+            (description.cpu_class, description.gpu_class),
+            (Some(CPUClass::Serial), None)
+        );
         Ok(())
     }
 

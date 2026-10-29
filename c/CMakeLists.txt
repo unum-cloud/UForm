@@ -15,11 +15,16 @@ add_library(uform_shared SHARED ${uform_library_exclusion_})
 add_library(uform::shared ALIAS uform_shared)
 # The encoder's variants follow `uform_host`, so the baseline's copy of an inline function they share comes first.
 target_link_libraries(uform_shared PRIVATE uform_host ${uform_encoder_variants_})
-# The archives it links, NumKong's, ForkUnion's and yyjson's among them, were compiled with default visibility, so only
-# the linker can keep their symbols in.
-if (CMAKE_SYSTEM_NAME MATCHES "^(Linux|Android|FreeBSD)$")
-    target_link_options(uform_shared PRIVATE "LINKER:--exclude-libs,ALL")
+# The archives it links, NumKong's, ForkUnion's and yyjson's among them, were compiled with default visibility, and the
+# standard library headers declare their templates visible, so only the linker can keep those symbols in.
+if (APPLE)
+    target_link_options(uform_shared PRIVATE "LINKER:-exported_symbol,_uform_*")
+elseif (CMAKE_SYSTEM_NAME MATCHES "^(Linux|Android|FreeBSD)$")
+    file(WRITE "${PROJECT_BINARY_DIR}/uform_shared.map" "{\n  global: uform_*;\n  local: *;\n};\n")
+    target_link_options(uform_shared PRIVATE "LINKER:--version-script=${PROJECT_BINARY_DIR}/uform_shared.map")
 endif ()
+# `SOVERSION` carries the major alone, the only break the C ABI admits.
+set_target_properties(uform_shared PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
 set(uform_variant_objects_)
 foreach (library_ IN LISTS uform_encoder_variants_)
     list(APPEND uform_variant_objects_ $<TARGET_OBJECTS:${library_}>)
@@ -37,6 +42,8 @@ add_library(
 add_library(uform::static ALIAS uform_static)
 add_library(uform_header INTERFACE)
 add_library(uform::header ALIAS uform_header)
+set_target_properties(uform_static PROPERTIES EXPORT_NAME static)
+set_target_properties(uform_shared PROPERTIES EXPORT_NAME shared)
 set_target_properties(uform_header PROPERTIES EXPORT_NAME header)
 target_include_directories(
     uform_header INTERFACE $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
@@ -127,35 +134,4 @@ if (TARGET uform_encoder_vram_nvidia_variants AND TARGET uform_tiny_checkpoint)
     set_target_properties(uform_test_vram PROPERTIES LINKER_LANGUAGE CXX)
     add_test(NAME uform_test_vram COMMAND uform_test_vram "${PROJECT_BINARY_DIR}/tiny.safetensors")
     set_tests_properties(uform_test_vram PROPERTIES FIXTURES_REQUIRED uform_tiny_checkpoint)
-endif ()
-
-# Both libraries install with a CMake package: `find_package(uform)` names them `uform::static` and `uform::shared`.
-if (UFORM_INSTALL AND UFORM_BUILD_SHARED)
-    include(CMakePackageConfigHelpers)
-    set(uform_config_install_dir_ "${CMAKE_INSTALL_LIBDIR}/cmake/uform")
-    install(
-        TARGETS uform_header uform_static uform_shared
-        EXPORT uformTargets
-        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
-    )
-    install(
-        EXPORT uformTargets
-        NAMESPACE uform::
-        DESTINATION ${uform_config_install_dir_}
-    )
-    configure_package_config_file(
-        "${PROJECT_SOURCE_DIR}/cmake/uform-config.cmake.in" "${PROJECT_BINARY_DIR}/uformConfig.cmake"
-        INSTALL_DESTINATION ${uform_config_install_dir_}
-    )
-    write_basic_package_version_file(
-        "${PROJECT_BINARY_DIR}/uformConfigVersion.cmake"
-        VERSION ${PROJECT_VERSION}
-        COMPATIBILITY SameMajorVersion
-    )
-    install(FILES "${PROJECT_BINARY_DIR}/uformConfig.cmake" "${PROJECT_BINARY_DIR}/uformConfigVersion.cmake"
-            DESTINATION ${uform_config_install_dir_}
-    )
-    install(DIRECTORY uform DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 endif ()

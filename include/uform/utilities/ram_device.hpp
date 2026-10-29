@@ -16,7 +16,7 @@
 #include <type_traits> // `std::is_nothrow_invocable_v`, `std::remove_reference_t`
 #include <utility>     // `std::exchange`, `std::swap`
 
-#include <forkunion.h> // `fu_pool_t`, `fu_topology_t`, `fu_pool_for_n`
+#include <forkunion/forkunion.h> // `fu_pool_t`, `fu_topology_t`, `fu_pool_for_n`
 
 #include "uform/utilities/types.hpp" // `status_t`, `expected`
 
