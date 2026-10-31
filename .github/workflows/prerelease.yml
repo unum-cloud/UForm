@@ -1,14 +1,11 @@
 name: Pre-Release
 
 on:
-  push:
-    branches: ["main-dev"]
   pull_request:
-    branches: ["main-dev"]
+    branches: ["main", "main-dev"]
 
 env:
   BUILD_TYPE: Release
-  GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
   PYTHONUTF8: 1
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
@@ -16,41 +13,20 @@ permissions:
   contents: read
 
 jobs:
-  versioning:
-    name: Update Version
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Run TinySemVer
-        uses: ashvardanian/tinysemver@v3.0.0
-        with:
-          verbose: "true"
-          version-file: "VERSION"
-          update-version-in: |
-            package.json:"version": "(\d+\.\d+\.\d+)"
-            package-lock.json:"uform",\n\s+"version": "(\d+\.\d+\.\d+)"
-            CITATION.cff:^version: (\d+\.\d+\.\d+)
-            pyproject.toml:^version = "(\d+\.\d+\.\d+)"
-          dry-run: "true"
-          
   test_python:
     name: Test Python
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Install dependencies
         run: |
@@ -63,13 +39,13 @@ jobs:
 
   test_javascript:
     name: Test JavaScript
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
 
@@ -81,11 +57,11 @@ jobs:
 
   test_swift:
     name: Test Swift
-    runs-on: macos-14
+    runs-on: macos-26
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Build
         run: swift build
       - name: Run tests

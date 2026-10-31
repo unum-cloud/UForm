@@ -1,84 +1,38 @@
 name: Release
 
 on:
-  push:
-    branches: ["main"]
+  release:
+    types: [published]
 
-env:
-  GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
-
-# Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 jobs:
-  versioning:
-    name: Update Version
-    runs-on: ubuntu-latest
+  hooks:
+    name: Check Release Commit
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Run TinySemVer
-        uses: ashvardanian/tinysemver@v3.0.0
-        with:
-          verbose: "true"
-          version-file: "VERSION"
-          update-version-in: |
-            package.json:"version": "(\d+\.\d+\.\d+)"
-            package-lock.json:"uform",\n\s+"version": "(\d+\.\d+\.\d+)"
-            CITATION.cff:^version: (\d+\.\d+\.\d+)
-            pyproject.toml:^version = "(\d+\.\d+\.\d+)"
-          dry-run: "false"
-          push: "true"
-          create-release: "true"
-          github-token: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
-
-  rebase:
-    name: Rebase Dev. Branch
-    needs: versioning
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Perform rebase
-        run: |
-          git fetch origin main
-          git checkout main-dev
-          git rebase origin/main
-
-      - name: Push changes
-        uses: CasperWA/push-protected@v2
-        with:
-          token: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
-          branch: main-dev
-          unprotect_reviews: True
-          force: True
+        uses: actions/checkout@v7
+      - name: Check the Release Commit
+        run: .github/scripts/check-release.sh "$GITHUB_REF_NAME"
 
   test_python:
     name: Run Tests
-    runs-on: ubuntu-latest
-    needs: versioning
+    runs-on: ubuntu-26.04
+    needs: hooks
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          ref: "main"
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Install dependencies
         run: |
@@ -90,21 +44,22 @@ jobs:
 
   publish_python:
     name: Publish Python
-    runs-on: ubuntu-latest
-    needs: [versioning, test_python]
+    runs-on: ubuntu-26.04
+    needs: [hooks, test_python]
+    permissions:
+      contents: read
+      id-token: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          ref: "main"
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10.3.3
 
       - name: Install dependencies
         run: |
@@ -121,17 +76,15 @@ jobs:
 
   publish_javascript:
     name: Publish JavaScript
-    needs: versioning
-    runs-on: ubuntu-22.04
+    needs: hooks
+    runs-on: ubuntu-26.04
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          ref: "main"
+        uses: actions/checkout@v7
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 20
 
@@ -142,22 +95,26 @@ jobs:
       #     npm test
 
       - name: Publish
-        uses: JS-DevTools/npm-publish@v2
+        uses: JS-DevTools/npm-publish@v4
         with:
           token: ${{ secrets.NPM_TOKEN }}
+          tag: ${{ github.event.release.prerelease && 'next' || 'latest' }}
 
   deploy_docs:
     name: Deploy Docs
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-26.04
     needs: [publish_python, publish_javascript]
+    if: ${{ !github.event.release.prerelease }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
-        with:
-          ref: "main"
+        uses: actions/checkout@v7
       - name: Install dependencies
         run: |
           sudo apt update && 
@@ -165,7 +122,7 @@ jobs:
           pip install sphinx==5.3.0 sphinx-js==3.2.1 breathe==4.35.0 furo==2023.3.27 m2r2==0.3.3.post2 sphinxcontrib-googleanalytics==0.2.dev20220708 sphinxcontrib-jquery==4.1 && 
           npm install -g jsdoc
       - name: Setup GitHub Pages
-        uses: actions/configure-pages@v2
+        uses: actions/configure-pages@v6
       - name: Install UForm from PyPi
         run: pip install uform
       - name: Build documentation
@@ -173,10 +130,10 @@ jobs:
       - name: Copy assets
         run: cp -r assets build/docs/html/
       - name: Upload artifacts
-        uses: actions/upload-pages-artifact@v1
+        uses: actions/upload-pages-artifact@v5
         with:
           # Upload entire repository
           path: "./build/docs/html/"
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v1
+        uses: actions/deploy-pages@v5
