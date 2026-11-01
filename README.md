@@ -1,7 +1,6 @@
 <h1 align="center">UForm</h1>
 <h3 align="center">
-Pocket-Sized Multimodal AI<br/>
-For Content Understanding and Generation<br/>
+Pocket-Sized Multimodal Perception AI<br/>
 </h3>
 <br/>
 
@@ -25,13 +24,13 @@ Text • Images • Videos • Audio • Code • Graphs
 CUDA Training • CPU, NVIDIA and AMD Inference • WebAssembly
 <br/>
 <a href="https://github.com/unum-cloud/UForm/tree/main/c/uform">C</a>
- • 
+ •
 <a href="https://github.com/unum-cloud/UForm/blob/main/python/README.md">Python</a>
- • 
+ •
 <a href="https://github.com/unum-cloud/UForm/blob/main/rust/README.md">Rust</a>
- • 
+ •
 <a href="https://github.com/unum-cloud/UForm/blob/main/javascript/README.md">JavaScript</a>
- • 
+ •
 <a href="https://github.com/unum-cloud/UForm/blob/main/swift/README.md">Swift</a>
 </p>
 

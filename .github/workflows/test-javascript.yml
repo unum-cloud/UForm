@@ -1,0 +1,75 @@
+name: Test JavaScript
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  EMSCRIPTEN_VERSION: 6.0.9
+  NODE_VERSION: 22
+  # The host codecs the engine decodes images, video and audio with; WebAssembly builds take decoded media instead.
+  UBUNTU_CODECS: >-
+    libturbojpeg0-dev libpng-dev libwebp-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
+    libswscale-dev
+
+jobs:
+  test_javascript:
+    name: Test JavaScript on Ubuntu
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Install Codecs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build $UBUNTU_CODECS
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Dependencies
+        run: npm install --ignore-scripts
+      - name: Build the Addon over the Engine
+        run: npm run build-native
+      # The suite asserts the stub's geometry, so it loads the stub's addon from `prebuilds/`.
+      - name: Build the Addon over the Stub
+        run: npm run build-native-stub
+      - name: Build JavaScript
+        run: npm run build-js
+      - name: Test JavaScript
+        run: npm test
+
+  # The JavaScript suite asserts the stub's geometry, so its module and its addon both link the stub.
+  test_javascript_wasm:
+    name: Test JavaScript over WASM
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Set Up Emscripten
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSCRIPTEN_VERSION }}
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Build the WASM Module over the Stub
+        run: |
+          cmake --preset wasm32_emscripten -B build_wasm32_emscripten_stub \
+            -D UFORM_BUILD_SHARED=OFF -D UFORM_BUILD_STUB=ON -D UFORM_BUILD_NODE=ON
+          cmake --build build_wasm32_emscripten_stub --target uform_wasm
+      - name: Build JavaScript
+        run: |
+          npm install --ignore-scripts
+          npm run build-native-stub
+          npm run build-js
+          mkdir -p javascript/dist/wasm
+          cp build_wasm32_emscripten_stub/javascript/uform.mjs build_wasm32_emscripten_stub/javascript/uform.wasm \
+            javascript/dist/wasm/
+      - name: Test JavaScript over WASM
+        run: npm test

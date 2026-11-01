@@ -1,476 +1,55 @@
 name: Pre-Release
 
 on:
-  push:
-    branches: ["main-dev"]
   pull_request:
-    branches: ["main-dev"]
+    branches: ["main", "main-dev"]
 
-env:
-  GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
-  PYTHONUTF8: 1
-  PYTHONFAULTHANDLER: 1
-  PYTHON_VERSION: "3.12"
-  NODE_VERSION: 22
-  EMSCRIPTEN_VERSION: 6.0.9
-  WASI_SDK_VERSION: "34"
-  WASMTIME_VERSION: v48.0.2
-  CUDA_VERSION: "13-4"
-  # The host codecs the engine decodes images, video and audio with; WebAssembly builds take decoded media instead.
-  UBUNTU_CODECS: >-
-    libturbojpeg0-dev libpng-dev libwebp-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
-    libswscale-dev
-  MACOS_CODECS: jpeg-turbo libpng webp ffmpeg
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  versioning:
-    name: Update Version
+  hooks:
+    name: Check Commits
     runs-on: ubuntu-26.04
+    timeout-minutes: 10
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          persist-credentials: false
-      - name: Run TinySemVer
-        uses: ashvardanian/tinysemver@v3
-        with:
-          verbose: "true"
-          version-file: "VERSION"
-          update-version-in: |
-            package.json:"version": "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
-            CITATION.cff:^version: (\d+\.\d+\.\d+(?:-rc\.\d+)?)
-            Cargo.toml:^version = "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
-            javascript/uform.test.js:version\(\), "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
-            src_stub/types.cpp:return "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
-            src/types.cpp:return "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
-            CMakeLists.txt:VERSION (\d+\.\d+\.\d+(?:-rc\.\d+)?)
-          dry-run: "true"
+      - name: Check Every Commit
+        run: .github/scripts/check-commits.sh "${{ github.event.pull_request.base.sha }}"
 
-  lint:
-    name: Lint
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-      - name: Set Up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-      - name: Install Linters
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install --group lint
+  test_c:
+    name: Test C
+    needs: hooks
+    uses: ./.github/workflows/test-c.yml
 
-      # The same checks a commit runs locally, over everything this branch adds.
-      - name: Check
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: .githooks/lint-range "$BASE_SHA"
-
-  lint_tree:
-    name: Lint Every Tracked File
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Set Up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-      - name: Install Linters
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install --group lint
-
-      # With no base, every tracked file reads as added, so no rule holds only for the lines a change touched.
-      - name: Check
-        run: .githooks/lint-range
-
-  test_data_scripts:
-    name: Test Data Scripts
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Set Up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-      - name: Install Dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install --group test
-      - name: Test Data Scripts
-        run: python -X faulthandler -m pytest -x scripts/data
-
-  verify_models:
-    name: Check Promela Models
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Pull the ForkUnion Submodule
-        run: git submodule update --init forkunion
-      - name: Install Spin
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y spin
-      - name: Verify Every Model
-        run: verification/check.sh
-
-  test_ubuntu_cpu:
-    name: Test C and Python on Ubuntu with the CPU Library
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Install Codecs
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build $UBUNTU_CODECS
-
-      # The suites write the tiny checkpoint as a fixture, which the C test and the inference parity test load.
-      - name: Build C
-        run: |
-          cmake --preset library -D UFORM_BUILD_TEST=ON
-          cmake --build --preset library
-      - name: Test C
-        run: ctest --test-dir build_library --output-on-failure
-
-      - name: Set Up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-      - name: Build Python
-        env:
-          CC: clang
-          CXX: clang++
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install --group test .
-      - name: Test Python
-        env:
-          UFORM_TEST_CHECKPOINT: ${{ github.workspace }}/build_library/tiny.safetensors
-        run: python -X faulthandler -m pytest -x test/python
+  test_python:
+    name: Test Python
+    needs: hooks
+    uses: ./.github/workflows/test-python.yml
 
   test_rust:
-    name: Test Rust on Ubuntu
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Install Codecs
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build $UBUNTU_CODECS
-      # `rust-version = "1.100"` is ahead of stable until 1.100 ships.
-      - name: Set Up Rust
-        run: |
-          rustup toolchain install beta --profile minimal --component clippy
-          rustup default beta
-      - name: Lint Rust
-        run: cargo clippy --all-targets --features stub -- -D warnings
-      - name: Build Rust over the Engine
-        run: cargo test --no-run
-      - name: Test Rust over the Stub
-        run: cargo test --features stub
+    name: Test Rust
+    needs: hooks
+    uses: ./.github/workflows/test-rust.yml
 
   test_javascript:
-    name: Test JavaScript on Ubuntu
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Install Codecs
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build $UBUNTU_CODECS
-      - name: Set Up Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-      - name: Install Dependencies
-        run: npm install --ignore-scripts
-      - name: Build the Addon over the Engine
-        run: npm run build-native
-      # The suite asserts the stub's geometry, so it loads the stub's addon from `prebuilds/`.
-      - name: Build the Addon over the Stub
-        run: npm run build-native-stub
-      - name: Build JavaScript
-        run: npm run build-js
-      - name: Test JavaScript
-        run: npm test
+    name: Test JavaScript
+    needs: hooks
+    uses: ./.github/workflows/test-javascript.yml
 
-  # The suite links the stub packed as the release packs the engine, for the host's slice alone.
-  test_swift_macos:
-    name: Test Swift on macOS
-    runs-on: macos-26
-    env:
-      UFORM_SWIFT_ARTIFACT: build_swift/UFormC.xcframework
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Build the Stub XCFramework
-        run: |
-          cmake --preset swift -D UFORM_BUILD_STUB=ON
-          cmake --build --preset swift
-      - name: Test Swift
-        run: swift test
+  test_swift:
+    name: Test Swift
+    needs: hooks
+    uses: ./.github/workflows/test-swift.yml
 
-  test_swift_ubuntu:
-    name: Test Swift on Ubuntu
-    runs-on: ubuntu-26.04
-    env:
-      UFORM_SWIFT_ARTIFACT: build_swift/UFormC.artifactbundle
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Build the Stub Artifact Bundle
-        run: |
-          cmake --preset swift -D UFORM_BUILD_STUB=ON
-          cmake --build --preset swift
-      - name: Test Swift
-        run: swift test
-
-  test_c_macos:
-    name: Test C on macOS
-    runs-on: macos-26
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Install Codecs
-        run: brew install ninja $MACOS_CODECS
-      - name: Build C
-        run: |
-          cmake --preset library -D UFORM_BUILD_TEST=ON \
-            -D CMAKE_PREFIX_PATH="$(brew --prefix);$(brew --prefix jpeg-turbo)"
-          cmake --build --preset library
-      - name: Test C
-        run: ctest --test-dir build_library --output-on-failure
-
-  test_wasm_node:
-    name: Test WASM under Node
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Set Up Emscripten
-        uses: mymindstorm/setup-emsdk@v16
-        with:
-          version: ${{ env.EMSCRIPTEN_VERSION }}
-      - name: Set Up Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      # The preset runs every test under Node, the C test over the tiny checkpoint the suites write.
-      - name: Build and Test C
-        run: |
-          cmake --preset wasm32_emscripten -D UFORM_BUILD_TEST=ON
-          cmake --build --preset wasm32_emscripten
-          ctest --test-dir build_wasm32_emscripten --output-on-failure
-
-      # The JavaScript suite asserts the stub's geometry, so its module and its addon both link the stub.
-      - name: Build the WASM Module over the Stub
-        run: |
-          cmake --preset wasm32_emscripten -B build_wasm32_emscripten_stub \
-            -D UFORM_BUILD_SHARED=OFF -D UFORM_BUILD_STUB=ON -D UFORM_BUILD_NODE=ON
-          cmake --build build_wasm32_emscripten_stub --target uform_wasm
-      - name: Build JavaScript
-        run: |
-          npm install --ignore-scripts
-          npm run build-native-stub
-          npm run build-js
-          mkdir -p javascript/dist/wasm
-          cp build_wasm32_emscripten_stub/javascript/uform.mjs build_wasm32_emscripten_stub/javascript/uform.wasm \
-            javascript/dist/wasm/
-      - name: Test JavaScript over WASM
-        run: npm test
-
-  test_wasm_wasmtime:
-    name: Test WASM under Wasmtime
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Set Up WASI SDK and Wasmtime
-        run: |
-          curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz" \
-            | tar xz -C "$HOME"
-          echo "WASI_SDK_PATH=$HOME/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux" >> "$GITHUB_ENV"
-          curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version "$WASMTIME_VERSION"
-          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
-      - name: Build and Test C
-        run: |
-          cmake --preset wasm32_wasi -D UFORM_BUILD_TEST=ON
-          cmake --build --preset wasm32_wasi
-          ctest --test-dir build_wasm32_wasi --output-on-failure
-
-  # Compile-only: no hosted runner carries a GPU, so this proves both residencies, the trainer and the mesh build.
-  # ROCm publishes no Ubuntu 26.04 packages, so AMD's 26.04 image carries it, and the mounted host folders let the job
-  # free the runner's disk.
-  build_gpu_libraries:
-    name: Build NVIDIA and AMD Libraries
-    runs-on: ubuntu-26.04
-    container:
-      image: rocm/dev-ubuntu-26.04:10.0.0-full
-      options: -v /usr/share/dotnet:/host/dotnet -v /usr/local/lib/android:/host/android -v /opt/ghc:/host/ghc
-    steps:
-      - name: Free Disk Space
-        run: rm -rf /host/dotnet/* /host/android/* /host/ghc/*
-      # ROCm 10's Clang is LLVM 23, under which NVCC 13.4's front end rejects libstdc++'s `<atomic>`, so NVCC hosts
-      # on Clang 22.
-      - name: Install CUDA, Clang 22 and the Codecs
-        run: |
-          apt-get update && apt-get install -y curl gnupg git cmake ninja-build python3-venv
-          curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
-          dpkg -i cuda-keyring_1.1-1_all.deb
-          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
-            > /etc/apt/sources.list.d/llvm.list
-          apt-get update
-          apt-get install -y clang-22 libibverbs-dev $UBUNTU_CODECS \
-            cuda-minimal-build-"$CUDA_VERSION" cuda-driver-dev-"$CUDA_VERSION" \
-            libnvjpeg-dev-"$CUDA_VERSION" libnpp-dev-"$CUDA_VERSION" \
-            libnvidia-decode-580
-          echo "/usr/local/cuda-${CUDA_VERSION/-/.}/bin" >> "$GITHUB_PATH"
-      - name: Checkout
-        uses: actions/checkout@v7
-      # The loaders read Parquet through libcudf, which ships as a wheel that CMake finds in the repository's `.venv`.
-      - name: Install libcudf
-        run: |
-          python3 -m venv .venv
-          .venv/bin/pip install --extra-index-url https://pypi.nvidia.com libcudf-cu13
-      - name: Build Libraries and the Trainer
-        run: |
-          cmake --preset cuda_rocm_library -D UFORM_BUILD_TOOLS=ON -D CMAKE_HIP_ARCHITECTURES=gfx942 \
-            -D CMAKE_PREFIX_PATH=/opt/rocm -D CMAKE_CUDA_HOST_COMPILER=clang++-22
-          cmake --build --preset cuda_rocm_library
-
-  # Compile-only: the inference library with both GPU residencies and no trainer must name no GPU driver or training
-  # library among its direct dependencies. The CUDA and HIP runtimes still arrive through NumKong's GPU kits, which
-  # launch through them, until those kits hand out launch plans; `TODO.md` tracks adding both runtimes here.
-  check_vendor_boundary:
-    name: Check the Inference Library Links No GPU Driver
-    runs-on: ubuntu-26.04
-    container: rocm/dev-ubuntu-26.04:10.0.0-full
-    steps:
-      - name: Install CUDA, Clang 22 and the Codecs
-        run: |
-          apt-get update && apt-get install -y curl gnupg git cmake ninja-build binutils
-          curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
-          dpkg -i cuda-keyring_1.1-1_all.deb
-          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
-            > /etc/apt/sources.list.d/llvm.list
-          apt-get update
-          apt-get install -y clang-22 $UBUNTU_CODECS cuda-minimal-build-"$CUDA_VERSION"
-          echo "/usr/local/cuda-${CUDA_VERSION/-/.}/bin" >> "$GITHUB_PATH"
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Build the Inference Library
-        run: |
-          cmake --preset linux_cuda_rocm -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 \
-            -D CMAKE_CUDA_HOST_COMPILER=clang++-22 -D CMAKE_HIP_ARCHITECTURES=gfx942 -D CMAKE_PREFIX_PATH=/opt/rocm
-          cmake --build --preset linux_cuda_rocm
-      - name: Check Its Direct Dependencies
-        run: |
-          readelf -d build_linux_cuda_rocm/c/libuform_shared.so | tee dependencies.txt
-          if grep -E 'NEEDED.*\[(libcuda|libcublas|libcublasLt|libcufile|libnccl|libnvjpeg|libnppc)\.' dependencies.txt; then
-            echo "::error::libuform_shared links a GPU driver or a training library"
-            exit 1
-          fi
-
-  # Compile-only: each machine profile builds the C library for one CPU class and one GPU code, the Arm ones on Arm
-  # runners. Clang 22 compiles the host code, as the first Clang to know Olympus.
-  build_machine_profile:
-    name: Build Machine Profile ${{ matrix.preset }}
-    runs-on: ${{ contains(fromJSON('["grace_hopper", "vera_rubin"]'), matrix.preset) && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        preset: [xeon4_hopper, xeon6_blackwell, grace_hopper, vera_rubin]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Free Disk Space
-        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
-      - name: Install CUDA, Clang 22 and the Codecs
-        run: |
-          if [ "$(uname -m)" = aarch64 ]; then cuda_repository=sbsa; else cuda_repository=x86_64; fi
-          curl -sSLO "https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/${cuda_repository}/cuda-keyring_1.1-1_all.deb"
-          sudo dpkg -i cuda-keyring_1.1-1_all.deb
-          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
-            | sudo tee /etc/apt/sources.list.d/llvm.list
-          sudo apt-get update
-          sudo apt-get install -y ninja-build clang-22 libibverbs-dev $UBUNTU_CODECS \
-            cuda-minimal-build-"$CUDA_VERSION" cuda-driver-dev-"$CUDA_VERSION" \
-            libnvjpeg-dev-"$CUDA_VERSION" libnpp-dev-"$CUDA_VERSION" \
-            libnvidia-decode-580
-          echo "/usr/local/cuda-${CUDA_VERSION/-/.}/bin" >> "$GITHUB_PATH"
-      - name: Install libcudf
-        run: |
-          python3 -m venv .venv
-          .venv/bin/pip install --extra-index-url https://pypi.nvidia.com libcudf-cu13
-      - name: Build
-        run: |
-          cmake --preset ${{ matrix.preset }} -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 \
-            -D CMAKE_CUDA_HOST_COMPILER=clang++-22
-          cmake --build --preset ${{ matrix.preset }}
-
-  # Compile-only: the Venice profile builds the C library for Zen 6 and MI450-class GPUs, without the trainer, in AMD's
-  # image, as ROCm publishes no Ubuntu 26.04 packages.
-  build_venice_profile:
-    name: Build Machine Profile venice_mi450
-    runs-on: ubuntu-26.04
-    container: rocm/dev-ubuntu-26.04:10.0.0-full
-    steps:
-      - name: Install Clang 22 and the Codecs
-        run: |
-          apt-get update && apt-get install -y curl gnupg git cmake ninja-build
-          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
-            > /etc/apt/sources.list.d/llvm.list
-          apt-get update && apt-get install -y clang-22 $UBUNTU_CODECS
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Build
-        run: |
-          cmake --preset venice_mi450 -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 \
-            -D CMAKE_PREFIX_PATH=/opt/rocm
-          cmake --build --preset venice_mi450
-
-  build_docs:
-    name: Build Docs
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Install Codecs
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build $UBUNTU_CODECS
-      - name: Set Up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.13"
-      - name: Install Doxygen
-        run: |
-          curl -sSfL https://www.doxygen.nl/files/doxygen-1.18.0.linux.bin.tar.gz | tar -xz -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/doxygen-1.18.0/bin" >> "$GITHUB_PATH"
-      - name: Install Sphinx
-        run: pip install -r docs/requirements.txt
-      - name: Install UForm from the Checkout
-        env:
-          CC: clang
-          CXX: clang++
-        run: pip install .
-      - name: Build Docs
-        run: cd docs && doxygen conf.dox && sphinx-build -M html . ../build/docs -W
+  test_docs:
+    name: Test Docs
+    needs: hooks
+    uses: ./.github/workflows/test-docs.yml

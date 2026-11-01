@@ -1,0 +1,37 @@
+name: Test Rust
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  # The host codecs the engine decodes images, video and audio with; WebAssembly builds take decoded media instead.
+  UBUNTU_CODECS: >-
+    libturbojpeg0-dev libpng-dev libwebp-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
+    libswscale-dev
+
+jobs:
+  test_rust:
+    name: Test Rust on Ubuntu
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Install Codecs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build $UBUNTU_CODECS
+      # `rust-version = "1.100"` is ahead of stable until 1.100 ships.
+      - name: Set Up Rust
+        run: |
+          rustup toolchain install beta --profile minimal --component clippy
+          rustup default beta
+      - name: Lint Rust
+        run: cargo clippy --all-targets --features stub -- -D warnings
+      - name: Build Rust over the Engine
+        run: cargo test --no-run
+      - name: Test Rust over the Stub
+        run: cargo test --features stub

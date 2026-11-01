@@ -1,11 +1,8 @@
-# Build outputs
+# Build trees and CMake
 /build*/
-/dist/
-/javascript/dist/
-/prebuilds/
-.build
+CMakeUserPresets.json
 
-# CUDA / profiling / crashes
+# Profilers and crash dumps
 *.nsys-rep
 *.ncu-rep
 *.qdrep
@@ -14,22 +11,6 @@
 /core.[0-9]*
 *.log
 
-# Local & machine-specific config
-.hf_token
-
-# Datasets (keep the directory, not its contents)
-data/*
-!data/.gitkeep
-
-# ML weights & tensors
-/models/
-*.onnx
-*.pt
-*.safetensors
-*.mlpackage
-/dictionary*
-/vocab*
-
 # Python
 /requirements.txt
 *.egg-info
@@ -37,30 +18,51 @@ data/*
 __pycache__
 *.pyc
 *.pyo
+/dist/
 .venv/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 
-# Node
+# Rust
+target/
+Cargo.lock
+/.cargo/config.toml
+
+# JavaScript
 node_modules
 node_build
 yarn.lock
 yarn-error.log
 package-lock.json
+/javascript/dist/
+/prebuilds/
 
 # Swift
+.build
 .swiftpm
 Package.resolved
+
+# Editors, assistants, language servers and tool caches
+/compile_commands.json
+.cache/
+.claude/
 
 # macOS
 .DS_Store
 
-# Editors, assistants, language servers and tool caches
-.cache/
-.claude/
-CMakeUserPresets.json
-/.cargo/config.toml
-/compile_commands.json
-target/
-Cargo.lock
+# Local secrets
+.hf_token
+
+# Datasets, keeping the directory but not its contents
+data/*
+!data/.gitkeep
+
+# Model weights and tensors
+/models/
+*.onnx
+*.pt
+*.safetensors
+*.mlpackage
+/dictionary*
+/vocab*

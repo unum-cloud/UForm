@@ -1,0 +1,256 @@
+name: Test C
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  EMSCRIPTEN_VERSION: 6.0.9
+  NODE_VERSION: 22
+  WASI_SDK_VERSION: "34"
+  WASMTIME_VERSION: v50.0.1
+  CUDA_VERSION: "13-4"
+  # The host codecs the engine decodes images, video and audio with; WebAssembly builds take decoded media instead.
+  UBUNTU_CODECS: >-
+    libturbojpeg0-dev libpng-dev libwebp-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
+    libswscale-dev
+  MACOS_CODECS: jpeg-turbo libpng webp ffmpeg
+
+jobs:
+  test_c_ubuntu:
+    name: Test C on Ubuntu with the CPU Library
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Install Codecs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build $UBUNTU_CODECS
+      # The suites write the tiny checkpoint as a fixture, which the C test and the inference parity test load.
+      - name: Build C
+        run: |
+          cmake --preset library -D UFORM_BUILD_TEST=ON
+          cmake --build --preset library
+      - name: Test C
+        run: ctest --test-dir build_library --output-on-failure
+
+  test_c_macos:
+    name: Test C on macOS
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Install Codecs
+        run: brew install ninja $MACOS_CODECS
+      - name: Build C
+        run: |
+          cmake --preset library -D UFORM_BUILD_TEST=ON \
+            -D CMAKE_PREFIX_PATH="$(brew --prefix);$(brew --prefix jpeg-turbo)"
+          cmake --build --preset library
+      - name: Test C
+        run: ctest --test-dir build_library --output-on-failure
+
+  test_wasm_node:
+    name: Test WASM under Node
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Set Up Emscripten
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSCRIPTEN_VERSION }}
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # The preset runs every test under Node, the C test over the tiny checkpoint the suites write.
+      - name: Build and Test C
+        run: |
+          cmake --preset wasm32_emscripten -D UFORM_BUILD_TEST=ON
+          cmake --build --preset wasm32_emscripten
+          ctest --test-dir build_wasm32_emscripten --output-on-failure
+
+  test_wasm_wasmtime:
+    name: Test WASM under Wasmtime
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Set Up WASI SDK and Wasmtime
+        run: |
+          curl -sSL "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz" \
+            | tar xz -C "$HOME"
+          echo "WASI_SDK_PATH=$HOME/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux" >> "$GITHUB_ENV"
+          curl https://wasmtime.dev/install.sh -sSf | bash -s -- --version "$WASMTIME_VERSION"
+          "$HOME/.wasmtime/bin/wasmtime" --version
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+      - name: Build and Test C
+        run: |
+          cmake --preset wasm32_wasi -D UFORM_BUILD_TEST=ON
+          cmake --build --preset wasm32_wasi
+          ctest --test-dir build_wasm32_wasi --output-on-failure
+
+  verify_models:
+    name: Check Promela Models
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Pull the ForkUnion Submodule
+        run: git submodule update --init forkunion
+      - name: Install Spin
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y spin
+      - name: Verify Every Model
+        run: verification/check.sh
+
+  # Compile-only: no hosted runner carries a GPU, so this proves both residencies, the trainer and the mesh build.
+  # ROCm publishes no Ubuntu 26.04 packages, so AMD's 26.04 image carries it, and the mounted host folders let the job
+  # free the runner's disk.
+  build_gpu_libraries:
+    name: Build NVIDIA and AMD Libraries
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    container:
+      image: rocm/dev-ubuntu-26.04:10.0.0-full
+      options: -v /usr/share/dotnet:/host/dotnet -v /usr/local/lib/android:/host/android -v /opt/ghc:/host/ghc
+    steps:
+      - name: Free Disk Space
+        run: rm -rf /host/dotnet/* /host/android/* /host/ghc/*
+      # ROCm 10's Clang is LLVM 23, under which NVCC 13.4's front end rejects libstdc++'s `<atomic>`, so NVCC hosts
+      # on Clang 22.
+      - name: Install CUDA, Clang 22 and the Codecs
+        run: |
+          apt-get update && apt-get install -y curl gnupg git cmake ninja-build python3-venv
+          curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
+          dpkg -i cuda-keyring_1.1-1_all.deb
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+            > /etc/apt/sources.list.d/llvm.list
+          apt-get update
+          apt-get install -y clang-22 libibverbs-dev $UBUNTU_CODECS \
+            cuda-minimal-build-"$CUDA_VERSION" cuda-driver-dev-"$CUDA_VERSION" \
+            libnvjpeg-dev-"$CUDA_VERSION" libnpp-dev-"$CUDA_VERSION" \
+            libnvidia-decode-580
+          echo "/usr/local/cuda-${CUDA_VERSION/-/.}/bin" >> "$GITHUB_PATH"
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      # The loaders read Parquet through libcudf, which ships as a wheel that CMake finds in the repository's `.venv`.
+      - name: Install libcudf
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --extra-index-url https://pypi.nvidia.com libcudf-cu13
+      - name: Build Libraries and the Trainer
+        run: |
+          cmake --preset cuda_rocm_library -D UFORM_BUILD_TOOLS=ON -D CMAKE_HIP_ARCHITECTURES=gfx942 \
+            -D CMAKE_PREFIX_PATH=/opt/rocm -D CMAKE_CUDA_HOST_COMPILER=clang++-22
+          cmake --build --preset cuda_rocm_library
+
+  # Compile-only: the inference library with both GPU residencies and no trainer must name no GPU driver or training
+  # library among its direct dependencies. The CUDA and HIP runtimes still arrive through NumKong's GPU kits, which
+  # launch through them, until those kits hand out launch plans; `TODO.md` tracks adding both runtimes here.
+  check_vendor_boundary:
+    name: Check the Inference Library Links No GPU Driver
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    container: rocm/dev-ubuntu-26.04:10.0.0-full
+    steps:
+      - name: Install CUDA, Clang 22 and the Codecs
+        run: |
+          apt-get update && apt-get install -y curl gnupg git cmake ninja-build binutils
+          curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
+          dpkg -i cuda-keyring_1.1-1_all.deb
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+            > /etc/apt/sources.list.d/llvm.list
+          apt-get update
+          apt-get install -y clang-22 $UBUNTU_CODECS cuda-minimal-build-"$CUDA_VERSION"
+          echo "/usr/local/cuda-${CUDA_VERSION/-/.}/bin" >> "$GITHUB_PATH"
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Build the Inference Library
+        run: |
+          cmake --preset linux_cuda_rocm -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 \
+            -D CMAKE_CUDA_HOST_COMPILER=clang++-22 -D CMAKE_HIP_ARCHITECTURES=gfx942 -D CMAKE_PREFIX_PATH=/opt/rocm
+          cmake --build --preset linux_cuda_rocm
+      - name: Check Its Direct Dependencies
+        run: |
+          readelf -d build_linux_cuda_rocm/c/libuform_shared.so
+          ! readelf -d build_linux_cuda_rocm/c/libuform_shared.so |
+            grep -E 'NEEDED.*\[(libcuda|libcublas|libcublasLt|libcufile|libnccl|libnvjpeg|libnppc)\.'
+
+  # Compile-only: each machine profile builds the C library for one CPU class and one GPU code, the Arm ones on Arm
+  # runners. Clang 22 compiles the host code, as the first Clang to know Olympus.
+  build_machine_profile:
+    name: Build Machine Profile ${{ matrix.preset }}
+    runs-on: ${{ matrix.cuda_repository == 'sbsa' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { preset: xeon4_hopper, cuda_repository: x86_64 }
+          - { preset: xeon6_blackwell, cuda_repository: x86_64 }
+          - { preset: grace_hopper, cuda_repository: sbsa }
+          - { preset: vera_rubin, cuda_repository: sbsa }
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Free Disk Space
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup
+      - name: Install CUDA, Clang 22 and the Codecs
+        run: |
+          curl -sSLO https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/${{ matrix.cuda_repository }}/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i cuda-keyring_1.1-1_all.deb
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update
+          sudo apt-get install -y ninja-build clang-22 libibverbs-dev $UBUNTU_CODECS \
+            cuda-minimal-build-"$CUDA_VERSION" cuda-driver-dev-"$CUDA_VERSION" \
+            libnvjpeg-dev-"$CUDA_VERSION" libnpp-dev-"$CUDA_VERSION" \
+            libnvidia-decode-580
+          echo "/usr/local/cuda-${CUDA_VERSION/-/.}/bin" >> "$GITHUB_PATH"
+      - name: Install libcudf
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --extra-index-url https://pypi.nvidia.com libcudf-cu13
+      - name: Build
+        run: |
+          cmake --preset ${{ matrix.preset }} -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 \
+            -D CMAKE_CUDA_HOST_COMPILER=clang++-22
+          cmake --build --preset ${{ matrix.preset }}
+
+  # Compile-only: the Venice profile builds the C library for Zen 6 and MI450-class GPUs, without the trainer, in AMD's
+  # image, as ROCm publishes no Ubuntu 26.04 packages.
+  build_venice_profile:
+    name: Build Machine Profile venice_mi450
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    container: rocm/dev-ubuntu-26.04:10.0.0-full
+    steps:
+      - name: Install Clang 22 and the Codecs
+        run: |
+          apt-get update && apt-get install -y curl gnupg git cmake ninja-build
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/resolute/ llvm-toolchain-resolute-22 main" \
+            > /etc/apt/sources.list.d/llvm.list
+          apt-get update && apt-get install -y clang-22 $UBUNTU_CODECS
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Build
+        run: |
+          cmake --preset venice_mi450 -D CMAKE_C_COMPILER=clang-22 -D CMAKE_CXX_COMPILER=clang++-22 \
+            -D CMAKE_PREFIX_PATH=/opt/rocm
+          cmake --build --preset venice_mi450

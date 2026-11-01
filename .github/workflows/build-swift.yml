@@ -1,0 +1,190 @@
+name: Build Swift Artifacts
+
+# The XCFramework and the artifact bundle `Package.swift` links, zipped as the release ships them. `mint-release.sh`
+# dispatches this with the version the release commit will carry, so the library and the bundle carry it too.
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version the release commit will carry"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  UBUNTU_CODECS: >-
+    libturbojpeg0-dev libpng-dev libwebp-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
+    libswscale-dev
+  MACOS_CODECS: jpeg-turbo libpng webp ffmpeg
+
+jobs:
+  # The files the release commit stamps that land in the Swift artifacts: the library's version string and the bundle's.
+  bump_version:
+    name: Bump Swift Artifacts Version
+    if: inputs.version
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Bump Version
+        env:
+          version: ${{ inputs.version }}
+        run: |
+          export core=${version%%-*}
+          echo "$version" > VERSION
+          perl -pi -e 's/^(    VERSION )[0-9.]+$/$1$ENV{core}/' CMakeLists.txt
+          perl -pi -e 's/(uform_version_name\(void\) \{ return ")[^"]+/$1$ENV{version}/' src/types.cpp
+      - name: Upload Bumped Files
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-version
+          path: |
+            VERSION
+            CMakeLists.txt
+            src/types.cpp
+          if-no-files-found: error
+          retention-days: 1
+
+  # Each build adds its slice, and `lipo` joins the architectures of one SDK. The simulators' runtimes and the 32-bit
+  # watchOS one lack the `__sme_memset` routine streaming SME code calls, so those go without NumKong's SME kernels.
+  build_swift_xcframework:
+    name: Build Swift XCFramework
+    needs: bump_version
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Install Codecs
+        run: brew install $MACOS_CODECS
+      - name: Take the Release Version
+        if: inputs.version
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-version
+          path: .
+      - name: Build Every Apple Slice
+        run: |
+          set -euo pipefail
+          no_sme="-D NUMKONG_TARGET_SME=0 -D NUMKONG_TARGET_SMEF64=0 -D NUMKONG_TARGET_SMEBI32=0"
+          slice() {
+            local name=$1
+            shift
+            cmake -S . -B "build_$name" --preset swift -D UFORM_SWIFT_DIRECTORY="$PWD/build_swift" "$@"
+            cmake --build "build_$name"
+          }
+          for arch in arm64 x86_64; do
+            slice "macos_$arch" -D CMAKE_OSX_ARCHITECTURES=$arch
+            slice "catalyst_$arch" -D UFORM_SWIFT_SDK=maccatalyst -D CMAKE_OSX_ARCHITECTURES=$arch \
+              -D "CMAKE_C_FLAGS=-target $arch-apple-ios18.0-macabi" -D "CMAKE_CXX_FLAGS=-target $arch-apple-ios18.0-macabi"
+            slice "iossim_$arch" -D CMAKE_SYSTEM_NAME=iOS -D CMAKE_OSX_SYSROOT=iphonesimulator \
+              -D UFORM_SWIFT_SDK=iphonesimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0 $no_sme
+            slice "tvossim_$arch" -D CMAKE_SYSTEM_NAME=tvOS -D CMAKE_OSX_SYSROOT=appletvsimulator \
+              -D UFORM_SWIFT_SDK=appletvsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0 $no_sme
+            slice "watchsim_$arch" -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchsimulator \
+              -D UFORM_SWIFT_SDK=watchsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0 $no_sme
+            slice "xrsim_$arch" -D CMAKE_SYSTEM_NAME=visionOS -D CMAKE_OSX_SYSROOT=xrsimulator \
+              -D UFORM_SWIFT_SDK=xrsimulator -D CMAKE_OSX_ARCHITECTURES=$arch -D CMAKE_OSX_DEPLOYMENT_TARGET=2.0 $no_sme
+          done
+          slice watchos_arm64_32 -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchos -D UFORM_SWIFT_SDK=watchos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64_32 -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0 $no_sme
+          slice watchos_arm64 -D CMAKE_SYSTEM_NAME=watchOS -D CMAKE_OSX_SYSROOT=watchos -D UFORM_SWIFT_SDK=watchos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          slice ios -D CMAKE_SYSTEM_NAME=iOS -D CMAKE_OSX_SYSROOT=iphoneos -D UFORM_SWIFT_SDK=iphoneos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0
+          slice tvos -D CMAKE_SYSTEM_NAME=tvOS -D CMAKE_OSX_SYSROOT=appletvos -D UFORM_SWIFT_SDK=appletvos \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=18.0
+          slice xros -D CMAKE_SYSTEM_NAME=visionOS -D CMAKE_OSX_SYSROOT=xros -D UFORM_SWIFT_SDK=xros \
+            -D CMAKE_OSX_ARCHITECTURES=arm64 -D CMAKE_OSX_DEPLOYMENT_TARGET=2.0
+          (cd build_swift && zip -qry ../UFormC.xcframework.zip UFormC.xcframework)
+      - name: Upload XCFramework
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-xcframework
+          path: UFormC.xcframework.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  build_swift_linux:
+    name: Build Swift Artifact Bundle for Linux ${{ matrix.arch }}
+    needs: bump_version
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-26.04-arm' || 'ubuntu-26.04' }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Install Codecs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build $UBUNTU_CODECS
+      - name: Take the Release Version
+        if: inputs.version
+        uses: actions/download-artifact@v8
+        with:
+          name: swift-version
+          path: .
+      - name: Build Artifact Bundle
+        run: |
+          cmake --preset swift
+          cmake --build --preset swift
+      - name: Upload Artifact Bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-part-linux-${{ matrix.arch }}
+          path: build_swift/UFormC.artifactbundle
+          if-no-files-found: error
+          retention-days: 1
+
+  # Each part's variants go through the same CMake script that wrote them, into one bundle.
+  merge_swift_artifact_bundle:
+    name: Merge Swift Artifact Bundle
+    needs: build_swift_linux
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: Download Artifact Bundle Parts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: swift-part-*
+          path: parts
+      - name: Merge Artifact Bundle Parts
+        run: |
+          set -euo pipefail
+          for part in parts/*; do
+            version=$(jq -r '.artifacts.UFormC.version' "$part/info.json")
+            jq -r '.artifacts.UFormC.variants[] | [.path, (.supportedTriples | join(","))] | @tsv' "$part/info.json" |
+              while IFS=$'\t' read -r path triples; do
+                cmake -D NUMKONG_SWIFT_MODULE=UFormC -D NUMKONG_SWIFT_ARCHIVE="$part/$path" \
+                  -D NUMKONG_SWIFT_HEADERS="$part/include" -D NUMKONG_SWIFT_DIRECTORY="$PWD/merged" \
+                  -D NUMKONG_SWIFT_TRIPLES="$triples" -D NUMKONG_SWIFT_VERSION="$version" \
+                  -P numkong/cmake/numkong_swift_artifact.cmake
+              done
+          done
+          (cd merged && zip -qry ../UFormC.artifactbundle.zip UFormC.artifactbundle)
+      - name: Upload Artifact Bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: swift-artifactbundle
+          path: UFormC.artifactbundle.zip
+          if-no-files-found: error
+          retention-days: 7

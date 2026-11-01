@@ -255,6 +255,7 @@ GPU code follows one policy per build kind.
 The release set compiles UForm's own CUDA units for `80`, `89`, `90a`, `100f` and `120f` cubins with a `compute_80` PTX tail, the encoder bundle's generic SIMT kernels as `compute_75` PTX alone, and the `multimem` bundle as one plain `90` cubin with its PTX, as it needs nothing past Hopper.
 A native or named code compiles every unit and bundle as that code's SASS alone.
 AMD compiles one code object per listed target either way.
+
 - `UFORM_SITE_PACKAGES` and `UFORM_CUDF_ROOT`: the directory the libcudf wheel discovery searches, or the prefix holding the libraries themselves.
 
 Binaries take long kebab-case flags with no short forms, as `uform_bench_encoder --checkpoint model.safetensors --cpu-class intel-haswell` does, and spell classes, scalars and statuses as the C name tables do.
@@ -294,12 +295,23 @@ Swift formatting follows the `.swift-format` file at the root, applied with `swi
 
 `.githooks/commit-msg` checks every message:
 
-- The title reads `<Verb>: <Summary>`, where the verb is one of `Add`, `Break`, `Build`, `Chore`, `Docs`, `Fix`, `Improve` or `Make`.
+- The title reads `<Verb>: <Summary>`, where the verb is one of `Add`, `Break`, `Chore`, `Docs`, `Fix`, `Improve` or `Make`.
 - The summary opens with a capital letter, unless it opens with a code identifier, which keeps its own case.
 - The title runs to at most 80 characters, and a body line to at most 100 columns, unless it holds a URL or is indented code.
 - The message carries no AI-assistant attribution, since authorship is the human who committed.
 
-Git's merge, `fixup!` and `squash!` titles and TinySemVer's `Release:` titles are exempt from the title rules.
+Git's merge, `fixup!` and `squash!` titles are exempt from the title rules.
+A `Release: vX.Y.Z` title is exempt too, but its commit must stamp every version site, and no other commit may change `VERSION`.
+`.githooks/pre-commit` formats and judges the staged lines, and `.githooks/selftest` runs both hooks against their fixtures.
+On a pull request, `.github/scripts/check-commits.sh` replays `commit-msg` over every commit and runs `pre-commit` over the whole range.
+
+## Releases
+
+`.github/scripts/mint-release.sh X.Y.Z` cuts a release from a clean checkout of the branch it ships.
+It builds the Swift binaries for that version, stamps every version site and the binaries' checksums, and commits `Release: vX.Y.Z`.
+`.github/scripts/check-release.sh` then checks that commit, even in a clone where `core.hooksPath` is unset, before the script tags it and pushes both.
+Then it publishes the GitHub release with the binaries attached, marking `X.Y.Z-rc.N` candidates as prereleases.
+Publishing starts every `release-<binding>.yml` at once, and each runs `check-release.sh` before it builds anything, so each registry trusts only its own binding's file.
 
 ## Implementing a New Engine
 

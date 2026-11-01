@@ -1,0 +1,144 @@
+name: Release JavaScript
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: 22
+  EMSCRIPTEN_VERSION: 6.0.9
+  UBUNTU_CODECS: >-
+    libturbojpeg0-dev libpng-dev libwebp-dev libavformat-dev libavcodec-dev libavutil-dev libswresample-dev
+    libswscale-dev
+  MACOS_CODECS: jpeg-turbo libpng webp ffmpeg
+
+jobs:
+  hooks:
+    name: Check Release Commit
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Check the Release Commit
+        run: .github/scripts/check-release.sh "$GITHUB_REF_NAME"
+
+  build_javascript:
+    name: Build JavaScript Addon for ${{ matrix.os }}
+    needs: hooks
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, ubuntu-26.04-arm, macos-26]
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Install Codecs on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build $UBUNTU_CODECS
+      - name: Install Codecs on macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja $MACOS_CODECS
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix);$(brew --prefix jpeg-turbo)" >> "$GITHUB_ENV"
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Install Dependencies
+        run: npm install --ignore-scripts
+      - name: Prebuild
+        run: npm run prebuild
+      - name: Upload Prebuilds
+        uses: actions/upload-artifact@v7
+        with:
+          name: prebuilds-${{ matrix.os }}
+          path: prebuilds
+          retention-days: 1
+
+  build_wasm:
+    name: Build WASM Module
+    needs: hooks
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Set Up Emscripten
+        uses: mymindstorm/setup-emsdk@v16
+        with:
+          version: ${{ env.EMSCRIPTEN_VERSION }}
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Build and Test C
+        run: |
+          cmake --preset wasm32_emscripten -D UFORM_BUILD_TEST=ON
+          cmake --build --preset wasm32_emscripten
+          ctest --test-dir build_wasm32_emscripten --output-on-failure
+      - name: Build the Module
+        run: npm run build-wasm
+      - name: Package the Module
+        run: |
+          version=$(cat VERSION)
+          tar -czf "uform_wasm32_emscripten_${version}.tar.gz" -C javascript/dist/wasm uform.mjs uform.wasm
+      - name: Upload the Module for npm
+        uses: actions/upload-artifact@v7
+        with:
+          name: wasm-module
+          path: javascript/dist/wasm
+          retention-days: 1
+      - name: Upload the Module to the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" uform_wasm32_emscripten_*.tar.gz --clobber
+
+  publish_javascript:
+    name: Publish JavaScript to npm
+    needs: [build_javascript, build_wasm]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@unum-cloud/uform
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      # Node 24 carries npm 11.5 or newer, the first to publish through trusted publishing.
+      - name: Set Up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          registry-url: "https://registry.npmjs.org"
+      - name: Download Prebuilds
+        uses: actions/download-artifact@v8
+        with:
+          pattern: prebuilds-*
+          merge-multiple: true
+          path: prebuilds
+      - name: Install Dependencies
+        run: npm install --ignore-scripts
+      - name: Build JavaScript
+        run: npm run build-js
+      - name: Download the WASM Module
+        uses: actions/download-artifact@v8
+        with:
+          name: wasm-module
+          path: javascript/dist/wasm
+      - name: Publish Dry Run
+        run: npm publish --dry-run
+      - name: Publish
+        run: npm publish --provenance --access public --tag ${{ github.event.release.prerelease && 'next' || 'latest' }}

@@ -1,21 +1,35 @@
 cff-version: 1.2.0
+title: "UForm: Pocket-Sized Multimodal Perception AI"
 message: "If you use this software, please cite it as below."
-authors:
-- family-names: "Kim"
-  given-names: "Mikhail"
-  orcid: "https://orcid.org/0009-0003-8413-3221"
-- family-names: "Orshulevich"
-  given-names: "Vladimir"
-  orcid: "https://orcid.org/0009-0007-8961-6969"
-- family-names: "Vardanian"
-  given-names: "Ash"
-  orcid: "https://orcid.org/0000-0002-4882-1815"
-title: "UForm by Unum Cloud"
+type: software
+license: Apache-2.0
 version: 4.0.0-rc.1
+doi: 10.5281/zenodo.8204323
+repository-code: https://github.com/unum-cloud/UForm
+url: https://github.com/unum-cloud/UForm
+abstract: >-
+  UForm 4 is a family of pocket-sized perception models trained from scratch to share one
+  representation across text, images, audio, video, and code, from a single GPU to a DGX node or a
+  whole cluster. It builds its training stack bottom-up: distributed primitives that scale
+  contrastive learning across nodes, custom NVLink multicast collectives in place of generic
+  all-reduce, and GPU data loaders pipelined with the linear-algebra kernels, so decoding never
+  stalls the math. Encoders produce embeddings from 64 to 1024 dimensions and serve on CPUs, NVIDIA
+  and AMD GPUs, and WebAssembly, behind one C ABI with C++, Python, Rust, JavaScript, and Swift
+  bindings.
+
 keywords:
-- "text-to-image retrieval"
-- "multimodal"
-- "visual-language pre-training"
-doi: 10.5281/zenodo.7951497
-date-released: 2023-01-03
-url: "https://github.com/unum-cloud/UForm"
+  - text-to-image retrieval
+  - multimodal
+  - visual-language pre-training
+
+authors:
+  - family-names: Kim
+    given-names: Mikhail
+    orcid: https://orcid.org/0009-0003-8413-3221
+  - family-names: Orshulevich
+    given-names: Vladimir
+    orcid: https://orcid.org/0009-0007-8961-6969
+  - family-names: Vardanian
+    given-names: Ash
+    alias: ashvardanian
+    orcid: https://orcid.org/0000-0002-4882-1815

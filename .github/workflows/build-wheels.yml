@@ -1,0 +1,75 @@
+name: Build Python Wheels
+
+on:
+  workflow_call:
+    inputs:
+      smoke:
+        description: "Build one GIL and one free-threaded interpreter on Linux x86 and macOS ARM only"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: 1
+  PYTHONFAULTHANDLER: 1
+  PYTHON_VERSION: "3.12"
+  MACOS_CODECS: jpeg-turbo libpng webp ffmpeg
+
+jobs:
+  # CPU wheels: the extension links the C library for the host alone, with the system codecs bundled by the repair step.
+  # The manylinux_2_34 images carry EPEL's FFmpeg, new enough for the channel-layout API the audio decoder calls.
+  build_wheels:
+    name: Build Python Wheels for ${{ matrix.os }} cp${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.smoke && '["ubuntu-26.04", "macos-26"]' || '["ubuntu-26.04", "ubuntu-26.04-arm", "macos-26", "macos-26-intel"]') }}
+        python-version: ${{ fromJSON(inputs.smoke && '["312", "315t"]' || '["312", "313", "314", "314t", "315", "315t"]') }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Set Up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install Codecs
+        if: runner.os == 'macOS'
+        run: |
+          brew install $MACOS_CODECS
+          echo "CMAKE_PREFIX_PATH=$(brew --prefix);$(brew --prefix jpeg-turbo)" >> "$GITHUB_ENV"
+      - name: Install cibuildwheel
+        uses: nick-fields/retry@v4
+        with:
+          max_attempts: 3
+          retry_wait_seconds: 10
+          timeout_minutes: 180
+          command: python -m pip install 'cibuildwheel==4.3.5'
+      # The suites need the tiny checkpoint the CMake fixture writes, so a wheel proves only that it imports.
+      - name: Build Wheels
+        run: cibuildwheel --output-dir wheelhouse
+        env:
+          CIBW_BUILD: cp${{ matrix.python-version }}-*
+          CIBW_ARCHS: native
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_34
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_34
+          CIBW_BEFORE_ALL_LINUX: >-
+            if command -v apk; then
+            apk add libjpeg-turbo-dev libpng-dev libwebp-dev ffmpeg-dev;
+            else
+            dnf install -y epel-release && dnf config-manager --set-enabled crb &&
+            dnf install -y turbojpeg-devel libpng-devel libwebp-devel libavcodec-free-devel
+            libavformat-free-devel libavutil-free-devel libswresample-free-devel libswscale-free-devel;
+            fi
+          # Homebrew bottles target the runner's own macOS, which the wheels then require.
+          CIBW_ENVIRONMENT_MACOS: MACOSX_DEPLOYMENT_TARGET=15.0
+          CIBW_TEST_COMMAND: python -c "import uform; print(uform.version(), uform.capabilities_compiled())"
+      - name: Upload Wheels
+        uses: actions/upload-artifact@v7
+        with:
+          name: cibw-wheels-${{ matrix.os }}-${{ matrix.python-version }}
+          path: ./wheelhouse/*.whl
+          overwrite: true

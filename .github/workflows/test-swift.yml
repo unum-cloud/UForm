@@ -1,0 +1,41 @@
+name: Test Swift
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  # The suite links the stub packed as the release packs the engine, for the host's slice alone.
+  test_swift_macos:
+    name: Test Swift on macOS
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      UFORM_SWIFT_ARTIFACT: build_swift/UFormC.xcframework
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Build the Stub XCFramework
+        run: |
+          cmake --preset swift -D UFORM_BUILD_STUB=ON
+          cmake --build --preset swift
+      - name: Test Swift
+        run: swift test
+
+  test_swift_ubuntu:
+    name: Test Swift on Ubuntu
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      UFORM_SWIFT_ARTIFACT: build_swift/UFormC.artifactbundle
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Build the Stub Artifact Bundle
+        run: |
+          cmake --preset swift -D UFORM_BUILD_STUB=ON
+          cmake --build --preset swift
+      - name: Test Swift
+        run: swift test

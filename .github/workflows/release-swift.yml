@@ -1,0 +1,32 @@
+name: Release Swift
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  hooks:
+    name: Check Release Commit
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Check the Release Commit
+        run: .github/scripts/check-release.sh "$GITHUB_REF_NAME"
+
+  # SwiftPM resolves the package from the release tag, downloading the artifacts that release carries, so
+  # publishing is proving that tag builds. The suite runs against the stub, in the pre-release checks.
+  publish_swift:
+    name: Publish Swift
+    needs: hooks
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+      - name: Build Swift
+        run: swift build
