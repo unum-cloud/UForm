@@ -20,7 +20,7 @@
 
 #include <unistd.h> // `getpid`
 
-#include <algorithm> // `std::max`, `std::min`, `std::sort`
+#include <algorithm> // `std::clamp`, `std::max`, `std::min`, `std::sort`
 #include <charconv>  // `std::from_chars` — the rows peers measured
 #include <limits>    // `std::numeric_limits`
 
@@ -441,16 +441,19 @@ struct device_budget_t {
                               "late interaction costs rows² times the query span times the columns, so its rows " //
                               "are set, never fitted to memory: pass --rows, or the batch's max_rows_per_device");
     std::size_t const gpus = devices.size();
+    // Configured rows bound the probes too, so a run that names its rows never measures past them.
+    u32_t const configured_rows = config.batch.max_rows_per_gpu;
+    u32_t const larger_probe_rows = configured_rows ? std::clamp(configured_rows, 3u, larger_probe_rows_k)
+                                                    : larger_probe_rows_k;
+    u32_t const middle_probe_rows = std::min(middle_probe_rows_k, larger_probe_rows - 1u);
     footprint_t smaller[max_gpus_per_host_k] = {}, middle[max_gpus_per_host_k] = {}, larger[max_gpus_per_host_k] = {};
     expected_t probed = probe_footprint_(mesh, config, devices, numerics, smaller_probe_rows_k, budgets,
                                          {smaller, gpus});
-    if (probed)
-        probed = probe_footprint_(mesh, config, devices, numerics, middle_probe_rows_k, budgets, {middle, gpus});
-    if (probed)
-        probed = probe_footprint_(mesh, config, devices, numerics, larger_probe_rows_k, budgets, {larger, gpus});
+    if (probed) probed = probe_footprint_(mesh, config, devices, numerics, middle_probe_rows, budgets, {middle, gpus});
+    if (probed) probed = probe_footprint_(mesh, config, devices, numerics, larger_probe_rows, budgets, {larger, gpus});
     if (!probed) return result_t::fail(std::move(probed));
 
-    f64_t const low_rows = smaller_probe_rows_k, middle_rows = middle_probe_rows_k, high_rows = larger_probe_rows_k;
+    f64_t const low_rows = smaller_probe_rows_k, middle_rows = middle_probe_rows, high_rows = larger_probe_rows;
     auto arena_fit = [&](std::size_t member) noexcept {
         f64_t const low = static_cast<f64_t>(smaller[member].arena_bytes);
         f64_t const lower_slope = (static_cast<f64_t>(middle[member].arena_bytes) - low) / (middle_rows - low_rows);
@@ -463,7 +466,6 @@ struct device_budget_t {
         fit.fixed = low - fit.row * low_rows - fit.pair * low_rows * low_rows;
         return fit;
     };
-    u32_t const configured_rows = config.batch.max_rows_per_gpu;
     u64_t const representable_rows = std::numeric_limits<u32_t>::max() / config.batch.max_columns_per_row;
     envelope_t envelope; // the device holding the fewest rows decides
     for (std::size_t member = 0; member != gpus; ++member) {
@@ -471,7 +473,7 @@ struct device_budget_t {
         if (high.device_bytes <= low.device_bytes || high.arena_bytes < low.arena_bytes)
             return result_t::fail(status_t::internal_k, "device {} took {} bytes at {} rows and {} at {}",
                                   devices[member], low.device_bytes, smaller_probe_rows_k, high.device_bytes,
-                                  larger_probe_rows_k);
+                                  larger_probe_rows);
         footprint_fit_t device = arena_fit(member);
         device.row = (static_cast<f64_t>(high.device_bytes) - static_cast<f64_t>(low.device_bytes) -
                       device.pair * (high_rows * high_rows - low_rows * low_rows)) /

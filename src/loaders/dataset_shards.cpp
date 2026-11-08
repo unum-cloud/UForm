@@ -1,8 +1,10 @@
 /**
+ *  @file src/loaders/dataset_shards.cpp
+ *  @author Ash Vardanian
+ *  @date July 3, 2026
  *  @brief The dataset-shard readers' one firewalled body: @ref parquet_file_t and @ref jsonl_file_t .
  *      cuDF and RMM throw and allocate freely, so every call to them lives inside this translation unit's
  *      @c try blocks and their types stay behind the readers' pimpls. See the header for the contract.
- *  @file src/loaders/dataset_shards.cpp
  */
 
 #include <cstring> // `std::memcpy` — a footer statistic's bytes
@@ -30,8 +32,8 @@
 #include <cudf/table/table.hpp>
 #include <cudf/unary.hpp>         // `cudf::cast` — the one offset widening
 #include <cudf/io/datasource.hpp> // `cudf::io::datasource` — a sidecar's tar, read to the device whole
-#include <rmm/cuda_stream_view.hpp>
-#include <rmm/device_buffer.hpp> // `rmm::device_buffer` — the gathered tar members
+#include <cuda/stream_ref>        // `cuda::stream_ref` — the stream every cuDF and RMM call takes
+#include <rmm/device_buffer.hpp>  // `rmm::device_buffer` — the gathered tar members
 
 #include "uform/utilities/vram_nvidia_device.hpp" // `device_address` — the tar gather's copy endpoints
 #include "uform/utilities/types.hpp"              // `st::basic_vector` — the owned per-column table
@@ -112,7 +114,7 @@ struct flat_column_t {
 /** The character bytes of the cuDF strings column @p strings — where cuDF's @c char
  *  tape becomes bytes. */
 [[nodiscard]] static bytes_view_t chars_of_(cudf::strings_column_view const &strings,
-                                            rmm::cuda_stream_view stream) noexcept {
+                                            cuda::stream_ref stream) noexcept {
     return std::as_bytes(
         std::span<char const> {strings.chars_begin(stream), static_cast<std::size_t>(strings.chars_size(stream))});
 }
@@ -121,7 +123,7 @@ struct flat_column_t {
  *  @c unsupported_k failure naming it when it is not one of @c string , @c list<uint8> , or
  *  @c list<string> . */
 [[nodiscard]] static expected<flat_column_t> flatten_column_(cudf::column_view const &decoded, sz::string_view_t name,
-                                                             rmm::cuda_stream_view stream) noexcept {
+                                                             cuda::stream_ref stream) noexcept {
     using result_t = expected<flat_column_t>;
     if (decoded.type().id() == cudf::type_id::STRING) {
         cudf::strings_column_view const strings {decoded};
@@ -162,7 +164,7 @@ struct flat_column_t {
 /** Own a @c u64_t copy of @p offsets — cuDF decodes 32- or 64-bit @b signed offsets, and byte
  *  positions are unsigned sizes, so the one @c cudf::cast to @c UINT64 both widens and unsigns.
  *  Writes the borrow into @p span and the owning column into @p owner . */
-static void widen_offsets_(cudf::column_view const &offsets, rmm::cuda_stream_view stream, std::span<u64_t const> &span,
+static void widen_offsets_(cudf::column_view const &offsets, cuda::stream_ref stream, std::span<u64_t const> &span,
                            std::unique_ptr<cudf::column> &owner) { // vendor-boundary: cuDF throws into the caller's try
     owner = cudf::cast(offsets, cudf::data_type {cudf::type_id::UINT64}, stream);
     span = {owner->view().data<u64_t>(), static_cast<std::size_t>(offsets.size())};
@@ -171,7 +173,7 @@ static void widen_offsets_(cudf::column_view const &offsets, rmm::cuda_stream_vi
 /** Widen a flattened column's offsets into an owned @ref column_span_t — the decode tail every
  *  reader shares once cuDF hands back a @ref flat_column_t . */
 [[nodiscard]] static expected<column_span_t> adopt_flat_(
-    expected<flat_column_t> flat, rmm::cuda_stream_view stream) { // vendor-boundary: cuDF throws into the caller's try
+    expected<flat_column_t> flat, cuda::stream_ref stream) { // vendor-boundary: cuDF throws into the caller's try
     if (!flat) return expected<column_span_t>::fail(std::move(flat));
     column_span_t column;
     column.payload = flat->payload;
@@ -206,7 +208,7 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
  *  cuDF concatenates them. */
 [[nodiscard]] static expected<column_span_t> read_tar_members_(
     cudf::column_view byte_offsets, cudf::column_view byte_lengths, sz::string_view_t extension,
-    sz::strings_view_t paths, std::span<std::size_t const> rows_per_shard, rmm::cuda_stream_view stream,
+    sz::strings_view_t paths, std::span<std::size_t const> rows_per_shard, cuda::stream_ref stream,
     rmm::device_buffer &payload) { // vendor-boundary: cuDF throws into the caller's try
     using result_t = expected<column_span_t>;
     std::size_t const rows = static_cast<std::size_t>(byte_offsets.size());
@@ -219,10 +221,10 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
         st::failed(row_runs.resize(rows)))
         return result_t::fail(status_t::bad_alloc_k, "tar index allocation failed ({} rows)", rows);
     if (cuMemcpyDtoHAsync(offsets.data(), device_address(byte_offsets.data<i64_t>()), rows * sizeof(i64_t),
-                          stream.value()) != CUDA_SUCCESS ||
+                          stream.get()) != CUDA_SUCCESS ||
         cuMemcpyDtoHAsync(lengths.data(), device_address(byte_lengths.data<i64_t>()), rows * sizeof(i64_t),
-                          stream.value()) != CUDA_SUCCESS ||
-        cuStreamSynchronize(stream.value()) != CUDA_SUCCESS)
+                          stream.get()) != CUDA_SUCCESS ||
+        cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
         return result_t::fail(status_t::device_error_k, "tar index landing failed ({} rows)", rows);
 
     // The members land back to back in row order, so each one starts at the running sum of lengths.
@@ -296,10 +298,10 @@ inline constexpr char tar_length_column_k[] = "tar_byte_length";
         }
         // KvikIO writes the next tar from the host, out of stream order, so these copies finish
         // before the staging they read is freed for it.
-        if ((row_end != row_begin && cuMemcpyBatchAsync(destinations.data() + row_begin, sources.data() + row_begin,
-                                                        sizes.data() + row_begin, row_end - row_begin, &attributes,
-                                                        &attribute_index, 1, stream.value()) != CUDA_SUCCESS) ||
-            cuStreamSynchronize(stream.value()) != CUDA_SUCCESS)
+        if ((row_end != row_begin &&
+             cuMemcpyBatchAsync(destinations.data() + row_begin, sources.data() + row_begin, sizes.data() + row_begin,
+                                row_end - row_begin, &attributes, &attribute_index, 1, stream.get()) != CUDA_SUCCESS) ||
+            cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
             return result_t::fail(status_t::device_error_k, "tar member gather failed for {}", paths[shard]);
         row_begin = row_end;
     }
@@ -431,7 +433,7 @@ expected<parquet_file_t> parquet_file_t::make(gpu_direct_storage_session_t const
         // GPU Direct reads land out of stream order, in pool memory a queued kernel may still read.
         if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
             return result_t::fail(status_t::device_error_k, "stream drain before the read failed");
-        rmm::cuda_stream_view const cudf_stream {stream.get()};
+        cuda::stream_ref const cudf_stream {stream.get()};
 
         // A column the sidecar lacks is each row's member of its sibling tar, read through the byte
         // index, whose two columns take its place and the end of the read.
@@ -642,7 +644,7 @@ expected<jsonl_file_t> jsonl_file_t::make(gpu_direct_storage_session_t const &, 
         // GPU Direct reads land out of stream order, in pool memory a queued kernel may still read.
         if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
             return result_t::fail(status_t::device_error_k, "stream drain before the read failed");
-        rmm::cuda_stream_view const cudf_stream {stream.get()};
+        cuda::stream_ref const cudf_stream {stream.get()};
         // One JSON object per line; KvikIO / GDS streams the bytes, cuDF decodes on the GPU.
         auto options = cudf::io::json_reader_options::builder(
                            cudf::io::source_info {std::string {path}}) // vendor-boundary
@@ -686,7 +688,7 @@ expected<jsonl_file_t> jsonl_file_t::concat(std::span<jsonl_file_t const> parts,
     try {
         switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
         if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed for the read");
-        rmm::cuda_stream_view const cudf_stream {stream.get()};
+        cuda::stream_ref const cudf_stream {stream.get()};
         std::vector<cudf::column_view> fields; // vendor-boundary: cudf::concatenate takes a column-view list
         fields.reserve(parts.size());
         for (jsonl_file_t const &part : parts) fields.push_back(part.state_->field->view());
@@ -736,7 +738,7 @@ expected<csv_file_t> csv_file_t::make(gpu_direct_storage_session_t const &, sz::
         // GPU Direct reads land out of stream order, in pool memory a queued kernel may still read.
         if (cuStreamSynchronize(stream.get()) != CUDA_SUCCESS)
             return result_t::fail(status_t::device_error_k, "stream drain before the read failed");
-        rmm::cuda_stream_view const cudf_stream {stream.get()};
+        cuda::stream_ref const cudf_stream {stream.get()};
         std::string const name {column}; // vendor-boundary
         // Read only the wanted column, forced to string so type inference cannot surprise us;
         // KvikIO / GDS streams the bytes, cuDF decodes on the GPU.
@@ -774,7 +776,7 @@ expected<csv_file_t> csv_file_t::concat(std::span<csv_file_t const> parts, gpu_s
     try {
         switch_to_gpu_t gpu_scope {stream}; // cuDF allocates and launches in the current context
         if (!gpu_scope.ok()) return result_t::fail(status_t::device_error_k, "context entry failed for the read");
-        rmm::cuda_stream_view const cudf_stream {stream.get()};
+        cuda::stream_ref const cudf_stream {stream.get()};
         std::vector<cudf::column_view> columns; // vendor-boundary: cudf::concatenate takes a column-view list
         columns.reserve(parts.size());
         for (csv_file_t const &part : parts) columns.push_back(part.state_->field->view());
